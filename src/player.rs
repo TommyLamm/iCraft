@@ -3,6 +3,8 @@ pub enum DamageSource {
     Fall,
     Void,
     Hunger,
+    Mob,
+    Explosion,
 }
 
 pub struct PlayerState {

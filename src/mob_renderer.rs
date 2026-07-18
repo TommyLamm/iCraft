@@ -1,6 +1,6 @@
 use glam::Vec3;
 use crate::state::Vertex;
-use crate::entity::{Entity, EntityType, EntityManager};
+use crate::entity::{EntityType, EntityManager};
 use crate::chunk_manager::ChunkManager;
 
 // South (+Z), North (-Z), West (-X), East (+X), Up (+Y), Down (-Y)

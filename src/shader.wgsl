@@ -50,8 +50,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Unpack lighting
     let packed = in.light_level;
-    let multiplier_code = floor(packed / 256.0);
-    let rest = packed - multiplier_code * 256.0;
+    var is_hurt = 0.0;
+    var rest_packed = packed;
+    if (rest_packed >= 1024.0) {
+        is_hurt = 1.0;
+        rest_packed = rest_packed - 1024.0;
+    }
+    let multiplier_code = floor(rest_packed / 256.0);
+    let rest = rest_packed - multiplier_code * 256.0;
     let block_light = floor(rest / 16.0);
     let sky_light = rest - block_light * 16.0;
 
@@ -69,7 +75,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let ambient = 0.08;
     let final_light = max(max_light / 15.0, ambient) * multiplier;
-    let fragment_color = color * final_light;
+    var fragment_color = color * final_light;
+    if (is_hurt > 0.5) {
+        fragment_color = mix(fragment_color, vec4<f32>(1.0, 0.0, 0.0, 1.0), 0.5);
+    }
 
     let dist = length(in.world_pos - camera.camera_pos.xyz);
     let fog_factor = clamp((dist - camera.fog_start) / (camera.fog_end - camera.fog_start), 0.0, 1.0);

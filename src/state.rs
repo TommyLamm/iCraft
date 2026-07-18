@@ -174,6 +174,11 @@ pub struct State {
     pub void_damage_timer: f32,
     pub world_time: crate::camera::WorldTime,
     pub show_debug: bool,
+    pub entity_manager: crate::entity::EntityManager,
+    mob_vertex_buffer: wgpu::Buffer,
+    mob_index_buffer: wgpu::Buffer,
+    mob_num_indices: u32,
+    total_time: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -763,6 +768,20 @@ impl State {
             mapped_at_creation: false,
         });
 
+        let mob_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Mob Vertex Buffer"),
+            size: (std::mem::size_of::<Vertex>() * 8192) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mob_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Mob Index Buffer"),
+            size: (std::mem::size_of::<u32>() * 12288) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             window,
             surface,
@@ -809,6 +828,11 @@ impl State {
             void_damage_timer: 0.0,
             world_time,
             show_debug,
+            entity_manager: crate::entity::EntityManager::new(),
+            mob_vertex_buffer,
+            mob_index_buffer,
+            mob_num_indices: 0,
+            total_time: 0.0,
         }
     }
 
@@ -1084,6 +1108,28 @@ impl State {
         if let Some((dmg, src)) = self.player_state.update(dt) {
             self.take_damage(dmg, src);
         }
+
+        self.total_time += dt;
+
+        // Spawn mobs
+        crate::mob::spawn_mobs(
+            &mut self.entity_manager,
+            &self.chunk_manager,
+            self.player_physics.position,
+            self.world_time.sky_light_level(),
+        );
+
+        // Update mobs
+        crate::mob::update_mobs(
+            &mut self.entity_manager,
+            &mut self.chunk_manager,
+            &mut self.chunk_meshes,
+            &mut self.player_physics,
+            &mut self.player_state,
+            self.game_mode,
+            self.world_time.sky_light_level(),
+            dt,
+        );
 
         // Sync camera position to player position at eye height
         self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
@@ -1412,6 +1458,83 @@ impl State {
             self.camera.pitch.sin(),
             self.camera.yaw.sin() * self.camera.pitch.cos(),
         ).normalize_or_zero();
+
+        // 1. Raycast against entities first for left-clicks
+        if is_left_click {
+            let mut closest_entity: Option<(u64, f32)> = None;
+            for entity in &self.entity_manager.entities {
+                if entity.entity_type == crate::entity::EntityType::Arrow {
+                    continue;
+                }
+                let aabb = entity.get_aabb();
+                if let Some(dist) = crate::entity::ray_intersects_aabb(self.camera.position, dir, &aabb) {
+                    if dist <= 4.0 {
+                        if let Some((_, closest_dist)) = closest_entity {
+                            if dist < closest_dist {
+                                closest_entity = Some((entity.id, dist));
+                            }
+                        } else {
+                            closest_entity = Some((entity.id, dist));
+                        }
+                    }
+                }
+            }
+
+            if let Some((entity_id, _)) = closest_entity {
+                if let Some(entity) = self.entity_manager.entities.iter_mut().find(|e| e.id == entity_id) {
+                    if entity.invulnerable_time <= 0.0 {
+                        let held_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
+                        let damage = held_item.tool_properties().map(|t| t.damage).unwrap_or(1.0);
+                        
+                        entity.health -= damage;
+                        entity.invulnerable_time = 0.4;
+                        entity.velocity += dir * 8.0 + Vec3::new(0.0, 3.0, 0.0);
+                        
+                        println!("[Debug] Hit {:?}, health={:.1}", entity.entity_type, entity.health);
+                        
+                        if entity.health <= 0.0 {
+                            println!("[Debug] Killed {:?}", entity.entity_type);
+                            if self.game_mode == GameMode::Survival {
+                                match entity.entity_type {
+                                    crate::entity::EntityType::Zombie => {
+                                        self.inventory.add_item(crate::inventory::Item::RottenFlesh);
+                                    }
+                                    crate::entity::EntityType::Skeleton => {
+                                        self.inventory.add_item(crate::inventory::Item::Bone);
+                                        let mut rng_seed = (entity.position.x as u32).wrapping_mul(31).wrapping_add(entity.position.z as u32);
+                                        let mut next_rand = || {
+                                            rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                                            (rng_seed / 65536) % 32768
+                                        };
+                                        if next_rand() % 10 == 0 {
+                                            self.inventory.add_item(crate::inventory::Item::Bow);
+                                        }
+                                    }
+                                    crate::entity::EntityType::Creeper => {
+                                        self.inventory.add_item(crate::inventory::Item::Gunpowder);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        
+                        if self.game_mode == GameMode::Survival {
+                            if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
+                                if stack.item.tool_properties().is_some() {
+                                    if stack.durability > 1 {
+                                        stack.durability -= 1;
+                                    } else {
+                                        self.inventory.hotbar[self.inventory.selected] = None;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        return;
+                    }
+                }
+            }
+        }
 
         if let Some(hit) = raycast(self.camera.position, dir, 5.0, &self.chunk_manager) {
             let target = if is_left_click {
@@ -1762,6 +1885,26 @@ impl State {
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Compile mob meshes
+        let mut mob_vertices = Vec::new();
+        let mut mob_indices = Vec::new();
+        crate::mob_renderer::render_mobs(
+            &self.entity_manager,
+            &self.chunk_manager,
+            &mut mob_vertices,
+            &mut mob_indices,
+            self.total_time,
+        );
+        let mob_indices_len = mob_indices.len();
+        self.mob_num_indices = mob_indices_len as u32;
+
+        if mob_indices_len > 0 {
+            let vert_limit = mob_vertices.len().min(8192);
+            let ind_limit = mob_indices_len.min(12288);
+            self.queue.write_buffer(&self.mob_vertex_buffer, 0, bytemuck::cast_slice(&mob_vertices[..vert_limit]));
+            self.queue.write_buffer(&self.mob_index_buffer, 0, bytemuck::cast_slice(&mob_indices[..ind_limit]));
+        }
+
         if self.player_state.is_dead {
             let mut ui_vertices = Vec::new();
             let mut ui_line_vertices = Vec::new();
@@ -1818,6 +1961,8 @@ impl State {
                 Some(DamageSource::Fall) => "FELL FROM A HIGH PLACE",
                 Some(DamageSource::Void) => "FELL INTO THE VOID",
                 Some(DamageSource::Hunger) => "STARVED TO DEATH",
+                Some(DamageSource::Mob) => "WAS SLAIN BY ZOMBIE/SKELETON",
+                Some(DamageSource::Explosion) => "WAS BLOWN UP BY CREEPER",
                 None => "DIED",
             };
             draw_centered_text(msg, 0.15, 0.015, 0.03, 0.006, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
@@ -2440,6 +2585,13 @@ impl State {
                     render_pass.set_index_buffer(mesh.opaque_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     render_pass.draw_indexed(0..mesh.opaque_num_indices, 0, 0..1);
                 }
+            }
+
+            // Draw Mobs
+            if self.mob_num_indices > 0 {
+                render_pass.set_vertex_buffer(0, self.mob_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.mob_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.mob_num_indices, 0, 0..1);
             }
 
             // Pass 2: Translucent (Water/Ice)
