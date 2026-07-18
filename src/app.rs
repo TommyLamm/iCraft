@@ -122,6 +122,14 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F3) => {
+                            if pressed {
+                                state.show_debug = !state.show_debug;
+                            }
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyT) => {
+                            state.keys.t = pressed;
+                        }
                         _ => {
                             if !state.is_paused && !state.inventory.is_open {
                                 match physical_key {

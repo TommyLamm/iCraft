@@ -124,6 +124,7 @@ pub struct KeyState {
     pub s: bool,
     pub d: bool,
     pub space: bool,
+    pub t: bool,
 }
 
 pub struct State {
