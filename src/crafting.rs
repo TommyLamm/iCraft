@@ -18,36 +18,40 @@ impl RecipeManager {
         let mut recipes = Vec::new();
 
         // Helper to add shaped recipe
-        let mut add_shaped = |pat: Vec<&str>, mapping: &[(&str, Item)], result: ItemStack| {
-            let height = pat.len();
-            let width = pat[0].len();
-            let mut pattern = vec![vec![Item::Air; width]; height];
-            for r in 0..height {
-                let chars: Vec<char> = pat[r].chars().collect();
-                for c in 0..width {
-                    let ch = chars[c].to_string();
-                    if ch != " " {
-                        let item = mapping.iter().find(|(s, _)| s == &ch).map(|(_, it)| *it).unwrap_or(Item::Air);
-                        pattern[r][c] = item;
+        macro_rules! add_shaped {
+            ($pat:expr, $mapping:expr, $result:expr) => {
+                let pat = $pat;
+                let height = pat.len();
+                let width = pat[0].len();
+                let mut pattern = vec![vec![Item::Air; width]; height];
+                for r in 0..height {
+                    let chars: Vec<char> = pat[r].chars().collect();
+                    for c in 0..width {
+                        let ch = chars[c].to_string();
+                        if ch != " " {
+                            let item = $mapping.iter().find(|(s, _)| s == &ch).map(|(_, it)| *it).unwrap_or(Item::Air);
+                            pattern[r][c] = item;
+                        }
                     }
                 }
-            }
-            recipes.push(Recipe { pattern, width, height, result, shapeless: false });
-        };
+                recipes.push(Recipe { pattern, width, height, result: $result, shapeless: false });
+            };
+        }
 
         // Helper for shapeless recipe
-        let mut add_shapeless = |ingredients: Vec<Item>, result: ItemStack| {
-            // Store sorted list in pattern[0]
-            let mut sorted = ingredients;
-            sorted.sort_by_key(|&it| it as i32);
-            recipes.push(Recipe {
-                pattern: vec![sorted],
-                width: 0,
-                height: 0,
-                result,
-                shapeless: true,
-            });
-        };
+        macro_rules! add_shapeless {
+            ($ingredients:expr, $result:expr) => {
+                let mut sorted = $ingredients;
+                sorted.sort_by_key(|&it| it as i32);
+                recipes.push(Recipe {
+                    pattern: vec![sorted],
+                    width: 0,
+                    height: 0,
+                    result: $result,
+                    shapeless: true,
+                });
+            };
+        }
 
         // 1. Logs -> Planks
         add_shaped(vec!["L"], &[("L", Item::OakLog)], ItemStack { item: Item::OakPlanks, count: 4 });
