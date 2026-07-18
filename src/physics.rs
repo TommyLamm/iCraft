@@ -90,7 +90,7 @@ impl PlayerPhysics {
             for y in min_y..=max_y {
                 for z in min_z..=max_z {
                     let block = chunk_manager.get_block(x, y, z);
-                    if block != crate::world::BlockType::Air {
+                    if block.properties().is_solid {
                         let block_aabb = AABB::new(
                             Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
                             Vec3::ONE,

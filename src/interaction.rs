@@ -35,7 +35,8 @@ pub fn raycast(origin: Vec3, direction: Vec3, max_dist: f32, chunk_manager: &Chu
 
     while t < max_dist {
         let block = chunk_manager.get_block(x, y, z);
-        if block != BlockType::Air {
+        let props = block.properties();
+        if block != BlockType::Air && !props.is_passable {
             return Some(RaycastResult {
                 block_pos: Vec3::new(x as f32, y as f32, z as f32),
                 normal: last_face,
