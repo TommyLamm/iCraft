@@ -47,8 +47,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (color.a < 0.5) {
         discard;
     }
+
+    // Unpack lighting
+    let packed = in.light_level;
+    let multiplier_code = floor(packed / 256.0);
+    let rest = packed - multiplier_code * 256.0;
+    let block_light = floor(rest / 16.0);
+    let sky_light = rest - block_light * 16.0;
+
+    var multiplier = 1.0;
+    if (multiplier_code > 1.5) {
+        multiplier = 0.5;
+    } else if (multiplier_code > 0.5) {
+        multiplier = 0.8;
+    }
+
+    // Dynamically scale sky light with global intensity
+    let sky_intensity = camera.sun_dir.w;
+    let adjusted_sky_light = sky_light * sky_intensity;
+    let max_light = max(adjusted_sky_light, block_light);
+
     let ambient = 0.08;
-    let final_light = max(in.light_level, ambient);
+    let final_light = max(max_light / 15.0, ambient) * multiplier;
     let fragment_color = color * final_light;
 
     let dist = length(in.world_pos - camera.camera_pos.xyz);
