@@ -1017,6 +1017,13 @@ impl State {
         if self.is_paused {
             return;
         }
+
+        // Update game time
+        let speed_multiplier = if self.keys.t { 200.0 } else { 1.0 };
+        self.world_time.tick_accumulator += dt * 20.0 * speed_multiplier;
+        let new_ticks = self.world_time.tick_accumulator.floor() as u64;
+        self.world_time.ticks += new_ticks;
+        self.world_time.tick_accumulator -= new_ticks as f32;
         let mut move_dir = Vec3::ZERO;
         let yaw_cos = self.camera.yaw.cos();
         let yaw_sin = self.camera.yaw.sin();
@@ -2366,9 +2373,9 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.53,
-                            g: 0.81,
-                            b: 0.92,
+                            r: self.camera_uniform.sky_color_horizon[0] as f64,
+                            g: self.camera_uniform.sky_color_horizon[1] as f64,
+                            b: self.camera_uniform.sky_color_horizon[2] as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
