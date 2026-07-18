@@ -1,3 +1,4 @@
+use crate::state::State;
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -6,22 +7,23 @@ use winit::{
 };
 
 pub struct App {
-    window: Option<Window>,
+    state: Option<State>,
 }
 
 impl App {
     pub fn new() -> Self {
-        Self { window: None }
+        Self { state: None }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
+        if self.state.is_none() {
             let window = event_loop
                 .create_window(Window::default_attributes().with_title("Minecraft wgpu Clone"))
                 .unwrap();
-            self.window = Some(window);
+            let state = pollster::block_on(State::new(window));
+            self.state = Some(state);
         }
     }
 
@@ -37,12 +39,22 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                println!("Esc pressed, exiting...");
                 event_loop.exit();
             }
+            WindowEvent::Resized(physical_size) => {
+                if let Some(state) = &mut self.state {
+                    state.resize(physical_size);
+                }
+            }
             WindowEvent::RedrawRequested => {
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                if let Some(state) = &mut self.state {
+                    state.window.request_redraw();
+                    match state.render() {
+                        Ok(_) => {}
+                        Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                        Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
+                        Err(e) => eprintln!("{:?}", e),
+                    }
                 }
             }
             _ => {}
