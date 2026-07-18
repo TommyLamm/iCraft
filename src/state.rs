@@ -1179,7 +1179,6 @@ impl State {
     pub fn handle_inventory_click(&mut self, is_left: bool) {
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
-        let aspect = self.size.width as f32 / self.size.height as f32;
         let slots = self.get_inventory_slots();
         
         let clicked_slot = slots.into_iter().find(|&(_, x0, x1, y0, y1)| {
