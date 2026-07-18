@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-winit = "0.29"
+winit = "0.30"
 wgpu = "0.19"
 glam = "0.25"
 noise = "0.8"
