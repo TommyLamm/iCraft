@@ -42,4 +42,41 @@ impl ChunkManager {
             }
         }
     }
+
+    pub fn get_sky_light(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                return chunk.sky_light[bx][by][bz];
+            }
+        }
+        if wy >= CHUNK_HEIGHT as i32 {
+            return 15; // Above world is fully lit by sky
+        }
+        0
+    }
+
+    pub fn set_sky_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8) {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                chunk.sky_light[bx][by][bz] = val;
+            }
+        }
+    }
+
+    pub fn get_block_light(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                return chunk.block_light[bx][by][bz];
+            }
+        }
+        0
+    }
+
+    pub fn set_block_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8) {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                chunk.block_light[bx][by][bz] = val;
+            }
+        }
+    }
 }

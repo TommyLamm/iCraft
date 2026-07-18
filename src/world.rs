@@ -383,6 +383,8 @@ pub struct Chunk {
     pub chunk_x: i32,
     pub chunk_z: i32,
     pub blocks: [[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
+    pub sky_light: [[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
+    pub block_light: [[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
 }
 
 impl Chunk {
@@ -468,10 +470,33 @@ impl Chunk {
                 }
             }
         }
+
+        let mut sky_light = [[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH];
+        let mut block_light = [[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH];
+
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                let mut direct_sky = 15;
+                for y in (0..CHUNK_HEIGHT).rev() {
+                    let block = blocks[x][y][z];
+                    if block.properties().render_type == RenderType::Opaque {
+                        direct_sky = 0;
+                    }
+                    sky_light[x][y][z] = direct_sky;
+
+                    if block == BlockType::Torch {
+                        block_light[x][y][z] = 14;
+                    }
+                }
+            }
+        }
+
         Self {
             chunk_x,
             chunk_z,
             blocks,
+            sky_light,
+            block_light,
         }
     }
 
@@ -485,7 +510,7 @@ impl Chunk {
     // 生成用於渲染的頂點和索引，區分為不透明與半透明網格
     pub fn generate_mesh<F>(&self, get_block_at: F) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>)
     where
-        F: Fn(i32, i32, i32) -> BlockType,
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8),
     {
         let mut opaque_vertices = Vec::new();
         let mut opaque_indices = Vec::new();
@@ -556,7 +581,7 @@ impl Chunk {
                         let ny = world_y + normal[1] as i32;
                         let nz = world_z + normal[2] as i32;
 
-                        let neighbor = get_block_at(nx, ny, nz);
+                        let (neighbor, neighbor_sky, neighbor_block) = get_block_at(nx, ny, nz);
                         let neighbor_props = neighbor.properties();
 
                         // Face Culling: 只有鄰居非 Opaque 才渲染（且排除相同水體相鄰）
@@ -581,6 +606,14 @@ impl Chunk {
                             let start_idx = v_list.len() as u32;
                             let (tx_col, tx_row) = block.get_face_tex_index(face_idx);
 
+                            let max_light = neighbor_sky.max(neighbor_block);
+                            let multiplier = match face_idx {
+                                4 => 1.0, // Top
+                                5 => 0.5, // Bottom
+                                _ => 0.8, // Sides
+                            };
+                            let light_val = (max_light as f32 / 15.0) * multiplier;
+
                             for (offset, uv) in corner_data.iter() {
                                 // 256x256 atlas -> 16 columns of 16x16 pixel blocks
                                 let u = (uv[0] + tx_col as f32) * 0.0625;
@@ -592,6 +625,7 @@ impl Chunk {
                                         world_z as f32 + offset[2],
                                     ],
                                     tex_coords: [u, v],
+                                    light_level: light_val,
                                 });
                             }
 

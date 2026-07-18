@@ -6,6 +6,7 @@ mod physics;
 mod interaction;
 mod texture;
 mod chunk_manager;
+mod lighting;
 
 
 use app::App;

@@ -127,6 +127,26 @@ impl ApplicationHandler for App {
                                     winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space) => {
                                         state.keys.space = pressed;
                                     }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
+                                        if pressed {
+                                            state.selected_block = crate::world::BlockType::Stone;
+                                        }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
+                                        if pressed {
+                                            state.selected_block = crate::world::BlockType::Torch;
+                                        }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit3) => {
+                                        if pressed {
+                                            state.selected_block = crate::world::BlockType::Glass;
+                                        }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit4) => {
+                                        if pressed {
+                                            state.selected_block = crate::world::BlockType::Water;
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }

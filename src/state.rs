@@ -23,6 +23,7 @@ pub struct ChunkMesh {
 pub struct Vertex {
     pub position: [f32; 3],
     pub tex_coords: [f32; 2],
+    pub light_level: f32,
 }
 
 impl Vertex {
@@ -40,6 +41,11 @@ impl Vertex {
                     offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>()) as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32,
                 },
             ],
         }
@@ -114,6 +120,7 @@ pub struct State {
     ui_line_vertex_buffer: wgpu::Buffer,
     num_ui_vertices: u32,
     num_ui_line_vertices: u32,
+    pub selected_block: BlockType,
 }
 
 impl State {
@@ -409,10 +416,10 @@ impl State {
         let aspect = size.width as f32 / size.height as f32;
         let crosshair_size = 0.02;
         let crosshair_vertices = [
-            Vertex { position: [-crosshair_size, 0.0, 0.0], tex_coords: [0.0, 0.0] },
-            Vertex { position: [crosshair_size, 0.0, 0.0], tex_coords: [0.0, 0.0] },
-            Vertex { position: [0.0, -crosshair_size * aspect, 0.0], tex_coords: [0.0, 0.0] },
-            Vertex { position: [0.0, crosshair_size * aspect, 0.0], tex_coords: [0.0, 0.0] },
+            Vertex { position: [-crosshair_size, 0.0, 0.0], tex_coords: [0.0, 0.0], light_level: 1.0 },
+            Vertex { position: [crosshair_size, 0.0, 0.0], tex_coords: [0.0, 0.0], light_level: 1.0 },
+            Vertex { position: [0.0, -crosshair_size * aspect, 0.0], tex_coords: [0.0, 0.0], light_level: 1.0 },
+            Vertex { position: [0.0, crosshair_size * aspect, 0.0], tex_coords: [0.0, 0.0], light_level: 1.0 },
         ];
 
         let crosshair_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -434,23 +441,37 @@ impl State {
             }
         }
 
+        // Propagate lighting for spawn chunks synchronously
+        let mut spawn_dirty = std::collections::HashSet::new();
+        let chunk_keys: Vec<(i32, i32)> = chunk_manager.chunks.keys().cloned().collect();
+        for &(cx, cz) in &chunk_keys {
+            crate::lighting::propagate_chunk_lighting(&mut chunk_manager, cx, cz, &mut spawn_dirty);
+        }
+
         // Build meshes for spawn chunks synchronously
         let chunks_ref = &chunk_manager.chunks;
         for cx in -render_distance..=render_distance {
             for cz in -render_distance..=render_distance {
                 let chunk = chunks_ref.get(&(cx, cz)).unwrap();
                 let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
+                    if wy < 0 {
+                        return (BlockType::Air, 0, 0);
+                    }
+                    if wy >= crate::world::CHUNK_HEIGHT as i32 {
+                        return (BlockType::Air, 15, 0);
+                    }
                     let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                     let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
                     let bx_neighbor = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32) as usize;
                     let bz_neighbor = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32) as usize;
-                    if wy < 0 || wy >= crate::world::CHUNK_HEIGHT as i32 {
-                        return BlockType::Air;
-                    }
                     if let Some(c) = chunks_ref.get(&(cx_neighbor, cz_neighbor)) {
-                        c.blocks[bx_neighbor][wy as usize][bz_neighbor]
+                        (
+                            c.blocks[bx_neighbor][wy as usize][bz_neighbor],
+                            c.sky_light[bx_neighbor][wy as usize][bz_neighbor],
+                            c.block_light[bx_neighbor][wy as usize][bz_neighbor],
+                        )
                     } else {
-                        BlockType::Air
+                        (BlockType::Air, 15, 0)
                     }
                 });
 
@@ -613,6 +634,7 @@ impl State {
             ui_line_vertex_buffer,
             num_ui_vertices: 0,
             num_ui_line_vertices: 0,
+            selected_block: BlockType::Stone,
         }
     }
 
@@ -662,9 +684,18 @@ impl State {
             let chunk = Chunk::new(cx, cz);
             self.chunk_manager.chunks.insert((cx, cz), chunk);
 
+            let mut dirty = std::collections::HashSet::new();
+            crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
+
             // Mark neighbors dirty
             for &(ncx, ncz) in &[(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(ncx, ncz)) {
+                    mesh.dirty = true;
+                }
+            }
+
+            for (dcx, dcz) in dirty {
+                if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
                     mesh.dirty = true;
                 }
             }
@@ -684,17 +715,24 @@ impl State {
         for (cx, cz) in to_rebuild.into_iter().take(2) {
             let chunk = chunks_ref.get(&(cx, cz)).unwrap();
             let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
+                if wy < 0 {
+                    return (BlockType::Air, 0, 0);
+                }
+                if wy >= crate::world::CHUNK_HEIGHT as i32 {
+                    return (BlockType::Air, 15, 0);
+                }
                 let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                 let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
                 let bx_neighbor = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32) as usize;
                 let bz_neighbor = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32) as usize;
-                if wy < 0 || wy >= crate::world::CHUNK_HEIGHT as i32 {
-                    return BlockType::Air;
-                }
                 if let Some(c) = chunks_ref.get(&(cx_neighbor, cz_neighbor)) {
-                    c.blocks[bx_neighbor][wy as usize][bz_neighbor]
+                    (
+                        c.blocks[bx_neighbor][wy as usize][bz_neighbor],
+                        c.sky_light[bx_neighbor][wy as usize][bz_neighbor],
+                        c.block_light[bx_neighbor][wy as usize][bz_neighbor],
+                    )
                 } else {
-                    BlockType::Air
+                    (BlockType::Air, 15, 0)
                 }
             });
 
@@ -852,10 +890,24 @@ impl State {
             let wy = target.y as i32;
             let wz = target.z as i32;
 
+            let mut dirty_chunks = std::collections::HashSet::new();
+
             if is_left_click {
-                self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+                let old_block = self.chunk_manager.get_block(wx, wy, wz);
+                if old_block != BlockType::Air {
+                    self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+
+                    // Update lighting for removal
+                    crate::lighting::update_sky_light_after_removed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
+                    crate::lighting::update_block_light_after_removed(&mut self.chunk_manager, wx, wy, wz, old_block.properties().light_emission, &mut dirty_chunks);
+                }
             } else {
-                self.chunk_manager.set_block(wx, wy, wz, BlockType::Stone);
+                let placed_block = self.selected_block;
+                self.chunk_manager.set_block(wx, wy, wz, placed_block);
+
+                // Update lighting for placement
+                crate::lighting::update_sky_light_after_placed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
+                crate::lighting::update_block_light_after_placed(&mut self.chunk_manager, wx, wy, wz, placed_block.properties().light_emission, &mut dirty_chunks);
             }
 
             // Mark the modified chunk and boundary neighbors dirty
@@ -864,20 +916,16 @@ impl State {
             let lx = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32);
             let lz = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32);
 
-            if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
-                mesh.dirty = true;
-            }
-            if lx == 0 {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(cx - 1, cz)) { mesh.dirty = true; }
-            }
-            if lx == 15 {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(cx + 1, cz)) { mesh.dirty = true; }
-            }
-            if lz == 0 {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz - 1)) { mesh.dirty = true; }
-            }
-            if lz == 15 {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz + 1)) { mesh.dirty = true; }
+            dirty_chunks.insert((cx, cz));
+            if lx == 0 { dirty_chunks.insert((cx - 1, cz)); }
+            if lx == 15 { dirty_chunks.insert((cx + 1, cz)); }
+            if lz == 0 { dirty_chunks.insert((cx, cz - 1)); }
+            if lz == 15 { dirty_chunks.insert((cx, cz + 1)); }
+
+            for (dcx, dcz) in dirty_chunks {
+                if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                    mesh.dirty = true;
+                }
             }
         }
     }
@@ -992,6 +1040,22 @@ impl State {
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
+        } else {
+            let mut hud_line_vertices = Vec::new();
+            let text_color = [1.0, 1.0, 1.0, 1.0];
+            let selected_text = format!("SELECTED: {:?}", self.selected_block);
+            let upper = selected_text.to_uppercase();
+            let char_w = 0.015;
+            let char_h = 0.03;
+            let spacing = 0.006;
+            let n = upper.len() as f32;
+            let width = n * char_w + (n - 1.0) * spacing;
+            let start_x = -width / 2.0;
+            add_string_lines(&upper, start_x, -0.90, char_w, char_h, spacing, text_color, &mut hud_line_vertices);
+
+            let hud_line_vert_len = hud_line_vertices.len().min(1024);
+            self.queue.write_buffer(&self.ui_line_vertex_buffer, 0, bytemuck::cast_slice(&hud_line_vertices[..hud_line_vert_len]));
+            self.num_ui_line_vertices = hud_line_vert_len as u32;
         }
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1052,6 +1116,11 @@ impl State {
                 render_pass.set_pipeline(&self.crosshair_pipeline);
                 render_pass.set_vertex_buffer(0, self.crosshair_buffer.slice(..));
                 render_pass.draw(0..4, 0..1);
+
+                // 2b. Draw 2D HUD text (using ui_line_pipeline)
+                render_pass.set_pipeline(&self.ui_line_pipeline);
+                render_pass.set_vertex_buffer(0, self.ui_line_vertex_buffer.slice(..));
+                render_pass.draw(0..self.num_ui_line_vertices, 0..1);
             } else {
                 // 3. Draw Pause Menu
                 // Background overlay & buttons
