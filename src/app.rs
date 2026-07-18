@@ -24,9 +24,22 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_none() {
+            let window_size = winit::dpi::PhysicalSize::new(2560, 1440);
             let window = event_loop
-                .create_window(Window::default_attributes().with_title("Minecraft wgpu Clone"))
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Minecraft wgpu Clone")
+                        .with_inner_size(window_size)
+                )
                 .unwrap();
+
+            // Center the window on the screen
+            if let Some(monitor) = window.primary_monitor() {
+                let monitor_size = monitor.size();
+                let x = (monitor_size.width as i32 - window_size.width as i32) / 2;
+                let y = (monitor_size.height as i32 - window_size.height as i32) / 2;
+                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
             
             // Grab and hide the cursor for first-person controls
             let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked)
@@ -47,13 +60,15 @@ impl ApplicationHandler for App {
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if let Some(state) = &mut self.state {
-                let sensitivity = 0.002;
-                state.camera.yaw += (delta.0 * sensitivity) as f32;
-                state.camera.pitch -= (delta.1 * sensitivity) as f32;
+                if !state.is_paused && state.window.has_focus() {
+                    let sensitivity = state.sensitivity;
+                    state.camera.yaw -= (delta.0 * sensitivity as f64) as f32;
+                    state.camera.pitch -= (delta.1 * sensitivity as f64) as f32;
 
-                // Clamp pitch to prevent flipping upside down
-                let max_pitch = f32::to_radians(89.0);
-                state.camera.pitch = state.camera.pitch.clamp(-max_pitch, max_pitch);
+                    // Clamp pitch to prevent flipping upside down
+                    let max_pitch = f32::to_radians(89.0);
+                    state.camera.pitch = state.camera.pitch.clamp(-max_pitch, max_pitch);
+                }
             }
         }
     }
@@ -62,6 +77,19 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
+            }
+            WindowEvent::Focused(focused) => {
+                println!("[Debug] Window focus changed to: {}", focused);
+                if !focused {
+                    if let Some(state) = &mut self.state {
+                        state.set_paused(true);
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(state) = &mut self.state {
+                    state.handle_mouse_move(position.x, position.y);
+                }
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -75,27 +103,34 @@ impl ApplicationHandler for App {
                 let pressed = state == ElementState::Pressed;
                 if let Some(state) = &mut self.state {
                     match physical_key {
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW) => {
-                            state.keys.w = pressed;
-                        }
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyS) => {
-                            state.keys.s = pressed;
-                        }
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA) => {
-                            state.keys.a = pressed;
-                        }
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD) => {
-                            state.keys.d = pressed;
-                        }
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space) => {
-                            state.keys.space = pressed;
-                        }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => {
                             if pressed {
-                                event_loop.exit();
+                                let new_paused = !state.is_paused;
+                                state.set_paused(new_paused);
                             }
                         }
-                        _ => {}
+                        _ => {
+                            if !state.is_paused {
+                                match physical_key {
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW) => {
+                                        state.keys.w = pressed;
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyS) => {
+                                        state.keys.s = pressed;
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA) => {
+                                        state.keys.a = pressed;
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD) => {
+                                        state.keys.d = pressed;
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space) => {
+                                        state.keys.space = pressed;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -106,14 +141,20 @@ impl ApplicationHandler for App {
             } => {
                 if state == ElementState::Pressed {
                     if let Some(state) = &mut self.state {
-                        match button {
-                            MouseButton::Left => {
-                                state.handle_click(true);
+                        if state.is_paused {
+                            if button == MouseButton::Left {
+                                state.handle_menu_click(event_loop);
                             }
-                            MouseButton::Right => {
-                                state.handle_click(false);
+                        } else {
+                            match button {
+                                MouseButton::Left => {
+                                    state.handle_click(true);
+                                }
+                                MouseButton::Right => {
+                                    state.handle_click(false);
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -125,6 +166,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(state) = &mut self.state {
+                    if !state.window.has_focus() && !state.is_paused {
+                        state.set_paused(true);
+                    }
                     let now = Instant::now();
                     let dt = now.duration_since(self.last_render_time).as_secs_f32();
                     self.last_render_time = now;
@@ -145,5 +189,10 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.state = None;
+        std::process::exit(0);
     }
 }

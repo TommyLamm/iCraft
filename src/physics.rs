@@ -1,5 +1,5 @@
 use glam::Vec3;
-use crate::world::Chunk;
+use crate::chunk_manager::ChunkManager;
 
 pub struct AABB {
     pub min: Vec3,
@@ -46,7 +46,7 @@ impl PlayerPhysics {
         AABB::new(self.position + Vec3::new(0.0, self.size.y * 0.5, 0.0), self.size)
     }
 
-    pub fn update(&mut self, dt: f32, chunk: &Chunk, movement_input: Vec3) {
+    pub fn update(&mut self, dt: f32, chunk_manager: &ChunkManager, movement_input: Vec3) {
         // 1. 套用玩家移動控制
         let speed = 8.0;
         self.velocity.x = movement_input.x * speed;
@@ -63,33 +63,33 @@ impl PlayerPhysics {
 
         // 3. 沿 X 軸位移並處理碰撞
         self.position.x += self.velocity.x * dt;
-        self.resolve_collisions(chunk, 0);
+        self.resolve_collisions(chunk_manager, 0);
 
         // 4. 沿 Z 軸位移並處理碰撞
         self.position.z += self.velocity.z * dt;
-        self.resolve_collisions(chunk, 2);
+        self.resolve_collisions(chunk_manager, 2);
 
         // 5. 沿 Y 軸位移並處理碰撞
         self.position.y += self.velocity.y * dt;
         self.on_ground = false;
-        self.resolve_collisions(chunk, 1);
+        self.resolve_collisions(chunk_manager, 1);
     }
 
-    fn resolve_collisions(&mut self, chunk: &Chunk, axis: usize) {
+    fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
         let player_aabb = self.get_aabb();
 
         // 檢測玩家周圍可能相交的方塊
-        let min_x = (player_aabb.min.x.floor() as i32).max(0);
-        let max_x = (player_aabb.max.x.floor() as i32).max(0);
-        let min_y = (player_aabb.min.y.floor() as i32).max(0);
-        let max_y = (player_aabb.max.y.floor() as i32).max(0);
-        let min_z = (player_aabb.min.z.floor() as i32).max(0);
-        let max_z = (player_aabb.max.z.floor() as i32).max(0);
+        let min_x = player_aabb.min.x.floor() as i32;
+        let max_x = player_aabb.max.x.floor() as i32;
+        let min_y = (player_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let max_y = (player_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let min_z = player_aabb.min.z.floor() as i32;
+        let max_z = player_aabb.max.z.floor() as i32;
 
         for x in min_x..=max_x {
             for y in min_y..=max_y {
                 for z in min_z..=max_z {
-                    let block = chunk.get_block(x, y, z);
+                    let block = chunk_manager.get_block(x, y, z);
                     if block != crate::world::BlockType::Air {
                         let block_aabb = AABB::new(
                             Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),

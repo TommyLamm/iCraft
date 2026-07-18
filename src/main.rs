@@ -5,6 +5,7 @@ mod world;
 mod physics;
 mod interaction;
 mod texture;
+mod chunk_manager;
 
 
 use app::App;
@@ -13,6 +14,7 @@ use winit::event_loop::EventLoop;
 fn main() {
     let event_loop = EventLoop::new().unwrap();
     let mut app = App::new();
-    event_loop.run_app(&mut app).unwrap();
+    let _ = event_loop.run_app(&mut app);
+    std::process::exit(0);
 }
 

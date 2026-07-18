@@ -1,12 +1,13 @@
 use glam::Vec3;
-use crate::world::{Chunk, BlockType};
+use crate::world::BlockType;
+use crate::chunk_manager::ChunkManager;
 
 pub struct RaycastResult {
     pub block_pos: Vec3, // 命中的方塊整數座標
     pub normal: Vec3,    // 命中的表面法線（用於放置新方塊）
 }
 
-pub fn raycast(origin: Vec3, direction: Vec3, max_dist: f32, chunk: &Chunk) -> Option<RaycastResult> {
+pub fn raycast(origin: Vec3, direction: Vec3, max_dist: f32, chunk_manager: &ChunkManager) -> Option<RaycastResult> {
     // Avoid division by zero/NaN by ensuring direction components are non-zero
     let eps = 1e-8;
     let dx = if direction.x.abs() < eps { direction.x.signum() * eps } else { direction.x };
@@ -33,7 +34,7 @@ pub fn raycast(origin: Vec3, direction: Vec3, max_dist: f32, chunk: &Chunk) -> O
     let mut last_face = Vec3::ZERO;
 
     while t < max_dist {
-        let block = chunk.get_block(x, y, z);
+        let block = chunk_manager.get_block(x, y, z);
         if block != BlockType::Air {
             return Some(RaycastResult {
                 block_pos: Vec3::new(x as f32, y as f32, z as f32),
@@ -70,3 +71,37 @@ pub fn raycast(origin: Vec3, direction: Vec3, max_dist: f32, chunk: &Chunk) -> O
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::{Chunk, BlockType};
+    use crate::chunk_manager::ChunkManager;
+    use glam::Vec3;
+
+    #[test]
+    fn test_raycast_air() {
+        let mut chunk_manager = ChunkManager::new(8);
+        chunk_manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        // Look up into the sky from the surface
+        let hit = raycast(Vec3::new(8.0, 70.0, 8.0), Vec3::new(0.0, 1.0, 0.0), 10.0, &chunk_manager);
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn test_raycast_hit() {
+        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk = Chunk::new(0, 0);
+        // Place a block in the air
+        chunk.blocks[8][72][8] = BlockType::Stone;
+        chunk_manager.chunks.insert((0, 0), chunk);
+
+        // Look straight up from 8.5, 70.5, 8.5 (distance 2.0 to the block min y=72)
+        let hit = raycast(Vec3::new(8.5, 70.5, 8.5), Vec3::new(0.0, 1.0, 0.0), 5.0, &chunk_manager);
+        assert!(hit.is_some());
+        let res = hit.unwrap();
+        assert_eq!(res.block_pos, Vec3::new(8.0, 72.0, 8.0));
+        assert_eq!(res.normal, Vec3::new(0.0, -1.0, 0.0)); // Ray hits bottom face, normal points down
+    }
+}
+

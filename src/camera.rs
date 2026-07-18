@@ -4,11 +4,12 @@ pub struct Camera {
     pub position: Vec3,
     pub yaw: f32,   // 弧度
     pub pitch: f32, // 弧度
+    pub fov: f32,   // 角度
 }
 
 impl Camera {
-    pub fn new(position: Vec3, yaw: f32, pitch: f32) -> Self {
-        Self { position, yaw, pitch }
+    pub fn new(position: Vec3, yaw: f32, pitch: f32, fov: f32) -> Self {
+        Self { position, yaw, pitch, fov }
     }
 
     pub fn build_view_projection_matrix(&self, aspect: f32) -> Mat4 {
@@ -18,7 +19,7 @@ impl Camera {
             self.yaw.sin() * self.pitch.cos(),
         );
         let view = Mat4::look_at_lh(self.position, target, Vec3::Y);
-        let proj = Mat4::perspective_lh(f32::to_radians(60.0), aspect, 0.1, 100.0);
+        let proj = Mat4::perspective_lh(f32::to_radians(self.fov), aspect, 0.1, 100.0);
         proj * view
     }
 }

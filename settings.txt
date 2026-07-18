@@ -1,0 +1,2 @@
+fov:90
+sensitivity:0.00059999997
