@@ -2,6 +2,7 @@ use std::sync::Arc;
 use winit::window::Window;
 use crate::camera::{Camera, CameraUniform};
 use crate::world::Chunk;
+use crate::physics::PlayerPhysics;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
@@ -33,6 +34,15 @@ impl Vertex {
     }
 }
 
+#[derive(Default)]
+pub struct KeyState {
+    pub w: bool,
+    pub a: bool,
+    pub s: bool,
+    pub d: bool,
+    pub space: bool,
+}
+
 pub struct State {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -41,7 +51,7 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
-    camera: Camera,
+    pub camera: Camera,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -49,6 +59,9 @@ pub struct State {
     index_buffer: wgpu::Buffer,
     num_indices: u32,
     depth_view: wgpu::TextureView,
+    pub chunk: Chunk,
+    pub player_physics: PlayerPhysics,
+    pub keys: KeyState,
 }
 
 impl State {
@@ -124,9 +137,13 @@ impl State {
         // Setup Depth Buffer
         let depth_view = Self::create_depth_texture(&device, &config);
 
+        // Initialize physics and keyboard input
+        let player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
+        let keys = KeyState::default();
+
         // Setup Camera
         let camera = Camera::new(
-            Vec3::new(8.0, 80.0, -10.0), // Adjust camera position to look at the generated chunk
+            player_physics.position + Vec3::new(0.0, 1.6, 0.0), // Spawn at player eye height
             f32::to_radians(90.0),
             f32::to_radians(-20.0),
         );
@@ -243,7 +260,42 @@ impl State {
             index_buffer,
             num_indices,
             depth_view,
+            chunk,
+            player_physics,
+            keys,
         }
+    }
+
+    pub fn update(&mut self, dt: f32) {
+        let mut move_dir = Vec3::ZERO;
+        let yaw_cos = self.camera.yaw.cos();
+        let yaw_sin = self.camera.yaw.sin();
+        let forward = Vec3::new(yaw_cos, 0.0, yaw_sin).normalize_or_zero();
+        let right = Vec3::new(-yaw_sin, 0.0, yaw_cos).normalize_or_zero();
+
+        if self.keys.w {
+            move_dir += forward;
+        }
+        if self.keys.s {
+            move_dir -= forward;
+        }
+        if self.keys.a {
+            move_dir -= right;
+        }
+        if self.keys.d {
+            move_dir += right;
+        }
+        let mut movement = move_dir.normalize_or_zero();
+        if self.keys.space {
+            movement.y = 1.0;
+        }
+
+        self.player_physics.update(dt, &self.chunk, movement);
+
+        // Sync camera position to player position at eye height
+        self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
+        self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32);
+        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {

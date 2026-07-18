@@ -2,6 +2,7 @@ mod app;
 mod state;
 mod camera;
 mod world;
+mod physics;
 
 use app::App;
 use winit::event_loop::EventLoop;
