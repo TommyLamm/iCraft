@@ -2,6 +2,8 @@ use std::sync::Arc;
 use winit::window::Window;
 use crate::camera::{Camera, CameraUniform};
 use crate::world::{Chunk, BlockType};
+use crate::inventory::{Inventory, GameMode, ItemStack};
+use crate::crafting::RecipeManager;
 use crate::chunk_manager::ChunkManager;
 use crate::physics::PlayerPhysics;
 use crate::interaction::raycast;
@@ -80,6 +82,40 @@ impl UiVertex {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TexturedUiVertex {
+    pub position: [f32; 3],
+    pub tex_coords: [f32; 2],
+    pub color: [f32; 4],
+}
+
+impl TexturedUiVertex {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<TexturedUiVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>()) as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct KeyState {
     pub w: bool,
@@ -119,9 +155,23 @@ pub struct State {
     ui_line_pipeline: wgpu::RenderPipeline,
     ui_vertex_buffer: wgpu::Buffer,
     ui_line_vertex_buffer: wgpu::Buffer,
+    ui_textured_pipeline: wgpu::RenderPipeline,
+    ui_textured_vertex_buffer: wgpu::Buffer,
     num_ui_vertices: u32,
     num_ui_line_vertices: u32,
-    pub selected_block: BlockType,
+    num_ui_textured_vertices: u32,
+    pub game_mode: GameMode,
+    pub inventory: Inventory,
+    pub recipe_manager: RecipeManager,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotType {
+    Hotbar(usize),
+    Backpack(usize),
+    Armor(usize),
+    CraftInput(usize),
+    CraftOutput,
 }
 
 impl State {
@@ -627,17 +677,61 @@ impl State {
             multiview: None,
         });
 
+        let ui_textured_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("UI Textured Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_textured_ui",
+                buffers: &[TexturedUiVertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_textured_ui",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         // Initialize UI Buffers
         let ui_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("UI Vertex Buffer"),
-            size: (std::mem::size_of::<UiVertex>() * 1024) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<UiVertex>() * 4096) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let ui_line_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("UI Line Vertex Buffer"),
-            size: (std::mem::size_of::<UiVertex>() * 1024) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<UiVertex>() * 4096) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let ui_textured_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UI Textured Vertex Buffer"),
+            size: (std::mem::size_of::<TexturedUiVertex>() * 4096) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -671,9 +765,14 @@ impl State {
             ui_line_pipeline,
             ui_vertex_buffer,
             ui_line_vertex_buffer,
+            ui_textured_pipeline,
+            ui_textured_vertex_buffer,
             num_ui_vertices: 0,
             num_ui_line_vertices: 0,
-            selected_block: BlockType::Stone,
+            num_ui_textured_vertices: 0,
+            game_mode: GameMode::Creative,
+            inventory: Inventory::new_creative(),
+            recipe_manager: RecipeManager::new(),
         }
     }
 
@@ -936,17 +1035,27 @@ impl State {
                 if old_block != BlockType::Air {
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
 
+                    if self.game_mode == GameMode::Survival {
+                        self.inventory.add_item(crate::inventory::Item::from_block(old_block));
+                    }
+
                     // Update lighting for removal
                     crate::lighting::update_sky_light_after_removed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
                     crate::lighting::update_block_light_after_removed(&mut self.chunk_manager, wx, wy, wz, old_block.properties().light_emission, &mut dirty_chunks);
                 }
             } else {
-                let placed_block = self.selected_block;
-                self.chunk_manager.set_block(wx, wy, wz, placed_block);
+                if let Some(placed_block) = self.inventory.get_selected_block() {
+                    self.chunk_manager.set_block(wx, wy, wz, placed_block);
 
-                // Update lighting for placement
-                crate::lighting::update_sky_light_after_placed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
-                crate::lighting::update_block_light_after_placed(&mut self.chunk_manager, wx, wy, wz, placed_block.properties().light_emission, &mut dirty_chunks);
+                    let is_creative = self.game_mode == GameMode::Creative;
+                    self.inventory.use_selected_item(is_creative);
+
+                    // Update lighting for placement
+                    crate::lighting::update_sky_light_after_placed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
+                    crate::lighting::update_block_light_after_placed(&mut self.chunk_manager, wx, wy, wz, placed_block.properties().light_emission, &mut dirty_chunks);
+                } else {
+                    return; // No block selected to place
+                }
             }
 
             // Mark the modified chunk and boundary neighbors dirty
@@ -964,6 +1073,237 @@ impl State {
             for (dcx, dcz) in dirty_chunks {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
                     mesh.dirty = true;
+                }
+            }
+        }
+    }
+
+    pub fn get_inventory_slots(&self) -> Vec<(SlotType, f32, f32, f32, f32)> {
+        let aspect = self.size.width as f32 / self.size.height as f32;
+        let slot_w = 0.08;
+        let slot_h = 0.08 * aspect;
+        let gap = 0.01;
+        let mut slots = Vec::new();
+
+        // 1. Hotbar (0..9)
+        for i in 0..9 {
+            let x0 = -0.40 + i as f32 * (slot_w + gap);
+            let y0 = -0.85;
+            slots.push((SlotType::Hotbar(i), x0, x0 + slot_w, y0, y0 + slot_h));
+        }
+
+        // 2. Backpack (0..27)
+        for r in 0..3 {
+            for c in 0..9 {
+                let i = r * 9 + c;
+                let x0 = -0.40 + c as f32 * (slot_w + gap);
+                let y0 = -0.70 + r as f32 * (slot_h + gap);
+                slots.push((SlotType::Backpack(i), x0, x0 + slot_w, y0, y0 + slot_h));
+            }
+        }
+
+        // 3. Armor (0..4)
+        for i in 0..4 {
+            let x0 = -0.40;
+            let y0 = -0.15 + i as f32 * (slot_h + gap);
+            slots.push((SlotType::Armor(i), x0, x0 + slot_w, y0, y0 + slot_h));
+        }
+
+        // 4. Crafting Grid & Output
+        if self.inventory.is_table_open {
+            // 3x3 table
+            let x_start = -0.05;
+            for r in 0..3 {
+                for c in 0..3 {
+                    let i = r * 3 + c;
+                    let x0 = x_start + c as f32 * (slot_w + gap);
+                    let y0 = -0.10 + r as f32 * (slot_h + gap);
+                    slots.push((SlotType::CraftInput(i), x0, x0 + slot_w, y0, y0 + slot_h));
+                }
+            }
+            // Output
+            let x0 = x_start + 3.0 * (slot_w + gap) + 0.06;
+            let y0 = -0.10 + 1.0 * (slot_h + gap);
+            slots.push((SlotType::CraftOutput, x0, x0 + slot_w, y0, y0 + slot_h));
+        } else {
+            // 2x2 player craft
+            let x_start = 0.05;
+            for r in 0..2 {
+                for c in 0..2 {
+                    let i = r * 2 + c;
+                    let x0 = x_start + c as f32 * (slot_w + gap);
+                    let y0 = -0.05 + r as f32 * (slot_h + gap);
+                    slots.push((SlotType::CraftInput(i), x0, x0 + slot_w, y0, y0 + slot_h));
+                }
+            }
+            // Output
+            let x0 = x_start + 2.0 * (slot_w + gap) + 0.06;
+            let y0 = -0.05 + 0.5 * (slot_h + gap);
+            slots.push((SlotType::CraftOutput, x0, x0 + slot_w, y0, y0 + slot_h));
+        }
+
+        slots
+    }
+
+    pub fn get_item_at_slot(&self, slot: SlotType) -> Option<ItemStack> {
+        match slot {
+            SlotType::Hotbar(i) => self.inventory.hotbar[i],
+            SlotType::Backpack(i) => self.inventory.main[i],
+            SlotType::Armor(i) => self.inventory.armor[i],
+            SlotType::CraftInput(i) => self.inventory.craft_input.get(i).copied().flatten(),
+            SlotType::CraftOutput => self.inventory.craft_output,
+        }
+    }
+
+    pub fn set_item_at_slot(&mut self, slot: SlotType, stack: Option<ItemStack>) {
+        match slot {
+            SlotType::Hotbar(i) => self.inventory.hotbar[i] = stack,
+            SlotType::Backpack(i) => self.inventory.main[i] = stack,
+            SlotType::Armor(i) => self.inventory.armor[i] = stack,
+            SlotType::CraftInput(i) => {
+                if i < self.inventory.craft_input.len() {
+                    self.inventory.craft_input[i] = stack;
+                }
+            }
+            SlotType::CraftOutput => self.inventory.craft_output = stack,
+        }
+    }
+
+    pub fn handle_inventory_click(&mut self, is_left: bool) {
+        let mouse_x = self.mouse_ndc[0];
+        let mouse_y = self.mouse_ndc[1];
+        let aspect = self.size.width as f32 / self.size.height as f32;
+        let slots = self.get_inventory_slots();
+        
+        let clicked_slot = slots.into_iter().find(|&(_, x0, x1, y0, y1)| {
+            mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
+        });
+
+        if let Some((slot_type, _, _, _, _)) = clicked_slot {
+            let slot_item = self.get_item_at_slot(slot_type);
+
+            match slot_type {
+                SlotType::CraftOutput => {
+                    if let Some(output) = slot_item {
+                        // Can only take from output slot
+                        let max_stack = output.item.properties().max_stack;
+                        if self.inventory.dragged.is_none() {
+                            self.inventory.dragged = Some(output);
+                            // Consume craft input ingredients
+                            for slot in self.inventory.craft_input.iter_mut() {
+                                if let Some(stack) = slot {
+                                    if stack.count > 1 {
+                                        stack.count -= 1;
+                                    } else {
+                                        *slot = None;
+                                    }
+                                }
+                            }
+                            let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
+                            self.inventory.craft_output = self.recipe_manager.match_recipe(&self.inventory.craft_input, grid_size);
+                        } else if let Some(ref mut dragged) = self.inventory.dragged {
+                            if dragged.item == output.item && dragged.count + output.count <= max_stack {
+                                dragged.count += output.count;
+                                // Consume craft input ingredients
+                                for slot in self.inventory.craft_input.iter_mut() {
+                                    if let Some(stack) = slot {
+                                        if stack.count > 1 {
+                                            stack.count -= 1;
+                                        } else {
+                                            *slot = None;
+                                        }
+                                    }
+                                }
+                                let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
+                                self.inventory.craft_output = self.recipe_manager.match_recipe(&self.inventory.craft_input, grid_size);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Normal slots (Backpack, Hotbar, Armor, CraftInput)
+                    let max_stack = slot_item.map(|s| s.item.properties().max_stack).unwrap_or(64);
+
+                    if is_left {
+                        // Left Click interaction
+                        if let Some(dragged) = self.inventory.dragged {
+                            if let Some(slot) = slot_item {
+                                if slot.item == dragged.item {
+                                    // Stack them
+                                    let space = max_stack.saturating_sub(slot.count);
+                                    let transfer = space.min(dragged.count);
+                                    let new_slot_count = slot.count + transfer;
+                                    let new_drag_count = dragged.count - transfer;
+
+                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: new_slot_count }));
+                                    if new_drag_count > 0 {
+                                        self.inventory.dragged = Some(ItemStack { item: dragged.item, count: new_drag_count });
+                                    } else {
+                                        self.inventory.dragged = None;
+                                    }
+                                } else {
+                                    // Swap slot and dragged
+                                    self.set_item_at_slot(slot_type, Some(dragged));
+                                    self.inventory.dragged = Some(slot);
+                                }
+                            } else {
+                                // Put dragged in empty slot
+                                self.set_item_at_slot(slot_type, Some(dragged));
+                                self.inventory.dragged = None;
+                            }
+                        } else {
+                            // Pickup entire slot
+                            if let Some(slot) = slot_item {
+                                self.inventory.dragged = Some(slot);
+                                self.set_item_at_slot(slot_type, None);
+                            }
+                        }
+                    } else {
+                        // Right Click interaction
+                        if let Some(dragged) = self.inventory.dragged {
+                            if let Some(slot) = slot_item {
+                                if slot.item == dragged.item && slot.count < max_stack {
+                                    // Drop 1
+                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: slot.count + 1 }));
+                                    if dragged.count > 1 {
+                                        self.inventory.dragged = Some(ItemStack { item: dragged.item, count: dragged.count - 1 });
+                                    } else {
+                                        self.inventory.dragged = None;
+                                    }
+                                } else if slot.item != dragged.item {
+                                    // Swap (like left click swap)
+                                    self.set_item_at_slot(slot_type, Some(dragged));
+                                    self.inventory.dragged = Some(slot);
+                                }
+                            } else {
+                                // Drop 1 in empty slot
+                                self.set_item_at_slot(slot_type, Some(ItemStack { item: dragged.item, count: 1 }));
+                                if dragged.count > 1 {
+                                    self.inventory.dragged = Some(ItemStack { item: dragged.item, count: dragged.count - 1 });
+                                } else {
+                                    self.inventory.dragged = None;
+                                }
+                            }
+                        } else {
+                            // Split stack in slot
+                            if let Some(slot) = slot_item {
+                                let take = (slot.count + 1) / 2;
+                                let keep = slot.count - take;
+                                self.inventory.dragged = Some(ItemStack { item: slot.item, count: take });
+                                if keep > 0 {
+                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: keep }));
+                                } else {
+                                    self.set_item_at_slot(slot_type, None);
+                                }
+                            }
+                        }
+                    }
+
+                    // If we clicked a craft input slot, recalculate craft output
+                    if let SlotType::CraftInput(_) = slot_type {
+                        let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
+                        self.inventory.craft_output = self.recipe_manager.match_recipe(&self.inventory.craft_input, grid_size);
+                    }
                 }
             }
         }
@@ -1070,9 +1410,9 @@ impl State {
             // "QUIT"
             draw_centered_text("QUIT", -0.28, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
 
-            // Cap the sizes to the preallocated buffers (1024 vertices)
-            let ui_vert_len = ui_vertices.len().min(1024);
-            let ui_line_vert_len = ui_line_vertices.len().min(1024);
+            // Cap the sizes to the preallocated buffers (4096 vertices)
+            let ui_vert_len = ui_vertices.len().min(4096);
+            let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
             self.queue.write_buffer(&self.ui_vertex_buffer, 0, bytemuck::cast_slice(&ui_vertices[..ui_vert_len]));
             self.queue.write_buffer(&self.ui_line_vertex_buffer, 0, bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]));
@@ -1080,21 +1420,307 @@ impl State {
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
         } else {
-            let mut hud_line_vertices = Vec::new();
-            let text_color = [1.0, 1.0, 1.0, 1.0];
-            let selected_text = format!("SELECTED: {:?}", self.selected_block);
-            let upper = selected_text.to_uppercase();
-            let char_w = 0.015;
-            let char_h = 0.03;
-            let spacing = 0.006;
-            let n = upper.len() as f32;
-            let width = n * char_w + (n - 1.0) * spacing;
-            let start_x = -width / 2.0;
-            add_string_lines(&upper, start_x, -0.90, char_w, char_h, spacing, text_color, &mut hud_line_vertices);
+            let mut ui_vertices = Vec::new();
+            let mut ui_line_vertices = Vec::new();
+            let mut ui_textured_vertices = Vec::new();
 
-            let hud_line_vert_len = hud_line_vertices.len().min(1024);
-            self.queue.write_buffer(&self.ui_line_vertex_buffer, 0, bytemuck::cast_slice(&hud_line_vertices[..hud_line_vert_len]));
-            self.num_ui_line_vertices = hud_line_vert_len as u32;
+            let aspect = self.size.width as f32 / self.size.height as f32;
+            let slot_w = 0.08;
+            let slot_h = 0.08 * aspect;
+            let gap = 0.01;
+            let start_x = -0.40;
+
+            if self.inventory.is_open {
+                // 1. Dark overlay (screen covers from -1.0 to 1.0)
+                let bg_color = [0.08, 0.08, 0.08, 0.6];
+                ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [-1.0, -1.0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [1.0, 1.0, 0.0], color: bg_color });
+
+                // 2. Draw slots
+                let slots = self.get_inventory_slots();
+                let mouse_x = self.mouse_ndc[0];
+                let mouse_y = self.mouse_ndc[1];
+                let mut hovered_slot = None;
+
+                for &(slot_type, x0, x1, y0, y1) in &slots {
+                    let is_hovered = mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1;
+                    if is_hovered {
+                        hovered_slot = Some((slot_type, x0, x1, y0, y1));
+                    }
+
+                    // Background Quad
+                    let slot_bg_color = if is_hovered {
+                        [0.35, 0.35, 0.35, 0.8]
+                    } else {
+                        [0.15, 0.15, 0.15, 0.8]
+                    };
+                    ui_vertices.push(UiVertex { position: [x0, y1, 0.0], color: slot_bg_color });
+                    ui_vertices.push(UiVertex { position: [x0, y0, 0.0], color: slot_bg_color });
+                    ui_vertices.push(UiVertex { position: [x1, y0, 0.0], color: slot_bg_color });
+                    ui_vertices.push(UiVertex { position: [x0, y1, 0.0], color: slot_bg_color });
+                    ui_vertices.push(UiVertex { position: [x1, y0, 0.0], color: slot_bg_color });
+                    ui_vertices.push(UiVertex { position: [x1, y1, 0.0], color: slot_bg_color });
+
+                    // Borders
+                    let border_color = match slot_type {
+                        SlotType::Hotbar(idx) if idx == self.inventory.selected => [1.0, 1.0, 1.0, 1.0],
+                        _ => [0.3, 0.3, 0.3, 0.8],
+                    };
+                    ui_line_vertices.push(UiVertex { position: [x0, y1, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x1, y1, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x1, y1, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x1, y0, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x1, y0, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x0, y0, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x0, y0, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x0, y1, 0.0], color: border_color });
+
+                    // Slot Item
+                    if let Some(stack) = self.get_item_at_slot(slot_type) {
+                        let (col, row) = stack.item.properties().tex_coords;
+                        let u0 = col as f32 * 0.0625;
+                        let u1 = (col + 1) as f32 * 0.0625;
+                        let v0 = row as f32 * 0.0625;
+                        let v1 = (row + 1) as f32 * 0.0625;
+
+                        let margin_x = 0.015;
+                        let margin_y = 0.015 * aspect;
+                        let tx0 = x0 + margin_x;
+                        let tx1 = x1 - margin_x;
+                        let ty0 = y0 + margin_y;
+                        let ty1 = y1 - margin_y;
+
+                        let c = [1.0, 1.0, 1.0, 1.0];
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty1, 0.0], tex_coords: [u0, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty0, 0.0], tex_coords: [u0, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty0, 0.0], tex_coords: [u1, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty1, 0.0], tex_coords: [u0, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty0, 0.0], tex_coords: [u1, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty1, 0.0], tex_coords: [u1, v0], color: c });
+
+                        if stack.count > 1 {
+                            let count_str = format!("{}", stack.count);
+                            let cw = 0.008;
+                            let ch = 0.016;
+                            let cs = 0.003;
+                            let n_chars = count_str.len() as f32;
+                            let count_w = n_chars * cw + (n_chars - 1.0) * cs;
+                            let count_x = x1 - count_w - 0.008;
+                            let count_y = y0 + 0.01 * aspect;
+                            add_string_lines(&count_str, count_x, count_y, cw, ch, cs, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                        }
+                    }
+                }
+
+                // 3. Draw crafting arrow symbol
+                let arrow_y = if self.inventory.is_table_open {
+                    -0.10 + 1.0 * (slot_h + gap) + slot_h / 2.0
+                } else {
+                    -0.05 + 0.5 * (slot_h + gap) + slot_h / 2.0
+                };
+                let arrow_x = if self.inventory.is_table_open {
+                    -0.05 + 3.0 * (slot_w + gap) + 0.015
+                } else {
+                    0.05 + 2.0 * (slot_w + gap) + 0.015
+                };
+                let ac = [0.8, 0.8, 0.8, 1.0];
+                ui_line_vertices.push(UiVertex { position: [arrow_x, arrow_y, 0.0], color: ac });
+                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.03, arrow_y, 0.0], color: ac });
+                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.03, arrow_y, 0.0], color: ac });
+                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.02, arrow_y + 0.01 * aspect, 0.0], color: ac });
+                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.03, arrow_y, 0.0], color: ac });
+                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.02, arrow_y - 0.01 * aspect, 0.0], color: ac });
+
+                // 4. Draw texts (Labels)
+                add_string_lines("INVENTORY", -0.40, -0.70 + 3.0 * (slot_h + gap) + 0.02, 0.008, 0.016, 0.003, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                let craft_lbl_x = if self.inventory.is_table_open { -0.05 } else { 0.05 };
+                let craft_lbl_y = if self.inventory.is_table_open {
+                    -0.10 + 3.0 * (slot_h + gap) + 0.02
+                } else {
+                    -0.05 + 2.0 * (slot_h + gap) + 0.02
+                };
+                add_string_lines("CRAFTING", craft_lbl_x, craft_lbl_y, 0.008, 0.016, 0.003, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+
+                // 5. Draw dragged item at cursor position
+                if let Some(dragged) = self.inventory.dragged {
+                    let (col, row) = dragged.item.properties().tex_coords;
+                    let u0 = col as f32 * 0.0625;
+                    let u1 = (col + 1) as f32 * 0.0625;
+                    let v0 = row as f32 * 0.0625;
+                    let v1 = (row + 1) as f32 * 0.0625;
+
+                    let dx0 = mouse_x - slot_w / 2.0 + 0.015;
+                    let dx1 = mouse_x + slot_w / 2.0 - 0.015;
+                    let dy0 = mouse_y - slot_h / 2.0 + 0.015 * aspect;
+                    let dy1 = mouse_y + slot_h / 2.0 - 0.015 * aspect;
+
+                    let c = [1.0, 1.0, 1.0, 1.0];
+                    ui_textured_vertices.push(TexturedUiVertex { position: [dx0, dy1, 0.0], tex_coords: [u0, v0], color: c });
+                    ui_textured_vertices.push(TexturedUiVertex { position: [dx0, dy0, 0.0], tex_coords: [u0, v1], color: c });
+                    ui_textured_vertices.push(TexturedUiVertex { position: [dx1, dy0, 0.0], tex_coords: [u1, v1], color: c });
+                    ui_textured_vertices.push(TexturedUiVertex { position: [dx0, dy1, 0.0], tex_coords: [u0, v0], color: c });
+                    ui_textured_vertices.push(TexturedUiVertex { position: [dx1, dy0, 0.0], tex_coords: [u1, v1], color: c });
+                    ui_textured_vertices.push(TexturedUiVertex { position: [dx1, dy1, 0.0], tex_coords: [u1, v0], color: c });
+
+                    if dragged.count > 1 {
+                        let count_str = format!("{}", dragged.count);
+                        let cw = 0.008;
+                        let ch = 0.016;
+                        let cs = 0.003;
+                        let n_chars = count_str.len() as f32;
+                        let count_w = n_chars * cw + (n_chars - 1.0) * cs;
+                        let count_x = mouse_x + slot_w / 2.0 - count_w - 0.008;
+                        let count_y = mouse_y - slot_h / 2.0 + 0.01 * aspect;
+                        add_string_lines(&count_str, count_x, count_y, cw, ch, cs, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                    }
+                }
+
+                // 6. Draw tooltip for hovered slot
+                if self.inventory.dragged.is_none() {
+                    if let Some((slot_type, _, _, _, _)) = hovered_slot {
+                        if let Some(stack) = self.get_item_at_slot(slot_type) {
+                            let name = stack.item.properties().name;
+                            let tw = name.len() as f32 * 0.014 + 0.02;
+                            let th = 0.035 * aspect;
+                            let tx = mouse_x + 0.02;
+                            let ty = mouse_y + 0.02;
+
+                            let tt_bg = [0.05, 0.05, 0.1, 0.95];
+                            ui_vertices.push(UiVertex { position: [tx, ty + th, 0.0], color: tt_bg });
+                            ui_vertices.push(UiVertex { position: [tx, ty, 0.0], color: tt_bg });
+                            ui_vertices.push(UiVertex { position: [tx + tw, ty, 0.0], color: tt_bg });
+                            ui_vertices.push(UiVertex { position: [tx, ty + th, 0.0], color: tt_bg });
+                            ui_vertices.push(UiVertex { position: [tx + tw, ty, 0.0], color: tt_bg });
+                            ui_vertices.push(UiVertex { position: [tx + tw, ty + th, 0.0], color: tt_bg });
+
+                            let tt_border = [0.3, 0.3, 0.7, 1.0];
+                            ui_line_vertices.push(UiVertex { position: [tx, ty + th, 0.0], color: tt_border });
+                            ui_line_vertices.push(UiVertex { position: [tx + tw, ty + th, 0.0], color: tt_border });
+                            ui_line_vertices.push(UiVertex { position: [tx + tw, ty + th, 0.0], color: tt_border });
+                            ui_line_vertices.push(UiVertex { position: [tx + tw, ty, 0.0], color: tt_border });
+                            ui_line_vertices.push(UiVertex { position: [tx + tw, ty, 0.0], color: tt_border });
+                            ui_line_vertices.push(UiVertex { position: [tx, ty, 0.0], color: tt_border });
+                            ui_line_vertices.push(UiVertex { position: [tx, ty, 0.0], color: tt_border });
+                            ui_line_vertices.push(UiVertex { position: [tx, ty + th, 0.0], color: tt_border });
+
+                            add_string_lines(name, tx + 0.01, ty + 0.01 * aspect, 0.008, 0.016, 0.003, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                        }
+                    }
+                }
+            } else {
+                // Background Bar
+                let bg_color = [0.05, 0.05, 0.05, 0.6];
+                let bg_x0 = -0.415;
+                let bg_x1 = 0.415;
+                let bg_y0 = -0.96;
+                let bg_y1 = -0.94 + slot_h;
+                ui_vertices.push(UiVertex { position: [bg_x0, bg_y1, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [bg_x0, bg_y0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [bg_x1, bg_y0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [bg_x0, bg_y1, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [bg_x1, bg_y0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex { position: [bg_x1, bg_y1, 0.0], color: bg_color });
+
+                // Slots
+                for i in 0..9 {
+                    let x0 = start_x + i as f32 * (slot_w + gap);
+                    let x1 = x0 + slot_w;
+                    let y0 = -0.95;
+                    let y1 = y0 + slot_h;
+
+                    let border_color = if i == self.inventory.selected {
+                        [1.0, 1.0, 1.0, 1.0] // White for active
+                    } else {
+                        [0.3, 0.3, 0.3, 0.8] // Gray for inactive
+                    };
+
+                    // Push lines to ui_line_vertices (forms border box)
+                    ui_line_vertices.push(UiVertex { position: [x0, y1, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x1, y1, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x1, y1, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x1, y0, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x1, y0, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x0, y0, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x0, y0, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex { position: [x0, y1, 0.0], color: border_color });
+
+                    if let Some(stack) = &self.inventory.hotbar[i] {
+                        let (col, row) = stack.item.properties().tex_coords;
+                        let u0 = col as f32 * 0.0625;
+                        let u1 = (col + 1) as f32 * 0.0625;
+                        let v0 = row as f32 * 0.0625;
+                        let v1 = (row + 1) as f32 * 0.0625;
+
+                        let margin_x = 0.015;
+                        let margin_y = 0.015 * aspect;
+                        let tx0 = x0 + margin_x;
+                        let tx1 = x1 - margin_x;
+                        let ty0 = y0 + margin_y;
+                        let ty1 = y1 - margin_y;
+
+                        let c = [1.0, 1.0, 1.0, 1.0];
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty1, 0.0], tex_coords: [u0, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty0, 0.0], tex_coords: [u0, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty0, 0.0], tex_coords: [u1, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty1, 0.0], tex_coords: [u0, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty0, 0.0], tex_coords: [u1, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty1, 0.0], tex_coords: [u1, v0], color: c });
+
+                        if stack.count > 1 {
+                            let count_str = format!("{}", stack.count);
+                            let cw = 0.008;
+                            let ch = 0.016;
+                            let cs = 0.003;
+                            let n_chars = count_str.len() as f32;
+                            let count_w = n_chars * cw + (n_chars - 1.0) * cs;
+                            let count_x = x1 - count_w - 0.01;
+                            let count_y = y0 + 0.012 * aspect;
+                            add_string_lines(&count_str, count_x, count_y, cw, ch, cs, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                        }
+                    }
+                }
+
+                // Selected Block/Item Text
+                let selected_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
+                let selected_text = format!("{:?}", selected_item).to_uppercase();
+                let char_w = 0.010;
+                let char_h = 0.020;
+                let spacing = 0.004;
+                let n = selected_text.len() as f32;
+                let width = n * char_w + (n - 1.0) * spacing;
+                let text_x = -width / 2.0;
+                add_string_lines(&selected_text, text_x, -0.78, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+
+                // Game Mode Status Text
+                let mode_text = match self.game_mode {
+                    GameMode::Creative => "CREATIVE MODE",
+                    GameMode::Survival => "SURVIVAL MODE",
+                };
+                let mode_w = 0.009;
+                let mode_h = 0.018;
+                let mode_s = 0.003;
+                let n_mode = mode_text.len() as f32;
+                let width_mode = n_mode * mode_w + (n_mode - 1.0) * mode_s;
+                let mode_x = -width_mode / 2.0;
+                add_string_lines(mode_text, mode_x, -0.71, mode_w, mode_h, mode_s, [1.0, 0.9, 0.4, 1.0], &mut ui_line_vertices);
+            }
+
+            // Write Buffers
+            let ui_vert_len = ui_vertices.len().min(4096);
+            let ui_line_vert_len = ui_line_vertices.len().min(4096);
+            let ui_textured_vert_len = ui_textured_vertices.len().min(4096);
+
+            self.queue.write_buffer(&self.ui_vertex_buffer, 0, bytemuck::cast_slice(&ui_vertices[..ui_vert_len]));
+            self.queue.write_buffer(&self.ui_line_vertex_buffer, 0, bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]));
+            self.queue.write_buffer(&self.ui_textured_vertex_buffer, 0, bytemuck::cast_slice(&ui_textured_vertices[..ui_textured_vert_len]));
+
+            self.num_ui_vertices = ui_vert_len as u32;
+            self.num_ui_line_vertices = ui_line_vert_len as u32;
+            self.num_ui_textured_vertices = ui_textured_vert_len as u32;
         }
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1156,15 +1782,32 @@ impl State {
             }
 
             if !self.is_paused {
-                // 2. Draw 2D UI Crosshair
+                // 1. Draw Textured UI (block thumbnails)
+                if self.num_ui_textured_vertices > 0 {
+                    render_pass.set_pipeline(&self.ui_textured_pipeline);
+                    render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, self.ui_textured_vertex_buffer.slice(..));
+                    render_pass.draw(0..self.num_ui_textured_vertices, 0..1);
+                }
+
+                // 2. Draw Colored UI (hotbar background)
+                if self.num_ui_vertices > 0 {
+                    render_pass.set_pipeline(&self.ui_pipeline);
+                    render_pass.set_vertex_buffer(0, self.ui_vertex_buffer.slice(..));
+                    render_pass.draw(0..self.num_ui_vertices, 0..1);
+                }
+
+                // 3. Draw Crosshair
                 render_pass.set_pipeline(&self.crosshair_pipeline);
                 render_pass.set_vertex_buffer(0, self.crosshair_buffer.slice(..));
                 render_pass.draw(0..4, 0..1);
 
-                // 2b. Draw 2D HUD text (using ui_line_pipeline)
-                render_pass.set_pipeline(&self.ui_line_pipeline);
-                render_pass.set_vertex_buffer(0, self.ui_line_vertex_buffer.slice(..));
-                render_pass.draw(0..self.num_ui_line_vertices, 0..1);
+                // 4. Draw Line/Text UI (slot borders & texts)
+                if self.num_ui_line_vertices > 0 {
+                    render_pass.set_pipeline(&self.ui_line_pipeline);
+                    render_pass.set_vertex_buffer(0, self.ui_line_vertex_buffer.slice(..));
+                    render_pass.draw(0..self.num_ui_line_vertices, 0..1);
+                }
             } else {
                 // 3. Draw Pause Menu
                 // Background overlay & buttons
