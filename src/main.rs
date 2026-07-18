@@ -10,6 +10,7 @@ mod lighting;
 mod inventory;
 mod crafting;
 mod player;
+mod entity;
 
 
 use app::App;
