@@ -2345,6 +2345,39 @@ impl State {
                     ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: flash_color });
                     ui_vertices.push(UiVertex { position: [1.0, 1.0, 0.0], color: flash_color });
                 }
+
+                // F3 Debug Screen
+                if self.show_debug {
+                    let time_of_day = self.world_time.time_of_day_smooth();
+                    let hour = ((time_of_day * 24.0 + 6.0) % 24.0).floor() as u32;
+                    let minute = (((time_of_day * 24.0 + 6.0) % 1.0) * 60.0).floor() as u32;
+                    let day = self.world_time.ticks / self.world_time.day_length;
+                    let time_str = format!("TIME: {:02}:{:02} (DAY {}, TICKS: {})", hour, minute, day, self.world_time.ticks);
+                    
+                    let pos = self.player_physics.position;
+                    let pos_str = format!("XYZ: {:.3} / {:.5} / {:.3}", pos.x, pos.y, pos.z);
+                    
+                    let dir_x = self.camera.yaw.cos() * self.camera.pitch.cos();
+                    let dir_y = self.camera.pitch.sin();
+                    let dir_z = self.camera.yaw.sin() * self.camera.pitch.cos();
+                    let dir_str = format!("DIR: {:.2} / {:.2} / {:.2}", dir_x, dir_y, dir_z);
+
+                    let light_lvl = self.world_time.sky_light_level();
+                    let light_str = format!("SKY LIGHT: {} (DAYTIME: {})", light_lvl, if light_lvl == 15 { "YES" } else if light_lvl == 4 { "NO" } else { "TRANSITION" });
+                    
+                    let char_w = 0.007;
+                    let char_h = 0.014;
+                    let spacing = 0.002;
+                    
+                    let start_x = -0.98;
+                    let start_y = 0.95;
+                    let line_gap = 0.025;
+                    
+                    add_string_lines(&time_str, start_x, start_y, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                    add_string_lines(&pos_str, start_x, start_y - line_gap, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                    add_string_lines(&dir_str, start_x, start_y - line_gap * 2.0, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                    add_string_lines(&light_str, start_x, start_y - line_gap * 3.0, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                }
             }
 
             // Write Buffers
