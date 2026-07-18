@@ -64,6 +64,8 @@ pub struct State {
     pub player_physics: PlayerPhysics,
     pub keys: KeyState,
     texture_atlas: crate::texture::TextureAtlas,
+    crosshair_pipeline: wgpu::RenderPipeline,
+    crosshair_buffer: wgpu::Buffer,
 }
 
 impl State {
@@ -259,6 +261,60 @@ impl State {
             multiview: None,
         });
 
+        // Initialize Crosshair Pipeline
+        let crosshair_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Crosshair Pipeline Layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+        let crosshair_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Crosshair Render Pipeline"),
+            layout: Some(&crosshair_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_crosshair",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_crosshair",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        // Crosshair Vertices (Horizontal and Vertical Lines)
+        let aspect = size.width as f32 / size.height as f32;
+        let crosshair_size = 0.02;
+        let crosshair_vertices = [
+            Vertex { position: [-crosshair_size, 0.0, 0.0], tex_coords: [0.0, 0.0] },
+            Vertex { position: [crosshair_size, 0.0, 0.0], tex_coords: [0.0, 0.0] },
+            Vertex { position: [0.0, -crosshair_size * aspect, 0.0], tex_coords: [0.0, 0.0] },
+            Vertex { position: [0.0, crosshair_size * aspect, 0.0], tex_coords: [0.0, 0.0] },
+        ];
+
+        let crosshair_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Crosshair Vertex Buffer"),
+            contents: bytemuck::cast_slice(&crosshair_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         // Initialize Chunk and mesh
         let chunk = Chunk::new();
         let (vertices, indices) = chunk.generate_mesh();
@@ -296,6 +352,8 @@ impl State {
             player_physics,
             keys,
             texture_atlas,
+            crosshair_pipeline,
+            crosshair_buffer,
         }
     }
 
@@ -422,6 +480,11 @@ impl State {
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+
+            // 2. Draw 2D UI Crosshair
+            render_pass.set_pipeline(&self.crosshair_pipeline);
+            render_pass.set_vertex_buffer(0, self.crosshair_buffer.slice(..));
+            render_pass.draw(0..4, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
