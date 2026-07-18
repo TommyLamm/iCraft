@@ -16,3 +16,5 @@ half = "=2.2.1"
 rayon = "=1.10.0"
 rayon-core = "=1.12.1"
 unicode-segmentation = "=1.12.0"
+bytemuck = { version = "1.16", features = ["derive"] }
+
