@@ -630,6 +630,175 @@ fn draw_bread_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     }
 }
 
+fn draw_rotten_flesh_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    let ox = tx * 16;
+    let oy = ty * 16;
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+    let border = Rgba([0, 0, 0, 255]);
+    let flesh_brown = Rgba([120, 80, 50, 255]);
+    let flesh_green = Rgba([90, 110, 50, 255]);
+    let dark_green = Rgba([50, 70, 30, 255]);
+    let grid = [
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0],
+        [0,0,0,0,0,1,2,3,2,1,0,0,0,0,0,0],
+        [0,0,0,0,1,2,4,3,4,2,1,0,0,0,0,0],
+        [0,0,0,1,2,3,4,3,2,3,2,1,0,0,0,0],
+        [0,0,1,2,4,3,2,4,3,4,2,1,0,0,0,0],
+        [0,0,1,3,2,4,3,2,3,2,1,0,0,0,0,0],
+        [0,0,0,1,1,3,4,3,2,1,1,0,0,0,0,0],
+        [0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    ];
+    for y in 0..grid.len() {
+        for x in 0..grid[y].len() {
+            let val = grid[y][x];
+            if val == 0 { continue; }
+            let c = match val {
+                1 => border,
+                2 => flesh_brown,
+                3 => flesh_green,
+                4 => dark_green,
+                _ => border,
+            };
+            img.put_pixel(ox + x as u32, oy + y as u32, c);
+        }
+    }
+}
+
+fn draw_bone_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    let ox = tx * 16;
+    let oy = ty * 16;
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+    let border = Rgba([0, 0, 0, 255]);
+    let bone_white = Rgba([230, 230, 220, 255]);
+    let bone_gray = Rgba([180, 180, 175, 255]);
+    let grid = [
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,1,2,2,1,0],
+        [0,0,0,0,0,0,0,0,0,0,1,2,2,1,1,0],
+        [0,0,0,0,0,0,0,0,0,1,2,2,1,0,0,0],
+        [0,0,0,0,0,0,0,0,1,2,2,1,0,0,0,0],
+        [0,0,0,0,0,0,0,1,2,2,1,0,0,0,0,0],
+        [0,0,0,0,0,0,1,2,2,1,0,0,0,0,0,0],
+        [0,0,0,0,0,1,2,2,1,0,0,0,0,0,0,0],
+        [0,0,0,0,1,2,2,1,0,0,0,0,0,0,0,0],
+        [0,0,0,1,2,2,1,0,0,0,0,0,0,0,0,0],
+        [0,0,1,1,2,2,1,0,0,0,0,0,0,0,0,0],
+        [0,1,2,2,1,1,0,0,0,0,0,0,0,0,0,0],
+        [0,1,3,3,1,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    ];
+    for y in 0..grid.len() {
+        for x in 0..grid[y].len() {
+            let val = grid[y][x];
+            if val == 0 { continue; }
+            let c = match val {
+                1 => border,
+                2 => bone_white,
+                3 => bone_gray,
+                _ => border,
+            };
+            img.put_pixel(ox + x as u32, oy + y as u32, c);
+        }
+    }
+}
+
+fn draw_bow_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    let ox = tx * 16;
+    let oy = ty * 16;
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+    let border = Rgba([0, 0, 0, 255]);
+    let wood = Rgba([140, 90, 45, 255]);
+    let string = Rgba([200, 200, 200, 255]);
+    let grid = [
+        [0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0],
+        [0,0,0,0,0,0,0,0,0,1,1,2,2,1,0,0],
+        [0,0,0,0,0,0,0,0,1,2,2,1,3,1,0,0],
+        [0,0,0,0,0,0,0,1,2,1,0,0,3,1,0,0],
+        [0,0,0,0,0,0,1,2,1,0,0,0,3,1,0,0],
+        [0,0,0,0,0,1,2,1,0,0,0,0,3,1,0,0],
+        [0,0,0,0,1,2,1,0,0,0,0,0,3,1,0,0],
+        [0,0,0,1,2,1,0,0,0,0,0,0,3,1,0,0],
+        [0,0,1,2,1,0,0,0,0,0,0,0,3,1,0,0],
+        [0,1,2,1,0,0,0,0,0,0,0,0,3,1,0,0],
+        [0,1,2,1,0,0,0,0,0,0,0,1,3,1,0,0],
+        [0,1,1,2,1,0,0,0,0,0,1,2,1,0,0,0],
+        [0,0,1,2,2,1,1,1,1,1,2,1,0,0,0,0],
+        [0,0,0,1,1,2,2,2,2,2,1,0,0,0,0,0],
+        [0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    ];
+    for y in 0..grid.len() {
+        for x in 0..grid[y].len() {
+            let val = grid[y][x];
+            if val == 0 { continue; }
+            let c = match val {
+                1 => border,
+                2 => wood,
+                3 => string,
+                _ => border,
+            };
+            img.put_pixel(ox + x as u32, oy + y as u32, c);
+        }
+    }
+}
+
+fn draw_gunpowder_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    let ox = tx * 16;
+    let oy = ty * 16;
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+    let border = Rgba([0, 0, 0, 255]);
+    let gray1 = Rgba([110, 110, 110, 255]);
+    let gray2 = Rgba([80, 80, 80, 255]);
+    let grid = [
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,1,2,3,1,0,0,0,0,0,0],
+        [0,0,0,0,0,1,2,2,3,2,1,0,0,0,0,0],
+        [0,0,0,0,1,3,2,3,2,2,3,1,0,0,0,0],
+        [0,0,0,1,2,2,3,2,2,3,2,2,1,0,0,0],
+        [0,0,1,3,2,2,2,3,2,2,3,2,3,1,0,0],
+        [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    ];
+    for y in 0..grid.len() {
+        for x in 0..grid[y].len() {
+            let val = grid[y][x];
+            if val == 0 { continue; }
+            let c = match val {
+                1 => border,
+                2 => gray1,
+                3 => gray2,
+                _ => border,
+            };
+            img.put_pixel(ox + x as u32, oy + y as u32, c);
+        }
+    }
+}
+
 impl TextureAtlas {
     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
         let mut img = RgbaImage::new(256, 256);
@@ -775,8 +944,12 @@ impl TextureAtlas {
         draw_redstone_icon(&mut img, 5, 3);
         draw_apple_icon(&mut img, 6, 3);
         draw_bread_icon(&mut img, 7, 3);
+        draw_rotten_flesh_icon(&mut img, 8, 3);
+        draw_bone_icon(&mut img, 9, 3);
+        draw_bow_icon(&mut img, 10, 3);
+        draw_gunpowder_icon(&mut img, 11, 3);
         // Clear remaining slots in Row 3
-        for tx in 8..16 {
+        for tx in 12..16 {
             for y in 0..16 {
                 for x in 0..16 {
                     img.put_pixel(tx * 16 + x, 3 * 16 + y, Rgba([0, 0, 0, 0]));

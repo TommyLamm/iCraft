@@ -24,6 +24,12 @@ pub enum Item {
 
     // Food
     Apple, Bread,
+    
+    // Mob Drops
+    RottenFlesh,
+    Bone,
+    Bow,
+    Gunpowder,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +160,12 @@ impl Item {
             Item::Redstone => ItemProperties { name: "Redstone Dust", max_stack: 64, is_block: false, block_type: None, tex_coords: (5, 3) },
             Item::Apple => ItemProperties { name: "Apple", max_stack: 64, is_block: false, block_type: None, tex_coords: (6, 3) },
             Item::Bread => ItemProperties { name: "Bread", max_stack: 64, is_block: false, block_type: None, tex_coords: (7, 3) },
+            
+            // Mob Drops on Row 3, Cols 8..11
+            Item::RottenFlesh => ItemProperties { name: "Rotten Flesh", max_stack: 64, is_block: false, block_type: None, tex_coords: (8, 3) },
+            Item::Bone => ItemProperties { name: "Bone", max_stack: 64, is_block: false, block_type: None, tex_coords: (9, 3) },
+            Item::Bow => ItemProperties { name: "Bow", max_stack: 1, is_block: false, block_type: None, tex_coords: (10, 3) },
+            Item::Gunpowder => ItemProperties { name: "Gunpowder", max_stack: 64, is_block: false, block_type: None, tex_coords: (11, 3) },
         }
     }
 
@@ -335,5 +347,13 @@ mod tests {
         assert_eq!(pick.durability, 131);
         let grass = ItemStack::new(Item::Grass, 64);
         assert_eq!(grass.durability, 0);
+    }
+
+    #[test]
+    fn test_new_mob_items() {
+        let flesh = Item::RottenFlesh;
+        let prop = flesh.properties();
+        assert_eq!(prop.name, "Rotten Flesh");
+        assert_eq!(prop.tex_coords, (8, 3));
     }
 }
