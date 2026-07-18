@@ -15,12 +15,13 @@
 ---
 
 ## 2. 當前進度狀態
-*   **階段**：設計階段完成，準備進入實作計劃 (Implementation Plan) 撰寫。
+*   **階段**：實作計劃完成，準備進入 Cargo 初始化與程式碼編寫階段。
 *   **已完成工作**：
     *   [x] 系統開發工具檢測（確定 Rust 已安裝，缺少 C++ 編譯器，因此選擇 Rust）。
     *   [x] 方案討論與確立（採用 **方案 A：Rust + wgpu + winit**）。
     *   [x] 系統架構設計與模組拆分討論。
     *   [x] 撰寫正式設計規格書並提交至 git [2026-07-18-minecraft-design.md](file:///f:/Desktop/MC/docs/superpowers/specs/2026-07-18-minecraft-design.md)。
+    *   [x] 撰寫詳細實作計劃並提交至 git [2026-07-18-minecraft-implementation.md](file:///f:/Desktop/MC/docs/superpowers/plans/2026-07-18-minecraft-implementation.md)。
     *   [x] 初始化 Git 儲存庫並完成初次提交。
     *   [x] 建立 `progress.md` 進度追蹤文件。
 
@@ -29,7 +30,7 @@
 ## 3. 開發路線圖與待辦清單 (TODO)
 
 ### 3.1. 實作計劃與初始化
-*   [ ] 撰寫詳細實作計劃 `implementation_plan.md`
+*   [x] 撰寫詳細實作計劃 `implementation_plan.md`
 *   [ ] 建立 `cargo` 專案結構與配置 `Cargo.toml` 依賴
 
 ### 3.2. 第一階段：視窗與 wgpu 渲染管線
