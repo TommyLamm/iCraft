@@ -196,6 +196,149 @@ fn draw_torch(img: &mut RgbaImage, tx: u32, ty: u32) {
     }
 }
 
+fn draw_stick_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_stick = x == y && x >= 3 && x <= 12;
+            if is_stick {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([139, 90, 43, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_coal_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let dx = (x as i32 - 8).abs();
+            let dy = (y as i32 - 8).abs();
+            let is_coal = dx + dy <= 5 && dx <= 4 && dy <= 4;
+            if is_coal {
+                let r = if dx == 0 && dy == 0 { 60 } else { 30 };
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([r, r, r, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_ingot_icon(img: &mut RgbaImage, tx: u32, ty: u32, color: [u8; 3]) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_ingot = x >= 3 && x <= 12 && y >= 5 && y <= 10;
+            if is_ingot {
+                let is_highlight = x == 3 || y == 5;
+                let c = if is_highlight {
+                    [color[0].saturating_add(40), color[1].saturating_add(40), color[2].saturating_add(40)]
+                } else {
+                    color
+                };
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([c[0], c[1], c[2], 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_diamond_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let dx = (x as i32 - 8).abs();
+            let dy = (y as i32 - 8).abs();
+            let is_diamond = dx + dy <= 5 && dy >= 1;
+            if is_diamond {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([90, 220, 240, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_redstone_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_center = (x as i32 - 8).abs() <= 2 && (y as i32 - 8).abs() <= 2;
+            if is_center {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([200, 20, 20, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_sword_icon(img: &mut RgbaImage, tx: u32, ty: u32, blade_color: [u8; 3]) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_handle = x == 3 && y == 12;
+            let is_guard = (x == 4 && y == 11) || (x == 3 && y == 11) || (x == 4 && y == 12);
+            let is_blade = x + y == 15 && x >= 5 && x <= 12;
+            if is_blade {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([blade_color[0], blade_color[1], blade_color[2], 255]));
+            } else if is_guard {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([120, 90, 60, 255]));
+            } else if is_handle {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([100, 70, 40, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_pickaxe_icon(img: &mut RgbaImage, tx: u32, ty: u32, head_color: [u8; 3]) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_handle = x == y && x >= 3 && x <= 12;
+            let is_head = (y == 3 && x >= 2 && x <= 6) || (x == 3 && y >= 2 && y <= 6) || (x + y == 6);
+            if is_head {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([head_color[0], head_color[1], head_color[2], 255]));
+            } else if is_handle {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([139, 90, 43, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_axe_icon(img: &mut RgbaImage, tx: u32, ty: u32, head_color: [u8; 3]) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_handle = x == y && x >= 3 && x <= 12;
+            let is_head = x >= 2 && x <= 4 && y >= 2 && y <= 4 && !(x == 4 && y == 4);
+            if is_head {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([head_color[0], head_color[1], head_color[2], 255]));
+            } else if is_handle {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([139, 90, 43, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_shovel_icon(img: &mut RgbaImage, tx: u32, ty: u32, head_color: [u8; 3]) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_handle = x == y && x >= 4 && x <= 12;
+            let is_head = x >= 2 && x <= 3 && y >= 2 && y <= 3;
+            if is_head {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([head_color[0], head_color[1], head_color[2], 255]));
+            } else if is_handle {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([139, 90, 43, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
 impl TextureAtlas {
     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
         let mut img = RgbaImage::new(256, 256);
@@ -323,10 +466,86 @@ impl TextureAtlas {
         }
         draw_torch(&mut img, 4, 2);
 
-        // Fill remaining spaces with zero transparent
-        for ty in 2..16 {
+        // Clear remaining slots in Row 2 (index 2)
+        for tx in 5..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    img.put_pixel(tx * 16 + x, 2 * 16 + y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+
+        // Row 3: Resources
+        draw_stick_icon(&mut img, 0, 3);
+        draw_coal_icon(&mut img, 1, 3);
+        draw_ingot_icon(&mut img, 2, 3, [200, 200, 200]); // Iron Ingot
+        draw_ingot_icon(&mut img, 3, 3, [240, 220, 70]);  // Gold Ingot
+        draw_diamond_icon(&mut img, 4, 3);
+        draw_redstone_icon(&mut img, 5, 3);
+        // Clear remaining slots in Row 3
+        for tx in 6..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    img.put_pixel(tx * 16 + x, 3 * 16 + y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+
+        // Row 4: Swords
+        draw_sword_icon(&mut img, 0, 4, [160, 160, 160]); // Stone Sword (gray)
+        draw_sword_icon(&mut img, 1, 4, [220, 220, 220]); // Iron Sword (silver)
+        draw_sword_icon(&mut img, 2, 4, [100, 220, 240]); // Diamond Sword (cyan)
+        // Clear remaining slots in Row 4
+        for tx in 3..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    img.put_pixel(tx * 16 + x, 4 * 16 + y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+
+        // Row 5: Pickaxes
+        draw_pickaxe_icon(&mut img, 0, 5, [160, 160, 160]); // Stone
+        draw_pickaxe_icon(&mut img, 1, 5, [220, 220, 220]); // Iron
+        draw_pickaxe_icon(&mut img, 2, 5, [100, 220, 240]); // Diamond
+        // Clear remaining slots in Row 5
+        for tx in 3..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    img.put_pixel(tx * 16 + x, 5 * 16 + y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+
+        // Row 6: Axes
+        draw_axe_icon(&mut img, 0, 6, [160, 160, 160]); // Stone
+        draw_axe_icon(&mut img, 1, 6, [220, 220, 220]); // Iron
+        draw_axe_icon(&mut img, 2, 6, [100, 220, 240]); // Diamond
+        // Clear remaining slots in Row 6
+        for tx in 3..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    img.put_pixel(tx * 16 + x, 6 * 16 + y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+
+        // Row 7: Shovels
+        draw_shovel_icon(&mut img, 0, 7, [160, 160, 160]); // Stone
+        draw_shovel_icon(&mut img, 1, 7, [220, 220, 220]); // Iron
+        draw_shovel_icon(&mut img, 2, 7, [100, 220, 240]); // Diamond
+        // Clear remaining slots in Row 7
+        for tx in 3..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    img.put_pixel(tx * 16 + x, 7 * 16 + y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+
+        // Fill remaining rows (8 to 15) with transparent
+        for ty in 8..16 {
             for tx in 0..16 {
-                if ty == 2 && tx <= 4 { continue; }
                 for y in 0..16 {
                     for x in 0..16 {
                         img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
