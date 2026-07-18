@@ -311,6 +311,72 @@ impl BlockType {
             },
         }
     }
+
+    pub fn get_face_tex_index(self, face_idx: usize) -> (u32, u32) {
+        match self {
+            BlockType::Grass => {
+                if face_idx == 4 { (0, 0) }
+                else if face_idx == 5 { (2, 0) }
+                else { (1, 0) }
+            }
+            BlockType::Dirt => (2, 0),
+            BlockType::Stone => (3, 0),
+            BlockType::Sand => (4, 0),
+            BlockType::Gravel => (5, 0),
+            BlockType::OakPlanks => (6, 0),
+            BlockType::OakLeaves => (7, 0),
+            BlockType::Cobblestone => (8, 0),
+            BlockType::Bedrock => (9, 0),
+            BlockType::Water => (10, 0),
+            BlockType::CoalOre => (11, 0),
+            BlockType::IronOre => (12, 0),
+            BlockType::GoldOre => (13, 0),
+            BlockType::DiamondOre => (14, 0),
+            BlockType::RedstoneOre => (15, 0),
+            
+            BlockType::Glass => (0, 1),
+            BlockType::Brick => (1, 1),
+            BlockType::StoneBrick => (2, 1),
+            BlockType::Snow => {
+                if face_idx == 4 { (3, 1) }
+                else if face_idx == 5 { (2, 0) }
+                else { (4, 1) }
+            }
+            BlockType::Ice => (5, 1),
+            BlockType::Clay => (6, 1),
+            BlockType::Sandstone => {
+                if face_idx == 4 || face_idx == 5 { (7, 1) }
+                else { (8, 1) }
+            }
+            BlockType::Obsidian => (9, 1),
+            BlockType::OakLog => {
+                if face_idx == 4 || face_idx == 5 { (10, 1) }
+                else { (11, 1) }
+            }
+            BlockType::CraftingTable => {
+                if face_idx == 4 { (12, 1) }
+                else if face_idx == 5 { (6, 0) }
+                else { (13, 1) }
+            }
+            BlockType::Furnace => {
+                if face_idx == 0 { (14, 1) }
+                else { (3, 0) }
+            }
+            BlockType::Chest => (15, 1),
+            
+            BlockType::TNT => {
+                if face_idx == 4 { (0, 2) }
+                else if face_idx == 5 { (1, 2) }
+                else { (2, 2) }
+            }
+            BlockType::Bookshelf => {
+                if face_idx == 4 || face_idx == 5 { (6, 0) }
+                else { (3, 2) }
+            }
+            BlockType::Torch => (4, 2),
+            BlockType::Air => (0, 0),
+        }
+    }
 }
 
 pub struct Chunk {
@@ -360,13 +426,15 @@ impl Chunk {
         self.blocks[x as usize][y as usize][z as usize]
     }
 
-    // 生成用於渲染的頂點和索引
-    pub fn generate_mesh<F>(&self, get_block_at: F) -> (Vec<Vertex>, Vec<u32>)
+    // 生成用於渲染的頂點和索引，區分為不透明與半透明網格
+    pub fn generate_mesh<F>(&self, get_block_at: F) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>)
     where
         F: Fn(i32, i32, i32) -> BlockType,
     {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let mut opaque_vertices = Vec::new();
+        let mut opaque_indices = Vec::new();
+        let mut trans_vertices = Vec::new();
+        let mut trans_indices = Vec::new();
 
         // 方塊的 6 個面法線偏移量與面頂點定義
         // 順序：前、後、左、右、上、下
@@ -432,32 +500,36 @@ impl Chunk {
                         let ny = world_y + normal[1] as i32;
                         let nz = world_z + normal[2] as i32;
 
-                        // Face Culling: 檢查相鄰區塊是否透明
                         let neighbor = get_block_at(nx, ny, nz);
-                        if neighbor == BlockType::Air {
-                            let start_idx = vertices.len() as u32;
+                        let neighbor_props = neighbor.properties();
 
-                            // Texture atlas mapping:
-                            // Col 0: Grass Top, Col 1: Grass Side, Col 2: Dirt, Col 3: Stone
-                            let tex_idx = match block {
-                                BlockType::Stone => 3,
-                                BlockType::Dirt => 2,
-                                BlockType::Grass => {
-                                    if face_idx == 4 { // Up face
-                                        0
-                                    } else if face_idx == 5 { // Down face
-                                        2
-                                    } else { // Side faces
-                                        1
-                                    }
-                                }
-                                BlockType::Air => 0,
+                        // Face Culling: 只有鄰居非 Opaque 才渲染（且排除相同水體相鄰）
+                        let should_render = if neighbor == BlockType::Air {
+                            true
+                        } else if neighbor_props.render_type != RenderType::Opaque {
+                            !(block == BlockType::Water && neighbor == BlockType::Water)
+                        } else {
+                            false
+                        };
+
+                        if should_render {
+                            let block_render_type = block.properties().render_type;
+                            let is_translucent = block_render_type == RenderType::Translucent;
+
+                            let (v_list, i_list) = if is_translucent {
+                                (&mut trans_vertices, &mut trans_indices)
+                            } else {
+                                (&mut opaque_vertices, &mut opaque_indices)
                             };
 
+                            let start_idx = v_list.len() as u32;
+                            let (tx_col, tx_row) = block.get_face_tex_index(face_idx);
+
                             for (offset, uv) in corner_data.iter() {
-                                let u = (uv[0] + tex_idx as f32) * 0.25;
-                                let v = uv[1] * 0.25;
-                                vertices.push(Vertex {
+                                // 256x256 atlas -> 16 columns of 16x16 pixel blocks
+                                let u = (uv[0] + tx_col as f32) * 0.0625;
+                                let v = (uv[1] + tx_row as f32) * 0.0625;
+                                v_list.push(Vertex {
                                     position: [
                                         world_x as f32 + offset[0],
                                         world_y as f32 + offset[1],
@@ -467,18 +539,18 @@ impl Chunk {
                                 });
                             }
 
-                            indices.push(start_idx + 0);
-                            indices.push(start_idx + 1);
-                            indices.push(start_idx + 2);
-                            indices.push(start_idx + 0);
-                            indices.push(start_idx + 2);
-                            indices.push(start_idx + 3);
+                            i_list.push(start_idx + 0);
+                            i_list.push(start_idx + 1);
+                            i_list.push(start_idx + 2);
+                            i_list.push(start_idx + 0);
+                            i_list.push(start_idx + 2);
+                            i_list.push(start_idx + 3);
                         }
                     }
                 }
             }
         }
 
-        (vertices, indices)
+        (opaque_vertices, opaque_indices, trans_vertices, trans_indices)
     }
 }
