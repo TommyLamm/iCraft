@@ -390,24 +390,82 @@ impl Chunk {
         let mut blocks = [[[BlockType::Air; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH];
         let perlin = Perlin::new(12345); // Seed: 12345
 
+        // Simple custom PRNG for ore distribution and bedrock blending
+        let mut rng_seed = (chunk_x as u32).wrapping_mul(31) ^ (chunk_z as u32);
+        let mut next_rand = |min: u8, max: u8| -> u8 {
+            rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+            let val = (rng_seed / 65536) % 32768;
+            let diff = max - min;
+            if diff == 0 { return min; }
+            min + (val % diff as u32) as u8
+        };
+
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 // Calculate surface height using Perlin noise
                 let world_x = chunk_x * (CHUNK_WIDTH as i32) + x as i32;
                 let world_z = chunk_z * (CHUNK_DEPTH as i32) + z as i32;
-                let noise_val = perlin.get([world_x as f64 * 0.08, world_z as f64 * 0.08]);
+                let noise_val = perlin.get([world_x as f64 * 0.04, world_z as f64 * 0.04]);
                 // Map noise value (-1.0 to 1.0) to height (e.g. 55 to 75)
-                let height = (64.0 + noise_val * 10.0) as usize;
+                let base_height = (64.0 + noise_val * 12.0) as usize;
+                
+                let is_beach = base_height <= 63;
+                let height = if base_height < 62 { 62 } else { base_height }; // Sea level is at 62
 
                 for y in 0..CHUNK_HEIGHT {
-                    if y < height - 4 {
-                        blocks[x][y][z] = BlockType::Stone;
-                    } else if y < height {
-                        blocks[x][y][z] = BlockType::Dirt;
-                      } else if y == height {
-                        blocks[x][y][z] = BlockType::Grass;
-                    } else {
-                        blocks[x][y][z] = BlockType::Air;
+                    // Bedrock Y=0-4
+                    if y <= 4 {
+                        if y == 0 {
+                            blocks[x][y][z] = BlockType::Bedrock;
+                        } else {
+                            // Blended bedrock
+                            let threshold = (5 - y) as u8 * 50; // Chance of bedrock
+                            if next_rand(0, 255) < threshold {
+                                blocks[x][y][z] = BlockType::Bedrock;
+                            } else {
+                                blocks[x][y][z] = BlockType::Stone;
+                            }
+                        }
+                    }
+                    // Underground Stone Layer
+                    else if y < base_height - 4 {
+                        // Ore generation distribution
+                        let block = if y < 16 && next_rand(0, 100) < 2 {
+                            if next_rand(0, 2) == 0 { BlockType::DiamondOre } else { BlockType::RedstoneOre }
+                        } else if y < 32 && next_rand(0, 100) < 3 {
+                            BlockType::GoldOre
+                        } else if y < 64 && next_rand(0, 100) < 5 {
+                            BlockType::IronOre
+                        } else if y < 128 && next_rand(0, 100) < 8 {
+                            BlockType::CoalOre
+                        } else {
+                            BlockType::Stone
+                        };
+                        blocks[x][y][z] = block;
+                    }
+                    // Dirt/Sand layer
+                    else if y < base_height {
+                        if is_beach {
+                            blocks[x][y][z] = BlockType::Sand;
+                        } else {
+                            blocks[x][y][z] = BlockType::Dirt;
+                        }
+                    }
+                    // Surface block
+                    else if y == base_height {
+                        if is_beach {
+                            blocks[x][y][z] = BlockType::Sand;
+                        } else {
+                            blocks[x][y][z] = BlockType::Grass;
+                        }
+                    }
+                    // Water/Air layer above base height
+                    else {
+                        if y <= 62 {
+                            blocks[x][y][z] = BlockType::Water;
+                        } else {
+                            blocks[x][y][z] = BlockType::Air;
+                        }
                     }
                 }
             }
