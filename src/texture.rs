@@ -1035,6 +1035,200 @@ impl TextureAtlas {
             draw_crack_pattern(&mut img, tx, 15, tx);
         }
 
+        // Row 9: Mob Skins
+        // Col 0: Zombie Face (front)
+        {
+            let ox = 0 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    // Dark green zombie skin with face features
+                    let is_eye_left = (x >= 3 && x <= 5) && (y >= 4 && y <= 6);
+                    let is_eye_right = (x >= 10 && x <= 12) && (y >= 4 && y <= 6);
+                    let is_mouth = (x >= 4 && x <= 11) && (y >= 9 && y <= 11);
+                    let is_nose = (x >= 7 && x <= 8) && (y >= 6 && y <= 8);
+                    let c = if is_eye_left || is_eye_right {
+                        Rgba([20, 20, 20, 255]) // Dark eyes
+                    } else if is_mouth {
+                        Rgba([40, 60, 30, 255]) // Dark mouth
+                    } else if is_nose {
+                        Rgba([50, 80, 40, 255]) // Nose shadow
+                    } else {
+                        // Green zombie skin with variation
+                        let var = ((x as i16 * 7 + y as i16 * 13) % 20 - 10) as i16;
+                        let r = (70i16 + var).clamp(0, 255) as u8;
+                        let g = (120i16 + var).clamp(0, 255) as u8;
+                        let b = (60i16 + var / 2).clamp(0, 255) as u8;
+                        Rgba([r, g, b, 255])
+                    };
+                    img.put_pixel(ox + x, oy + y, c);
+                }
+            }
+        }
+
+        // Col 1: Zombie Head sides/top/bottom
+        {
+            let ox = 1 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let var = ((x as i16 * 11 + y as i16 * 7) % 16 - 8) as i16;
+                    let r = (65i16 + var).clamp(0, 255) as u8;
+                    let g = (110i16 + var).clamp(0, 255) as u8;
+                    let b = (55i16 + var / 2).clamp(0, 255) as u8;
+                    img.put_pixel(ox + x, oy + y, Rgba([r, g, b, 255]));
+                }
+            }
+        }
+
+        // Col 2: Zombie Torso
+        {
+            let ox = 2 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    // Teal shirt
+                    let var = ((x as i16 * 5 + y as i16 * 9) % 14 - 7) as i16;
+                    let r = (50i16 + var).clamp(0, 255) as u8;
+                    let g = (140i16 + var).clamp(0, 255) as u8;
+                    let b = (140i16 + var).clamp(0, 255) as u8;
+                    img.put_pixel(ox + x, oy + y, Rgba([r, g, b, 255]));
+                }
+            }
+        }
+
+        // Col 3: Zombie Arms/Legs (dark blue pants + green arms)
+        {
+            let ox = 3 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let var = ((x as i16 * 3 + y as i16 * 11) % 12 - 6) as i16;
+                    let r = (40i16 + var).clamp(0, 255) as u8;
+                    let g = (40i16 + var).clamp(0, 255) as u8;
+                    let b = (80i16 + var).clamp(0, 255) as u8;
+                    img.put_pixel(ox + x, oy + y, Rgba([r, g, b, 255]));
+                }
+            }
+        }
+
+        // Col 4: Skeleton Face (front)
+        {
+            let ox = 4 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let is_eye_left = (x >= 2 && x <= 5) && (y >= 4 && y <= 7);
+                    let is_eye_right = (x >= 10 && x <= 13) && (y >= 4 && y <= 7);
+                    let is_nose = (x >= 7 && x <= 8) && (y >= 7 && y <= 9);
+                    let is_mouth = (y >= 11 && y <= 12) && (x >= 3 && x <= 12) && (x % 2 == 0);
+                    let c = if is_eye_left || is_eye_right || is_nose {
+                        Rgba([15, 15, 15, 255]) // Dark eye sockets
+                    } else if is_mouth {
+                        Rgba([30, 30, 30, 255]) // Teeth gaps
+                    } else {
+                        // Bone white with noise
+                        let var = ((x as i16 * 7 + y as i16 * 3) % 10 - 5) as i16;
+                        let v = (220i16 + var).clamp(0, 255) as u8;
+                        Rgba([v, v, (v as i16 - 10).max(0) as u8, 255])
+                    };
+                    img.put_pixel(ox + x, oy + y, c);
+                }
+            }
+        }
+
+        // Col 5: Skeleton Body parts (bone white)
+        {
+            let ox = 5 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let var = ((x as i16 * 13 + y as i16 * 7) % 12 - 6) as i16;
+                    let v = (210i16 + var).clamp(0, 255) as u8;
+                    img.put_pixel(ox + x, oy + y, Rgba([v, v, (v as i16 - 15).max(0) as u8, 255]));
+                }
+            }
+        }
+
+        // Col 6: Creeper Face (front) - iconic sad face pattern
+        {
+            let ox = 6 * 16;
+            let oy = 9 * 16;
+            // Creeper face pixel art grid
+            let face = [
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0],
+                [0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0],
+                [0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0],
+                [0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0],
+                [0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0],
+                [0,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0],
+                [0,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            ];
+            for y in 0..16u32 {
+                for x in 0..16u32 {
+                    let c = if face[y as usize][x as usize] == 1 {
+                        Rgba([15, 15, 15, 255]) // Black face features
+                    } else {
+                        // Green mottled skin
+                        let var = ((x as i16 * 5 + y as i16 * 11) % 18 - 9) as i16;
+                        let r = (80i16 + var).clamp(0, 255) as u8;
+                        let g = (160i16 + var).clamp(0, 255) as u8;
+                        let b = (70i16 + var / 2).clamp(0, 255) as u8;
+                        Rgba([r, g, b, 255])
+                    };
+                    img.put_pixel(ox + x, oy + y, c);
+                }
+            }
+        }
+
+        // Col 7: Creeper Body (mottled green)
+        {
+            let ox = 7 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let var = ((x as i16 * 9 + y as i16 * 13) % 20 - 10) as i16;
+                    let r = (75i16 + var).clamp(0, 255) as u8;
+                    let g = (150i16 + var).clamp(0, 255) as u8;
+                    let b = (65i16 + var / 2).clamp(0, 255) as u8;
+                    img.put_pixel(ox + x, oy + y, Rgba([r, g, b, 255]));
+                }
+            }
+        }
+
+        // Col 8: Arrow
+        {
+            let ox = 8 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    // Arrow shaft (brown) with gray tip and red fletching
+                    let is_tip = y <= 3 && x >= 6 && x <= 9;
+                    let is_shaft = x >= 7 && x <= 8 && y >= 4 && y <= 12;
+                    let is_fletch = y >= 13 && ((x >= 5 && x <= 6) || (x >= 9 && x <= 10));
+                    let c = if is_tip {
+                        Rgba([180, 180, 180, 255]) // Gray stone tip
+                    } else if is_shaft {
+                        Rgba([140, 100, 55, 255]) // Brown shaft
+                    } else if is_fletch {
+                        Rgba([200, 200, 210, 255]) // White feather
+                    } else {
+                        Rgba([140, 100, 55, 255]) // Default brown (entire face is small)
+                    };
+                    img.put_pixel(ox + x, oy + y, c);
+                }
+            }
+        }
+
         // Save to assets folder
         let _ = std::fs::create_dir_all("assets");
         let _ = img.save("assets/texture_atlas.png");

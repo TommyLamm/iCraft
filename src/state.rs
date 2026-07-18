@@ -1117,6 +1117,7 @@ impl State {
             &self.chunk_manager,
             self.player_physics.position,
             self.world_time.sky_light_level(),
+            self.total_time,
         );
 
         // Update mobs
@@ -1901,6 +1902,7 @@ impl State {
         if mob_indices_len > 0 {
             let vert_limit = mob_vertices.len().min(8192);
             let ind_limit = mob_indices_len.min(12288);
+            self.mob_num_indices = ind_limit as u32;
             self.queue.write_buffer(&self.mob_vertex_buffer, 0, bytemuck::cast_slice(&mob_vertices[..vert_limit]));
             self.queue.write_buffer(&self.mob_index_buffer, 0, bytemuck::cast_slice(&mob_indices[..ind_limit]));
         }

@@ -123,22 +123,26 @@ pub fn spawn_mobs(
     chunk_manager: &ChunkManager,
     player_pos: Vec3,
     sky_light_level: u8,
+    time: f32,
 ) {
     if entity_manager.entities.len() >= 25 {
         return;
     }
 
-    // Simple pseudo-random spawning using player pos coordinates
-    let mut rng_seed = (player_pos.x as u32)
+    // Use time-varying seed so RNG produces different results each frame
+    let time_bits = (time * 1000.0) as u32;
+    let mut rng_seed = (player_pos.x.to_bits())
         .wrapping_mul(31)
-        .wrapping_add(player_pos.z as u32)
-        .wrapping_add(entity_manager.entities.len() as u32);
+        .wrapping_add(player_pos.z.to_bits())
+        .wrapping_add(entity_manager.entities.len() as u32)
+        .wrapping_add(time_bits.wrapping_mul(2654435761));
         
     let mut next_rand = || {
         rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
         (rng_seed / 65536) % 32768
     };
 
+    // ~1% chance per frame to attempt a spawn
     if next_rand() % 100 != 0 {
         return;
     }
