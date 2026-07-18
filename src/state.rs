@@ -1021,6 +1021,13 @@ impl State {
             let target = if is_left_click {
                 hit.block_pos
             } else {
+                let clicked_block = self.chunk_manager.get_block(hit.block_pos.x as i32, hit.block_pos.y as i32, hit.block_pos.z as i32);
+                if clicked_block == BlockType::CraftingTable {
+                    self.inventory.is_table_open = true;
+                    self.inventory.craft_input = vec![None; 9];
+                    self.open_inventory();
+                    return;
+                }
                 hit.block_pos + hit.normal
             };
 
@@ -1307,6 +1314,42 @@ impl State {
                 }
             }
         }
+    }
+
+    pub fn open_inventory(&mut self) {
+        self.inventory.is_open = true;
+        // Release cursor grab
+        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+        self.keys = KeyState::default();
+    }
+
+    pub fn close_inventory(&mut self) {
+        self.inventory.is_open = false;
+        // Return craft input items
+        let inputs: Vec<ItemStack> = self.inventory.craft_input.iter_mut()
+            .filter_map(|slot| slot.take())
+            .collect();
+        for stack in inputs {
+            for _ in 0..stack.count {
+                self.inventory.add_item(stack.item);
+            }
+        }
+        // Also return dragged item if any
+        if let Some(dragged) = self.inventory.dragged.take() {
+            for _ in 0..dragged.count {
+                self.inventory.add_item(dragged.item);
+            }
+        }
+        
+        self.inventory.is_table_open = false;
+        self.inventory.craft_input = vec![None; 4];
+        self.inventory.craft_output = None;
+        
+        // Re-lock cursor
+        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked)
+            .or_else(|_| self.window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
+        self.window.set_cursor_visible(false);
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
