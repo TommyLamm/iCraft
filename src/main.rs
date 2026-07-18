@@ -7,6 +7,8 @@ mod interaction;
 mod texture;
 mod chunk_manager;
 mod lighting;
+mod inventory;
+mod crafting;
 
 
 use app::App;
