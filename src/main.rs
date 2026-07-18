@@ -4,6 +4,8 @@ mod camera;
 mod world;
 mod physics;
 mod interaction;
+mod texture;
+
 
 use app::App;
 use winit::event_loop::EventLoop;

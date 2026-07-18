@@ -106,7 +106,7 @@ impl Chunk {
                     let py = y as f32;
                     let pz = z as f32;
 
-                    for (_face_idx, (normal, corner_data)) in faces.iter().enumerate() {
+                    for (face_idx, (normal, corner_data)) in faces.iter().enumerate() {
                         let nx = x as i32 + normal[0] as i32;
                         let ny = y as i32 + normal[1] as i32;
                         let nz = z as i32 + normal[2] as i32;
@@ -116,10 +116,29 @@ impl Chunk {
                         if neighbor == BlockType::Air {
                             let start_idx = vertices.len() as u32;
 
+                            // Texture atlas mapping:
+                            // Col 0: Grass Top, Col 1: Grass Side, Col 2: Dirt, Col 3: Stone
+                            let tex_idx = match block {
+                                BlockType::Stone => 3,
+                                BlockType::Dirt => 2,
+                                BlockType::Grass => {
+                                    if face_idx == 4 { // Up face
+                                        0
+                                    } else if face_idx == 5 { // Down face
+                                        2
+                                    } else { // Side faces
+                                        1
+                                    }
+                                }
+                                BlockType::Air => 0,
+                            };
+
                             for (offset, uv) in corner_data.iter() {
+                                let u = (uv[0] + tex_idx as f32) * 0.25;
+                                let v = uv[1] * 0.25;
                                 vertices.push(Vertex {
                                     position: [px + offset[0], py + offset[1], pz + offset[2]],
-                                    tex_coords: *uv,
+                                    tex_coords: [u, v],
                                 });
                             }
 

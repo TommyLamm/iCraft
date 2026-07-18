@@ -5,6 +5,11 @@ struct CameraUniform {
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
+@group(0) @binding(1)
+var t_diffuse: texture_2d<f32>;
+@group(0) @binding(2)
+var s_diffuse: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) tex_coords: vec2<f32>,
@@ -25,6 +30,6 @@ fn vs_main(model: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // 當前暫用 UV 進行簡單著色以驗證 3D 投影效果
-    return vec4<f32>(in.tex_coords, 0.5, 1.0);
+    return textureSample(t_diffuse, s_diffuse, in.tex_coords);
 }
+
