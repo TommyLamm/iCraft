@@ -9,9 +9,12 @@ use glam::Vec3;
 use wgpu::util::DeviceExt;
 
 pub struct ChunkMesh {
-    pub vertex_buffer: wgpu::Buffer,
-    pub index_buffer: wgpu::Buffer,
-    pub num_indices: u32,
+    pub opaque_vertex_buffer: wgpu::Buffer,
+    pub opaque_index_buffer: wgpu::Buffer,
+    pub opaque_num_indices: u32,
+    pub transparent_vertex_buffer: wgpu::Buffer,
+    pub transparent_index_buffer: wgpu::Buffer,
+    pub transparent_num_indices: u32,
     pub dirty: bool,
 }
 
@@ -88,6 +91,7 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
+    trans_pipeline: wgpu::RenderPipeline,
     pub camera: Camera,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
@@ -309,6 +313,54 @@ impl State {
             multiview: None,
         });
 
+        let trans_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Translucent Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         // Initialize Crosshair Pipeline
         let crosshair_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Crosshair Pipeline Layout"),
@@ -387,7 +439,7 @@ impl State {
         for cx in -render_distance..=render_distance {
             for cz in -render_distance..=render_distance {
                 let chunk = chunks_ref.get(&(cx, cz)).unwrap();
-                let (vertices, indices) = chunk.generate_mesh(|wx, wy, wz| {
+                let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
                     let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                     let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
                     let bx_neighbor = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32) as usize;
@@ -402,21 +454,34 @@ impl State {
                     }
                 });
 
-                let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Initial Chunk Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&vertices),
+                let opaque_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Opaque Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&o_verts),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
-                let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Initial Chunk Index Buffer"),
-                    contents: bytemuck::cast_slice(&indices),
+                let opaque_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Opaque Index Buffer"),
+                    contents: bytemuck::cast_slice(&o_inds),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                let transparent_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Translucent Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&t_verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let transparent_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Translucent Index Buffer"),
+                    contents: bytemuck::cast_slice(&t_inds),
                     usage: wgpu::BufferUsages::INDEX,
                 });
 
                 chunk_meshes.insert((cx, cz), ChunkMesh {
-                    vertex_buffer,
-                    index_buffer,
-                    num_indices: indices.len() as u32,
+                    opaque_vertex_buffer,
+                    opaque_index_buffer,
+                    opaque_num_indices: o_inds.len() as u32,
+                    transparent_vertex_buffer,
+                    transparent_index_buffer,
+                    transparent_num_indices: t_inds.len() as u32,
                     dirty: false,
                 });
             }
@@ -526,6 +591,7 @@ impl State {
             config,
             size,
             render_pipeline,
+            trans_pipeline,
             camera,
             camera_uniform,
             camera_buffer,
@@ -617,7 +683,7 @@ impl State {
         let chunks_ref = &self.chunk_manager.chunks;
         for (cx, cz) in to_rebuild.into_iter().take(2) {
             let chunk = chunks_ref.get(&(cx, cz)).unwrap();
-            let (vertices, indices) = chunk.generate_mesh(|wx, wy, wz| {
+            let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
                 let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                 let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
                 let bx_neighbor = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32) as usize;
@@ -632,21 +698,34 @@ impl State {
                 }
             });
 
-            let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Chunk Vertex Buffer"),
-                contents: bytemuck::cast_slice(&vertices),
+            let opaque_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Chunk Opaque Vertex Buffer"),
+                contents: bytemuck::cast_slice(&o_verts),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-            let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Chunk Index Buffer"),
-                contents: bytemuck::cast_slice(&indices),
+            let opaque_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Chunk Opaque Index Buffer"),
+                contents: bytemuck::cast_slice(&o_inds),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let transparent_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Chunk Translucent Vertex Buffer"),
+                contents: bytemuck::cast_slice(&t_verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let transparent_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Chunk Translucent Index Buffer"),
+                contents: bytemuck::cast_slice(&t_inds),
                 usage: wgpu::BufferUsages::INDEX,
             });
 
             self.chunk_meshes.insert((cx, cz), ChunkMesh {
-                vertex_buffer,
-                index_buffer,
-                num_indices: indices.len() as u32,
+                opaque_vertex_buffer,
+                opaque_index_buffer,
+                opaque_num_indices: o_inds.len() as u32,
+                transparent_vertex_buffer,
+                transparent_index_buffer,
+                transparent_num_indices: t_inds.len() as u32,
                 dirty: false,
             });
         }
@@ -947,13 +1026,24 @@ impl State {
                 timestamp_writes: None,
             });
 
+            // Pass 1: Opaque & Cutout
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             for mesh in self.chunk_meshes.values() {
-                if mesh.num_indices > 0 {
-                    render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    render_pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+                if mesh.opaque_num_indices > 0 {
+                    render_pass.set_vertex_buffer(0, mesh.opaque_vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(mesh.opaque_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.draw_indexed(0..mesh.opaque_num_indices, 0, 0..1);
+                }
+            }
+
+            // Pass 2: Translucent (Water/Ice)
+            render_pass.set_pipeline(&self.trans_pipeline);
+            for mesh in self.chunk_meshes.values() {
+                if mesh.transparent_num_indices > 0 {
+                    render_pass.set_vertex_buffer(0, mesh.transparent_vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(mesh.transparent_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.draw_indexed(0..mesh.transparent_num_indices, 0, 0..1);
                 }
             }
 
