@@ -105,12 +105,25 @@ impl ApplicationHandler for App {
                     match physical_key {
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => {
                             if pressed {
-                                let new_paused = !state.is_paused;
-                                state.set_paused(new_paused);
+                                if state.inventory.is_open {
+                                    state.close_inventory();
+                                } else {
+                                    let new_paused = !state.is_paused;
+                                    state.set_paused(new_paused);
+                                }
+                            }
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyE) => {
+                            if pressed {
+                                if state.inventory.is_open {
+                                    state.close_inventory();
+                                } else if !state.is_paused {
+                                    state.open_inventory();
+                                }
                             }
                         }
                         _ => {
-                            if !state.is_paused {
+                            if !state.is_paused && !state.inventory.is_open {
                                 match physical_key {
                                     winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW) => {
                                         state.keys.w = pressed;
@@ -128,23 +141,39 @@ impl ApplicationHandler for App {
                                         state.keys.space = pressed;
                                     }
                                     winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
-                                        if pressed {
-                                            state.selected_block = crate::world::BlockType::Stone;
-                                        }
+                                        if pressed { state.inventory.selected = 0; }
                                     }
                                     winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
-                                        if pressed {
-                                            state.selected_block = crate::world::BlockType::Torch;
-                                        }
+                                        if pressed { state.inventory.selected = 1; }
                                     }
                                     winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit3) => {
-                                        if pressed {
-                                            state.selected_block = crate::world::BlockType::Glass;
-                                        }
+                                        if pressed { state.inventory.selected = 2; }
                                     }
                                     winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit4) => {
+                                        if pressed { state.inventory.selected = 3; }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit5) => {
+                                        if pressed { state.inventory.selected = 4; }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit6) => {
+                                        if pressed { state.inventory.selected = 5; }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit7) => {
+                                        if pressed { state.inventory.selected = 6; }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit8) => {
+                                        if pressed { state.inventory.selected = 7; }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit9) => {
+                                        if pressed { state.inventory.selected = 8; }
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyG) => {
                                         if pressed {
-                                            state.selected_block = crate::world::BlockType::Water;
+                                            state.game_mode = match state.game_mode {
+                                                crate::inventory::GameMode::Creative => crate::inventory::GameMode::Survival,
+                                                crate::inventory::GameMode::Survival => crate::inventory::GameMode::Creative,
+                                            };
+                                            println!("[Debug] Game mode changed to: {:?}", state.game_mode);
                                         }
                                     }
                                     _ => {}
@@ -165,6 +194,10 @@ impl ApplicationHandler for App {
                             if button == MouseButton::Left {
                                 state.handle_menu_click(event_loop);
                             }
+                        } else if state.inventory.is_open {
+                            if button == MouseButton::Left || button == MouseButton::Right {
+                                state.handle_inventory_click(button == MouseButton::Left);
+                            }
                         } else {
                             match button {
                                 MouseButton::Left => {
@@ -175,6 +208,24 @@ impl ApplicationHandler for App {
                                 }
                                 _ => {}
                             }
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(state) = &mut self.state {
+                    if !state.is_paused && !state.inventory.is_open {
+                        let scroll_dir = match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                                if y > 0.0 { -1 } else if y < 0.0 { 1 } else { 0 }
+                            }
+                            winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                                if pos.y > 0.0 { -1 } else if pos.y < 0.0 { 1 } else { 0 }
+                            }
+                        };
+                        if scroll_dir != 0 {
+                            let new_sel = (state.inventory.selected as i32 + scroll_dir).rem_euclid(9);
+                            state.inventory.selected = new_sel as usize;
                         }
                     }
                 }
