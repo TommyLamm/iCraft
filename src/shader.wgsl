@@ -137,6 +137,40 @@ fn vs_sky(@builtin(vertex_index) vertex_index: u32) -> SkyVertexOutput {
     return out;
 }
 
+fn hash3(p: vec3<f32>) -> f32 {
+    let sin_val = sin(dot(p, vec3<f32>(127.1, 311.7, 74.7)));
+    return fract(sin_val * 43758.5453123);
+}
+
+fn get_star(dir: vec3<f32>) -> f32 {
+    if (dir.y <= 0.0) {
+        return 0.0;
+    }
+    
+    let grid_size = 120.0;
+    let grid_pos = floor(dir * grid_size);
+    
+    let h1 = hash3(grid_pos);
+    let h2 = hash3(grid_pos + vec3<f32>(1.0, 2.0, 3.0));
+    let h3 = hash3(grid_pos + vec3<f32>(4.0, 5.0, 6.0));
+    
+    if (h1 < 0.992) {
+        return 0.0;
+    }
+    
+    let cell_center = (grid_pos + vec3<f32>(0.5, 0.5, 0.5)) / grid_size;
+    let offset = (vec3<f32>(h1, h2, h3) - vec3<f32>(0.5)) * 0.4 / grid_size;
+    let star_pos = normalize(cell_center + offset);
+    
+    let d = dot(dir, star_pos);
+    let star_size = 0.9998;
+    if (d > star_size) {
+        let intensity = (d - star_size) / (1.0 - star_size);
+        return intensity * h2; 
+    }
+    return 0.0;
+}
+
 @fragment
 fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
     let unprojected = camera.inv_view_proj * vec4<f32>(in.ndc_pos.x, in.ndc_pos.y, 1.0, 1.0);
@@ -159,6 +193,20 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
         let moon_factor = smoothstep(0.997, 0.998, moon_dot);
         sky_color = mix(sky_color, vec4<f32>(0.9, 0.9, 0.95, 1.0), moon_factor);
     }
+
+    // Stars (with celestial rotation around the Z axis)
+    let sun_angle = atan2(camera.sun_dir.y, camera.sun_dir.x);
+    let cos_a = cos(-sun_angle);
+    let sin_a = sin(-sun_angle);
+    let rotated_dir = vec3<f32>(
+        view_dir.x * cos_a - view_dir.y * sin_a,
+        view_dir.x * sin_a + view_dir.y * cos_a,
+        view_dir.z
+    );
+    
+    let star_intensity = smoothstep(0.1, -0.1, camera.sun_dir.y);
+    let star_val = get_star(rotated_dir) * star_intensity;
+    sky_color = sky_color + vec4<f32>(star_val, star_val, star_val, 0.0);
 
     return sky_color;
 }
