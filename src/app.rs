@@ -190,7 +190,11 @@ impl ApplicationHandler for App {
             } => {
                 if let Some(state) = &mut self.state {
                     let pressed = element_state == ElementState::Pressed;
-                    if state.is_paused {
+                    if state.player_state.is_dead {
+                        if pressed && button == MouseButton::Left {
+                            state.handle_death_click();
+                        }
+                    } else if state.is_paused {
                         if pressed && button == MouseButton::Left {
                             state.handle_menu_click(event_loop);
                         }

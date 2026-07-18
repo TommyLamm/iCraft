@@ -374,6 +374,262 @@ fn draw_crack_pattern(img: &mut RgbaImage, tx: u32, ty: u32, stage: u32) {
     }
 }
 
+fn draw_heart(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
+    let ox = tx * 16 + 3;
+    let oy = ty * 16 + 4;
+    
+    // Clear tile first
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+
+    let border = Rgba([0, 0, 0, 255]);
+    let red = Rgba([220, 20, 20, 255]);
+    let dark_red = Rgba([140, 10, 10, 255]);
+    let empty_fill = Rgba([60, 60, 60, 255]);
+    let empty_dark = Rgba([40, 40, 40, 255]);
+    let white = Rgba([255, 255, 255, 255]);
+
+    let is_border = |x: i32, y: i32| -> bool {
+        match y {
+            0 => x == 1 || x == 2 || x == 6 || x == 7,
+            1 => x == 0 || x == 3 || x == 5 || x == 8,
+            2 => x == 0 || x == 8,
+            3 => x == 0 || x == 8,
+            4 => x == 1 || x == 7,
+            5 => x == 2 || x == 6,
+            6 => x == 3 || x == 5,
+            7 => x == 4,
+            _ => false,
+        }
+    };
+
+    let is_inside = |x: i32, y: i32| -> bool {
+        if is_border(x, y) { return false; }
+        match y {
+            0 => false,
+            1 => x == 1 || x == 2 || x == 6 || x == 7,
+            2..=3 => x > 0 && x < 8,
+            4 => x > 1 && x < 7,
+            5 => x > 2 && x < 6,
+            6 => x == 4,
+            _ => false,
+        }
+    };
+
+    for y in 0..8 {
+        for x in 0..9 {
+            let px = ox + x as u32;
+            let py = oy + y as u32;
+            if is_border(x, y) {
+                img.put_pixel(px, py, border);
+            } else if is_inside(x, y) {
+                let is_left = x < 4;
+                let is_filled = if fill >= 1.0 {
+                    true
+                } else if fill >= 0.5 {
+                    is_left
+                } else {
+                    false
+                };
+
+                let color = if is_filled {
+                    if y == 1 && x == 1 {
+                        white
+                    } else if y >= 4 || x >= 6 {
+                        dark_red
+                    } else {
+                        red
+                    }
+                } else {
+                    if y >= 4 || x >= 6 {
+                        empty_dark
+                    } else {
+                        empty_fill
+                    }
+                };
+                img.put_pixel(px, py, color);
+            }
+        }
+    }
+}
+
+fn draw_hunger(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
+    let ox = tx * 16 + 3;
+    let oy = ty * 16 + 3;
+    
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+
+    let border = Rgba([0, 0, 0, 255]);
+    let bone = Rgba([220, 220, 220, 255]);
+    let bone_shadow = Rgba([150, 150, 150, 255]);
+    let meat = Rgba([160, 100, 60, 255]);
+    let meat_dark = Rgba([110, 60, 30, 255]);
+    let empty_meat = Rgba([70, 70, 70, 255]);
+    let empty_meat_dark = Rgba([50, 50, 50, 255]);
+
+    let grid = [
+        [0,0,0,0,0,1,1,1,0,0],
+        [0,0,0,0,1,2,2,2,1,0],
+        [0,0,0,1,2,2,2,2,2,1],
+        [0,0,1,2,2,2,2,2,2,1],
+        [0,0,1,2,2,2,2,2,1,0],
+        [0,0,0,1,2,2,2,1,0,0],
+        [0,0,0,0,1,3,3,1,0,0],
+        [0,0,0,1,3,1,1,0,0,0],
+        [0,0,1,3,1,0,0,0,0,0],
+        [0,1,1,1,0,0,0,0,0,0],
+    ];
+
+    for y in 0..10 {
+        for x in 0..10 {
+            let val = grid[y][x];
+            if val == 0 { continue; }
+            let px = ox + x as u32;
+            let py = oy + y as u32;
+            if val == 1 {
+                img.put_pixel(px, py, border);
+            } else if val == 3 {
+                let c = if x == 2 || y == 8 { bone_shadow } else { bone };
+                img.put_pixel(px, py, c);
+            } else if val == 2 {
+                let is_filled = if fill >= 1.0 {
+                    true
+                } else if fill >= 0.5 {
+                    (y as i32 - x as i32) >= -2
+                } else {
+                    false
+                };
+
+                let c = if is_filled {
+                    if x == 7 || (y == 2 && x == 8) || (y == 3 && x == 8) {
+                        meat_dark
+                    } else {
+                        meat
+                    }
+                } else {
+                    if x == 7 || (y == 2 && x == 8) || (y == 3 && x == 8) {
+                        empty_meat_dark
+                    } else {
+                        empty_meat
+                    }
+                };
+                img.put_pixel(px, py, c);
+            }
+        }
+    }
+}
+
+fn draw_apple_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    let ox = tx * 16;
+    let oy = ty * 16;
+    
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+
+    let border = Rgba([0, 0, 0, 255]);
+    let red = Rgba([220, 20, 20, 255]);
+    let dark_red = Rgba([140, 10, 10, 255]);
+    let highlight = Rgba([255, 100, 100, 255]);
+    let stem = Rgba([100, 70, 40, 255]);
+    let leaf = Rgba([60, 140, 40, 255]);
+
+    let grid = [
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,4,3,3,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,1,3,0,0,0,0,0,0,0],
+        [0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0],
+        [0,0,0,1,2,2,2,2,2,2,2,2,1,0,0,0],
+        [0,0,1,2,5,2,2,2,2,2,2,2,2,1,0,0],
+        [0,0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
+        [0,0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
+        [0,0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
+        [0,0,1,2,2,2,2,2,2,2,2,6,6,1,0,0],
+        [0,0,0,1,2,2,2,2,2,2,6,6,1,0,0,0],
+        [0,0,0,0,1,1,2,2,2,2,1,1,0,0,0,0],
+        [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    ];
+
+    for y in 0..16 {
+        for x in 0..16 {
+            let val = grid[y][x];
+            if val == 0 { continue; }
+            let c = match val {
+                1 => border,
+                2 => red,
+                3 => stem,
+                4 => leaf,
+                5 => highlight,
+                6 => dark_red,
+                _ => border,
+            };
+            img.put_pixel(ox + x as u32, oy + y as u32, c);
+        }
+    }
+}
+
+fn draw_bread_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    let ox = tx * 16;
+    let oy = ty * 16;
+    
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+
+    let border = Rgba([0, 0, 0, 255]);
+    let brown = Rgba([185, 120, 60, 255]);
+    let light_brown = Rgba([225, 160, 90, 255]);
+    let dark_brown = Rgba([120, 70, 30, 255]);
+
+    let grid = [
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0],
+        [0,0,0,0,0,0,0,0,1,1,2,2,2,1,0,0],
+        [0,0,0,0,0,0,1,1,2,3,2,2,2,2,1,0],
+        [0,0,0,0,1,1,2,2,2,2,2,3,2,2,1,0],
+        [0,0,0,1,2,4,2,2,3,2,2,2,2,1,0,0],
+        [0,0,1,2,4,4,2,2,2,2,3,2,1,0,0,0],
+        [0,0,1,2,2,4,4,2,2,2,2,1,0,0,0,0],
+        [0,1,2,2,2,2,4,4,2,2,1,0,0,0,0,0],
+        [0,1,2,2,2,2,2,4,2,1,0,0,0,0,0,0],
+        [0,0,1,2,2,2,2,2,1,0,0,0,0,0,0,0],
+        [0,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    ];
+
+    for y in 0..16 {
+        for x in 0..16 {
+            let val = grid[y][x];
+            if val == 0 { continue; }
+            let c = match val {
+                1 => border,
+                2 => brown,
+                3 => dark_brown,
+                4 => light_brown,
+                _ => border,
+            };
+            img.put_pixel(ox + x as u32, oy + y as u32, c);
+        }
+    }
+}
+
 impl TextureAtlas {
     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
         let mut img = RgbaImage::new(256, 256);
@@ -517,8 +773,10 @@ impl TextureAtlas {
         draw_ingot_icon(&mut img, 3, 3, [240, 220, 70]);  // Gold Ingot
         draw_diamond_icon(&mut img, 4, 3);
         draw_redstone_icon(&mut img, 5, 3);
+        draw_apple_icon(&mut img, 6, 3);
+        draw_bread_icon(&mut img, 7, 3);
         // Clear remaining slots in Row 3
-        for tx in 6..16 {
+        for tx in 8..16 {
             for y in 0..16 {
                 for x in 0..16 {
                     img.put_pixel(tx * 16 + x, 3 * 16 + y, Rgba([0, 0, 0, 0]));
@@ -588,6 +846,16 @@ impl TextureAtlas {
                 }
             }
         }
+
+        // Draw Heart icons on Row 8
+        draw_heart(&mut img, 0, 8, 1.0); // Full Heart
+        draw_heart(&mut img, 1, 8, 0.5); // Half Heart
+        draw_heart(&mut img, 2, 8, 0.0); // Empty Heart
+
+        // Draw Hunger icons on Row 8
+        draw_hunger(&mut img, 3, 8, 1.0); // Full Hunger
+        draw_hunger(&mut img, 4, 8, 0.5); // Half Hunger
+        draw_hunger(&mut img, 5, 8, 0.0); // Empty Hunger
 
         // Row 15: Crack overlays (cols 0..10)
         for tx in 0..10 {

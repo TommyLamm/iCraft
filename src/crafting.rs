@@ -89,6 +89,9 @@ impl RecipeManager {
         // TNT (Redstone + Sand)
         add_shaped(&mut recipes, vec!["RSR", "SRS", "RSR"], &[("R", Item::Redstone), ("S", Item::Sand)], ItemStack::new(Item::TNT, 1));
 
+        // Bread (3 Apples horizontal)
+        add_shaped(&mut recipes, vec!["AAA"], &[("A", Item::Apple)], ItemStack::new(Item::Bread, 1));
+
         Self { recipes }
     }
 

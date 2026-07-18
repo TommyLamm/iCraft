@@ -30,6 +30,7 @@ pub struct PlayerPhysics {
     pub velocity: Vec3,
     pub size: Vec3,
     pub on_ground: bool,
+    pub highest_y: f32,
 }
 
 impl PlayerPhysics {
@@ -39,6 +40,7 @@ impl PlayerPhysics {
             velocity: Vec3::ZERO,
             size: Vec3::new(0.6, 1.8, 0.6), // Minecraft 玩家寬高
             on_ground: false,
+            highest_y: position.y,
         }
     }
 
@@ -46,7 +48,9 @@ impl PlayerPhysics {
         AABB::new(self.position + Vec3::new(0.0, self.size.y * 0.5, 0.0), self.size)
     }
 
-    pub fn update(&mut self, dt: f32, chunk_manager: &ChunkManager, movement_input: Vec3) {
+    pub fn update(&mut self, dt: f32, chunk_manager: &ChunkManager, movement_input: Vec3) -> f32 {
+        let was_on_ground = self.on_ground;
+
         // 1. 套用玩家移動控制
         let speed = 8.0;
         self.velocity.x = movement_input.x * speed;
@@ -73,6 +77,23 @@ impl PlayerPhysics {
         self.position.y += self.velocity.y * dt;
         self.on_ground = false;
         self.resolve_collisions(chunk_manager, 1);
+
+        // Calculate fall damage on landing
+        let mut fall_damage = 0.0;
+        if !was_on_ground && self.on_ground {
+            let fall_distance = self.highest_y - self.position.y;
+            if fall_distance > 3.0 {
+                fall_damage = fall_distance - 3.0;
+            }
+        }
+
+        if self.on_ground {
+            self.highest_y = self.position.y;
+        } else {
+            self.highest_y = self.highest_y.max(self.position.y);
+        }
+
+        fall_damage
     }
 
     fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {

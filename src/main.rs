@@ -9,6 +9,7 @@ mod chunk_manager;
 mod lighting;
 mod inventory;
 mod crafting;
+mod player;
 
 
 use app::App;

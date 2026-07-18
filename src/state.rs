@@ -7,6 +7,7 @@ use crate::crafting::RecipeManager;
 use crate::chunk_manager::ChunkManager;
 use crate::physics::PlayerPhysics;
 use crate::interaction::raycast;
+use crate::player::{PlayerState, DamageSource};
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
@@ -168,6 +169,8 @@ pub struct State {
     pub mining_progress: f32,
     crack_vertex_buffer: wgpu::Buffer,
     crack_index_buffer: wgpu::Buffer,
+    pub player_state: PlayerState,
+    pub void_damage_timer: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -797,6 +800,8 @@ impl State {
             mining_progress: 0.0,
             crack_vertex_buffer,
             crack_index_buffer,
+            player_state: PlayerState::new(),
+            void_damage_timer: 0.0,
         }
     }
 
@@ -999,6 +1004,9 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
+        if self.player_state.is_dead {
+            return;
+        }
         if self.is_paused {
             return;
         }
@@ -1025,8 +1033,43 @@ impl State {
             movement.y = 1.0;
         }
 
-        self.player_physics.update(dt, &self.chunk_manager, movement);
+        // Jump exhaustion check
+        let jumped = self.keys.space && self.player_physics.on_ground;
+        if jumped && self.game_mode == GameMode::Survival {
+            self.player_state.add_exhaustion(0.05);
+        }
+
+        let old_pos = self.player_physics.position;
+
+        let fall_damage = self.player_physics.update(dt, &self.chunk_manager, movement);
         self.update_chunks();
+
+        // Apply fall damage
+        if self.game_mode == GameMode::Survival && fall_damage > 0.0 {
+            self.take_damage(fall_damage, DamageSource::Fall);
+        }
+
+        // Movement exhaustion check
+        let horizontal_dist = glam::Vec2::new(self.player_physics.position.x - old_pos.x, self.player_physics.position.z - old_pos.z).length();
+        if self.game_mode == GameMode::Survival {
+            self.player_state.add_exhaustion(0.02 * horizontal_dist);
+        }
+
+        // Void damage check
+        if self.player_physics.position.y < -64.0 {
+            self.void_damage_timer += dt;
+            if self.void_damage_timer >= 0.5 {
+                self.void_damage_timer = 0.0;
+                self.take_damage(2.0, DamageSource::Void);
+            }
+        } else {
+            self.void_damage_timer = 0.0;
+        }
+
+        // Update player state timers & starvation
+        if let Some((dmg, src)) = self.player_state.update(dt) {
+            self.take_damage(dmg, src);
+        }
 
         // Sync camera position to player position at eye height
         self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
@@ -1220,8 +1263,23 @@ impl State {
             }
 
             if eligible_to_harvest {
-                self.inventory.add_item(Item::from_block(old_block));
+                if old_block == BlockType::OakLeaves {
+                    let mut rng_seed = (wx as u32).wrapping_mul(31).wrapping_add(wy as u32).wrapping_mul(17).wrapping_add(wz as u32);
+                    let mut next_rand = || {
+                        rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                        (rng_seed / 65536) % 32768
+                    };
+                    if next_rand() % 10 == 0 {
+                        self.inventory.add_item(crate::inventory::Item::Apple);
+                    } else {
+                        self.inventory.add_item(crate::inventory::Item::from_block(old_block));
+                    }
+                } else {
+                    self.inventory.add_item(crate::inventory::Item::from_block(old_block));
+                }
             }
+
+            self.player_state.add_exhaustion(0.005);
 
             // Deduct tool durability
             if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
@@ -1260,7 +1318,81 @@ impl State {
         }
     }
 
+    pub fn take_damage(&mut self, amount: f32, source: DamageSource) {
+        if self.game_mode == GameMode::Creative {
+            return;
+        }
+
+        let died = self.player_state.take_damage(amount, source);
+        if died {
+            println!("[Debug] Player died due to: {:?}", source);
+            self.inventory.clear();
+            
+            // Release cursor grab immediately on death so player can click Respawn
+            let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+            self.window.set_cursor_visible(true);
+            self.keys = KeyState::default();
+        }
+    }
+
+    pub fn respawn(&mut self) {
+        // Reset player physics position to spawn point: (8.0, 80.0, 8.0)
+        self.player_physics.position = glam::Vec3::new(8.0, 80.0, 8.0);
+        self.player_physics.velocity = glam::Vec3::ZERO;
+        self.player_physics.on_ground = false;
+        self.player_physics.highest_y = 80.0;
+        
+        // Reset player state
+        self.player_state.health = self.player_state.max_health;
+        self.player_state.hunger = 20.0;
+        self.player_state.saturation = 5.0;
+        self.player_state.exhaustion = 0.0;
+        self.player_state.is_dead = false;
+        self.player_state.death_reason = None;
+        self.player_state.invulnerable_time = 1.0; // Give 1.0s invulnerability on respawn
+        self.player_state.damaged_flash_time = 0.0;
+        self.void_damage_timer = 0.0;
+        
+        // Grab cursor
+        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked)
+            .or_else(|_| self.window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
+        self.window.set_cursor_visible(false);
+        
+        println!("[Debug] Player respawned at spawn point");
+    }
+
+    pub fn handle_death_click(&mut self) {
+        let mouse_x = self.mouse_ndc[0];
+        let mouse_y = self.mouse_ndc[1];
+        
+        // Respawn button: bounds X: [-0.3, 0.3], Y: [-0.1, 0.0]
+        if mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.1 && mouse_y <= 0.0 {
+            self.respawn();
+        }
+    }
+
     pub fn handle_click(&mut self, is_left_click: bool) {
+        if !is_left_click {
+            let held_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
+            if held_item == crate::inventory::Item::Apple || held_item == crate::inventory::Item::Bread {
+                if self.player_state.hunger < 20.0 || self.game_mode == GameMode::Creative {
+                    let (heal_hunger, heal_saturation) = match held_item {
+                        crate::inventory::Item::Apple => (4.0, 2.4),
+                        crate::inventory::Item::Bread => (5.0, 6.0),
+                        _ => (0.0, 0.0),
+                    };
+                    self.player_state.hunger = (self.player_state.hunger + heal_hunger).min(20.0);
+                    self.player_state.saturation = (self.player_state.saturation + heal_saturation).min(self.player_state.hunger);
+                    
+                    let is_creative = self.game_mode == GameMode::Creative;
+                    self.inventory.use_selected_item(is_creative);
+                    
+                    println!("[Debug] Ate {:?}, hunger={:.1}, saturation={:.1}", held_item, self.player_state.hunger, self.player_state.saturation);
+                    return;
+                }
+            }
+        }
+
         let dir = Vec3::new(
             self.camera.yaw.cos() * self.camera.pitch.cos(),
             self.camera.pitch.sin(),
@@ -1616,7 +1748,77 @@ impl State {
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        if self.is_paused {
+        if self.player_state.is_dead {
+            let mut ui_vertices = Vec::new();
+            let mut ui_line_vertices = Vec::new();
+
+            let mouse_x = self.mouse_ndc[0];
+            let mouse_y = self.mouse_ndc[1];
+
+            // Respawn button hover (X: [-0.3, 0.3], Y: [-0.1, 0.0])
+            let respawn_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.1 && mouse_y <= 0.0;
+
+            // Reddish overlay
+            let bg_color = [0.4, 0.0, 0.0, 0.6];
+            ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
+            ui_vertices.push(UiVertex { position: [-1.0, -1.0, 0.0], color: bg_color });
+            ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
+            ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
+            ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
+            ui_vertices.push(UiVertex { position: [1.0, 1.0, 0.0], color: bg_color });
+
+            // Button background
+            let btn_bg = if respawn_hover { [0.4, 0.1, 0.1, 1.0] } else { [0.2, 0.0, 0.0, 1.0] };
+            let btn_border = if respawn_hover { [1.0, 1.0, 1.0, 1.0] } else { [0.6, 0.2, 0.2, 1.0] };
+            let btn_y_min = -0.10;
+            let btn_y_max = 0.00;
+
+            ui_vertices.push(UiVertex { position: [-0.3, btn_y_max, 0.0], color: btn_bg });
+            ui_vertices.push(UiVertex { position: [-0.3, btn_y_min, 0.0], color: btn_bg });
+            ui_vertices.push(UiVertex { position: [0.3, btn_y_min, 0.0], color: btn_bg });
+            ui_vertices.push(UiVertex { position: [-0.3, btn_y_max, 0.0], color: btn_bg });
+            ui_vertices.push(UiVertex { position: [0.3, btn_y_min, 0.0], color: btn_bg });
+            ui_vertices.push(UiVertex { position: [0.3, btn_y_max, 0.0], color: btn_bg });
+
+            // Button border
+            ui_line_vertices.push(UiVertex { position: [-0.3, btn_y_max, 0.0], color: btn_border });
+            ui_line_vertices.push(UiVertex { position: [0.3, btn_y_max, 0.0], color: btn_border });
+            ui_line_vertices.push(UiVertex { position: [0.3, btn_y_max, 0.0], color: btn_border });
+            ui_line_vertices.push(UiVertex { position: [0.3, btn_y_min, 0.0], color: btn_border });
+            ui_line_vertices.push(UiVertex { position: [0.3, btn_y_min, 0.0], color: btn_border });
+            ui_line_vertices.push(UiVertex { position: [-0.3, btn_y_min, 0.0], color: btn_border });
+            ui_line_vertices.push(UiVertex { position: [-0.3, btn_y_min, 0.0], color: btn_border });
+            ui_line_vertices.push(UiVertex { position: [-0.3, btn_y_max, 0.0], color: btn_border });
+
+            let draw_centered_text = |s: &str, y: f32, char_w: f32, char_h: f32, spacing: f32, color: [f32; 4], vertices: &mut Vec<UiVertex>| {
+                let upper = s.to_uppercase();
+                let n = upper.len() as f32;
+                let width = n * char_w + (n - 1.0) * spacing;
+                let start_x = -width / 2.0;
+                add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
+            };
+
+            draw_centered_text("YOU DIED!", 0.30, 0.04, 0.08, 0.015, [1.0, 0.2, 0.2, 1.0], &mut ui_line_vertices);
+
+            let msg = match self.player_state.death_reason {
+                Some(DamageSource::Fall) => "FELL FROM A HIGH PLACE",
+                Some(DamageSource::Void) => "FELL INTO THE VOID",
+                Some(DamageSource::Hunger) => "STARVED TO DEATH",
+                None => "DIED",
+            };
+            draw_centered_text(msg, 0.15, 0.015, 0.03, 0.006, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+            draw_centered_text("RESPAWN", -0.06, 0.02, 0.04, 0.008, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+
+            let ui_vert_len = ui_vertices.len().min(4096);
+            let ui_line_vert_len = ui_line_vertices.len().min(4096);
+
+            self.queue.write_buffer(&self.ui_vertex_buffer, 0, bytemuck::cast_slice(&ui_vertices[..ui_vert_len]));
+            self.queue.write_buffer(&self.ui_line_vertex_buffer, 0, bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]));
+
+            self.num_ui_vertices = ui_vert_len as u32;
+            self.num_ui_line_vertices = ui_line_vert_len as u32;
+            self.num_ui_textured_vertices = 0;
+        } else if self.is_paused {
             let mut ui_vertices = Vec::new();
             let mut ui_line_vertices = Vec::new();
 
@@ -2025,6 +2227,75 @@ impl State {
                     }
                 }
 
+                if self.game_mode == GameMode::Survival {
+                    // Draw Health HUD
+                    let hud_w = 0.03;
+                    let hud_h = 0.03 * aspect;
+                    let hud_gap = 0.005;
+                    let x_hearts_start = -0.38;
+                    let y_hud = -0.76;
+                    
+                    for i in 0..10 {
+                        let h_val = self.player_state.health;
+                        let (col, row) = if h_val >= 2.0 * (i + 1) as f32 {
+                            (0, 8) // Full
+                        } else if h_val >= 2.0 * i as f32 + 1.0 {
+                            (1, 8) // Half
+                        } else {
+                            (2, 8) // Empty
+                        };
+                        
+                        let u0 = col as f32 * 0.0625;
+                        let u1 = (col + 1) as f32 * 0.0625;
+                        let v0 = row as f32 * 0.0625;
+                        let v1 = (row + 1) as f32 * 0.0625;
+                        
+                        let hx0 = x_hearts_start + i as f32 * (hud_w + hud_gap);
+                        let hx1 = hx0 + hud_w;
+                        let hy0 = y_hud;
+                        let hy1 = hy0 + hud_h;
+                        
+                        let c = [1.0, 1.0, 1.0, 1.0];
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy0, 0.0], tex_coords: [u0, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy1, 0.0], tex_coords: [u1, v0], color: c });
+                    }
+                    
+                    // Draw Hunger HUD
+                    let x_hunger_start = 0.38 - 10.0 * hud_w - 9.0 * hud_gap;
+                    for i in 0..10 {
+                        let hung_val = self.player_state.hunger;
+                        let (col, row) = if hung_val >= 2.0 * (i + 1) as f32 {
+                            (3, 8) // Full
+                        } else if hung_val >= 2.0 * i as f32 + 1.0 {
+                            (4, 8) // Half
+                        } else {
+                            (5, 8) // Empty
+                        };
+                        
+                        let u0 = col as f32 * 0.0625;
+                        let u1 = (col + 1) as f32 * 0.0625;
+                        let v0 = row as f32 * 0.0625;
+                        let v1 = (row + 1) as f32 * 0.0625;
+                        
+                        let hx0 = x_hunger_start + i as f32 * (hud_w + hud_gap);
+                        let hx1 = hx0 + hud_w;
+                        let hy0 = y_hud;
+                        let hy1 = hy0 + hud_h;
+                        
+                        let c = [1.0, 1.0, 1.0, 1.0];
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy0, 0.0], tex_coords: [u0, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy1, 0.0], tex_coords: [u1, v0], color: c });
+                    }
+                }
+
                 // Selected Block/Item Text
                 let selected_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
                 let selected_text = format!("{:?}", selected_item).to_uppercase();
@@ -2048,6 +2319,18 @@ impl State {
                 let width_mode = n_mode * mode_w + (n_mode - 1.0) * mode_s;
                 let mode_x = -width_mode / 2.0;
                 add_string_lines(mode_text, mode_x, -0.71, mode_w, mode_h, mode_s, [1.0, 0.9, 0.4, 1.0], &mut ui_line_vertices);
+
+                // Damaged screen red flash overlay
+                if self.player_state.damaged_flash_time > 0.0 {
+                    let alpha = (self.player_state.damaged_flash_time / 0.5).min(1.0) * 0.25;
+                    let flash_color = [1.0, 0.0, 0.0, alpha];
+                    ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: flash_color });
+                    ui_vertices.push(UiVertex { position: [-1.0, -1.0, 0.0], color: flash_color });
+                    ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: flash_color });
+                    ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: flash_color });
+                    ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: flash_color });
+                    ui_vertices.push(UiVertex { position: [1.0, 1.0, 0.0], color: flash_color });
+                }
             }
 
             // Write Buffers

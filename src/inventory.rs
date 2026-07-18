@@ -21,6 +21,9 @@ pub enum Item {
     
     // Resources
     Stick, Coal, IronIngot, GoldIngot, Diamond, Redstone,
+
+    // Food
+    Apple, Bread,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +152,8 @@ impl Item {
             Item::GoldIngot => ItemProperties { name: "Gold Ingot", max_stack: 64, is_block: false, block_type: None, tex_coords: (3, 3) },
             Item::Diamond => ItemProperties { name: "Diamond", max_stack: 64, is_block: false, block_type: None, tex_coords: (4, 3) },
             Item::Redstone => ItemProperties { name: "Redstone Dust", max_stack: 64, is_block: false, block_type: None, tex_coords: (5, 3) },
+            Item::Apple => ItemProperties { name: "Apple", max_stack: 64, is_block: false, block_type: None, tex_coords: (6, 3) },
+            Item::Bread => ItemProperties { name: "Bread", max_stack: 64, is_block: false, block_type: None, tex_coords: (7, 3) },
         }
     }
 
@@ -225,7 +230,25 @@ impl Inventory {
         for (i, &item) in creative_items.iter().enumerate() {
             inv.hotbar[i] = Some(ItemStack::new(item, 64));
         }
+        
+        let extra_items = [
+            Item::StoneSword, Item::IronPickaxe, Item::DiamondPickaxe, Item::DiamondAxe, Item::DiamondShovel,
+            Item::Apple, Item::Bread, Item::Coal, Item::IronIngot, Item::Diamond, Item::Redstone,
+            Item::CraftingTable, Item::Furnace, Item::Chest, Item::TNT, Item::Bookshelf, Item::Sand,
+        ];
+        for (i, &item) in extra_items.iter().enumerate() {
+            inv.main[i] = Some(ItemStack::new(item, 64));
+        }
         inv
+    }
+
+    pub fn clear(&mut self) {
+        self.hotbar = [None; 9];
+        self.main = [None; 27];
+        self.armor = [None; 4];
+        self.craft_input.fill(None);
+        self.craft_output = None;
+        self.dragged = None;
     }
 
     pub fn get_selected_block(&self) -> Option<BlockType> {
