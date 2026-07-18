@@ -651,3 +651,39 @@ impl Chunk {
         (opaque_vertices, opaque_indices, trans_vertices, trans_indices)
     }
 }
+
+use crate::inventory::{ToolType, ToolMaterial};
+
+impl BlockType {
+    pub fn preferred_tool(self) -> ToolType {
+        match self {
+            BlockType::Grass | BlockType::Dirt | BlockType::Sand | BlockType::Gravel | BlockType::Snow | BlockType::Clay | BlockType::Sandstone => ToolType::Shovel,
+            BlockType::Stone | BlockType::Cobblestone | BlockType::CoalOre | BlockType::IronOre | BlockType::GoldOre | BlockType::DiamondOre | BlockType::RedstoneOre | BlockType::StoneBrick | BlockType::Obsidian | BlockType::Furnace => ToolType::Pickaxe,
+            BlockType::OakLog | BlockType::OakPlanks | BlockType::CraftingTable | BlockType::Chest | BlockType::Bookshelf => ToolType::Axe,
+            _ => ToolType::None,
+        }
+    }
+
+    pub fn min_harvest_material(self) -> Option<ToolMaterial> {
+        match self {
+            BlockType::Stone | BlockType::Cobblestone | BlockType::CoalOre | BlockType::Furnace | BlockType::StoneBrick | BlockType::Sandstone => Some(ToolMaterial::Wood), // Stone tier tools or above
+            BlockType::IronOre => Some(ToolMaterial::Stone),
+            BlockType::GoldOre | BlockType::RedstoneOre | BlockType::DiamondOre => Some(ToolMaterial::Iron),
+            BlockType::Obsidian => Some(ToolMaterial::Diamond),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_block_harvest_properties() {
+        assert_eq!(BlockType::Obsidian.preferred_tool(), ToolType::Pickaxe);
+        assert_eq!(BlockType::Obsidian.min_harvest_material(), Some(ToolMaterial::Diamond));
+        assert_eq!(BlockType::OakPlanks.preferred_tool(), ToolType::Axe);
+        assert_eq!(BlockType::OakPlanks.min_harvest_material(), None);
+    }
+}

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use winit::window::Window;
 use crate::camera::{Camera, CameraUniform};
 use crate::world::{Chunk, BlockType};
-use crate::inventory::{Inventory, GameMode, ItemStack};
+use crate::inventory::{Inventory, GameMode, ItemStack, Item, ToolType};
 use crate::crafting::RecipeManager;
 use crate::chunk_manager::ChunkManager;
 use crate::physics::PlayerPhysics;
@@ -163,6 +163,11 @@ pub struct State {
     pub game_mode: GameMode,
     pub inventory: Inventory,
     pub recipe_manager: RecipeManager,
+    pub left_mouse_pressed: bool,
+    pub mining_target: Option<glam::Vec3>,
+    pub mining_progress: f32,
+    crack_vertex_buffer: wgpu::Buffer,
+    crack_index_buffer: wgpu::Buffer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -736,6 +741,20 @@ impl State {
             mapped_at_creation: false,
         });
 
+        let crack_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Crack Vertex Buffer"),
+            size: (24 * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let crack_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Crack Index Buffer"),
+            size: (36 * std::mem::size_of::<u32>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             window,
             surface,
@@ -773,6 +792,11 @@ impl State {
             game_mode: GameMode::Creative,
             inventory: Inventory::new_creative(),
             recipe_manager: RecipeManager::new(),
+            left_mouse_pressed: false,
+            mining_target: None,
+            mining_progress: 0.0,
+            crack_vertex_buffer,
+            crack_index_buffer,
         }
     }
 
@@ -1008,6 +1032,232 @@ impl State {
         self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
         self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+
+        // Continuous mining logic
+        if self.left_mouse_pressed && self.game_mode == GameMode::Survival {
+            let dir = Vec3::new(
+                self.camera.yaw.cos() * self.camera.pitch.cos(),
+                self.camera.pitch.sin(),
+                self.camera.yaw.sin() * self.camera.pitch.cos(),
+            ).normalize_or_zero();
+
+            if let Some(hit) = raycast(self.camera.position, dir, 5.0, &self.chunk_manager) {
+                let target = hit.block_pos;
+                let block = self.chunk_manager.get_block(target.x as i32, target.y as i32, target.z as i32);
+                
+                if block != BlockType::Air && block.properties().hardness >= 0.0 {
+                    if self.mining_target != Some(target) {
+                        self.mining_target = Some(target);
+                        self.mining_progress = 0.0;
+                    } else {
+                        let mining_time = self.calculate_mining_time(block);
+                        self.mining_progress += dt / mining_time;
+                        if self.mining_progress >= 1.0 {
+                            let pos = target;
+                            self.break_block(pos);
+                            self.mining_target = None;
+                            self.mining_progress = 0.0;
+                        }
+                    }
+                } else {
+                    self.mining_target = None;
+                    self.mining_progress = 0.0;
+                }
+            } else {
+                self.mining_target = None;
+                self.mining_progress = 0.0;
+            }
+        } else if !self.left_mouse_pressed {
+            self.mining_target = None;
+            self.mining_progress = 0.0;
+        }
+    }
+
+    pub fn update_crack_buffers(&self, target_pos: Vec3, progress: f32) -> Option<(u32, u32)> {
+        let stage = (progress * 10.0).floor().clamp(0.0, 9.0) as u32;
+        let wx = target_pos.x;
+        let wy = target_pos.y;
+        let wz = target_pos.z;
+
+        // Cube corner scale (slightly expanded to 1.002 to avoid z-fighting)
+        let s = 1.002f32;
+        let offset_min = 0.5 - 0.5 * s;
+        let offset_max = 0.5 + 0.5 * s;
+
+        let faces = [
+            // South
+            ([0.0, 0.0, 1.0], [
+                ([offset_min, offset_min, offset_max], [0.0, 1.0]),
+                ([offset_max, offset_min, offset_max], [1.0, 1.0]),
+                ([offset_max, offset_max, offset_max], [1.0, 0.0]),
+                ([offset_min, offset_max, offset_max], [0.0, 0.0]),
+            ]),
+            // North
+            ([0.0, 0.0, -1.0], [
+                ([offset_max, offset_min, offset_min], [0.0, 1.0]),
+                ([offset_min, offset_min, offset_min], [1.0, 1.0]),
+                ([offset_min, offset_max, offset_min], [1.0, 0.0]),
+                ([offset_max, offset_max, offset_min], [0.0, 0.0]),
+            ]),
+            // West
+            ([-1.0, 0.0, 0.0], [
+                ([offset_min, offset_min, offset_min], [0.0, 1.0]),
+                ([offset_min, offset_min, offset_max], [1.0, 1.0]),
+                ([offset_min, offset_max, offset_max], [1.0, 0.0]),
+                ([offset_min, offset_max, offset_min], [0.0, 0.0]),
+            ]),
+            // East
+            ([1.0, 0.0, 0.0], [
+                ([offset_max, offset_min, offset_max], [0.0, 1.0]),
+                ([offset_max, offset_min, offset_min], [1.0, 1.0]),
+                ([offset_max, offset_max, offset_min], [1.0, 0.0]),
+                ([offset_max, offset_max, offset_max], [0.0, 0.0]),
+            ]),
+            // Up
+            ([0.0, 1.0, 0.0], [
+                ([offset_min, offset_max, offset_max], [0.0, 1.0]),
+                ([offset_max, offset_max, offset_max], [1.0, 1.0]),
+                ([offset_max, offset_max, offset_min], [1.0, 0.0]),
+                ([offset_min, offset_max, offset_min], [0.0, 0.0]),
+            ]),
+            // Down
+            ([0.0, -1.0, 0.0], [
+                ([offset_min, offset_min, offset_min], [0.0, 1.0]),
+                ([offset_max, offset_min, offset_min], [1.0, 1.0]),
+                ([offset_max, offset_min, offset_max], [1.0, 0.0]),
+                ([offset_min, offset_min, offset_max], [0.0, 0.0]),
+            ]),
+        ];
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let max_light = self.chunk_manager.get_sky_light(wx as i32, wy as i32, wz as i32)
+            .max(self.chunk_manager.get_block_light(wx as i32, wy as i32, wz as i32));
+        
+        for (face_idx, (_normal, corners)) in faces.iter().enumerate() {
+            let start_idx = vertices.len() as u32;
+            let multiplier = match face_idx {
+                4 => 1.0,
+                5 => 0.5,
+                _ => 0.8,
+            };
+            let light_val = (max_light as f32 / 15.0) * multiplier;
+
+            for &(corner, uv) in corners {
+                // UV points to Row 15, Col "stage"
+                let u = (uv[0] + stage as f32) * 0.0625;
+                let v = (uv[1] + 15.0) * 0.0625;
+                vertices.push(Vertex {
+                    position: [wx + corner[0], wy + corner[1], wz + corner[2]],
+                    tex_coords: [u, v],
+                    light_level: light_val,
+                });
+            }
+
+            indices.push(start_idx + 0);
+            indices.push(start_idx + 1);
+            indices.push(start_idx + 2);
+            indices.push(start_idx + 0);
+            indices.push(start_idx + 2);
+            indices.push(start_idx + 3);
+        }
+
+        self.queue.write_buffer(&self.crack_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        self.queue.write_buffer(&self.crack_index_buffer, 0, bytemuck::cast_slice(&indices));
+
+        Some((vertices.len() as u32, indices.len() as u32))
+    }
+
+    pub fn calculate_mining_time(&self, block: BlockType) -> f32 {
+        let hardness = block.properties().hardness;
+        if hardness < 0.0 {
+            return f32::MAX; // Unbreakable (e.g. bedrock)
+        }
+        
+        let held_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(Item::Air);
+        let preferred = block.preferred_tool();
+        
+        let mut speed_multiplier = 1.0;
+        let mut matching_tool = false;
+        
+        if let Some(tool_prop) = held_item.tool_properties() {
+            if tool_prop.tool_type == preferred && preferred != ToolType::None {
+                speed_multiplier = tool_prop.mining_speed;
+                matching_tool = true;
+            }
+        }
+        
+        let base_time = if matching_tool || preferred == ToolType::None {
+            hardness * 1.5
+        } else {
+            hardness * 5.0
+        };
+        
+        base_time / speed_multiplier
+    }
+
+    pub fn break_block(&mut self, pos: glam::Vec3) {
+        let wx = pos.x as i32;
+        let wy = pos.y as i32;
+        let wz = pos.z as i32;
+        let old_block = self.chunk_manager.get_block(wx, wy, wz);
+        if old_block == BlockType::Air { return; }
+
+        self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+        println!("[Debug] Block mined at ({}, {}, {})", wx, wy, wz);
+
+        // Survival drops check
+        if self.game_mode == GameMode::Survival {
+            let mut eligible_to_harvest = true;
+            if let Some(min_material) = old_block.min_harvest_material() {
+                let held_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(Item::Air);
+                if let Some(tool_prop) = held_item.tool_properties() {
+                    eligible_to_harvest = tool_prop.tool_type == old_block.preferred_tool() && tool_prop.material >= min_material;
+                } else {
+                    eligible_to_harvest = false;
+                }
+            }
+
+            if eligible_to_harvest {
+                self.inventory.add_item(Item::from_block(old_block));
+            }
+
+            // Deduct tool durability
+            if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
+                if stack.item.tool_properties().is_some() {
+                    if stack.durability > 1 {
+                        stack.durability -= 1;
+                    } else {
+                        // Destroy tool
+                        println!("[Debug] Tool broke: {:?}", stack.item);
+                        self.inventory.hotbar[self.inventory.selected] = None;
+                    }
+                }
+            }
+        }
+
+        // recalculate lighting and redraw chunk
+        let mut dirty_chunks = std::collections::HashSet::new();
+        crate::lighting::update_sky_light_after_removed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
+        crate::lighting::update_block_light_after_removed(&mut self.chunk_manager, wx, wy, wz, old_block.properties().light_emission, &mut dirty_chunks);
+
+        let cx = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
+        let cz = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
+        let lx = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32);
+        let lz = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32);
+
+        dirty_chunks.insert((cx, cz));
+        if lx == 0 { dirty_chunks.insert((cx - 1, cz)); }
+        if lx == 15 { dirty_chunks.insert((cx + 1, cz)); }
+        if lz == 0 { dirty_chunks.insert((cx, cz - 1)); }
+        if lz == 15 { dirty_chunks.insert((cx, cz + 1)); }
+
+        for (dcx, dcz) in dirty_chunks {
+            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                mesh.dirty = true;
+            }
+        }
     }
 
     pub fn handle_click(&mut self, is_left_click: bool) {
@@ -1241,9 +1491,9 @@ impl State {
                                     let new_slot_count = slot.count + transfer;
                                     let new_drag_count = dragged.count - transfer;
 
-                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: new_slot_count }));
+                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: new_slot_count, durability: slot.durability }));
                                     if new_drag_count > 0 {
-                                        self.inventory.dragged = Some(ItemStack { item: dragged.item, count: new_drag_count });
+                                        self.inventory.dragged = Some(ItemStack { item: dragged.item, count: new_drag_count, durability: dragged.durability });
                                     } else {
                                         self.inventory.dragged = None;
                                     }
@@ -1270,9 +1520,9 @@ impl State {
                             if let Some(slot) = slot_item {
                                 if slot.item == dragged.item && slot.count < max_stack {
                                     // Drop 1
-                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: slot.count + 1 }));
+                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: slot.count + 1, durability: slot.durability }));
                                     if dragged.count > 1 {
-                                        self.inventory.dragged = Some(ItemStack { item: dragged.item, count: dragged.count - 1 });
+                                        self.inventory.dragged = Some(ItemStack { item: dragged.item, count: dragged.count - 1, durability: dragged.durability });
                                     } else {
                                         self.inventory.dragged = None;
                                     }
@@ -1283,9 +1533,9 @@ impl State {
                                 }
                             } else {
                                 // Drop 1 in empty slot
-                                self.set_item_at_slot(slot_type, Some(ItemStack { item: dragged.item, count: 1 }));
+                                self.set_item_at_slot(slot_type, Some(ItemStack { item: dragged.item, count: 1, durability: dragged.durability }));
                                 if dragged.count > 1 {
-                                    self.inventory.dragged = Some(ItemStack { item: dragged.item, count: dragged.count - 1 });
+                                    self.inventory.dragged = Some(ItemStack { item: dragged.item, count: dragged.count - 1, durability: dragged.durability });
                                 } else {
                                     self.inventory.dragged = None;
                                 }
@@ -1295,9 +1545,9 @@ impl State {
                             if let Some(slot) = slot_item {
                                 let take = (slot.count + 1) / 2;
                                 let keep = slot.count - take;
-                                self.inventory.dragged = Some(ItemStack { item: slot.item, count: take });
+                                self.inventory.dragged = Some(ItemStack { item: slot.item, count: take, durability: slot.durability });
                                 if keep > 0 {
-                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: keep }));
+                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: keep, durability: slot.durability }));
                                 } else {
                                     self.set_item_at_slot(slot_type, None);
                                 }
@@ -1472,6 +1722,49 @@ impl State {
             let gap = 0.01;
             let start_x = -0.40;
 
+            let draw_durability_bar = |stack: &ItemStack, x0: f32, x1: f32, y0: f32, y1: f32, _aspect: f32, ui_vertices: &mut Vec<UiVertex>| {
+                if let Some(tool_prop) = stack.item.tool_properties() {
+                    let max_dur = tool_prop.durability;
+                    if stack.durability < max_dur {
+                        let ratio = (stack.durability as f32 / max_dur as f32).clamp(0.0, 1.0);
+                        
+                        // Define bar bounds relative to slot size
+                        let slot_w = x1 - x0;
+                        let slot_h = y1 - y0;
+                        
+                        let bar_x0 = x0 + slot_w * 0.15;
+                        let bar_x1 = x1 - slot_w * 0.15;
+                        let bar_y0 = y0 + slot_h * 0.10;
+                        let bar_y1 = y0 + slot_h * 0.16;
+                        
+                        // 1. Black background bar
+                        let bg_color = [0.0, 0.0, 0.0, 1.0];
+                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y1, 0.0], color: bg_color });
+                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y0, 0.0], color: bg_color });
+                        ui_vertices.push(UiVertex { position: [bar_x1, bar_y0, 0.0], color: bg_color });
+                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y1, 0.0], color: bg_color });
+                        ui_vertices.push(UiVertex { position: [bar_x1, bar_y0, 0.0], color: bg_color });
+                        ui_vertices.push(UiVertex { position: [bar_x1, bar_y1, 0.0], color: bg_color });
+                        
+                        // 2. Colored foreground bar
+                        let fg_x1 = bar_x0 + (bar_x1 - bar_x0) * ratio;
+                        let (r, g) = if ratio > 0.5 {
+                            ((1.0 - ratio) * 2.0, 1.0)
+                        } else {
+                            (1.0, ratio * 2.0)
+                        };
+                        let fg_color = [r, g, 0.0, 1.0];
+                        
+                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y1, 0.0], color: fg_color });
+                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y0, 0.0], color: fg_color });
+                        ui_vertices.push(UiVertex { position: [fg_x1, bar_y0, 0.0], color: fg_color });
+                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y1, 0.0], color: fg_color });
+                        ui_vertices.push(UiVertex { position: [fg_x1, bar_y0, 0.0], color: fg_color });
+                        ui_vertices.push(UiVertex { position: [fg_x1, bar_y1, 0.0], color: fg_color });
+                    }
+                }
+            };
+
             if self.inventory.is_open {
                 // 1. Dark overlay (screen covers from -1.0 to 1.0)
                 let bg_color = [0.08, 0.08, 0.08, 0.6];
@@ -1555,6 +1848,9 @@ impl State {
                             let count_y = y0 + 0.01 * aspect;
                             add_string_lines(&count_str, count_x, count_y, cw, ch, cs, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
                         }
+
+                        // Draw durability bar
+                        draw_durability_bar(&stack, x0, x1, y0, y1, aspect, &mut ui_vertices);
                     }
                 }
 
@@ -1723,6 +2019,9 @@ impl State {
                             let count_y = y0 + 0.012 * aspect;
                             add_string_lines(&count_str, count_x, count_y, cw, ch, cs, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
                         }
+
+                        // Draw durability bar
+                        draw_durability_bar(stack, x0, x1, y0, y1, aspect, &mut ui_vertices);
                     }
                 }
 
@@ -1820,6 +2119,17 @@ impl State {
                     render_pass.set_vertex_buffer(0, mesh.transparent_vertex_buffer.slice(..));
                     render_pass.set_index_buffer(mesh.transparent_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     render_pass.draw_indexed(0..mesh.transparent_num_indices, 0, 0..1);
+                }
+            }
+
+            // Draw Block cracking animation overlay
+            if let Some(target) = self.mining_target {
+                if self.mining_progress > 0.0 {
+                    if let Some((_num_vertices, num_indices)) = self.update_crack_buffers(target, self.mining_progress) {
+                        render_pass.set_vertex_buffer(0, self.crack_vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(self.crack_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        render_pass.draw_indexed(0..num_indices, 0, 0..1);
+                    }
                 }
             }
 

@@ -24,9 +24,44 @@ pub enum Item {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolType {
+    None,
+    Pickaxe,
+    Axe,
+    Shovel,
+    Sword,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ToolMaterial {
+    Wood,
+    Stone,
+    Iron,
+    Gold,
+    Diamond,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ToolProperties {
+    pub tool_type: ToolType,
+    pub material: ToolMaterial,
+    pub mining_speed: f32,
+    pub durability: u32,
+    pub damage: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemStack {
     pub item: Item,
     pub count: u32,
+    pub durability: u32,
+}
+
+impl ItemStack {
+    pub fn new(item: Item, count: u32) -> Self {
+        let durability = item.tool_properties().map(|t| t.durability).unwrap_or(0);
+        Self { item, count, durability }
+    }
 }
 
 pub struct ItemProperties {
@@ -38,6 +73,27 @@ pub struct ItemProperties {
 }
 
 impl Item {
+    pub fn tool_properties(self) -> Option<ToolProperties> {
+        match self {
+            Item::StoneSword => Some(ToolProperties { tool_type: ToolType::Sword, material: ToolMaterial::Stone, mining_speed: 4.0, durability: 131, damage: 5.0 }),
+            Item::StonePickaxe => Some(ToolProperties { tool_type: ToolType::Pickaxe, material: ToolMaterial::Stone, mining_speed: 4.0, durability: 131, damage: 3.0 }),
+            Item::StoneAxe => Some(ToolProperties { tool_type: ToolType::Axe, material: ToolMaterial::Stone, mining_speed: 4.0, durability: 131, damage: 4.0 }),
+            Item::StoneShovel => Some(ToolProperties { tool_type: ToolType::Shovel, material: ToolMaterial::Stone, mining_speed: 4.0, durability: 131, damage: 2.0 }),
+
+            Item::IronSword => Some(ToolProperties { tool_type: ToolType::Sword, material: ToolMaterial::Iron, mining_speed: 6.0, durability: 250, damage: 6.0 }),
+            Item::IronPickaxe => Some(ToolProperties { tool_type: ToolType::Pickaxe, material: ToolMaterial::Iron, mining_speed: 6.0, durability: 250, damage: 4.0 }),
+            Item::IronAxe => Some(ToolProperties { tool_type: ToolType::Axe, material: ToolMaterial::Iron, mining_speed: 6.0, durability: 250, damage: 5.0 }),
+            Item::IronShovel => Some(ToolProperties { tool_type: ToolType::Shovel, material: ToolMaterial::Iron, mining_speed: 6.0, durability: 250, damage: 3.0 }),
+
+            Item::DiamondSword => Some(ToolProperties { tool_type: ToolType::Sword, material: ToolMaterial::Diamond, mining_speed: 8.0, durability: 1561, damage: 7.0 }),
+            Item::DiamondPickaxe => Some(ToolProperties { tool_type: ToolType::Pickaxe, material: ToolMaterial::Diamond, mining_speed: 8.0, durability: 1561, damage: 5.0 }),
+            Item::DiamondAxe => Some(ToolProperties { tool_type: ToolType::Axe, material: ToolMaterial::Diamond, mining_speed: 8.0, durability: 1561, damage: 6.0 }),
+            Item::DiamondShovel => Some(ToolProperties { tool_type: ToolType::Shovel, material: ToolMaterial::Diamond, mining_speed: 8.0, durability: 1561, damage: 4.0 }),
+
+            _ => None,
+        }
+    }
+
     pub fn properties(self) -> ItemProperties {
         match self {
             Item::Air => ItemProperties { name: "Air", max_stack: 64, is_block: false, block_type: None, tex_coords: (0, 0) },
@@ -167,7 +223,7 @@ impl Inventory {
             Item::Glass, Item::Cobblestone, Item::Water, Item::Torch,
         ];
         for (i, &item) in creative_items.iter().enumerate() {
-            inv.hotbar[i] = Some(ItemStack { item, count: 64 });
+            inv.hotbar[i] = Some(ItemStack::new(item, 64));
         }
         inv
     }
@@ -201,14 +257,14 @@ impl Inventory {
         // 3. Try to add to empty slot in hotbar
         for slot in self.hotbar.iter_mut() {
             if slot.is_none() {
-                *slot = Some(ItemStack { item, count: 1 });
+                *slot = Some(ItemStack::new(item, 1));
                 return true;
             }
         }
         // 4. Try to add to empty slot in main backpack
         for slot in self.main.iter_mut() {
             if slot.is_none() {
-                *slot = Some(ItemStack { item, count: 1 });
+                *slot = Some(ItemStack::new(item, 1));
                 return true;
             }
         }
@@ -248,5 +304,13 @@ mod tests {
 
         assert!(inv.add_item(Item::Stone));
         assert_eq!(inv.hotbar[0].unwrap().count, 2);
+    }
+
+    #[test]
+    fn test_item_properties() {
+        let pick = ItemStack::new(Item::StonePickaxe, 1);
+        assert_eq!(pick.durability, 131);
+        let grass = ItemStack::new(Item::Grass, 64);
+        assert_eq!(grass.durability, 0);
     }
 }

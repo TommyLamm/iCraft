@@ -339,6 +339,41 @@ fn draw_shovel_icon(img: &mut RgbaImage, tx: u32, ty: u32, head_color: [u8; 3]) 
     }
 }
 
+fn draw_crack_pattern(img: &mut RgbaImage, tx: u32, ty: u32, stage: u32) {
+    // Determine crack pattern density based on stage (0..10)
+    // We draw random dark gray lines.
+    let mut seed = 54321 + stage;
+    let mut next_rand = |min: i32, max: i32| -> i32 {
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        let val = (seed / 65536) % 32768;
+        let diff = max - min;
+        if diff <= 0 { return min; }
+        min + (val as i32 % diff)
+    };
+
+    // Background is transparent Rgba([0, 0, 0, 0])
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+
+    // Number of crack lines scales with stage
+    let num_lines = (stage + 1) * 2;
+    for _ in 0..num_lines {
+        let mut cx = next_rand(0, 16) as i32;
+        let mut cy = next_rand(0, 16) as i32;
+        let length = next_rand(3, 8);
+        for _ in 0..length {
+            if cx >= 0 && cx < 16 && cy >= 0 && cy < 16 {
+                img.put_pixel(tx * 16 + cx as u32, ty * 16 + cy as u32, Rgba([20, 20, 20, 200])); // Dark grey crack line
+            }
+            cx += next_rand(-1, 2);
+            cy += next_rand(-1, 2);
+        }
+    }
+}
+
 impl TextureAtlas {
     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
         let mut img = RgbaImage::new(256, 256);
@@ -552,6 +587,11 @@ impl TextureAtlas {
                     }
                 }
             }
+        }
+
+        // Row 15: Crack overlays (cols 0..10)
+        for tx in 0..10 {
+            draw_crack_pattern(&mut img, tx, 15, tx);
         }
 
         // Save to assets folder

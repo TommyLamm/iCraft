@@ -184,30 +184,37 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput {
-                state,
+                state: element_state,
                 button,
                 ..
             } => {
-                if state == ElementState::Pressed {
-                    if let Some(state) = &mut self.state {
-                        if state.is_paused {
-                            if button == MouseButton::Left {
-                                state.handle_menu_click(event_loop);
-                            }
-                        } else if state.inventory.is_open {
-                            if button == MouseButton::Left || button == MouseButton::Right {
-                                state.handle_inventory_click(button == MouseButton::Left);
-                            }
-                        } else {
-                            match button {
-                                MouseButton::Left => {
-                                    state.handle_click(true);
+                if let Some(state) = &mut self.state {
+                    let pressed = element_state == ElementState::Pressed;
+                    if state.is_paused {
+                        if pressed && button == MouseButton::Left {
+                            state.handle_menu_click(event_loop);
+                        }
+                    } else if state.inventory.is_open {
+                        if pressed && (button == MouseButton::Left || button == MouseButton::Right) {
+                            state.handle_inventory_click(button == MouseButton::Left);
+                        }
+                    } else {
+                        match button {
+                            MouseButton::Left => {
+                                state.left_mouse_pressed = pressed;
+                                if pressed {
+                                    // Initial click triggers instant check for Creative mode
+                                    if state.game_mode == crate::inventory::GameMode::Creative {
+                                        state.handle_click(true);
+                                    }
                                 }
-                                MouseButton::Right => {
+                            }
+                            MouseButton::Right => {
+                                if pressed {
                                     state.handle_click(false);
                                 }
-                                _ => {}
                             }
+                            _ => {}
                         }
                     }
                 }

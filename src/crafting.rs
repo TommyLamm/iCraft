@@ -47,47 +47,47 @@ impl RecipeManager {
         let mut recipes = Vec::new();
 
         // 1. Logs -> Planks
-        add_shaped(&mut recipes, vec!["L"], &[("L", Item::OakLog)], ItemStack { item: Item::OakPlanks, count: 4 });
+        add_shaped(&mut recipes, vec!["L"], &[("L", Item::OakLog)], ItemStack::new(Item::OakPlanks, 4));
         // 2. Sticks
-        add_shaped(&mut recipes, vec!["P", "P"], &[("P", Item::OakPlanks)], ItemStack { item: Item::Stick, count: 4 });
+        add_shaped(&mut recipes, vec!["P", "P"], &[("P", Item::OakPlanks)], ItemStack::new(Item::Stick, 4));
         // 3. Crafting Table
-        add_shaped(&mut recipes, vec!["PP", "PP"], &[("P", Item::OakPlanks)], ItemStack { item: Item::CraftingTable, count: 1 });
+        add_shaped(&mut recipes, vec!["PP", "PP"], &[("P", Item::OakPlanks)], ItemStack::new(Item::CraftingTable, 1));
         // 4. Chest
-        add_shaped(&mut recipes, vec!["PPP", "P P", "PPP"], &[("P", Item::OakPlanks)], ItemStack { item: Item::Chest, count: 1 });
+        add_shaped(&mut recipes, vec!["PPP", "P P", "PPP"], &[("P", Item::OakPlanks)], ItemStack::new(Item::Chest, 1));
         // 5. Furnace
-        add_shaped(&mut recipes, vec!["CCC", "C C", "CCC"], &[("C", Item::Cobblestone)], ItemStack { item: Item::Furnace, count: 1 });
+        add_shaped(&mut recipes, vec!["CCC", "C C", "CCC"], &[("C", Item::Cobblestone)], ItemStack::new(Item::Furnace, 1));
         // 6. Torch
-        add_shaped(&mut recipes, vec!["C", "S"], &[("C", Item::Coal), ("S", Item::Stick)], ItemStack { item: Item::Torch, count: 4 });
+        add_shaped(&mut recipes, vec!["C", "S"], &[("C", Item::Coal), ("S", Item::Stick)], ItemStack::new(Item::Torch, 4));
         
         // Ore Smelting Conversion
-        add_shapeless(&mut recipes, vec![Item::IronOre], ItemStack { item: Item::IronIngot, count: 1 });
-        add_shapeless(&mut recipes, vec![Item::GoldOre], ItemStack { item: Item::GoldIngot, count: 1 });
+        add_shapeless(&mut recipes, vec![Item::IronOre], ItemStack::new(Item::IronIngot, 1));
+        add_shapeless(&mut recipes, vec![Item::GoldOre], ItemStack::new(Item::GoldIngot, 1));
 
         // 7. Stone Tools
-        add_shaped(&mut recipes, vec!["SSS", " t ", " t "], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack { item: Item::StonePickaxe, count: 1 });
-        add_shaped(&mut recipes, vec!["SS ", "St ", " t "], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack { item: Item::StoneAxe, count: 1 });
-        add_shaped(&mut recipes, vec!["S", "t", "t"], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack { item: Item::StoneShovel, count: 1 });
-        add_shaped(&mut recipes, vec!["S", "S", "t"], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack { item: Item::StoneSword, count: 1 });
+        add_shaped(&mut recipes, vec!["SSS", " t ", " t "], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack::new(Item::StonePickaxe, 1));
+        add_shaped(&mut recipes, vec!["SS ", "St ", " t "], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack::new(Item::StoneAxe, 1));
+        add_shaped(&mut recipes, vec!["S", "t", "t"], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack::new(Item::StoneShovel, 1));
+        add_shaped(&mut recipes, vec!["S", "S", "t"], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack::new(Item::StoneSword, 1));
 
         // 8. Iron Tools
-        add_shaped(&mut recipes, vec!["III", " t ", " t "], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack { item: Item::IronPickaxe, count: 1 });
-        add_shaped(&mut recipes, vec!["II ", "It ", " t "], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack { item: Item::IronAxe, count: 1 });
-        add_shaped(&mut recipes, vec!["I", "t", "t"], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack { item: Item::IronShovel, count: 1 });
-        add_shaped(&mut recipes, vec!["I", "I", "t"], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack { item: Item::IronSword, count: 1 });
+        add_shaped(&mut recipes, vec!["III", " t ", " t "], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack::new(Item::IronPickaxe, 1));
+        add_shaped(&mut recipes, vec!["II ", "It ", " t "], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack::new(Item::IronAxe, 1));
+        add_shaped(&mut recipes, vec!["I", "t", "t"], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack::new(Item::IronShovel, 1));
+        add_shaped(&mut recipes, vec!["I", "I", "t"], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack::new(Item::IronSword, 1));
 
         // 9. Diamond Tools
-        add_shaped(&mut recipes, vec!["DDD", " t ", " t "], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack { item: Item::DiamondPickaxe, count: 1 });
-        add_shaped(&mut recipes, vec!["DD ", "Dt ", " t "], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack { item: Item::DiamondAxe, count: 1 });
-        add_shaped(&mut recipes, vec!["D", "t", "t"], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack { item: Item::DiamondShovel, count: 1 });
-        add_shaped(&mut recipes, vec!["D", "D", "t"], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack { item: Item::DiamondSword, count: 1 });
+        add_shaped(&mut recipes, vec!["DDD", " t ", " t "], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack::new(Item::DiamondPickaxe, 1));
+        add_shaped(&mut recipes, vec!["DD ", "Dt ", " t "], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack::new(Item::DiamondAxe, 1));
+        add_shaped(&mut recipes, vec!["D", "t", "t"], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack::new(Item::DiamondShovel, 1));
+        add_shaped(&mut recipes, vec!["D", "D", "t"], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack::new(Item::DiamondSword, 1));
 
         // 10. Block Conversions
-        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Stone)], ItemStack { item: Item::StoneBrick, count: 4 });
-        add_shaped(&mut recipes, vec!["CC", "CC"], &[("C", Item::Clay)], ItemStack { item: Item::Brick, count: 4 });
-        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Sand)], ItemStack { item: Item::Sandstone, count: 4 });
-        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Snow)], ItemStack { item: Item::Snow, count: 1 });
+        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Stone)], ItemStack::new(Item::StoneBrick, 4));
+        add_shaped(&mut recipes, vec!["CC", "CC"], &[("C", Item::Clay)], ItemStack::new(Item::Brick, 4));
+        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Sand)], ItemStack::new(Item::Sandstone, 4));
+        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Snow)], ItemStack::new(Item::Snow, 1));
         // TNT (Redstone + Sand)
-        add_shaped(&mut recipes, vec!["RSR", "SRS", "RSR"], &[("R", Item::Redstone), ("S", Item::Sand)], ItemStack { item: Item::TNT, count: 1 });
+        add_shaped(&mut recipes, vec!["RSR", "SRS", "RSR"], &[("R", Item::Redstone), ("S", Item::Sand)], ItemStack::new(Item::TNT, 1));
 
         Self { recipes }
     }
@@ -181,7 +181,7 @@ mod tests {
     fn test_crafting_planks() {
         let manager = RecipeManager::new();
         let mut grid = vec![None; 4];
-        grid[0] = Some(ItemStack { item: Item::OakLog, count: 1 });
+        grid[0] = Some(ItemStack::new(Item::OakLog, 1));
         let res = manager.match_recipe(&grid, 2);
         assert!(res.is_some());
         assert_eq!(res.unwrap().item, Item::OakPlanks);
@@ -192,8 +192,8 @@ mod tests {
     fn test_crafting_sticks() {
         let manager = RecipeManager::new();
         let mut grid = vec![None; 4];
-        grid[0] = Some(ItemStack { item: Item::OakPlanks, count: 1 });
-        grid[2] = Some(ItemStack { item: Item::OakPlanks, count: 1 });
+        grid[0] = Some(ItemStack::new(Item::OakPlanks, 1));
+        grid[2] = Some(ItemStack::new(Item::OakPlanks, 1));
         let res = manager.match_recipe(&grid, 2);
         assert!(res.is_some());
         assert_eq!(res.unwrap().item, Item::Stick);
