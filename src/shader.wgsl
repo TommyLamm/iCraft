@@ -28,6 +28,7 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
     @location(1) light_level: f32,
+    @location(2) world_pos: vec3<f32>,
 };
 
 @vertex
@@ -36,6 +37,7 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
     out.tex_coords = model.tex_coords;
     out.light_level = model.light_level;
+    out.world_pos = model.position;
     return out;
 }
 
@@ -47,7 +49,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let ambient = 0.08;
     let final_light = max(in.light_level, ambient);
-    return color * final_light;
+    let fragment_color = color * final_light;
+
+    let dist = length(in.world_pos - camera.camera_pos.xyz);
+    let fog_factor = clamp((dist - camera.fog_start) / (camera.fog_end - camera.fog_start), 0.0, 1.0);
+
+    return mix(fragment_color, camera.sky_color_horizon, fog_factor);
 }
 
 @vertex
@@ -56,6 +63,7 @@ fn vs_crosshair(model: VertexInput) -> VertexOutput {
     out.clip_position = vec4<f32>(model.position, 1.0);
     out.tex_coords = model.tex_coords;
     out.light_level = model.light_level;
+    out.world_pos = model.position;
     return out;
 }
 
