@@ -613,13 +613,12 @@ impl Chunk {
                             let start_idx = v_list.len() as u32;
                             let (tx_col, tx_row) = block.get_face_tex_index(face_idx);
 
-                            let max_light = neighbor_sky.max(neighbor_block);
-                            let multiplier = match face_idx {
-                                4 => 1.0, // Top
-                                5 => 0.5, // Bottom
-                                _ => 0.8, // Sides
+                            let multiplier_code = match face_idx {
+                                4 => 0.0, // Top
+                                5 => 2.0, // Bottom
+                                _ => 1.0, // Sides
                             };
-                            let light_val = (max_light as f32 / 15.0) * multiplier;
+                            let light_val = (neighbor_sky as f32) + (neighbor_block as f32) * 16.0 + multiplier_code * 256.0;
 
                             for (offset, uv) in corner_data.iter() {
                                 // 256x256 atlas -> 16 columns of 16x16 pixel blocks

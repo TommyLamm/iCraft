@@ -1189,17 +1189,17 @@ impl State {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        let max_light = self.chunk_manager.get_sky_light(wx as i32, wy as i32, wz as i32)
-            .max(self.chunk_manager.get_block_light(wx as i32, wy as i32, wz as i32));
+        let sky_light = self.chunk_manager.get_sky_light(wx as i32, wy as i32, wz as i32);
+        let block_light = self.chunk_manager.get_block_light(wx as i32, wy as i32, wz as i32);
         
         for (face_idx, (_normal, corners)) in faces.iter().enumerate() {
             let start_idx = vertices.len() as u32;
-            let multiplier = match face_idx {
-                4 => 1.0,
-                5 => 0.5,
-                _ => 0.8,
+            let multiplier_code = match face_idx {
+                4 => 0.0, // Top
+                5 => 2.0, // Bottom
+                _ => 1.0, // Sides
             };
-            let light_val = (max_light as f32 / 15.0) * multiplier;
+            let light_val = (sky_light as f32) + (block_light as f32) * 16.0 + multiplier_code * 256.0;
 
             for &(corner, uv) in corners {
                 // UV points to Row 15, Col "stage"
