@@ -171,6 +171,8 @@ pub struct State {
     crack_index_buffer: wgpu::Buffer,
     pub player_state: PlayerState,
     pub void_damage_timer: f32,
+    pub world_time: crate::camera::WorldTime,
+    pub show_debug: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,8 +271,10 @@ impl State {
             f32::to_radians(-20.0),
             settings.fov,
         );
+        let world_time = crate::camera::WorldTime::new();
+        let show_debug = false;
         let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera, config.width as f32 / config.height as f32, settings.render_distance as u32);
+        camera_uniform.update_view_proj(&camera, config.width as f32 / config.height as f32, settings.render_distance as u32, &world_time);
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -802,6 +806,8 @@ impl State {
             crack_index_buffer,
             player_state: PlayerState::new(),
             void_damage_timer: 0.0,
+            world_time,
+            show_debug,
         }
     }
 
@@ -974,7 +980,7 @@ impl State {
                     self.camera.fov = (self.camera.fov + 5.0).min(120.0);
                 }
                 // Update camera projection buffer immediately for visual feedback in paused state
-                self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32);
+                self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32, &self.world_time);
                 self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
                 self.save_settings();
             }
@@ -1073,7 +1079,7 @@ impl State {
 
         // Sync camera position to player position at eye height
         self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
-        self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32);
+        self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32, &self.world_time);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
 
         // Continuous mining logic
