@@ -3,6 +3,7 @@ use winit::window::Window;
 use crate::camera::{Camera, CameraUniform};
 use crate::world::Chunk;
 use crate::physics::PlayerPhysics;
+use crate::interaction::raycast;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
@@ -296,6 +297,46 @@ impl State {
         self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
         self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+    }
+
+    pub fn handle_click(&mut self, is_left_click: bool) {
+        let dir = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        ).normalize_or_zero();
+
+        if let Some(hit) = raycast(self.camera.position, dir, 5.0, &self.chunk) {
+            if is_left_click {
+                // Break block: set to Air
+                let bx = hit.block_pos.x as usize;
+                let by = hit.block_pos.y as usize;
+                let bz = hit.block_pos.z as usize;
+                self.chunk.blocks[bx][by][bz] = crate::world::BlockType::Air;
+            } else {
+                // Place block: set adjacent in normal direction to Stone
+                let target = hit.block_pos + hit.normal;
+                let bx = target.x as usize;
+                let by = target.y as usize;
+                let bz = target.z as usize;
+                if bx < crate::world::CHUNK_WIDTH && by < crate::world::CHUNK_HEIGHT && bz < crate::world::CHUNK_DEPTH {
+                    self.chunk.blocks[bx][by][bz] = crate::world::BlockType::Stone;
+                }
+            }
+            // Regenerate mesh and recreate GPU buffers to avoid sizing/panic issues
+            let (vertices, indices) = self.chunk.generate_mesh();
+            self.num_indices = indices.len() as u32;
+            self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex Buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            self.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        }
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {

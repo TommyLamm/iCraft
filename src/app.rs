@@ -27,9 +27,34 @@ impl ApplicationHandler for App {
             let window = event_loop
                 .create_window(Window::default_attributes().with_title("Minecraft wgpu Clone"))
                 .unwrap();
+            
+            // Grab and hide the cursor for first-person controls
+            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
+            window.set_cursor_visible(false);
+
             let state = pollster::block_on(State::new(window));
             self.state = Some(state);
             self.last_render_time = Instant::now();
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if let Some(state) = &mut self.state {
+                let sensitivity = 0.002;
+                state.camera.yaw += (delta.0 * sensitivity) as f32;
+                state.camera.pitch -= (delta.1 * sensitivity) as f32;
+
+                // Clamp pitch to prevent flipping upside down
+                let max_pitch = f32::to_radians(89.0);
+                state.camera.pitch = state.camera.pitch.clamp(-max_pitch, max_pitch);
+            }
         }
     }
 
@@ -71,6 +96,25 @@ impl ApplicationHandler for App {
                             }
                         }
                         _ => {}
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button,
+                ..
+            } => {
+                if state == ElementState::Pressed {
+                    if let Some(state) = &mut self.state {
+                        match button {
+                            MouseButton::Left => {
+                                state.handle_click(true);
+                            }
+                            MouseButton::Right => {
+                                state.handle_click(false);
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
