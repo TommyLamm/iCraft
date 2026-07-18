@@ -11,6 +11,7 @@ mod inventory;
 mod crafting;
 mod player;
 mod entity;
+mod mob;
 
 
 use app::App;
