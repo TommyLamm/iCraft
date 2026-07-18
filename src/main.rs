@@ -12,6 +12,7 @@ mod crafting;
 mod player;
 mod entity;
 mod mob;
+mod mob_renderer;
 
 
 use app::App;
