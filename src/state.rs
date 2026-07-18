@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use winit::window::Window;
 use crate::camera::{Camera, CameraUniform};
+use crate::world::Chunk;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
@@ -44,9 +45,31 @@ pub struct State {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
+    depth_view: wgpu::TextureView,
 }
 
 impl State {
+    fn create_depth_texture(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        depth_texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
     pub async fn new(window: Window) -> Self {
         let size = window.inner_size();
         let window = Arc::new(window);
@@ -98,9 +121,12 @@ impl State {
         };
         surface.configure(&device, &config);
 
+        // Setup Depth Buffer
+        let depth_view = Self::create_depth_texture(&device, &config);
+
         // Setup Camera
         let camera = Camera::new(
-            Vec3::new(0.0, 5.0, -10.0),
+            Vec3::new(8.0, 80.0, -10.0), // Adjust camera position to look at the generated chunk
             f32::to_radians(90.0),
             f32::to_radians(-20.0),
         );
@@ -173,9 +199,32 @@ impl State {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+        });
+
+        // Initialize Chunk and mesh
+        let chunk = Chunk::new();
+        let (vertices, indices) = chunk.generate_mesh();
+        let num_indices = indices.len() as u32;
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
         });
 
         Self {
@@ -190,6 +239,10 @@ impl State {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
+            vertex_buffer,
+            index_buffer,
+            num_indices,
+            depth_view,
         }
     }
 
@@ -199,6 +252,8 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            // Recreate depth texture on resize
+            self.depth_view = Self::create_depth_texture(&self.device, &self.config);
         }
     }
 
@@ -225,13 +280,23 @@ impl State {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
