@@ -410,8 +410,6 @@ impl Chunk {
                 let base_height = (64.0 + noise_val * 12.0) as usize;
                 
                 let is_beach = base_height <= 63;
-                let height = if base_height < 62 { 62 } else { base_height }; // Sea level is at 62
-
                 for y in 0..CHUNK_HEIGHT {
                     // Bedrock Y=0-4
                     if y <= 4 {
