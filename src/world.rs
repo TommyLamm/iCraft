@@ -1,4 +1,6 @@
 use crate::state::Vertex;
+use noise::{NoiseFn, Perlin};
+
 
 pub const CHUNK_WIDTH: usize = 16;
 pub const CHUNK_HEIGHT: usize = 256;
@@ -20,16 +22,27 @@ pub struct Chunk {
 impl Chunk {
     pub fn new() -> Self {
         let mut blocks = [[[BlockType::Air; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH];
-        // 簡單填充地面
+        let perlin = Perlin::new(12345); // Seed: 12345
+
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in 0..64 {
-                    blocks[x][y][z] = BlockType::Stone;
+                // Calculate surface height using Perlin noise
+                // We map (x, z) to smooth noise space with a frequency of 0.08
+                let noise_val = perlin.get([x as f64 * 0.08, z as f64 * 0.08]);
+                // Map noise value (-1.0 to 1.0) to height (e.g. 55 to 75)
+                let height = (64.0 + noise_val * 10.0) as usize;
+
+                for y in 0..CHUNK_HEIGHT {
+                    if y < height - 4 {
+                        blocks[x][y][z] = BlockType::Stone;
+                    } else if y < height {
+                        blocks[x][y][z] = BlockType::Dirt;
+                    } else if y == height {
+                        blocks[x][y][z] = BlockType::Grass;
+                    } else {
+                        blocks[x][y][z] = BlockType::Air;
+                    }
                 }
-                for y in 64..68 {
-                    blocks[x][y][z] = BlockType::Dirt;
-                }
-                blocks[x][68][z] = BlockType::Grass;
             }
         }
         Self { blocks }
