@@ -526,6 +526,55 @@ fn draw_hunger(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
     }
 }
 
+fn draw_bubble_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    let ox = tx * 16;
+    let oy = ty * 16;
+    
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+
+    let border = Rgba([0, 50, 150, 255]);
+    let body = Rgba([100, 200, 255, 255]);
+    let highlight = Rgba([255, 255, 255, 255]);
+
+    let grid = [
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+        [0,0,0,0,0,1,3,2,2,2,1,0,0,0,0,0],
+        [0,0,0,0,1,3,3,2,2,2,2,1,0,0,0,0],
+        [0,0,0,0,1,2,2,2,2,2,2,1,0,0,0,0],
+        [0,0,0,0,1,2,2,2,2,2,2,1,0,0,0,0],
+        [0,0,0,0,0,1,2,2,2,2,1,0,0,0,0,0],
+        [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    ];
+
+    for y in 0..16 {
+        for x in 0..16 {
+            let val = grid[y][x];
+            let px = ox + x as u32;
+            let py = oy + y as u32;
+            if val == 1 {
+                img.put_pixel(px, py, border);
+            } else if val == 2 {
+                img.put_pixel(px, py, body);
+            } else if val == 3 {
+                img.put_pixel(px, py, highlight);
+            }
+        }
+    }
+}
+
 fn draw_apple_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let ox = tx * 16;
     let oy = ty * 16;
@@ -956,6 +1005,7 @@ impl TextureAtlas {
                 }
             }
         }
+        draw_bubble_icon(&mut img, 15, 3);
 
         // Row 4: Swords
         draw_sword_icon(&mut img, 0, 4, [160, 160, 160]); // Stone Sword (gray)

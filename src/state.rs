@@ -1242,7 +1242,8 @@ impl State {
         }
 
         // Update player state timers & starvation
-        if let Some((dmg, src)) = self.player_state.update(dt) {
+        let is_underwater = block_at_eyes == BlockType::Water;
+        if let Some((dmg, src)) = self.player_state.update(dt, is_underwater) {
             self.take_damage(dmg, src);
         }
 
@@ -2130,6 +2131,7 @@ impl State {
                 Some(DamageSource::Hunger) => "STARVED TO DEATH",
                 Some(DamageSource::Mob) => "WAS SLAIN BY ZOMBIE/SKELETON",
                 Some(DamageSource::Explosion) => "WAS BLOWN UP BY CREEPER",
+                Some(DamageSource::Drowning) => "DROWNED",
                 None => "DIED",
             };
             draw_centered_text(msg, 0.15, 0.015, 0.03, 0.006, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
@@ -2625,6 +2627,36 @@ impl State {
                         ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
                         ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
                         ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy1, 0.0], tex_coords: [u1, v0], color: c });
+                    }
+
+                    // Draw Oxygen HUD
+                    if self.player_state.oxygen < 300.0 {
+                        let oxygen = self.player_state.oxygen;
+                        let bubble_count = (oxygen / 30.0).ceil() as i32;
+                        let y_bubbles = y_hud + hud_h + 0.005;
+                        
+                        for i in 0..bubble_count {
+                            let col = 15;
+                            let row = 3;
+                            let u0 = col as f32 * 0.0625;
+                            let u1 = (col + 1) as f32 * 0.0625;
+                            let v0 = row as f32 * 0.0625;
+                            let v1 = (row + 1) as f32 * 0.0625;
+                            
+                            let slot_idx = 9 - i;
+                            let hx0 = x_hunger_start + slot_idx as f32 * (hud_w + hud_gap);
+                            let hx1 = hx0 + hud_w;
+                            let hy0 = y_bubbles;
+                            let hy1 = hy0 + hud_h;
+                            
+                            let c = [1.0, 1.0, 1.0, 1.0];
+                            ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
+                            ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy0, 0.0], tex_coords: [u0, v1], color: c });
+                            ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
+                            ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
+                            ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
+                            ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy1, 0.0], tex_coords: [u1, v0], color: c });
+                        }
                     }
                 }
 

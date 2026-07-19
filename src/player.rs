@@ -5,6 +5,7 @@ pub enum DamageSource {
     Hunger,
     Mob,
     Explosion,
+    Drowning,
 }
 
 pub struct PlayerState {
@@ -19,6 +20,8 @@ pub struct PlayerState {
     pub damaged_flash_time: f32, // in seconds (for screen red flash)
     pub regen_timer: f32,        // in seconds
     pub starve_timer: f32,       // in seconds
+    pub oxygen: f32,             // 0.0 to 300.0
+    pub drowning_timer: f32,     // in seconds
 }
 
 impl PlayerState {
@@ -35,6 +38,8 @@ impl PlayerState {
             damaged_flash_time: 0.0,
             regen_timer: 0.0,
             starve_timer: 0.0,
+            oxygen: 300.0,
+            drowning_timer: 0.0,
         }
     }
 
@@ -69,7 +74,7 @@ impl PlayerState {
         }
     }
 
-    pub fn update(&mut self, dt: f32) -> Option<(f32, DamageSource)> {
+    pub fn update(&mut self, dt: f32, is_underwater: bool) -> Option<(f32, DamageSource)> {
         if self.is_dead {
             return None;
         }
@@ -110,7 +115,26 @@ impl PlayerState {
             self.starve_timer = 0.0;
         }
 
-        starve_damage
+        // Oxygen & Drowning logic
+        let mut drown_damage = None;
+        if is_underwater {
+            let prev_oxygen = self.oxygen;
+            self.oxygen = (self.oxygen - dt * 20.0).max(0.0);
+            if self.oxygen == 0.0 {
+                if prev_oxygen == 0.0 {
+                    self.drowning_timer += dt;
+                }
+                if self.drowning_timer >= 1.0 {
+                    self.drowning_timer = 0.0;
+                    drown_damage = Some((2.0, DamageSource::Drowning));
+                }
+            }
+        } else {
+            self.oxygen = (self.oxygen + dt * 100.0).min(300.0);
+            self.drowning_timer = 0.0;
+        }
+
+        drown_damage.or(starve_damage)
     }
 }
 
@@ -174,7 +198,7 @@ mod tests {
         state.saturation = 5.0;
 
         // At 20 hunger and >0 saturation, fast regen is 0.5 seconds
-        let starve = state.update(0.5);
+        let starve = state.update(0.5, false);
         assert!(starve.is_none());
         assert_eq!(state.health, 11.0);
         // Regen consumes 6.0 exhaustion
@@ -190,11 +214,26 @@ mod tests {
         state.health = 10.0;
 
         // Starve timer ticks up
-        let starve = state.update(3.9);
+        let starve = state.update(3.9, false);
         assert!(starve.is_none());
 
         // At 4.0 seconds, hunger starvation damage triggers
-        let starve = state.update(0.1);
+        let starve = state.update(0.1, false);
         assert_eq!(starve, Some((1.0, DamageSource::Hunger)));
+    }
+
+    #[test]
+    fn test_player_drowning() {
+        let mut state = PlayerState::new();
+        assert_eq!(state.oxygen, 300.0);
+        // Deplete oxygen underwater: 300.0 / 20.0 = 15.0 seconds
+        for _ in 0..15 {
+            let dmg = state.update(1.0, true);
+            assert!(dmg.is_none());
+        }
+        assert_eq!(state.oxygen, 0.0);
+        // Next second underwater should trigger drowning damage
+        let damage = state.update(1.0, true);
+        assert_eq!(damage, Some((2.0, DamageSource::Drowning)));
     }
 }
