@@ -186,6 +186,8 @@ pub fn update_mobs(
     game_mode: GameMode,
     sky_light_level: u8,
     dt: f32,
+    audio_manager: &mut crate::audio::AudioManager,
+    listener_right: Vec3,
 ) {
     let player_pos = player_physics.position;
 
@@ -329,6 +331,14 @@ pub fn update_mobs(
                         
                         arrows_to_spawn.push((spawn_pos, arrow_vel));
                         entity.action_cooldown = 2.0; // Shooting cooldown
+
+                        let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
+                        audio_manager.play_sound_3d(
+                            crate::audio::SoundId::ArrowShoot,
+                            spawn_pos,
+                            listener_pos,
+                            listener_right,
+                        );
                     }
                 }
                 EntityType::Creeper => {
@@ -358,6 +368,14 @@ pub fn update_mobs(
                             println!("[Debug] Creeper: ssssssssss...");
                             entity.is_ignited = true;
                             entity.action_cooldown = 1.5; // Fuse duration
+
+                            let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
+                            audio_manager.play_sound_3d(
+                                crate::audio::SoundId::CreeperIgnition,
+                                entity.position,
+                                listener_pos,
+                                listener_right,
+                            );
                         }
                     } else if dist > 3.5 {
                         if entity.is_ignited {
@@ -409,6 +427,14 @@ pub fn update_mobs(
             player_physics,
             player_state,
             game_mode,
+        );
+
+        let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
+        audio_manager.play_sound_3d(
+            crate::audio::SoundId::Explosion,
+            exp_pos,
+            listener_pos,
+            listener_right,
         );
     }
 

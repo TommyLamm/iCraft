@@ -1199,6 +1199,8 @@ impl State {
             self.game_mode,
             self.world_time.sky_light_level(),
             dt,
+            &mut self.audio_manager,
+            right,
         );
 
         // Sync camera position to player position at eye height
