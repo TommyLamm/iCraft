@@ -82,6 +82,11 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
+                if let Some(state) = &mut self.state {
+                    state.is_saving = true;
+                    let _ = state.render();
+                    state.save_synchronously();
+                }
                 event_loop.exit();
             }
             WindowEvent::Focused(focused) => {

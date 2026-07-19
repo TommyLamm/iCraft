@@ -249,7 +249,7 @@ fn place_spruce_tree(
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum BlockType {
     Air = 0,
@@ -317,6 +317,14 @@ pub struct BlockProperties {
 }
 
 impl BlockType {
+    pub fn from_u8(val: u8) -> Self {
+        if val <= 44 {
+            unsafe { std::mem::transmute(val) }
+        } else {
+            BlockType::Air
+        }
+    }
+
     pub fn sound_material(self) -> Option<crate::audio::SoundMaterial> {
         match self {
             BlockType::Air | BlockType::Water | BlockType::Lava => None,

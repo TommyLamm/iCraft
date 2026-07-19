@@ -13,6 +13,7 @@ mod mob_renderer;
 mod passive_mob;
 mod physics;
 mod player;
+pub mod save;
 mod state;
 mod texture;
 mod world;

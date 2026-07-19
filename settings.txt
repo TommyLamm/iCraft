@@ -1,2 +1,4 @@
 fov:90
 sensitivity:0.00059999997
+render_distance:12
+volume:1

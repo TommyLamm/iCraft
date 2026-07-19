@@ -5,7 +5,7 @@ use crate::interaction::raycast;
 use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
 use crate::physics::{PlayerPhysics, AABB};
 use crate::player::{DamageSource, PlayerState};
-use crate::world::{BlockType, Chunk};
+use crate::world::{BlockType, Chunk, CHUNK_DEPTH, CHUNK_WIDTH};
 use glam::Vec3;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -188,6 +188,10 @@ pub struct State {
     pub lava_tick_timer: f32,
     pub lava_damage_timer: f32,
     pub cactus_damage_timer: f32,
+    pub save_manager: std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>,
+    pub save_tx: std::sync::mpsc::Sender<crate::save::SaveCommand>,
+    pub autosave_timer: f32,
+    pub is_saving: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,8 +279,31 @@ impl State {
         // Setup Depth Buffer
         let depth_view = Self::create_depth_texture(&device, &config);
 
+        // Initialize SaveManager
+        let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::save::SaveManager::new("saves/world_001"),
+        ));
+
+        // Spawn background worker thread
+        let (save_tx, save_rx) = std::sync::mpsc::channel::<crate::save::SaveCommand>();
+        let save_manager_clone = std::sync::Arc::clone(&save_manager);
+        std::thread::spawn(move || {
+            while let Ok(cmd) = save_rx.recv() {
+                match cmd {
+                    crate::save::SaveCommand::SaveChunk(data) => {
+                        let mut mgr = save_manager_clone.lock().unwrap();
+                        let _ = mgr.save_chunk(data.chunk_x, data.chunk_z, data);
+                    }
+                    crate::save::SaveCommand::SaveLevelAndPlayer(level, player) => {
+                        let mgr = save_manager_clone.lock().unwrap();
+                        let _ = mgr.save_player_and_level(&level, &player);
+                    }
+                }
+            }
+        });
+
         // Initialize physics and keyboard input
-        let player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
+        let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
         let keys = KeyState::default();
 
         // Load settings
@@ -285,14 +312,47 @@ impl State {
         let mut audio_manager = crate::audio::AudioManager::new();
         audio_manager.set_volume(settings.volume);
 
+        // Load save data if exists
+        let mut game_mode = GameMode::Creative;
+        let mut inventory = Inventory::new_creative();
+        let mut player_state = PlayerState::new();
+        let mut camera_yaw = f32::to_radians(90.0);
+        let mut camera_pitch = f32::to_radians(-20.0);
+        let mut world_time = crate::camera::WorldTime::new();
+        let mut _seed = 12345;
+
+        let has_save = {
+            let mgr = save_manager.lock().unwrap();
+            mgr.load_player_and_level().is_ok()
+        };
+
+        if has_save {
+            let (level, player) = {
+                let mgr = save_manager.lock().unwrap();
+                mgr.load_player_and_level().unwrap()
+            };
+            _seed = level.seed;
+            world_time.ticks = level.time;
+            player_physics.position = Vec3::from_slice(&player.position);
+            player_physics.velocity = Vec3::from_slice(&player.velocity);
+            camera_yaw = player.yaw;
+            camera_pitch = player.pitch;
+            player_state.health = player.health;
+            player_state.hunger = player.hunger;
+            player_state.saturation = player.saturation;
+            player_state.exhaustion = player.exhaustion;
+            player_state.oxygen = player.oxygen;
+            game_mode = player.game_mode;
+            inventory = player.inventory.to_inventory();
+        }
+
         // Setup Camera
         let camera = Camera::new(
             player_physics.position + Vec3::new(0.0, 1.6, 0.0), // Spawn at player eye height
-            f32::to_radians(90.0),
-            f32::to_radians(-20.0),
+            camera_yaw,
+            camera_pitch,
             settings.fov,
         );
-        let world_time = crate::camera::WorldTime::new();
         let show_debug = false;
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(
@@ -583,9 +643,18 @@ impl State {
         let mut chunk_meshes = std::collections::HashMap::new();
 
         // Load spawn chunks synchronously
-        for cx in -render_distance..=render_distance {
-            for cz in -render_distance..=render_distance {
-                let chunk = Chunk::new(cx, cz);
+        let player_chunk_x = (player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32;
+        let player_chunk_z = (player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32;
+        for cx in player_chunk_x - render_distance..=player_chunk_x + render_distance {
+            for cz in player_chunk_z - render_distance..=player_chunk_z + render_distance {
+                let mut chunk = Chunk::new(cx, cz);
+                let saved_chunk = {
+                    let mut manager = save_manager.lock().unwrap();
+                    manager.load_chunk(cx, cz)
+                };
+                if let Some(data) = saved_chunk {
+                    data.restore_to_chunk(&mut chunk);
+                }
                 chunk_manager.chunks.insert((cx, cz), chunk);
             }
         }
@@ -599,71 +668,68 @@ impl State {
 
         // Build meshes for spawn chunks synchronously
         let chunks_ref = &chunk_manager.chunks;
-        for cx in -render_distance..=render_distance {
-            for cz in -render_distance..=render_distance {
-                let chunk = chunks_ref.get(&(cx, cz)).unwrap();
-                let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
-                    if wy < 0 {
-                        return (BlockType::Air, 0, 0, 0, false);
-                    }
-                    if wy >= crate::world::CHUNK_HEIGHT as i32 {
-                        return (BlockType::Air, 15, 0, 0, false);
-                    }
-                    let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
-                    let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
-                    let bx_neighbor = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32) as usize;
-                    let bz_neighbor = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32) as usize;
-                    if let Some(c) = chunks_ref.get(&(cx_neighbor, cz_neighbor)) {
-                        (
-                            c.blocks[bx_neighbor][wy as usize][bz_neighbor],
-                            c.sky_light[bx_neighbor][wy as usize][bz_neighbor],
-                            c.block_light[bx_neighbor][wy as usize][bz_neighbor],
-                            c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x07,
-                            (c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x08) != 0,
-                        )
-                    } else {
-                        (BlockType::Air, 15, 0, 0, false)
-                    }
+        for (&(cx, cz), chunk) in chunks_ref {
+            let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
+                if wy < 0 {
+                    return (BlockType::Air, 0, 0, 0, false);
+                }
+                if wy >= crate::world::CHUNK_HEIGHT as i32 {
+                    return (BlockType::Air, 15, 0, 0, false);
+                }
+                let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
+                let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
+                let bx_neighbor = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32) as usize;
+                let bz_neighbor = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32) as usize;
+                if let Some(c) = chunks_ref.get(&(cx_neighbor, cz_neighbor)) {
+                    (
+                        c.blocks[bx_neighbor][wy as usize][bz_neighbor],
+                        c.sky_light[bx_neighbor][wy as usize][bz_neighbor],
+                        c.block_light[bx_neighbor][wy as usize][bz_neighbor],
+                        c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x07,
+                        (c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x08) != 0,
+                    )
+                } else {
+                    (BlockType::Air, 15, 0, 0, false)
+                }
+            });
+
+            let opaque_vertex_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Opaque Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&o_verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let opaque_index_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Opaque Index Buffer"),
+                    contents: bytemuck::cast_slice(&o_inds),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            let transparent_vertex_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Translucent Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&t_verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let transparent_index_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Translucent Index Buffer"),
+                    contents: bytemuck::cast_slice(&t_inds),
+                    usage: wgpu::BufferUsages::INDEX,
                 });
 
-                let opaque_vertex_buffer =
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Opaque Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&o_verts),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                let opaque_index_buffer =
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Opaque Index Buffer"),
-                        contents: bytemuck::cast_slice(&o_inds),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-                let transparent_vertex_buffer =
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Translucent Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&t_verts),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                let transparent_index_buffer =
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Translucent Index Buffer"),
-                        contents: bytemuck::cast_slice(&t_inds),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-
-                chunk_meshes.insert(
-                    (cx, cz),
-                    ChunkMesh {
-                        opaque_vertex_buffer,
-                        opaque_index_buffer,
-                        opaque_num_indices: o_inds.len() as u32,
-                        transparent_vertex_buffer,
-                        transparent_index_buffer,
-                        transparent_num_indices: t_inds.len() as u32,
-                        dirty: false,
-                    },
-                );
-            }
+            chunk_meshes.insert(
+                (cx, cz),
+                ChunkMesh {
+                    opaque_vertex_buffer,
+                    opaque_index_buffer,
+                    opaque_num_indices: o_inds.len() as u32,
+                    transparent_vertex_buffer,
+                    transparent_index_buffer,
+                    transparent_num_indices: t_inds.len() as u32,
+                    dirty: false,
+                },
+            );
         }
 
         // Initialize UI Pipelines
@@ -868,15 +934,15 @@ impl State {
             num_ui_vertices: 0,
             num_ui_line_vertices: 0,
             num_ui_textured_vertices: 0,
-            game_mode: GameMode::Creative,
-            inventory: Inventory::new_creative(),
+            game_mode,
+            inventory,
             recipe_manager: RecipeManager::new(),
             left_mouse_pressed: false,
             mining_target: None,
             mining_progress: 0.0,
             crack_vertex_buffer,
             crack_index_buffer,
-            player_state: PlayerState::new(),
+            player_state,
             void_damage_timer: 0.0,
             world_time,
             show_debug,
@@ -892,6 +958,10 @@ impl State {
             lava_tick_timer: 0.0,
             lava_damage_timer: 0.0,
             cactus_damage_timer: 0.0,
+            save_manager,
+            save_tx,
+            autosave_timer: 0.0,
+            is_saving: false,
         }
     }
 
@@ -905,6 +975,57 @@ impl State {
         settings.save();
     }
 
+    pub fn trigger_background_save(&self) {
+        let level = crate::save::LevelData {
+            seed: 12345,
+            time: self.world_time.ticks,
+        };
+        let player = crate::save::PlayerData::from_state(
+            self.player_physics.position,
+            self.player_physics.velocity,
+            self.camera.yaw,
+            self.camera.pitch,
+            &self.player_state,
+            self.game_mode,
+            &self.inventory,
+        );
+        let _ = self
+            .save_tx
+            .send(crate::save::SaveCommand::SaveLevelAndPlayer(level, player));
+
+        for chunk in self.chunk_manager.chunks.values() {
+            let chunk_data = crate::save::ChunkSaveData::from_chunk(chunk);
+            let _ = self
+                .save_tx
+                .send(crate::save::SaveCommand::SaveChunk(chunk_data));
+        }
+    }
+
+    pub fn save_synchronously(&self) {
+        let level = crate::save::LevelData {
+            seed: 12345,
+            time: self.world_time.ticks,
+        };
+        let player = crate::save::PlayerData::from_state(
+            self.player_physics.position,
+            self.player_physics.velocity,
+            self.camera.yaw,
+            self.camera.pitch,
+            &self.player_state,
+            self.game_mode,
+            &self.inventory,
+        );
+
+        let mut mgr = self.save_manager.lock().unwrap();
+        let _ = mgr.save_player_and_level(&level, &player);
+
+        for chunk in self.chunk_manager.chunks.values() {
+            let chunk_data = crate::save::ChunkSaveData::from_chunk(chunk);
+            let _ = mgr.save_chunk(chunk.chunk_x, chunk.chunk_z, chunk_data);
+        }
+        println!("[Save] Synchronously saved world state.");
+    }
+
     pub fn update_chunks(&mut self) {
         let player_pos = self.player_physics.position;
         let px = (player_pos.x / 16.0).floor() as i32;
@@ -912,9 +1033,20 @@ impl State {
         let r = self.chunk_manager.render_distance;
 
         // 1. Unload out-of-bounds chunks
-        self.chunk_manager
-            .chunks
-            .retain(|&(cx, cz), _| (cx - px).abs() <= r && (cz - pz).abs() <= r);
+        let mut to_unload = Vec::new();
+        for &(cx, cz) in self.chunk_manager.chunks.keys() {
+            if (cx - px).abs() > r || (cz - pz).abs() > r {
+                to_unload.push((cx, cz));
+            }
+        }
+        for (cx, cz) in to_unload {
+            if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
+                let chunk_data = crate::save::ChunkSaveData::from_chunk(&chunk);
+                let _ = self
+                    .save_tx
+                    .send(crate::save::SaveCommand::SaveChunk(chunk_data));
+            }
+        }
         self.chunk_meshes
             .retain(|&(cx, cz), _| (cx - px).abs() <= r && (cz - pz).abs() <= r);
 
@@ -938,7 +1070,14 @@ impl State {
 
         // 3. Load 1 chunk per frame
         if let Some(&(cx, cz)) = load_queue.first() {
-            let chunk = Chunk::new(cx, cz);
+            let mut chunk = Chunk::new(cx, cz);
+            let chunk_data = {
+                let mut mgr = self.save_manager.lock().unwrap();
+                mgr.load_chunk(cx, cz)
+            };
+            if let Some(data) = chunk_data {
+                data.restore_to_chunk(&mut chunk);
+            }
             self.chunk_manager.chunks.insert((cx, cz), chunk);
 
             let mut dirty = std::collections::HashSet::new();
@@ -1183,12 +1322,21 @@ impl State {
             else if x >= -0.3 && x <= 0.3 && y >= -0.46 && y <= -0.36 {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::UiClick);
+                self.is_saving = true;
+                let _ = self.render();
+                self.save_synchronously();
                 event_loop.exit();
             }
         }
     }
 
     pub fn update(&mut self, dt: f32) {
+        self.autosave_timer += dt;
+        if self.autosave_timer >= 300.0 {
+            self.autosave_timer = 0.0;
+            self.trigger_background_save();
+        }
+
         self.water_tick_timer += dt;
         if self.water_tick_timer >= 0.25 {
             self.water_tick_timer = 0.0;
@@ -2762,7 +2910,79 @@ impl State {
             );
         }
 
-        if self.player_state.is_dead {
+        if self.is_saving {
+            let mut ui_vertices = Vec::new();
+            let mut ui_line_vertices = Vec::new();
+
+            let bg_color = [0.1, 0.1, 0.1, 0.75];
+            ui_vertices.push(UiVertex {
+                position: [-1.0, 1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [-1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [-1.0, 1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, 1.0, 0.0],
+                color: bg_color,
+            });
+
+            let draw_centered_text =
+                |s: &str,
+                 y: f32,
+                 char_w: f32,
+                 char_h: f32,
+                 spacing: f32,
+                 color: [f32; 4],
+                 vertices: &mut Vec<UiVertex>| {
+                    let upper = s.to_uppercase();
+                    let n = upper.len() as f32;
+                    let width = n * char_w + (n - 1.0) * spacing;
+                    let start_x = -width / 2.0;
+                    add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
+                };
+
+            draw_centered_text(
+                "SAVING WORLD...",
+                0.0,
+                0.03,
+                0.06,
+                0.012,
+                [1.0, 1.0, 1.0, 1.0],
+                &mut ui_line_vertices,
+            );
+
+            let ui_vert_len = ui_vertices.len().min(4096);
+            let ui_line_vert_len = ui_line_vertices.len().min(4096);
+
+            self.queue.write_buffer(
+                &self.ui_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
+            );
+            self.queue.write_buffer(
+                &self.ui_line_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
+            );
+
+            self.num_ui_vertices = ui_vert_len as u32;
+            self.num_ui_line_vertices = ui_line_vert_len as u32;
+            self.num_ui_textured_vertices = 0;
+        } else if self.player_state.is_dead {
             let mut ui_vertices = Vec::new();
             let mut ui_line_vertices = Vec::new();
 
@@ -3200,9 +3420,9 @@ impl State {
                 &mut ui_line_vertices,
             );
 
-            // "QUIT"
+            // "SAVE AND QUIT"
             draw_centered_text(
-                "QUIT",
+                "SAVE AND QUIT",
                 -0.42,
                 0.02,
                 0.04,

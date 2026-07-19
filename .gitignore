@@ -2,3 +2,4 @@ target/
 .superpowers/
 **/*.rs.bk
 .worktrees/
+saves/

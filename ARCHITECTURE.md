@@ -9,9 +9,7 @@
 event loop, keeps the simulation on the main thread, and renders through `wgpu`.
 Terrain, the texture atlas, and fallback sounds are generated procedurally.
 
-There is currently no server, networking layer, database, or world save/load.
-Only display/input/audio settings persist in `settings.txt`; world, player,
-inventory, and entity state live in memory for the process lifetime.
+There is currently no server, networking layer, or database. Display/input/audio settings persist in `settings.txt`, while world data (including seed, game time, player status, inventory, and chunks) is stored under the `saves/world_001/` directory. Entity state is still transient in-memory.
 
 ## How agents should navigate
 
@@ -135,6 +133,7 @@ and matching live in `crafting::RecipeManager`. World interactions are handled b
 | `src/fluid.rs` | Budgeted event-driven water/lava cells, falling/level propagation, draining, infinite water, and water/lava solidification. Returns dirty chunk coordinates. |
 | `src/physics.rs` | `AABB`, `PlayerPhysics`; movement, gravity, jumping/swimming, axis collision resolution, fall-distance result. |
 | `src/interaction.rs` | Grid DDA block `raycast` and `RaycastResult`; read-only world targeting. |
+| `src/save.rs` | `LevelData`, `PlayerData`, `ChunkSaveData`, `SaveManager`; Bincode serialization, Zlib compression, Region file management, and thread-based background saving. |
 
 ### Gameplay and entities
 
@@ -194,5 +193,5 @@ initialization degrades to silent operation when no default output device exists
 - Chunk meshes and mob meshes are derived caches, not authoritative state. The
   authoritative world is `ChunkManager::chunks`; authoritative entities are in
   `EntityManager::entities`.
-- Save/load is a planned feature (`plans/p2/16_save_load.md`), not an existing
-  persistence boundary.
+- Save/load is managed by `SaveManager` in `src/save.rs` utilizing Bincode and Zlib compression. The main thread spawns a background thread listening on `SaveCommand` for non-blocking autosaves (every 5 minutes) and chunk unloads, while a synchronous save is flushed on window close or "Save and Quit" action.
+
