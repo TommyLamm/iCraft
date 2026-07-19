@@ -8,7 +8,7 @@ struct CameraUniform {
     fog_start: f32,
     fog_end: f32,
     total_time: f32,
-    padding: f32,
+    is_underwater: f32,
 };
 
 @group(0) @binding(0)
