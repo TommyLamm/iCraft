@@ -848,6 +848,104 @@ fn draw_gunpowder_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     }
 }
 
+fn draw_wheat_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_wheat = (x + y) % 3 == 0 && x >= 3 && x <= 12 && y >= 3 && y <= 12;
+            if is_wheat {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([220, 180, 70, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_seeds_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_seed = (x as i32 - y as i32).abs() <= 1 && x >= 5 && x <= 10 && y >= 5 && y <= 10;
+            if is_seed {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([140, 110, 60, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_carrot_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_leaf = y <= 4 && x >= 6 && x <= 9;
+            let is_carrot = y >= 5 && (x as i32 - 8).abs() <= (10 - y as i32) / 2 + 1;
+            if is_leaf {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([40, 180, 40, 255]));
+            } else if is_carrot {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([255, 130, 0, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_shears_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_blade = (x == y || x == y + 1) && x >= 4 && x <= 11;
+            let is_handle = (x == 3 && y == 12) || (x == 12 && y == 3);
+            if is_blade {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([180, 180, 180, 255]));
+            } else if is_handle {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([80, 80, 80, 255]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_bucket_icon(img: &mut RgbaImage, tx: u32, ty: u32, content_color: Option<[u8; 4]>) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_rim = y == 4 && x >= 3 && x <= 12;
+            let is_body = y >= 5 && y <= 12 && (x as i32 - 8).abs() <= (y as i32 - 4) / 2 + 3;
+            let is_metal = is_rim || is_body && ((x as i32 - 8).abs() == (y as i32 - 4) / 2 + 3 || y == 12);
+            if is_metal {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([160, 160, 160, 255]));
+            } else if is_body && content_color.is_some() {
+                let c = content_color.unwrap();
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([c[0], c[1], c[2], c[3]]));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
+fn draw_meat_icon(img: &mut RgbaImage, tx: u32, ty: u32, is_cooked: bool, base_color: [u8; 3]) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let dx = (x as i32 - 8).abs();
+            let dy = (y as i32 - 8).abs();
+            let is_meat = dx + dy <= 5 && dx <= 4 && dy <= 4;
+            if is_meat {
+                let c = if is_cooked {
+                    [base_color[0].saturating_sub(40), base_color[1].saturating_sub(20), base_color[2].saturating_add(20)]
+                } else {
+                    base_color
+                };
+                let is_fat = (x + y) % 5 == 0;
+                let col = if is_fat { [240, 240, 240, 255] } else { [c[0], c[1], c[2], 255] };
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba(col));
+            } else {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
 impl TextureAtlas {
     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
         let mut img = RgbaImage::new(256, 256);
@@ -997,14 +1095,9 @@ impl TextureAtlas {
         draw_bone_icon(&mut img, 9, 3);
         draw_bow_icon(&mut img, 10, 3);
         draw_gunpowder_icon(&mut img, 11, 3);
-        // Clear remaining slots in Row 3
-        for tx in 12..16 {
-            for y in 0..16 {
-                for x in 0..16 {
-                    img.put_pixel(tx * 16 + x, 3 * 16 + y, Rgba([0, 0, 0, 0]));
-                }
-            }
-        }
+        draw_wheat_icon(&mut img, 12, 3);
+        draw_seeds_icon(&mut img, 13, 3);
+        draw_carrot_icon(&mut img, 14, 3);
         draw_bubble_icon(&mut img, 15, 3);
 
         // Row 4: Swords
@@ -1275,6 +1368,163 @@ impl TextureAtlas {
                         Rgba([140, 100, 55, 255]) // Default brown (entire face is small)
                     };
                     img.put_pixel(ox + x, oy + y, c);
+                }
+            }
+        }
+
+        // Row 10: Passive Mob Skins
+        // Col 0: Pig Face, Col 1: Pig Body (pink)
+        {
+            let ox0 = 0 * 16;
+            let ox1 = 1 * 16;
+            let oy = 10 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    // Pig Face: black eyes and protruding snout
+                    let is_eye = (y >= 6 && y <= 7) && (x == 3 || x == 12);
+                    let is_snout = (y >= 9 && y <= 11) && (x >= 5 && x <= 10);
+                    let is_nostril = is_snout && y == 10 && (x == 6 || x == 9);
+                    
+                    let c0 = if is_nostril {
+                        Rgba([180, 70, 110, 255])
+                    } else if is_snout {
+                        Rgba([255, 140, 175, 255])
+                    } else if is_eye {
+                        Rgba([10, 10, 10, 255])
+                    } else {
+                        let var = ((x * 3 + y * 7) % 15) as u8;
+                        Rgba([255, 160 + var, 190 + var / 2, 255])
+                    };
+                    img.put_pixel(ox0 + x, oy + y, c0);
+
+                    let var = ((x * 7 + y * 3) % 12) as u8;
+                    img.put_pixel(ox1 + x, oy + y, Rgba([255, 150 + var, 180 + var / 2, 255]));
+                }
+            }
+        }
+
+        // Col 2: Cow Face, Col 3: Cow Body (black and white)
+        {
+            let ox2 = 2 * 16;
+            let ox3 = 3 * 16;
+            let oy = 10 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    // Cow face spots and nose
+                    let is_nose = y >= 9 && x >= 4 && x <= 11;
+                    let is_eye = (y == 6 || y == 7) && (x == 3 || x == 12);
+                    let is_spot = (x * y) % 7 < 3;
+                    
+                    let c2 = if is_nose {
+                        Rgba([230, 160, 160, 255])
+                    } else if is_eye {
+                        Rgba([10, 10, 10, 255])
+                    } else if is_spot {
+                        Rgba([40, 40, 40, 255]) // Black spot
+                    } else {
+                        Rgba([230, 230, 230, 255]) // White base
+                    };
+                    img.put_pixel(ox2 + x, oy + y, c2);
+
+                    let c3 = if is_spot { Rgba([45, 45, 45, 255]) } else { Rgba([225, 225, 225, 255]) };
+                    img.put_pixel(ox3 + x, oy + y, c3);
+                }
+            }
+        }
+
+        // Col 4: Sheep Head/Legs (skin), Col 5: Wool layer (rough white), Col 6: Sheared sheep skin (pinkish skin)
+        {
+            let ox4 = 4 * 16;
+            let ox5 = 5 * 16;
+            let ox6 = 6 * 16;
+            let oy = 10 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    // Sheep Head: tan skin
+                    let is_eye = (y == 7) && (x == 4 || x == 11);
+                    let c4 = if is_eye { Rgba([20, 20, 20, 255]) } else { Rgba([235, 215, 190, 255]) };
+                    img.put_pixel(ox4 + x, oy + y, c4);
+
+                    // Wool: textured white/grey
+                    let var = ((x * 13 + y * 7) % 20) as u8;
+                    img.put_pixel(ox5 + x, oy + y, Rgba([235 + var, 235 + var, 235 + var, 255]));
+
+                    // Sheared skin: light pink skin with some sheep features
+                    img.put_pixel(ox6 + x, oy + y, Rgba([245, 210, 200, 255]));
+                }
+            }
+        }
+
+        // Col 7: Chicken Head/Beak, Col 8: Chicken Body (white/yellow legs/red wattles)
+        {
+            let ox7 = 7 * 16;
+            let ox8 = 8 * 16;
+            let oy = 10 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    // Chicken head: eyes, orange beak
+                    let is_eye = y == 5 && (x == 5 || x == 10);
+                    let is_beak = y >= 8 && y <= 9 && x >= 6 && x <= 9;
+                    let is_wattle = y >= 10 && y <= 11 && x >= 7 && x <= 8; // red neck wattle
+                    
+                    let c7 = if is_beak {
+                        Rgba([255, 160, 0, 255])
+                    } else if is_wattle {
+                        Rgba([230, 20, 20, 255])
+                    } else if is_eye {
+                        Rgba([15, 15, 15, 255])
+                    } else {
+                        Rgba([245, 245, 245, 255])
+                    };
+                    img.put_pixel(ox7 + x, oy + y, c7);
+
+                    // Chicken body (fluffy white)
+                    let var = ((x * 5 + y * 11) % 15) as u8;
+                    img.put_pixel(ox8 + x, oy + y, Rgba([240 + var, 240 + var, 240 + var, 255]));
+                }
+            }
+        }
+
+        // Row 11: Passive Mob items
+        draw_shears_icon(&mut img, 0, 11);
+        draw_bucket_icon(&mut img, 1, 11, None); // Empty bucket
+        draw_bucket_icon(&mut img, 2, 11, Some([240, 240, 245, 255])); // Milk bucket (white liquid)
+        
+        draw_meat_icon(&mut img, 3, 11, false, [220, 100, 100]); // Raw Porkchop
+        draw_meat_icon(&mut img, 4, 11, false, [200, 70, 70]);   // Raw Beef
+        draw_meat_icon(&mut img, 5, 11, false, [220, 120, 120]); // Raw Mutton
+        draw_meat_icon(&mut img, 6, 11, false, [240, 200, 180]); // Raw Chicken
+        
+        draw_meat_icon(&mut img, 7, 11, true, [140, 60, 40]);    // Cooked Porkchop
+        draw_meat_icon(&mut img, 8, 11, true, [120, 50, 30]);    // Cooked Beef
+        draw_meat_icon(&mut img, 9, 11, true, [140, 70, 50]);    // Cooked Mutton
+        draw_meat_icon(&mut img, 10, 11, true, [180, 110, 70]);  // Cooked Chicken
+
+        // Leather icon (Col 11, Row 11)
+        for y in 0..16 {
+            for x in 0..16 {
+                let is_leather = x >= 4 && x <= 11 && y >= 3 && y <= 12;
+                if is_leather {
+                    img.put_pixel(11 * 16 + x, 11 * 16 + y, Rgba([140, 80, 40, 255]));
+                }
+            }
+        }
+        // Feather (Col 12, Row 11)
+        for y in 0..16 {
+            for x in 0..16 {
+                let is_feather = x + y >= 10 && x + y <= 20 && (x as i32 - y as i32).abs() <= 2;
+                if is_feather {
+                    img.put_pixel(12 * 16 + x, 11 * 16 + y, Rgba([240, 240, 245, 255]));
+                }
+            }
+        }
+        // Egg (Col 13, Row 11)
+        for y in 0..16 {
+            for x in 0..16 {
+                let dx = (x as i32 - 8).abs();
+                let dy = (y as i32 - 8).abs();
+                if dx * dx + dy * dy <= 12 {
+                    img.put_pixel(13 * 16 + x, 11 * 16 + y, Rgba([240, 235, 215, 255]));
                 }
             }
         }
