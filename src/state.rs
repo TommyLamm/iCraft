@@ -1013,10 +1013,12 @@ impl State {
             
             // Resume Button bounds: X: [-0.3, 0.3], Y: [0.24, 0.34]
             if x >= -0.3 && x <= 0.3 && y >= 0.24 && y <= 0.34 {
+                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
                 self.set_paused(false);
             }
             // FOV Button bounds: X: [-0.3, 0.3], Y: [0.10, 0.20]
             else if x >= -0.3 && x <= 0.3 && y >= 0.10 && y <= 0.20 {
+                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
                     self.camera.fov = (self.camera.fov - 5.0).max(30.0);
                 } else {
@@ -1029,6 +1031,7 @@ impl State {
             }
             // Sensitivity Button bounds: X: [-0.3, 0.3], Y: [-0.04, 0.06]
             else if x >= -0.3 && x <= 0.3 && y >= -0.04 && y <= 0.06 {
+                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
                     self.sensitivity = (self.sensitivity - 0.0002).max(0.0002);
                 } else {
@@ -1038,6 +1041,7 @@ impl State {
             }
             // Render Distance Button bounds: X: [-0.3, 0.3], Y: [-0.18, -0.08]
             else if x >= -0.3 && x <= 0.3 && y >= -0.18 && y <= -0.08 {
+                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
                     self.chunk_manager.render_distance = (self.chunk_manager.render_distance - 1).max(2);
                 } else {
@@ -1045,8 +1049,21 @@ impl State {
                 }
                 self.save_settings();
             }
-            // Quit Button bounds: X: [-0.3, 0.3], Y: [-0.32, -0.22]
+            // Volume Button: X: [-0.3, 0.3], Y: [-0.32, -0.22]
             else if x >= -0.3 && x <= 0.3 && y >= -0.32 && y <= -0.22 {
+                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+                let mut new_vol = self.audio_manager.volume;
+                if x < 0.0 {
+                    new_vol = (new_vol - 0.1).max(0.0);
+                } else {
+                    new_vol = (new_vol + 0.1).min(1.0);
+                }
+                self.audio_manager.set_volume(new_vol);
+                self.save_settings();
+            }
+            // Quit Button bounds (Shifted): X: [-0.3, 0.3], Y: [-0.46, -0.36]
+            else if x >= -0.3 && x <= 0.3 && y >= -0.46 && y <= -0.36 {
+                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
                 event_loop.exit();
             }
         }
@@ -1724,6 +1741,7 @@ impl State {
         });
 
         if let Some((slot_type, _, _, _, _)) = clicked_slot {
+            self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
             let slot_item = self.get_item_at_slot(slot_type);
 
             match slot_type {
@@ -2009,7 +2027,8 @@ impl State {
             let fov_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= 0.10 && mouse_y <= 0.20;
             let sens_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.04 && mouse_y <= 0.06;
             let rd_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.18 && mouse_y <= -0.08;
-            let quit_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.32 && mouse_y <= -0.22;
+            let vol_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.32 && mouse_y <= -0.22;
+            let quit_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.46 && mouse_y <= -0.36;
 
             // 1. Dark overlay (screen covers from -1.0 to 1.0)
             let bg_color = [0.1, 0.1, 0.1, 0.7];
@@ -2049,7 +2068,8 @@ impl State {
             draw_button(fov_hover, 0.10, 0.20, &mut ui_vertices, &mut ui_line_vertices);
             draw_button(sens_hover, -0.04, 0.06, &mut ui_vertices, &mut ui_line_vertices);
             draw_button(rd_hover, -0.18, -0.08, &mut ui_vertices, &mut ui_line_vertices);
-            draw_button(quit_hover, -0.32, -0.22, &mut ui_vertices, &mut ui_line_vertices);
+            draw_button(vol_hover, -0.32, -0.22, &mut ui_vertices, &mut ui_line_vertices);
+            draw_button(quit_hover, -0.46, -0.36, &mut ui_vertices, &mut ui_line_vertices);
 
             // Centered text drawing helper
             let draw_centered_text = |s: &str, y: f32, char_w: f32, char_h: f32, spacing: f32, color: [f32; 4], vertices: &mut Vec<UiVertex>| {
@@ -2080,8 +2100,12 @@ impl State {
             let rd_text = format!("RENDER DISTANCE < {} >", self.chunk_manager.render_distance);
             draw_centered_text(&rd_text, -0.14, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
             
+            // "VOLUME < value >"
+            let vol_text = format!("VOLUME < {:.0}% >", self.audio_manager.volume * 100.0);
+            draw_centered_text(&vol_text, -0.28, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
+
             // "QUIT"
-            draw_centered_text("QUIT", -0.28, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
+            draw_centered_text("QUIT", -0.42, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
 
             // Cap the sizes to the preallocated buffers (4096 vertices)
             let ui_vert_len = ui_vertices.len().min(4096);
