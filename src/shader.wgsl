@@ -102,9 +102,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let dist = length(in.world_pos - camera.camera_pos.xyz);
-    let fog_factor = clamp((dist - camera.fog_start) / (camera.fog_end - camera.fog_start), 0.0, 1.0);
-
-    return mix(fragment_color, camera.sky_color_horizon, fog_factor);
+    let is_underwater = camera.is_underwater > 0.5;
+    
+    if (is_underwater) {
+        let fog_factor = clamp((dist - 0.2) / (4.0 - 0.2), 0.0, 1.0);
+        return mix(fragment_color, vec4<f32>(0.05, 0.15, 0.45, 1.0), fog_factor);
+    } else {
+        let fog_factor = clamp((dist - camera.fog_start) / (camera.fog_end - camera.fog_start), 0.0, 1.0);
+        return mix(fragment_color, camera.sky_color_horizon, fog_factor);
+    }
 }
 
 @vertex
@@ -237,6 +243,10 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
     let star_intensity = smoothstep(0.1, -0.1, camera.sun_dir.y);
     let star_val = get_star(rotated_dir) * star_intensity;
     sky_color = sky_color + vec4<f32>(star_val, star_val, star_val, 0.0);
+
+    if (camera.is_underwater > 0.5) {
+        return vec4<f32>(0.05, 0.15, 0.45, 1.0);
+    }
 
     return sky_color;
 }

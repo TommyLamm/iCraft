@@ -37,7 +37,7 @@ pub struct CameraUniform {
     pub fog_start: f32,
     pub fog_end: f32,
     pub total_time: f32,
-    pub padding: [f32; 1],
+    pub is_underwater: f32,
 }
 
 impl CameraUniform {
@@ -52,11 +52,11 @@ impl CameraUniform {
             fog_start: 0.0,
             fog_end: 100.0,
             total_time: 0.0,
-            padding: [0.0; 1],
+            is_underwater: 0.0,
         }
     }
 
-    pub fn update_view_proj(&mut self, camera: &Camera, aspect: f32, render_distance: u32, world_time: &WorldTime, total_time: f32) {
+    pub fn update_view_proj(&mut self, camera: &Camera, aspect: f32, render_distance: u32, world_time: &WorldTime, total_time: f32, is_underwater: bool) {
         let view_proj = camera.build_view_projection_matrix(aspect);
         self.view_proj = view_proj.to_cols_array_2d();
         self.inv_view_proj = view_proj.inverse().to_cols_array_2d();
@@ -104,7 +104,7 @@ impl CameraUniform {
         self.fog_end = fog_end;
         self.fog_start = fog_end * 0.6;
         self.total_time = total_time;
-        self.padding = [0.0; 1];
+        self.is_underwater = if is_underwater { 1.0 } else { 0.0 };
     }
 }
 
