@@ -179,6 +179,9 @@ pub struct State {
     mob_index_buffer: wgpu::Buffer,
     mob_num_indices: u32,
     total_time: f32,
+    pub audio_manager: crate::audio::AudioManager,
+    pub footstep_accumulator: f32,
+    pub was_on_ground: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +272,9 @@ impl State {
 
         // Load settings
         let settings = GameSettings::load();
+
+        let mut audio_manager = crate::audio::AudioManager::new();
+        audio_manager.set_volume(settings.volume);
 
         // Setup Camera
         let camera = Camera::new(
@@ -833,6 +839,9 @@ impl State {
             mob_index_buffer,
             mob_num_indices: 0,
             total_time: 0.0,
+            audio_manager,
+            footstep_accumulator: 0.0,
+            was_on_ground: false,
         }
     }
 
@@ -841,6 +850,7 @@ impl State {
             fov: self.camera.fov,
             sensitivity: self.sensitivity,
             render_distance: self.chunk_manager.render_distance,
+            volume: self.audio_manager.volume,
         };
         settings.save();
     }
@@ -2922,6 +2932,7 @@ pub struct GameSettings {
     pub fov: f32,
     pub sensitivity: f32,
     pub render_distance: i32,
+    pub volume: f32,
 }
 
 impl GameSettings {
@@ -2929,6 +2940,7 @@ impl GameSettings {
         let mut fov = 70.0;
         let mut sensitivity = 0.002;
         let mut render_distance = 8;
+        let mut volume = 1.0;
         if let Ok(mut file) = std::fs::File::open("settings.txt") {
             let mut contents = String::new();
             use std::io::Read;
@@ -2954,18 +2966,23 @@ impl GameSettings {
                                     render_distance = parsed;
                                 }
                             }
+                            "volume" => {
+                                if let Ok(parsed) = value.parse::<f32>() {
+                                    volume = parsed;
+                                }
+                            }
                             _ => {}
                         }
                     }
                 }
             }
         }
-        Self { fov, sensitivity, render_distance }
+        Self { fov, sensitivity, render_distance, volume }
     }
 
     pub fn save(&self) {
         if let Ok(mut file) = std::fs::File::create("settings.txt") {
-            let contents = format!("fov:{}\nsensitivity:{}\nrender_distance:{}\n", self.fov, self.sensitivity, self.render_distance);
+            let contents = format!("fov:{}\nsensitivity:{}\nrender_distance:{}\nvolume:{}\n", self.fov, self.sensitivity, self.render_distance, self.volume);
             use std::io::Write;
             let _ = file.write_all(contents.as_bytes());
         }
