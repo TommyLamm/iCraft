@@ -277,4 +277,13 @@ mod tests {
         let ray_dir_away = Vec3::new(0.0, 0.0, -1.0);
         assert!(ray_intersects_aabb(ray_origin, ray_dir_away, &aabb).is_none());
     }
+
+    #[test]
+    fn test_chicken_slow_fall() {
+        let mut chicken = Entity::new(1, EntityType::Chicken, Vec3::new(0.0, 10.0, 0.0));
+        chicken.velocity.y = -10.0;
+        let chunk_manager = ChunkManager::new(4);
+        chicken.update_physics(0.1, &chunk_manager);
+        assert!(chicken.velocity.y >= -2.01 && chicken.velocity.y <= -1.99);
+    }
 }
