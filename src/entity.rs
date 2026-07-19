@@ -1,6 +1,6 @@
-use glam::Vec3;
-use crate::physics::AABB;
 use crate::chunk_manager::ChunkManager;
+use crate::physics::AABB;
+use glam::Vec3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityType {
@@ -18,7 +18,7 @@ pub enum EntityType {
 pub struct Entity {
     pub id: u64,
     pub entity_type: EntityType,
-    
+
     // Physics & movement
     pub position: Vec3,
     pub velocity: Vec3,
@@ -26,7 +26,7 @@ pub struct Entity {
     pub yaw: f32,
     pub pitch: f32,
     pub on_ground: bool,
-    
+
     // Mob properties
     pub health: f32,
     pub max_health: f32,
@@ -96,7 +96,10 @@ impl Entity {
 
     pub fn get_aabb(&self) -> AABB {
         // Foot-based position
-        AABB::new(self.position + Vec3::new(0.0, self.size.y * 0.5, 0.0), self.size)
+        AABB::new(
+            self.position + Vec3::new(0.0, self.size.y * 0.5, 0.0),
+            self.size,
+        )
     }
 
     pub fn update_physics(&mut self, dt: f32, chunk_manager: &ChunkManager) {
@@ -108,7 +111,7 @@ impl Entity {
             // Arrow physics: gravity only, no horizontal deceleration
             self.velocity.y -= 12.0 * dt;
             self.position += self.velocity * dt;
-            
+
             // Align orientation to velocity
             let dir = self.velocity.normalize_or_zero();
             self.yaw = f32::atan2(-dir.x, -dir.z);
@@ -122,9 +125,9 @@ impl Entity {
         } else {
             32.0
         };
-        
+
         self.velocity.y -= gravity * dt;
-        
+
         let terminal_vel = if self.entity_type == EntityType::Chicken {
             -2.0
         } else {
@@ -157,8 +160,10 @@ impl Entity {
         let entity_aabb = self.get_aabb();
         let min_x = entity_aabb.min.x.floor() as i32;
         let max_x = entity_aabb.max.x.floor() as i32;
-        let min_y = (entity_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
-        let max_y = (entity_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let min_y =
+            (entity_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let max_y =
+            (entity_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
         let min_z = entity_aabb.min.z.floor() as i32;
         let max_z = entity_aabb.max.z.floor() as i32;
 
@@ -228,27 +233,41 @@ impl EntityManager {
 pub fn ray_intersects_aabb(origin: Vec3, dir: Vec3, aabb: &AABB) -> Option<f32> {
     let mut tmin = (aabb.min.x - origin.x) / dir.x;
     let mut tmax = (aabb.max.x - origin.x) / dir.x;
-    if tmin > tmax { std::mem::swap(&mut tmin, &mut tmax); }
+    if tmin > tmax {
+        std::mem::swap(&mut tmin, &mut tmax);
+    }
 
     let mut tymin = (aabb.min.y - origin.y) / dir.y;
     let mut tymax = (aabb.max.y - origin.y) / dir.y;
-    if tymin > tymax { std::mem::swap(&mut tymin, &mut tymax); }
+    if tymin > tymax {
+        std::mem::swap(&mut tymin, &mut tymax);
+    }
 
     if tmin > tymax || tymin > tmax {
         return None;
     }
-    if tymin > tmin { tmin = tymin; }
-    if tymax < tmax { tmax = tymax; }
+    if tymin > tmin {
+        tmin = tymin;
+    }
+    if tymax < tmax {
+        tmax = tymax;
+    }
 
     let mut tzmin = (aabb.min.z - origin.z) / dir.z;
     let mut tzmax = (aabb.max.z - origin.z) / dir.z;
-    if tzmin > tzmax { std::mem::swap(&mut tzmin, &mut tzmax); }
+    if tzmin > tzmax {
+        std::mem::swap(&mut tzmin, &mut tzmax);
+    }
 
     if tmin > tzmax || tzmin > tmax {
         return None;
     }
-    if tzmin > tmin { tmin = tzmin; }
-    if tzmax < tmax { tmax = tzmax; }
+    if tzmin > tmin {
+        tmin = tzmin;
+    }
+    if tzmax < tmax {
+        tmax = tzmax;
+    }
 
     if tmax >= 0.0 {
         Some(tmin.max(0.0))
@@ -265,7 +284,7 @@ mod tests {
     fn test_ray_aabb_intersection() {
         let box_pos = Vec3::new(0.0, 0.0, 0.0);
         let aabb = AABB::new(box_pos, Vec3::ONE);
-        
+
         // Ray pointing straight at the center of the box from Z=-3
         let ray_origin = Vec3::new(0.0, 0.0, -3.0);
         let ray_dir = Vec3::new(0.0, 0.0, 1.0);

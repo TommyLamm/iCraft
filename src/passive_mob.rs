@@ -1,14 +1,14 @@
-use glam::Vec3;
-use crate::entity::{Entity, EntityType, EntityManager};
 use crate::chunk_manager::ChunkManager;
-use crate::inventory::{Item, GameMode};
+use crate::entity::{Entity, EntityManager, EntityType};
+use crate::inventory::{GameMode, Item};
 use crate::physics::PlayerPhysics;
+use glam::Vec3;
 
 fn check_cliff_ahead(entity: &Entity, chunk_manager: &ChunkManager) -> bool {
     // Calculate walking direction unit vector
     let dir_x = -entity.yaw.sin();
     let dir_z = -entity.yaw.cos();
-    
+
     let check_x = (entity.position.x + dir_x * 1.0).floor() as i32;
     let check_z = (entity.position.z + dir_z * 1.0).floor() as i32;
     let feet_y = entity.position.y.floor() as i32;
@@ -39,13 +39,24 @@ pub fn update_passive_mobs(
     for i in 0..entity_len {
         let (entity_type, pos, invuln, age, breed_timer, breed_cd, _has_wool) = {
             let e = &entity_manager.entities[i];
-            (e.entity_type, e.position, e.invulnerable_time, e.age, e.breeding_timer, e.breed_cooldown, e.has_wool)
+            (
+                e.entity_type,
+                e.position,
+                e.invulnerable_time,
+                e.age,
+                e.breeding_timer,
+                e.breed_cooldown,
+                e.has_wool,
+            )
         };
 
         // Skip arrow, zombie, skeleton, creeper, heart particles
-        if entity_type == EntityType::Arrow || entity_type == EntityType::Zombie || 
-           entity_type == EntityType::Skeleton || entity_type == EntityType::Creeper ||
-           entity_type == EntityType::HeartParticle {
+        if entity_type == EntityType::Arrow
+            || entity_type == EntityType::Zombie
+            || entity_type == EntityType::Skeleton
+            || entity_type == EntityType::Creeper
+            || entity_type == EntityType::HeartParticle
+        {
             continue;
         }
 
@@ -57,7 +68,7 @@ pub fn update_passive_mobs(
         // Handle breeding timers & cooldowns
         if breed_timer > 0.0 {
             entity_manager.entities[i].breeding_timer = (breed_timer - dt).max(0.0);
-            
+
             // Spawn heart particles periodically
             if (time * 2.0) as u32 % 4 == 0 && (time * 10.0) as u32 % 5 == 0 {
                 hearts_to_spawn.push(pos + Vec3::new(0.0, 1.0, 0.0));
@@ -94,7 +105,7 @@ pub fn update_passive_mobs(
                     let sz = pos.z.floor() as i32;
                     if chunk_manager.get_block(sx, sy, sz) == crate::world::BlockType::Grass {
                         chunk_manager.set_block(sx, sy, sz, crate::world::BlockType::Dirt);
-                        
+
                         // Mark mesh dirty
                         let chx = sx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                         let chz = sz.div_euclid(crate::world::CHUNK_DEPTH as i32);
@@ -118,7 +129,7 @@ pub fn update_passive_mobs(
         // Movement speed & direction selection
         let mut speed = 1.0;
         let is_panicking = invuln > 0.0;
-        
+
         if is_panicking {
             speed = 4.0;
             // Run away from player
@@ -129,7 +140,9 @@ pub fn update_passive_mobs(
             let mut nearest_partner = None;
             let mut nearest_dist = 999.0;
             for j in 0..entity_len {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 let partner = &entity_manager.entities[j];
                 if partner.entity_type == entity_type && partner.breeding_timer > 0.0 {
                     let dist = pos.distance(partner.position);
@@ -150,10 +163,12 @@ pub fn update_passive_mobs(
                     // Trigger mating
                     entity_manager.entities[i].breeding_timer = 0.0;
                     entity_manager.entities[i].breed_cooldown = 300.0;
-                    
+
                     // Find and update partner
                     for j in 0..entity_len {
-                        if entity_manager.entities[j].entity_type == entity_type && entity_manager.entities[j].breeding_timer > 0.0 {
+                        if entity_manager.entities[j].entity_type == entity_type
+                            && entity_manager.entities[j].breeding_timer > 0.0
+                        {
                             if entity_manager.entities[j].position.distance(pos) <= 1.5 {
                                 entity_manager.entities[j].breeding_timer = 0.0;
                                 entity_manager.entities[j].breed_cooldown = 300.0;
@@ -195,7 +210,13 @@ pub fn update_passive_mobs(
             }
         } else {
             // Standard wandering AI: choose random direction occasionally
-            let is_moving = Vec3::new(entity_manager.entities[i].velocity.x, 0.0, entity_manager.entities[i].velocity.z).length() > 0.1;
+            let is_moving = Vec3::new(
+                entity_manager.entities[i].velocity.x,
+                0.0,
+                entity_manager.entities[i].velocity.z,
+            )
+            .length()
+                > 0.1;
             let seed = (pos.x.to_bits() ^ pos.z.to_bits()) as u32;
             if !is_moving && (time * 100.0) as u32 % 500 == 0 {
                 // Turn to a random angle
@@ -227,7 +248,9 @@ pub fn update_passive_mobs(
             let bx = check_pos.x.floor() as i32;
             let bz = check_pos.z.floor() as i32;
             let by = pos.y.floor() as i32;
-            if entity_manager.entities[i].on_ground && chunk_manager.get_block(bx, by, bz).properties().is_solid {
+            if entity_manager.entities[i].on_ground
+                && chunk_manager.get_block(bx, by, bz).properties().is_solid
+            {
                 entity_manager.entities[i].velocity.y = 7.0; // Jump height
             }
         } else {
@@ -253,7 +276,7 @@ pub fn update_passive_mobs(
             let rand_z = (((time_seed / 100) % 100) as f32 - 50.0) / 100.0;
             p.velocity = Vec3::new(rand_x * 0.5, 1.5, rand_z * 0.5);
             p.life_time = 1.5;
-            
+
             // Task 6 Step 2: Set heart particle rotation
             let to_player = (player_pos - h_pos).normalize_or_zero();
             p.yaw = f32::atan2(-to_player.x, -to_player.z);
@@ -296,7 +319,7 @@ pub fn spawn_passive_mobs(
         .wrapping_add(player_pos.z.to_bits())
         .wrapping_add(entity_manager.entities.len() as u32)
         .wrapping_add(time_bits.wrapping_mul(2654435761));
-        
+
     let mut next_rand = || {
         rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
         (rng_seed / 65536) % 32768
@@ -315,7 +338,11 @@ pub fn spawn_passive_mobs(
     // Find highest solid block
     let mut highest_y = None;
     for y in (0..crate::world::CHUNK_HEIGHT as i32).rev() {
-        if chunk_manager.get_block(spawn_x, y, spawn_z).properties().is_solid {
+        if chunk_manager
+            .get_block(spawn_x, y, spawn_z)
+            .properties()
+            .is_solid
+        {
             highest_y = Some(y);
             break;
         }
@@ -329,9 +356,9 @@ pub fn spawn_passive_mobs(
             let block_head = chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z);
 
             // Passive mobs spawn on Grass Blocks under daylight
-            if block_below == crate::world::BlockType::Grass 
-               && block_feet == crate::world::BlockType::Air 
-               && block_head == crate::world::BlockType::Air 
+            if block_below == crate::world::BlockType::Grass
+                && block_feet == crate::world::BlockType::Air
+                && block_head == crate::world::BlockType::Air
             {
                 let r = next_rand() % 4;
                 let et = match r {
@@ -340,8 +367,14 @@ pub fn spawn_passive_mobs(
                     2 => EntityType::Sheep,
                     _ => EntityType::Chicken,
                 };
-                entity_manager.spawn(et, Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5));
-                println!("[Debug] Spawned passive {:?} at ({}, {}, {})", et, spawn_x, spawn_y, spawn_z);
+                entity_manager.spawn(
+                    et,
+                    Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5),
+                );
+                println!(
+                    "[Debug] Spawned passive {:?} at ({}, {}, {})",
+                    et, spawn_x, spawn_y, spawn_z
+                );
             }
         }
     }

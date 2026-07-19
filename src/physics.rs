@@ -1,5 +1,5 @@
-use glam::Vec3;
 use crate::chunk_manager::ChunkManager;
+use glam::Vec3;
 
 pub struct AABB {
     pub min: Vec3,
@@ -45,7 +45,10 @@ impl PlayerPhysics {
     }
 
     pub fn get_aabb(&self) -> AABB {
-        AABB::new(self.position + Vec3::new(0.0, self.size.y * 0.5, 0.0), self.size)
+        AABB::new(
+            self.position + Vec3::new(0.0, self.size.y * 0.5, 0.0),
+            self.size,
+        )
     }
 
     pub fn update(&mut self, dt: f32, chunk_manager: &ChunkManager, movement_input: Vec3) -> f32 {
@@ -55,10 +58,13 @@ impl PlayerPhysics {
         let py = self.position.y.floor() as i32;
         let pz = self.position.z.floor() as i32;
         let block_at_feet = chunk_manager.get_block(px, py, pz);
-        let block_at_eyes = chunk_manager.get_block(px, (self.position.y + 1.62).floor() as i32, pz);
-        
-        let is_in_water = block_at_feet == crate::world::BlockType::Water || block_at_eyes == crate::world::BlockType::Water;
-        let is_in_lava = block_at_feet == crate::world::BlockType::Lava || block_at_eyes == crate::world::BlockType::Lava;
+        let block_at_eyes =
+            chunk_manager.get_block(px, (self.position.y + 1.62).floor() as i32, pz);
+
+        let is_in_water = block_at_feet == crate::world::BlockType::Water
+            || block_at_eyes == crate::world::BlockType::Water;
+        let is_in_lava = block_at_feet == crate::world::BlockType::Lava
+            || block_at_eyes == crate::world::BlockType::Lava;
 
         // 1. 套用玩家移動控制
         let mut speed = 8.0;
@@ -132,8 +138,10 @@ impl PlayerPhysics {
         // 檢測玩家周圍可能相交的方塊
         let min_x = player_aabb.min.x.floor() as i32;
         let max_x = player_aabb.max.x.floor() as i32;
-        let min_y = (player_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
-        let max_y = (player_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let min_y =
+            (player_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let max_y =
+            (player_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
         let min_z = player_aabb.min.z.floor() as i32;
         let max_z = player_aabb.max.z.floor() as i32;
 
@@ -148,21 +156,24 @@ impl PlayerPhysics {
                         );
 
                         if self.get_aabb().intersects(&block_aabb) {
-                            if axis == 0 { // X 軸
+                            if axis == 0 {
+                                // X 軸
                                 if self.velocity.x > 0.0 {
                                     self.position.x = block_aabb.min.x - self.size.x * 0.5;
                                 } else {
                                     self.position.x = block_aabb.max.x + self.size.x * 0.5;
                                 }
                                 self.velocity.x = 0.0;
-                            } else if axis == 2 { // Z 軸
+                            } else if axis == 2 {
+                                // Z 軸
                                 if self.velocity.z > 0.0 {
                                     self.position.z = block_aabb.min.z - self.size.z * 0.5;
                                 } else {
                                     self.position.z = block_aabb.max.z + self.size.z * 0.5;
                                 }
                                 self.velocity.z = 0.0;
-                            } else if axis == 1 { // Y 軸
+                            } else if axis == 1 {
+                                // Y 軸
                                 if self.velocity.y > 0.0 {
                                     self.position.y = block_aabb.min.y - self.size.y;
                                 } else {

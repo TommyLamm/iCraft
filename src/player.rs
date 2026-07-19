@@ -9,11 +9,11 @@ pub enum DamageSource {
 }
 
 pub struct PlayerState {
-    pub health: f32,             // 0 ~ 20 (10 hearts)
-    pub max_health: f32,         // 20
-    pub hunger: f32,             // 0 ~ 20 (10 drumsticks)
-    pub saturation: f32,         // 0 ~ 20
-    pub exhaustion: f32,         // 0 ~ 4.0
+    pub health: f32,     // 0 ~ 20 (10 hearts)
+    pub max_health: f32, // 20
+    pub hunger: f32,     // 0 ~ 20 (10 drumsticks)
+    pub saturation: f32, // 0 ~ 20
+    pub exhaustion: f32, // 0 ~ 4.0
     pub is_dead: bool,
     pub death_reason: Option<DamageSource>,
     pub invulnerable_time: f32,  // in seconds
@@ -62,7 +62,9 @@ impl PlayerState {
     }
 
     pub fn add_exhaustion(&mut self, amount: f32) {
-        if self.is_dead { return; }
+        if self.is_dead {
+            return;
+        }
         self.exhaustion += amount;
         while self.exhaustion >= 4.0 {
             self.exhaustion -= 4.0;

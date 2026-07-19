@@ -1,9 +1,9 @@
-use glam::Vec3;
-use crate::entity::{Entity, EntityType, EntityManager};
 use crate::chunk_manager::ChunkManager;
-use crate::player::PlayerState;
-use crate::physics::PlayerPhysics;
+use crate::entity::{Entity, EntityManager, EntityType};
 use crate::inventory::GameMode;
+use crate::physics::PlayerPhysics;
+use crate::player::PlayerState;
+use glam::Vec3;
 
 pub fn calculate_explosion_damage(center: Vec3, player_pos: Vec3) -> f32 {
     let dist = center.distance(player_pos);
@@ -38,9 +38,11 @@ pub fn explode(
                 let dx = x as f32 + 0.5 - center.x;
                 let dy = y as f32 + 0.5 - center.y;
                 let dz = z as f32 + 0.5 - center.z;
-                if dx*dx + dy*dy + dz*dz <= radius*radius {
+                if dx * dx + dy * dy + dz * dz <= radius * radius {
                     let block = chunk_manager.get_block(x, y, z);
-                    if block != crate::world::BlockType::Air && block != crate::world::BlockType::Bedrock {
+                    if block != crate::world::BlockType::Air
+                        && block != crate::world::BlockType::Bedrock
+                    {
                         chunk_manager.set_block(x, y, z, crate::world::BlockType::Air);
                         blocks_removed.push((x, y, z, block));
                     }
@@ -52,7 +54,14 @@ pub fn explode(
     // 2. Recalculate lighting for affected spots
     for (x, y, z, old_block) in blocks_removed {
         crate::lighting::update_sky_light_after_removed(chunk_manager, x, y, z, &mut dirty_chunks);
-        crate::lighting::update_block_light_after_removed(chunk_manager, x, y, z, old_block.properties().light_emission, &mut dirty_chunks);
+        crate::lighting::update_block_light_after_removed(
+            chunk_manager,
+            x,
+            y,
+            z,
+            old_block.properties().light_emission,
+            &mut dirty_chunks,
+        );
 
         let chx = x.div_euclid(crate::world::CHUNK_WIDTH as i32);
         let chz = z.div_euclid(crate::world::CHUNK_DEPTH as i32);
@@ -60,10 +69,18 @@ pub fn explode(
         let lz = z.rem_euclid(crate::world::CHUNK_DEPTH as i32);
 
         dirty_chunks.insert((chx, chz));
-        if lx == 0 { dirty_chunks.insert((chx - 1, chz)); }
-        if lx == 15 { dirty_chunks.insert((chx + 1, chz)); }
-        if lz == 0 { dirty_chunks.insert((chx, chz - 1)); }
-        if lz == 15 { dirty_chunks.insert((chx, chz + 1)); }
+        if lx == 0 {
+            dirty_chunks.insert((chx - 1, chz));
+        }
+        if lx == 15 {
+            dirty_chunks.insert((chx + 1, chz));
+        }
+        if lz == 0 {
+            dirty_chunks.insert((chx, chz - 1));
+        }
+        if lz == 15 {
+            dirty_chunks.insert((chx, chz + 1));
+        }
     }
 
     // Mark chunk meshes dirty
@@ -136,7 +153,7 @@ pub fn spawn_mobs(
         .wrapping_add(player_pos.z.to_bits())
         .wrapping_add(entity_manager.entities.len() as u32)
         .wrapping_add(time_bits.wrapping_mul(2654435761));
-        
+
     let mut next_rand = || {
         rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
         (rng_seed / 65536) % 32768
@@ -156,10 +173,15 @@ pub fn spawn_mobs(
         let spawn_y = solid_y + 1;
         if spawn_y > 0 && spawn_y < (crate::world::CHUNK_HEIGHT as i32 - 2) {
             if chunk_manager.get_block(spawn_x, spawn_y, spawn_z) == crate::world::BlockType::Air
-                && chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z) == crate::world::BlockType::Air
+                && chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z)
+                    == crate::world::BlockType::Air
             {
                 let block_light = chunk_manager.get_block_light(spawn_x, spawn_y, spawn_z);
-                let effective_sky = if sky_light_level > 10 { sky_light_level } else { 4 };
+                let effective_sky = if sky_light_level > 10 {
+                    sky_light_level
+                } else {
+                    4
+                };
                 let total_light = effective_sky.max(block_light);
 
                 if total_light <= 7 {
@@ -169,8 +191,14 @@ pub fn spawn_mobs(
                         1 => EntityType::Skeleton,
                         _ => EntityType::Creeper,
                     };
-                    entity_manager.spawn(et, Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5));
-                    println!("[Debug] Spawned {:?} at ({}, {}, {})", et, spawn_x, spawn_y, spawn_z);
+                    entity_manager.spawn(
+                        et,
+                        Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5),
+                    );
+                    println!(
+                        "[Debug] Spawned {:?} at ({}, {}, {})",
+                        et, spawn_x, spawn_y, spawn_z
+                    );
                 }
             }
         }
@@ -275,7 +303,10 @@ pub fn update_mobs(
                     let by = entity.position.y.floor() as i32;
                     if entity.on_ground
                         && chunk_manager.get_block(bx, by, bz).properties().is_solid
-                        && !chunk_manager.get_block(bx, by + 2, bz).properties().is_solid
+                        && !chunk_manager
+                            .get_block(bx, by + 2, bz)
+                            .properties()
+                            .is_solid
                     {
                         entity.velocity.y = 8.0;
                     }
@@ -314,7 +345,10 @@ pub fn update_mobs(
                         let by = entity.position.y.floor() as i32;
                         if entity.on_ground
                             && chunk_manager.get_block(bx, by, bz).properties().is_solid
-                            && !chunk_manager.get_block(bx, by + 2, bz).properties().is_solid
+                            && !chunk_manager
+                                .get_block(bx, by + 2, bz)
+                                .properties()
+                                .is_solid
                         {
                             entity.velocity.y = 8.0;
                         }
@@ -324,11 +358,12 @@ pub fn update_mobs(
                     if entity.action_cooldown <= 0.0 {
                         // Shoot Arrow
                         let spawn_pos = entity.position + Vec3::new(0.0, 1.4, 0.0);
-                        let mut shoot_dir = (player_pos + Vec3::new(0.0, 1.0, 0.0) - spawn_pos).normalize_or_zero();
+                        let mut shoot_dir =
+                            (player_pos + Vec3::new(0.0, 1.0, 0.0) - spawn_pos).normalize_or_zero();
                         // Add slight gravity correction
                         shoot_dir.y += 0.08;
                         let arrow_vel = shoot_dir.normalize() * 18.0;
-                        
+
                         arrows_to_spawn.push((spawn_pos, arrow_vel));
                         entity.action_cooldown = 2.0; // Shooting cooldown
 
@@ -356,7 +391,10 @@ pub fn update_mobs(
                         let by = entity.position.y.floor() as i32;
                         if entity.on_ground
                             && chunk_manager.get_block(bx, by, bz).properties().is_solid
-                            && !chunk_manager.get_block(bx, by + 2, bz).properties().is_solid
+                            && !chunk_manager
+                                .get_block(bx, by + 2, bz)
+                                .properties()
+                                .is_solid
                         {
                             entity.velocity.y = 8.0;
                         }
@@ -454,7 +492,9 @@ pub fn update_mobs(
     }
 
     // Clean up dead entities (health < 0 or health == 0)
-    entity_manager.entities.retain(|entity| entity.health >= 0.0);
+    entity_manager
+        .entities
+        .retain(|entity| entity.health >= 0.0);
 }
 
 #[cfg(test)]
@@ -464,7 +504,7 @@ mod tests {
     #[test]
     fn test_explosion_damage() {
         let center = Vec3::new(0.0, 0.0, 0.0);
-        
+
         // Exact center: maximum damage
         let d1 = calculate_explosion_damage(center, center);
         assert_eq!(d1, 25.0);

@@ -13,7 +13,12 @@ pub struct RecipeManager {
     pub recipes: Vec<Recipe>,
 }
 
-fn add_shaped(recipes: &mut Vec<Recipe>, pat: Vec<&str>, mapping: &[(&str, Item)], result: ItemStack) {
+fn add_shaped(
+    recipes: &mut Vec<Recipe>,
+    pat: Vec<&str>,
+    mapping: &[(&str, Item)],
+    result: ItemStack,
+) {
     let height = pat.len();
     let width = pat[0].len();
     let mut pattern = vec![vec![Item::Air; width]; height];
@@ -22,12 +27,22 @@ fn add_shaped(recipes: &mut Vec<Recipe>, pat: Vec<&str>, mapping: &[(&str, Item)
         for c in 0..width {
             let ch = chars[c].to_string();
             if ch != " " {
-                let item = mapping.iter().find(|(s, _)| s == &ch).map(|(_, it)| *it).unwrap_or(Item::Air);
+                let item = mapping
+                    .iter()
+                    .find(|(s, _)| s == &ch)
+                    .map(|(_, it)| *it)
+                    .unwrap_or(Item::Air);
                 pattern[r][c] = item;
             }
         }
     }
-    recipes.push(Recipe { pattern, width, height, result, shapeless: false });
+    recipes.push(Recipe {
+        pattern,
+        width,
+        height,
+        result,
+        shapeless: false,
+    });
 }
 
 fn add_shapeless(recipes: &mut Vec<Recipe>, ingredients: Vec<Item>, result: ItemStack) {
@@ -47,50 +62,226 @@ impl RecipeManager {
         let mut recipes = Vec::new();
 
         // 1. Logs -> Planks
-        add_shaped(&mut recipes, vec!["L"], &[("L", Item::OakLog)], ItemStack::new(Item::OakPlanks, 4));
+        add_shaped(
+            &mut recipes,
+            vec!["L"],
+            &[("L", Item::OakLog)],
+            ItemStack::new(Item::OakPlanks, 4),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["L"],
+            &[("L", Item::BirchLog)],
+            ItemStack::new(Item::BirchPlanks, 4),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["L"],
+            &[("L", Item::SpruceLog)],
+            ItemStack::new(Item::SprucePlanks, 4),
+        );
         // 2. Sticks
-        add_shaped(&mut recipes, vec!["P", "P"], &[("P", Item::OakPlanks)], ItemStack::new(Item::Stick, 4));
+        add_shaped(
+            &mut recipes,
+            vec!["P", "P"],
+            &[("P", Item::OakPlanks)],
+            ItemStack::new(Item::Stick, 4),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["P", "P"],
+            &[("P", Item::BirchPlanks)],
+            ItemStack::new(Item::Stick, 4),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["P", "P"],
+            &[("P", Item::SprucePlanks)],
+            ItemStack::new(Item::Stick, 4),
+        );
         // 3. Crafting Table
-        add_shaped(&mut recipes, vec!["PP", "PP"], &[("P", Item::OakPlanks)], ItemStack::new(Item::CraftingTable, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["PP", "PP"],
+            &[("P", Item::OakPlanks)],
+            ItemStack::new(Item::CraftingTable, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["PP", "PP"],
+            &[("P", Item::BirchPlanks)],
+            ItemStack::new(Item::CraftingTable, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["PP", "PP"],
+            &[("P", Item::SprucePlanks)],
+            ItemStack::new(Item::CraftingTable, 1),
+        );
         // 4. Chest
-        add_shaped(&mut recipes, vec!["PPP", "P P", "PPP"], &[("P", Item::OakPlanks)], ItemStack::new(Item::Chest, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["PPP", "P P", "PPP"],
+            &[("P", Item::OakPlanks)],
+            ItemStack::new(Item::Chest, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["PPP", "P P", "PPP"],
+            &[("P", Item::BirchPlanks)],
+            ItemStack::new(Item::Chest, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["PPP", "P P", "PPP"],
+            &[("P", Item::SprucePlanks)],
+            ItemStack::new(Item::Chest, 1),
+        );
         // 5. Furnace
-        add_shaped(&mut recipes, vec!["CCC", "C C", "CCC"], &[("C", Item::Cobblestone)], ItemStack::new(Item::Furnace, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["CCC", "C C", "CCC"],
+            &[("C", Item::Cobblestone)],
+            ItemStack::new(Item::Furnace, 1),
+        );
         // 6. Torch
-        add_shaped(&mut recipes, vec!["C", "S"], &[("C", Item::Coal), ("S", Item::Stick)], ItemStack::new(Item::Torch, 4));
-        
+        add_shaped(
+            &mut recipes,
+            vec!["C", "S"],
+            &[("C", Item::Coal), ("S", Item::Stick)],
+            ItemStack::new(Item::Torch, 4),
+        );
+
         // Ore Smelting Conversion
-        add_shapeless(&mut recipes, vec![Item::IronOre], ItemStack::new(Item::IronIngot, 1));
-        add_shapeless(&mut recipes, vec![Item::GoldOre], ItemStack::new(Item::GoldIngot, 1));
+        add_shapeless(
+            &mut recipes,
+            vec![Item::IronOre],
+            ItemStack::new(Item::IronIngot, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::GoldOre],
+            ItemStack::new(Item::GoldIngot, 1),
+        );
 
         // 7. Stone Tools
-        add_shaped(&mut recipes, vec!["SSS", " t ", " t "], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack::new(Item::StonePickaxe, 1));
-        add_shaped(&mut recipes, vec!["SS ", "St ", " t "], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack::new(Item::StoneAxe, 1));
-        add_shaped(&mut recipes, vec!["S", "t", "t"], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack::new(Item::StoneShovel, 1));
-        add_shaped(&mut recipes, vec!["S", "S", "t"], &[("S", Item::Cobblestone), ("t", Item::Stick)], ItemStack::new(Item::StoneSword, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["SSS", " t ", " t "],
+            &[("S", Item::Cobblestone), ("t", Item::Stick)],
+            ItemStack::new(Item::StonePickaxe, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["SS ", "St ", " t "],
+            &[("S", Item::Cobblestone), ("t", Item::Stick)],
+            ItemStack::new(Item::StoneAxe, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["S", "t", "t"],
+            &[("S", Item::Cobblestone), ("t", Item::Stick)],
+            ItemStack::new(Item::StoneShovel, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["S", "S", "t"],
+            &[("S", Item::Cobblestone), ("t", Item::Stick)],
+            ItemStack::new(Item::StoneSword, 1),
+        );
 
         // 8. Iron Tools
-        add_shaped(&mut recipes, vec!["III", " t ", " t "], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack::new(Item::IronPickaxe, 1));
-        add_shaped(&mut recipes, vec!["II ", "It ", " t "], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack::new(Item::IronAxe, 1));
-        add_shaped(&mut recipes, vec!["I", "t", "t"], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack::new(Item::IronShovel, 1));
-        add_shaped(&mut recipes, vec!["I", "I", "t"], &[("I", Item::IronIngot), ("t", Item::Stick)], ItemStack::new(Item::IronSword, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["III", " t ", " t "],
+            &[("I", Item::IronIngot), ("t", Item::Stick)],
+            ItemStack::new(Item::IronPickaxe, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["II ", "It ", " t "],
+            &[("I", Item::IronIngot), ("t", Item::Stick)],
+            ItemStack::new(Item::IronAxe, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["I", "t", "t"],
+            &[("I", Item::IronIngot), ("t", Item::Stick)],
+            ItemStack::new(Item::IronShovel, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["I", "I", "t"],
+            &[("I", Item::IronIngot), ("t", Item::Stick)],
+            ItemStack::new(Item::IronSword, 1),
+        );
 
         // 9. Diamond Tools
-        add_shaped(&mut recipes, vec!["DDD", " t ", " t "], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack::new(Item::DiamondPickaxe, 1));
-        add_shaped(&mut recipes, vec!["DD ", "Dt ", " t "], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack::new(Item::DiamondAxe, 1));
-        add_shaped(&mut recipes, vec!["D", "t", "t"], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack::new(Item::DiamondShovel, 1));
-        add_shaped(&mut recipes, vec!["D", "D", "t"], &[("D", Item::Diamond), ("t", Item::Stick)], ItemStack::new(Item::DiamondSword, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["DDD", " t ", " t "],
+            &[("D", Item::Diamond), ("t", Item::Stick)],
+            ItemStack::new(Item::DiamondPickaxe, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["DD ", "Dt ", " t "],
+            &[("D", Item::Diamond), ("t", Item::Stick)],
+            ItemStack::new(Item::DiamondAxe, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["D", "t", "t"],
+            &[("D", Item::Diamond), ("t", Item::Stick)],
+            ItemStack::new(Item::DiamondShovel, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["D", "D", "t"],
+            &[("D", Item::Diamond), ("t", Item::Stick)],
+            ItemStack::new(Item::DiamondSword, 1),
+        );
 
         // 10. Block Conversions
-        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Stone)], ItemStack::new(Item::StoneBrick, 4));
-        add_shaped(&mut recipes, vec!["CC", "CC"], &[("C", Item::Clay)], ItemStack::new(Item::Brick, 4));
-        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Sand)], ItemStack::new(Item::Sandstone, 4));
-        add_shaped(&mut recipes, vec!["SS", "SS"], &[("S", Item::Snow)], ItemStack::new(Item::Snow, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["SS", "SS"],
+            &[("S", Item::Stone)],
+            ItemStack::new(Item::StoneBrick, 4),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["CC", "CC"],
+            &[("C", Item::Clay)],
+            ItemStack::new(Item::Brick, 4),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["SS", "SS"],
+            &[("S", Item::Sand)],
+            ItemStack::new(Item::Sandstone, 4),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["SS", "SS"],
+            &[("S", Item::Snow)],
+            ItemStack::new(Item::Snow, 1),
+        );
         // TNT (Redstone + Sand)
-        add_shaped(&mut recipes, vec!["RSR", "SRS", "RSR"], &[("R", Item::Redstone), ("S", Item::Sand)], ItemStack::new(Item::TNT, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["RSR", "SRS", "RSR"],
+            &[("R", Item::Redstone), ("S", Item::Sand)],
+            ItemStack::new(Item::TNT, 1),
+        );
 
         // Bread (3 Apples horizontal)
-        add_shaped(&mut recipes, vec!["AAA"], &[("A", Item::Apple)], ItemStack::new(Item::Bread, 1));
+        add_shaped(
+            &mut recipes,
+            vec!["AAA"],
+            &[("A", Item::Apple)],
+            ItemStack::new(Item::Bread, 1),
+        );
 
         Self { recipes }
     }
@@ -105,7 +296,9 @@ impl RecipeManager {
                 }
             }
         }
-        if active_items.is_empty() { return None; }
+        if active_items.is_empty() {
+            return None;
+        }
         active_items.sort_by_key(|&it| it as i32);
 
         for recipe in &self.recipes {
@@ -128,16 +321,26 @@ impl RecipeManager {
                 if let Some(stack) = grid[r * grid_size + c] {
                     if stack.item != Item::Air {
                         has_items = true;
-                        if r < min_r { min_r = r; }
-                        if r > max_r { max_r = r; }
-                        if c < min_c { min_c = c; }
-                        if c > max_c { max_c = c; }
+                        if r < min_r {
+                            min_r = r;
+                        }
+                        if r > max_r {
+                            max_r = r;
+                        }
+                        if c < min_c {
+                            min_c = c;
+                        }
+                        if c > max_c {
+                            max_c = c;
+                        }
                     }
                 }
             }
         }
 
-        if !has_items { return None; }
+        if !has_items {
+            return None;
+        }
 
         let h_size = max_r - min_r + 1;
         let w_size = max_c - min_c + 1;
@@ -154,7 +357,9 @@ impl RecipeManager {
 
         // Match against shaped recipes
         for recipe in &self.recipes {
-            if recipe.shapeless { continue; }
+            if recipe.shapeless {
+                continue;
+            }
             if recipe.width == w_size && recipe.height == h_size {
                 let mut match_ok = true;
                 for r in 0..h_size {
@@ -164,7 +369,9 @@ impl RecipeManager {
                             break;
                         }
                     }
-                    if !match_ok { break; }
+                    if !match_ok {
+                        break;
+                    }
                 }
                 if match_ok {
                     return Some(recipe.result);

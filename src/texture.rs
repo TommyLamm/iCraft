@@ -1,5 +1,5 @@
-use wgpu::{Device, Queue, Texture, TextureView, Sampler};
-use image::{RgbaImage, Rgba};
+use image::{Rgba, RgbaImage};
+use wgpu::{Device, Queue, Sampler, Texture, TextureView};
 
 pub struct TextureAtlas {
     pub texture: Texture,
@@ -12,7 +12,9 @@ fn draw_noise(img: &mut RgbaImage, tx: u32, ty: u32, base: [u8; 3], noise: u8, s
         *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let val = (*seed / 65536) % 32768;
         let diff = max - min;
-        if diff <= 0 { return min; }
+        if diff <= 0 {
+            return min;
+        }
         min + (val as i16 % diff)
     };
 
@@ -27,12 +29,21 @@ fn draw_noise(img: &mut RgbaImage, tx: u32, ty: u32, base: [u8; 3], noise: u8, s
     }
 }
 
-fn draw_brick(img: &mut RgbaImage, tx: u32, ty: u32, base: [u8; 3], mortar: [u8; 3], seed: &mut u32) {
+fn draw_brick(
+    img: &mut RgbaImage,
+    tx: u32,
+    ty: u32,
+    base: [u8; 3],
+    mortar: [u8; 3],
+    seed: &mut u32,
+) {
     let mut next_rand = |min: i16, max: i16| -> i16 {
         *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let val = (*seed / 65536) % 32768;
         let diff = max - min;
-        if diff <= 0 { return min; }
+        if diff <= 0 {
+            return min;
+        }
         min + (val as i16 % diff)
     };
 
@@ -50,7 +61,11 @@ fn draw_brick(img: &mut RgbaImage, tx: u32, ty: u32, base: [u8; 3], mortar: [u8;
                     (base[2] as i16 + offset).clamp(0, 255) as u8,
                 ]
             };
-            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([color[0], color[1], color[2], 255]));
+            img.put_pixel(
+                tx * 16 + x,
+                ty * 16 + y,
+                Rgba([color[0], color[1], color[2], 255]),
+            );
         }
     }
 }
@@ -60,7 +75,9 @@ fn draw_planks(img: &mut RgbaImage, tx: u32, ty: u32, base: [u8; 3], seed: &mut 
         *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let val = (*seed / 65536) % 32768;
         let diff = max - min;
-        if diff <= 0 { return min; }
+        if diff <= 0 {
+            return min;
+        }
         min + (val as i16 % diff)
     };
 
@@ -77,7 +94,11 @@ fn draw_planks(img: &mut RgbaImage, tx: u32, ty: u32, base: [u8; 3], seed: &mut 
                     (base[2] as i16 + offset).clamp(0, 255) as u8,
                 ]
             };
-            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([color[0], color[1], color[2], 255]));
+            img.put_pixel(
+                tx * 16 + x,
+                ty * 16 + y,
+                Rgba([color[0], color[1], color[2], 255]),
+            );
         }
     }
 }
@@ -85,12 +106,14 @@ fn draw_planks(img: &mut RgbaImage, tx: u32, ty: u32, base: [u8; 3], seed: &mut 
 fn draw_ore(img: &mut RgbaImage, tx: u32, ty: u32, ore_color: [u8; 3], seed: &mut u32) {
     // Start with stone noise
     draw_noise(img, tx, ty, [120, 120, 120], 15, seed);
-    
+
     let mut next_rand = |min: i16, max: i16| -> i16 {
         *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let val = (*seed / 65536) % 32768;
         let diff = max - min;
-        if diff <= 0 { return min; }
+        if diff <= 0 {
+            return min;
+        }
         min + (val as i16 % diff)
     };
 
@@ -98,8 +121,16 @@ fn draw_ore(img: &mut RgbaImage, tx: u32, ty: u32, ore_color: [u8; 3], seed: &mu
     for _ in 0..8 {
         let ox = next_rand(1, 14) as u32;
         let oy = next_rand(1, 14) as u32;
-        img.put_pixel(tx * 16 + ox, ty * 16 + oy, Rgba([ore_color[0], ore_color[1], ore_color[2], 255]));
-        img.put_pixel(tx * 16 + ox + 1, ty * 16 + oy, Rgba([ore_color[0], ore_color[1], ore_color[2], 255]));
+        img.put_pixel(
+            tx * 16 + ox,
+            ty * 16 + oy,
+            Rgba([ore_color[0], ore_color[1], ore_color[2], 255]),
+        );
+        img.put_pixel(
+            tx * 16 + ox + 1,
+            ty * 16 + oy,
+            Rgba([ore_color[0], ore_color[1], ore_color[2], 255]),
+        );
     }
 }
 
@@ -108,7 +139,9 @@ fn draw_leaves(img: &mut RgbaImage, tx: u32, ty: u32, seed: &mut u32) {
         *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let val = (*seed / 65536) % 32768;
         let diff = max - min;
-        if diff <= 0 { return min; }
+        if diff <= 0 {
+            return min;
+        }
         min + (val as i16 % diff)
     };
 
@@ -145,7 +178,9 @@ fn draw_water(img: &mut RgbaImage, tx: u32, ty: u32, seed: &mut u32) {
         *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let val = (*seed / 65536) % 32768;
         let diff = max - min;
-        if diff <= 0 { return min; }
+        if diff <= 0 {
+            return min;
+        }
         min + (val as i16 % diff)
     };
 
@@ -164,7 +199,9 @@ fn draw_ice(img: &mut RgbaImage, tx: u32, ty: u32, seed: &mut u32) {
         *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let val = (*seed / 65536) % 32768;
         let diff = max - min;
-        if diff <= 0 { return min; }
+        if diff <= 0 {
+            return min;
+        }
         min + (val as i16 % diff)
     };
 
@@ -232,7 +269,11 @@ fn draw_ingot_icon(img: &mut RgbaImage, tx: u32, ty: u32, color: [u8; 3]) {
             if is_ingot {
                 let is_highlight = x == 3 || y == 5;
                 let c = if is_highlight {
-                    [color[0].saturating_add(40), color[1].saturating_add(40), color[2].saturating_add(40)]
+                    [
+                        color[0].saturating_add(40),
+                        color[1].saturating_add(40),
+                        color[2].saturating_add(40),
+                    ]
                 } else {
                     color
                 };
@@ -279,7 +320,11 @@ fn draw_sword_icon(img: &mut RgbaImage, tx: u32, ty: u32, blade_color: [u8; 3]) 
             let is_guard = (x == 4 && y == 11) || (x == 3 && y == 11) || (x == 4 && y == 12);
             let is_blade = x + y == 15 && x >= 5 && x <= 12;
             if is_blade {
-                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([blade_color[0], blade_color[1], blade_color[2], 255]));
+                img.put_pixel(
+                    tx * 16 + x,
+                    ty * 16 + y,
+                    Rgba([blade_color[0], blade_color[1], blade_color[2], 255]),
+                );
             } else if is_guard {
                 img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([120, 90, 60, 255]));
             } else if is_handle {
@@ -295,9 +340,14 @@ fn draw_pickaxe_icon(img: &mut RgbaImage, tx: u32, ty: u32, head_color: [u8; 3])
     for y in 0..16 {
         for x in 0..16 {
             let is_handle = x == y && x >= 3 && x <= 12;
-            let is_head = (y == 3 && x >= 2 && x <= 6) || (x == 3 && y >= 2 && y <= 6) || (x + y == 6);
+            let is_head =
+                (y == 3 && x >= 2 && x <= 6) || (x == 3 && y >= 2 && y <= 6) || (x + y == 6);
             if is_head {
-                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([head_color[0], head_color[1], head_color[2], 255]));
+                img.put_pixel(
+                    tx * 16 + x,
+                    ty * 16 + y,
+                    Rgba([head_color[0], head_color[1], head_color[2], 255]),
+                );
             } else if is_handle {
                 img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([139, 90, 43, 255]));
             } else {
@@ -313,7 +363,11 @@ fn draw_axe_icon(img: &mut RgbaImage, tx: u32, ty: u32, head_color: [u8; 3]) {
             let is_handle = x == y && x >= 3 && x <= 12;
             let is_head = x >= 2 && x <= 4 && y >= 2 && y <= 4 && !(x == 4 && y == 4);
             if is_head {
-                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([head_color[0], head_color[1], head_color[2], 255]));
+                img.put_pixel(
+                    tx * 16 + x,
+                    ty * 16 + y,
+                    Rgba([head_color[0], head_color[1], head_color[2], 255]),
+                );
             } else if is_handle {
                 img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([139, 90, 43, 255]));
             } else {
@@ -329,7 +383,11 @@ fn draw_shovel_icon(img: &mut RgbaImage, tx: u32, ty: u32, head_color: [u8; 3]) 
             let is_handle = x == y && x >= 4 && x <= 12;
             let is_head = x >= 2 && x <= 3 && y >= 2 && y <= 3;
             if is_head {
-                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([head_color[0], head_color[1], head_color[2], 255]));
+                img.put_pixel(
+                    tx * 16 + x,
+                    ty * 16 + y,
+                    Rgba([head_color[0], head_color[1], head_color[2], 255]),
+                );
             } else if is_handle {
                 img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([139, 90, 43, 255]));
             } else {
@@ -347,7 +405,9 @@ fn draw_crack_pattern(img: &mut RgbaImage, tx: u32, ty: u32, stage: u32) {
         seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
         let val = (seed / 65536) % 32768;
         let diff = max - min;
-        if diff <= 0 { return min; }
+        if diff <= 0 {
+            return min;
+        }
         min + (val as i32 % diff)
     };
 
@@ -366,7 +426,11 @@ fn draw_crack_pattern(img: &mut RgbaImage, tx: u32, ty: u32, stage: u32) {
         let length = next_rand(3, 8);
         for _ in 0..length {
             if cx >= 0 && cx < 16 && cy >= 0 && cy < 16 {
-                img.put_pixel(tx * 16 + cx as u32, ty * 16 + cy as u32, Rgba([20, 20, 20, 200])); // Dark grey crack line
+                img.put_pixel(
+                    tx * 16 + cx as u32,
+                    ty * 16 + cy as u32,
+                    Rgba([20, 20, 20, 200]),
+                ); // Dark grey crack line
             }
             cx += next_rand(-1, 2);
             cy += next_rand(-1, 2);
@@ -377,7 +441,7 @@ fn draw_crack_pattern(img: &mut RgbaImage, tx: u32, ty: u32, stage: u32) {
 fn draw_heart(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
     let ox = tx * 16 + 3;
     let oy = ty * 16 + 4;
-    
+
     // Clear tile first
     for y in 0..16 {
         for x in 0..16 {
@@ -407,7 +471,9 @@ fn draw_heart(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
     };
 
     let is_inside = |x: i32, y: i32| -> bool {
-        if is_border(x, y) { return false; }
+        if is_border(x, y) {
+            return false;
+        }
         match y {
             0 => false,
             1 => x == 1 || x == 2 || x == 6 || x == 7,
@@ -459,7 +525,7 @@ fn draw_heart(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
 fn draw_hunger(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
     let ox = tx * 16 + 3;
     let oy = ty * 16 + 3;
-    
+
     for y in 0..16 {
         for x in 0..16 {
             img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
@@ -475,22 +541,24 @@ fn draw_hunger(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
     let empty_meat_dark = Rgba([50, 50, 50, 255]);
 
     let grid = [
-        [0,0,0,0,0,1,1,1,0,0],
-        [0,0,0,0,1,2,2,2,1,0],
-        [0,0,0,1,2,2,2,2,2,1],
-        [0,0,1,2,2,2,2,2,2,1],
-        [0,0,1,2,2,2,2,2,1,0],
-        [0,0,0,1,2,2,2,1,0,0],
-        [0,0,0,0,1,3,3,1,0,0],
-        [0,0,0,1,3,1,1,0,0,0],
-        [0,0,1,3,1,0,0,0,0,0],
-        [0,1,1,1,0,0,0,0,0,0],
+        [0, 0, 0, 0, 0, 1, 1, 1, 0, 0],
+        [0, 0, 0, 0, 1, 2, 2, 2, 1, 0],
+        [0, 0, 0, 1, 2, 2, 2, 2, 2, 1],
+        [0, 0, 1, 2, 2, 2, 2, 2, 2, 1],
+        [0, 0, 1, 2, 2, 2, 2, 2, 1, 0],
+        [0, 0, 0, 1, 2, 2, 2, 1, 0, 0],
+        [0, 0, 0, 0, 1, 3, 3, 1, 0, 0],
+        [0, 0, 0, 1, 3, 1, 1, 0, 0, 0],
+        [0, 0, 1, 3, 1, 0, 0, 0, 0, 0],
+        [0, 1, 1, 1, 0, 0, 0, 0, 0, 0],
     ];
 
     for y in 0..10 {
         for x in 0..10 {
             let val = grid[y][x];
-            if val == 0 { continue; }
+            if val == 0 {
+                continue;
+            }
             let px = ox + x as u32;
             let py = oy + y as u32;
             if val == 1 {
@@ -529,7 +597,7 @@ fn draw_hunger(img: &mut RgbaImage, tx: u32, ty: u32, fill: f32) {
 fn draw_bubble_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let ox = tx * 16;
     let oy = ty * 16;
-    
+
     for y in 0..16 {
         for x in 0..16 {
             img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
@@ -541,22 +609,22 @@ fn draw_bubble_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let highlight = Rgba([255, 255, 255, 255]);
 
     let grid = [
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-        [0,0,0,0,0,1,3,2,2,2,1,0,0,0,0,0],
-        [0,0,0,0,1,3,3,2,2,2,2,1,0,0,0,0],
-        [0,0,0,0,1,2,2,2,2,2,2,1,0,0,0,0],
-        [0,0,0,0,1,2,2,2,2,2,2,1,0,0,0,0],
-        [0,0,0,0,0,1,2,2,2,2,1,0,0,0,0,0],
-        [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 3, 3, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
 
     for y in 0..16 {
@@ -578,7 +646,7 @@ fn draw_bubble_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
 fn draw_apple_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let ox = tx * 16;
     let oy = ty * 16;
-    
+
     for y in 0..16 {
         for x in 0..16 {
             img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
@@ -593,28 +661,30 @@ fn draw_apple_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let leaf = Rgba([60, 140, 40, 255]);
 
     let grid = [
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,4,3,3,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,1,3,0,0,0,0,0,0,0],
-        [0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0],
-        [0,0,0,1,2,2,2,2,2,2,2,2,1,0,0,0],
-        [0,0,1,2,5,2,2,2,2,2,2,2,2,1,0,0],
-        [0,0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
-        [0,0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
-        [0,0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
-        [0,0,1,2,2,2,2,2,2,2,2,6,6,1,0,0],
-        [0,0,0,1,2,2,2,2,2,2,6,6,1,0,0,0],
-        [0,0,0,0,1,1,2,2,2,2,1,1,0,0,0,0],
-        [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 4, 3, 3, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0],
+        [0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0],
+        [0, 0, 1, 2, 5, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+        [0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+        [0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+        [0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+        [0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 6, 6, 1, 0, 0],
+        [0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 6, 6, 1, 0, 0, 0],
+        [0, 0, 0, 0, 1, 1, 2, 2, 2, 2, 1, 1, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
 
     for y in 0..16 {
         for x in 0..16 {
             let val = grid[y][x];
-            if val == 0 { continue; }
+            if val == 0 {
+                continue;
+            }
             let c = match val {
                 1 => border,
                 2 => red,
@@ -632,7 +702,7 @@ fn draw_apple_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
 fn draw_bread_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let ox = tx * 16;
     let oy = ty * 16;
-    
+
     for y in 0..16 {
         for x in 0..16 {
             img.put_pixel(ox + x, oy + y, Rgba([0, 0, 0, 0]));
@@ -645,28 +715,30 @@ fn draw_bread_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let dark_brown = Rgba([120, 70, 30, 255]);
 
     let grid = [
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0],
-        [0,0,0,0,0,0,0,0,1,1,2,2,2,1,0,0],
-        [0,0,0,0,0,0,1,1,2,3,2,2,2,2,1,0],
-        [0,0,0,0,1,1,2,2,2,2,2,3,2,2,1,0],
-        [0,0,0,1,2,4,2,2,3,2,2,2,2,1,0,0],
-        [0,0,1,2,4,4,2,2,2,2,3,2,1,0,0,0],
-        [0,0,1,2,2,4,4,2,2,2,2,1,0,0,0,0],
-        [0,1,2,2,2,2,4,4,2,2,1,0,0,0,0,0],
-        [0,1,2,2,2,2,2,4,2,1,0,0,0,0,0,0],
-        [0,0,1,2,2,2,2,2,1,0,0,0,0,0,0,0],
-        [0,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 2, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 1, 2, 3, 2, 2, 2, 2, 1, 0],
+        [0, 0, 0, 0, 1, 1, 2, 2, 2, 2, 2, 3, 2, 2, 1, 0],
+        [0, 0, 0, 1, 2, 4, 2, 2, 3, 2, 2, 2, 2, 1, 0, 0],
+        [0, 0, 1, 2, 4, 4, 2, 2, 2, 2, 3, 2, 1, 0, 0, 0],
+        [0, 0, 1, 2, 2, 4, 4, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+        [0, 1, 2, 2, 2, 2, 4, 4, 2, 2, 1, 0, 0, 0, 0, 0],
+        [0, 1, 2, 2, 2, 2, 2, 4, 2, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
 
     for y in 0..16 {
         for x in 0..16 {
             let val = grid[y][x];
-            if val == 0 { continue; }
+            if val == 0 {
+                continue;
+            }
             let c = match val {
                 1 => border,
                 2 => brown,
@@ -692,23 +764,25 @@ fn draw_rotten_flesh_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let flesh_green = Rgba([90, 110, 50, 255]);
     let dark_green = Rgba([50, 70, 30, 255]);
     let grid = [
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0],
-        [0,0,0,0,0,1,2,3,2,1,0,0,0,0,0,0],
-        [0,0,0,0,1,2,4,3,4,2,1,0,0,0,0,0],
-        [0,0,0,1,2,3,4,3,2,3,2,1,0,0,0,0],
-        [0,0,1,2,4,3,2,4,3,4,2,1,0,0,0,0],
-        [0,0,1,3,2,4,3,2,3,2,1,0,0,0,0,0],
-        [0,0,0,1,1,3,4,3,2,1,1,0,0,0,0,0],
-        [0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 2, 3, 2, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 2, 4, 3, 4, 2, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 2, 3, 4, 3, 2, 3, 2, 1, 0, 0, 0, 0],
+        [0, 0, 1, 2, 4, 3, 2, 4, 3, 4, 2, 1, 0, 0, 0, 0],
+        [0, 0, 1, 3, 2, 4, 3, 2, 3, 2, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 1, 3, 4, 3, 2, 1, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
     for y in 0..grid.len() {
         for x in 0..grid[y].len() {
             let val = grid[y][x];
-            if val == 0 { continue; }
+            if val == 0 {
+                continue;
+            }
             let c = match val {
                 1 => border,
                 2 => flesh_brown,
@@ -733,27 +807,29 @@ fn draw_bone_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let bone_white = Rgba([230, 230, 220, 255]);
     let bone_gray = Rgba([180, 180, 175, 255]);
     let grid = [
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,1,2,2,1,0],
-        [0,0,0,0,0,0,0,0,0,0,1,2,2,1,1,0],
-        [0,0,0,0,0,0,0,0,0,1,2,2,1,0,0,0],
-        [0,0,0,0,0,0,0,0,1,2,2,1,0,0,0,0],
-        [0,0,0,0,0,0,0,1,2,2,1,0,0,0,0,0],
-        [0,0,0,0,0,0,1,2,2,1,0,0,0,0,0,0],
-        [0,0,0,0,0,1,2,2,1,0,0,0,0,0,0,0],
-        [0,0,0,0,1,2,2,1,0,0,0,0,0,0,0,0],
-        [0,0,0,1,2,2,1,0,0,0,0,0,0,0,0,0],
-        [0,0,1,1,2,2,1,0,0,0,0,0,0,0,0,0],
-        [0,1,2,2,1,1,0,0,0,0,0,0,0,0,0,0],
-        [0,1,3,3,1,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 1, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 1, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 1, 3, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
     for y in 0..grid.len() {
         for x in 0..grid[y].len() {
             let val = grid[y][x];
-            if val == 0 { continue; }
+            if val == 0 {
+                continue;
+            }
             let c = match val {
                 1 => border,
                 2 => bone_white,
@@ -777,27 +853,29 @@ fn draw_bow_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let wood = Rgba([140, 90, 45, 255]);
     let string = Rgba([200, 200, 200, 255]);
     let grid = [
-        [0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0],
-        [0,0,0,0,0,0,0,0,0,1,1,2,2,1,0,0],
-        [0,0,0,0,0,0,0,0,1,2,2,1,3,1,0,0],
-        [0,0,0,0,0,0,0,1,2,1,0,0,3,1,0,0],
-        [0,0,0,0,0,0,1,2,1,0,0,0,3,1,0,0],
-        [0,0,0,0,0,1,2,1,0,0,0,0,3,1,0,0],
-        [0,0,0,0,1,2,1,0,0,0,0,0,3,1,0,0],
-        [0,0,0,1,2,1,0,0,0,0,0,0,3,1,0,0],
-        [0,0,1,2,1,0,0,0,0,0,0,0,3,1,0,0],
-        [0,1,2,1,0,0,0,0,0,0,0,0,3,1,0,0],
-        [0,1,2,1,0,0,0,0,0,0,0,1,3,1,0,0],
-        [0,1,1,2,1,0,0,0,0,0,1,2,1,0,0,0],
-        [0,0,1,2,2,1,1,1,1,1,2,1,0,0,0,0],
-        [0,0,0,1,1,2,2,2,2,2,1,0,0,0,0,0],
-        [0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 3, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 3, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 3, 1, 0, 0],
+        [0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 3, 1, 0, 0],
+        [0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0, 3, 1, 0, 0],
+        [0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0],
+        [0, 0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0],
+        [0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0],
+        [0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 1, 0, 0],
+        [0, 1, 1, 2, 1, 0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0],
+        [0, 0, 1, 2, 2, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 0],
+        [0, 0, 0, 1, 1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
     for y in 0..grid.len() {
         for x in 0..grid[y].len() {
             let val = grid[y][x];
-            if val == 0 { continue; }
+            if val == 0 {
+                continue;
+            }
             let c = match val {
                 1 => border,
                 2 => wood,
@@ -821,22 +899,24 @@ fn draw_gunpowder_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     let gray1 = Rgba([110, 110, 110, 255]);
     let gray2 = Rgba([80, 80, 80, 255]);
     let grid = [
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-        [0,0,0,0,0,0,1,2,3,1,0,0,0,0,0,0],
-        [0,0,0,0,0,1,2,2,3,2,1,0,0,0,0,0],
-        [0,0,0,0,1,3,2,3,2,2,3,1,0,0,0,0],
-        [0,0,0,1,2,2,3,2,2,3,2,2,1,0,0,0],
-        [0,0,1,3,2,2,2,3,2,2,3,2,3,1,0,0],
-        [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 2, 3, 1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 1, 2, 2, 3, 2, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 3, 2, 3, 2, 2, 3, 1, 0, 0, 0, 0],
+        [0, 0, 0, 1, 2, 2, 3, 2, 2, 3, 2, 2, 1, 0, 0, 0],
+        [0, 0, 1, 3, 2, 2, 2, 3, 2, 2, 3, 2, 3, 1, 0, 0],
+        [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
     for y in 0..grid.len() {
         for x in 0..grid[y].len() {
             let val = grid[y][x];
-            if val == 0 { continue; }
+            if val == 0 {
+                continue;
+            }
             let c = match val {
                 1 => border,
                 2 => gray1,
@@ -864,7 +944,8 @@ fn draw_wheat_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
 fn draw_seeds_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     for y in 0..16 {
         for x in 0..16 {
-            let is_seed = (x as i32 - y as i32).abs() <= 1 && x >= 5 && x <= 10 && y >= 5 && y <= 10;
+            let is_seed =
+                (x as i32 - y as i32).abs() <= 1 && x >= 5 && x <= 10 && y >= 5 && y <= 10;
             if is_seed {
                 img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([140, 110, 60, 255]));
             } else {
@@ -911,7 +992,8 @@ fn draw_bucket_icon(img: &mut RgbaImage, tx: u32, ty: u32, content_color: Option
         for x in 0..16 {
             let is_rim = y == 4 && x >= 3 && x <= 12;
             let is_body = y >= 5 && y <= 12 && (x as i32 - 8).abs() <= (y as i32 - 4) / 2 + 3;
-            let is_metal = is_rim || is_body && ((x as i32 - 8).abs() == (y as i32 - 4) / 2 + 3 || y == 12);
+            let is_metal =
+                is_rim || is_body && ((x as i32 - 8).abs() == (y as i32 - 4) / 2 + 3 || y == 12);
             if is_metal {
                 img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([160, 160, 160, 255]));
             } else if is_body && content_color.is_some() {
@@ -932,12 +1014,20 @@ fn draw_meat_icon(img: &mut RgbaImage, tx: u32, ty: u32, is_cooked: bool, base_c
             let is_meat = dx + dy <= 5 && dx <= 4 && dy <= 4;
             if is_meat {
                 let c = if is_cooked {
-                    [base_color[0].saturating_sub(40), base_color[1].saturating_sub(20), base_color[2].saturating_add(20)]
+                    [
+                        base_color[0].saturating_sub(40),
+                        base_color[1].saturating_sub(20),
+                        base_color[2].saturating_add(20),
+                    ]
                 } else {
                     base_color
                 };
                 let is_fat = (x + y) % 5 == 0;
-                let col = if is_fat { [240, 240, 240, 255] } else { [c[0], c[1], c[2], 255] };
+                let col = if is_fat {
+                    [240, 240, 240, 255]
+                } else {
+                    [c[0], c[1], c[2], 255]
+                };
                 img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba(col));
             } else {
                 img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
@@ -946,15 +1036,157 @@ fn draw_meat_icon(img: &mut RgbaImage, tx: u32, ty: u32, is_cooked: bool, base_c
     }
 }
 
+fn draw_birch_bark(img: &mut RgbaImage, tx: u32, ty: u32, seed: &mut u32) {
+    let mut next_rand = |min: i16, max: i16| -> i16 {
+        *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        let val = (*seed / 65536) % 32768;
+        let diff = max - min;
+        if diff <= 0 {
+            return min;
+        }
+        min + (val as i16 % diff)
+    };
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_stripe = y % 5 == 0 && next_rand(0, 10) < 6;
+            let c = if is_stripe {
+                [30, 30, 30]
+            } else {
+                [230, 230, 225]
+            };
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([c[0], c[1], c[2], 255]));
+        }
+    }
+}
+
+fn draw_spruce_bark(img: &mut RgbaImage, tx: u32, ty: u32, seed: &mut u32) {
+    draw_noise(img, tx, ty, [70, 50, 35], 10, seed);
+    for y in 0..16 {
+        for x in 0..16 {
+            if (x % 3 == 0 || y % 4 == 0) && (x + y) % 2 == 0 {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([50, 35, 25, 255]));
+            }
+        }
+    }
+}
+
+fn draw_flower(img: &mut RgbaImage, tx: u32, ty: u32, petal_color: [u8; 3]) {
+    // Clear tile first
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+    for y in 2..14 {
+        for x in 4..12 {
+            let dx = (x as i32 - 8).abs();
+            let dy = (y as i32 - 6).abs();
+            let is_stem = x == 8 && y >= 7;
+            let is_petal = dx + dy <= 3 && y < 8;
+            let is_center = dx == 0 && dy == 0;
+            let c = if is_center {
+                [230, 180, 20, 255]
+            } else if is_petal {
+                [petal_color[0], petal_color[1], petal_color[2], 255]
+            } else if is_stem {
+                [80, 150, 40, 255]
+            } else {
+                continue;
+            };
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba(c));
+        }
+    }
+}
+
+fn draw_tall_grass(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+    for y in 2..16 {
+        for x in 2..14 {
+            let is_blade = (x + y) % 3 == 0 && x >= 4 && x <= 11;
+            if is_blade {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([60, 140, 40, 255]));
+            }
+        }
+    }
+}
+
+fn draw_cactus(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_border = x == 0 || x == 15 || y == 0 || y == 15;
+            let is_spine = (x * y) % 7 == 3;
+            let c = if is_spine {
+                [230, 230, 230, 255]
+            } else if is_border {
+                [40, 100, 30, 255]
+            } else {
+                [60, 140, 40, 255]
+            };
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba(c));
+        }
+    }
+}
+
+fn draw_sugar_cane(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([0, 0, 0, 0]));
+        }
+    }
+    for y in 0..16 {
+        for x in 3..13 {
+            let is_stalk = x == 4 || x == 8 || x == 11;
+            if is_stalk {
+                img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([90, 180, 60, 255]));
+            }
+        }
+    }
+}
+
+fn draw_pumpkin(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let dx = (x as i32 - 8).abs();
+            let dy = (y as i32 - 8).abs();
+            let is_face =
+                y >= 6 && y <= 11 && (dx == 3 || (dy == 2 && dx <= 2) || (y == 7 && dx == 0));
+            let c = if is_face {
+                [30, 20, 10]
+            } else {
+                [220, 120, 30]
+            };
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([c[0], c[1], c[2], 255]));
+        }
+    }
+}
+
+fn draw_melon(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_stripe = (x + y / 2) % 4 == 0;
+            let c = if is_stripe {
+                [40, 80, 20]
+            } else {
+                [90, 150, 40]
+            };
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba([c[0], c[1], c[2], 255]));
+        }
+    }
+}
+
 impl TextureAtlas {
     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
         let mut img = RgbaImage::new(256, 256);
         let mut seed = 12345u32;
-        
+
         // Define row & col mapping for block textures
         // Row 0
         draw_noise(&mut img, 0, 0, [100, 160, 60], 10, &mut seed); // Grass Top (greenish)
-        // Grass Side (grass on top, dirt below)
+                                                                   // Grass Side (grass on top, dirt below)
         for y in 0..16 {
             for x in 0..16 {
                 let grass_h = if (x % 3 == 0) || (x % 5 == 0) { 5 } else { 3 };
@@ -965,27 +1197,27 @@ impl TextureAtlas {
                 }
             }
         }
-        draw_noise(&mut img, 2, 0, [120, 80, 50], 10, &mut seed);   // Dirt
+        draw_noise(&mut img, 2, 0, [120, 80, 50], 10, &mut seed); // Dirt
         draw_noise(&mut img, 3, 0, [120, 120, 120], 15, &mut seed); // Stone
-        draw_noise(&mut img, 4, 0, [210, 200, 160], 8, &mut seed);  // Sand
+        draw_noise(&mut img, 4, 0, [210, 200, 160], 8, &mut seed); // Sand
         draw_noise(&mut img, 5, 0, [130, 120, 120], 12, &mut seed); // Gravel
-        draw_planks(&mut img, 6, 0, [180, 140, 90], &mut seed);     // Oak Planks
-        draw_leaves(&mut img, 7, 0, &mut seed);                     // Oak Leaves
+        draw_planks(&mut img, 6, 0, [180, 140, 90], &mut seed); // Oak Planks
+        draw_leaves(&mut img, 7, 0, &mut seed); // Oak Leaves
         draw_brick(&mut img, 8, 0, [120, 120, 120], [80, 80, 80], &mut seed); // Cobblestone
-        draw_noise(&mut img, 9, 0, [60, 60, 60], 20, &mut seed);     // Bedrock
-        draw_water(&mut img, 10, 0, &mut seed);                      // Water
-        draw_ore(&mut img, 11, 0, [30, 30, 30], &mut seed);          // Coal Ore
-        draw_ore(&mut img, 12, 0, [220, 160, 120], &mut seed);        // Iron Ore
-        draw_ore(&mut img, 13, 0, [240, 220, 70], &mut seed);         // Gold Ore
-        draw_ore(&mut img, 14, 0, [100, 220, 240], &mut seed);        // Diamond Ore
-        draw_ore(&mut img, 15, 0, [240, 30, 30], &mut seed);          // Redstone Ore
+        draw_noise(&mut img, 9, 0, [60, 60, 60], 20, &mut seed); // Bedrock
+        draw_water(&mut img, 10, 0, &mut seed); // Water
+        draw_ore(&mut img, 11, 0, [30, 30, 30], &mut seed); // Coal Ore
+        draw_ore(&mut img, 12, 0, [220, 160, 120], &mut seed); // Iron Ore
+        draw_ore(&mut img, 13, 0, [240, 220, 70], &mut seed); // Gold Ore
+        draw_ore(&mut img, 14, 0, [100, 220, 240], &mut seed); // Diamond Ore
+        draw_ore(&mut img, 15, 0, [240, 30, 30], &mut seed); // Redstone Ore
 
         // Row 1
-        draw_glass(&mut img, 0, 1);                                  // Glass
+        draw_glass(&mut img, 0, 1); // Glass
         draw_brick(&mut img, 1, 1, [150, 70, 50], [200, 200, 200], &mut seed); // Brick
         draw_brick(&mut img, 2, 1, [110, 110, 110], [70, 70, 70], &mut seed); // Stone Brick
-        draw_noise(&mut img, 3, 1, [240, 240, 240], 5, &mut seed);   // Snow Block
-        // Snow Side
+        draw_noise(&mut img, 3, 1, [240, 240, 240], 5, &mut seed); // Snow Block
+                                                                   // Snow Side
         for y in 0..16 {
             for x in 0..16 {
                 if y < 4 {
@@ -995,20 +1227,24 @@ impl TextureAtlas {
                 }
             }
         }
-        draw_ice(&mut img, 5, 1, &mut seed);                         // Ice
-        draw_noise(&mut img, 6, 1, [140, 130, 120], 10, &mut seed);  // Clay
-        draw_noise(&mut img, 7, 1, [200, 180, 130], 5, &mut seed);   // Sandstone (top/bottom)
-        // Sandstone side
+        draw_ice(&mut img, 5, 1, &mut seed); // Ice
+        draw_noise(&mut img, 6, 1, [140, 130, 120], 10, &mut seed); // Clay
+        draw_noise(&mut img, 7, 1, [200, 180, 130], 5, &mut seed); // Sandstone (top/bottom)
+                                                                   // Sandstone side
         for y in 0..16 {
             for x in 0..16 {
                 let is_stripe = y == 3 || y == 4 || y == 11 || y == 12;
-                let c = if is_stripe { [180, 150, 100] } else { [200, 180, 130] };
+                let c = if is_stripe {
+                    [180, 150, 100]
+                } else {
+                    [200, 180, 130]
+                };
                 img.put_pixel(8 * 16 + x, 1 * 16 + y, Rgba([c[0], c[1], c[2], 255]));
             }
         }
-        draw_noise(&mut img, 9, 1, [20, 15, 30], 8, &mut seed);      // Obsidian
-        draw_noise(&mut img, 10, 1, [150, 110, 70], 12, &mut seed);   // Log Top
-        // Log Side
+        draw_noise(&mut img, 9, 1, [20, 15, 30], 8, &mut seed); // Obsidian
+        draw_noise(&mut img, 10, 1, [150, 110, 70], 12, &mut seed); // Log Top
+                                                                    // Log Side
         for y in 0..16 {
             for x in 0..16 {
                 let is_bark = x % 4 == 0 || y % 6 == 0;
@@ -1020,7 +1256,11 @@ impl TextureAtlas {
         for y in 0..16 {
             for x in 0..16 {
                 let is_border = x == 0 || x == 15 || y == 0 || y == 15;
-                let c = if is_border { [90, 60, 30] } else { [180, 140, 90] };
+                let c = if is_border {
+                    [90, 60, 30]
+                } else {
+                    [180, 140, 90]
+                };
                 img.put_pixel(12 * 16 + x, 1 * 16 + y, Rgba([c[0], c[1], c[2], 255]));
             }
         }
@@ -1028,7 +1268,11 @@ impl TextureAtlas {
         for y in 0..16 {
             for x in 0..16 {
                 let is_tool = x > 3 && x < 12 && y > 3 && y < 12;
-                let c = if is_tool { [120, 80, 40] } else { [180, 140, 90] };
+                let c = if is_tool {
+                    [120, 80, 40]
+                } else {
+                    [180, 140, 90]
+                };
                 img.put_pixel(13 * 16 + x, 1 * 16 + y, Rgba([c[0], c[1], c[2], 255]));
             }
         }
@@ -1036,7 +1280,11 @@ impl TextureAtlas {
         for y in 0..16 {
             for x in 0..16 {
                 let is_mouth = y >= 9 && y <= 13 && x >= 3 && x <= 12;
-                let c = if is_mouth { [30, 30, 30] } else { [120, 120, 120] };
+                let c = if is_mouth {
+                    [30, 30, 30]
+                } else {
+                    [120, 120, 120]
+                };
                 img.put_pixel(14 * 16 + x, 1 * 16 + y, Rgba([c[0], c[1], c[2], 255]));
             }
         }
@@ -1045,7 +1293,13 @@ impl TextureAtlas {
             for x in 0..16 {
                 let is_latch = x >= 7 && x <= 8 && y >= 6 && y <= 8;
                 let is_border = x == 0 || x == 15 || y == 0 || y == 15 || y == 5;
-                let c = if is_latch { [220, 220, 220] } else if is_border { [70, 45, 20] } else { [140, 90, 45] };
+                let c = if is_latch {
+                    [220, 220, 220]
+                } else if is_border {
+                    [70, 45, 20]
+                } else {
+                    [140, 90, 45]
+                };
                 img.put_pixel(15 * 16 + x, 1 * 16 + y, Rgba([c[0], c[1], c[2], 255]));
             }
         }
@@ -1059,7 +1313,11 @@ impl TextureAtlas {
         for y in 0..16 {
             for x in 0..16 {
                 let is_white_band = y >= 6 && y <= 9;
-                let c = if is_white_band { [255, 255, 255] } else { [200, 50, 40] };
+                let c = if is_white_band {
+                    [255, 255, 255]
+                } else {
+                    [200, 50, 40]
+                };
                 img.put_pixel(2 * 16 + x, 2 * 16 + y, Rgba([c[0], c[1], c[2], 255]));
             }
         }
@@ -1067,7 +1325,11 @@ impl TextureAtlas {
         for y in 0..16 {
             for x in 0..16 {
                 let is_shelf = y == 0 || y == 5 || y == 10 || y == 15;
-                let c = if is_shelf { [90, 60, 30] } else { [160, 80, 60] };
+                let c = if is_shelf {
+                    [90, 60, 30]
+                } else {
+                    [160, 80, 60]
+                };
                 img.put_pixel(3 * 16 + x, 2 * 16 + y, Rgba([c[0], c[1], c[2], 255]));
             }
         }
@@ -1086,7 +1348,7 @@ impl TextureAtlas {
         draw_stick_icon(&mut img, 0, 3);
         draw_coal_icon(&mut img, 1, 3);
         draw_ingot_icon(&mut img, 2, 3, [200, 200, 200]); // Iron Ingot
-        draw_ingot_icon(&mut img, 3, 3, [240, 220, 70]);  // Gold Ingot
+        draw_ingot_icon(&mut img, 3, 3, [240, 220, 70]); // Gold Ingot
         draw_diamond_icon(&mut img, 4, 3);
         draw_redstone_icon(&mut img, 5, 3);
         draw_apple_icon(&mut img, 6, 3);
@@ -1104,7 +1366,7 @@ impl TextureAtlas {
         draw_sword_icon(&mut img, 0, 4, [160, 160, 160]); // Stone Sword (gray)
         draw_sword_icon(&mut img, 1, 4, [220, 220, 220]); // Iron Sword (silver)
         draw_sword_icon(&mut img, 2, 4, [100, 220, 240]); // Diamond Sword (cyan)
-        // Clear remaining slots in Row 4
+                                                          // Clear remaining slots in Row 4
         for tx in 3..16 {
             for y in 0..16 {
                 for x in 0..16 {
@@ -1117,7 +1379,7 @@ impl TextureAtlas {
         draw_pickaxe_icon(&mut img, 0, 5, [160, 160, 160]); // Stone
         draw_pickaxe_icon(&mut img, 1, 5, [220, 220, 220]); // Iron
         draw_pickaxe_icon(&mut img, 2, 5, [100, 220, 240]); // Diamond
-        // Clear remaining slots in Row 5
+                                                            // Clear remaining slots in Row 5
         for tx in 3..16 {
             for y in 0..16 {
                 for x in 0..16 {
@@ -1130,7 +1392,7 @@ impl TextureAtlas {
         draw_axe_icon(&mut img, 0, 6, [160, 160, 160]); // Stone
         draw_axe_icon(&mut img, 1, 6, [220, 220, 220]); // Iron
         draw_axe_icon(&mut img, 2, 6, [100, 220, 240]); // Diamond
-        // Clear remaining slots in Row 6
+                                                        // Clear remaining slots in Row 6
         for tx in 3..16 {
             for y in 0..16 {
                 for x in 0..16 {
@@ -1143,7 +1405,7 @@ impl TextureAtlas {
         draw_shovel_icon(&mut img, 0, 7, [160, 160, 160]); // Stone
         draw_shovel_icon(&mut img, 1, 7, [220, 220, 220]); // Iron
         draw_shovel_icon(&mut img, 2, 7, [100, 220, 240]); // Diamond
-        // Clear remaining slots in Row 7
+                                                           // Clear remaining slots in Row 7
         for tx in 3..16 {
             for y in 0..16 {
                 for x in 0..16 {
@@ -1288,7 +1550,11 @@ impl TextureAtlas {
                 for x in 0..16 {
                     let var = ((x as i16 * 13 + y as i16 * 7) % 12 - 6) as i16;
                     let v = (210i16 + var).clamp(0, 255) as u8;
-                    img.put_pixel(ox + x, oy + y, Rgba([v, v, (v as i16 - 15).max(0) as u8, 255]));
+                    img.put_pixel(
+                        ox + x,
+                        oy + y,
+                        Rgba([v, v, (v as i16 - 15).max(0) as u8, 255]),
+                    );
                 }
             }
         }
@@ -1299,22 +1565,22 @@ impl TextureAtlas {
             let oy = 9 * 16;
             // Creeper face pixel art grid
             let face = [
-                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-                [0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0],
-                [0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0],
-                [0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0],
-                [0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0],
-                [0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0],
-                [0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0],
-                [0,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0],
-                [0,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0],
-                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-                [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+                [0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+                [0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             ];
             for y in 0..16u32 {
                 for x in 0..16u32 {
@@ -1384,7 +1650,7 @@ impl TextureAtlas {
                     let is_eye = (y >= 6 && y <= 7) && (x == 3 || x == 12);
                     let is_snout = (y >= 9 && y <= 11) && (x >= 5 && x <= 10);
                     let is_nostril = is_snout && y == 10 && (x == 6 || x == 9);
-                    
+
                     let c0 = if is_nostril {
                         Rgba([180, 70, 110, 255])
                     } else if is_snout {
@@ -1414,7 +1680,7 @@ impl TextureAtlas {
                     let is_nose = y >= 9 && x >= 4 && x <= 11;
                     let is_eye = (y == 6 || y == 7) && (x == 3 || x == 12);
                     let is_spot = (x * y) % 7 < 3;
-                    
+
                     let c2 = if is_nose {
                         Rgba([230, 160, 160, 255])
                     } else if is_eye {
@@ -1426,7 +1692,11 @@ impl TextureAtlas {
                     };
                     img.put_pixel(ox2 + x, oy + y, c2);
 
-                    let c3 = if is_spot { Rgba([45, 45, 45, 255]) } else { Rgba([225, 225, 225, 255]) };
+                    let c3 = if is_spot {
+                        Rgba([45, 45, 45, 255])
+                    } else {
+                        Rgba([225, 225, 225, 255])
+                    };
                     img.put_pixel(ox3 + x, oy + y, c3);
                 }
             }
@@ -1442,12 +1712,20 @@ impl TextureAtlas {
                 for x in 0..16 {
                     // Sheep Head: tan skin
                     let is_eye = (y == 7) && (x == 4 || x == 11);
-                    let c4 = if is_eye { Rgba([20, 20, 20, 255]) } else { Rgba([235, 215, 190, 255]) };
+                    let c4 = if is_eye {
+                        Rgba([20, 20, 20, 255])
+                    } else {
+                        Rgba([235, 215, 190, 255])
+                    };
                     img.put_pixel(ox4 + x, oy + y, c4);
 
                     // Wool: textured white/grey
                     let var = ((x * 13 + y * 7) % 20) as u8;
-                    img.put_pixel(ox5 + x, oy + y, Rgba([235 + var, 235 + var, 235 + var, 255]));
+                    img.put_pixel(
+                        ox5 + x,
+                        oy + y,
+                        Rgba([235 + var, 235 + var, 235 + var, 255]),
+                    );
 
                     // Sheared skin: light pink skin with some sheep features
                     img.put_pixel(ox6 + x, oy + y, Rgba([245, 210, 200, 255]));
@@ -1466,7 +1744,7 @@ impl TextureAtlas {
                     let is_eye = y == 5 && (x == 5 || x == 10);
                     let is_beak = y >= 8 && y <= 9 && x >= 6 && x <= 9;
                     let is_wattle = y >= 10 && y <= 11 && x >= 7 && x <= 8; // red neck wattle
-                    
+
                     let c7 = if is_beak {
                         Rgba([255, 160, 0, 255])
                     } else if is_wattle {
@@ -1480,7 +1758,11 @@ impl TextureAtlas {
 
                     // Chicken body (fluffy white)
                     let var = ((x * 5 + y * 11) % 15) as u8;
-                    img.put_pixel(ox8 + x, oy + y, Rgba([240 + var, 240 + var, 240 + var, 255]));
+                    img.put_pixel(
+                        ox8 + x,
+                        oy + y,
+                        Rgba([240 + var, 240 + var, 240 + var, 255]),
+                    );
                 }
             }
         }
@@ -1489,16 +1771,16 @@ impl TextureAtlas {
         draw_shears_icon(&mut img, 0, 11);
         draw_bucket_icon(&mut img, 1, 11, None); // Empty bucket
         draw_bucket_icon(&mut img, 2, 11, Some([240, 240, 245, 255])); // Milk bucket (white liquid)
-        
+
         draw_meat_icon(&mut img, 3, 11, false, [220, 100, 100]); // Raw Porkchop
-        draw_meat_icon(&mut img, 4, 11, false, [200, 70, 70]);   // Raw Beef
+        draw_meat_icon(&mut img, 4, 11, false, [200, 70, 70]); // Raw Beef
         draw_meat_icon(&mut img, 5, 11, false, [220, 120, 120]); // Raw Mutton
         draw_meat_icon(&mut img, 6, 11, false, [240, 200, 180]); // Raw Chicken
-        
-        draw_meat_icon(&mut img, 7, 11, true, [140, 60, 40]);    // Cooked Porkchop
-        draw_meat_icon(&mut img, 8, 11, true, [120, 50, 30]);    // Cooked Beef
-        draw_meat_icon(&mut img, 9, 11, true, [140, 70, 50]);    // Cooked Mutton
-        draw_meat_icon(&mut img, 10, 11, true, [180, 110, 70]);  // Cooked Chicken
+
+        draw_meat_icon(&mut img, 7, 11, true, [140, 60, 40]); // Cooked Porkchop
+        draw_meat_icon(&mut img, 8, 11, true, [120, 50, 30]); // Cooked Beef
+        draw_meat_icon(&mut img, 9, 11, true, [140, 70, 50]); // Cooked Mutton
+        draw_meat_icon(&mut img, 10, 11, true, [180, 110, 70]); // Cooked Chicken
 
         // Leather icon (Col 11, Row 11)
         for y in 0..16 {
@@ -1528,6 +1810,28 @@ impl TextureAtlas {
                 }
             }
         }
+
+        // Draw Row 12 Blocks & Items
+        // Birch Log Top/Bottom & Side
+        draw_noise(&mut img, 0, 12, [215, 200, 175], 5, &mut seed);
+        draw_birch_bark(&mut img, 1, 12, &mut seed);
+        draw_noise(&mut img, 2, 12, [225, 210, 180], 5, &mut seed); // Birch Planks
+        draw_leaves(&mut img, 3, 12, &mut seed); // Birch Leaves (green)
+
+        // Spruce Log Top/Bottom & Side
+        draw_noise(&mut img, 4, 12, [100, 75, 50], 8, &mut seed);
+        draw_spruce_bark(&mut img, 5, 12, &mut seed);
+        draw_noise(&mut img, 6, 12, [105, 80, 55], 5, &mut seed); // Spruce Planks
+        draw_leaves(&mut img, 7, 12, &mut seed); // Spruce Leaves (dark pine green)
+
+        // Decorative Plants & Cacti
+        draw_tall_grass(&mut img, 8, 12);
+        draw_flower(&mut img, 9, 12, [240, 220, 40]); // Dandelion (Yellow)
+        draw_flower(&mut img, 10, 12, [230, 30, 30]); // Poppy (Red)
+        draw_cactus(&mut img, 11, 12);
+        draw_sugar_cane(&mut img, 12, 12);
+        draw_pumpkin(&mut img, 13, 12);
+        draw_melon(&mut img, 14, 12);
 
         // Save to assets folder
         let _ = std::fs::create_dir_all("assets");
@@ -1568,7 +1872,7 @@ impl TextureAtlas {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,

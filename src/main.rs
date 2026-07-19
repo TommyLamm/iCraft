@@ -1,22 +1,21 @@
 mod app;
-mod state;
+pub mod audio;
 mod camera;
-mod world;
-mod physics;
-mod interaction;
-mod texture;
 mod chunk_manager;
-mod lighting;
-mod inventory;
 mod crafting;
-mod player;
 mod entity;
+mod fluid;
+mod interaction;
+mod inventory;
+mod lighting;
 mod mob;
 mod mob_renderer;
 mod passive_mob;
-pub mod audio;
-mod fluid;
-
+mod physics;
+mod player;
+mod state;
+mod texture;
+mod world;
 
 use app::App;
 use winit::event_loop::EventLoop;
@@ -27,4 +26,3 @@ fn main() {
     let _ = event_loop.run_app(&mut app);
     std::process::exit(0);
 }
-

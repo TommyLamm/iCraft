@@ -1,6 +1,6 @@
 use crate::chunk_manager::ChunkManager;
-use crate::world::{CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH, RenderType};
-use std::collections::{VecDeque, HashSet};
+use crate::world::{RenderType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use std::collections::{HashSet, VecDeque};
 
 pub struct LightNode {
     pub x: i32,
@@ -21,9 +21,12 @@ pub fn propagate_sky_light(
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
     let dirs = [
-        (1, 0, 0), (-1, 0, 0),
-        (0, 1, 0), (0, -1, 0),
-        (0, 0, 1), (0, 0, -1),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
     ];
 
     while let Some(node) = queue.pop_front() {
@@ -51,7 +54,7 @@ pub fn propagate_sky_light(
 
             if neighbor_light < expected_light {
                 chunk_manager.set_sky_light(nx, ny, nz, expected_light);
-                
+
                 let cx = nx.div_euclid(CHUNK_WIDTH as i32);
                 let cz = nz.div_euclid(CHUNK_DEPTH as i32);
                 dirty_chunks.insert((cx, cz));
@@ -59,12 +62,24 @@ pub fn propagate_sky_light(
                 // Mark neighbors on boundaries dirty
                 let lx = nx.rem_euclid(CHUNK_WIDTH as i32);
                 let lz = nz.rem_euclid(CHUNK_DEPTH as i32);
-                if lx == 0 { dirty_chunks.insert((cx - 1, cz)); }
-                if lx == 15 { dirty_chunks.insert((cx + 1, cz)); }
-                if lz == 0 { dirty_chunks.insert((cx, cz - 1)); }
-                if lz == 15 { dirty_chunks.insert((cx, cz + 1)); }
+                if lx == 0 {
+                    dirty_chunks.insert((cx - 1, cz));
+                }
+                if lx == 15 {
+                    dirty_chunks.insert((cx + 1, cz));
+                }
+                if lz == 0 {
+                    dirty_chunks.insert((cx, cz - 1));
+                }
+                if lz == 15 {
+                    dirty_chunks.insert((cx, cz + 1));
+                }
 
-                queue.push_back(LightNode { x: nx, y: ny, z: nz });
+                queue.push_back(LightNode {
+                    x: nx,
+                    y: ny,
+                    z: nz,
+                });
             }
         }
     }
@@ -77,9 +92,12 @@ pub fn remove_sky_light(
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
     let dirs = [
-        (1, 0, 0), (-1, 0, 0),
-        (0, 1, 0), (0, -1, 0),
-        (0, 0, 1), (0, 0, -1),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
     ];
 
     while let Some(node) = removal_queue.pop_front() {
@@ -95,20 +113,37 @@ pub fn remove_sky_light(
             let neighbor_light = chunk_manager.get_sky_light(nx, ny, nz);
             if neighbor_light != 0 && neighbor_light < node.val {
                 chunk_manager.set_sky_light(nx, ny, nz, 0);
-                
+
                 let cx = nx.div_euclid(CHUNK_WIDTH as i32);
                 let cz = nz.div_euclid(CHUNK_DEPTH as i32);
                 dirty_chunks.insert((cx, cz));
                 let lx = nx.rem_euclid(CHUNK_WIDTH as i32);
                 let lz = nz.rem_euclid(CHUNK_DEPTH as i32);
-                if lx == 0 { dirty_chunks.insert((cx - 1, cz)); }
-                if lx == 15 { dirty_chunks.insert((cx + 1, cz)); }
-                if lz == 0 { dirty_chunks.insert((cx, cz - 1)); }
-                if lz == 15 { dirty_chunks.insert((cx, cz + 1)); }
+                if lx == 0 {
+                    dirty_chunks.insert((cx - 1, cz));
+                }
+                if lx == 15 {
+                    dirty_chunks.insert((cx + 1, cz));
+                }
+                if lz == 0 {
+                    dirty_chunks.insert((cx, cz - 1));
+                }
+                if lz == 15 {
+                    dirty_chunks.insert((cx, cz + 1));
+                }
 
-                removal_queue.push_back(LightRemovalNode { x: nx, y: ny, z: nz, val: neighbor_light });
+                removal_queue.push_back(LightRemovalNode {
+                    x: nx,
+                    y: ny,
+                    z: nz,
+                    val: neighbor_light,
+                });
             } else if neighbor_light >= node.val {
-                propagate_queue.push_back(LightNode { x: nx, y: ny, z: nz });
+                propagate_queue.push_back(LightNode {
+                    x: nx,
+                    y: ny,
+                    z: nz,
+                });
             }
         }
     }
@@ -120,9 +155,12 @@ pub fn propagate_block_light(
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
     let dirs = [
-        (1, 0, 0), (-1, 0, 0),
-        (0, 1, 0), (0, -1, 0),
-        (0, 0, 1), (0, 0, -1),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
     ];
 
     while let Some(node) = queue.pop_front() {
@@ -150,18 +188,30 @@ pub fn propagate_block_light(
 
             if neighbor_light < expected_light {
                 chunk_manager.set_block_light(nx, ny, nz, expected_light);
-                
+
                 let cx = nx.div_euclid(CHUNK_WIDTH as i32);
                 let cz = nz.div_euclid(CHUNK_DEPTH as i32);
                 dirty_chunks.insert((cx, cz));
                 let lx = nx.rem_euclid(CHUNK_WIDTH as i32);
                 let lz = nz.rem_euclid(CHUNK_DEPTH as i32);
-                if lx == 0 { dirty_chunks.insert((cx - 1, cz)); }
-                if lx == 15 { dirty_chunks.insert((cx + 1, cz)); }
-                if lz == 0 { dirty_chunks.insert((cx, cz - 1)); }
-                if lz == 15 { dirty_chunks.insert((cx, cz + 1)); }
+                if lx == 0 {
+                    dirty_chunks.insert((cx - 1, cz));
+                }
+                if lx == 15 {
+                    dirty_chunks.insert((cx + 1, cz));
+                }
+                if lz == 0 {
+                    dirty_chunks.insert((cx, cz - 1));
+                }
+                if lz == 15 {
+                    dirty_chunks.insert((cx, cz + 1));
+                }
 
-                queue.push_back(LightNode { x: nx, y: ny, z: nz });
+                queue.push_back(LightNode {
+                    x: nx,
+                    y: ny,
+                    z: nz,
+                });
             }
         }
     }
@@ -174,9 +224,12 @@ pub fn remove_block_light(
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
     let dirs = [
-        (1, 0, 0), (-1, 0, 0),
-        (0, 1, 0), (0, -1, 0),
-        (0, 0, 1), (0, 0, -1),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
     ];
 
     while let Some(node) = removal_queue.pop_front() {
@@ -192,20 +245,37 @@ pub fn remove_block_light(
             let neighbor_light = chunk_manager.get_block_light(nx, ny, nz);
             if neighbor_light != 0 && neighbor_light < node.val {
                 chunk_manager.set_block_light(nx, ny, nz, 0);
-                
+
                 let cx = nx.div_euclid(CHUNK_WIDTH as i32);
                 let cz = nz.div_euclid(CHUNK_DEPTH as i32);
                 dirty_chunks.insert((cx, cz));
                 let lx = nx.rem_euclid(CHUNK_WIDTH as i32);
                 let lz = nz.rem_euclid(CHUNK_DEPTH as i32);
-                if lx == 0 { dirty_chunks.insert((cx - 1, cz)); }
-                if lx == 15 { dirty_chunks.insert((cx + 1, cz)); }
-                if lz == 0 { dirty_chunks.insert((cx, cz - 1)); }
-                if lz == 15 { dirty_chunks.insert((cx, cz + 1)); }
+                if lx == 0 {
+                    dirty_chunks.insert((cx - 1, cz));
+                }
+                if lx == 15 {
+                    dirty_chunks.insert((cx + 1, cz));
+                }
+                if lz == 0 {
+                    dirty_chunks.insert((cx, cz - 1));
+                }
+                if lz == 15 {
+                    dirty_chunks.insert((cx, cz + 1));
+                }
 
-                removal_queue.push_back(LightRemovalNode { x: nx, y: ny, z: nz, val: neighbor_light });
+                removal_queue.push_back(LightRemovalNode {
+                    x: nx,
+                    y: ny,
+                    z: nz,
+                    val: neighbor_light,
+                });
             } else if neighbor_light >= node.val {
-                propagate_queue.push_back(LightNode { x: nx, y: ny, z: nz });
+                propagate_queue.push_back(LightNode {
+                    x: nx,
+                    y: ny,
+                    z: nz,
+                });
             }
         }
     }
@@ -223,7 +293,11 @@ pub fn update_sky_light_after_placed(
 
     let block = chunk_manager.get_block(wx, wy, wz);
     if block.properties().render_type != RenderType::Opaque {
-        propagate_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+        propagate_queue.push_back(LightNode {
+            x: wx,
+            y: wy,
+            z: wz,
+        });
         propagate_sky_light(chunk_manager, &mut propagate_queue, dirty_chunks);
         return;
     }
@@ -231,7 +305,12 @@ pub fn update_sky_light_after_placed(
     let old_val = chunk_manager.get_sky_light(wx, wy, wz);
     if old_val > 0 {
         chunk_manager.set_sky_light(wx, wy, wz, 0);
-        removal_queue.push_back(LightRemovalNode { x: wx, y: wy, z: wz, val: old_val });
+        removal_queue.push_back(LightRemovalNode {
+            x: wx,
+            y: wy,
+            z: wz,
+            val: old_val,
+        });
 
         if old_val == 15 {
             for y in (0..wy).rev() {
@@ -240,11 +319,21 @@ pub fn update_sky_light_after_placed(
                     break;
                 }
                 chunk_manager.set_sky_light(wx, y, wz, 0);
-                removal_queue.push_back(LightRemovalNode { x: wx, y: y, z: wz, val });
+                removal_queue.push_back(LightRemovalNode {
+                    x: wx,
+                    y: y,
+                    z: wz,
+                    val,
+                });
             }
         }
 
-        remove_sky_light(chunk_manager, &mut removal_queue, &mut propagate_queue, dirty_chunks);
+        remove_sky_light(
+            chunk_manager,
+            &mut removal_queue,
+            &mut propagate_queue,
+            dirty_chunks,
+        );
         propagate_sky_light(chunk_manager, &mut propagate_queue, dirty_chunks);
     }
 }
@@ -271,7 +360,7 @@ pub fn update_sky_light_after_removed(
                 break;
             }
             chunk_manager.set_sky_light(wx, y, wz, 15);
-            
+
             let cx = wx.div_euclid(CHUNK_WIDTH as i32);
             let cz = wz.div_euclid(CHUNK_DEPTH as i32);
             dirty_chunks.insert((cx, cz));
@@ -282,9 +371,12 @@ pub fn update_sky_light_after_removed(
         chunk_manager.set_sky_light(wx, wy, wz, 0);
         let mut max_neighbor = 0;
         let dirs = [
-            (1, 0, 0), (-1, 0, 0),
-            (0, 1, 0), (0, -1, 0),
-            (0, 0, 1), (0, 0, -1),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
         ];
         for &(dx, dy, dz) in &dirs {
             let ny = wy + dy;
@@ -297,7 +389,11 @@ pub fn update_sky_light_after_removed(
         }
         if max_neighbor > 1 {
             chunk_manager.set_sky_light(wx, wy, wz, max_neighbor - 1);
-            propagate_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+            propagate_queue.push_back(LightNode {
+                x: wx,
+                y: wy,
+                z: wz,
+            });
         }
     }
 
@@ -316,7 +412,11 @@ pub fn update_block_light_after_placed(
 
     if emission > 0 {
         chunk_manager.set_block_light(wx, wy, wz, emission);
-        propagate_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+        propagate_queue.push_back(LightNode {
+            x: wx,
+            y: wy,
+            z: wz,
+        });
         propagate_block_light(chunk_manager, &mut propagate_queue, dirty_chunks);
     } else {
         let block = chunk_manager.get_block(wx, wy, wz);
@@ -325,8 +425,18 @@ pub fn update_block_light_after_placed(
             if old_val > 0 {
                 chunk_manager.set_block_light(wx, wy, wz, 0);
                 let mut removal_queue = VecDeque::new();
-                removal_queue.push_back(LightRemovalNode { x: wx, y: wy, z: wz, val: old_val });
-                remove_block_light(chunk_manager, &mut removal_queue, &mut propagate_queue, dirty_chunks);
+                removal_queue.push_back(LightRemovalNode {
+                    x: wx,
+                    y: wy,
+                    z: wz,
+                    val: old_val,
+                });
+                remove_block_light(
+                    chunk_manager,
+                    &mut removal_queue,
+                    &mut propagate_queue,
+                    dirty_chunks,
+                );
                 propagate_block_light(chunk_manager, &mut propagate_queue, dirty_chunks);
             }
         }
@@ -346,16 +456,29 @@ pub fn update_block_light_after_removed(
     if old_emission > 0 {
         chunk_manager.set_block_light(wx, wy, wz, 0);
         let mut removal_queue = VecDeque::new();
-        removal_queue.push_back(LightRemovalNode { x: wx, y: wy, z: wz, val: old_emission });
-        remove_block_light(chunk_manager, &mut removal_queue, &mut propagate_queue, dirty_chunks);
+        removal_queue.push_back(LightRemovalNode {
+            x: wx,
+            y: wy,
+            z: wz,
+            val: old_emission,
+        });
+        remove_block_light(
+            chunk_manager,
+            &mut removal_queue,
+            &mut propagate_queue,
+            dirty_chunks,
+        );
         propagate_block_light(chunk_manager, &mut propagate_queue, dirty_chunks);
     } else {
         chunk_manager.set_block_light(wx, wy, wz, 0);
         let mut max_neighbor = 0;
         let dirs = [
-            (1, 0, 0), (-1, 0, 0),
-            (0, 1, 0), (0, -1, 0),
-            (0, 0, 1), (0, 0, -1),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
         ];
         for &(dx, dy, dz) in &dirs {
             let ny = wy + dy;
@@ -368,7 +491,11 @@ pub fn update_block_light_after_removed(
         }
         if max_neighbor > 1 {
             chunk_manager.set_block_light(wx, wy, wz, max_neighbor - 1);
-            propagate_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+            propagate_queue.push_back(LightNode {
+                x: wx,
+                y: wy,
+                z: wz,
+            });
         }
         propagate_block_light(chunk_manager, &mut propagate_queue, dirty_chunks);
     }
@@ -387,9 +514,12 @@ pub fn propagate_chunk_lighting(
     let start_z = cz * CHUNK_DEPTH as i32;
 
     let dirs = [
-        (1, 0, 0), (-1, 0, 0),
-        (0, 1, 0), (0, -1, 0),
-        (0, 0, 1), (0, 0, -1),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
     ];
 
     if let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) {
@@ -397,10 +527,10 @@ pub fn propagate_chunk_lighting(
             for z in 0..CHUNK_DEPTH {
                 let wx = start_x + x as i32;
                 let wz = start_z + z as i32;
-                
+
                 for y in 0..CHUNK_HEIGHT {
                     let wy = y as i32;
-                    
+
                     // 1. Seed sky light only where a loaded, transparent
                     // neighbor actually needs light. Treating every chunk
                     // boundary as dirty creates thousands of useless nodes.
@@ -422,15 +552,20 @@ pub fn propagate_chunk_lighting(
                                 && local_nz < CHUNK_DEPTH as i32
                             {
                                 (
-                                    chunk.blocks[local_nx as usize][local_ny as usize][local_nz as usize],
-                                    chunk.sky_light[local_nx as usize][local_ny as usize][local_nz as usize],
+                                    chunk.blocks[local_nx as usize][local_ny as usize]
+                                        [local_nz as usize],
+                                    chunk.sky_light[local_nx as usize][local_ny as usize]
+                                        [local_nz as usize],
                                 )
                             } else {
                                 let nx = wx + dx;
                                 let nz = wz + dz;
                                 let neighbor_cx = nx.div_euclid(CHUNK_WIDTH as i32);
                                 let neighbor_cz = nz.div_euclid(CHUNK_DEPTH as i32);
-                                if !chunk_manager.chunks.contains_key(&(neighbor_cx, neighbor_cz)) {
+                                if !chunk_manager
+                                    .chunks
+                                    .contains_key(&(neighbor_cx, neighbor_cz))
+                                {
                                     continue;
                                 }
                                 (
@@ -446,9 +581,13 @@ pub fn propagate_chunk_lighting(
                                 break;
                             }
                         }
-                        
+
                         if has_darker_neighbor {
-                            sky_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+                            sky_queue.push_back(LightNode {
+                                x: wx,
+                                y: wy,
+                                z: wz,
+                            });
                         }
                     }
 
@@ -471,15 +610,20 @@ pub fn propagate_chunk_lighting(
                                 && local_nz < CHUNK_DEPTH as i32
                             {
                                 (
-                                    chunk.blocks[local_nx as usize][local_ny as usize][local_nz as usize],
-                                    chunk.block_light[local_nx as usize][local_ny as usize][local_nz as usize],
+                                    chunk.blocks[local_nx as usize][local_ny as usize]
+                                        [local_nz as usize],
+                                    chunk.block_light[local_nx as usize][local_ny as usize]
+                                        [local_nz as usize],
                                 )
                             } else {
                                 let nx = wx + dx;
                                 let nz = wz + dz;
                                 let neighbor_cx = nx.div_euclid(CHUNK_WIDTH as i32);
                                 let neighbor_cz = nz.div_euclid(CHUNK_DEPTH as i32);
-                                if !chunk_manager.chunks.contains_key(&(neighbor_cx, neighbor_cz)) {
+                                if !chunk_manager
+                                    .chunks
+                                    .contains_key(&(neighbor_cx, neighbor_cz))
+                                {
                                     continue;
                                 }
                                 (
@@ -497,7 +641,11 @@ pub fn propagate_chunk_lighting(
                         }
 
                         if has_darker_neighbor {
-                            block_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+                            block_queue.push_back(LightNode {
+                                x: wx,
+                                y: wy,
+                                z: wz,
+                            });
                         }
                     }
                 }

@@ -29,7 +29,7 @@ impl ApplicationHandler for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("Minecraft wgpu Clone")
-                        .with_inner_size(window_size)
+                        .with_inner_size(window_size),
                 )
                 .unwrap();
 
@@ -40,9 +40,10 @@ impl ApplicationHandler for App {
                 let y = (monitor_size.height as i32 - window_size.height as i32) / 2;
                 window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
             }
-            
+
             // Grab and hide the cursor for first-person controls
-            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked)
+            let _ = window
+                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
             window.set_cursor_visible(false);
 
@@ -73,7 +74,12 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -133,55 +139,110 @@ impl ApplicationHandler for App {
                         _ => {
                             if !state.is_paused && !state.inventory.is_open {
                                 match physical_key {
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW) => {
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::KeyW,
+                                    ) => {
                                         state.keys.w = pressed;
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyS) => {
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::KeyS,
+                                    ) => {
                                         state.keys.s = pressed;
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA) => {
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::KeyA,
+                                    ) => {
                                         state.keys.a = pressed;
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD) => {
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::KeyD,
+                                    ) => {
                                         state.keys.d = pressed;
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space) => {
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Space,
+                                    ) => {
                                         state.keys.space = pressed;
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
-                                        if pressed { state.inventory.selected = 0; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit1,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 0;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
-                                        if pressed { state.inventory.selected = 1; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit2,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 1;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit3) => {
-                                        if pressed { state.inventory.selected = 2; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit3,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 2;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit4) => {
-                                        if pressed { state.inventory.selected = 3; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit4,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 3;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit5) => {
-                                        if pressed { state.inventory.selected = 4; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit5,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 4;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit6) => {
-                                        if pressed { state.inventory.selected = 5; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit6,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 5;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit7) => {
-                                        if pressed { state.inventory.selected = 6; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit7,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 6;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit8) => {
-                                        if pressed { state.inventory.selected = 7; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit8,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 7;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit9) => {
-                                        if pressed { state.inventory.selected = 8; }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::Digit9,
+                                    ) => {
+                                        if pressed {
+                                            state.inventory.selected = 8;
+                                        }
                                     }
-                                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyG) => {
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::KeyG,
+                                    ) => {
                                         if pressed {
                                             state.game_mode = match state.game_mode {
-                                                crate::inventory::GameMode::Creative => crate::inventory::GameMode::Survival,
-                                                crate::inventory::GameMode::Survival => crate::inventory::GameMode::Creative,
+                                                crate::inventory::GameMode::Creative => {
+                                                    crate::inventory::GameMode::Survival
+                                                }
+                                                crate::inventory::GameMode::Survival => {
+                                                    crate::inventory::GameMode::Creative
+                                                }
                                             };
-                                            println!("[Debug] Game mode changed to: {:?}", state.game_mode);
+                                            println!(
+                                                "[Debug] Game mode changed to: {:?}",
+                                                state.game_mode
+                                            );
                                         }
                                     }
                                     _ => {}
@@ -207,7 +268,8 @@ impl ApplicationHandler for App {
                             state.handle_menu_click(event_loop);
                         }
                     } else if state.inventory.is_open {
-                        if pressed && (button == MouseButton::Left || button == MouseButton::Right) {
+                        if pressed && (button == MouseButton::Left || button == MouseButton::Right)
+                        {
                             state.handle_inventory_click(button == MouseButton::Left);
                         }
                     } else {
@@ -236,14 +298,27 @@ impl ApplicationHandler for App {
                     if !state.is_paused && !state.inventory.is_open {
                         let scroll_dir = match delta {
                             winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                                if y > 0.0 { -1 } else if y < 0.0 { 1 } else { 0 }
+                                if y > 0.0 {
+                                    -1
+                                } else if y < 0.0 {
+                                    1
+                                } else {
+                                    0
+                                }
                             }
                             winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                                if pos.y > 0.0 { -1 } else if pos.y < 0.0 { 1 } else { 0 }
+                                if pos.y > 0.0 {
+                                    -1
+                                } else if pos.y < 0.0 {
+                                    1
+                                } else {
+                                    0
+                                }
                             }
                         };
                         if scroll_dir != 0 {
-                            let new_sel = (state.inventory.selected as i32 + scroll_dir).rem_euclid(9);
+                            let new_sel =
+                                (state.inventory.selected as i32 + scroll_dir).rem_euclid(9);
                             state.inventory.selected = new_sel as usize;
                         }
                     }

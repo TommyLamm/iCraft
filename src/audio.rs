@@ -1,9 +1,9 @@
+use glam::Vec3;
+use rodio::{OutputStream, OutputStreamHandle, Sink, SpatialSink};
 use std::collections::HashMap;
 use std::fs::{create_dir_all, File};
 use std::io::{Cursor, Write};
 use std::path::Path;
-use rodio::{OutputStream, OutputStreamHandle, Sink, SpatialSink};
-use glam::Vec3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoundMaterial {
@@ -101,39 +101,49 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
     match sound_id {
         SoundId::UiClick => {
             let len = (0.05 * sample_rate as f32) as usize;
-            (0..len).map(|i| {
-                let t = i as f32 / sample_rate as f32;
-                let env = 1.0 - (t / 0.05);
-                (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * env * 0.5
-            }).collect()
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = 1.0 - (t / 0.05);
+                    (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * env * 0.5
+                })
+                .collect()
         }
         SoundId::PlayerHurt => {
             let len = (0.15 * sample_rate as f32) as usize;
-            (0..len).map(|i| {
-                let t = i as f32 / sample_rate as f32;
-                let env = (1.0 - (t / 0.15)).powi(2);
-                let freq = 180.0 - (t / 0.15) * 100.0;
-                let tri = 2.0 * ((t * freq).fract() - 0.5).abs() - 0.5;
-                tri * env * 0.8
-            }).collect()
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - (t / 0.15)).powi(2);
+                    let freq = 180.0 - (t / 0.15) * 100.0;
+                    let tri = 2.0 * ((t * freq).fract() - 0.5).abs() - 0.5;
+                    tri * env * 0.8
+                })
+                .collect()
         }
         SoundId::PlayerDeath => {
             let len = (0.4 * sample_rate as f32) as usize;
-            (0..len).map(|i| {
-                let t = i as f32 / sample_rate as f32;
-                let env = (1.0 - (t / 0.4)).powi(2);
-                let freq = 120.0 - (t / 0.4) * 80.0;
-                let tri = 2.0 * ((t * freq).fract() - 0.5).abs() - 0.5;
-                tri * env * 0.8
-            }).collect()
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - (t / 0.4)).powi(2);
+                    let freq = 120.0 - (t / 0.4) * 80.0;
+                    let tri = 2.0 * ((t * freq).fract() - 0.5).abs() - 0.5;
+                    tri * env * 0.8
+                })
+                .collect()
         }
         SoundId::ArrowShoot => {
             let noise = synth_noise(0.12, sample_rate, seed);
-            noise.into_iter().enumerate().map(|(i, val)| {
-                let t = i as f32 / sample_rate as f32;
-                let env = (1.0 - (t / 0.12)).powi(3);
-                val * env * 0.3
-            }).collect()
+            noise
+                .into_iter()
+                .enumerate()
+                .map(|(i, val)| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - (t / 0.12)).powi(3);
+                    val * env * 0.3
+                })
+                .collect()
         }
         SoundId::Explosion => {
             let len = (1.5 * sample_rate as f32) as usize;
@@ -161,13 +171,20 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
         }
         SoundId::Jump => {
             let noise = synth_noise(0.10, sample_rate, seed);
-            noise.into_iter().enumerate().map(|(i, val)| {
-                let t = i as f32 / sample_rate as f32;
-                let env = (1.0 - (t / 0.10)).powi(2);
-                val * env * 0.15
-            }).collect()
+            noise
+                .into_iter()
+                .enumerate()
+                .map(|(i, val)| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - (t / 0.10)).powi(2);
+                    val * env * 0.15
+                })
+                .collect()
         }
-        SoundId::Footstep(mat) | SoundId::BlockBreak(mat) | SoundId::BlockPlace(mat) | SoundId::Land(mat) => {
+        SoundId::Footstep(mat)
+        | SoundId::BlockBreak(mat)
+        | SoundId::BlockPlace(mat)
+        | SoundId::Land(mat) => {
             let dur = match sound_id {
                 SoundId::BlockBreak(_) => 0.22,
                 SoundId::BlockPlace(_) => 0.12,
@@ -211,7 +228,10 @@ impl AudioManager {
         let (_stream, stream_handle) = match OutputStream::try_default() {
             Ok((s, h)) => (Some(s), Some(h)),
             Err(e) => {
-                eprintln!("[Audio] Warning: Failed to open default audio output device: {:?}", e);
+                eprintln!(
+                    "[Audio] Warning: Failed to open default audio output device: {:?}",
+                    e
+                );
                 (None, None)
             }
         };
@@ -326,7 +346,13 @@ impl AudioManager {
         }
     }
 
-    pub fn play_sound_3d(&self, sound_id: SoundId, pos: Vec3, listener_pos: Vec3, listener_right: Vec3) {
+    pub fn play_sound_3d(
+        &self,
+        sound_id: SoundId,
+        pos: Vec3,
+        listener_pos: Vec3,
+        listener_right: Vec3,
+    ) {
         let handle = match &self.stream_handle {
             Some(h) => h,
             None => return,
@@ -361,7 +387,13 @@ impl AudioManager {
         }
     }
 
-    pub fn update_looping_sound_position(&self, _entity_id: u64, _pos: Vec3, _listener_pos: Vec3, _listener_right: Vec3) {
+    pub fn update_looping_sound_position(
+        &self,
+        _entity_id: u64,
+        _pos: Vec3,
+        _listener_pos: Vec3,
+        _listener_right: Vec3,
+    ) {
     }
 
     pub fn stop_looping_sound(&mut self, entity_id: u64) {

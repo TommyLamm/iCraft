@@ -1,15 +1,15 @@
-use std::sync::Arc;
-use winit::window::Window;
 use crate::camera::{Camera, CameraUniform};
-use crate::world::{Chunk, BlockType};
-use crate::inventory::{Inventory, GameMode, ItemStack, Item, ToolType};
-use crate::crafting::RecipeManager;
 use crate::chunk_manager::ChunkManager;
-use crate::physics::PlayerPhysics;
+use crate::crafting::RecipeManager;
 use crate::interaction::raycast;
-use crate::player::{PlayerState, DamageSource};
+use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
+use crate::physics::{PlayerPhysics, AABB};
+use crate::player::{DamageSource, PlayerState};
+use crate::world::{BlockType, Chunk};
 use glam::Vec3;
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
+use winit::window::Window;
 
 pub struct ChunkMesh {
     pub opaque_vertex_buffer: wgpu::Buffer,
@@ -46,7 +46,8 @@ impl Vertex {
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>()) as wgpu::BufferAddress,
+                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>())
+                        as wgpu::BufferAddress,
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32,
                 },
@@ -108,7 +109,8 @@ impl TexturedUiVertex {
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>()) as wgpu::BufferAddress,
+                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>())
+                        as wgpu::BufferAddress,
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x4,
                 },
@@ -185,6 +187,7 @@ pub struct State {
     pub water_tick_timer: f32,
     pub lava_tick_timer: f32,
     pub lava_damage_timer: f32,
+    pub cactus_damage_timer: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,7 +200,10 @@ pub enum SlotType {
 }
 
 impl State {
-    fn create_depth_texture(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
+    fn create_depth_texture(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> wgpu::TextureView {
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Texture"),
             size: wgpu::Extent3d {
@@ -289,7 +295,14 @@ impl State {
         let world_time = crate::camera::WorldTime::new();
         let show_debug = false;
         let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera, config.width as f32 / config.height as f32, settings.render_distance as u32, &world_time, 0.0, false);
+        camera_uniform.update_view_proj(
+            &camera,
+            config.width as f32 / config.height as f32,
+            settings.render_distance as u32,
+            &world_time,
+            0.0,
+            false,
+        );
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -299,37 +312,38 @@ impl State {
 
         let texture_atlas = crate::texture::TextureAtlas::new_procedural(&device, &queue);
 
-        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-            label: Some("camera_bind_group_layout"),
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("camera_bind_group_layout"),
+            });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
@@ -352,14 +366,17 @@ impl State {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shader.wgsl"))),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shader.wgsl"
+            ))),
         });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&camera_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -484,11 +501,12 @@ impl State {
         });
 
         // Initialize Crosshair Pipeline
-        let crosshair_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Crosshair Pipeline Layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
+        let crosshair_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Crosshair Pipeline Layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
 
         let crosshair_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Crosshair Render Pipeline"),
@@ -531,10 +549,26 @@ impl State {
         let aspect = size.width as f32 / size.height as f32;
         let crosshair_size = 0.02;
         let crosshair_vertices = [
-            Vertex { position: [-crosshair_size, 0.0, 0.0], tex_coords: [0.0, 0.0], light_level: 1.0 },
-            Vertex { position: [crosshair_size, 0.0, 0.0], tex_coords: [0.0, 0.0], light_level: 1.0 },
-            Vertex { position: [0.0, -crosshair_size * aspect, 0.0], tex_coords: [0.0, 0.0], light_level: 1.0 },
-            Vertex { position: [0.0, crosshair_size * aspect, 0.0], tex_coords: [0.0, 0.0], light_level: 1.0 },
+            Vertex {
+                position: [-crosshair_size, 0.0, 0.0],
+                tex_coords: [0.0, 0.0],
+                light_level: 1.0,
+            },
+            Vertex {
+                position: [crosshair_size, 0.0, 0.0],
+                tex_coords: [0.0, 0.0],
+                light_level: 1.0,
+            },
+            Vertex {
+                position: [0.0, -crosshair_size * aspect, 0.0],
+                tex_coords: [0.0, 0.0],
+                light_level: 1.0,
+            },
+            Vertex {
+                position: [0.0, crosshair_size * aspect, 0.0],
+                tex_coords: [0.0, 0.0],
+                light_level: 1.0,
+            },
         ];
 
         let crosshair_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -592,36 +626,43 @@ impl State {
                     }
                 });
 
-                let opaque_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Chunk Opaque Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&o_verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                let opaque_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Chunk Opaque Index Buffer"),
-                    contents: bytemuck::cast_slice(&o_inds),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-                let transparent_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Chunk Translucent Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&t_verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                let transparent_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Chunk Translucent Index Buffer"),
-                    contents: bytemuck::cast_slice(&t_inds),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
+                let opaque_vertex_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Opaque Vertex Buffer"),
+                        contents: bytemuck::cast_slice(&o_verts),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                let opaque_index_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Opaque Index Buffer"),
+                        contents: bytemuck::cast_slice(&o_inds),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+                let transparent_vertex_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Translucent Vertex Buffer"),
+                        contents: bytemuck::cast_slice(&t_verts),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                let transparent_index_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Translucent Index Buffer"),
+                        contents: bytemuck::cast_slice(&t_inds),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
 
-                chunk_meshes.insert((cx, cz), ChunkMesh {
-                    opaque_vertex_buffer,
-                    opaque_index_buffer,
-                    opaque_num_indices: o_inds.len() as u32,
-                    transparent_vertex_buffer,
-                    transparent_index_buffer,
-                    transparent_num_indices: t_inds.len() as u32,
-                    dirty: false,
-                });
+                chunk_meshes.insert(
+                    (cx, cz),
+                    ChunkMesh {
+                        opaque_vertex_buffer,
+                        opaque_index_buffer,
+                        opaque_num_indices: o_inds.len() as u32,
+                        transparent_vertex_buffer,
+                        transparent_index_buffer,
+                        transparent_num_indices: t_inds.len() as u32,
+                        dirty: false,
+                    },
+                );
             }
         }
 
@@ -850,6 +891,7 @@ impl State {
             water_tick_timer: 0.0,
             lava_tick_timer: 0.0,
             lava_damage_timer: 0.0,
+            cactus_damage_timer: 0.0,
         }
     }
 
@@ -870,12 +912,11 @@ impl State {
         let r = self.chunk_manager.render_distance;
 
         // 1. Unload out-of-bounds chunks
-        self.chunk_manager.chunks.retain(|&(cx, cz), _| {
-            (cx - px).abs() <= r && (cz - pz).abs() <= r
-        });
-        self.chunk_meshes.retain(|&(cx, cz), _| {
-            (cx - px).abs() <= r && (cz - pz).abs() <= r
-        });
+        self.chunk_manager
+            .chunks
+            .retain(|&(cx, cz), _| (cx - px).abs() <= r && (cz - pz).abs() <= r);
+        self.chunk_meshes
+            .retain(|&(cx, cz), _| (cx - px).abs() <= r && (cz - pz).abs() <= r);
 
         // 2. Queue missing chunks
         let mut load_queue = Vec::new();
@@ -911,7 +952,11 @@ impl State {
                 (cx, cz - 1),
                 (cx, cz + 1),
             ] {
-                if self.chunk_manager.chunks.contains_key(&(lighting_cx, lighting_cz)) {
+                if self
+                    .chunk_manager
+                    .chunks
+                    .contains_key(&(lighting_cx, lighting_cz))
+                {
                     crate::lighting::propagate_chunk_lighting(
                         &mut self.chunk_manager,
                         lighting_cx,
@@ -942,7 +987,11 @@ impl State {
         let mut to_rebuild = Vec::new();
         for (&(cx, cz), _) in &self.chunk_manager.chunks {
             let needs_mesh = !self.chunk_meshes.contains_key(&(cx, cz));
-            let is_dirty = self.chunk_meshes.get(&(cx, cz)).map(|m| m.dirty).unwrap_or(false);
+            let is_dirty = self
+                .chunk_meshes
+                .get(&(cx, cz))
+                .map(|m| m.dirty)
+                .unwrap_or(false);
             if needs_mesh || is_dirty {
                 let dx = cx - px;
                 let dz = cz - pz;
@@ -980,36 +1029,47 @@ impl State {
                 }
             });
 
-            let opaque_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Chunk Opaque Vertex Buffer"),
-                contents: bytemuck::cast_slice(&o_verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let opaque_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Chunk Opaque Index Buffer"),
-                contents: bytemuck::cast_slice(&o_inds),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-            let transparent_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Chunk Translucent Vertex Buffer"),
-                contents: bytemuck::cast_slice(&t_verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let transparent_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Chunk Translucent Index Buffer"),
-                contents: bytemuck::cast_slice(&t_inds),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+            let opaque_vertex_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Opaque Vertex Buffer"),
+                        contents: bytemuck::cast_slice(&o_verts),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            let opaque_index_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Opaque Index Buffer"),
+                        contents: bytemuck::cast_slice(&o_inds),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+            let transparent_vertex_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Translucent Vertex Buffer"),
+                        contents: bytemuck::cast_slice(&t_verts),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            let transparent_index_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Translucent Index Buffer"),
+                        contents: bytemuck::cast_slice(&t_inds),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
 
-            self.chunk_meshes.insert((cx, cz), ChunkMesh {
-                opaque_vertex_buffer,
-                opaque_index_buffer,
-                opaque_num_indices: o_inds.len() as u32,
-                transparent_vertex_buffer,
-                transparent_index_buffer,
-                transparent_num_indices: t_inds.len() as u32,
-                dirty: false,
-            });
+            self.chunk_meshes.insert(
+                (cx, cz),
+                ChunkMesh {
+                    opaque_vertex_buffer,
+                    opaque_index_buffer,
+                    opaque_num_indices: o_inds.len() as u32,
+                    transparent_vertex_buffer,
+                    transparent_index_buffer,
+                    transparent_num_indices: t_inds.len() as u32,
+                    dirty: false,
+                },
+            );
         }
     }
 
@@ -1017,13 +1077,20 @@ impl State {
         self.is_paused = paused;
         println!("[Debug] set_paused called with: {}", paused);
         if paused {
-            let res = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+            let res = self
+                .window
+                .set_cursor_grab(winit::window::CursorGrabMode::None);
             println!("[Debug] Release grab result: {:?}", res);
             self.window.set_cursor_visible(true);
             self.keys = KeyState::default();
         } else {
-            let res = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                .or_else(|_| self.window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
+            let res = self
+                .window
+                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                .or_else(|_| {
+                    self.window
+                        .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                });
             println!("[Debug] Grab cursor result: {:?}", res);
             self.window.set_cursor_visible(false);
         }
@@ -1038,29 +1105,47 @@ impl State {
     pub fn handle_menu_click(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         if self.is_paused {
             let [x, y] = self.mouse_ndc;
-            
+
             // Resume Button bounds: X: [-0.3, 0.3], Y: [0.24, 0.34]
             if x >= -0.3 && x <= 0.3 && y >= 0.24 && y <= 0.34 {
-                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
                 self.set_paused(false);
             }
             // FOV Button bounds: X: [-0.3, 0.3], Y: [0.10, 0.20]
             else if x >= -0.3 && x <= 0.3 && y >= 0.10 && y <= 0.20 {
-                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
                     self.camera.fov = (self.camera.fov - 5.0).max(30.0);
                 } else {
                     self.camera.fov = (self.camera.fov + 5.0).min(120.0);
                 }
                 // Update camera projection buffer immediately for visual feedback in paused state
-                let is_underwater = self.chunk_manager.get_block(self.camera.position.x.floor() as i32, self.camera.position.y.floor() as i32, self.camera.position.z.floor() as i32) == BlockType::Water;
-                self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32, &self.world_time, self.total_time, is_underwater);
-                self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+                let is_underwater = self.chunk_manager.get_block(
+                    self.camera.position.x.floor() as i32,
+                    self.camera.position.y.floor() as i32,
+                    self.camera.position.z.floor() as i32,
+                ) == BlockType::Water;
+                self.camera_uniform.update_view_proj(
+                    &self.camera,
+                    self.config.width as f32 / self.config.height as f32,
+                    self.chunk_manager.render_distance as u32,
+                    &self.world_time,
+                    self.total_time,
+                    is_underwater,
+                );
+                self.queue.write_buffer(
+                    &self.camera_buffer,
+                    0,
+                    bytemuck::cast_slice(&[self.camera_uniform]),
+                );
                 self.save_settings();
             }
             // Sensitivity Button bounds: X: [-0.3, 0.3], Y: [-0.04, 0.06]
             else if x >= -0.3 && x <= 0.3 && y >= -0.04 && y <= 0.06 {
-                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
                     self.sensitivity = (self.sensitivity - 0.0002).max(0.0002);
                 } else {
@@ -1070,17 +1155,21 @@ impl State {
             }
             // Render Distance Button bounds: X: [-0.3, 0.3], Y: [-0.18, -0.08]
             else if x >= -0.3 && x <= 0.3 && y >= -0.18 && y <= -0.08 {
-                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
-                    self.chunk_manager.render_distance = (self.chunk_manager.render_distance - 1).max(2);
+                    self.chunk_manager.render_distance =
+                        (self.chunk_manager.render_distance - 1).max(2);
                 } else {
-                    self.chunk_manager.render_distance = (self.chunk_manager.render_distance + 1).min(16);
+                    self.chunk_manager.render_distance =
+                        (self.chunk_manager.render_distance + 1).min(16);
                 }
                 self.save_settings();
             }
             // Volume Button: X: [-0.3, 0.3], Y: [-0.32, -0.22]
             else if x >= -0.3 && x <= 0.3 && y >= -0.32 && y <= -0.22 {
-                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
                 let mut new_vol = self.audio_manager.volume;
                 if x < 0.0 {
                     new_vol = (new_vol - 0.1).max(0.0);
@@ -1092,7 +1181,8 @@ impl State {
             }
             // Quit Button bounds (Shifted): X: [-0.3, 0.3], Y: [-0.46, -0.36]
             else if x >= -0.3 && x <= 0.3 && y >= -0.46 && y <= -0.36 {
-                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
                 event_loop.exit();
             }
         }
@@ -1167,7 +1257,9 @@ impl State {
 
         let old_pos = self.player_physics.position;
 
-        let fall_damage = self.player_physics.update(dt, &self.chunk_manager, movement);
+        let fall_damage = self
+            .player_physics
+            .update(dt, &self.chunk_manager, movement);
         self.update_chunks();
 
         // Landing sound
@@ -1178,7 +1270,8 @@ impl State {
 
         if self.player_physics.on_ground && !self.was_on_ground {
             if let Some(mat) = under_block.sound_material() {
-                self.audio_manager.play_sound(crate::audio::SoundId::Land(mat));
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::Land(mat));
             }
         }
 
@@ -1188,7 +1281,11 @@ impl State {
         }
 
         // Movement exhaustion check
-        let horizontal_dist = glam::Vec2::new(self.player_physics.position.x - old_pos.x, self.player_physics.position.z - old_pos.z).length();
+        let horizontal_dist = glam::Vec2::new(
+            self.player_physics.position.x - old_pos.x,
+            self.player_physics.position.z - old_pos.z,
+        )
+        .length();
         if self.game_mode == GameMode::Survival {
             self.player_state.add_exhaustion(0.02 * horizontal_dist);
         }
@@ -1196,13 +1293,18 @@ impl State {
         // Footstep sound update
         if self.player_physics.on_ground {
             if horizontal_dist > 0.0001 {
-                let vel_h = glam::Vec2::new(self.player_physics.velocity.x, self.player_physics.velocity.z).length();
+                let vel_h = glam::Vec2::new(
+                    self.player_physics.velocity.x,
+                    self.player_physics.velocity.z,
+                )
+                .length();
                 let step_interval = if vel_h > 5.0 { 1.5 } else { 2.0 };
                 self.footstep_accumulator += horizontal_dist;
                 if self.footstep_accumulator >= step_interval {
                     self.footstep_accumulator = 0.0;
                     if let Some(mat) = under_block.sound_material() {
-                        self.audio_manager.play_sound(crate::audio::SoundId::Footstep(mat));
+                        self.audio_manager
+                            .play_sound(crate::audio::SoundId::Footstep(mat));
                     }
                 }
             }
@@ -1228,7 +1330,11 @@ impl State {
         let py = self.player_physics.position.y.floor() as i32;
         let pz = self.player_physics.position.z.floor() as i32;
         let block_at_feet = self.chunk_manager.get_block(px, py, pz);
-        let block_at_eyes = self.chunk_manager.get_block(px, (self.player_physics.position.y + 1.62).floor() as i32, pz);
+        let block_at_eyes = self.chunk_manager.get_block(
+            px,
+            (self.player_physics.position.y + 1.62).floor() as i32,
+            pz,
+        );
         let player_in_lava = block_at_feet == BlockType::Lava || block_at_eyes == BlockType::Lava;
 
         if player_in_lava {
@@ -1239,6 +1345,148 @@ impl State {
             }
         } else {
             self.lava_damage_timer = 0.0;
+        }
+
+        // Leaf Decay Random Ticks
+        let chunk_keys: Vec<(i32, i32)> = self.chunk_manager.chunks.keys().cloned().collect();
+        if !chunk_keys.is_empty() {
+            // Run 30 random ticks per frame
+            let mut rng_seed = (self.total_time * 1000.0) as u32;
+            let mut next_rand = |max: u32| -> u32 {
+                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                ((rng_seed / 65536) % 32768) % max
+            };
+
+            for _ in 0..30 {
+                let chunk_idx = next_rand(chunk_keys.len() as u32) as usize;
+                let (cx, cz) = chunk_keys[chunk_idx];
+
+                let rx = next_rand(16) as i32;
+                let rz = next_rand(16) as i32;
+                let ry = next_rand(120) as i32 + 40; // Leaves usually spawn between Y=40..160
+
+                let wx = cx * 16 + rx;
+                let wz = cz * 16 + rz;
+
+                let block = self.chunk_manager.get_block(wx, ry, wz);
+                if block == BlockType::OakLeaves
+                    || block == BlockType::BirchLeaves
+                    || block == BlockType::SpruceLeaves
+                {
+                    // Run BFS check for log in radius 4
+                    let mut queue = std::collections::VecDeque::new();
+                    let mut visited = std::collections::HashSet::new();
+                    queue.push_back((wx, ry, wz, 0));
+                    visited.insert((wx, ry, wz));
+
+                    let mut found_log = false;
+                    while let Some((bx, by, bz, dist)) = queue.pop_front() {
+                        let b = self.chunk_manager.get_block(bx, by, bz);
+                        if b == BlockType::OakLog
+                            || b == BlockType::BirchLog
+                            || b == BlockType::SpruceLog
+                        {
+                            found_log = true;
+                            break;
+                        }
+                        if dist < 4 {
+                            for (dx, dy, dz) in &[
+                                (1, 0, 0),
+                                (-1, 0, 0),
+                                (0, 1, 0),
+                                (0, -1, 0),
+                                (0, 0, 1),
+                                (0, 0, -1),
+                            ] {
+                                let nx = bx + dx;
+                                let ny = by + dy;
+                                let nz = bz + dz;
+                                let neighbor_b = self.chunk_manager.get_block(nx, ny, nz);
+                                let is_leaf = neighbor_b == BlockType::OakLeaves
+                                    || neighbor_b == BlockType::BirchLeaves
+                                    || neighbor_b == BlockType::SpruceLeaves;
+                                if (is_leaf
+                                    || neighbor_b == BlockType::OakLog
+                                    || neighbor_b == BlockType::BirchLog
+                                    || neighbor_b == BlockType::SpruceLog)
+                                    && visited.insert((nx, ny, nz))
+                                {
+                                    queue.push_back((nx, ny, nz, dist + 1));
+                                }
+                            }
+                        }
+                    }
+
+                    if !found_log {
+                        self.chunk_manager.set_block(wx, ry, wz, BlockType::Air);
+                        // Recalculate lighting & mark dirty meshes
+                        let mut dirty_chunks = std::collections::HashSet::new();
+                        crate::lighting::update_sky_light_after_removed(
+                            &mut self.chunk_manager,
+                            wx,
+                            ry,
+                            wz,
+                            &mut dirty_chunks,
+                        );
+                        dirty_chunks.insert((cx, cz));
+                        if rx == 0 {
+                            dirty_chunks.insert((cx - 1, cz));
+                        }
+                        if rx == 15 {
+                            dirty_chunks.insert((cx + 1, cz));
+                        }
+                        if rz == 0 {
+                            dirty_chunks.insert((cx, cz - 1));
+                        }
+                        if rz == 15 {
+                            dirty_chunks.insert((cx, cz + 1));
+                        }
+                        for (dcx, dcz) in dirty_chunks {
+                            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                                mesh.dirty = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cactus damage check
+        let player_aabb = self.player_physics.get_aabb();
+        let min_x = player_aabb.min.x.floor() as i32;
+        let max_x = player_aabb.max.x.floor() as i32;
+        let min_y =
+            (player_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let max_y =
+            (player_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let min_z = player_aabb.min.z.floor() as i32;
+        let max_z = player_aabb.max.z.floor() as i32;
+
+        let mut touching_cactus = false;
+        for x in min_x..=max_x {
+            for y in min_y..=max_y {
+                for z in min_z..=max_z {
+                    if self.chunk_manager.get_block(x, y, z) == BlockType::Cactus {
+                        let block_aabb = AABB::new(
+                            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                            Vec3::ONE,
+                        );
+                        if player_aabb.intersects(&block_aabb) {
+                            touching_cactus = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if touching_cactus {
+            self.cactus_damage_timer += dt;
+            if self.cactus_damage_timer >= 0.5 {
+                self.cactus_damage_timer = 0.0;
+                self.take_damage(1.0, DamageSource::Mob); // Deal 1.0 contact damage (0.5 heart)
+            }
+        } else {
+            self.cactus_damage_timer = 0.0;
         }
 
         // Update player state timers & starvation
@@ -1295,9 +1543,24 @@ impl State {
 
         // Sync camera position to player position at eye height
         self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
-        let is_underwater = self.chunk_manager.get_block(self.camera.position.x.floor() as i32, self.camera.position.y.floor() as i32, self.camera.position.z.floor() as i32) == BlockType::Water;
-        self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32, &self.world_time, self.total_time, is_underwater);
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+        let is_underwater = self.chunk_manager.get_block(
+            self.camera.position.x.floor() as i32,
+            self.camera.position.y.floor() as i32,
+            self.camera.position.z.floor() as i32,
+        ) == BlockType::Water;
+        self.camera_uniform.update_view_proj(
+            &self.camera,
+            self.config.width as f32 / self.config.height as f32,
+            self.chunk_manager.render_distance as u32,
+            &self.world_time,
+            self.total_time,
+            is_underwater,
+        );
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
 
         // Continuous mining logic
         if self.left_mouse_pressed && self.game_mode == GameMode::Survival {
@@ -1305,12 +1568,15 @@ impl State {
                 self.camera.yaw.cos() * self.camera.pitch.cos(),
                 self.camera.pitch.sin(),
                 self.camera.yaw.sin() * self.camera.pitch.cos(),
-            ).normalize_or_zero();
+            )
+            .normalize_or_zero();
 
             if let Some(hit) = raycast(self.camera.position, dir, 5.0, &self.chunk_manager) {
                 let target = hit.block_pos;
-                let block = self.chunk_manager.get_block(target.x as i32, target.y as i32, target.z as i32);
-                
+                let block =
+                    self.chunk_manager
+                        .get_block(target.x as i32, target.y as i32, target.z as i32);
+
                 if block != BlockType::Air && block.properties().hardness >= 0.0 {
                     if self.mining_target != Some(target) {
                         self.mining_target = Some(target);
@@ -1352,55 +1618,77 @@ impl State {
 
         let faces = [
             // South
-            ([0.0, 0.0, 1.0], [
-                ([offset_min, offset_min, offset_max], [0.0, 1.0]),
-                ([offset_max, offset_min, offset_max], [1.0, 1.0]),
-                ([offset_max, offset_max, offset_max], [1.0, 0.0]),
-                ([offset_min, offset_max, offset_max], [0.0, 0.0]),
-            ]),
+            (
+                [0.0, 0.0, 1.0],
+                [
+                    ([offset_min, offset_min, offset_max], [0.0, 1.0]),
+                    ([offset_max, offset_min, offset_max], [1.0, 1.0]),
+                    ([offset_max, offset_max, offset_max], [1.0, 0.0]),
+                    ([offset_min, offset_max, offset_max], [0.0, 0.0]),
+                ],
+            ),
             // North
-            ([0.0, 0.0, -1.0], [
-                ([offset_max, offset_min, offset_min], [0.0, 1.0]),
-                ([offset_min, offset_min, offset_min], [1.0, 1.0]),
-                ([offset_min, offset_max, offset_min], [1.0, 0.0]),
-                ([offset_max, offset_max, offset_min], [0.0, 0.0]),
-            ]),
+            (
+                [0.0, 0.0, -1.0],
+                [
+                    ([offset_max, offset_min, offset_min], [0.0, 1.0]),
+                    ([offset_min, offset_min, offset_min], [1.0, 1.0]),
+                    ([offset_min, offset_max, offset_min], [1.0, 0.0]),
+                    ([offset_max, offset_max, offset_min], [0.0, 0.0]),
+                ],
+            ),
             // West
-            ([-1.0, 0.0, 0.0], [
-                ([offset_min, offset_min, offset_min], [0.0, 1.0]),
-                ([offset_min, offset_min, offset_max], [1.0, 1.0]),
-                ([offset_min, offset_max, offset_max], [1.0, 0.0]),
-                ([offset_min, offset_max, offset_min], [0.0, 0.0]),
-            ]),
+            (
+                [-1.0, 0.0, 0.0],
+                [
+                    ([offset_min, offset_min, offset_min], [0.0, 1.0]),
+                    ([offset_min, offset_min, offset_max], [1.0, 1.0]),
+                    ([offset_min, offset_max, offset_max], [1.0, 0.0]),
+                    ([offset_min, offset_max, offset_min], [0.0, 0.0]),
+                ],
+            ),
             // East
-            ([1.0, 0.0, 0.0], [
-                ([offset_max, offset_min, offset_max], [0.0, 1.0]),
-                ([offset_max, offset_min, offset_min], [1.0, 1.0]),
-                ([offset_max, offset_max, offset_min], [1.0, 0.0]),
-                ([offset_max, offset_max, offset_max], [0.0, 0.0]),
-            ]),
+            (
+                [1.0, 0.0, 0.0],
+                [
+                    ([offset_max, offset_min, offset_max], [0.0, 1.0]),
+                    ([offset_max, offset_min, offset_min], [1.0, 1.0]),
+                    ([offset_max, offset_max, offset_min], [1.0, 0.0]),
+                    ([offset_max, offset_max, offset_max], [0.0, 0.0]),
+                ],
+            ),
             // Up
-            ([0.0, 1.0, 0.0], [
-                ([offset_min, offset_max, offset_max], [0.0, 1.0]),
-                ([offset_max, offset_max, offset_max], [1.0, 1.0]),
-                ([offset_max, offset_max, offset_min], [1.0, 0.0]),
-                ([offset_min, offset_max, offset_min], [0.0, 0.0]),
-            ]),
+            (
+                [0.0, 1.0, 0.0],
+                [
+                    ([offset_min, offset_max, offset_max], [0.0, 1.0]),
+                    ([offset_max, offset_max, offset_max], [1.0, 1.0]),
+                    ([offset_max, offset_max, offset_min], [1.0, 0.0]),
+                    ([offset_min, offset_max, offset_min], [0.0, 0.0]),
+                ],
+            ),
             // Down
-            ([0.0, -1.0, 0.0], [
-                ([offset_min, offset_min, offset_min], [0.0, 1.0]),
-                ([offset_max, offset_min, offset_min], [1.0, 1.0]),
-                ([offset_max, offset_min, offset_max], [1.0, 0.0]),
-                ([offset_min, offset_min, offset_max], [0.0, 0.0]),
-            ]),
+            (
+                [0.0, -1.0, 0.0],
+                [
+                    ([offset_min, offset_min, offset_min], [0.0, 1.0]),
+                    ([offset_max, offset_min, offset_min], [1.0, 1.0]),
+                    ([offset_max, offset_min, offset_max], [1.0, 0.0]),
+                    ([offset_min, offset_min, offset_max], [0.0, 0.0]),
+                ],
+            ),
         ];
 
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        let sky_light = self.chunk_manager.get_sky_light(wx as i32, wy as i32, wz as i32);
-        let block_light = self.chunk_manager.get_block_light(wx as i32, wy as i32, wz as i32);
-        
+        let sky_light = self
+            .chunk_manager
+            .get_sky_light(wx as i32, wy as i32, wz as i32);
+        let block_light = self
+            .chunk_manager
+            .get_block_light(wx as i32, wy as i32, wz as i32);
+
         for (face_idx, (_normal, corners)) in faces.iter().enumerate() {
             let start_idx = vertices.len() as u32;
             let multiplier_code = match face_idx {
@@ -1408,7 +1696,8 @@ impl State {
                 5 => 2.0, // Bottom
                 _ => 1.0, // Sides
             };
-            let light_val = (sky_light as f32) + (block_light as f32) * 16.0 + multiplier_code * 256.0;
+            let light_val =
+                (sky_light as f32) + (block_light as f32) * 16.0 + multiplier_code * 256.0;
 
             for &(corner, uv) in corners {
                 // UV points to Row 15, Col "stage"
@@ -1429,8 +1718,13 @@ impl State {
             indices.push(start_idx + 3);
         }
 
-        self.queue.write_buffer(&self.crack_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-        self.queue.write_buffer(&self.crack_index_buffer, 0, bytemuck::cast_slice(&indices));
+        self.queue.write_buffer(
+            &self.crack_vertex_buffer,
+            0,
+            bytemuck::cast_slice(&vertices),
+        );
+        self.queue
+            .write_buffer(&self.crack_index_buffer, 0, bytemuck::cast_slice(&indices));
 
         Some((vertices.len() as u32, indices.len() as u32))
     }
@@ -1440,26 +1734,28 @@ impl State {
         if hardness < 0.0 {
             return f32::MAX; // Unbreakable (e.g. bedrock)
         }
-        
-        let held_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(Item::Air);
+
+        let held_item = self.inventory.hotbar[self.inventory.selected]
+            .map(|s| s.item)
+            .unwrap_or(Item::Air);
         let preferred = block.preferred_tool();
-        
+
         let mut speed_multiplier = 1.0;
         let mut matching_tool = false;
-        
+
         if let Some(tool_prop) = held_item.tool_properties() {
             if tool_prop.tool_type == preferred && preferred != ToolType::None {
                 speed_multiplier = tool_prop.mining_speed;
                 matching_tool = true;
             }
         }
-        
+
         let base_time = if matching_tool || preferred == ToolType::None {
             hardness * 1.5
         } else {
             hardness * 5.0
         };
-        
+
         base_time / speed_multiplier
     }
 
@@ -1468,32 +1764,50 @@ impl State {
         let wy = pos.y as i32;
         let wz = pos.z as i32;
         let old_block = self.chunk_manager.get_block(wx, wy, wz);
-        if old_block == BlockType::Air { return; }
+        if old_block == BlockType::Air {
+            return;
+        }
 
         self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
         println!("[Debug] Block mined at ({}, {}, {})", wx, wy, wz);
 
         let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-        let listener_right = glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
+        let listener_right =
+            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
         if let Some(mat) = old_block.sound_material() {
-            self.audio_manager.play_sound_3d(crate::audio::SoundId::BlockBreak(mat), sound_pos, self.camera.position, listener_right);
+            self.audio_manager.play_sound_3d(
+                crate::audio::SoundId::BlockBreak(mat),
+                sound_pos,
+                self.camera.position,
+                listener_right,
+            );
         }
 
         // Survival drops check
         if self.game_mode == GameMode::Survival {
             let mut eligible_to_harvest = true;
             if let Some(min_material) = old_block.min_harvest_material() {
-                let held_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(Item::Air);
+                let held_item = self.inventory.hotbar[self.inventory.selected]
+                    .map(|s| s.item)
+                    .unwrap_or(Item::Air);
                 if let Some(tool_prop) = held_item.tool_properties() {
-                    eligible_to_harvest = tool_prop.tool_type == old_block.preferred_tool() && tool_prop.material >= min_material;
+                    eligible_to_harvest = tool_prop.tool_type == old_block.preferred_tool()
+                        && tool_prop.material >= min_material;
                 } else {
                     eligible_to_harvest = false;
                 }
             }
 
             if eligible_to_harvest {
-                if old_block == BlockType::OakLeaves {
-                    let mut rng_seed = (wx as u32).wrapping_mul(31).wrapping_add(wy as u32).wrapping_mul(17).wrapping_add(wz as u32);
+                let is_any_leaves = old_block == BlockType::OakLeaves
+                    || old_block == BlockType::BirchLeaves
+                    || old_block == BlockType::SpruceLeaves;
+                if is_any_leaves {
+                    let mut rng_seed = (wx as u32)
+                        .wrapping_mul(31)
+                        .wrapping_add(wy as u32)
+                        .wrapping_mul(17)
+                        .wrapping_add(wz as u32);
                     let mut next_rand = || {
                         rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
                         (rng_seed / 65536) % 32768
@@ -1501,10 +1815,26 @@ impl State {
                     if next_rand() % 10 == 0 {
                         self.inventory.add_item(crate::inventory::Item::Apple);
                     } else {
-                        self.inventory.add_item(crate::inventory::Item::from_block(old_block));
+                        self.inventory
+                            .add_item(crate::inventory::Item::from_block(old_block));
+                    }
+                } else if old_block == BlockType::TallGrass {
+                    let mut rng_seed = (wx as u32)
+                        .wrapping_mul(31)
+                        .wrapping_add(wy as u32)
+                        .wrapping_mul(17)
+                        .wrapping_add(wz as u32);
+                    let mut next_rand = || {
+                        rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                        (rng_seed / 65536) % 32768
+                    };
+                    if next_rand() % 8 == 0 {
+                        // 12.5% chance to drop seed
+                        self.inventory.add_item(crate::inventory::Item::Seeds);
                     }
                 } else {
-                    self.inventory.add_item(crate::inventory::Item::from_block(old_block));
+                    self.inventory
+                        .add_item(crate::inventory::Item::from_block(old_block));
                 }
             }
 
@@ -1526,8 +1856,21 @@ impl State {
 
         // recalculate lighting and redraw chunk
         let mut dirty_chunks = std::collections::HashSet::new();
-        crate::lighting::update_sky_light_after_removed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
-        crate::lighting::update_block_light_after_removed(&mut self.chunk_manager, wx, wy, wz, old_block.properties().light_emission, &mut dirty_chunks);
+        crate::lighting::update_sky_light_after_removed(
+            &mut self.chunk_manager,
+            wx,
+            wy,
+            wz,
+            &mut dirty_chunks,
+        );
+        crate::lighting::update_block_light_after_removed(
+            &mut self.chunk_manager,
+            wx,
+            wy,
+            wz,
+            old_block.properties().light_emission,
+            &mut dirty_chunks,
+        );
 
         let cx = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
         let cz = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
@@ -1535,10 +1878,18 @@ impl State {
         let lz = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32);
 
         dirty_chunks.insert((cx, cz));
-        if lx == 0 { dirty_chunks.insert((cx - 1, cz)); }
-        if lx == 15 { dirty_chunks.insert((cx + 1, cz)); }
-        if lz == 0 { dirty_chunks.insert((cx, cz - 1)); }
-        if lz == 15 { dirty_chunks.insert((cx, cz + 1)); }
+        if lx == 0 {
+            dirty_chunks.insert((cx - 1, cz));
+        }
+        if lx == 15 {
+            dirty_chunks.insert((cx + 1, cz));
+        }
+        if lz == 0 {
+            dirty_chunks.insert((cx, cz - 1));
+        }
+        if lz == 15 {
+            dirty_chunks.insert((cx, cz + 1));
+        }
 
         for (dcx, dcz) in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
@@ -1554,19 +1905,23 @@ impl State {
 
         let can_damage = !self.player_state.is_dead && self.player_state.invulnerable_time <= 0.0;
         let died = self.player_state.take_damage(amount, source);
-        
+
         if can_damage {
             if died {
-                self.audio_manager.play_sound(crate::audio::SoundId::PlayerDeath);
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::PlayerDeath);
                 println!("[Debug] Player died due to: {:?}", source);
                 self.inventory.clear();
-                
+
                 // Release cursor grab immediately on death so player can click Respawn
-                let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                let _ = self
+                    .window
+                    .set_cursor_grab(winit::window::CursorGrabMode::None);
                 self.window.set_cursor_visible(true);
                 self.keys = KeyState::default();
             } else {
-                self.audio_manager.play_sound(crate::audio::SoundId::PlayerHurt);
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::PlayerHurt);
             }
         }
     }
@@ -1577,7 +1932,7 @@ impl State {
         self.player_physics.velocity = glam::Vec3::ZERO;
         self.player_physics.on_ground = false;
         self.player_physics.highest_y = 80.0;
-        
+
         // Reset player state
         self.player_state.health = self.player_state.max_health;
         self.player_state.hunger = 20.0;
@@ -1588,19 +1943,24 @@ impl State {
         self.player_state.invulnerable_time = 1.0; // Give 1.0s invulnerability on respawn
         self.player_state.damaged_flash_time = 0.0;
         self.void_damage_timer = 0.0;
-        
+
         // Grab cursor
-        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked)
-            .or_else(|_| self.window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
+        let _ = self
+            .window
+            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+            .or_else(|_| {
+                self.window
+                    .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+            });
         self.window.set_cursor_visible(false);
-        
+
         println!("[Debug] Player respawned at spawn point");
     }
 
     pub fn handle_death_click(&mut self) {
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
-        
+
         // Respawn button: bounds X: [-0.3, 0.3], Y: [-0.1, 0.0]
         if mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.1 && mouse_y <= 0.0 {
             self.respawn();
@@ -1609,8 +1969,12 @@ impl State {
 
     pub fn handle_click(&mut self, is_left_click: bool) {
         if !is_left_click {
-            let held_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
-            if held_item == crate::inventory::Item::Apple || held_item == crate::inventory::Item::Bread {
+            let held_item = self.inventory.hotbar[self.inventory.selected]
+                .map(|s| s.item)
+                .unwrap_or(crate::inventory::Item::Air);
+            if held_item == crate::inventory::Item::Apple
+                || held_item == crate::inventory::Item::Bread
+            {
                 if self.player_state.hunger < 20.0 || self.game_mode == GameMode::Creative {
                     let (heal_hunger, heal_saturation) = match held_item {
                         crate::inventory::Item::Apple => (4.0, 2.4),
@@ -1618,12 +1982,16 @@ impl State {
                         _ => (0.0, 0.0),
                     };
                     self.player_state.hunger = (self.player_state.hunger + heal_hunger).min(20.0);
-                    self.player_state.saturation = (self.player_state.saturation + heal_saturation).min(self.player_state.hunger);
-                    
+                    self.player_state.saturation = (self.player_state.saturation + heal_saturation)
+                        .min(self.player_state.hunger);
+
                     let is_creative = self.game_mode == GameMode::Creative;
                     self.inventory.use_selected_item(is_creative);
-                    
-                    println!("[Debug] Ate {:?}, hunger={:.1}, saturation={:.1}", held_item, self.player_state.hunger, self.player_state.saturation);
+
+                    println!(
+                        "[Debug] Ate {:?}, hunger={:.1}, saturation={:.1}",
+                        held_item, self.player_state.hunger, self.player_state.saturation
+                    );
                     return;
                 }
             }
@@ -1633,7 +2001,8 @@ impl State {
             self.camera.yaw.cos() * self.camera.pitch.cos(),
             self.camera.pitch.sin(),
             self.camera.yaw.sin() * self.camera.pitch.cos(),
-        ).normalize_or_zero();
+        )
+        .normalize_or_zero();
 
         // 1. Raycast against entities first for left-clicks
         if is_left_click {
@@ -1643,7 +2012,9 @@ impl State {
                     continue;
                 }
                 let aabb = entity.get_aabb();
-                if let Some(dist) = crate::entity::ray_intersects_aabb(self.camera.position, dir, &aabb) {
+                if let Some(dist) =
+                    crate::entity::ray_intersects_aabb(self.camera.position, dir, &aabb)
+                {
                     if dist <= 4.0 {
                         if let Some((_, closest_dist)) = closest_entity {
                             if dist < closest_dist {
@@ -1657,29 +2028,44 @@ impl State {
             }
 
             if let Some((entity_id, _)) = closest_entity {
-                if let Some(entity) = self.entity_manager.entities.iter_mut().find(|e| e.id == entity_id) {
+                if let Some(entity) = self
+                    .entity_manager
+                    .entities
+                    .iter_mut()
+                    .find(|e| e.id == entity_id)
+                {
                     if entity.invulnerable_time <= 0.0 {
-                        let held_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
+                        let held_item = self.inventory.hotbar[self.inventory.selected]
+                            .map(|s| s.item)
+                            .unwrap_or(crate::inventory::Item::Air);
                         let damage = held_item.tool_properties().map(|t| t.damage).unwrap_or(1.0);
-                        
+
                         entity.health -= damage;
                         entity.invulnerable_time = 0.4;
                         entity.velocity += dir * 8.0 + Vec3::new(0.0, 3.0, 0.0);
-                        
-                        println!("[Debug] Hit {:?}, health={:.1}", entity.entity_type, entity.health);
-                        
+
+                        println!(
+                            "[Debug] Hit {:?}, health={:.1}",
+                            entity.entity_type, entity.health
+                        );
+
                         if entity.health <= 0.0 {
                             println!("[Debug] Killed {:?}", entity.entity_type);
                             if self.game_mode == GameMode::Survival {
                                 match entity.entity_type {
                                     crate::entity::EntityType::Zombie => {
-                                        self.inventory.add_item(crate::inventory::Item::RottenFlesh);
+                                        self.inventory
+                                            .add_item(crate::inventory::Item::RottenFlesh);
                                     }
                                     crate::entity::EntityType::Skeleton => {
                                         self.inventory.add_item(crate::inventory::Item::Bone);
-                                        let mut rng_seed = (entity.position.x as u32).wrapping_mul(31).wrapping_add(entity.position.z as u32);
+                                        let mut rng_seed = (entity.position.x as u32)
+                                            .wrapping_mul(31)
+                                            .wrapping_add(entity.position.z as u32);
                                         let mut next_rand = || {
-                                            rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                                            rng_seed = rng_seed
+                                                .wrapping_mul(1103515245)
+                                                .wrapping_add(12345);
                                             (rng_seed / 65536) % 32768
                                         };
                                         if next_rand() % 10 == 0 {
@@ -1691,14 +2077,19 @@ impl State {
                                     }
                                     crate::entity::EntityType::Pig => {
                                         let is_on_fire = entity.burn_timer > 0.0;
-                                        let drop = if is_on_fire { crate::inventory::Item::CookedPorkchop } else { crate::inventory::Item::RawPorkchop };
+                                        let drop = if is_on_fire {
+                                            crate::inventory::Item::CookedPorkchop
+                                        } else {
+                                            crate::inventory::Item::RawPorkchop
+                                        };
                                         self.inventory.add_item(drop);
                                     }
                                     crate::entity::EntityType::Cow => {
                                         self.inventory.add_item(crate::inventory::Item::RawBeef);
                                         let rng = (entity.position.x as u32).wrapping_mul(31);
                                         if rng % 2 == 0 {
-                                            self.inventory.add_item(crate::inventory::Item::Leather);
+                                            self.inventory
+                                                .add_item(crate::inventory::Item::Leather);
                                         }
                                     }
                                     crate::entity::EntityType::Sheep => {
@@ -1715,9 +2106,10 @@ impl State {
                                 }
                             }
                         }
-                        
+
                         if self.game_mode == GameMode::Survival {
-                            if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
+                            if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected]
+                            {
                                 if stack.item.tool_properties().is_some() {
                                     if stack.durability > 1 {
                                         stack.durability -= 1;
@@ -1727,7 +2119,7 @@ impl State {
                                 }
                             }
                         }
-                        
+
                         return;
                     }
                 }
@@ -1737,11 +2129,15 @@ impl State {
         if !is_left_click {
             let mut closest_entity: Option<(u64, f32)> = None;
             for entity in &self.entity_manager.entities {
-                if entity.entity_type == crate::entity::EntityType::Arrow || entity.entity_type == crate::entity::EntityType::HeartParticle {
+                if entity.entity_type == crate::entity::EntityType::Arrow
+                    || entity.entity_type == crate::entity::EntityType::HeartParticle
+                {
                     continue;
                 }
                 let aabb = entity.get_aabb();
-                if let Some(dist) = crate::entity::ray_intersects_aabb(self.camera.position, dir, &aabb) {
+                if let Some(dist) =
+                    crate::entity::ray_intersects_aabb(self.camera.position, dir, &aabb)
+                {
                     if dist <= 4.0 {
                         if let Some((_, closest_dist)) = closest_entity {
                             if dist < closest_dist {
@@ -1755,13 +2151,24 @@ impl State {
             }
 
             if let Some((entity_id, _)) = closest_entity {
-                if let Some(entity) = self.entity_manager.entities.iter_mut().find(|e| e.id == entity_id) {
+                if let Some(entity) = self
+                    .entity_manager
+                    .entities
+                    .iter_mut()
+                    .find(|e| e.id == entity_id)
+                {
                     let held_stack = self.inventory.hotbar[self.inventory.selected].clone();
-                    let held_item = held_stack.map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
-                    
+                    let held_item = held_stack
+                        .map(|s| s.item)
+                        .unwrap_or(crate::inventory::Item::Air);
+
                     match entity.entity_type {
                         crate::entity::EntityType::Pig => {
-                            if held_item == crate::inventory::Item::Carrot && entity.age >= 0.0 && entity.breeding_timer <= 0.0 && entity.breed_cooldown <= 0.0 {
+                            if held_item == crate::inventory::Item::Carrot
+                                && entity.age >= 0.0
+                                && entity.breeding_timer <= 0.0
+                                && entity.breed_cooldown <= 0.0
+                            {
                                 entity.breeding_timer = 20.0;
                                 self.inventory.remove_selected_item(1);
                                 println!("[Debug] Pig entered love mode!");
@@ -1769,20 +2176,29 @@ impl State {
                             }
                         }
                         crate::entity::EntityType::Cow => {
-                            if held_item == crate::inventory::Item::Wheat && entity.age >= 0.0 && entity.breeding_timer <= 0.0 && entity.breed_cooldown <= 0.0 {
+                            if held_item == crate::inventory::Item::Wheat
+                                && entity.age >= 0.0
+                                && entity.breeding_timer <= 0.0
+                                && entity.breed_cooldown <= 0.0
+                            {
                                 entity.breeding_timer = 20.0;
                                 self.inventory.remove_selected_item(1);
                                 println!("[Debug] Cow entered love mode!");
                                 return;
                             }
                             if held_item == crate::inventory::Item::Bucket {
-                                self.inventory.replace_selected_item(crate::inventory::Item::MilkBucket);
+                                self.inventory
+                                    .replace_selected_item(crate::inventory::Item::MilkBucket);
                                 println!("[Debug] Milked a Cow!");
                                 return;
                             }
                         }
                         crate::entity::EntityType::Sheep => {
-                            if held_item == crate::inventory::Item::Wheat && entity.age >= 0.0 && entity.breeding_timer <= 0.0 && entity.breed_cooldown <= 0.0 {
+                            if held_item == crate::inventory::Item::Wheat
+                                && entity.age >= 0.0
+                                && entity.breeding_timer <= 0.0
+                                && entity.breed_cooldown <= 0.0
+                            {
                                 entity.breeding_timer = 20.0;
                                 self.inventory.remove_selected_item(1);
                                 println!("[Debug] Sheep entered love mode!");
@@ -1792,7 +2208,9 @@ impl State {
                                 entity.has_wool = false;
                                 self.inventory.add_item(crate::inventory::Item::Wool);
                                 println!("[Debug] Sheared a Sheep!");
-                                if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
+                                if let Some(stack) =
+                                    &mut self.inventory.hotbar[self.inventory.selected]
+                                {
                                     if stack.durability > 1 {
                                         stack.durability -= 1;
                                     } else {
@@ -1803,7 +2221,11 @@ impl State {
                             }
                         }
                         crate::entity::EntityType::Chicken => {
-                            if held_item == crate::inventory::Item::Seeds && entity.age >= 0.0 && entity.breeding_timer <= 0.0 && entity.breed_cooldown <= 0.0 {
+                            if held_item == crate::inventory::Item::Seeds
+                                && entity.age >= 0.0
+                                && entity.breeding_timer <= 0.0
+                                && entity.breed_cooldown <= 0.0
+                            {
                                 entity.breeding_timer = 20.0;
                                 self.inventory.remove_selected_item(1);
                                 println!("[Debug] Chicken entered love mode!");
@@ -1820,7 +2242,11 @@ impl State {
             let target = if is_left_click {
                 hit.block_pos
             } else {
-                let clicked_block = self.chunk_manager.get_block(hit.block_pos.x as i32, hit.block_pos.y as i32, hit.block_pos.z as i32);
+                let clicked_block = self.chunk_manager.get_block(
+                    hit.block_pos.x as i32,
+                    hit.block_pos.y as i32,
+                    hit.block_pos.z as i32,
+                );
                 if clicked_block == BlockType::CraftingTable {
                     self.inventory.is_table_open = true;
                     self.inventory.craft_input = vec![None; 9];
@@ -1835,19 +2261,28 @@ impl State {
             let wz = target.z as i32;
 
             let mut dirty_chunks = std::collections::HashSet::new();
-             if is_left_click {
+            if is_left_click {
                 let old_block = self.chunk_manager.get_block(wx, wy, wz);
                 if old_block != BlockType::Air {
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
 
-                    let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-                    let listener_right = glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
+                    let sound_pos =
+                        glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                    let listener_right =
+                        glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
+                            .normalize_or_zero();
                     if let Some(mat) = old_block.sound_material() {
-                        self.audio_manager.play_sound_3d(crate::audio::SoundId::BlockBreak(mat), sound_pos, self.camera.position, listener_right);
+                        self.audio_manager.play_sound_3d(
+                            crate::audio::SoundId::BlockBreak(mat),
+                            sound_pos,
+                            self.camera.position,
+                            listener_right,
+                        );
                     }
 
                     if self.game_mode == GameMode::Survival {
-                        self.inventory.add_item(crate::inventory::Item::from_block(old_block));
+                        self.inventory
+                            .add_item(crate::inventory::Item::from_block(old_block));
 
                         if old_block == BlockType::Grass {
                             let rng = (wx as u32).wrapping_mul(31).wrapping_add(wz as u32);
@@ -1863,25 +2298,59 @@ impl State {
                     }
 
                     // Update lighting for removal
-                    crate::lighting::update_sky_light_after_removed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
-                    crate::lighting::update_block_light_after_removed(&mut self.chunk_manager, wx, wy, wz, old_block.properties().light_emission, &mut dirty_chunks);
+                    crate::lighting::update_sky_light_after_removed(
+                        &mut self.chunk_manager,
+                        wx,
+                        wy,
+                        wz,
+                        &mut dirty_chunks,
+                    );
+                    crate::lighting::update_block_light_after_removed(
+                        &mut self.chunk_manager,
+                        wx,
+                        wy,
+                        wz,
+                        old_block.properties().light_emission,
+                        &mut dirty_chunks,
+                    );
                 }
             } else {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
                     self.chunk_manager.set_block(wx, wy, wz, placed_block);
 
-                    let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-                    let listener_right = glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
+                    let sound_pos =
+                        glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                    let listener_right =
+                        glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
+                            .normalize_or_zero();
                     if let Some(mat) = placed_block.sound_material() {
-                        self.audio_manager.play_sound_3d(crate::audio::SoundId::BlockPlace(mat), sound_pos, self.camera.position, listener_right);
+                        self.audio_manager.play_sound_3d(
+                            crate::audio::SoundId::BlockPlace(mat),
+                            sound_pos,
+                            self.camera.position,
+                            listener_right,
+                        );
                     }
 
                     let is_creative = self.game_mode == GameMode::Creative;
                     self.inventory.use_selected_item(is_creative);
 
                     // Update lighting for placement
-                    crate::lighting::update_sky_light_after_placed(&mut self.chunk_manager, wx, wy, wz, &mut dirty_chunks);
-                    crate::lighting::update_block_light_after_placed(&mut self.chunk_manager, wx, wy, wz, placed_block.properties().light_emission, &mut dirty_chunks);
+                    crate::lighting::update_sky_light_after_placed(
+                        &mut self.chunk_manager,
+                        wx,
+                        wy,
+                        wz,
+                        &mut dirty_chunks,
+                    );
+                    crate::lighting::update_block_light_after_placed(
+                        &mut self.chunk_manager,
+                        wx,
+                        wy,
+                        wz,
+                        placed_block.properties().light_emission,
+                        &mut dirty_chunks,
+                    );
                 } else {
                     return; // No block selected to place
                 }
@@ -1894,10 +2363,18 @@ impl State {
             let lz = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32);
 
             dirty_chunks.insert((cx, cz));
-            if lx == 0 { dirty_chunks.insert((cx - 1, cz)); }
-            if lx == 15 { dirty_chunks.insert((cx + 1, cz)); }
-            if lz == 0 { dirty_chunks.insert((cx, cz - 1)); }
-            if lz == 15 { dirty_chunks.insert((cx, cz + 1)); }
+            if lx == 0 {
+                dirty_chunks.insert((cx - 1, cz));
+            }
+            if lx == 15 {
+                dirty_chunks.insert((cx + 1, cz));
+            }
+            if lz == 0 {
+                dirty_chunks.insert((cx, cz - 1));
+            }
+            if lz == 15 {
+                dirty_chunks.insert((cx, cz + 1));
+            }
 
             for (dcx, dcz) in dirty_chunks {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
@@ -2002,13 +2479,14 @@ impl State {
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
         let slots = self.get_inventory_slots();
-        
+
         let clicked_slot = slots.into_iter().find(|&(_, x0, x1, y0, y1)| {
             mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
         });
 
         if let Some((slot_type, _, _, _, _)) = clicked_slot {
-            self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::UiClick);
             let slot_item = self.get_item_at_slot(slot_type);
 
             match slot_type {
@@ -2029,9 +2507,13 @@ impl State {
                                 }
                             }
                             let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-                            self.inventory.craft_output = self.recipe_manager.match_recipe(&self.inventory.craft_input, grid_size);
+                            self.inventory.craft_output = self
+                                .recipe_manager
+                                .match_recipe(&self.inventory.craft_input, grid_size);
                         } else if let Some(ref mut dragged) = self.inventory.dragged {
-                            if dragged.item == output.item && dragged.count + output.count <= max_stack {
+                            if dragged.item == output.item
+                                && dragged.count + output.count <= max_stack
+                            {
                                 dragged.count += output.count;
                                 // Consume craft input ingredients
                                 for slot in self.inventory.craft_input.iter_mut() {
@@ -2044,14 +2526,18 @@ impl State {
                                     }
                                 }
                                 let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-                                self.inventory.craft_output = self.recipe_manager.match_recipe(&self.inventory.craft_input, grid_size);
+                                self.inventory.craft_output = self
+                                    .recipe_manager
+                                    .match_recipe(&self.inventory.craft_input, grid_size);
                             }
                         }
                     }
                 }
                 _ => {
                     // Normal slots (Backpack, Hotbar, Armor, CraftInput)
-                    let max_stack = slot_item.map(|s| s.item.properties().max_stack).unwrap_or(64);
+                    let max_stack = slot_item
+                        .map(|s| s.item.properties().max_stack)
+                        .unwrap_or(64);
 
                     if is_left {
                         // Left Click interaction
@@ -2064,9 +2550,20 @@ impl State {
                                     let new_slot_count = slot.count + transfer;
                                     let new_drag_count = dragged.count - transfer;
 
-                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: new_slot_count, durability: slot.durability }));
+                                    self.set_item_at_slot(
+                                        slot_type,
+                                        Some(ItemStack {
+                                            item: slot.item,
+                                            count: new_slot_count,
+                                            durability: slot.durability,
+                                        }),
+                                    );
                                     if new_drag_count > 0 {
-                                        self.inventory.dragged = Some(ItemStack { item: dragged.item, count: new_drag_count, durability: dragged.durability });
+                                        self.inventory.dragged = Some(ItemStack {
+                                            item: dragged.item,
+                                            count: new_drag_count,
+                                            durability: dragged.durability,
+                                        });
                                     } else {
                                         self.inventory.dragged = None;
                                     }
@@ -2093,9 +2590,20 @@ impl State {
                             if let Some(slot) = slot_item {
                                 if slot.item == dragged.item && slot.count < max_stack {
                                     // Drop 1
-                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: slot.count + 1, durability: slot.durability }));
+                                    self.set_item_at_slot(
+                                        slot_type,
+                                        Some(ItemStack {
+                                            item: slot.item,
+                                            count: slot.count + 1,
+                                            durability: slot.durability,
+                                        }),
+                                    );
                                     if dragged.count > 1 {
-                                        self.inventory.dragged = Some(ItemStack { item: dragged.item, count: dragged.count - 1, durability: dragged.durability });
+                                        self.inventory.dragged = Some(ItemStack {
+                                            item: dragged.item,
+                                            count: dragged.count - 1,
+                                            durability: dragged.durability,
+                                        });
                                     } else {
                                         self.inventory.dragged = None;
                                     }
@@ -2106,9 +2614,20 @@ impl State {
                                 }
                             } else {
                                 // Drop 1 in empty slot
-                                self.set_item_at_slot(slot_type, Some(ItemStack { item: dragged.item, count: 1, durability: dragged.durability }));
+                                self.set_item_at_slot(
+                                    slot_type,
+                                    Some(ItemStack {
+                                        item: dragged.item,
+                                        count: 1,
+                                        durability: dragged.durability,
+                                    }),
+                                );
                                 if dragged.count > 1 {
-                                    self.inventory.dragged = Some(ItemStack { item: dragged.item, count: dragged.count - 1, durability: dragged.durability });
+                                    self.inventory.dragged = Some(ItemStack {
+                                        item: dragged.item,
+                                        count: dragged.count - 1,
+                                        durability: dragged.durability,
+                                    });
                                 } else {
                                     self.inventory.dragged = None;
                                 }
@@ -2118,9 +2637,20 @@ impl State {
                             if let Some(slot) = slot_item {
                                 let take = (slot.count + 1) / 2;
                                 let keep = slot.count - take;
-                                self.inventory.dragged = Some(ItemStack { item: slot.item, count: take, durability: slot.durability });
+                                self.inventory.dragged = Some(ItemStack {
+                                    item: slot.item,
+                                    count: take,
+                                    durability: slot.durability,
+                                });
                                 if keep > 0 {
-                                    self.set_item_at_slot(slot_type, Some(ItemStack { item: slot.item, count: keep, durability: slot.durability }));
+                                    self.set_item_at_slot(
+                                        slot_type,
+                                        Some(ItemStack {
+                                            item: slot.item,
+                                            count: keep,
+                                            durability: slot.durability,
+                                        }),
+                                    );
                                 } else {
                                     self.set_item_at_slot(slot_type, None);
                                 }
@@ -2131,7 +2661,9 @@ impl State {
                     // If we clicked a craft input slot, recalculate craft output
                     if let SlotType::CraftInput(_) = slot_type {
                         let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-                        self.inventory.craft_output = self.recipe_manager.match_recipe(&self.inventory.craft_input, grid_size);
+                        self.inventory.craft_output = self
+                            .recipe_manager
+                            .match_recipe(&self.inventory.craft_input, grid_size);
                     }
                 }
             }
@@ -2141,7 +2673,9 @@ impl State {
     pub fn open_inventory(&mut self) {
         self.inventory.is_open = true;
         // Release cursor grab
-        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+        let _ = self
+            .window
+            .set_cursor_grab(winit::window::CursorGrabMode::None);
         self.window.set_cursor_visible(true);
         self.keys = KeyState::default();
     }
@@ -2149,7 +2683,10 @@ impl State {
     pub fn close_inventory(&mut self) {
         self.inventory.is_open = false;
         // Return craft input items
-        let inputs: Vec<ItemStack> = self.inventory.craft_input.iter_mut()
+        let inputs: Vec<ItemStack> = self
+            .inventory
+            .craft_input
+            .iter_mut()
             .filter_map(|slot| slot.take())
             .collect();
         for stack in inputs {
@@ -2163,14 +2700,19 @@ impl State {
                 self.inventory.add_item(dragged.item);
             }
         }
-        
+
         self.inventory.is_table_open = false;
         self.inventory.craft_input = vec![None; 4];
         self.inventory.craft_output = None;
-        
+
         // Re-lock cursor
-        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked)
-            .or_else(|_| self.window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
+        let _ = self
+            .window
+            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+            .or_else(|_| {
+                self.window
+                    .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+            });
         self.window.set_cursor_visible(false);
     }
 
@@ -2187,7 +2729,9 @@ impl State {
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Compile mob meshes
         let mut mob_vertices = Vec::new();
@@ -2206,8 +2750,16 @@ impl State {
             let vert_limit = mob_vertices.len().min(8192);
             let ind_limit = mob_indices_len.min(12288);
             self.mob_num_indices = ind_limit as u32;
-            self.queue.write_buffer(&self.mob_vertex_buffer, 0, bytemuck::cast_slice(&mob_vertices[..vert_limit]));
-            self.queue.write_buffer(&self.mob_index_buffer, 0, bytemuck::cast_slice(&mob_indices[..ind_limit]));
+            self.queue.write_buffer(
+                &self.mob_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&mob_vertices[..vert_limit]),
+            );
+            self.queue.write_buffer(
+                &self.mob_index_buffer,
+                0,
+                bytemuck::cast_slice(&mob_indices[..ind_limit]),
+            );
         }
 
         if self.player_state.is_dead {
@@ -2218,49 +2770,133 @@ impl State {
             let mouse_y = self.mouse_ndc[1];
 
             // Respawn button hover (X: [-0.3, 0.3], Y: [-0.1, 0.0])
-            let respawn_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.1 && mouse_y <= 0.0;
+            let respawn_hover =
+                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.1 && mouse_y <= 0.0;
 
             // Reddish overlay
             let bg_color = [0.4, 0.0, 0.0, 0.6];
-            ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [-1.0, -1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [1.0, 1.0, 0.0], color: bg_color });
+            ui_vertices.push(UiVertex {
+                position: [-1.0, 1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [-1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [-1.0, 1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, 1.0, 0.0],
+                color: bg_color,
+            });
 
             // Button background
-            let btn_bg = if respawn_hover { [0.4, 0.1, 0.1, 1.0] } else { [0.2, 0.0, 0.0, 1.0] };
-            let btn_border = if respawn_hover { [1.0, 1.0, 1.0, 1.0] } else { [0.6, 0.2, 0.2, 1.0] };
+            let btn_bg = if respawn_hover {
+                [0.4, 0.1, 0.1, 1.0]
+            } else {
+                [0.2, 0.0, 0.0, 1.0]
+            };
+            let btn_border = if respawn_hover {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                [0.6, 0.2, 0.2, 1.0]
+            };
             let btn_y_min = -0.10;
             let btn_y_max = 0.00;
 
-            ui_vertices.push(UiVertex { position: [-0.3, btn_y_max, 0.0], color: btn_bg });
-            ui_vertices.push(UiVertex { position: [-0.3, btn_y_min, 0.0], color: btn_bg });
-            ui_vertices.push(UiVertex { position: [0.3, btn_y_min, 0.0], color: btn_bg });
-            ui_vertices.push(UiVertex { position: [-0.3, btn_y_max, 0.0], color: btn_bg });
-            ui_vertices.push(UiVertex { position: [0.3, btn_y_min, 0.0], color: btn_bg });
-            ui_vertices.push(UiVertex { position: [0.3, btn_y_max, 0.0], color: btn_bg });
+            ui_vertices.push(UiVertex {
+                position: [-0.3, btn_y_max, 0.0],
+                color: btn_bg,
+            });
+            ui_vertices.push(UiVertex {
+                position: [-0.3, btn_y_min, 0.0],
+                color: btn_bg,
+            });
+            ui_vertices.push(UiVertex {
+                position: [0.3, btn_y_min, 0.0],
+                color: btn_bg,
+            });
+            ui_vertices.push(UiVertex {
+                position: [-0.3, btn_y_max, 0.0],
+                color: btn_bg,
+            });
+            ui_vertices.push(UiVertex {
+                position: [0.3, btn_y_min, 0.0],
+                color: btn_bg,
+            });
+            ui_vertices.push(UiVertex {
+                position: [0.3, btn_y_max, 0.0],
+                color: btn_bg,
+            });
 
             // Button border
-            ui_line_vertices.push(UiVertex { position: [-0.3, btn_y_max, 0.0], color: btn_border });
-            ui_line_vertices.push(UiVertex { position: [0.3, btn_y_max, 0.0], color: btn_border });
-            ui_line_vertices.push(UiVertex { position: [0.3, btn_y_max, 0.0], color: btn_border });
-            ui_line_vertices.push(UiVertex { position: [0.3, btn_y_min, 0.0], color: btn_border });
-            ui_line_vertices.push(UiVertex { position: [0.3, btn_y_min, 0.0], color: btn_border });
-            ui_line_vertices.push(UiVertex { position: [-0.3, btn_y_min, 0.0], color: btn_border });
-            ui_line_vertices.push(UiVertex { position: [-0.3, btn_y_min, 0.0], color: btn_border });
-            ui_line_vertices.push(UiVertex { position: [-0.3, btn_y_max, 0.0], color: btn_border });
+            ui_line_vertices.push(UiVertex {
+                position: [-0.3, btn_y_max, 0.0],
+                color: btn_border,
+            });
+            ui_line_vertices.push(UiVertex {
+                position: [0.3, btn_y_max, 0.0],
+                color: btn_border,
+            });
+            ui_line_vertices.push(UiVertex {
+                position: [0.3, btn_y_max, 0.0],
+                color: btn_border,
+            });
+            ui_line_vertices.push(UiVertex {
+                position: [0.3, btn_y_min, 0.0],
+                color: btn_border,
+            });
+            ui_line_vertices.push(UiVertex {
+                position: [0.3, btn_y_min, 0.0],
+                color: btn_border,
+            });
+            ui_line_vertices.push(UiVertex {
+                position: [-0.3, btn_y_min, 0.0],
+                color: btn_border,
+            });
+            ui_line_vertices.push(UiVertex {
+                position: [-0.3, btn_y_min, 0.0],
+                color: btn_border,
+            });
+            ui_line_vertices.push(UiVertex {
+                position: [-0.3, btn_y_max, 0.0],
+                color: btn_border,
+            });
 
-            let draw_centered_text = |s: &str, y: f32, char_w: f32, char_h: f32, spacing: f32, color: [f32; 4], vertices: &mut Vec<UiVertex>| {
-                let upper = s.to_uppercase();
-                let n = upper.len() as f32;
-                let width = n * char_w + (n - 1.0) * spacing;
-                let start_x = -width / 2.0;
-                add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
-            };
+            let draw_centered_text =
+                |s: &str,
+                 y: f32,
+                 char_w: f32,
+                 char_h: f32,
+                 spacing: f32,
+                 color: [f32; 4],
+                 vertices: &mut Vec<UiVertex>| {
+                    let upper = s.to_uppercase();
+                    let n = upper.len() as f32;
+                    let width = n * char_w + (n - 1.0) * spacing;
+                    let start_x = -width / 2.0;
+                    add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
+                };
 
-            draw_centered_text("YOU DIED!", 0.30, 0.04, 0.08, 0.015, [1.0, 0.2, 0.2, 1.0], &mut ui_line_vertices);
+            draw_centered_text(
+                "YOU DIED!",
+                0.30,
+                0.04,
+                0.08,
+                0.015,
+                [1.0, 0.2, 0.2, 1.0],
+                &mut ui_line_vertices,
+            );
 
             let msg = match self.player_state.death_reason {
                 Some(DamageSource::Fall) => "FELL FROM A HIGH PLACE",
@@ -2271,14 +2907,38 @@ impl State {
                 Some(DamageSource::Drowning) => "DROWNED",
                 None => "DIED",
             };
-            draw_centered_text(msg, 0.15, 0.015, 0.03, 0.006, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
-            draw_centered_text("RESPAWN", -0.06, 0.02, 0.04, 0.008, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+            draw_centered_text(
+                msg,
+                0.15,
+                0.015,
+                0.03,
+                0.006,
+                [1.0, 1.0, 1.0, 1.0],
+                &mut ui_line_vertices,
+            );
+            draw_centered_text(
+                "RESPAWN",
+                -0.06,
+                0.02,
+                0.04,
+                0.008,
+                [1.0, 1.0, 1.0, 1.0],
+                &mut ui_line_vertices,
+            );
 
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
-            self.queue.write_buffer(&self.ui_vertex_buffer, 0, bytemuck::cast_slice(&ui_vertices[..ui_vert_len]));
-            self.queue.write_buffer(&self.ui_line_vertex_buffer, 0, bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]));
+            self.queue.write_buffer(
+                &self.ui_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
+            );
+            self.queue.write_buffer(
+                &self.ui_line_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
+            );
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
@@ -2291,96 +2951,280 @@ impl State {
             let mouse_y = self.mouse_ndc[1];
 
             // Hover states
-            let resume_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= 0.24 && mouse_y <= 0.34;
+            let resume_hover =
+                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= 0.24 && mouse_y <= 0.34;
             let fov_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= 0.10 && mouse_y <= 0.20;
-            let sens_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.04 && mouse_y <= 0.06;
-            let rd_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.18 && mouse_y <= -0.08;
-            let vol_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.32 && mouse_y <= -0.22;
-            let quit_hover = mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.46 && mouse_y <= -0.36;
+            let sens_hover =
+                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.04 && mouse_y <= 0.06;
+            let rd_hover =
+                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.18 && mouse_y <= -0.08;
+            let vol_hover =
+                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.32 && mouse_y <= -0.22;
+            let quit_hover =
+                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.46 && mouse_y <= -0.36;
 
             // 1. Dark overlay (screen covers from -1.0 to 1.0)
             let bg_color = [0.1, 0.1, 0.1, 0.7];
-            ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [-1.0, -1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
-            ui_vertices.push(UiVertex { position: [1.0, 1.0, 0.0], color: bg_color });
+            ui_vertices.push(UiVertex {
+                position: [-1.0, 1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [-1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [-1.0, 1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, -1.0, 0.0],
+                color: bg_color,
+            });
+            ui_vertices.push(UiVertex {
+                position: [1.0, 1.0, 0.0],
+                color: bg_color,
+            });
 
             // Button drawing helper
-            let draw_button = |hover: bool, y_min: f32, y_max: f32, ui_verts: &mut Vec<UiVertex>, ui_line_verts: &mut Vec<UiVertex>| {
-                let bg = if hover { [0.4, 0.4, 0.4, 1.0] } else { [0.2, 0.2, 0.2, 1.0] };
-                let border = if hover { [1.0, 1.0, 1.0, 1.0] } else { [0.6, 0.6, 0.6, 1.0] };
-                
+            let draw_button = |hover: bool,
+                               y_min: f32,
+                               y_max: f32,
+                               ui_verts: &mut Vec<UiVertex>,
+                               ui_line_verts: &mut Vec<UiVertex>| {
+                let bg = if hover {
+                    [0.4, 0.4, 0.4, 1.0]
+                } else {
+                    [0.2, 0.2, 0.2, 1.0]
+                };
+                let border = if hover {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    [0.6, 0.6, 0.6, 1.0]
+                };
+
                 // Background (two triangles)
-                ui_verts.push(UiVertex { position: [-0.3, y_max, 0.0], color: bg });
-                ui_verts.push(UiVertex { position: [-0.3, y_min, 0.0], color: bg });
-                ui_verts.push(UiVertex { position: [0.3, y_min, 0.0], color: bg });
-                ui_verts.push(UiVertex { position: [-0.3, y_max, 0.0], color: bg });
-                ui_verts.push(UiVertex { position: [0.3, y_min, 0.0], color: bg });
-                ui_verts.push(UiVertex { position: [0.3, y_max, 0.0], color: bg });
+                ui_verts.push(UiVertex {
+                    position: [-0.3, y_max, 0.0],
+                    color: bg,
+                });
+                ui_verts.push(UiVertex {
+                    position: [-0.3, y_min, 0.0],
+                    color: bg,
+                });
+                ui_verts.push(UiVertex {
+                    position: [0.3, y_min, 0.0],
+                    color: bg,
+                });
+                ui_verts.push(UiVertex {
+                    position: [-0.3, y_max, 0.0],
+                    color: bg,
+                });
+                ui_verts.push(UiVertex {
+                    position: [0.3, y_min, 0.0],
+                    color: bg,
+                });
+                ui_verts.push(UiVertex {
+                    position: [0.3, y_max, 0.0],
+                    color: bg,
+                });
 
                 // Border (line loop)
-                ui_line_verts.push(UiVertex { position: [-0.3, y_max, 0.0], color: border });
-                ui_line_verts.push(UiVertex { position: [0.3, y_max, 0.0], color: border });
-                ui_line_verts.push(UiVertex { position: [0.3, y_max, 0.0], color: border });
-                ui_line_verts.push(UiVertex { position: [0.3, y_min, 0.0], color: border });
-                ui_line_verts.push(UiVertex { position: [0.3, y_min, 0.0], color: border });
-                ui_line_verts.push(UiVertex { position: [-0.3, y_min, 0.0], color: border });
-                ui_line_verts.push(UiVertex { position: [-0.3, y_min, 0.0], color: border });
-                ui_line_verts.push(UiVertex { position: [-0.3, y_max, 0.0], color: border });
+                ui_line_verts.push(UiVertex {
+                    position: [-0.3, y_max, 0.0],
+                    color: border,
+                });
+                ui_line_verts.push(UiVertex {
+                    position: [0.3, y_max, 0.0],
+                    color: border,
+                });
+                ui_line_verts.push(UiVertex {
+                    position: [0.3, y_max, 0.0],
+                    color: border,
+                });
+                ui_line_verts.push(UiVertex {
+                    position: [0.3, y_min, 0.0],
+                    color: border,
+                });
+                ui_line_verts.push(UiVertex {
+                    position: [0.3, y_min, 0.0],
+                    color: border,
+                });
+                ui_line_verts.push(UiVertex {
+                    position: [-0.3, y_min, 0.0],
+                    color: border,
+                });
+                ui_line_verts.push(UiVertex {
+                    position: [-0.3, y_min, 0.0],
+                    color: border,
+                });
+                ui_line_verts.push(UiVertex {
+                    position: [-0.3, y_max, 0.0],
+                    color: border,
+                });
             };
 
             // Draw Button backgrounds and borders
-            draw_button(resume_hover, 0.24, 0.34, &mut ui_vertices, &mut ui_line_vertices);
-            draw_button(fov_hover, 0.10, 0.20, &mut ui_vertices, &mut ui_line_vertices);
-            draw_button(sens_hover, -0.04, 0.06, &mut ui_vertices, &mut ui_line_vertices);
-            draw_button(rd_hover, -0.18, -0.08, &mut ui_vertices, &mut ui_line_vertices);
-            draw_button(vol_hover, -0.32, -0.22, &mut ui_vertices, &mut ui_line_vertices);
-            draw_button(quit_hover, -0.46, -0.36, &mut ui_vertices, &mut ui_line_vertices);
+            draw_button(
+                resume_hover,
+                0.24,
+                0.34,
+                &mut ui_vertices,
+                &mut ui_line_vertices,
+            );
+            draw_button(
+                fov_hover,
+                0.10,
+                0.20,
+                &mut ui_vertices,
+                &mut ui_line_vertices,
+            );
+            draw_button(
+                sens_hover,
+                -0.04,
+                0.06,
+                &mut ui_vertices,
+                &mut ui_line_vertices,
+            );
+            draw_button(
+                rd_hover,
+                -0.18,
+                -0.08,
+                &mut ui_vertices,
+                &mut ui_line_vertices,
+            );
+            draw_button(
+                vol_hover,
+                -0.32,
+                -0.22,
+                &mut ui_vertices,
+                &mut ui_line_vertices,
+            );
+            draw_button(
+                quit_hover,
+                -0.46,
+                -0.36,
+                &mut ui_vertices,
+                &mut ui_line_vertices,
+            );
 
             // Centered text drawing helper
-            let draw_centered_text = |s: &str, y: f32, char_w: f32, char_h: f32, spacing: f32, color: [f32; 4], vertices: &mut Vec<UiVertex>| {
-                let upper = s.to_uppercase();
-                let n = upper.len() as f32;
-                let width = n * char_w + (n - 1.0) * spacing;
-                let start_x = -width / 2.0;
-                add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
-            };
+            let draw_centered_text =
+                |s: &str,
+                 y: f32,
+                 char_w: f32,
+                 char_h: f32,
+                 spacing: f32,
+                 color: [f32; 4],
+                 vertices: &mut Vec<UiVertex>| {
+                    let upper = s.to_uppercase();
+                    let n = upper.len() as f32;
+                    let width = n * char_w + (n - 1.0) * spacing;
+                    let start_x = -width / 2.0;
+                    add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
+                };
 
             // Render Text Labels
             let text_color = [1.0, 1.0, 1.0, 1.0];
             // "GAME PAUSED"
-            draw_centered_text("GAME PAUSED", 0.40, 0.03, 0.06, 0.012, text_color, &mut ui_line_vertices);
+            draw_centered_text(
+                "GAME PAUSED",
+                0.40,
+                0.03,
+                0.06,
+                0.012,
+                text_color,
+                &mut ui_line_vertices,
+            );
             // "RESUME"
-            draw_centered_text("RESUME", 0.28, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
-            
+            draw_centered_text(
+                "RESUME",
+                0.28,
+                0.02,
+                0.04,
+                0.008,
+                text_color,
+                &mut ui_line_vertices,
+            );
+
             // "FOV < value >"
             let fov_text = format!("FOV < {:.0} >", self.camera.fov);
-            draw_centered_text(&fov_text, 0.14, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
-            
+            draw_centered_text(
+                &fov_text,
+                0.14,
+                0.02,
+                0.04,
+                0.008,
+                text_color,
+                &mut ui_line_vertices,
+            );
+
             // "SENS < value >"
             let sens_val = (self.sensitivity / 0.002 * 100.0).round();
             let sens_text = format!("SENS < {:.0} >", sens_val);
-            draw_centered_text(&sens_text, 0.00, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
+            draw_centered_text(
+                &sens_text,
+                0.00,
+                0.02,
+                0.04,
+                0.008,
+                text_color,
+                &mut ui_line_vertices,
+            );
 
             // "RENDER DISTANCE < value >"
             let rd_text = format!("RENDER DISTANCE < {} >", self.chunk_manager.render_distance);
-            draw_centered_text(&rd_text, -0.14, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
-            
+            draw_centered_text(
+                &rd_text,
+                -0.14,
+                0.02,
+                0.04,
+                0.008,
+                text_color,
+                &mut ui_line_vertices,
+            );
+
             // "VOLUME < value >"
             let vol_text = format!("VOLUME < {:.0}% >", self.audio_manager.volume * 100.0);
-            draw_centered_text(&vol_text, -0.28, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
+            draw_centered_text(
+                &vol_text,
+                -0.28,
+                0.02,
+                0.04,
+                0.008,
+                text_color,
+                &mut ui_line_vertices,
+            );
 
             // "QUIT"
-            draw_centered_text("QUIT", -0.42, 0.02, 0.04, 0.008, text_color, &mut ui_line_vertices);
+            draw_centered_text(
+                "QUIT",
+                -0.42,
+                0.02,
+                0.04,
+                0.008,
+                text_color,
+                &mut ui_line_vertices,
+            );
 
             // Cap the sizes to the preallocated buffers (4096 vertices)
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
-            self.queue.write_buffer(&self.ui_vertex_buffer, 0, bytemuck::cast_slice(&ui_vertices[..ui_vert_len]));
-            self.queue.write_buffer(&self.ui_line_vertex_buffer, 0, bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]));
+            self.queue.write_buffer(
+                &self.ui_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
+            );
+            self.queue.write_buffer(
+                &self.ui_line_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
+            );
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
@@ -2395,58 +3239,119 @@ impl State {
             let gap = 0.01;
             let start_x = -0.40;
 
-            let draw_durability_bar = |stack: &ItemStack, x0: f32, x1: f32, y0: f32, y1: f32, _aspect: f32, ui_vertices: &mut Vec<UiVertex>| {
-                if let Some(tool_prop) = stack.item.tool_properties() {
-                    let max_dur = tool_prop.durability;
-                    if stack.durability < max_dur {
-                        let ratio = (stack.durability as f32 / max_dur as f32).clamp(0.0, 1.0);
-                        
-                        // Define bar bounds relative to slot size
-                        let slot_w = x1 - x0;
-                        let slot_h = y1 - y0;
-                        
-                        let bar_x0 = x0 + slot_w * 0.15;
-                        let bar_x1 = x1 - slot_w * 0.15;
-                        let bar_y0 = y0 + slot_h * 0.10;
-                        let bar_y1 = y0 + slot_h * 0.16;
-                        
-                        // 1. Black background bar
-                        let bg_color = [0.0, 0.0, 0.0, 1.0];
-                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y1, 0.0], color: bg_color });
-                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y0, 0.0], color: bg_color });
-                        ui_vertices.push(UiVertex { position: [bar_x1, bar_y0, 0.0], color: bg_color });
-                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y1, 0.0], color: bg_color });
-                        ui_vertices.push(UiVertex { position: [bar_x1, bar_y0, 0.0], color: bg_color });
-                        ui_vertices.push(UiVertex { position: [bar_x1, bar_y1, 0.0], color: bg_color });
-                        
-                        // 2. Colored foreground bar
-                        let fg_x1 = bar_x0 + (bar_x1 - bar_x0) * ratio;
-                        let (r, g) = if ratio > 0.5 {
-                            ((1.0 - ratio) * 2.0, 1.0)
-                        } else {
-                            (1.0, ratio * 2.0)
-                        };
-                        let fg_color = [r, g, 0.0, 1.0];
-                        
-                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y1, 0.0], color: fg_color });
-                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y0, 0.0], color: fg_color });
-                        ui_vertices.push(UiVertex { position: [fg_x1, bar_y0, 0.0], color: fg_color });
-                        ui_vertices.push(UiVertex { position: [bar_x0, bar_y1, 0.0], color: fg_color });
-                        ui_vertices.push(UiVertex { position: [fg_x1, bar_y0, 0.0], color: fg_color });
-                        ui_vertices.push(UiVertex { position: [fg_x1, bar_y1, 0.0], color: fg_color });
+            let draw_durability_bar =
+                |stack: &ItemStack,
+                 x0: f32,
+                 x1: f32,
+                 y0: f32,
+                 y1: f32,
+                 _aspect: f32,
+                 ui_vertices: &mut Vec<UiVertex>| {
+                    if let Some(tool_prop) = stack.item.tool_properties() {
+                        let max_dur = tool_prop.durability;
+                        if stack.durability < max_dur {
+                            let ratio = (stack.durability as f32 / max_dur as f32).clamp(0.0, 1.0);
+
+                            // Define bar bounds relative to slot size
+                            let slot_w = x1 - x0;
+                            let slot_h = y1 - y0;
+
+                            let bar_x0 = x0 + slot_w * 0.15;
+                            let bar_x1 = x1 - slot_w * 0.15;
+                            let bar_y0 = y0 + slot_h * 0.10;
+                            let bar_y1 = y0 + slot_h * 0.16;
+
+                            // 1. Black background bar
+                            let bg_color = [0.0, 0.0, 0.0, 1.0];
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x0, bar_y1, 0.0],
+                                color: bg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x0, bar_y0, 0.0],
+                                color: bg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x1, bar_y0, 0.0],
+                                color: bg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x0, bar_y1, 0.0],
+                                color: bg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x1, bar_y0, 0.0],
+                                color: bg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x1, bar_y1, 0.0],
+                                color: bg_color,
+                            });
+
+                            // 2. Colored foreground bar
+                            let fg_x1 = bar_x0 + (bar_x1 - bar_x0) * ratio;
+                            let (r, g) = if ratio > 0.5 {
+                                ((1.0 - ratio) * 2.0, 1.0)
+                            } else {
+                                (1.0, ratio * 2.0)
+                            };
+                            let fg_color = [r, g, 0.0, 1.0];
+
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x0, bar_y1, 0.0],
+                                color: fg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x0, bar_y0, 0.0],
+                                color: fg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [fg_x1, bar_y0, 0.0],
+                                color: fg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [bar_x0, bar_y1, 0.0],
+                                color: fg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [fg_x1, bar_y0, 0.0],
+                                color: fg_color,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [fg_x1, bar_y1, 0.0],
+                                color: fg_color,
+                            });
+                        }
                     }
-                }
-            };
+                };
 
             if self.inventory.is_open {
                 // 1. Dark overlay (screen covers from -1.0 to 1.0)
                 let bg_color = [0.08, 0.08, 0.08, 0.6];
-                ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [-1.0, -1.0, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [1.0, 1.0, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex {
+                    position: [-1.0, 1.0, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [-1.0, -1.0, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [1.0, -1.0, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [-1.0, 1.0, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [1.0, -1.0, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [1.0, 1.0, 0.0],
+                    color: bg_color,
+                });
 
                 // 2. Draw slots
                 let slots = self.get_inventory_slots();
@@ -2455,7 +3360,8 @@ impl State {
                 let mut hovered_slot = None;
 
                 for &(slot_type, x0, x1, y0, y1) in &slots {
-                    let is_hovered = mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1;
+                    let is_hovered =
+                        mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1;
                     if is_hovered {
                         hovered_slot = Some((slot_type, x0, x1, y0, y1));
                     }
@@ -2466,26 +3372,70 @@ impl State {
                     } else {
                         [0.15, 0.15, 0.15, 0.8]
                     };
-                    ui_vertices.push(UiVertex { position: [x0, y1, 0.0], color: slot_bg_color });
-                    ui_vertices.push(UiVertex { position: [x0, y0, 0.0], color: slot_bg_color });
-                    ui_vertices.push(UiVertex { position: [x1, y0, 0.0], color: slot_bg_color });
-                    ui_vertices.push(UiVertex { position: [x0, y1, 0.0], color: slot_bg_color });
-                    ui_vertices.push(UiVertex { position: [x1, y0, 0.0], color: slot_bg_color });
-                    ui_vertices.push(UiVertex { position: [x1, y1, 0.0], color: slot_bg_color });
+                    ui_vertices.push(UiVertex {
+                        position: [x0, y1, 0.0],
+                        color: slot_bg_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [x0, y0, 0.0],
+                        color: slot_bg_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [x1, y0, 0.0],
+                        color: slot_bg_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [x0, y1, 0.0],
+                        color: slot_bg_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [x1, y0, 0.0],
+                        color: slot_bg_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [x1, y1, 0.0],
+                        color: slot_bg_color,
+                    });
 
                     // Borders
                     let border_color = match slot_type {
-                        SlotType::Hotbar(idx) if idx == self.inventory.selected => [1.0, 1.0, 1.0, 1.0],
+                        SlotType::Hotbar(idx) if idx == self.inventory.selected => {
+                            [1.0, 1.0, 1.0, 1.0]
+                        }
                         _ => [0.3, 0.3, 0.3, 0.8],
                     };
-                    ui_line_vertices.push(UiVertex { position: [x0, y1, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x1, y1, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x1, y1, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x1, y0, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x1, y0, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x0, y0, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x0, y0, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x0, y1, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x0, y1, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x1, y1, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x1, y1, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x1, y0, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x1, y0, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x0, y0, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x0, y0, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x0, y1, 0.0],
+                        color: border_color,
+                    });
 
                     // Slot Item
                     if let Some(stack) = self.get_item_at_slot(slot_type) {
@@ -2503,12 +3453,36 @@ impl State {
                         let ty1 = y1 - margin_y;
 
                         let c = [1.0, 1.0, 1.0, 1.0];
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty1, 0.0], tex_coords: [u0, v0], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty0, 0.0], tex_coords: [u0, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty0, 0.0], tex_coords: [u1, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty1, 0.0], tex_coords: [u0, v0], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty0, 0.0], tex_coords: [u1, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty1, 0.0], tex_coords: [u1, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx0, ty1, 0.0],
+                            tex_coords: [u0, v0],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx0, ty0, 0.0],
+                            tex_coords: [u0, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx1, ty0, 0.0],
+                            tex_coords: [u1, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx0, ty1, 0.0],
+                            tex_coords: [u0, v0],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx1, ty0, 0.0],
+                            tex_coords: [u1, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx1, ty1, 0.0],
+                            tex_coords: [u1, v0],
+                            color: c,
+                        });
 
                         if stack.count > 1 {
                             let count_str = format!("{}", stack.count);
@@ -2519,7 +3493,16 @@ impl State {
                             let count_w = n_chars * cw + (n_chars - 1.0) * cs;
                             let count_x = x1 - count_w - 0.008;
                             let count_y = y0 + 0.01 * aspect;
-                            add_string_lines(&count_str, count_x, count_y, cw, ch, cs, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                            add_string_lines(
+                                &count_str,
+                                count_x,
+                                count_y,
+                                cw,
+                                ch,
+                                cs,
+                                [1.0, 1.0, 1.0, 1.0],
+                                &mut ui_line_vertices,
+                            );
                         }
 
                         // Draw durability bar
@@ -2539,22 +3522,62 @@ impl State {
                     0.05 + 2.0 * (slot_w + gap) + 0.015
                 };
                 let ac = [0.8, 0.8, 0.8, 1.0];
-                ui_line_vertices.push(UiVertex { position: [arrow_x, arrow_y, 0.0], color: ac });
-                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.03, arrow_y, 0.0], color: ac });
-                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.03, arrow_y, 0.0], color: ac });
-                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.02, arrow_y + 0.01 * aspect, 0.0], color: ac });
-                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.03, arrow_y, 0.0], color: ac });
-                ui_line_vertices.push(UiVertex { position: [arrow_x + 0.02, arrow_y - 0.01 * aspect, 0.0], color: ac });
+                ui_line_vertices.push(UiVertex {
+                    position: [arrow_x, arrow_y, 0.0],
+                    color: ac,
+                });
+                ui_line_vertices.push(UiVertex {
+                    position: [arrow_x + 0.03, arrow_y, 0.0],
+                    color: ac,
+                });
+                ui_line_vertices.push(UiVertex {
+                    position: [arrow_x + 0.03, arrow_y, 0.0],
+                    color: ac,
+                });
+                ui_line_vertices.push(UiVertex {
+                    position: [arrow_x + 0.02, arrow_y + 0.01 * aspect, 0.0],
+                    color: ac,
+                });
+                ui_line_vertices.push(UiVertex {
+                    position: [arrow_x + 0.03, arrow_y, 0.0],
+                    color: ac,
+                });
+                ui_line_vertices.push(UiVertex {
+                    position: [arrow_x + 0.02, arrow_y - 0.01 * aspect, 0.0],
+                    color: ac,
+                });
 
                 // 4. Draw texts (Labels)
-                add_string_lines("INVENTORY", -0.40, -0.70 + 3.0 * (slot_h + gap) + 0.02, 0.008, 0.016, 0.003, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
-                let craft_lbl_x = if self.inventory.is_table_open { -0.05 } else { 0.05 };
+                add_string_lines(
+                    "INVENTORY",
+                    -0.40,
+                    -0.70 + 3.0 * (slot_h + gap) + 0.02,
+                    0.008,
+                    0.016,
+                    0.003,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
+                let craft_lbl_x = if self.inventory.is_table_open {
+                    -0.05
+                } else {
+                    0.05
+                };
                 let craft_lbl_y = if self.inventory.is_table_open {
                     -0.10 + 3.0 * (slot_h + gap) + 0.02
                 } else {
                     -0.05 + 2.0 * (slot_h + gap) + 0.02
                 };
-                add_string_lines("CRAFTING", craft_lbl_x, craft_lbl_y, 0.008, 0.016, 0.003, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                add_string_lines(
+                    "CRAFTING",
+                    craft_lbl_x,
+                    craft_lbl_y,
+                    0.008,
+                    0.016,
+                    0.003,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
 
                 // 5. Draw dragged item at cursor position
                 if let Some(dragged) = self.inventory.dragged {
@@ -2570,12 +3593,36 @@ impl State {
                     let dy1 = mouse_y + slot_h / 2.0 - 0.015 * aspect;
 
                     let c = [1.0, 1.0, 1.0, 1.0];
-                    ui_textured_vertices.push(TexturedUiVertex { position: [dx0, dy1, 0.0], tex_coords: [u0, v0], color: c });
-                    ui_textured_vertices.push(TexturedUiVertex { position: [dx0, dy0, 0.0], tex_coords: [u0, v1], color: c });
-                    ui_textured_vertices.push(TexturedUiVertex { position: [dx1, dy0, 0.0], tex_coords: [u1, v1], color: c });
-                    ui_textured_vertices.push(TexturedUiVertex { position: [dx0, dy1, 0.0], tex_coords: [u0, v0], color: c });
-                    ui_textured_vertices.push(TexturedUiVertex { position: [dx1, dy0, 0.0], tex_coords: [u1, v1], color: c });
-                    ui_textured_vertices.push(TexturedUiVertex { position: [dx1, dy1, 0.0], tex_coords: [u1, v0], color: c });
+                    ui_textured_vertices.push(TexturedUiVertex {
+                        position: [dx0, dy1, 0.0],
+                        tex_coords: [u0, v0],
+                        color: c,
+                    });
+                    ui_textured_vertices.push(TexturedUiVertex {
+                        position: [dx0, dy0, 0.0],
+                        tex_coords: [u0, v1],
+                        color: c,
+                    });
+                    ui_textured_vertices.push(TexturedUiVertex {
+                        position: [dx1, dy0, 0.0],
+                        tex_coords: [u1, v1],
+                        color: c,
+                    });
+                    ui_textured_vertices.push(TexturedUiVertex {
+                        position: [dx0, dy1, 0.0],
+                        tex_coords: [u0, v0],
+                        color: c,
+                    });
+                    ui_textured_vertices.push(TexturedUiVertex {
+                        position: [dx1, dy0, 0.0],
+                        tex_coords: [u1, v1],
+                        color: c,
+                    });
+                    ui_textured_vertices.push(TexturedUiVertex {
+                        position: [dx1, dy1, 0.0],
+                        tex_coords: [u1, v0],
+                        color: c,
+                    });
 
                     if dragged.count > 1 {
                         let count_str = format!("{}", dragged.count);
@@ -2586,7 +3633,16 @@ impl State {
                         let count_w = n_chars * cw + (n_chars - 1.0) * cs;
                         let count_x = mouse_x + slot_w / 2.0 - count_w - 0.008;
                         let count_y = mouse_y - slot_h / 2.0 + 0.01 * aspect;
-                        add_string_lines(&count_str, count_x, count_y, cw, ch, cs, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                        add_string_lines(
+                            &count_str,
+                            count_x,
+                            count_y,
+                            cw,
+                            ch,
+                            cs,
+                            [1.0, 1.0, 1.0, 1.0],
+                            &mut ui_line_vertices,
+                        );
                     }
                 }
 
@@ -2601,24 +3657,75 @@ impl State {
                             let ty = mouse_y + 0.02;
 
                             let tt_bg = [0.05, 0.05, 0.1, 0.95];
-                            ui_vertices.push(UiVertex { position: [tx, ty + th, 0.0], color: tt_bg });
-                            ui_vertices.push(UiVertex { position: [tx, ty, 0.0], color: tt_bg });
-                            ui_vertices.push(UiVertex { position: [tx + tw, ty, 0.0], color: tt_bg });
-                            ui_vertices.push(UiVertex { position: [tx, ty + th, 0.0], color: tt_bg });
-                            ui_vertices.push(UiVertex { position: [tx + tw, ty, 0.0], color: tt_bg });
-                            ui_vertices.push(UiVertex { position: [tx + tw, ty + th, 0.0], color: tt_bg });
+                            ui_vertices.push(UiVertex {
+                                position: [tx, ty + th, 0.0],
+                                color: tt_bg,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [tx, ty, 0.0],
+                                color: tt_bg,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [tx + tw, ty, 0.0],
+                                color: tt_bg,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [tx, ty + th, 0.0],
+                                color: tt_bg,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [tx + tw, ty, 0.0],
+                                color: tt_bg,
+                            });
+                            ui_vertices.push(UiVertex {
+                                position: [tx + tw, ty + th, 0.0],
+                                color: tt_bg,
+                            });
 
                             let tt_border = [0.3, 0.3, 0.7, 1.0];
-                            ui_line_vertices.push(UiVertex { position: [tx, ty + th, 0.0], color: tt_border });
-                            ui_line_vertices.push(UiVertex { position: [tx + tw, ty + th, 0.0], color: tt_border });
-                            ui_line_vertices.push(UiVertex { position: [tx + tw, ty + th, 0.0], color: tt_border });
-                            ui_line_vertices.push(UiVertex { position: [tx + tw, ty, 0.0], color: tt_border });
-                            ui_line_vertices.push(UiVertex { position: [tx + tw, ty, 0.0], color: tt_border });
-                            ui_line_vertices.push(UiVertex { position: [tx, ty, 0.0], color: tt_border });
-                            ui_line_vertices.push(UiVertex { position: [tx, ty, 0.0], color: tt_border });
-                            ui_line_vertices.push(UiVertex { position: [tx, ty + th, 0.0], color: tt_border });
+                            ui_line_vertices.push(UiVertex {
+                                position: [tx, ty + th, 0.0],
+                                color: tt_border,
+                            });
+                            ui_line_vertices.push(UiVertex {
+                                position: [tx + tw, ty + th, 0.0],
+                                color: tt_border,
+                            });
+                            ui_line_vertices.push(UiVertex {
+                                position: [tx + tw, ty + th, 0.0],
+                                color: tt_border,
+                            });
+                            ui_line_vertices.push(UiVertex {
+                                position: [tx + tw, ty, 0.0],
+                                color: tt_border,
+                            });
+                            ui_line_vertices.push(UiVertex {
+                                position: [tx + tw, ty, 0.0],
+                                color: tt_border,
+                            });
+                            ui_line_vertices.push(UiVertex {
+                                position: [tx, ty, 0.0],
+                                color: tt_border,
+                            });
+                            ui_line_vertices.push(UiVertex {
+                                position: [tx, ty, 0.0],
+                                color: tt_border,
+                            });
+                            ui_line_vertices.push(UiVertex {
+                                position: [tx, ty + th, 0.0],
+                                color: tt_border,
+                            });
 
-                            add_string_lines(name, tx + 0.01, ty + 0.01 * aspect, 0.008, 0.016, 0.003, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                            add_string_lines(
+                                name,
+                                tx + 0.01,
+                                ty + 0.01 * aspect,
+                                0.008,
+                                0.016,
+                                0.003,
+                                [1.0, 1.0, 1.0, 1.0],
+                                &mut ui_line_vertices,
+                            );
                         }
                     }
                 }
@@ -2629,12 +3736,30 @@ impl State {
                 let bg_x1 = 0.415;
                 let bg_y0 = -0.96;
                 let bg_y1 = -0.94 + slot_h;
-                ui_vertices.push(UiVertex { position: [bg_x0, bg_y1, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [bg_x0, bg_y0, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [bg_x1, bg_y0, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [bg_x0, bg_y1, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [bg_x1, bg_y0, 0.0], color: bg_color });
-                ui_vertices.push(UiVertex { position: [bg_x1, bg_y1, 0.0], color: bg_color });
+                ui_vertices.push(UiVertex {
+                    position: [bg_x0, bg_y1, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [bg_x0, bg_y0, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [bg_x1, bg_y0, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [bg_x0, bg_y1, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [bg_x1, bg_y0, 0.0],
+                    color: bg_color,
+                });
+                ui_vertices.push(UiVertex {
+                    position: [bg_x1, bg_y1, 0.0],
+                    color: bg_color,
+                });
 
                 // Slots
                 for i in 0..9 {
@@ -2650,14 +3775,38 @@ impl State {
                     };
 
                     // Push lines to ui_line_vertices (forms border box)
-                    ui_line_vertices.push(UiVertex { position: [x0, y1, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x1, y1, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x1, y1, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x1, y0, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x1, y0, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x0, y0, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x0, y0, 0.0], color: border_color });
-                    ui_line_vertices.push(UiVertex { position: [x0, y1, 0.0], color: border_color });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x0, y1, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x1, y1, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x1, y1, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x1, y0, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x1, y0, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x0, y0, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x0, y0, 0.0],
+                        color: border_color,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [x0, y1, 0.0],
+                        color: border_color,
+                    });
 
                     if let Some(stack) = &self.inventory.hotbar[i] {
                         let (col, row) = stack.item.properties().tex_coords;
@@ -2674,12 +3823,36 @@ impl State {
                         let ty1 = y1 - margin_y;
 
                         let c = [1.0, 1.0, 1.0, 1.0];
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty1, 0.0], tex_coords: [u0, v0], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty0, 0.0], tex_coords: [u0, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty0, 0.0], tex_coords: [u1, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx0, ty1, 0.0], tex_coords: [u0, v0], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty0, 0.0], tex_coords: [u1, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [tx1, ty1, 0.0], tex_coords: [u1, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx0, ty1, 0.0],
+                            tex_coords: [u0, v0],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx0, ty0, 0.0],
+                            tex_coords: [u0, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx1, ty0, 0.0],
+                            tex_coords: [u1, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx0, ty1, 0.0],
+                            tex_coords: [u0, v0],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx1, ty0, 0.0],
+                            tex_coords: [u1, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [tx1, ty1, 0.0],
+                            tex_coords: [u1, v0],
+                            color: c,
+                        });
 
                         if stack.count > 1 {
                             let count_str = format!("{}", stack.count);
@@ -2690,7 +3863,16 @@ impl State {
                             let count_w = n_chars * cw + (n_chars - 1.0) * cs;
                             let count_x = x1 - count_w - 0.01;
                             let count_y = y0 + 0.012 * aspect;
-                            add_string_lines(&count_str, count_x, count_y, cw, ch, cs, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                            add_string_lines(
+                                &count_str,
+                                count_x,
+                                count_y,
+                                cw,
+                                ch,
+                                cs,
+                                [1.0, 1.0, 1.0, 1.0],
+                                &mut ui_line_vertices,
+                            );
                         }
 
                         // Draw durability bar
@@ -2705,7 +3887,7 @@ impl State {
                     let hud_gap = 0.005;
                     let x_hearts_start = -0.38;
                     let y_hud = -0.76;
-                    
+
                     for i in 0..10 {
                         let h_val = self.player_state.health;
                         let (col, row) = if h_val >= 2.0 * (i + 1) as f32 {
@@ -2715,26 +3897,50 @@ impl State {
                         } else {
                             (2, 8) // Empty
                         };
-                        
+
                         let u0 = col as f32 * 0.0625;
                         let u1 = (col + 1) as f32 * 0.0625;
                         let v0 = row as f32 * 0.0625;
                         let v1 = (row + 1) as f32 * 0.0625;
-                        
+
                         let hx0 = x_hearts_start + i as f32 * (hud_w + hud_gap);
                         let hx1 = hx0 + hud_w;
                         let hy0 = y_hud;
                         let hy1 = hy0 + hud_h;
-                        
+
                         let c = [1.0, 1.0, 1.0, 1.0];
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy0, 0.0], tex_coords: [u0, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy1, 0.0], tex_coords: [u1, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx0, hy1, 0.0],
+                            tex_coords: [u0, v0],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx0, hy0, 0.0],
+                            tex_coords: [u0, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx1, hy0, 0.0],
+                            tex_coords: [u1, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx0, hy1, 0.0],
+                            tex_coords: [u0, v0],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx1, hy0, 0.0],
+                            tex_coords: [u1, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx1, hy1, 0.0],
+                            tex_coords: [u1, v0],
+                            color: c,
+                        });
                     }
-                    
+
                     // Draw Hunger HUD
                     let x_hunger_start = 0.38 - 10.0 * hud_w - 9.0 * hud_gap;
                     for i in 0..10 {
@@ -2746,24 +3952,48 @@ impl State {
                         } else {
                             (5, 8) // Empty
                         };
-                        
+
                         let u0 = col as f32 * 0.0625;
                         let u1 = (col + 1) as f32 * 0.0625;
                         let v0 = row as f32 * 0.0625;
                         let v1 = (row + 1) as f32 * 0.0625;
-                        
+
                         let hx0 = x_hunger_start + i as f32 * (hud_w + hud_gap);
                         let hx1 = hx0 + hud_w;
                         let hy0 = y_hud;
                         let hy1 = hy0 + hud_h;
-                        
+
                         let c = [1.0, 1.0, 1.0, 1.0];
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy0, 0.0], tex_coords: [u0, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
-                        ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy1, 0.0], tex_coords: [u1, v0], color: c });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx0, hy1, 0.0],
+                            tex_coords: [u0, v0],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx0, hy0, 0.0],
+                            tex_coords: [u0, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx1, hy0, 0.0],
+                            tex_coords: [u1, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx0, hy1, 0.0],
+                            tex_coords: [u0, v0],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx1, hy0, 0.0],
+                            tex_coords: [u1, v1],
+                            color: c,
+                        });
+                        ui_textured_vertices.push(TexturedUiVertex {
+                            position: [hx1, hy1, 0.0],
+                            tex_coords: [u1, v0],
+                            color: c,
+                        });
                     }
 
                     // Draw Oxygen HUD
@@ -2771,7 +4001,7 @@ impl State {
                         let oxygen = self.player_state.oxygen;
                         let bubble_count = (oxygen / 30.0).ceil() as i32;
                         let y_bubbles = y_hud + hud_h + 0.005;
-                        
+
                         for i in 0..bubble_count {
                             let col = 15;
                             let row = 3;
@@ -2779,26 +4009,52 @@ impl State {
                             let u1 = (col + 1) as f32 * 0.0625;
                             let v0 = row as f32 * 0.0625;
                             let v1 = (row + 1) as f32 * 0.0625;
-                            
+
                             let slot_idx = 9 - i;
                             let hx0 = x_hunger_start + slot_idx as f32 * (hud_w + hud_gap);
                             let hx1 = hx0 + hud_w;
                             let hy0 = y_bubbles;
                             let hy1 = hy0 + hud_h;
-                            
+
                             let c = [1.0, 1.0, 1.0, 1.0];
-                            ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
-                            ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy0, 0.0], tex_coords: [u0, v1], color: c });
-                            ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
-                            ui_textured_vertices.push(TexturedUiVertex { position: [hx0, hy1, 0.0], tex_coords: [u0, v0], color: c });
-                            ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy0, 0.0], tex_coords: [u1, v1], color: c });
-                            ui_textured_vertices.push(TexturedUiVertex { position: [hx1, hy1, 0.0], tex_coords: [u1, v0], color: c });
+                            ui_textured_vertices.push(TexturedUiVertex {
+                                position: [hx0, hy1, 0.0],
+                                tex_coords: [u0, v0],
+                                color: c,
+                            });
+                            ui_textured_vertices.push(TexturedUiVertex {
+                                position: [hx0, hy0, 0.0],
+                                tex_coords: [u0, v1],
+                                color: c,
+                            });
+                            ui_textured_vertices.push(TexturedUiVertex {
+                                position: [hx1, hy0, 0.0],
+                                tex_coords: [u1, v1],
+                                color: c,
+                            });
+                            ui_textured_vertices.push(TexturedUiVertex {
+                                position: [hx0, hy1, 0.0],
+                                tex_coords: [u0, v0],
+                                color: c,
+                            });
+                            ui_textured_vertices.push(TexturedUiVertex {
+                                position: [hx1, hy0, 0.0],
+                                tex_coords: [u1, v1],
+                                color: c,
+                            });
+                            ui_textured_vertices.push(TexturedUiVertex {
+                                position: [hx1, hy1, 0.0],
+                                tex_coords: [u1, v0],
+                                color: c,
+                            });
                         }
                     }
                 }
 
                 // Selected Block/Item Text
-                let selected_item = self.inventory.hotbar[self.inventory.selected].map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
+                let selected_item = self.inventory.hotbar[self.inventory.selected]
+                    .map(|s| s.item)
+                    .unwrap_or(crate::inventory::Item::Air);
                 let selected_text = format!("{:?}", selected_item).to_uppercase();
                 let char_w = 0.010;
                 let char_h = 0.020;
@@ -2806,7 +4062,16 @@ impl State {
                 let n = selected_text.len() as f32;
                 let width = n * char_w + (n - 1.0) * spacing;
                 let text_x = -width / 2.0;
-                add_string_lines(&selected_text, text_x, -0.78, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+                add_string_lines(
+                    &selected_text,
+                    text_x,
+                    -0.78,
+                    char_w,
+                    char_h,
+                    spacing,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
 
                 // Game Mode Status Text
                 let mode_text = match self.game_mode {
@@ -2819,18 +4084,45 @@ impl State {
                 let n_mode = mode_text.len() as f32;
                 let width_mode = n_mode * mode_w + (n_mode - 1.0) * mode_s;
                 let mode_x = -width_mode / 2.0;
-                add_string_lines(mode_text, mode_x, -0.71, mode_w, mode_h, mode_s, [1.0, 0.9, 0.4, 1.0], &mut ui_line_vertices);
+                add_string_lines(
+                    mode_text,
+                    mode_x,
+                    -0.71,
+                    mode_w,
+                    mode_h,
+                    mode_s,
+                    [1.0, 0.9, 0.4, 1.0],
+                    &mut ui_line_vertices,
+                );
 
                 // Damaged screen red flash overlay
                 if self.player_state.damaged_flash_time > 0.0 {
                     let alpha = (self.player_state.damaged_flash_time / 0.5).min(1.0) * 0.25;
                     let flash_color = [1.0, 0.0, 0.0, alpha];
-                    ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: flash_color });
-                    ui_vertices.push(UiVertex { position: [-1.0, -1.0, 0.0], color: flash_color });
-                    ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: flash_color });
-                    ui_vertices.push(UiVertex { position: [-1.0, 1.0, 0.0], color: flash_color });
-                    ui_vertices.push(UiVertex { position: [1.0, -1.0, 0.0], color: flash_color });
-                    ui_vertices.push(UiVertex { position: [1.0, 1.0, 0.0], color: flash_color });
+                    ui_vertices.push(UiVertex {
+                        position: [-1.0, 1.0, 0.0],
+                        color: flash_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [-1.0, -1.0, 0.0],
+                        color: flash_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [1.0, -1.0, 0.0],
+                        color: flash_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [-1.0, 1.0, 0.0],
+                        color: flash_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [1.0, -1.0, 0.0],
+                        color: flash_color,
+                    });
+                    ui_vertices.push(UiVertex {
+                        position: [1.0, 1.0, 0.0],
+                        color: flash_color,
+                    });
                 }
 
                 // F3 Debug Screen
@@ -2839,31 +4131,80 @@ impl State {
                     let hour = ((time_of_day * 24.0 + 6.0) % 24.0).floor() as u32;
                     let minute = (((time_of_day * 24.0 + 6.0) % 1.0) * 60.0).floor() as u32;
                     let day = self.world_time.ticks / self.world_time.day_length;
-                    let time_str = format!("TIME: {:02}:{:02} (DAY {}, TICKS: {})", hour, minute, day, self.world_time.ticks);
-                    
+                    let time_str = format!(
+                        "TIME: {:02}:{:02} (DAY {}, TICKS: {})",
+                        hour, minute, day, self.world_time.ticks
+                    );
+
                     let pos = self.player_physics.position;
                     let pos_str = format!("XYZ: {:.3} / {:.5} / {:.3}", pos.x, pos.y, pos.z);
-                    
+
                     let dir_x = self.camera.yaw.cos() * self.camera.pitch.cos();
                     let dir_y = self.camera.pitch.sin();
                     let dir_z = self.camera.yaw.sin() * self.camera.pitch.cos();
                     let dir_str = format!("DIR: {:.2} / {:.2} / {:.2}", dir_x, dir_y, dir_z);
 
                     let light_lvl = self.world_time.sky_light_level();
-                    let light_str = format!("SKY LIGHT: {} (DAYTIME: {})", light_lvl, if light_lvl == 15 { "YES" } else if light_lvl == 4 { "NO" } else { "TRANSITION" });
-                    
+                    let light_str = format!(
+                        "SKY LIGHT: {} (DAYTIME: {})",
+                        light_lvl,
+                        if light_lvl == 15 {
+                            "YES"
+                        } else if light_lvl == 4 {
+                            "NO"
+                        } else {
+                            "TRANSITION"
+                        }
+                    );
+
                     let char_w = 0.007;
                     let char_h = 0.014;
                     let spacing = 0.002;
-                    
+
                     let start_x = -0.98;
                     let start_y = 0.95;
                     let line_gap = 0.025;
-                    
-                    add_string_lines(&time_str, start_x, start_y, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
-                    add_string_lines(&pos_str, start_x, start_y - line_gap, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
-                    add_string_lines(&dir_str, start_x, start_y - line_gap * 2.0, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
-                    add_string_lines(&light_str, start_x, start_y - line_gap * 3.0, char_w, char_h, spacing, [1.0, 1.0, 1.0, 1.0], &mut ui_line_vertices);
+
+                    add_string_lines(
+                        &time_str,
+                        start_x,
+                        start_y,
+                        char_w,
+                        char_h,
+                        spacing,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+                    add_string_lines(
+                        &pos_str,
+                        start_x,
+                        start_y - line_gap,
+                        char_w,
+                        char_h,
+                        spacing,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+                    add_string_lines(
+                        &dir_str,
+                        start_x,
+                        start_y - line_gap * 2.0,
+                        char_w,
+                        char_h,
+                        spacing,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+                    add_string_lines(
+                        &light_str,
+                        start_x,
+                        start_y - line_gap * 3.0,
+                        char_w,
+                        char_h,
+                        spacing,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
                 }
             }
 
@@ -2872,18 +4213,32 @@ impl State {
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
             let ui_textured_vert_len = ui_textured_vertices.len().min(4096);
 
-            self.queue.write_buffer(&self.ui_vertex_buffer, 0, bytemuck::cast_slice(&ui_vertices[..ui_vert_len]));
-            self.queue.write_buffer(&self.ui_line_vertex_buffer, 0, bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]));
-            self.queue.write_buffer(&self.ui_textured_vertex_buffer, 0, bytemuck::cast_slice(&ui_textured_vertices[..ui_textured_vert_len]));
+            self.queue.write_buffer(
+                &self.ui_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
+            );
+            self.queue.write_buffer(
+                &self.ui_line_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
+            );
+            self.queue.write_buffer(
+                &self.ui_textured_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_textured_vertices[..ui_textured_vert_len]),
+            );
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
             self.num_ui_textured_vertices = ui_textured_vert_len as u32;
         }
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2924,7 +4279,10 @@ impl State {
             for mesh in self.chunk_meshes.values() {
                 if mesh.opaque_num_indices > 0 {
                     render_pass.set_vertex_buffer(0, mesh.opaque_vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(mesh.opaque_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.set_index_buffer(
+                        mesh.opaque_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
                     render_pass.draw_indexed(0..mesh.opaque_num_indices, 0, 0..1);
                 }
             }
@@ -2932,7 +4290,8 @@ impl State {
             // Draw Mobs
             if self.mob_num_indices > 0 {
                 render_pass.set_vertex_buffer(0, self.mob_vertex_buffer.slice(..));
-                render_pass.set_index_buffer(self.mob_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(self.mob_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.mob_num_indices, 0, 0..1);
             }
 
@@ -2941,7 +4300,10 @@ impl State {
             for mesh in self.chunk_meshes.values() {
                 if mesh.transparent_num_indices > 0 {
                     render_pass.set_vertex_buffer(0, mesh.transparent_vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(mesh.transparent_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.set_index_buffer(
+                        mesh.transparent_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
                     render_pass.draw_indexed(0..mesh.transparent_num_indices, 0, 0..1);
                 }
             }
@@ -2949,9 +4311,14 @@ impl State {
             // Draw Block cracking animation overlay
             if let Some(target) = self.mining_target {
                 if self.mining_progress > 0.0 {
-                    if let Some((_num_vertices, num_indices)) = self.update_crack_buffers(target, self.mining_progress) {
+                    if let Some((_num_vertices, num_indices)) =
+                        self.update_crack_buffers(target, self.mining_progress)
+                    {
                         render_pass.set_vertex_buffer(0, self.crack_vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(self.crack_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        render_pass.set_index_buffer(
+                            self.crack_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
                         render_pass.draw_indexed(0..num_indices, 0, 0..1);
                     }
                 }
@@ -3021,8 +4388,14 @@ fn add_char_lines(
     let ym = y + h * 0.5;
 
     let mut add_line = |x_start: f32, y_start: f32, x_end: f32, y_end: f32| {
-        vertices.push(UiVertex { position: [x_start, y_start, 0.0], color });
-        vertices.push(UiVertex { position: [x_end, y_end, 0.0], color });
+        vertices.push(UiVertex {
+            position: [x_start, y_start, 0.0],
+            color,
+        });
+        vertices.push(UiVertex {
+            position: [x_end, y_end, 0.0],
+            color,
+        });
     };
 
     match c {
@@ -3245,7 +4618,9 @@ fn add_string_lines(
 
 impl Drop for State {
     fn drop(&mut self) {
-        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+        let _ = self
+            .window
+            .set_cursor_grab(winit::window::CursorGrabMode::None);
         self.window.set_cursor_visible(true);
     }
 }
@@ -3299,12 +4674,20 @@ impl GameSettings {
                 }
             }
         }
-        Self { fov, sensitivity, render_distance, volume }
+        Self {
+            fov,
+            sensitivity,
+            render_distance,
+            volume,
+        }
     }
 
     pub fn save(&self) {
         if let Ok(mut file) = std::fs::File::create("settings.txt") {
-            let contents = format!("fov:{}\nsensitivity:{}\nrender_distance:{}\nvolume:{}\n", self.fov, self.sensitivity, self.render_distance, self.volume);
+            let contents = format!(
+                "fov:{}\nsensitivity:{}\nrender_distance:{}\nvolume:{}\n",
+                self.fov, self.sensitivity, self.render_distance, self.volume
+            );
             use std::io::Write;
             let _ = file.write_all(contents.as_bytes());
         }
