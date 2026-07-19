@@ -13,6 +13,7 @@ mod player;
 mod entity;
 mod mob;
 mod mob_renderer;
+mod passive_mob;
 pub mod audio;
 mod fluid;
 
