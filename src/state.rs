@@ -569,10 +569,10 @@ impl State {
                 let chunk = chunks_ref.get(&(cx, cz)).unwrap();
                 let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
                     if wy < 0 {
-                        return (BlockType::Air, 0, 0);
+                        return (BlockType::Air, 0, 0, 0, false);
                     }
                     if wy >= crate::world::CHUNK_HEIGHT as i32 {
-                        return (BlockType::Air, 15, 0);
+                        return (BlockType::Air, 15, 0, 0, false);
                     }
                     let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                     let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
@@ -583,9 +583,11 @@ impl State {
                             c.blocks[bx_neighbor][wy as usize][bz_neighbor],
                             c.sky_light[bx_neighbor][wy as usize][bz_neighbor],
                             c.block_light[bx_neighbor][wy as usize][bz_neighbor],
+                            c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x07,
+                            (c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x08) != 0,
                         )
                     } else {
-                        (BlockType::Air, 15, 0)
+                        (BlockType::Air, 15, 0, 0, false)
                     }
                 });
 
@@ -954,10 +956,10 @@ impl State {
             let chunk = chunks_ref.get(&(cx, cz)).unwrap();
             let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
                 if wy < 0 {
-                    return (BlockType::Air, 0, 0);
+                    return (BlockType::Air, 0, 0, 0, false);
                 }
                 if wy >= crate::world::CHUNK_HEIGHT as i32 {
-                    return (BlockType::Air, 15, 0);
+                    return (BlockType::Air, 15, 0, 0, false);
                 }
                 let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                 let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
@@ -968,9 +970,11 @@ impl State {
                         c.blocks[bx_neighbor][wy as usize][bz_neighbor],
                         c.sky_light[bx_neighbor][wy as usize][bz_neighbor],
                         c.block_light[bx_neighbor][wy as usize][bz_neighbor],
+                        c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x07,
+                        (c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x08) != 0,
                     )
                 } else {
-                    (BlockType::Air, 15, 0)
+                    (BlockType::Air, 15, 0, 0, false)
                 }
             });
 
@@ -1682,7 +1686,8 @@ impl State {
             let wy = target.y as i32;
             let wz = target.z as i32;
 
-            let mut dirty_chunks = std::collections::HashSet::new();             if is_left_click {
+            let mut dirty_chunks = std::collections::HashSet::new();
+             if is_left_click {
                 let old_block = self.chunk_manager.get_block(wx, wy, wz);
                 if old_block != BlockType::Air {
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);

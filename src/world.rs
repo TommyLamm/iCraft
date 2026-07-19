@@ -696,7 +696,7 @@ impl Chunk {
     // 生成用於渲染的頂點和索引，區分為不透明與半透明網格
     pub fn generate_mesh<F>(&self, get_block_at: F) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>)
     where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8),
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
     {
         let mut opaque_vertices = Vec::new();
         let mut opaque_indices = Vec::new();
@@ -768,14 +768,34 @@ impl Chunk {
                         let ny = world_y + normal[1] as i32;
                         let nz = world_z + normal[2] as i32;
 
-                        let (neighbor, neighbor_sky, neighbor_block) = get_block_at(nx, ny, nz);
+                        let (neighbor, neighbor_sky, neighbor_block, neighbor_level, neighbor_falling) = get_block_at(nx, ny, nz);
                         let neighbor_props = neighbor.properties();
 
-                        // Face Culling: 只有鄰居非 Opaque 才渲染（且排除相同水體相鄰）
+                        let is_fluid = block == BlockType::Water || block == BlockType::Lava;
+                        let level = self.fluid_levels[x][y][z] & 0x07;
+                        let falling = (self.fluid_levels[x][y][z] & 0x08) != 0;
+
+                        // Face Culling: 只有鄰居非 Opaque 才渲染（且排除相同流體相鄰）
                         let should_render = if neighbor == BlockType::Air {
                             true
                         } else if neighbor_props.render_type != RenderType::Opaque {
-                            !(block == BlockType::Water && neighbor == BlockType::Water)
+                            if is_fluid && neighbor == block {
+                                if face_idx == 4 {
+                                    false
+                                } else if face_idx == 5 {
+                                    false
+                                } else {
+                                    if neighbor_falling {
+                                        false
+                                    } else if falling {
+                                        true
+                                    } else {
+                                        neighbor_level > level
+                                    }
+                                }
+                            } else {
+                                true
+                            }
                         } else {
                             false
                         };
@@ -800,6 +820,12 @@ impl Chunk {
                             };
                             let light_val = (neighbor_sky as f32) + (neighbor_block as f32) * 16.0 + multiplier_code * 256.0;
 
+                            let h = if is_fluid {
+                                if falling { 1.0 } else { (8 - level) as f32 / 8.0 * 0.9 }
+                            } else {
+                                1.0
+                            };
+
                             for (offset, uv) in corner_data.iter() {
                                 // 256x256 atlas -> 16 columns of 16x16 pixel blocks
                                 // Apply half-pixel inset adjustment to prevent Nearest-neighbor coordinate bleeding
@@ -807,10 +833,16 @@ impl Chunk {
                                 let v_adj = if uv[1] == 0.0 { 0.005 } else { 0.995 };
                                 let u = (u_adj + tx_col as f32) * 0.0625;
                                 let v = (v_adj + tx_row as f32) * 0.0625;
+
+                                let mut vy = world_y as f32 + offset[1];
+                                if is_fluid && offset[1] > 0.0 {
+                                    vy = world_y as f32 + h;
+                                }
+
                                 v_list.push(Vertex {
                                     position: [
                                         world_x as f32 + offset[0],
-                                        world_y as f32 + offset[1],
+                                        vy,
                                         world_z as f32 + offset[2],
                                     ],
                                     tex_coords: [u, v],
