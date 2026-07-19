@@ -893,7 +893,25 @@ impl State {
             self.chunk_manager.chunks.insert((cx, cz), chunk);
 
             let mut dirty = std::collections::HashSet::new();
-            crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
+            // Re-seed both sides of every newly available boundary. This lets
+            // light from an already-loaded neighboring cave enter the new
+            // chunk, as well as light from the new chunk flow outward.
+            for (lighting_cx, lighting_cz) in [
+                (cx, cz),
+                (cx - 1, cz),
+                (cx + 1, cz),
+                (cx, cz - 1),
+                (cx, cz + 1),
+            ] {
+                if self.chunk_manager.chunks.contains_key(&(lighting_cx, lighting_cz)) {
+                    crate::lighting::propagate_chunk_lighting(
+                        &mut self.chunk_manager,
+                        lighting_cx,
+                        lighting_cz,
+                        &mut dirty,
+                    );
+                }
+            }
 
             // Only mark direct neighbors dirty (limit cascade)
             for &(ncx, ncz) in &[(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {

@@ -27,7 +27,9 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
-    @location(1) light_level: f32,
+    // This value packs several integer fields. Interpolating it can cross an
+    // integer boundary and make floor() decode a completely different light.
+    @location(1) @interpolate(flat) light_level: f32,
     @location(2) world_pos: vec3<f32>,
 };
 
@@ -49,7 +51,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Unpack lighting
-    let packed = in.light_level;
+    // Vertex attributes are f32, but the encoded value is always integral.
+    // Round defensively before unpacking so floating-point representation
+    // cannot turn (for example) 256 into 255.99998.
+    let packed = round(in.light_level);
     var is_hurt = 0.0;
     var rest_packed = packed;
     if (rest_packed >= 1024.0) {
