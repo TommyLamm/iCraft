@@ -366,7 +366,262 @@ pub fn render_mobs(
                     9, light_val
                 );
             }
-            _ => {}
+            EntityType::Pig => {
+                let scale = if entity.age < 0.0 { 0.5f32 } else { 1.0f32 };
+                let head_scale = if entity.age < 0.0 { 0.75f32 } else { 1.0f32 };
+                
+                // Pig Head (Row 10, Col 0)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.5, 0.5, 0.5) * head_scale,
+                    Vec3::new(0.0, 0.25, 0.0) * head_scale,
+                    entity.position + Vec3::new(0.0, 0.65 * scale, 0.0),
+                    entity.yaw, entity.pitch,
+                    [0, 0, 0, 0, 0, 0], // Col 0
+                    10, light_val
+                );
+                // Torso (Row 10, Col 1)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.6, 0.8, 0.6) * scale,
+                    Vec3::new(0.0, 0.4, 0.0) * scale,
+                    entity.position + Vec3::new(0.0, 0.1 * scale, 0.0),
+                    entity.yaw, 0.0,
+                    [1; 6], // Col 1
+                    10, light_val
+                );
+                // 4 Legs (Row 10, Col 1)
+                // Left Front
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.2, 0.4, 0.2) * scale,
+                    Vec3::new(0.0, -0.2, 0.0) * scale,
+                    entity.position + Vec3::new(-0.25 * scale, 0.4 * scale, 0.2 * scale),
+                    entity.yaw, swing,
+                    [1; 6], 10, light_val
+                );
+                // Right Front
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.2, 0.4, 0.2) * scale,
+                    Vec3::new(0.0, -0.2, 0.0) * scale,
+                    entity.position + Vec3::new(0.25 * scale, 0.4 * scale, 0.2 * scale),
+                    entity.yaw, -swing,
+                    [1; 6], 10, light_val
+                );
+                // Left Back
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.2, 0.4, 0.2) * scale,
+                    Vec3::new(0.0, -0.2, 0.0) * scale,
+                    entity.position + Vec3::new(-0.25 * scale, 0.4 * scale, -0.2 * scale),
+                    entity.yaw, -swing,
+                    [1; 6], 10, light_val
+                );
+                // Right Back
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.2, 0.4, 0.2) * scale,
+                    Vec3::new(0.0, -0.2, 0.0) * scale,
+                    entity.position + Vec3::new(0.25 * scale, 0.4 * scale, -0.2 * scale),
+                    entity.yaw, swing,
+                    [1; 6], 10, light_val
+                );
+            }
+            EntityType::Cow => {
+                let scale = if entity.age < 0.0 { 0.5 } else { 1.0 };
+                let head_scale = if entity.age < 0.0 { 0.75 } else { 1.0 };
+                
+                // Cow Head (Row 10, Col 2)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.5, 0.5, 0.5) * head_scale,
+                    Vec3::new(0.0, 0.25, 0.0) * head_scale,
+                    entity.position + Vec3::new(0.0, 1.0 * scale, 0.0),
+                    entity.yaw, entity.pitch,
+                    [2, 2, 2, 2, 2, 2],
+                    10, light_val
+                );
+                // Torso (Row 10, Col 3)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.65, 1.0, 0.7) * scale,
+                    Vec3::new(0.0, 0.5, 0.0) * scale,
+                    entity.position + Vec3::new(0.0, 0.4 * scale, 0.0),
+                    entity.yaw, 0.0,
+                    [3; 6],
+                    10, light_val
+                );
+                // 4 Legs (Row 10, Col 3)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.22, 0.6, 0.22) * scale,
+                    Vec3::new(0.0, -0.3, 0.0) * scale,
+                    entity.position + Vec3::new(-0.25 * scale, 0.6 * scale, 0.3 * scale),
+                    entity.yaw, swing, [3; 6], 10, light_val
+                );
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.22, 0.6, 0.22) * scale,
+                    Vec3::new(0.0, -0.3, 0.0) * scale,
+                    entity.position + Vec3::new(0.25 * scale, 0.6 * scale, 0.3 * scale),
+                    entity.yaw, -swing, [3; 6], 10, light_val
+                );
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.22, 0.6, 0.22) * scale,
+                    Vec3::new(0.0, -0.3, 0.0) * scale,
+                    entity.position + Vec3::new(-0.25 * scale, 0.6 * scale, -0.3 * scale),
+                    entity.yaw, -swing, [3; 6], 10, light_val
+                );
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.22, 0.6, 0.22) * scale,
+                    Vec3::new(0.0, -0.3, 0.0) * scale,
+                    entity.position + Vec3::new(0.25 * scale, 0.6 * scale, -0.3 * scale),
+                    entity.yaw, swing, [3; 6], 10, light_val
+                );
+            }
+            EntityType::Sheep => {
+                let scale = if entity.age < 0.0 { 0.5 } else { 1.0 };
+                let head_scale = if entity.age < 0.0 { 0.75 } else { 1.0 };
+                
+                // Grazing animation head tilt
+                let is_grazing = entity.grass_eat_timer > 0.0;
+                let final_pitch = if is_grazing {
+                    std::f32::consts::FRAC_PI_4 // look down
+                } else {
+                    entity.pitch
+                };
+
+                // Head (Row 10, Col 4)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.45, 0.45, 0.45) * head_scale,
+                    Vec3::new(0.0, 0.225, 0.0) * head_scale,
+                    entity.position + Vec3::new(0.0, 0.9 * scale, 0.0),
+                    entity.yaw, final_pitch,
+                    [4, 4, 4, 4, 4, 4],
+                    10, light_val
+                );
+
+                // Body (sheared skin Col 6 or wool layer Col 5)
+                let body_col = if entity.has_wool { 5 } else { 6 };
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.6, 0.9, 0.6) * scale,
+                    Vec3::new(0.0, 0.45, 0.0) * scale,
+                    entity.position + Vec3::new(0.0, 0.3 * scale, 0.0),
+                    entity.yaw, 0.0,
+                    [body_col; 6],
+                    10, light_val
+                );
+
+                // 4 Legs (Col 4)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.2, 0.5, 0.2) * scale,
+                    Vec3::new(0.0, -0.25, 0.0) * scale,
+                    entity.position + Vec3::new(-0.25 * scale, 0.5 * scale, 0.25 * scale),
+                    entity.yaw, swing, [4; 6], 10, light_val
+                );
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.2, 0.5, 0.2) * scale,
+                    Vec3::new(0.0, -0.25, 0.0) * scale,
+                    entity.position + Vec3::new(0.25 * scale, 0.5 * scale, 0.25 * scale),
+                    entity.yaw, -swing, [4; 6], 10, light_val
+                );
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.2, 0.5, 0.2) * scale,
+                    Vec3::new(0.0, -0.25, 0.0) * scale,
+                    entity.position + Vec3::new(-0.25 * scale, 0.5 * scale, -0.25 * scale),
+                    entity.yaw, -swing, [4; 6], 10, light_val
+                );
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.2, 0.5, 0.2) * scale,
+                    Vec3::new(0.0, -0.25, 0.0) * scale,
+                    entity.position + Vec3::new(0.25 * scale, 0.5 * scale, -0.25 * scale),
+                    entity.yaw, swing, [4; 6], 10, light_val
+                );
+            }
+            EntityType::Chicken => {
+                let scale = if entity.age < 0.0 { 0.5 } else { 1.0 };
+                let head_scale = if entity.age < 0.0 { 0.75 } else { 1.0 };
+                let flap = if entity.velocity.y < 0.0 {
+                    (time * 40.0).sin() * 0.7
+                } else {
+                    0.0
+                };
+
+                // Head (Row 10, Col 7)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.25, 0.35, 0.25) * head_scale,
+                    Vec3::new(0.0, 0.175, 0.0) * head_scale,
+                    entity.position + Vec3::new(0.0, 0.4 * scale, 0.0),
+                    entity.yaw, entity.pitch,
+                    [7, 7, 7, 7, 7, 7],
+                    10, light_val
+                );
+                // Body (Row 10, Col 8)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.3, 0.4, 0.3) * scale,
+                    Vec3::new(0.0, 0.2, 0.0) * scale,
+                    entity.position + Vec3::new(0.0, 0.15 * scale, 0.0),
+                    entity.yaw, 0.0,
+                    [8; 6],
+                    10, light_val
+                );
+                // Wings: rotate along Z axis for flapping animation
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.05, 0.25, 0.2) * scale,
+                    Vec3::new(0.0, -0.125, 0.0) * scale,
+                    entity.position + Vec3::new(-0.175 * scale, 0.35 * scale, 0.0),
+                    entity.yaw, flap, // Left wing rotation
+                    [8; 6], 10, light_val
+                );
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.05, 0.25, 0.2) * scale,
+                    Vec3::new(0.0, -0.125, 0.0) * scale,
+                    entity.position + Vec3::new(0.175 * scale, 0.35 * scale, 0.0),
+                    entity.yaw, -flap, // Right wing rotation
+                    [8; 6], 10, light_val
+                );
+                // Legs (thin boxes, Col 8)
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.06, 0.2, 0.06) * scale,
+                    Vec3::new(0.0, -0.1, 0.0) * scale,
+                    entity.position + Vec3::new(-0.06 * scale, 0.2 * scale, 0.0),
+                    entity.yaw, swing, [8; 6], 10, light_val
+                );
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.06, 0.2, 0.06) * scale,
+                    Vec3::new(0.0, -0.1, 0.0) * scale,
+                    entity.position + Vec3::new(0.06 * scale, 0.2 * scale, 0.0),
+                    entity.yaw, -swing, [8; 6], 10, light_val
+                );
+            }
+            EntityType::HeartParticle => {
+                // Heart Particle billboard rendering
+                // Reuses Row 8, Col 0 Heart icon
+                add_cuboid(
+                    vertices, indices,
+                    Vec3::new(0.25, 0.25, 0.01),
+                    Vec3::new(0.0, 0.0, 0.0),
+                    entity.position,
+                    entity.yaw, entity.pitch,
+                    [0, 0, 0, 0, 0, 0], // Col 0
+                    8, light_val
+                );
+            }
         }
     }
 }
