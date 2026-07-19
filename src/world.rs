@@ -482,6 +482,112 @@ impl Chunk {
             }
         }
 
+        // --- Pass 2: Ore Vein Distribution ---
+        struct OreConfig {
+            block_type: BlockType,
+            min_y: i32,
+            max_y: i32,
+            vein_size: usize,
+            frequency: usize,
+        }
+
+        let ore_configs = [
+            OreConfig {
+                block_type: BlockType::CoalOre,
+                min_y: 0,
+                max_y: 128,
+                vein_size: 17,
+                frequency: 15,
+            },
+            OreConfig {
+                block_type: BlockType::IronOre,
+                min_y: 0,
+                max_y: 64,
+                vein_size: 9,
+                frequency: 10,
+            },
+            OreConfig {
+                block_type: BlockType::GoldOre,
+                min_y: 0,
+                max_y: 32,
+                vein_size: 9,
+                frequency: 3,
+            },
+            OreConfig {
+                block_type: BlockType::RedstoneOre,
+                min_y: 0,
+                max_y: 16,
+                vein_size: 8,
+                frequency: 4,
+            },
+            OreConfig {
+                block_type: BlockType::DiamondOre,
+                min_y: 0,
+                max_y: 16,
+                vein_size: 8,
+                frequency: 1,
+            },
+        ];
+
+        let mut next_rand_range = |min: i32, max: i32| -> i32 {
+            if min >= max { return min; }
+            let diff = (max - min) as u32;
+            rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+            let val = (rng_seed / 65536) % 32768;
+            min + (val % diff) as i32
+        };
+
+        for config in &ore_configs {
+            for _ in 0..config.frequency {
+                let start_x = next_rand_range(0, CHUNK_WIDTH as i32) as usize;
+                let start_z = next_rand_range(0, CHUNK_DEPTH as i32) as usize;
+                let start_y = next_rand_range(config.min_y, config.max_y + 1) as usize;
+
+                if start_y >= CHUNK_HEIGHT { continue; }
+
+                if blocks[start_x][start_y][start_z] == BlockType::Stone {
+                    let mut queue = Vec::new();
+                    queue.push((start_x, start_y, start_z));
+                    blocks[start_x][start_y][start_z] = config.block_type;
+                    
+                    let mut placed = 1;
+                    let mut head = 0;
+
+                    while head < queue.len() && placed < config.vein_size {
+                        let (cx, cy, cz) = queue[head];
+                        head += 1;
+
+                        // Randomly select one of the 6 neighbor directions
+                        let dir = next_rand_range(0, 6);
+                        let neighbors = [
+                            (cx as i32 + 1, cy as i32, cz as i32),
+                            (cx as i32 - 1, cy as i32, cz as i32),
+                            (cx as i32, cy as i32 + 1, cz as i32),
+                            (cx as i32, cy as i32 - 1, cz as i32),
+                            (cx as i32, cy as i32, cz as i32 + 1),
+                            (cx as i32, cy as i32, cz as i32 - 1),
+                        ];
+
+                        let (nx, ny, nz) = neighbors[dir as usize];
+                        if nx >= 0 && nx < CHUNK_WIDTH as i32
+                            && nz >= 0 && nz < CHUNK_DEPTH as i32
+                            && ny > 4 && ny < CHUNK_HEIGHT as i32 {
+                            
+                            let ux = nx as usize;
+                            let uy = ny as usize;
+                            let uz = nz as usize;
+                            
+                            if blocks[ux][uy][uz] == BlockType::Stone {
+                                blocks[ux][uy][uz] = config.block_type;
+                                queue.push((ux, uy, uz));
+                                placed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut sky_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
             vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
                 .try_into().unwrap();
@@ -741,5 +847,41 @@ mod tests {
         }
         assert!(air_underground > 0, "Caves should carve some air underground");
         assert!(stone_underground > 0, "Caves should leave some stone underground");
+    }
+
+    #[test]
+    fn test_ore_clustering() {
+        let chunk = Chunk::new(0, 0);
+        let mut clustered = false;
+        let mut coal_count = 0;
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                for y in 0..CHUNK_HEIGHT {
+                    if chunk.blocks[x][y][z] == BlockType::CoalOre {
+                        coal_count += 1;
+                        let neighbors = [
+                            (x as i32 + 1, y as i32, z as i32),
+                            (x as i32 - 1, y as i32, z as i32),
+                            (x as i32, y as i32 + 1, z as i32),
+                            (x as i32, y as i32 - 1, z as i32),
+                            (x as i32, y as i32, z as i32 + 1),
+                            (x as i32, y as i32, z as i32 - 1),
+                        ];
+                        for &(nx, ny, nz) in &neighbors {
+                            if nx >= 0 && nx < CHUNK_WIDTH as i32
+                                && nz >= 0 && nz < CHUNK_DEPTH as i32
+                                && ny >= 0 && ny < CHUNK_HEIGHT as i32 {
+                                if chunk.blocks[nx as usize][ny as usize][nz as usize] == BlockType::CoalOre {
+                                    clustered = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(coal_count > 0, "Coal should be generated in the chunk");
+        assert!(clustered, "Coal ores should generate in clusters (veins)");
     }
 }
