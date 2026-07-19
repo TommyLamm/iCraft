@@ -1111,11 +1111,26 @@ impl State {
         if jumped && self.game_mode == GameMode::Survival {
             self.player_state.add_exhaustion(0.05);
         }
+        if jumped {
+            self.audio_manager.play_sound(crate::audio::SoundId::Jump);
+        }
 
         let old_pos = self.player_physics.position;
 
         let fall_damage = self.player_physics.update(dt, &self.chunk_manager, movement);
         self.update_chunks();
+
+        // Landing sound
+        let px = self.player_physics.position.x.floor() as i32;
+        let py = (self.player_physics.position.y - 0.1).floor() as i32;
+        let pz = self.player_physics.position.z.floor() as i32;
+        let under_block = self.chunk_manager.get_block(px, py, pz);
+
+        if self.player_physics.on_ground && !self.was_on_ground {
+            if let Some(mat) = under_block.sound_material() {
+                self.audio_manager.play_sound(crate::audio::SoundId::Land(mat));
+            }
+        }
 
         // Apply fall damage
         if self.game_mode == GameMode::Survival && fall_damage > 0.0 {
@@ -1127,6 +1142,25 @@ impl State {
         if self.game_mode == GameMode::Survival {
             self.player_state.add_exhaustion(0.02 * horizontal_dist);
         }
+
+        // Footstep sound update
+        if self.player_physics.on_ground {
+            if horizontal_dist > 0.0001 {
+                let vel_h = glam::Vec2::new(self.player_physics.velocity.x, self.player_physics.velocity.z).length();
+                let step_interval = if vel_h > 5.0 { 1.5 } else { 2.0 };
+                self.footstep_accumulator += horizontal_dist;
+                if self.footstep_accumulator >= step_interval {
+                    self.footstep_accumulator = 0.0;
+                    if let Some(mat) = under_block.sound_material() {
+                        self.audio_manager.play_sound(crate::audio::SoundId::Footstep(mat));
+                    }
+                }
+            }
+        } else {
+            self.footstep_accumulator = 0.0;
+        }
+
+        self.was_on_ground = self.player_physics.on_ground;
 
         // Void damage check
         if self.player_physics.position.y < -64.0 {
@@ -1346,6 +1380,12 @@ impl State {
         self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
         println!("[Debug] Block mined at ({}, {}, {})", wx, wy, wz);
 
+        let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+        let listener_right = glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
+        if let Some(mat) = old_block.sound_material() {
+            self.audio_manager.play_sound_3d(crate::audio::SoundId::BlockBreak(mat), sound_pos, self.camera.position, listener_right);
+        }
+
         // Survival drops check
         if self.game_mode == GameMode::Survival {
             let mut eligible_to_harvest = true;
@@ -1419,15 +1459,22 @@ impl State {
             return;
         }
 
+        let can_damage = !self.player_state.is_dead && self.player_state.invulnerable_time <= 0.0;
         let died = self.player_state.take_damage(amount, source);
-        if died {
-            println!("[Debug] Player died due to: {:?}", source);
-            self.inventory.clear();
-            
-            // Release cursor grab immediately on death so player can click Respawn
-            let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
-            self.window.set_cursor_visible(true);
-            self.keys = KeyState::default();
+        
+        if can_damage {
+            if died {
+                self.audio_manager.play_sound(crate::audio::SoundId::PlayerDeath);
+                println!("[Debug] Player died due to: {:?}", source);
+                self.inventory.clear();
+                
+                // Release cursor grab immediately on death so player can click Respawn
+                let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                self.window.set_cursor_visible(true);
+                self.keys = KeyState::default();
+            } else {
+                self.audio_manager.play_sound(crate::audio::SoundId::PlayerHurt);
+            }
         }
     }
 
@@ -1590,12 +1637,16 @@ impl State {
             let wy = target.y as i32;
             let wz = target.z as i32;
 
-            let mut dirty_chunks = std::collections::HashSet::new();
-
-            if is_left_click {
+            let mut dirty_chunks = std::collections::HashSet::new();             if is_left_click {
                 let old_block = self.chunk_manager.get_block(wx, wy, wz);
                 if old_block != BlockType::Air {
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+
+                    let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                    let listener_right = glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
+                    if let Some(mat) = old_block.sound_material() {
+                        self.audio_manager.play_sound_3d(crate::audio::SoundId::BlockBreak(mat), sound_pos, self.camera.position, listener_right);
+                    }
 
                     if self.game_mode == GameMode::Survival {
                         self.inventory.add_item(crate::inventory::Item::from_block(old_block));
@@ -1608,6 +1659,12 @@ impl State {
             } else {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
                     self.chunk_manager.set_block(wx, wy, wz, placed_block);
+
+                    let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                    let listener_right = glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
+                    if let Some(mat) = placed_block.sound_material() {
+                        self.audio_manager.play_sound_3d(crate::audio::SoundId::BlockPlace(mat), sound_pos, self.camera.position, listener_right);
+                    }
 
                     let is_creative = self.game_mode == GameMode::Creative;
                     self.inventory.use_selected_item(is_creative);

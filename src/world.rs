@@ -59,6 +59,20 @@ pub struct BlockProperties {
 }
 
 impl BlockType {
+    pub fn sound_material(self) -> Option<crate::audio::SoundMaterial> {
+        match self {
+            BlockType::Air | BlockType::Water => None,
+            BlockType::Grass | BlockType::OakLeaves => Some(crate::audio::SoundMaterial::Grass),
+            BlockType::OakLog | BlockType::OakPlanks | BlockType::Bookshelf | BlockType::CraftingTable | BlockType::Chest => Some(crate::audio::SoundMaterial::Wood),
+            BlockType::Sand | BlockType::Clay => Some(crate::audio::SoundMaterial::Sand),
+            BlockType::Gravel => Some(crate::audio::SoundMaterial::Gravel),
+            BlockType::Snow => Some(crate::audio::SoundMaterial::Snow),
+            BlockType::Ice => Some(crate::audio::SoundMaterial::Ice),
+            BlockType::Glass => Some(crate::audio::SoundMaterial::Glass),
+            _ => Some(crate::audio::SoundMaterial::Stone),
+        }
+    }
+
     pub fn properties(self) -> BlockProperties {
         match self {
             BlockType::Air => BlockProperties {
