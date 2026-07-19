@@ -419,65 +419,73 @@ impl Chunk {
                 let base_height = (64.0 + noise_val * 12.0) as usize;
                 
                 let is_beach = base_height <= 63;
+                let entrance_noise = perlin.get([world_x as f64 * 0.015, world_z as f64 * 0.015]);
+                let is_entrance_zone = entrance_noise > 0.55 && base_height > 63;
+
                 for y in 0..CHUNK_HEIGHT {
                     let world_y = y as i32;
+                    let mut block;
+
                     // Bedrock Y=0-4
                     if y <= 4 {
                         if y == 0 {
-                            blocks[x][y][z] = BlockType::Bedrock;
+                            block = BlockType::Bedrock;
                         } else {
                             // Blended bedrock
                             let threshold = (5 - y) as u8 * 50; // Chance of bedrock
                             if next_rand(0, 255) < threshold {
-                                blocks[x][y][z] = BlockType::Bedrock;
+                                block = BlockType::Bedrock;
                             } else {
-                                blocks[x][y][z] = BlockType::Stone;
+                                block = BlockType::Stone;
                             }
                         }
                     }
                     // Underground Stone Layer
                     else if y < base_height - 4 {
-                        let mut is_cave = false;
-                        if y < base_height.saturating_sub(6) && y < 62 {
-                            let cave_val = caves_perlin.get([world_x as f64 * 0.05, world_y as f64 * 0.08, world_z as f64 * 0.05]);
-                            let cavern_val = caverns_perlin.get([world_x as f64 * 0.01, world_y as f64 * 0.01, world_z as f64 * 0.01]);
-                            let threshold = if cavern_val > 0.6 { 0.20 } else { 0.08 };
-                            
-                            if cave_val.abs() < threshold {
-                                is_cave = true;
-                            }
-                        }
-
-                        if is_cave {
-                            blocks[x][y][z] = BlockType::Air;
-                        } else {
-                            blocks[x][y][z] = BlockType::Stone;
-                        }
+                        block = BlockType::Stone;
                     }
                     // Dirt/Sand layer
                     else if y < base_height {
                         if is_beach {
-                            blocks[x][y][z] = BlockType::Sand;
+                            block = BlockType::Sand;
                         } else {
-                            blocks[x][y][z] = BlockType::Dirt;
+                            block = BlockType::Dirt;
                         }
                     }
                     // Surface block
                     else if y == base_height {
                         if is_beach {
-                            blocks[x][y][z] = BlockType::Sand;
+                            block = BlockType::Sand;
                         } else {
-                            blocks[x][y][z] = BlockType::Grass;
+                            block = BlockType::Grass;
                         }
                     }
                     // Water/Air layer above base height
                     else {
                         if y <= 62 {
-                            blocks[x][y][z] = BlockType::Water;
+                            block = BlockType::Water;
                         } else {
-                            blocks[x][y][z] = BlockType::Air;
+                            block = BlockType::Air;
                         }
                     }
+
+                    // Carve caves
+                    if y > 4 && block != BlockType::Water && block != BlockType::Bedrock {
+                        let in_cave_zone = (y < base_height.saturating_sub(6) && y < 62)
+                            || (is_entrance_zone && y <= base_height);
+
+                        if in_cave_zone {
+                            let cave_val = caves_perlin.get([world_x as f64 * 0.05, world_y as f64 * 0.08, world_z as f64 * 0.05]);
+                            let cavern_val = caverns_perlin.get([world_x as f64 * 0.01, world_y as f64 * 0.01, world_z as f64 * 0.01]);
+                            let threshold = if cavern_val > 0.6 { 0.20 } else { 0.08 };
+
+                            if cave_val.abs() < threshold {
+                                block = BlockType::Air;
+                            }
+                        }
+                    }
+
+                    blocks[x][y][z] = block;
                 }
             }
         }
@@ -764,8 +772,11 @@ impl Chunk {
 
                             for (offset, uv) in corner_data.iter() {
                                 // 256x256 atlas -> 16 columns of 16x16 pixel blocks
-                                let u = (uv[0] + tx_col as f32) * 0.0625;
-                                let v = (uv[1] + tx_row as f32) * 0.0625;
+                                // Apply half-pixel inset adjustment to prevent Nearest-neighbor coordinate bleeding
+                                let u_adj = if uv[0] == 0.0 { 0.005 } else { 0.995 };
+                                let v_adj = if uv[1] == 0.0 { 0.005 } else { 0.995 };
+                                let u = (u_adj + tx_col as f32) * 0.0625;
+                                let v = (v_adj + tx_row as f32) * 0.0625;
                                 v_list.push(Vertex {
                                     position: [
                                         world_x as f32 + offset[0],
@@ -883,5 +894,58 @@ mod tests {
         }
         assert!(coal_count > 0, "Coal should be generated in the chunk");
         assert!(clustered, "Coal ores should generate in clusters (veins)");
+    }
+
+    #[test]
+    fn test_cave_entrances() {
+        let perlin = Perlin::new(12345);
+        let mut found_chunk = None;
+        for cx in -20..20 {
+            for cz in -20..20 {
+                let mut found_entrance = false;
+                for x in 0..CHUNK_WIDTH {
+                    for z in 0..CHUNK_DEPTH {
+                        let world_x = cx * CHUNK_WIDTH as i32 + x as i32;
+                        let world_z = cz * CHUNK_DEPTH as i32 + z as i32;
+                        let noise_val = perlin.get([world_x as f64 * 0.04, world_z as f64 * 0.04]);
+                        let base_height = (64.0 + noise_val * 12.0) as usize;
+                        let entrance_noise = perlin.get([world_x as f64 * 0.015, world_z as f64 * 0.015]);
+                        if entrance_noise > 0.55 && base_height > 63 {
+                            found_entrance = true;
+                            break;
+                        }
+                    }
+                    if found_entrance { break; }
+                }
+                if found_entrance {
+                    found_chunk = Some((cx, cz));
+                    break;
+                }
+            }
+            if found_chunk.is_some() { break; }
+        }
+
+        assert!(found_chunk.is_some(), "Should find a chunk with entrance zone in range");
+        let (cx, cz) = found_chunk.unwrap();
+        let chunk = Chunk::new(cx, cz);
+
+        let mut found_surface_air = false;
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                let world_x = cx * CHUNK_WIDTH as i32 + x as i32;
+                let world_z = cz * CHUNK_DEPTH as i32 + z as i32;
+                let noise_val = perlin.get([world_x as f64 * 0.04, world_z as f64 * 0.04]);
+                let base_height = (64.0 + noise_val * 12.0) as usize;
+                let entrance_noise = perlin.get([world_x as f64 * 0.015, world_z as f64 * 0.015]);
+                if entrance_noise > 0.55 && base_height > 63 {
+                    if chunk.blocks[x][base_height][z] == BlockType::Air {
+                        found_surface_air = true;
+                        break;
+                    }
+                }
+            }
+            if found_surface_air { break; }
+        }
+        assert!(found_surface_air, "Should carve some cave air at surface in entrance zones");
     }
 }

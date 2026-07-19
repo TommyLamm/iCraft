@@ -106,7 +106,7 @@ P3 [░░░░░░░░░░] 0%
 ### 2026-07-19
 - ✅ 完成任務 #11：洞穴與礦脈生成系統
   - 修改文件：`src/world.rs`
-  - 關鍵決策：實現了基於 3D Perlin 噪聲的洞穴雕刻系統以及第二階段確定性隨機走樣 (Deterministic Random-walk) 礦脈生成演算法。在第一階段中，使用 cave 與 cavern 雙重 Perlin 噪聲雕刻地下 Stone 方塊；在第二階段中以區塊種子為起點進行隨機步進，依頻率和大小分佈 Coal, Iron, Gold, Redstone, Diamond 等礦脈。
+  - 關鍵決策：實現了基於 3D Perlin 噪聲的洞穴雕刻系統以及第二階段確定性隨機走樣 (Deterministic Random-walk) 礦脈生成演算法。在第一階段中，使用 cave 與 cavern 雙重 Perlin 噪聲雕刻地下 Stone 方塊；在第二階段中以區塊種子為起點進行隨機步進，依頻率和大小分佈 Coal, Iron, Gold, Redstone, Diamond 等礦脈。此外，引入 2D 噪聲遮罩來動態放寬洞穴雕刻高度限制，實作了自然的隨機地表洞穴入口；並在網格頂點生成時，將 UV 座標向像素中心收縮半像素（`0.005` 至 `0.995` 之間），解決了 WGPU 在 Nearest 採樣下因浮點數精度導致的紋理條紋與黑白線縫問題。
 - ✅ 完成任務 #10：基礎敵對生物系統
   - 新增文件：`src/entity.rs`, `src/mob.rs`, `src/mob_renderer.rs`
   - 修改文件：`src/main.rs`, `src/inventory.rs`, `src/texture.rs`, `src/player.rs`, `src/state.rs`, `src/shader.wgsl`
