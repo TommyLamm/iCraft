@@ -127,6 +127,8 @@ pub struct KeyState {
     pub d: bool,
     pub space: bool,
     pub t: bool,
+    pub ctrl: bool,
+    pub shift: bool,
 }
 
 pub struct State {
@@ -192,6 +194,10 @@ pub struct State {
     pub save_tx: std::sync::mpsc::Sender<crate::save::SaveCommand>,
     pub autosave_timer: f32,
     pub is_saving: bool,
+    pub is_sprinting: bool,
+    pub base_fov: f32,
+    pub w_click_timer: f32,
+    pub last_w_pressed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +359,7 @@ impl State {
             camera_pitch,
             settings.fov,
         );
+        let base_fov = camera.fov;
         let show_debug = false;
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(
@@ -962,6 +969,10 @@ impl State {
             save_tx,
             autosave_timer: 0.0,
             is_saving: false,
+            is_sprinting: false,
+            base_fov,
+            w_click_timer: 0.0,
+            last_w_pressed: false,
         }
     }
 
@@ -1365,6 +1376,50 @@ impl State {
             return;
         }
 
+        // Double click W logic
+        if self.keys.w && !self.last_w_pressed {
+            if self.w_click_timer > 0.0 && self.player_state.hunger > 6.0 {
+                self.is_sprinting = true;
+            }
+            self.w_click_timer = 0.3; // 0.3 seconds window
+        }
+        self.last_w_pressed = self.keys.w;
+        if self.w_click_timer > 0.0 {
+            self.w_click_timer -= dt;
+        }
+
+        // Ctrl key sprint check
+        if self.keys.ctrl && self.keys.w && self.player_state.hunger > 6.0 {
+            self.is_sprinting = true;
+        }
+
+        // Cancel sprinting conditions
+        if !self.keys.w || self.keys.shift || self.player_state.hunger <= 6.0 {
+            self.is_sprinting = false;
+        }
+
+        // Cancel if player collides with a wall but has movement inputs
+        if self.is_sprinting
+            && (self.player_physics.velocity.x.abs() < 0.01
+                && self.player_physics.velocity.z.abs() < 0.01)
+            && (self.keys.w || self.keys.a || self.keys.s || self.keys.d)
+        {
+            self.is_sprinting = false;
+        }
+
+        // Interpolate FOV smoothly
+        let target_fov = if self.is_sprinting {
+            self.base_fov * 1.12
+        } else {
+            self.base_fov
+        };
+        self.camera.fov = self.camera.fov + (target_fov - self.camera.fov) * dt * 10.0;
+
+        // Consume more hunger when sprinting
+        if self.is_sprinting && (self.keys.w || self.keys.a || self.keys.s || self.keys.d) {
+            self.player_state.add_exhaustion(dt * 0.15);
+        }
+
         // Update game time
         let speed_multiplier = if self.keys.t { 200.0 } else { 1.0 };
         self.world_time.tick_accumulator += dt * 20.0 * speed_multiplier;
@@ -1405,9 +1460,13 @@ impl State {
 
         let old_pos = self.player_physics.position;
 
-        let fall_damage = self
-            .player_physics
-            .update(dt, &self.chunk_manager, movement);
+        let fall_damage = self.player_physics.update(
+            dt,
+            &self.chunk_manager,
+            movement,
+            self.keys.shift,
+            self.is_sprinting,
+        );
         self.update_chunks();
 
         // Landing sound
@@ -1690,7 +1749,8 @@ impl State {
         );
 
         // Sync camera position to player position at eye height
-        self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
+        let eye_height = if self.keys.shift { 1.4 } else { 1.6 };
+        self.camera.position = self.player_physics.position + Vec3::new(0.0, eye_height, 0.0);
         let is_underwater = self.chunk_manager.get_block(
             self.camera.position.x.floor() as i32,
             self.camera.position.y.floor() as i32,

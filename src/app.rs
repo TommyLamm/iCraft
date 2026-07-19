@@ -170,6 +170,16 @@ impl ApplicationHandler for App {
                                         state.keys.space = pressed;
                                     }
                                     winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::ControlLeft,
+                                    ) => {
+                                        state.keys.ctrl = pressed;
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(
+                                        winit::keyboard::KeyCode::ShiftLeft,
+                                    ) => {
+                                        state.keys.shift = pressed;
+                                    }
+                                    winit::keyboard::PhysicalKey::Code(
                                         winit::keyboard::KeyCode::Digit1,
                                     ) => {
                                         if pressed {

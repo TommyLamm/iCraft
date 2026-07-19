@@ -51,7 +51,21 @@ impl PlayerPhysics {
         )
     }
 
-    pub fn update(&mut self, dt: f32, chunk_manager: &ChunkManager, movement_input: Vec3) -> f32 {
+    pub fn update(
+        &mut self,
+        dt: f32,
+        chunk_manager: &ChunkManager,
+        movement_input: Vec3,
+        is_sneaking: bool,
+        is_sprinting: bool,
+    ) -> f32 {
+        // Hitbox size adjustment
+        if is_sneaking {
+            self.size.y = 1.5;
+        } else {
+            self.size.y = 1.8;
+        }
+
         let was_on_ground = self.on_ground;
 
         let px = self.position.x.floor() as i32;
@@ -68,6 +82,12 @@ impl PlayerPhysics {
 
         // 1. 套用玩家移動控制
         let mut speed = 8.0;
+        if is_sprinting {
+            speed *= 1.3;
+        } else if is_sneaking {
+            speed *= 0.3;
+        }
+
         if is_in_water {
             speed *= 0.6;
         } else if is_in_lava {
@@ -102,12 +122,26 @@ impl PlayerPhysics {
         }
 
         // 3. 沿 X 軸位移並處理碰撞
+        let old_x = self.position.x;
         self.position.x += self.velocity.x * dt;
         self.resolve_collisions(chunk_manager, 0);
+        if is_sneaking && self.on_ground {
+            if !self.is_block_below(chunk_manager) {
+                self.position.x = old_x;
+                self.velocity.x = 0.0;
+            }
+        }
 
         // 4. 沿 Z 軸位移並處理碰撞
+        let old_z = self.position.z;
         self.position.z += self.velocity.z * dt;
         self.resolve_collisions(chunk_manager, 2);
+        if is_sneaking && self.on_ground {
+            if !self.is_block_below(chunk_manager) {
+                self.position.z = old_z;
+                self.velocity.z = 0.0;
+            }
+        }
 
         // 5. 沿 Y 軸位移並處理碰撞
         self.position.y += self.velocity.y * dt;
@@ -188,11 +222,45 @@ impl PlayerPhysics {
             }
         }
     }
+
+    pub fn is_block_below(&self, chunk_manager: &ChunkManager) -> bool {
+        let mut check_aabb = self.get_aabb();
+        check_aabb.min.y -= 0.05;
+        check_aabb.max.y = self.position.y;
+
+        let min_x = check_aabb.min.x.floor() as i32;
+        let max_x = check_aabb.max.x.floor() as i32;
+        let min_y =
+            (check_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let max_y =
+            (check_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+        let min_z = check_aabb.min.z.floor() as i32;
+        let max_z = check_aabb.max.z.floor() as i32;
+
+        for x in min_x..=max_x {
+            for y in min_y..=max_y {
+                for z in min_z..=max_z {
+                    let block = chunk_manager.get_block(x, y, z);
+                    if block.properties().is_solid {
+                        let block_aabb = AABB::new(
+                            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                            Vec3::ONE,
+                        );
+                        if check_aabb.intersects(&block_aabb) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::{BlockType, Chunk};
 
     #[test]
     fn test_aabb_intersection() {
@@ -202,5 +270,57 @@ mod tests {
 
         assert!(box1.intersects(&box2));
         assert!(!box1.intersects(&box3));
+    }
+
+    #[test]
+    fn test_player_sneaking_speed() {
+        let chunk_manager = ChunkManager::new(2);
+        let mut physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
+        physics.on_ground = false;
+        let dt = 0.1;
+
+        physics.update(dt, &chunk_manager, Vec3::new(1.0, 0.0, 0.0), true, false);
+        // Sneak speed: 8.0 * 0.3 = 2.4
+        assert_eq!(physics.velocity.x, 2.4);
+    }
+
+    #[test]
+    fn test_player_sprinting_speed() {
+        let chunk_manager = ChunkManager::new(2);
+        let mut physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
+        physics.on_ground = true;
+        let dt = 0.1;
+
+        physics.update(dt, &chunk_manager, Vec3::new(1.0, 0.0, 0.0), false, true);
+        // Sprint speed: 8.0 * 1.3 = 10.4
+        assert_eq!(physics.velocity.x, 10.4);
+    }
+
+    #[test]
+    fn test_player_edge_guard() {
+        let mut chunk_manager = ChunkManager::new(2);
+        let mut chunk = Chunk::new(0, 0);
+        // Clear all blocks to Air to prevent procedural terrain interference
+        for x in 0..16 {
+            for y in 0..256 {
+                for z in 0..16 {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                }
+            }
+        }
+        // Set one stone block at (8, 70, 8)
+        chunk.blocks[8][70][8] = BlockType::Stone;
+        chunk_manager.chunks.insert((0, 0), chunk);
+
+        let mut physics = PlayerPhysics::new(Vec3::new(8.5, 71.0, 8.5));
+        physics.on_ground = true;
+        // dt = 0.5, speed = 2.4 => displacement = 1.2.
+        // Walking to X = 9.7 (min X = 9.4), which is off the block.
+        // Edge guard should prevent it and revert position to 8.5.
+        let dt = 0.5;
+
+        physics.update(dt, &chunk_manager, Vec3::new(1.0, 0.0, 0.0), true, false);
+        assert_eq!(physics.position.x, 8.5);
+        assert_eq!(physics.velocity.x, 0.0);
     }
 }
