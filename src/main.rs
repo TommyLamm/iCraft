@@ -14,6 +14,7 @@ mod entity;
 mod mob;
 mod mob_renderer;
 pub mod audio;
+mod fluid;
 
 
 use app::App;

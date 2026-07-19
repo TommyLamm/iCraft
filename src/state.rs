@@ -182,6 +182,8 @@ pub struct State {
     pub audio_manager: crate::audio::AudioManager,
     pub footstep_accumulator: f32,
     pub was_on_ground: bool,
+    pub water_tick_timer: f32,
+    pub lava_tick_timer: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -842,6 +844,8 @@ impl State {
             audio_manager,
             footstep_accumulator: 0.0,
             was_on_ground: false,
+            water_tick_timer: 0.0,
+            lava_tick_timer: 0.0,
         }
     }
 
@@ -1088,6 +1092,27 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
+        self.water_tick_timer += dt;
+        if self.water_tick_timer >= 0.25 {
+            self.water_tick_timer = 0.0;
+            let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, false);
+            for (cx, cz) in dirty {
+                if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
+                    mesh.dirty = true;
+                }
+            }
+        }
+
+        self.lava_tick_timer += dt;
+        if self.lava_tick_timer >= 1.5 {
+            self.lava_tick_timer = 0.0;
+            let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, true);
+            for (cx, cz) in dirty {
+                if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
+                    mesh.dirty = true;
+                }
+            }
+        }
         if self.player_state.is_dead {
             return;
         }
