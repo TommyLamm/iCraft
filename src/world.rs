@@ -396,6 +396,8 @@ impl Chunk {
             vec![[[BlockType::Air; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
                 .try_into().unwrap();
         let perlin = Perlin::new(12345); // Seed: 12345
+        let caves_perlin = Perlin::new(54321);
+        let caverns_perlin = Perlin::new(65432);
 
         // Simple custom PRNG for ore distribution and bedrock blending
         let mut rng_seed = (chunk_x as u32).wrapping_mul(31) ^ (chunk_z as u32);
@@ -418,6 +420,7 @@ impl Chunk {
                 
                 let is_beach = base_height <= 63;
                 for y in 0..CHUNK_HEIGHT {
+                    let world_y = y as i32;
                     // Bedrock Y=0-4
                     if y <= 4 {
                         if y == 0 {
@@ -434,19 +437,22 @@ impl Chunk {
                     }
                     // Underground Stone Layer
                     else if y < base_height - 4 {
-                        // Ore generation distribution
-                        let block = if y < 16 && next_rand(0, 100) < 2 {
-                            if next_rand(0, 2) == 0 { BlockType::DiamondOre } else { BlockType::RedstoneOre }
-                        } else if y < 32 && next_rand(0, 100) < 3 {
-                            BlockType::GoldOre
-                        } else if y < 64 && next_rand(0, 100) < 5 {
-                            BlockType::IronOre
-                        } else if y < 128 && next_rand(0, 100) < 8 {
-                            BlockType::CoalOre
+                        let mut is_cave = false;
+                        if y < base_height.saturating_sub(6) && y < 62 {
+                            let cave_val = caves_perlin.get([world_x as f64 * 0.05, world_y as f64 * 0.08, world_z as f64 * 0.05]);
+                            let cavern_val = caverns_perlin.get([world_x as f64 * 0.01, world_y as f64 * 0.01, world_z as f64 * 0.01]);
+                            let threshold = if cavern_val > 0.6 { 0.20 } else { 0.08 };
+                            
+                            if cave_val.abs() < threshold {
+                                is_cave = true;
+                            }
+                        }
+
+                        if is_cave {
+                            blocks[x][y][z] = BlockType::Air;
                         } else {
-                            BlockType::Stone
-                        };
-                        blocks[x][y][z] = block;
+                            blocks[x][y][z] = BlockType::Stone;
+                        }
                     }
                     // Dirt/Sand layer
                     else if y < base_height {
@@ -714,5 +720,26 @@ mod tests {
         assert_eq!(BlockType::Obsidian.min_harvest_material(), Some(ToolMaterial::Diamond));
         assert_eq!(BlockType::OakPlanks.preferred_tool(), ToolType::Axe);
         assert_eq!(BlockType::OakPlanks.min_harvest_material(), None);
+    }
+
+    #[test]
+    fn test_cave_generation() {
+        let chunk = Chunk::new(0, 0);
+        let mut air_underground = 0;
+        let mut stone_underground = 0;
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                for y in 5..50 {
+                    let block = chunk.blocks[x][y][z];
+                    if block == BlockType::Air {
+                        air_underground += 1;
+                    } else if block == BlockType::Stone {
+                        stone_underground += 1;
+                    }
+                }
+            }
+        }
+        assert!(air_underground > 0, "Caves should carve some air underground");
+        assert!(stone_underground > 0, "Caves should leave some stone underground");
     }
 }
