@@ -366,6 +366,7 @@ pub fn render_mobs(
                     9, light_val
                 );
             }
+            _ => {}
         }
     }
 }

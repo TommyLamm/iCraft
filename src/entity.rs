@@ -8,6 +8,11 @@ pub enum EntityType {
     Skeleton,
     Creeper,
     Arrow,
+    Pig,
+    Cow,
+    Sheep,
+    Chicken,
+    HeartParticle,
 }
 
 pub struct Entity {
@@ -30,6 +35,16 @@ pub struct Entity {
     pub is_ignited: bool,
     pub burn_timer: f32,
     pub invulnerable_time: f32,
+
+    // Passive mob fields
+    pub age: f32,
+    pub breeding_timer: f32,
+    pub breed_cooldown: f32,
+    pub has_wool: bool,
+    pub wool_color: [f32; 3],
+    pub grass_eat_timer: f32,
+    pub egg_lay_timer: f32,
+    pub life_time: f32,
 }
 
 impl Entity {
@@ -38,10 +53,19 @@ impl Entity {
             EntityType::Zombie | EntityType::Skeleton => Vec3::new(0.6, 1.8, 0.6),
             EntityType::Creeper => Vec3::new(0.6, 1.7, 0.6),
             EntityType::Arrow => Vec3::new(0.15, 0.15, 0.15),
+            EntityType::Pig => Vec3::new(0.9, 0.9, 0.9),
+            EntityType::Cow => Vec3::new(0.9, 1.4, 0.9),
+            EntityType::Sheep => Vec3::new(0.9, 1.3, 0.9),
+            EntityType::Chicken => Vec3::new(0.4, 0.7, 0.4),
+            EntityType::HeartParticle => Vec3::new(0.25, 0.25, 0.25),
         };
         let max_health = match entity_type {
             EntityType::Zombie | EntityType::Skeleton | EntityType::Creeper => 20.0,
-            EntityType::Arrow => 0.0,
+            EntityType::Pig => 10.0,
+            EntityType::Cow => 10.0,
+            EntityType::Sheep => 8.0,
+            EntityType::Chicken => 4.0,
+            EntityType::Arrow | EntityType::HeartParticle => 0.0,
         };
         Self {
             id,
@@ -59,6 +83,14 @@ impl Entity {
             is_ignited: false,
             burn_timer: 0.0,
             invulnerable_time: 0.0,
+            age: 0.0,
+            breeding_timer: 0.0,
+            breed_cooldown: 0.0,
+            has_wool: true,
+            wool_color: [1.0, 1.0, 1.0],
+            grass_eat_timer: 0.0,
+            egg_lay_timer: 300.0 + (id % 300) as f32,
+            life_time: 1.5,
         }
     }
 
@@ -68,6 +100,10 @@ impl Entity {
     }
 
     pub fn update_physics(&mut self, dt: f32, chunk_manager: &ChunkManager) {
+        if self.entity_type == EntityType::HeartParticle {
+            self.position += self.velocity * dt;
+            return;
+        }
         if self.entity_type == EntityType::Arrow {
             // Arrow physics: gravity only, no horizontal deceleration
             self.velocity.y -= 12.0 * dt;
@@ -81,9 +117,21 @@ impl Entity {
         }
 
         // Apply gravity
-        self.velocity.y -= 32.0 * dt;
-        if self.velocity.y < -50.0 {
-            self.velocity.y = -50.0;
+        let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
+            8.0 // slow glide
+        } else {
+            32.0
+        };
+        
+        self.velocity.y -= gravity * dt;
+        
+        let terminal_vel = if self.entity_type == EntityType::Chicken {
+            -2.0
+        } else {
+            -50.0
+        };
+        if self.velocity.y < terminal_vel {
+            self.velocity.y = terminal_vel;
         }
 
         // Move X
