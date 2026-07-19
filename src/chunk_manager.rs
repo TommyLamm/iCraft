@@ -39,6 +39,7 @@ impl ChunkManager {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
                 chunk.blocks[bx][by][bz] = block;
+                chunk.update_heightmap(bx, bz);
             }
         }
     }

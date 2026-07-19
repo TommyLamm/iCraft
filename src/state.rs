@@ -885,32 +885,40 @@ impl State {
             let mut dirty = std::collections::HashSet::new();
             crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
 
-            // Mark neighbors dirty
+            // Only mark direct neighbors dirty (limit cascade)
             for &(ncx, ncz) in &[(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(ncx, ncz)) {
                     mesh.dirty = true;
                 }
             }
 
+            // Only mark dirty chunks within ±2 of the loaded chunk to limit cascade
             for (dcx, dcz) in dirty {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                    mesh.dirty = true;
+                if (dcx - cx).abs() <= 2 && (dcz - cz).abs() <= 2 {
+                    if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                        mesh.dirty = true;
+                    }
                 }
             }
         }
 
-        // 4. Rebuild at most 2 dirty meshes per frame
+        // 4. Rebuild at most 4 dirty meshes per frame, prioritize nearest
         let mut to_rebuild = Vec::new();
         for (&(cx, cz), _) in &self.chunk_manager.chunks {
             let needs_mesh = !self.chunk_meshes.contains_key(&(cx, cz));
             let is_dirty = self.chunk_meshes.get(&(cx, cz)).map(|m| m.dirty).unwrap_or(false);
             if needs_mesh || is_dirty {
-                to_rebuild.push((cx, cz));
+                let dx = cx - px;
+                let dz = cz - pz;
+                to_rebuild.push((cx, cz, dx * dx + dz * dz));
             }
         }
 
+        // Sort by distance — rebuild closest chunks first
+        to_rebuild.sort_by_key(|&(_, _, dist)| dist);
+
         let chunks_ref = &self.chunk_manager.chunks;
-        for (cx, cz) in to_rebuild.into_iter().take(2) {
+        for (cx, cz, _) in to_rebuild.into_iter().take(4) {
             let chunk = chunks_ref.get(&(cx, cz)).unwrap();
             let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
                 if wy < 0 {

@@ -385,6 +385,8 @@ pub struct Chunk {
     pub blocks: Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     pub sky_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     pub block_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
+    /// Per-column max Y of non-air blocks (indexed as [x][z])
+    pub heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]>,
 }
 
 impl Chunk {
@@ -498,13 +500,40 @@ impl Chunk {
             }
         }
 
+        // Build heightmap: per-column max Y of non-air blocks
+        let mut heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
+            vec![[0u16; CHUNK_DEPTH]; CHUNK_WIDTH]
+                .try_into().unwrap();
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                for y in (0..CHUNK_HEIGHT).rev() {
+                    if blocks[x][y][z] != BlockType::Air {
+                        heightmap[x][z] = y as u16;
+                        break;
+                    }
+                }
+            }
+        }
+
         Self {
             chunk_x,
             chunk_z,
             blocks,
             sky_light,
             block_light,
+            heightmap,
         }
+    }
+
+    /// Update heightmap for a single column after block placement/removal
+    pub fn update_heightmap(&mut self, x: usize, z: usize) {
+        for y in (0..CHUNK_HEIGHT).rev() {
+            if self.blocks[x][y][z] != BlockType::Air {
+                self.heightmap[x][z] = y as u16;
+                return;
+            }
+        }
+        self.heightmap[x][z] = 0;
     }
 
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
@@ -572,8 +601,9 @@ impl Chunk {
         ];
 
         for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
-                for z in 0..CHUNK_DEPTH {
+            for z in 0..CHUNK_DEPTH {
+                let max_y = self.heightmap[x][z] as usize;
+                for y in 0..=max_y {
                     let block = self.blocks[x][y][z];
                     if block == BlockType::Air {
                         continue;

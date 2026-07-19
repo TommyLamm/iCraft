@@ -15,6 +15,9 @@ pub struct LightRemovalNode {
     pub val: u8,
 }
 
+/// Max BFS iterations per call to avoid single-frame stalls
+const MAX_LIGHT_ITERATIONS: usize = 5_000;
+
 pub fn propagate_sky_light(
     chunk_manager: &mut ChunkManager,
     queue: &mut VecDeque<LightNode>,
@@ -26,7 +29,15 @@ pub fn propagate_sky_light(
         (0, 0, 1), (0, 0, -1),
     ];
 
+    let mut iterations = 0;
     while let Some(node) = queue.pop_front() {
+        iterations += 1;
+        if iterations > MAX_LIGHT_ITERATIONS {
+            // Put node back and stop — remaining work deferred
+            queue.push_front(node);
+            break;
+        }
+
         let current_light = chunk_manager.get_sky_light(node.x, node.y, node.z);
         if current_light <= 1 {
             continue;
@@ -125,7 +136,14 @@ pub fn propagate_block_light(
         (0, 0, 1), (0, 0, -1),
     ];
 
+    let mut iterations = 0;
     while let Some(node) = queue.pop_front() {
+        iterations += 1;
+        if iterations > MAX_LIGHT_ITERATIONS {
+            queue.push_front(node);
+            break;
+        }
+
         let current_light = chunk_manager.get_block_light(node.x, node.y, node.z);
         if current_light <= 1 {
             continue;
@@ -386,22 +404,80 @@ pub fn propagate_chunk_lighting(
     let start_x = cx * CHUNK_WIDTH as i32;
     let start_z = cz * CHUNK_DEPTH as i32;
 
-    for x in 0..CHUNK_WIDTH {
-        for z in 0..CHUNK_DEPTH {
-            let wx = start_x + x as i32;
-            let wz = start_z + z as i32;
-            
-            for y in 0..CHUNK_HEIGHT {
-                let wy = y as i32;
-                
-                let sky_val = chunk_manager.get_sky_light(wx, wy, wz);
-                if sky_val > 1 {
-                    sky_queue.push_back(LightNode { x: wx, y: wy, z: wz });
-                  }
+    let dirs = [
+        (1, 0, 0), (-1, 0, 0),
+        (0, 1, 0), (0, -1, 0),
+        (0, 0, 1), (0, 0, -1),
+    ];
 
-                let block_val = chunk_manager.get_block_light(wx, wy, wz);
-                if block_val > 1 {
-                    block_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+    if let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) {
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                let wx = start_x + x as i32;
+                let wz = start_z + z as i32;
+                
+                for y in 0..CHUNK_HEIGHT {
+                    let wy = y as i32;
+                    
+                    // 1. Sky light queue optimization
+                    let sky_val = chunk.sky_light[x][y][z];
+                    if sky_val > 1 {
+                        let is_boundary = x == 0 || x == CHUNK_WIDTH - 1 || z == 0 || z == CHUNK_DEPTH - 1;
+                        let mut has_darker_neighbor = is_boundary;
+                        
+                        if !has_darker_neighbor {
+                            for &(dx, dy, dz) in &dirs {
+                                let nx = x as i32 + dx;
+                                let ny = y as i32 + dy;
+                                let nz = z as i32 + dz;
+                                
+                                if ny >= 0 && ny < CHUNK_HEIGHT as i32 {
+                                    let neighbor_block = chunk.blocks[nx as usize][ny as usize][nz as usize];
+                                    if neighbor_block.properties().render_type != RenderType::Opaque {
+                                        let neighbor_light = chunk.sky_light[nx as usize][ny as usize][nz as usize];
+                                        if neighbor_light < sky_val - 1 {
+                                            has_darker_neighbor = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if has_darker_neighbor {
+                            sky_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+                        }
+                    }
+
+                    // 2. Block light queue optimization
+                    let block_val = chunk.block_light[x][y][z];
+                    if block_val > 1 {
+                        let is_boundary = x == 0 || x == CHUNK_WIDTH - 1 || z == 0 || z == CHUNK_DEPTH - 1;
+                        let mut has_darker_neighbor = is_boundary;
+                        
+                        if !has_darker_neighbor {
+                            for &(dx, dy, dz) in &dirs {
+                                let nx = x as i32 + dx;
+                                let ny = y as i32 + dy;
+                                let nz = z as i32 + dz;
+                                
+                                if ny >= 0 && ny < CHUNK_HEIGHT as i32 {
+                                    let neighbor_block = chunk.blocks[nx as usize][ny as usize][nz as usize];
+                                    if neighbor_block.properties().render_type != RenderType::Opaque {
+                                        let neighbor_light = chunk.block_light[nx as usize][ny as usize][nz as usize];
+                                        if neighbor_light < block_val - 1 {
+                                            has_darker_neighbor = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if has_darker_neighbor {
+                            block_queue.push_back(LightNode { x: wx, y: wy, z: wz });
+                        }
+                    }
                 }
             }
         }
