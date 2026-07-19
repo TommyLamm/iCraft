@@ -1272,6 +1272,27 @@ impl State {
             right,
         );
 
+        // Update passive mobs
+        crate::passive_mob::update_passive_mobs(
+            &mut self.entity_manager,
+            &mut self.chunk_manager,
+            &mut self.chunk_meshes,
+            &self.player_physics,
+            &mut self.inventory,
+            self.game_mode,
+            dt,
+            self.total_time,
+        );
+
+        // Spawn passive mobs (daytime spawn)
+        crate::passive_mob::spawn_passive_mobs(
+            &mut self.entity_manager,
+            &self.chunk_manager,
+            self.player_physics.position,
+            self.world_time.sky_light_level(),
+            self.total_time,
+        );
+
         // Sync camera position to player position at eye height
         self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
         let is_underwater = self.chunk_manager.get_block(self.camera.position.x.floor() as i32, self.camera.position.y.floor() as i32, self.camera.position.z.floor() as i32) == BlockType::Water;
@@ -1668,6 +1689,28 @@ impl State {
                                     crate::entity::EntityType::Creeper => {
                                         self.inventory.add_item(crate::inventory::Item::Gunpowder);
                                     }
+                                    crate::entity::EntityType::Pig => {
+                                        let is_on_fire = entity.burn_timer > 0.0;
+                                        let drop = if is_on_fire { crate::inventory::Item::CookedPorkchop } else { crate::inventory::Item::RawPorkchop };
+                                        self.inventory.add_item(drop);
+                                    }
+                                    crate::entity::EntityType::Cow => {
+                                        self.inventory.add_item(crate::inventory::Item::RawBeef);
+                                        let rng = (entity.position.x as u32).wrapping_mul(31);
+                                        if rng % 2 == 0 {
+                                            self.inventory.add_item(crate::inventory::Item::Leather);
+                                        }
+                                    }
+                                    crate::entity::EntityType::Sheep => {
+                                        self.inventory.add_item(crate::inventory::Item::RawMutton);
+                                        if entity.has_wool {
+                                            self.inventory.add_item(crate::inventory::Item::Wool);
+                                        }
+                                    }
+                                    crate::entity::EntityType::Chicken => {
+                                        self.inventory.add_item(crate::inventory::Item::RawChicken);
+                                        self.inventory.add_item(crate::inventory::Item::Feather);
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1686,6 +1729,88 @@ impl State {
                         }
                         
                         return;
+                    }
+                }
+            }
+        }
+
+        if !is_left_click {
+            let mut closest_entity: Option<(u64, f32)> = None;
+            for entity in &self.entity_manager.entities {
+                if entity.entity_type == crate::entity::EntityType::Arrow || entity.entity_type == crate::entity::EntityType::HeartParticle {
+                    continue;
+                }
+                let aabb = entity.get_aabb();
+                if let Some(dist) = crate::entity::ray_intersects_aabb(self.camera.position, dir, &aabb) {
+                    if dist <= 4.0 {
+                        if let Some((_, closest_dist)) = closest_entity {
+                            if dist < closest_dist {
+                                closest_entity = Some((entity.id, dist));
+                            }
+                        } else {
+                            closest_entity = Some((entity.id, dist));
+                        }
+                    }
+                }
+            }
+
+            if let Some((entity_id, _)) = closest_entity {
+                if let Some(entity) = self.entity_manager.entities.iter_mut().find(|e| e.id == entity_id) {
+                    let held_stack = self.inventory.hotbar[self.inventory.selected].clone();
+                    let held_item = held_stack.map(|s| s.item).unwrap_or(crate::inventory::Item::Air);
+                    
+                    match entity.entity_type {
+                        crate::entity::EntityType::Pig => {
+                            if held_item == crate::inventory::Item::Carrot && entity.age >= 0.0 && entity.breeding_timer <= 0.0 && entity.breed_cooldown <= 0.0 {
+                                entity.breeding_timer = 20.0;
+                                self.inventory.remove_selected_item(1);
+                                println!("[Debug] Pig entered love mode!");
+                                return;
+                            }
+                        }
+                        crate::entity::EntityType::Cow => {
+                            if held_item == crate::inventory::Item::Wheat && entity.age >= 0.0 && entity.breeding_timer <= 0.0 && entity.breed_cooldown <= 0.0 {
+                                entity.breeding_timer = 20.0;
+                                self.inventory.remove_selected_item(1);
+                                println!("[Debug] Cow entered love mode!");
+                                return;
+                            }
+                            if held_item == crate::inventory::Item::Bucket {
+                                self.inventory.replace_selected_item(crate::inventory::Item::MilkBucket);
+                                println!("[Debug] Milked a Cow!");
+                                return;
+                            }
+                        }
+                        crate::entity::EntityType::Sheep => {
+                            if held_item == crate::inventory::Item::Wheat && entity.age >= 0.0 && entity.breeding_timer <= 0.0 && entity.breed_cooldown <= 0.0 {
+                                entity.breeding_timer = 20.0;
+                                self.inventory.remove_selected_item(1);
+                                println!("[Debug] Sheep entered love mode!");
+                                return;
+                            }
+                            if held_item == crate::inventory::Item::Shears && entity.has_wool {
+                                entity.has_wool = false;
+                                self.inventory.add_item(crate::inventory::Item::Wool);
+                                println!("[Debug] Sheared a Sheep!");
+                                if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
+                                    if stack.durability > 1 {
+                                        stack.durability -= 1;
+                                    } else {
+                                        self.inventory.hotbar[self.inventory.selected] = None;
+                                    }
+                                }
+                                return;
+                            }
+                        }
+                        crate::entity::EntityType::Chicken => {
+                            if held_item == crate::inventory::Item::Seeds && entity.age >= 0.0 && entity.breeding_timer <= 0.0 && entity.breed_cooldown <= 0.0 {
+                                entity.breeding_timer = 20.0;
+                                self.inventory.remove_selected_item(1);
+                                println!("[Debug] Chicken entered love mode!");
+                                return;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1723,6 +1848,18 @@ impl State {
 
                     if self.game_mode == GameMode::Survival {
                         self.inventory.add_item(crate::inventory::Item::from_block(old_block));
+
+                        if old_block == BlockType::Grass {
+                            let rng = (wx as u32).wrapping_mul(31).wrapping_add(wz as u32);
+                            if rng % 20 == 0 {
+                                let drop = match rng % 3 {
+                                    0 => crate::inventory::Item::Seeds,
+                                    1 => crate::inventory::Item::Wheat,
+                                    _ => crate::inventory::Item::Carrot,
+                                };
+                                self.inventory.add_item(drop);
+                            }
+                        }
                     }
 
                     // Update lighting for removal
