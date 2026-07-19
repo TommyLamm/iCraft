@@ -818,7 +818,11 @@ impl Chunk {
                                 5 => 2.0, // Bottom
                                 _ => 1.0, // Sides
                             };
-                            let light_val = (neighbor_sky as f32) + (neighbor_block as f32) * 16.0 + multiplier_code * 256.0;
+                            let light_val = if block == BlockType::Lava {
+                                15.0 * 16.0 + 15.0 + multiplier_code * 256.0
+                            } else {
+                                (neighbor_sky as f32) + (neighbor_block as f32) * 16.0 + multiplier_code * 256.0
+                            };
 
                             let h = if is_fluid {
                                 if falling { 1.0 } else { (8 - level) as f32 / 8.0 * 0.9 }

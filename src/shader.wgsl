@@ -7,7 +7,8 @@ struct CameraUniform {
     sun_dir: vec4<f32>,
     fog_start: f32,
     fog_end: f32,
-    padding: vec2<f32>,
+    total_time: f32,
+    padding: f32,
 };
 
 @group(0) @binding(0)
@@ -37,7 +38,22 @@ struct VertexOutput {
 fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
-    out.tex_coords = model.tex_coords;
+    
+    var out_tex = model.tex_coords;
+    let is_water = model.tex_coords.x >= 10.0 * 0.0625 - 0.001 && model.tex_coords.x < 11.0 * 0.0625 + 0.001 
+                && model.tex_coords.y >= 0.0 * 0.0625 - 0.001 && model.tex_coords.y < 1.0 * 0.0625 + 0.001;
+    let is_lava = model.tex_coords.x >= 15.0 * 0.0625 - 0.001 && model.tex_coords.x < 16.0 * 0.0625 + 0.001 
+               && model.tex_coords.y >= 2.0 * 0.0625 - 0.001 && model.tex_coords.y < 3.0 * 0.0625 + 0.001;
+    
+    if (is_water) {
+        let local_y = (model.tex_coords.y - 0.0 * 0.0625) / 0.0625 + camera.total_time * 0.8;
+        out_tex.y = 0.0 * 0.0625 + fract(local_y) * 0.0625;
+    } else if (is_lava) {
+        let local_y = (model.tex_coords.y - 2.0 * 0.0625) / 0.0625 + camera.total_time * 0.2;
+        out_tex.y = 2.0 * 0.0625 + fract(local_y) * 0.0625;
+    }
+    out.tex_coords = out_tex;
+    
     out.light_level = model.light_level;
     out.world_pos = model.position;
     return out;

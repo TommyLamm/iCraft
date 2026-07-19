@@ -288,7 +288,7 @@ impl State {
         let world_time = crate::camera::WorldTime::new();
         let show_debug = false;
         let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera, config.width as f32 / config.height as f32, settings.render_distance as u32, &world_time);
+        camera_uniform.update_view_proj(&camera, config.width as f32 / config.height as f32, settings.render_distance as u32, &world_time, 0.0);
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -1051,7 +1051,7 @@ impl State {
                     self.camera.fov = (self.camera.fov + 5.0).min(120.0);
                 }
                 // Update camera projection buffer immediately for visual feedback in paused state
-                self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32, &self.world_time);
+                self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32, &self.world_time, self.total_time);
                 self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
                 self.save_settings();
             }
@@ -1252,7 +1252,7 @@ impl State {
 
         // Sync camera position to player position at eye height
         self.camera.position = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
-        self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32, &self.world_time);
+        self.camera_uniform.update_view_proj(&self.camera, self.config.width as f32 / self.config.height as f32, self.chunk_manager.render_distance as u32, &self.world_time, self.total_time);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
 
         // Continuous mining logic

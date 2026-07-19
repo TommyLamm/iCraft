@@ -36,7 +36,8 @@ pub struct CameraUniform {
     pub sun_dir: [f32; 4],
     pub fog_start: f32,
     pub fog_end: f32,
-    pub padding: [f32; 2],
+    pub total_time: f32,
+    pub padding: [f32; 1],
 }
 
 impl CameraUniform {
@@ -50,11 +51,12 @@ impl CameraUniform {
             sun_dir: [0.5, 0.8, 0.3, 0.0],
             fog_start: 0.0,
             fog_end: 100.0,
-            padding: [0.0; 2],
+            total_time: 0.0,
+            padding: [0.0; 1],
         }
     }
 
-    pub fn update_view_proj(&mut self, camera: &Camera, aspect: f32, render_distance: u32, world_time: &WorldTime) {
+    pub fn update_view_proj(&mut self, camera: &Camera, aspect: f32, render_distance: u32, world_time: &WorldTime, total_time: f32) {
         let view_proj = camera.build_view_projection_matrix(aspect);
         self.view_proj = view_proj.to_cols_array_2d();
         self.inv_view_proj = view_proj.inverse().to_cols_array_2d();
@@ -101,7 +103,8 @@ impl CameraUniform {
         let fog_end = (render_distance as f32) * 16.0;
         self.fog_end = fog_end;
         self.fog_start = fog_end * 0.6;
-        self.padding = [0.0; 2];
+        self.total_time = total_time;
+        self.padding = [0.0; 1];
     }
 }
 
