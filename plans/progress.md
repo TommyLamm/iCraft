@@ -104,6 +104,10 @@ P3 [░░░░░░░░░░] 0%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-19
+- 🔧 額外修復：流體模擬週期性卡死與遊戲無響應
+  - 修改文件：`src/fluid.rs`, `src/chunk_manager.rs`, `src/state.rs`
+  - 修復內容：修正流體 Tick 每 0.25 秒重複掃描所有已載入 Chunk、遍歷數千萬個方塊並從全部流體源重新執行 BFS，導致 Debug 版畫面卡死及 Release 版週期性停頓的性能問題。將流體模擬改為事件驅動的去重更新佇列，只在方塊或流體狀態實際改變時排程鄰近格子；水與岩漿每輪分別限制最多處理 2,048 與 512 個更新，使大型流動跨多幀漸進完成。保留垂直下流、水平擴散、無限水源、流體消退及水與岩漿凝固交互，並確保靜態生成海洋不產生週期性工作。
+  - 驗證：新增靜態海洋零排程、放置水源局部流動及移除水源消退回歸測試；`cargo test` 共 27 項全部通過，`cargo check --release` 通過。實際運行 Debug 與 Release 版本均持續維持視窗響應，未再出現週期性卡死。
 - ✅ 完成任務 #13：水/岩漿流體模擬系統
   - 新增文件：`src/fluid.rs`
   - 修改文件：`src/world.rs`, `src/chunk_manager.rs`, `src/state.rs`, `src/camera.rs`, `src/shader.wgsl`, `src/physics.rs`, `src/player.rs`, `src/texture.rs`

@@ -1102,7 +1102,7 @@ impl State {
         self.water_tick_timer += dt;
         if self.water_tick_timer >= 0.25 {
             self.water_tick_timer = 0.0;
-            let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, false);
+            let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
             for (cx, cz) in dirty {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
                     mesh.dirty = true;
@@ -1113,7 +1113,7 @@ impl State {
         self.lava_tick_timer += dt;
         if self.lava_tick_timer >= 1.5 {
             self.lava_tick_timer = 0.0;
-            let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, true);
+            let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
             for (cx, cz) in dirty {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
                     mesh.dirty = true;

@@ -1,242 +1,284 @@
-use crate::world::{BlockType, CHUNK_HEIGHT};
 use crate::chunk_manager::ChunkManager;
-use std::collections::{HashSet, VecDeque, HashMap};
+use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use std::collections::HashSet;
 
-pub fn tick_fluids(chunk_manager: &mut ChunkManager, is_lava: bool) -> HashSet<(i32, i32)> {
+type BlockPos = (i32, i32, i32);
+
+const HORIZONTAL_DIRECTIONS: [(i32, i32, i32); 4] = [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)];
+
+/// Advances only fluid cells affected by a block change. Work is capped so a
+/// large flow can span several frames without blocking rendering.
+pub fn tick_fluids(
+    chunk_manager: &mut ChunkManager,
+    is_lava: bool,
+    max_updates: usize,
+) -> HashSet<(i32, i32)> {
     let mut dirty_chunks = HashSet::new();
-    let target_type = if is_lava { BlockType::Lava } else { BlockType::Water };
-    let other_type = if is_lava { BlockType::Water } else { BlockType::Lava };
-    let flow_limit = 7; // Max level is 7 (thinnest)
+    let target_type = if is_lava {
+        BlockType::Lava
+    } else {
+        BlockType::Water
+    };
+    let other_type = if is_lava {
+        BlockType::Water
+    } else {
+        BlockType::Lava
+    };
 
-    // 1. Handle Infinite Water Sources (only for water)
-    if !is_lava {
-        let mut new_sources = Vec::new();
-        // Check all columns in loaded chunks
-        let chunk_coords: Vec<(i32, i32)> = chunk_manager.chunks.keys().cloned().collect();
-        for &(cx, cz) in &chunk_coords {
-            for x in 0..16 {
-                for z in 0..16 {
-                    let wx = cx * 16 + x as i32;
-                    let wz = cz * 16 + z as i32;
-                    // Scan vertically
-                    for wy in 1..CHUNK_HEIGHT as i32 {
-                        let block = chunk_manager.get_block(wx, wy, wz);
-                        // Can only become source if it's currently air or flowing water
-                        if block == BlockType::Air || (block == BlockType::Water && chunk_manager.get_fluid_level(wx, wy, wz) > 0) {
-                            // Check if the block below is solid or water
-                            let below = chunk_manager.get_block(wx, wy - 1, wz);
-                            if below != BlockType::Air && below != BlockType::Lava {
-                                // Count horizontal source water neighbors
-                                let mut source_count = 0;
-                                let neighbors = [
-                                    (wx + 1, wy, wz),
-                                    (wx - 1, wy, wz),
-                                    (wx, wy, wz + 1),
-                                    (wx, wy, wz - 1),
-                                ];
-                                for &(nx, ny, nz) in &neighbors {
-                                    if chunk_manager.get_block(nx, ny, nz) == BlockType::Water
-                                       && chunk_manager.get_fluid_level(nx, ny, nz) == 0
-                                       && !chunk_manager.get_fluid_falling(nx, ny, nz)
-                                    {
-                                        source_count += 1;
-                                    }
-                                }
-                                if source_count >= 2 {
-                                    new_sources.push((wx, wy, wz));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for (wx, wy, wz) in new_sources {
-            chunk_manager.set_block(wx, wy, wz, BlockType::Water);
-            chunk_manager.set_fluid_level(wx, wy, wz, 0);
-            chunk_manager.set_fluid_falling(wx, wy, wz, false);
-            dirty_chunks.insert((wx.div_euclid(16), wz.div_euclid(16)));
-        }
-    }
-
-    // 2. Gather all fluid source blocks (level == 0, falling == false)
-    let mut queue = VecDeque::new();
-    let mut visited = HashMap::new(); // (wx, wy, wz) -> (level, falling)
-
-    for (&(cx, cz), chunk) in chunk_manager.chunks.iter() {
-        for x in 0..16 {
-            for z in 0..16 {
-                for y in 0..CHUNK_HEIGHT {
-                    let block = chunk.blocks[x][y][z];
-                    if block == target_type {
-                        let wx = cx * 16 + x as i32;
-                        let wy = y as i32;
-                        let wz = cz * 16 + z as i32;
-                        let level = chunk.fluid_levels[x][y][z] & 0x07;
-                        let falling = (chunk.fluid_levels[x][y][z] & 0x08) != 0;
-
-                        // Source blocks are level 0 and not falling
-                        if level == 0 && !falling {
-                            queue.push_back((wx, wy, wz, 0, false));
-                            visited.insert((wx, wy, wz), (0, false));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Run BFS to propagate fluids
-    while let Some((wx, wy, wz, level, falling)) = queue.pop_front() {
-        // A. Flow downwards
-        if wy > 0 {
-            let below_x = wx;
-            let below_y = wy - 1;
-            let below_z = wz;
-            let below_cx = below_x.div_euclid(16);
-            let below_cz = below_z.div_euclid(16);
-
-            if chunk_manager.chunks.contains_key(&(below_cx, below_cz)) {
-                let below_block = chunk_manager.get_block(below_x, below_y, below_z);
-                if below_block == BlockType::Air 
-                   || below_block.properties().is_passable 
-                   || below_block == target_type 
-                   || below_block == other_type 
-                {
-                    let next_level = 0;
-                    let next_falling = true;
-                    let entry = visited.get(&(below_x, below_y, below_z));
-                    if entry.is_none() || entry.unwrap().0 > next_level {
-                        visited.insert((below_x, below_y, below_z), (next_level, next_falling));
-                        queue.push_back((below_x, below_y, below_z, next_level, next_falling));
-                    }
-                }
-            }
-        }
-
-        // B. Flow horizontally if we are not falling, OR if the block below is solid (cannot flow down)
-        let can_flow_horizontally = if falling {
-            if wy > 0 {
-                let below_block = chunk_manager.get_block(wx, wy - 1, wz);
-                // Cannot flow down further -> must flow horizontally
-                below_block != BlockType::Air 
-                && !below_block.properties().is_passable 
-                && below_block != target_type 
-                && below_block != other_type
-            } else {
-                true // Bottom of the world
-            }
-        } else {
-            true
+    for _ in 0..max_updates {
+        let Some((wx, wy, wz)) = chunk_manager.pop_fluid_update(is_lava) else {
+            break;
         };
 
-        if can_flow_horizontally && level < flow_limit {
-            let neighbors = [
-                (wx + 1, wy, wz),
-                (wx - 1, wy, wz),
-                (wx, wy, wz + 1),
-                (wx, wy, wz - 1),
-            ];
-            for &(nx, ny, nz) in &neighbors {
-                let ncx = nx.div_euclid(16);
-                let ncz = nz.div_euclid(16);
-                if chunk_manager.chunks.contains_key(&(ncx, ncz)) {
-                    let n_block = chunk_manager.get_block(nx, ny, nz);
-                    if n_block == BlockType::Air 
-                       || n_block.properties().is_passable 
-                       || n_block == target_type 
-                       || n_block == other_type 
-                    {
-                        let next_level = level + 1;
-                        let next_falling = false;
-                        let entry = visited.get(&(nx, ny, nz));
-                        if entry.is_none() || entry.unwrap().0 > next_level {
-                            visited.insert((nx, ny, nz), (next_level, next_falling));
-                            queue.push_back((nx, ny, nz, next_level, next_falling));
-                        }
-                    }
-                }
-            }
+        if wy < 0 || wy >= CHUNK_HEIGHT as i32 {
+            continue;
         }
-    }
-
-    // 4. Update the world based on the BFS results
-    let chunk_coords: Vec<(i32, i32)> = chunk_manager.chunks.keys().cloned().collect();
-    for &(cx, cz) in &chunk_coords {
-        let mut chunk_dirty = false;
-        for x in 0..16 {
-            for z in 0..16 {
-                for y in 0..CHUNK_HEIGHT {
-                    let wx = cx * 16 + x as i32;
-                    let wy = y as i32;
-                    let wz = cz * 16 + z as i32;
-                    let current_block = chunk_manager.get_block(wx, wy, wz);
-
-                    if current_block == target_type {
-                        let current_level = chunk_manager.get_fluid_level(wx, wy, wz);
-                        let current_falling = chunk_manager.get_fluid_falling(wx, wy, wz);
-                        // Is it a permanent source? (placed by player/generated, level 0 and not falling)
-                        if current_level == 0 && !current_falling {
-                            continue;
-                        }
-
-                        if let Some(&(new_level, new_falling)) = visited.get(&(wx, wy, wz)) {
-                            if current_level != new_level || current_falling != new_falling {
-                                chunk_manager.set_fluid_level(wx, wy, wz, new_level);
-                                chunk_manager.set_fluid_falling(wx, wy, wz, new_falling);
-                                chunk_dirty = true;
-                            }
-                        } else {
-                            // Decayed completely
-                            chunk_manager.set_block(wx, wy, wz, BlockType::Air);
-                            chunk_manager.set_fluid_level(wx, wy, wz, 0);
-                            chunk_manager.set_fluid_falling(wx, wy, wz, false);
-                            chunk_dirty = true;
-                        }
-                    } else if current_block == BlockType::Air || current_block.properties().is_passable || current_block == other_type {
-                        if let Some(&(new_level, new_falling)) = visited.get(&(wx, wy, wz)) {
-                            // Water/Lava interaction checks
-                            let mut resolved = false;
-                            if current_block == other_type {
-                                let other_level = chunk_manager.get_fluid_level(wx, wy, wz);
-                                if target_type == BlockType::Water {
-                                    // Water flows into Lava
-                                    if other_level == 0 {
-                                        chunk_manager.set_block(wx, wy, wz, BlockType::Obsidian);
-                                    } else {
-                                        chunk_manager.set_block(wx, wy, wz, BlockType::Cobblestone);
-                                    }
-                                    chunk_manager.set_fluid_level(wx, wy, wz, 0);
-                                    chunk_manager.set_fluid_falling(wx, wy, wz, false);
-                                    resolved = true;
-                                } else {
-                                    // Lava flows into Water
-                                    if other_level == 0 {
-                                        chunk_manager.set_block(wx, wy, wz, BlockType::Stone);
-                                    } else {
-                                        chunk_manager.set_block(wx, wy, wz, BlockType::Cobblestone);
-                                    }
-                                    chunk_manager.set_fluid_level(wx, wy, wz, 0);
-                                    chunk_manager.set_fluid_falling(wx, wy, wz, false);
-                                    resolved = true;
-                                }
-                            }
-
-                            if !resolved {
-                                chunk_manager.set_block(wx, wy, wz, target_type);
-                                chunk_manager.set_fluid_level(wx, wy, wz, new_level);
-                                chunk_manager.set_fluid_falling(wx, wy, wz, new_falling);
-                            }
-                            chunk_dirty = true;
-                        }
-                    }
-                }
-            }
+        let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+        let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+        if !chunk_manager.chunks.contains_key(&(cx, cz)) {
+            continue;
         }
-        if chunk_dirty {
-            dirty_chunks.insert((cx, cz));
+
+        if update_cell(
+            chunk_manager,
+            (wx, wy, wz),
+            target_type,
+            other_type,
+            is_lava,
+        ) {
+            mark_mesh_boundaries_dirty(&mut dirty_chunks, wx, wz);
         }
     }
 
     dirty_chunks
+}
+
+fn update_cell(
+    chunk_manager: &mut ChunkManager,
+    pos: BlockPos,
+    target_type: BlockType,
+    other_type: BlockType,
+    is_lava: bool,
+) -> bool {
+    let (wx, wy, wz) = pos;
+    let current = chunk_manager.get_block(wx, wy, wz);
+
+    // Level-zero, non-falling cells are permanent sources (terrain-generated
+    // oceans and player-placed buckets). They require no periodic work.
+    if current == target_type
+        && chunk_manager.get_fluid_level(wx, wy, wz) == 0
+        && !chunk_manager.get_fluid_falling(wx, wy, wz)
+    {
+        return false;
+    }
+
+    let desired = desired_flow(chunk_manager, pos, target_type, is_lava);
+
+    if current == target_type {
+        return match desired {
+            Some((level, falling)) => {
+                set_fluid_state(chunk_manager, pos, target_type, level, falling)
+            }
+            None => {
+                chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+                chunk_manager.set_fluid_level(wx, wy, wz, 0);
+                chunk_manager.set_fluid_falling(wx, wy, wz, false);
+                true
+            }
+        };
+    }
+
+    let replaceable =
+        current == BlockType::Air || current == other_type || current.properties().is_passable;
+    if !replaceable {
+        return false;
+    }
+
+    let Some((level, falling)) = desired else {
+        return false;
+    };
+
+    if current == other_type {
+        let other_is_source = chunk_manager.get_fluid_level(wx, wy, wz) == 0
+            && !chunk_manager.get_fluid_falling(wx, wy, wz);
+        let solid = if target_type == BlockType::Water {
+            if other_is_source {
+                BlockType::Obsidian
+            } else {
+                BlockType::Cobblestone
+            }
+        } else if other_is_source {
+            BlockType::Stone
+        } else {
+            BlockType::Cobblestone
+        };
+        chunk_manager.set_block(wx, wy, wz, solid);
+        chunk_manager.set_fluid_level(wx, wy, wz, 0);
+        chunk_manager.set_fluid_falling(wx, wy, wz, false);
+        return true;
+    }
+
+    set_fluid_state(chunk_manager, pos, target_type, level, falling)
+}
+
+fn desired_flow(
+    chunk_manager: &ChunkManager,
+    (wx, wy, wz): BlockPos,
+    target_type: BlockType,
+    is_lava: bool,
+) -> Option<(u8, bool)> {
+    if wy + 1 < CHUNK_HEIGHT as i32 && chunk_manager.get_block(wx, wy + 1, wz) == target_type {
+        return Some((0, true));
+    }
+
+    // Two adjacent source blocks above a supporting block create an infinite
+    // water source. Lava intentionally does not use this rule.
+    if !is_lava && is_supported(chunk_manager, wx, wy, wz, target_type) {
+        let source_count = HORIZONTAL_DIRECTIONS
+            .iter()
+            .filter(|&&(dx, _, dz)| {
+                chunk_manager.get_block(wx + dx, wy, wz + dz) == BlockType::Water
+                    && chunk_manager.get_fluid_level(wx + dx, wy, wz + dz) == 0
+                    && !chunk_manager.get_fluid_falling(wx + dx, wy, wz + dz)
+            })
+            .count();
+        if source_count >= 2 {
+            return Some((0, false));
+        }
+    }
+
+    let mut best_level = None;
+    for (dx, _, dz) in HORIZONTAL_DIRECTIONS {
+        let nx = wx + dx;
+        let nz = wz + dz;
+        if chunk_manager.get_block(nx, wy, nz) != target_type {
+            continue;
+        }
+
+        let neighbor_level = chunk_manager.get_fluid_level(nx, wy, nz);
+        let neighbor_falling = chunk_manager.get_fluid_falling(nx, wy, nz);
+        if neighbor_level >= 7 {
+            continue;
+        }
+
+        // A falling column spreads sideways only after it reaches a surface.
+        if neighbor_falling && !is_supported(chunk_manager, nx, wy, nz, target_type) {
+            continue;
+        }
+
+        best_level = Some(best_level.map_or(neighbor_level, |best: u8| best.min(neighbor_level)));
+    }
+
+    best_level.map(|level| (level + 1, false))
+}
+
+fn is_supported(
+    chunk_manager: &ChunkManager,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    fluid_type: BlockType,
+) -> bool {
+    if wy == 0 {
+        return true;
+    }
+    let below = chunk_manager.get_block(wx, wy - 1, wz);
+    below != BlockType::Air && below != fluid_type && !below.properties().is_passable
+}
+
+fn set_fluid_state(
+    chunk_manager: &mut ChunkManager,
+    (wx, wy, wz): BlockPos,
+    fluid_type: BlockType,
+    level: u8,
+    falling: bool,
+) -> bool {
+    let changed = chunk_manager.get_block(wx, wy, wz) != fluid_type
+        || chunk_manager.get_fluid_level(wx, wy, wz) != level
+        || chunk_manager.get_fluid_falling(wx, wy, wz) != falling;
+    if !changed {
+        return false;
+    }
+
+    chunk_manager.set_block(wx, wy, wz, fluid_type);
+    chunk_manager.set_fluid_level(wx, wy, wz, level);
+    chunk_manager.set_fluid_falling(wx, wy, wz, falling);
+    true
+}
+
+fn mark_mesh_boundaries_dirty(dirty: &mut HashSet<(i32, i32)>, wx: i32, wz: i32) {
+    let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+    let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+    let lx = wx.rem_euclid(CHUNK_WIDTH as i32);
+    let lz = wz.rem_euclid(CHUNK_DEPTH as i32);
+    dirty.insert((cx, cz));
+    if lx == 0 {
+        dirty.insert((cx - 1, cz));
+    }
+    if lx == CHUNK_WIDTH as i32 - 1 {
+        dirty.insert((cx + 1, cz));
+    }
+    if lz == 0 {
+        dirty.insert((cx, cz - 1));
+    }
+    if lz == CHUNK_DEPTH as i32 - 1 {
+        dirty.insert((cx, cz + 1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::Chunk;
+
+    #[test]
+    fn generated_chunks_do_not_schedule_the_static_ocean() {
+        let mut manager = ChunkManager::new(1);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+
+        assert_eq!(manager.pending_fluid_updates(false), 0);
+        assert!(tick_fluids(&mut manager, false, 64).is_empty());
+        assert_eq!(manager.pending_fluid_updates(false), 0);
+    }
+
+    #[test]
+    fn placed_source_flows_without_scanning_the_world() {
+        let mut manager = ChunkManager::new(1);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        let source = (8, 120, 8);
+        manager.set_block(source.0, source.1, source.2, BlockType::Water);
+
+        let dirty = tick_fluids(&mut manager, false, 128);
+
+        assert!(!dirty.is_empty());
+        assert_eq!(manager.get_block(8, 119, 8), BlockType::Water);
+        assert!(manager.get_fluid_falling(8, 119, 8));
+    }
+
+    #[test]
+    fn removing_a_source_drains_its_incremental_flow() {
+        let mut manager = ChunkManager::new(1);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        let source = (8, 120, 8);
+        manager.set_block(source.0, source.1, source.2, BlockType::Water);
+
+        for _ in 0..32 {
+            tick_fluids(&mut manager, false, 256);
+            if manager.pending_fluid_updates(false) == 0 {
+                break;
+            }
+        }
+        assert_eq!(manager.get_block(8, 119, 8), BlockType::Water);
+
+        manager.set_block(source.0, source.1, source.2, BlockType::Air);
+        for _ in 0..2048 {
+            tick_fluids(&mut manager, false, 256);
+            if manager.pending_fluid_updates(false) == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(manager.pending_fluid_updates(false), 0);
+        assert_eq!(manager.get_block(8, 119, 8), BlockType::Air);
+    }
 }

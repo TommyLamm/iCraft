@@ -1,9 +1,39 @@
-use std::collections::HashMap;
-use crate::world::{Chunk, BlockType, CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH};
+use crate::world::{BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+type BlockPos = (i32, i32, i32);
+
+struct FluidUpdateQueue {
+    queue: VecDeque<BlockPos>,
+    queued: HashSet<BlockPos>,
+}
+
+impl FluidUpdateQueue {
+    fn new() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            queued: HashSet::new(),
+        }
+    }
+
+    fn push(&mut self, pos: BlockPos) {
+        if self.queued.insert(pos) {
+            self.queue.push_back(pos);
+        }
+    }
+
+    fn pop(&mut self) -> Option<BlockPos> {
+        let pos = self.queue.pop_front()?;
+        self.queued.remove(&pos);
+        Some(pos)
+    }
+}
 
 pub struct ChunkManager {
     pub chunks: HashMap<(i32, i32), Chunk>,
     pub render_distance: i32,
+    water_updates: FluidUpdateQueue,
+    lava_updates: FluidUpdateQueue,
 }
 
 impl ChunkManager {
@@ -11,10 +41,54 @@ impl ChunkManager {
         Self {
             chunks: HashMap::new(),
             render_distance,
+            water_updates: FluidUpdateQueue::new(),
+            lava_updates: FluidUpdateQueue::new(),
         }
     }
 
-    pub fn world_to_local(&self, wx: i32, wy: i32, wz: i32) -> Option<((i32, i32), (usize, usize, usize))> {
+    fn schedule_fluid_neighbors(&mut self, wx: i32, wy: i32, wz: i32) {
+        const OFFSETS: [(i32, i32, i32); 7] = [
+            (0, 0, 0),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ];
+
+        for (dx, dy, dz) in OFFSETS {
+            let pos = (wx + dx, wy + dy, wz + dz);
+            if pos.1 >= 0 && pos.1 < CHUNK_HEIGHT as i32 {
+                self.water_updates.push(pos);
+                self.lava_updates.push(pos);
+            }
+        }
+    }
+
+    pub fn pop_fluid_update(&mut self, is_lava: bool) -> Option<BlockPos> {
+        if is_lava {
+            self.lava_updates.pop()
+        } else {
+            self.water_updates.pop()
+        }
+    }
+
+    #[cfg(test)]
+    pub fn pending_fluid_updates(&self, is_lava: bool) -> usize {
+        if is_lava {
+            self.lava_updates.queue.len()
+        } else {
+            self.water_updates.queue.len()
+        }
+    }
+
+    pub fn world_to_local(
+        &self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+    ) -> Option<((i32, i32), (usize, usize, usize))> {
         if wy < 0 || wy >= CHUNK_HEIGHT as i32 {
             return None;
         }
@@ -38,8 +112,15 @@ impl ChunkManager {
     pub fn set_block(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                if chunk.blocks[bx][by][bz] == block {
+                    return;
+                }
                 chunk.blocks[bx][by][bz] = block;
+                if block != BlockType::Water && block != BlockType::Lava {
+                    chunk.fluid_levels[bx][by][bz] = 0;
+                }
                 chunk.update_heightmap(bx, bz);
+                self.schedule_fluid_neighbors(wx, wy, wz);
             }
         }
     }
@@ -94,7 +175,11 @@ impl ChunkManager {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
                 let current = chunk.fluid_levels[bx][by][bz];
-                chunk.fluid_levels[bx][by][bz] = (current & 0xF8) | (level & 0x07);
+                let updated = (current & 0xF8) | (level & 0x07);
+                if current != updated {
+                    chunk.fluid_levels[bx][by][bz] = updated;
+                    self.schedule_fluid_neighbors(wx, wy, wz);
+                }
             }
         }
     }
@@ -112,10 +197,14 @@ impl ChunkManager {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
                 let current = chunk.fluid_levels[bx][by][bz];
-                if falling {
-                    chunk.fluid_levels[bx][by][bz] = current | 0x08;
+                let updated = if falling {
+                    current | 0x08
                 } else {
-                    chunk.fluid_levels[bx][by][bz] = current & !0x08;
+                    current & !0x08
+                };
+                if current != updated {
+                    chunk.fluid_levels[bx][by][bz] = updated;
+                    self.schedule_fluid_neighbors(wx, wy, wz);
                 }
             }
         }
