@@ -30,6 +30,29 @@ pub enum Item {
     Bone,
     Bow,
     Gunpowder,
+
+    // Passive Mob Items
+    Wheat,
+    Seeds,
+    Carrot,
+    Shears,
+    Bucket,
+    MilkBucket,
+    RawPorkchop,
+    CookedPorkchop,
+    RawBeef,
+    CookedBeef,
+    RawMutton,
+    CookedMutton,
+    RawChicken,
+    CookedChicken,
+    Wool,
+    Leather,
+    Feather,
+    Egg,
+    RedDye,
+    BlueDye,
+    GreenDye,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +111,7 @@ impl Item {
             Item::StonePickaxe => Some(ToolProperties { tool_type: ToolType::Pickaxe, material: ToolMaterial::Stone, mining_speed: 4.0, durability: 131, damage: 3.0 }),
             Item::StoneAxe => Some(ToolProperties { tool_type: ToolType::Axe, material: ToolMaterial::Stone, mining_speed: 4.0, durability: 131, damage: 4.0 }),
             Item::StoneShovel => Some(ToolProperties { tool_type: ToolType::Shovel, material: ToolMaterial::Stone, mining_speed: 4.0, durability: 131, damage: 2.0 }),
+            Item::Shears => Some(ToolProperties { tool_type: ToolType::None, material: ToolMaterial::Iron, mining_speed: 1.0, durability: 238, damage: 1.0 }),
 
             Item::IronSword => Some(ToolProperties { tool_type: ToolType::Sword, material: ToolMaterial::Iron, mining_speed: 6.0, durability: 250, damage: 6.0 }),
             Item::IronPickaxe => Some(ToolProperties { tool_type: ToolType::Pickaxe, material: ToolMaterial::Iron, mining_speed: 6.0, durability: 250, damage: 4.0 }),
@@ -167,6 +191,29 @@ impl Item {
             Item::Bone => ItemProperties { name: "Bone", max_stack: 64, is_block: false, block_type: None, tex_coords: (9, 3) },
             Item::Bow => ItemProperties { name: "Bow", max_stack: 1, is_block: false, block_type: None, tex_coords: (10, 3) },
             Item::Gunpowder => ItemProperties { name: "Gunpowder", max_stack: 64, is_block: false, block_type: None, tex_coords: (11, 3) },
+
+            // Passive Mob Items
+            Item::Wheat => ItemProperties { name: "Wheat", max_stack: 64, is_block: false, block_type: None, tex_coords: (12, 3) },
+            Item::Seeds => ItemProperties { name: "Seeds", max_stack: 64, is_block: false, block_type: None, tex_coords: (13, 3) },
+            Item::Carrot => ItemProperties { name: "Carrot", max_stack: 64, is_block: false, block_type: None, tex_coords: (14, 3) },
+            Item::Shears => ItemProperties { name: "Shears", max_stack: 1, is_block: false, block_type: None, tex_coords: (0, 11) },
+            Item::Bucket => ItemProperties { name: "Bucket", max_stack: 16, is_block: false, block_type: None, tex_coords: (1, 11) },
+            Item::MilkBucket => ItemProperties { name: "Milk Bucket", max_stack: 1, is_block: false, block_type: None, tex_coords: (2, 11) },
+            Item::RawPorkchop => ItemProperties { name: "Raw Porkchop", max_stack: 64, is_block: false, block_type: None, tex_coords: (3, 11) },
+            Item::CookedPorkchop => ItemProperties { name: "Cooked Porkchop", max_stack: 64, is_block: false, block_type: None, tex_coords: (7, 11) },
+            Item::RawBeef => ItemProperties { name: "Raw Beef", max_stack: 64, is_block: false, block_type: None, tex_coords: (4, 11) },
+            Item::CookedBeef => ItemProperties { name: "Cooked Beef", max_stack: 64, is_block: false, block_type: None, tex_coords: (8, 11) },
+            Item::RawMutton => ItemProperties { name: "Raw Mutton", max_stack: 64, is_block: false, block_type: None, tex_coords: (5, 11) },
+            Item::CookedMutton => ItemProperties { name: "Cooked Mutton", max_stack: 64, is_block: false, block_type: None, tex_coords: (9, 11) },
+            Item::RawChicken => ItemProperties { name: "Raw Chicken", max_stack: 64, is_block: false, block_type: None, tex_coords: (6, 11) },
+            Item::CookedChicken => ItemProperties { name: "Cooked Chicken", max_stack: 64, is_block: false, block_type: None, tex_coords: (10, 11) },
+            Item::Wool => ItemProperties { name: "Wool Block", max_stack: 64, is_block: true, block_type: Some(BlockType::Snow), tex_coords: (10, 11) },
+            Item::Leather => ItemProperties { name: "Leather", max_stack: 64, is_block: false, block_type: None, tex_coords: (11, 11) },
+            Item::Feather => ItemProperties { name: "Feather", max_stack: 64, is_block: false, block_type: None, tex_coords: (12, 11) },
+            Item::Egg => ItemProperties { name: "Egg", max_stack: 16, is_block: false, block_type: None, tex_coords: (13, 11) },
+            Item::RedDye => ItemProperties { name: "Red Dye", max_stack: 64, is_block: false, block_type: None, tex_coords: (14, 11) },
+            Item::BlueDye => ItemProperties { name: "Blue Dye", max_stack: 64, is_block: false, block_type: None, tex_coords: (15, 11) },
+            Item::GreenDye => ItemProperties { name: "Green Dye", max_stack: 64, is_block: false, block_type: None, tex_coords: (15, 11) },
         }
     }
 
@@ -317,6 +364,20 @@ impl Inventory {
                 self.hotbar[self.selected] = None;
             }
         }
+    }
+
+    pub fn remove_selected_item(&mut self, count: u32) {
+        if let Some(stack) = &mut self.hotbar[self.selected] {
+            if stack.count > count {
+                stack.count -= count;
+            } else {
+                self.hotbar[self.selected] = None;
+            }
+        }
+    }
+
+    pub fn replace_selected_item(&mut self, item: Item) {
+        self.hotbar[self.selected] = Some(ItemStack::new(item, 1));
     }
 }
 
