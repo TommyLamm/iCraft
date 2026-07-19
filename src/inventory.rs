@@ -12,7 +12,7 @@ pub enum Item {
     // Blocks
     Grass, Dirt, Stone, Sand, Gravel, OakLog, OakPlanks, OakLeaves, Cobblestone, Bedrock, Water,
     CoalOre, IronOre, GoldOre, DiamondOre, RedstoneOre, Glass, Brick, StoneBrick, Snow, Ice, Clay,
-    Sandstone, Obsidian, CraftingTable, Furnace, Chest, TNT, Bookshelf, Torch,
+    Sandstone, Obsidian, CraftingTable, Furnace, Chest, TNT, Bookshelf, Torch, Lava,
     
     // Tools
     StoneSword, StonePickaxe, StoneAxe, StoneShovel,
@@ -136,6 +136,7 @@ impl Item {
             Item::TNT => ItemProperties { name: "TNT", max_stack: 64, is_block: true, block_type: Some(BlockType::TNT), tex_coords: (2, 2) },
             Item::Bookshelf => ItemProperties { name: "Bookshelf", max_stack: 64, is_block: true, block_type: Some(BlockType::Bookshelf), tex_coords: (3, 2) },
             Item::Torch => ItemProperties { name: "Torch", max_stack: 64, is_block: true, block_type: Some(BlockType::Torch), tex_coords: (4, 2) },
+            Item::Lava => ItemProperties { name: "Lava", max_stack: 64, is_block: true, block_type: Some(BlockType::Lava), tex_coords: (15, 2) },
             
             // Tools (row 4-7)
             Item::StoneSword => ItemProperties { name: "Stone Sword", max_stack: 1, is_block: false, block_type: None, tex_coords: (0, 4) },
@@ -202,6 +203,7 @@ impl Item {
             BlockType::TNT => Item::TNT,
             BlockType::Bookshelf => Item::Bookshelf,
             BlockType::Torch => Item::Torch,
+            BlockType::Lava => Item::Lava,
         }
     }
 }
@@ -246,7 +248,7 @@ impl Inventory {
         let extra_items = [
             Item::StoneSword, Item::IronPickaxe, Item::DiamondPickaxe, Item::DiamondAxe, Item::DiamondShovel,
             Item::Apple, Item::Bread, Item::Coal, Item::IronIngot, Item::Diamond, Item::Redstone,
-            Item::CraftingTable, Item::Furnace, Item::Chest, Item::TNT, Item::Bookshelf, Item::Sand,
+            Item::CraftingTable, Item::Furnace, Item::Chest, Item::TNT, Item::Bookshelf, Item::Sand, Item::Lava,
         ];
         for (i, &item) in extra_items.iter().enumerate() {
             inv.main[i] = Some(ItemStack::new(item, 64));

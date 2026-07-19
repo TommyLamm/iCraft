@@ -40,6 +40,7 @@ pub enum BlockType {
     TNT = 28,
     Bookshelf = 29,
     Torch = 30,
+    Lava = 31,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -61,7 +62,7 @@ pub struct BlockProperties {
 impl BlockType {
     pub fn sound_material(self) -> Option<crate::audio::SoundMaterial> {
         match self {
-            BlockType::Air | BlockType::Water => None,
+            BlockType::Air | BlockType::Water | BlockType::Lava => None,
             BlockType::Grass | BlockType::OakLeaves => Some(crate::audio::SoundMaterial::Grass),
             BlockType::OakLog | BlockType::OakPlanks | BlockType::Bookshelf | BlockType::CraftingTable | BlockType::Chest => Some(crate::audio::SoundMaterial::Wood),
             BlockType::Sand | BlockType::Clay => Some(crate::audio::SoundMaterial::Sand),
@@ -323,6 +324,14 @@ impl BlockType {
                 is_passable: false,
                 light_emission: 14,
             },
+            BlockType::Lava => BlockProperties {
+                name: "Lava",
+                hardness: 100.0,
+                render_type: RenderType::Opaque,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 15,
+            },
         }
     }
 
@@ -388,6 +397,7 @@ impl BlockType {
                 else { (3, 2) }
             }
             BlockType::Torch => (4, 2),
+            BlockType::Lava => (15, 2),
             BlockType::Air => (0, 0),
         }
     }
