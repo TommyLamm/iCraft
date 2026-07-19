@@ -13,6 +13,7 @@ mod player;
 mod entity;
 mod mob;
 mod mob_renderer;
+pub mod audio;
 
 
 use app::App;
