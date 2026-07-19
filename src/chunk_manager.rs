@@ -80,4 +80,44 @@ impl ChunkManager {
             }
         }
     }
+
+    pub fn get_fluid_level(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                return chunk.fluid_levels[bx][by][bz] & 0x07;
+            }
+        }
+        0
+    }
+
+    pub fn set_fluid_level(&mut self, wx: i32, wy: i32, wz: i32, level: u8) {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                let current = chunk.fluid_levels[bx][by][bz];
+                chunk.fluid_levels[bx][by][bz] = (current & 0xF8) | (level & 0x07);
+            }
+        }
+    }
+
+    pub fn get_fluid_falling(&self, wx: i32, wy: i32, wz: i32) -> bool {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                return (chunk.fluid_levels[bx][by][bz] & 0x08) != 0;
+            }
+        }
+        false
+    }
+
+    pub fn set_fluid_falling(&mut self, wx: i32, wy: i32, wz: i32, falling: bool) {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                let current = chunk.fluid_levels[bx][by][bz];
+                if falling {
+                    chunk.fluid_levels[bx][by][bz] = current | 0x08;
+                } else {
+                    chunk.fluid_levels[bx][by][bz] = current & !0x08;
+                }
+            }
+        }
+    }
 }

@@ -411,6 +411,7 @@ pub struct Chunk {
     pub block_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     /// Per-column max Y of non-air blocks (indexed as [x][z])
     pub heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]>,
+    pub fluid_levels: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
 }
 
 impl Chunk {
@@ -659,6 +660,10 @@ impl Chunk {
             }
         }
 
+        let fluid_levels: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
+            vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
+                .try_into().unwrap();
+
         Self {
             chunk_x,
             chunk_z,
@@ -666,6 +671,7 @@ impl Chunk {
             sky_light,
             block_light,
             heightmap,
+            fluid_levels,
         }
     }
 
@@ -971,5 +977,13 @@ mod tests {
             if found_surface_air { break; }
         }
         assert!(found_surface_air, "Should carve some cave air at surface in entrance zones");
+    }
+
+    #[test]
+    fn test_fluid_level_encoding() {
+        let mut chunk = Chunk::new(0, 0);
+        chunk.fluid_levels[0][10][0] = 5 | 0x08; // level 5, falling = true
+        assert_eq!(chunk.fluid_levels[0][10][0] & 0x07, 5);
+        assert_eq!((chunk.fluid_levels[0][10][0] & 0x08) != 0, true);
     }
 }
