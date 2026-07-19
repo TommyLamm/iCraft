@@ -51,18 +51,48 @@ impl PlayerPhysics {
     pub fn update(&mut self, dt: f32, chunk_manager: &ChunkManager, movement_input: Vec3) -> f32 {
         let was_on_ground = self.on_ground;
 
+        let px = self.position.x.floor() as i32;
+        let py = self.position.y.floor() as i32;
+        let pz = self.position.z.floor() as i32;
+        let block_at_feet = chunk_manager.get_block(px, py, pz);
+        let block_at_eyes = chunk_manager.get_block(px, (self.position.y + 1.62).floor() as i32, pz);
+        
+        let is_in_water = block_at_feet == crate::world::BlockType::Water || block_at_eyes == crate::world::BlockType::Water;
+        let is_in_lava = block_at_feet == crate::world::BlockType::Lava || block_at_eyes == crate::world::BlockType::Lava;
+
         // 1. 套用玩家移動控制
-        let speed = 8.0;
+        let mut speed = 8.0;
+        if is_in_water {
+            speed *= 0.6;
+        } else if is_in_lava {
+            speed *= 0.3;
+        }
         self.velocity.x = movement_input.x * speed;
         self.velocity.z = movement_input.z * speed;
 
         // 2. 套用重力與跳躍
-        if movement_input.y > 0.0 && self.on_ground {
-            self.velocity.y = 10.0;
-        }
-        self.velocity.y -= 32.0 * dt;
-        if self.velocity.y < -50.0 {
-            self.velocity.y = -50.0; // 終端速度
+        if is_in_water {
+            if movement_input.y > 0.0 {
+                self.velocity.y = 2.5; // Swim up buoyancy
+            } else {
+                self.velocity.y -= 12.0 * dt;
+            }
+            self.velocity.y = self.velocity.y.max(-2.0); // Terminal velocity cap in water
+        } else if is_in_lava {
+            if movement_input.y > 0.0 {
+                self.velocity.y = 1.0; // Swim up buoyancy in lava
+            } else {
+                self.velocity.y -= 8.0 * dt;
+            }
+            self.velocity.y = self.velocity.y.max(-0.5); // Terminal velocity cap in lava
+        } else {
+            if movement_input.y > 0.0 && self.on_ground {
+                self.velocity.y = 10.0;
+            }
+            self.velocity.y -= 32.0 * dt;
+            if self.velocity.y < -50.0 {
+                self.velocity.y = -50.0; // 終端速度
+            }
         }
 
         // 3. 沿 X 軸位移並處理碰撞
@@ -87,7 +117,7 @@ impl PlayerPhysics {
             }
         }
 
-        if self.on_ground {
+        if self.on_ground || is_in_water || is_in_lava {
             self.highest_y = self.position.y;
         } else {
             self.highest_y = self.highest_y.max(self.position.y);

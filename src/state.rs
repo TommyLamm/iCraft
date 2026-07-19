@@ -184,6 +184,7 @@ pub struct State {
     pub was_on_ground: bool,
     pub water_tick_timer: f32,
     pub lava_tick_timer: f32,
+    pub lava_damage_timer: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -848,6 +849,7 @@ impl State {
             was_on_ground: false,
             water_tick_timer: 0.0,
             lava_tick_timer: 0.0,
+            lava_damage_timer: 0.0,
         }
     }
 
@@ -1218,6 +1220,24 @@ impl State {
             }
         } else {
             self.void_damage_timer = 0.0;
+        }
+
+        // Lava damage check
+        let px = self.player_physics.position.x.floor() as i32;
+        let py = self.player_physics.position.y.floor() as i32;
+        let pz = self.player_physics.position.z.floor() as i32;
+        let block_at_feet = self.chunk_manager.get_block(px, py, pz);
+        let block_at_eyes = self.chunk_manager.get_block(px, (self.player_physics.position.y + 1.62).floor() as i32, pz);
+        let player_in_lava = block_at_feet == BlockType::Lava || block_at_eyes == BlockType::Lava;
+
+        if player_in_lava {
+            self.lava_damage_timer += dt;
+            if self.lava_damage_timer >= 0.5 {
+                self.lava_damage_timer = 0.0;
+                self.take_damage(4.0, DamageSource::Mob); // Deal 4.0 damage (2 hearts) every 0.5s
+            }
+        } else {
+            self.lava_damage_timer = 0.0;
         }
 
         // Update player state timers & starvation
