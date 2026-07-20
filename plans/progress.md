@@ -104,6 +104,10 @@ P3 [██████░░░░] 55.6%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-21
+- 🔧 額外修復：選取／建立世界時 NVIDIA Vulkan 驅動崩潰 (By GPT-5.6 Terra Extra High)
+  - 修改文件：`src/app.rs`, `src/menu.rs`, `src/state.rs`, `ARCHITECTURE.md`
+  - 修復內容：世界切換改為在 `WindowEvent` 中排程、於 `about_to_wait` 才執行，避免在原生滑鼠 callback 尚未返回時銷毀 menu 的 wgpu surface 並為同一視窗建立遊戲 surface。`State::new` 僅同步載入玩家周圍 3×3 Chunk，剩餘視距交由既有逐幀串流處理，避免視距 12 時一次建立 625 個網格。Windows 上 menu 與遊戲統一強制使用 DX12；Windows Error Reporting 已確認原始故障模組為 NVIDIA Vulkan ICD `nvoglv64.dll`（`0xc0000005` / `0xc000041d`），而 `PRIMARY` 仍會優先選擇 Vulkan。
+  - 驗證：`cargo fmt --check`、`cargo test`（100 項單元測試與 1 項整合測試）、`cargo build --release` 通過；實際點擊 Play Selected 與 Create World 已確認可進入世界且不再崩潰。
 - ✅ 完成任務 #26 (By GPT-5.6 Sol Extra High)：Nether / End + Boss
   - 新增文件：`src/dimension.rs`, `src/boss.rs`
   - 修改文件：`src/main.rs`, `src/state.rs`, `src/world.rs`, `src/chunk_manager.rs`, `src/save.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/mob_renderer.rs`, `src/inventory.rs`, `src/crafting.rs`, `src/texture.rs`, `src/shader.wgsl`, `ARCHITECTURE.md`

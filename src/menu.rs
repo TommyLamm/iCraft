@@ -673,8 +673,16 @@ impl Menu {
         let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
         apply_fullscreen(&window, settings.fullscreen);
         let size = window.inner_size();
+        // On this Windows/NVIDIA setup the Vulkan ICD crashes while the game
+        // surface is created. `PRIMARY` still prefers Vulkan, so explicitly
+        // select DX12 on Windows and use the normal primary backends elsewhere.
+        let backends = if cfg!(target_os = "windows") {
+            wgpu::Backends::DX12
+        } else {
+            wgpu::Backends::PRIMARY
+        };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             ..Default::default()
         });
         let surface = instance.create_surface(window.clone()).unwrap();

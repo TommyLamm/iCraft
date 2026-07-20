@@ -15,10 +15,16 @@ enum Runtime {
     Game(State),
 }
 
+enum PendingRuntimeTransition {
+    MenuAction(MenuAction),
+    ReturnToMainMenu,
+}
+
 pub struct App {
     runtime: Option<Runtime>,
     window: Option<Arc<Window>>,
     last_render_time: Instant,
+    pending_transition: Option<PendingRuntimeTransition>,
 }
 
 impl App {
@@ -27,6 +33,14 @@ impl App {
             runtime: None,
             window: None,
             last_render_time: Instant::now(),
+            pending_transition: None,
+        }
+    }
+
+    fn defer_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::None => {}
+            action => self.pending_transition = Some(PendingRuntimeTransition::MenuAction(action)),
         }
     }
 
@@ -56,6 +70,27 @@ impl App {
         let menu = pollster::block_on(Menu::new(window, settings));
         self.runtime = Some(Runtime::Menu(menu));
         self.last_render_time = Instant::now();
+    }
+
+    fn apply_pending_transition(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(transition) = self.pending_transition.take() else {
+            return;
+        };
+
+        // Do not destroy one wgpu surface and create another for the same
+        // window from inside a WindowEvent callback.  On Windows that can
+        // re-enter the native window procedure while its swapchain is still
+        // active, which manifests as STATUS_FATAL_USER_CALLBACK_EXCEPTION.
+        match transition {
+            PendingRuntimeTransition::MenuAction(action) => {
+                self.handle_menu_action(action, event_loop)
+            }
+            PendingRuntimeTransition::ReturnToMainMenu => self.return_to_main_menu(),
+        }
+
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 }
 
@@ -148,7 +183,7 @@ impl ApplicationHandler for App {
                     }
                     None => MenuAction::None,
                 };
-                self.handle_menu_action(action, event_loop);
+                self.defer_menu_action(action);
             }
             WindowEvent::MouseInput {
                 state: element_state,
@@ -197,9 +232,9 @@ impl ApplicationHandler for App {
                     None => {}
                 }
                 if return_to_menu {
-                    self.return_to_main_menu();
+                    self.pending_transition = Some(PendingRuntimeTransition::ReturnToMainMenu);
                 } else {
-                    self.handle_menu_action(action, event_loop);
+                    self.defer_menu_action(action);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -278,7 +313,12 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.apply_pending_transition(event_loop);
+    }
+
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.pending_transition = None;
         self.runtime = None;
     }
 }

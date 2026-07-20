@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `7df488c26b61a69ce17fbbc162af6a47328975be` (`7df488c`). This identifies the
+> `fdd74d4369f70b05a838e2194fee0586148f3b04` (`fdd74d4`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -49,9 +49,13 @@ src/main.rs
 
 - `src/main.rs::main` declares every crate module and starts `EventLoop::run_app`.
 - `src/app.rs::App` owns an optional `Menu` / `Game` runtime and frame timing.
-  `resumed` creates the window and calls `Menu::new`; a `WorldLaunch` transition
-  drops that surface before creating `State`. `window_event` routes configurable
-  keyboard input, mouse, resize, pause, inventory, menu actions, and redraw.
+  `resumed` creates the window and calls `Menu::new`. A `WorldLaunch` is queued
+  from `window_event` and applied from `about_to_wait`, after the native input
+  callback has returned, so a menu surface is never destroyed and replaced for
+  the same window re-entrantly. On Windows both runtimes explicitly use wgpu's
+  DX12 backend; other platforms use the normal primary native backends.
+  `window_event` routes configurable keyboard input, mouse, resize, pause,
+  inventory, menu actions, and redraw.
 - On `RedrawRequested`, `App` caps `dt` at 0.1 seconds, updates the active
   runtime, requests the next redraw, then renders its current surface.
 - `src/state.rs::State` is the composition root and principal coupling hotspot.
@@ -66,13 +70,15 @@ src/main.rs
 
 `main` -> `App::resumed` -> `Menu::new` first creates only the lightweight menu
 surface and procedural rotating panorama. Selecting or creating a world yields a
-`WorldLaunch`; `App` drops the menu surface, then calls `State::new` with the
-selected directory, seed, mode, difficulty, and current `GameSettings`.
-`State::new` initializes wgpu pipelines/buffers (including the dedicated crack
-pipeline and particle buffers) -> builds the texture atlas -> restores the saved
-dimension -> restores or creates spawn chunks from the selected world's seed ->
-propagates initial lighting -> generates chunk meshes -> initializes gameplay,
-entity, particle, UI, and audio state. Crack tiles prefer external
+`WorldLaunch`; `App` queues the transition and, from `about_to_wait`, drops the
+menu surface before calling `State::new` with the selected directory, seed, mode,
+difficulty, and current `GameSettings`. `State::new` initializes wgpu
+pipelines/buffers (including the dedicated crack pipeline and particle buffers)
+-> builds the texture atlas -> restores the saved dimension -> restores or creates
+only the 3×3 spawn area from the selected world's seed -> propagates initial
+lighting -> generates its chunk meshes -> initializes gameplay, entity, particle,
+UI, and audio state. `State::update_chunks` streams the remainder of the selected
+render distance after the first frame. Crack tiles prefer external
 `destroy_stage_*.png` files and fall back to procedural generation when those
 assets are unavailable.
 
@@ -357,5 +363,9 @@ initialization degrades to silent operation when no default output device exists
   authoritative world is `ChunkManager::chunks`; authoritative entities are in
   `EntityManager::entities`. Particle vertices are also derived each frame from
   `ParticleSystem::particles`.
+- On Windows, `Menu::new` and `State::new` intentionally force DX12 rather than
+  the usual primary-backend selection. This avoids a verified NVIDIA Vulkan ICD
+  crash (`nvoglv64.dll`) during the menu-to-world transition; do not switch this
+  back to `PRIMARY` without testing the affected driver path.
 - Save/load is managed by `SaveManager` in `src/save.rs` utilizing Bincode and Zlib compression. The main thread spawns a background thread listening on `SaveCommand` for non-blocking autosaves (every 5 minutes) and chunk unloads, while a synchronous save is flushed on window close or "Save and Quit" action.
 - Dimension switching rebuilds chunk, mesh, entity, particle, and redstone runtime state around the target dimension. Keep portal placement, chunk saves, and `dimension.dat` updates together when changing this flow.

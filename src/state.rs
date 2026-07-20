@@ -16,6 +16,15 @@ const UI_VERTEX_CAPACITY: usize = 4096;
 const UI_LINE_VERTEX_CAPACITY: usize = 16384;
 const DEBUG_STATS_INTERVAL: f32 = 0.5;
 const RAIN_LOOP_ID: u64 = u64::MAX - 1;
+// Creating an entire render distance while handling a menu click blocks the
+// window event loop and can allocate hundreds of chunk meshes at once.  Start
+// with a safe area around the player; `update_chunks` streams the rest in over
+// subsequent frames.
+const INITIAL_WORLD_CHUNK_RADIUS: i32 = 1;
+
+fn initial_chunk_radius(render_distance: i32) -> i32 {
+    render_distance.clamp(0, INITIAL_WORLD_CHUNK_RADIUS)
+}
 
 pub struct ChunkMesh {
     pub opaque_vertex_buffer: wgpu::Buffer,
@@ -562,8 +571,16 @@ impl State {
 
     pub async fn new(window: Arc<Window>, launch: WorldLaunch, settings: GameSettings) -> Self {
         let size = window.inner_size();
+        // The NVIDIA Vulkan ICD crashes during the menu-to-world transition on
+        // this Windows setup. `PRIMARY` still chooses Vulkan first, so force
+        // DX12 here to match the menu and keep other platforms unchanged.
+        let backends = if cfg!(target_os = "windows") {
+            wgpu::Backends::DX12
+        } else {
+            wgpu::Backends::PRIMARY
+        };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             ..Default::default()
         });
 
@@ -1040,11 +1057,17 @@ impl State {
         let mut chunk_manager = ChunkManager::new_in_dimension(render_distance, current_dimension);
         let mut chunk_meshes = std::collections::HashMap::new();
 
-        // Load spawn chunks synchronously
+        // Load only the immediate spawn area synchronously.  Loading every
+        // chunk in a large render distance here used to create all CPU/GPU
+        // meshes in one window event (625 chunks at distance 12), freezing the
+        // app and often causing the graphics driver to reset.  `update_chunks`
+        // loads the remaining requested chunks one at a time after the first
+        // frame is visible.
         let player_chunk_x = (player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32;
         let player_chunk_z = (player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32;
-        for cx in player_chunk_x - render_distance..=player_chunk_x + render_distance {
-            for cz in player_chunk_z - render_distance..=player_chunk_z + render_distance {
+        let initial_radius = initial_chunk_radius(render_distance);
+        for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
+            for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
                 let mut chunk =
                     crate::dimension::generate_chunk(current_dimension, cx, cz, world_seed);
                 let saved_chunk = {
@@ -7113,6 +7136,14 @@ mod debug_tests {
         assert_eq!(debug_chunk_coordinate(-0.001, CHUNK_WIDTH), -1);
         assert_eq!(debug_chunk_coordinate(-16.0, CHUNK_WIDTH), -1);
         assert_eq!(debug_chunk_coordinate(-16.001, CHUNK_WIDTH), -2);
+    }
+
+    #[test]
+    fn initial_world_load_is_bounded_independently_of_render_distance() {
+        assert_eq!(initial_chunk_radius(0), 0);
+        assert_eq!(initial_chunk_radius(2), INITIAL_WORLD_CHUNK_RADIUS);
+        assert_eq!(initial_chunk_radius(12), INITIAL_WORLD_CHUNK_RADIUS);
+        assert_eq!(initial_chunk_radius(16), INITIAL_WORLD_CHUNK_RADIUS);
     }
 
     #[test]
