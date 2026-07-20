@@ -10,6 +10,7 @@ mod fluid;
 mod interaction;
 mod inventory;
 mod lighting;
+mod menu;
 mod mob;
 mod mob_renderer;
 mod particles;

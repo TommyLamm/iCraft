@@ -3,6 +3,7 @@ use crate::chunk_manager::{mark_block_mesh_dependencies, surrounding_chunk_coord
 use crate::crafting::RecipeManager;
 use crate::interaction::raycast;
 use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
+use crate::menu::{Difficulty, GameSettings, WorldLaunch};
 use crate::physics::{PlayerPhysics, AABB};
 use crate::player::{DamageSource, PlayerState};
 use crate::world::{Biome, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
@@ -237,6 +238,9 @@ pub struct State {
     pub redstone: crate::redstone::RedstoneSystem,
     redstone_tick_timer: f32,
     pub weather: crate::weather::WeatherSystem,
+    pub settings: GameSettings,
+    pub world_seed: u32,
+    pub difficulty: Difficulty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,9 +281,8 @@ impl State {
         depth_texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    pub async fn new(window: Window) -> Self {
+    pub async fn new(window: Arc<Window>, launch: WorldLaunch, settings: GameSettings) -> Self {
         let size = window.inner_size();
-        let window = Arc::new(window);
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -321,7 +324,15 @@ impl State {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: if settings.vsync
+                || !surface_caps
+                    .present_modes
+                    .contains(&wgpu::PresentMode::Immediate)
+            {
+                wgpu::PresentMode::Fifo
+            } else {
+                wgpu::PresentMode::Immediate
+            },
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -333,7 +344,7 @@ impl State {
 
         // Initialize SaveManager
         let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::save::SaveManager::new("saves/world_001"),
+            crate::save::SaveManager::new(&launch.world_dir),
         ));
 
         // Spawn background worker thread
@@ -358,20 +369,20 @@ impl State {
         let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
         let keys = KeyState::default();
 
-        // Load settings
-        let settings = GameSettings::load();
-
         let mut audio_manager = crate::audio::AudioManager::new();
-        audio_manager.set_volume(settings.volume);
+        audio_manager.set_volume(settings.effective_sound_volume());
 
         // Load save data if exists
-        let mut game_mode = GameMode::Creative;
-        let mut inventory = Inventory::new_creative();
+        let mut game_mode = launch.game_mode;
+        let mut inventory = match launch.game_mode {
+            GameMode::Creative => Inventory::new_creative(),
+            GameMode::Survival => Inventory::new(),
+        };
         let mut player_state = PlayerState::new();
         let mut camera_yaw = f32::to_radians(90.0);
         let mut camera_pitch = f32::to_radians(-20.0);
         let mut world_time = crate::camera::WorldTime::new();
-        let mut _seed = 12345;
+        let mut world_seed = launch.seed;
 
         let has_save = {
             let mgr = save_manager.lock().unwrap();
@@ -383,7 +394,7 @@ impl State {
                 let mgr = save_manager.lock().unwrap();
                 mgr.load_player_and_level().unwrap()
             };
-            _seed = level.seed;
+            world_seed = level.seed;
             world_time.ticks = level.time;
             player_physics.position = Vec3::from_slice(&player.position);
             player_physics.velocity = Vec3::from_slice(&player.velocity);
@@ -754,7 +765,7 @@ impl State {
         let player_chunk_z = (player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32;
         for cx in player_chunk_x - render_distance..=player_chunk_x + render_distance {
             for cz in player_chunk_z - render_distance..=player_chunk_z + render_distance {
-                let mut chunk = Chunk::new(cx, cz);
+                let mut chunk = Chunk::new_with_seed(cx, cz, world_seed);
                 let saved_chunk = {
                     let mut manager = save_manager.lock().unwrap();
                     manager.load_chunk(cx, cz)
@@ -1025,7 +1036,7 @@ impl State {
         });
 
         let particles = crate::particles::ParticleSystem::new();
-        let weather = crate::weather::WeatherSystem::new(_seed as u32);
+        let weather = crate::weather::WeatherSystem::new(world_seed);
 
         Self {
             window,
@@ -1111,22 +1122,35 @@ impl State {
             redstone: crate::redstone::RedstoneSystem::new(),
             redstone_tick_timer: 0.0,
             weather,
+            difficulty: launch.difficulty,
+            world_seed,
+            settings,
         }
     }
 
     pub fn save_settings(&self) {
-        let settings = GameSettings {
-            fov: self.camera.fov,
-            sensitivity: self.sensitivity,
-            render_distance: self.chunk_manager.render_distance,
-            volume: self.audio_manager.volume,
+        let mut settings = self.settings.clone();
+        settings.fov = self.camera.fov;
+        settings.sensitivity = self.sensitivity;
+        settings.render_distance = self.chunk_manager.render_distance;
+        settings.master_volume = if settings.sound_volume > 0.0 {
+            (self.audio_manager.volume / settings.sound_volume).clamp(0.0, 1.0)
+        } else {
+            settings.master_volume
         };
         settings.save();
     }
 
     pub fn trigger_background_save(&self) {
+        let world_dir = self.save_manager.lock().unwrap().world_dir.clone();
+        crate::menu::update_world_metadata(
+            &world_dir,
+            self.world_seed,
+            self.game_mode,
+            self.difficulty,
+        );
         let level = crate::save::LevelData {
-            seed: 12345,
+            seed: self.world_seed,
             time: self.world_time.ticks,
         };
         let player = crate::save::PlayerData::from_state(
@@ -1152,7 +1176,7 @@ impl State {
 
     pub fn save_synchronously(&self) {
         let level = crate::save::LevelData {
-            seed: 12345,
+            seed: self.world_seed,
             time: self.world_time.ticks,
         };
         let player = crate::save::PlayerData::from_state(
@@ -1172,6 +1196,12 @@ impl State {
             let chunk_data = crate::save::ChunkSaveData::from_chunk(chunk);
             let _ = mgr.save_chunk(chunk.chunk_x, chunk.chunk_z, chunk_data);
         }
+        crate::menu::update_world_metadata(
+            &mgr.world_dir,
+            self.world_seed,
+            self.game_mode,
+            self.difficulty,
+        );
         println!("[Save] Synchronously saved world state.");
     }
 
@@ -1228,7 +1258,7 @@ impl State {
 
         // 3. Load 1 chunk per frame
         if let Some(&(cx, cz)) = load_queue.first() {
-            let mut chunk = Chunk::new(cx, cz);
+            let mut chunk = Chunk::new_with_seed(cx, cz, self.world_seed);
             let chunk_data = {
                 let mut mgr = self.save_manager.lock().unwrap();
                 mgr.load_chunk(cx, cz)
@@ -1399,7 +1429,7 @@ impl State {
         self.mouse_ndc = [ndc_x, ndc_y];
     }
 
-    pub fn handle_menu_click(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    pub fn handle_menu_click(&mut self) -> bool {
         if self.is_paused {
             let [x, y] = self.mouse_ndc;
 
@@ -1483,9 +1513,10 @@ impl State {
                 self.is_saving = true;
                 let _ = self.render();
                 self.save_synchronously();
-                event_loop.exit();
+                return true;
             }
         }
+        false
     }
 
     pub fn update(&mut self, dt: f32) {
@@ -2006,14 +2037,26 @@ impl State {
 
         self.total_time += dt;
 
-        // Spawn mobs
-        crate::mob::spawn_mobs(
-            &mut self.entity_manager,
-            &self.chunk_manager,
-            self.player_physics.position,
-            self.world_time.sky_light_level(),
-            self.total_time,
-        );
+        // Peaceful worlds keep passive creatures and dropped items, but remove
+        // hostile actors immediately and do not schedule new hostile spawns.
+        if self.difficulty == Difficulty::Peaceful {
+            self.entity_manager.entities.retain(|entity| {
+                !matches!(
+                    entity.entity_type,
+                    crate::entity::EntityType::Zombie
+                        | crate::entity::EntityType::Skeleton
+                        | crate::entity::EntityType::Creeper
+                )
+            });
+        } else {
+            crate::mob::spawn_mobs(
+                &mut self.entity_manager,
+                &self.chunk_manager,
+                self.player_physics.position,
+                self.world_time.sky_light_level(),
+                self.total_time,
+            );
+        }
 
         // Update mobs
         self.update_player_projectiles(dt);
@@ -6602,74 +6645,5 @@ mod debug_tests {
         assert!(biomes
             .into_iter()
             .all(|biome| !biome_debug_name(biome).is_empty()));
-    }
-}
-
-pub struct GameSettings {
-    pub fov: f32,
-    pub sensitivity: f32,
-    pub render_distance: i32,
-    pub volume: f32,
-}
-
-impl GameSettings {
-    pub fn load() -> Self {
-        let mut fov = 70.0;
-        let mut sensitivity = 0.002;
-        let mut render_distance = 8;
-        let mut volume = 1.0;
-        if let Ok(mut file) = std::fs::File::open("settings.txt") {
-            let mut contents = String::new();
-            use std::io::Read;
-            if file.read_to_string(&mut contents).is_ok() {
-                for line in contents.lines() {
-                    let parts: Vec<&str> = line.split(':').collect();
-                    if parts.len() == 2 {
-                        let key = parts[0].trim();
-                        let value = parts[1].trim();
-                        match key {
-                            "fov" => {
-                                if let Ok(parsed) = value.parse::<f32>() {
-                                    fov = parsed;
-                                }
-                            }
-                            "sensitivity" => {
-                                if let Ok(parsed) = value.parse::<f32>() {
-                                    sensitivity = parsed;
-                                }
-                            }
-                            "render_distance" => {
-                                if let Ok(parsed) = value.parse::<i32>() {
-                                    render_distance = parsed;
-                                }
-                            }
-                            "volume" => {
-                                if let Ok(parsed) = value.parse::<f32>() {
-                                    volume = parsed;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        Self {
-            fov,
-            sensitivity,
-            render_distance,
-            volume,
-        }
-    }
-
-    pub fn save(&self) {
-        if let Ok(mut file) = std::fs::File::create("settings.txt") {
-            let contents = format!(
-                "fov:{}\nsensitivity:{}\nrender_distance:{}\nvolume:{}\n",
-                self.fov, self.sensitivity, self.render_distance, self.volume
-            );
-            use std::io::Write;
-            let _ = file.write_all(contents.as_bytes());
-        }
     }
 }

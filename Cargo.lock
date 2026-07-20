@@ -928,6 +928,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
 
 [[package]]
+name = "icraft"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bytemuck",
+ "exr",
+ "flate2",
+ "glam",
+ "half",
+ "image",
+ "indexmap",
+ "noise",
+ "pollster",
+ "rayon",
+ "rayon-core",
+ "rodio",
+ "serde",
+ "unicode-segmentation",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "image"
 version = "0.24.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1219,29 +1242,6 @@ dependencies = [
  "log",
  "objc",
  "paste",
-]
-
-[[package]]
-name = "minecraft_clone"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bytemuck",
- "exr",
- "flate2",
- "glam",
- "half",
- "image",
- "indexmap",
- "noise",
- "pollster",
- "rayon",
- "rayon-core",
- "rodio",
- "serde",
- "unicode-segmentation",
- "wgpu",
- "winit",
 ]
 
 [[package]]

@@ -1218,20 +1218,25 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn new(chunk_x: i32, chunk_z: i32) -> Self {
+        Self::new_with_seed(chunk_x, chunk_z, 12345)
+    }
+
+    pub fn new_with_seed(chunk_x: i32, chunk_z: i32, world_seed: u32) -> Self {
         // Allocate on the heap to avoid stack overflow (~192 KB per chunk)
         let mut blocks: Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
             vec![[[BlockType::Air; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
                 .try_into()
                 .unwrap();
-        let perlin = Perlin::new(12345); // Seed: 12345
-        let caves_perlin = Perlin::new(54321);
-        let caverns_perlin = Perlin::new(65432);
-        let temp_perlin = Perlin::new(99999);
-        let moist_perlin = Perlin::new(88888);
-        let ocean_perlin = Perlin::new(77777);
+        let perlin = Perlin::new(world_seed);
+        let caves_perlin = Perlin::new(world_seed ^ 0xA341_316C);
+        let caverns_perlin = Perlin::new(world_seed ^ 0xC801_3EA4);
+        let temp_perlin = Perlin::new(world_seed ^ 0xAD90_777D);
+        let moist_perlin = Perlin::new(world_seed ^ 0x7E95_761E);
+        let ocean_perlin = Perlin::new(world_seed ^ 0x4CF5_AD43);
 
         // Simple custom PRNG for ore distribution and bedrock blending
-        let mut rng_seed = (chunk_x as u32).wrapping_mul(31) ^ (chunk_z as u32);
+        let mut rng_seed =
+            (chunk_x as u32).wrapping_mul(31) ^ (chunk_z as u32) ^ world_seed.rotate_left(13);
         let mut next_rand = |min: u8, max: u8| -> u8 {
             rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
             let val = (rng_seed / 65536) % 32768;
@@ -1963,6 +1968,15 @@ impl BlockType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_seed_changes_generated_terrain() {
+        let first = Chunk::new_with_seed(0, 0, 1);
+        let same = Chunk::new_with_seed(0, 0, 1);
+        let different = Chunk::new_with_seed(0, 0, 2);
+        assert_eq!(first.heightmap, same.heightmap);
+        assert_ne!(first.heightmap, different.heightmap);
+    }
     use std::collections::HashSet;
 
     fn triangle_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {

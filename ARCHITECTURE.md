@@ -13,11 +13,14 @@
 
 ## Project at a glance
 
-`minecraft_clone` is a single-binary Rust desktop voxel game. It runs a `winit`
+`iCraft` is a single-binary Rust desktop voxel game. It runs a `winit`
 event loop, keeps the simulation on the main thread, and renders through `wgpu`.
 Terrain, the texture atlas, and fallback sounds are generated procedurally.
 
-There is currently no server, networking layer, or database. Display/input/audio settings persist in `settings.txt`, while world data (including seed, game time, player status, inventory, and chunks) is stored under the `saves/world_001/` directory. Entity state is still transient in-memory.
+There is currently no server, networking layer, or database. Display/input/audio
+settings persist in `settings.txt`, while each world's data (including seed,
+metadata, game time, player status, inventory, and chunks) is stored under its
+own `saves/<world>/` directory. Entity state is still transient in-memory.
 
 ## How agents should navigate
 
@@ -37,17 +40,19 @@ There is currently no server, networking layer, or database. Display/input/audio
 ```text
 src/main.rs
   -> App (src/app.rs): winit lifecycle and input/event translation
-     -> State (src/state.rs): owns the game, simulation systems, and GPU state
+     -> Menu (src/menu.rs): startup UI, settings, and world management
+     -> State (src/state.rs): selected world, simulation systems, and GPU state
         -> update(dt): advances simulation and produces dirty CPU/GPU state
         -> render(): builds transient meshes/UI, records passes, presents frame
 ```
 
 - `src/main.rs::main` declares every crate module and starts `EventLoop::run_app`.
-- `src/app.rs::App` owns `Option<State>` and frame timing. `resumed` creates the
-  window and calls `State::new`; `device_event` handles raw mouse motion;
-  `window_event` routes keyboard, mouse, resize, pause, inventory, and redraw.
-- On `RedrawRequested`, `App` caps `dt` at 0.1 seconds, calls `State::update`,
-  requests the next redraw, then calls `State::render`.
+- `src/app.rs::App` owns an optional `Menu` / `Game` runtime and frame timing.
+  `resumed` creates the window and calls `Menu::new`; a `WorldLaunch` transition
+  drops that surface before creating `State`. `window_event` routes configurable
+  keyboard input, mouse, resize, pause, inventory, menu actions, and redraw.
+- On `RedrawRequested`, `App` caps `dt` at 0.1 seconds, updates the active
+  runtime, requests the next redraw, then renders its current surface.
 - `src/state.rs::State` is the composition root and principal coupling hotspot.
   It owns the window/GPU resources, camera, chunks and mesh cache, player,
   inventory/crafting, enchanting/brewing workstations, potion effects,
@@ -58,12 +63,16 @@ src/main.rs
 
 ### Startup
 
-`main` -> `App::resumed` -> `State::new` -> load `GameSettings` -> initialize
-wgpu pipelines/buffers (including the dedicated crack pipeline and particle
-buffers) -> build the texture atlas -> create spawn chunks -> propagate initial
-lighting -> generate chunk meshes -> initialize gameplay, entity, particle, UI,
-and audio state. Crack tiles prefer external `destroy_stage_*.png` files and fall
-back to procedural generation when those assets are unavailable.
+`main` -> `App::resumed` -> `Menu::new` first creates only the lightweight menu
+surface and procedural rotating panorama. Selecting or creating a world yields a
+`WorldLaunch`; `App` drops the menu surface, then calls `State::new` with the
+selected directory, seed, mode, difficulty, and current `GameSettings`.
+`State::new` initializes wgpu pipelines/buffers (including the dedicated crack
+pipeline and particle buffers) -> builds the texture atlas -> restores or creates
+spawn chunks from the selected world's seed -> propagates initial lighting ->
+generates chunk meshes -> initializes gameplay, entity, particle, UI, and audio
+state. Crack tiles prefer external `destroy_stage_*.png` files and fall back to
+procedural generation when those assets are unavailable.
 
 ### Per-frame update
 
@@ -227,8 +236,9 @@ rebuilt when chunks load; block variants remain part of normal chunk saves.
 | File | Responsibility / key symbols |
 | --- | --- |
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
-| `src/app.rs` | `winit::ApplicationHandler`; OS events, key/mouse routing, redraw loop, resize and surface-error policy. |
-| `src/state.rs` | `State`, `ChunkMesh`, `KeyState`, `SlotType`, `GameSettings`; GPU setup, frame ordering, UI, mining/placement, particle emitters, dropped-item collection, damage/respawn, chunk streaming. Start with the exact method, not the whole file. |
+| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing, redraw loop, resize and surface-error policy. |
+| `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, and `WorldLaunch`. |
+| `src/state.rs` | `State`, `ChunkMesh`, `KeyState`, `SlotType`; selected-world GPU setup, frame ordering, in-game UI, mining/placement, particle emitters, dropped-item collection, damage/respawn, chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
 | `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
@@ -268,7 +278,8 @@ rebuilt when chunks load; block variants remain part of normal chunk saves.
 | Path | Role |
 | --- | --- |
 | `Cargo.toml` | Rust package and graphics/window/audio/noise dependencies. |
-| `settings.txt` | Working-directory-relative `key:value` settings. Defaults and parser/writer are `state.rs::GameSettings`; settings are saved by pause-menu adjustments. |
+| `settings.txt` | Working-directory-relative `key:value` settings. Defaults and parser/writer are `menu.rs::GameSettings`; includes display, three audio levels, difficulty, language, sensitivity, and key bindings. |
+| `saves/<world>/world.meta` | Human-readable world-list metadata: display name, generation seed, game mode, difficulty, and last-played timestamp. Legacy `world_001` saves are inferred and upgraded when selected. |
 | `assets/texture_atlas.png` | Generated diagnostic/runtime atlas output; `texture.rs` is the source of truth. |
 | `assets/sounds/*.wav` | Loaded by `AudioManager`; missing files are synthesized and written at startup. |
 | `plans/progress.md` | Feature roadmap/status. Useful for intent, not current runtime truth. |
@@ -280,7 +291,7 @@ Most behavioral tests are inline `#[cfg(test)]` unit tests beside their modules,
 especially in `world.rs`, `lighting.rs`, `fluid.rs`, `physics.rs`,
 `interaction.rs`, `inventory.rs`, `crafting.rs`, `enchantment.rs`, `brewing.rs`,
 `player.rs`, `entity.rs`, `particles.rs`, `weather.rs`, `mob.rs`, `redstone.rs`,
-and `audio.rs`.
+`audio.rs`, and `menu.rs`.
 
 `tests/passive_mob_tests.rs` is currently only a placeholder. Because the package
 has no `src/lib.rs`, integration tests cannot directly import the internal

@@ -596,7 +596,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let world_dir = std::env::temp_dir().join(format!(
-            "minecraft_clone_chunk_save_{}_{}",
+            "icraft_chunk_save_{}_{}",
             std::process::id(),
             unique
         ));
