@@ -1,4 +1,4 @@
-fov:90
-sensitivity:0.00059999997
+fov:85
+sensitivity:0.0009999999
 render_distance:12
-volume:1
+volume:0.9

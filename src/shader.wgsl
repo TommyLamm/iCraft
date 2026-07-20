@@ -40,10 +40,10 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
     
     var out_tex = model.tex_coords;
-    let is_water = model.tex_coords.x >= 10.0 * 0.0625 - 0.001 && model.tex_coords.x < 11.0 * 0.0625 + 0.001 
-                && model.tex_coords.y >= 0.0 * 0.0625 - 0.001 && model.tex_coords.y < 1.0 * 0.0625 + 0.001;
-    let is_lava = model.tex_coords.x >= 15.0 * 0.0625 - 0.001 && model.tex_coords.x < 16.0 * 0.0625 + 0.001 
-               && model.tex_coords.y >= 2.0 * 0.0625 - 0.001 && model.tex_coords.y < 3.0 * 0.0625 + 0.001;
+    let tx = model.tex_coords.x * 16.0;
+    let ty = model.tex_coords.y * 16.0;
+    let is_water = tx >= 10.0 && tx < 11.0 && ty >= 0.0 && ty < 1.0;
+    let is_lava = tx >= 15.0 && tx < 16.0 && ty >= 2.0 && ty < 3.0;
     
     if (is_water) {
         let local_y = (model.tex_coords.y - 0.0 * 0.0625) / 0.0625 + camera.total_time * 0.8;

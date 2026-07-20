@@ -283,8 +283,12 @@ pub fn update_mobs(
         }
 
         // AI decision logic
+        let is_hostile = entity.entity_type == EntityType::Zombie
+            || entity.entity_type == EntityType::Skeleton
+            || entity.entity_type == EntityType::Creeper;
+
         let dist = entity.position.distance(player_pos);
-        if dist <= 16.0 {
+        if is_hostile && dist <= 16.0 {
             entity.target_player = true;
 
             // Turn towards player
