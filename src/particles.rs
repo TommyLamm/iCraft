@@ -121,21 +121,25 @@ impl ParticleSystem {
                 position: c0.into(),
                 tex_coords: [u0, v1],
                 light_level: 240.0,
+                ao: 1.0,
             });
             vertices.push(Vertex {
                 position: c1.into(),
                 tex_coords: [u1, v1],
                 light_level: 240.0,
+                ao: 1.0,
             });
             vertices.push(Vertex {
                 position: c2.into(),
                 tex_coords: [u1, v0],
                 light_level: 240.0,
+                ao: 1.0,
             });
             vertices.push(Vertex {
                 position: c3.into(),
                 tex_coords: [u0, v0],
                 light_level: 240.0,
+                ao: 1.0,
             });
 
             indices.push(start_idx + 0);

@@ -3,6 +3,55 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 type BlockPos = (i32, i32, i32);
 
+/// Adds every chunk whose mesh can depend on a block at the supplied world position.
+/// AO corner samples make a diagonal chunk dependent on blocks at chunk corners.
+pub(crate) fn mark_block_mesh_dependencies(dirty: &mut HashSet<(i32, i32)>, wx: i32, wz: i32) {
+    let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+    let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+    let lx = wx.rem_euclid(CHUNK_WIDTH as i32);
+    let lz = wz.rem_euclid(CHUNK_DEPTH as i32);
+
+    let x_neighbor = if lx == 0 {
+        Some(cx - 1)
+    } else if lx == CHUNK_WIDTH as i32 - 1 {
+        Some(cx + 1)
+    } else {
+        None
+    };
+
+    let z_neighbor = if lz == 0 {
+        Some(cz - 1)
+    } else if lz == CHUNK_DEPTH as i32 - 1 {
+        Some(cz + 1)
+    } else {
+        None
+    };
+
+    dirty.insert((cx, cz));
+    if let Some(affected_cx) = x_neighbor {
+        dirty.insert((affected_cx, cz));
+    }
+    if let Some(affected_cz) = z_neighbor {
+        dirty.insert((cx, affected_cz));
+    }
+    if let (Some(affected_cx), Some(affected_cz)) = (x_neighbor, z_neighbor) {
+        dirty.insert((affected_cx, affected_cz));
+    }
+}
+
+pub(crate) fn surrounding_chunk_coords(cx: i32, cz: i32) -> [(i32, i32); 8] {
+    [
+        (cx - 1, cz - 1),
+        (cx, cz - 1),
+        (cx + 1, cz - 1),
+        (cx - 1, cz),
+        (cx + 1, cz),
+        (cx - 1, cz + 1),
+        (cx, cz + 1),
+        (cx + 1, cz + 1),
+    ]
+}
+
 struct FluidUpdateQueue {
     queue: VecDeque<BlockPos>,
     queued: HashSet<BlockPos>,
@@ -208,5 +257,70 @@ impl ChunkManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dependencies(wx: i32, wz: i32) -> HashSet<(i32, i32)> {
+        let mut result = HashSet::new();
+        mark_block_mesh_dependencies(&mut result, wx, wz);
+        result
+    }
+
+    #[test]
+    fn interior_block_only_invalidates_its_own_chunk() {
+        assert_eq!(dependencies(8, 8), HashSet::from([(0, 0)]));
+    }
+
+    #[test]
+    fn chunk_edges_include_the_adjacent_chunk() {
+        assert_eq!(dependencies(0, 8), HashSet::from([(0, 0), (-1, 0)]));
+        assert_eq!(dependencies(15, 8), HashSet::from([(0, 0), (1, 0)]));
+        assert_eq!(dependencies(8, 0), HashSet::from([(0, 0), (0, -1)]));
+        assert_eq!(dependencies(8, 15), HashSet::from([(0, 0), (0, 1)]));
+    }
+
+    #[test]
+    fn chunk_corners_include_the_diagonal_chunk() {
+        assert_eq!(
+            dependencies(15, 15),
+            HashSet::from([(0, 0), (1, 0), (0, 1), (1, 1)])
+        );
+        assert_eq!(
+            dependencies(0, 0),
+            HashSet::from([(0, 0), (-1, 0), (0, -1), (-1, -1)])
+        );
+    }
+
+    #[test]
+    fn negative_world_coordinates_use_euclidean_chunk_boundaries() {
+        assert_eq!(
+            dependencies(-1, -1),
+            HashSet::from([(-1, -1), (0, -1), (-1, 0), (0, 0)])
+        );
+        assert_eq!(
+            dependencies(-16, -16),
+            HashSet::from([(-1, -1), (-2, -1), (-1, -2), (-2, -2)])
+        );
+    }
+
+    #[test]
+    fn surrounding_chunks_contains_all_eight_neighbors() {
+        assert_eq!(
+            HashSet::from(surrounding_chunk_coords(3, -2)),
+            HashSet::from([
+                (2, -3),
+                (3, -3),
+                (4, -3),
+                (2, -2),
+                (4, -2),
+                (2, -1),
+                (3, -1),
+                (4, -1),
+            ])
+        );
     }
 }

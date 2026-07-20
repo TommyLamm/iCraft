@@ -1,5 +1,5 @@
 use crate::camera::{Camera, CameraUniform};
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::{mark_block_mesh_dependencies, surrounding_chunk_coords, ChunkManager};
 use crate::crafting::RecipeManager;
 use crate::interaction::raycast;
 use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
@@ -31,6 +31,7 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub tex_coords: [f32; 2],
     pub light_level: f32,
+    pub ao: f32,
 }
 
 impl Vertex {
@@ -53,6 +54,14 @@ impl Vertex {
                     offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>())
                         as wgpu::BufferAddress,
                     shader_location: 2,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>()
+                        + std::mem::size_of::<[f32; 2]>()
+                        + std::mem::size_of::<f32>())
+                        as wgpu::BufferAddress,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32,
                 },
             ],
@@ -682,21 +691,25 @@ impl State {
                 position: [-crosshair_size, 0.0, 0.0],
                 tex_coords: [0.0, 0.0],
                 light_level: 1.0,
+                ao: 1.0,
             },
             Vertex {
                 position: [crosshair_size, 0.0, 0.0],
                 tex_coords: [0.0, 0.0],
                 light_level: 1.0,
+                ao: 1.0,
             },
             Vertex {
                 position: [0.0, -crosshair_size * aspect, 0.0],
                 tex_coords: [0.0, 0.0],
                 light_level: 1.0,
+                ao: 1.0,
             },
             Vertex {
                 position: [0.0, crosshair_size * aspect, 0.0],
                 tex_coords: [0.0, 0.0],
                 light_level: 1.0,
+                ao: 1.0,
             },
         ];
 
@@ -1141,12 +1154,21 @@ impl State {
                 to_unload.push((cx, cz));
             }
         }
-        for (cx, cz) in to_unload {
+        for &(cx, cz) in &to_unload {
             if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
                 let chunk_data = crate::save::ChunkSaveData::from_chunk(&chunk);
                 let _ = self
                     .save_tx
                     .send(crate::save::SaveCommand::SaveChunk(chunk_data));
+            }
+        }
+        for &(cx, cz) in &to_unload {
+            for neighbor in surrounding_chunk_coords(cx, cz) {
+                if self.chunk_manager.chunks.contains_key(&neighbor) {
+                    if let Some(mesh) = self.chunk_meshes.get_mut(&neighbor) {
+                        mesh.dirty = true;
+                    }
+                }
             }
         }
         self.chunk_meshes
@@ -1207,9 +1229,9 @@ impl State {
                 }
             }
 
-            // Only mark direct neighbors dirty (limit cascade)
-            for &(ncx, ncz) in &[(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(ncx, ncz)) {
+            // AO corner samples and face culling depend on all eight neighbors.
+            for neighbor in surrounding_chunk_coords(cx, cz) {
+                if let Some(mesh) = self.chunk_meshes.get_mut(&neighbor) {
                     mesh.dirty = true;
                 }
             }
@@ -1834,19 +1856,7 @@ impl State {
                             wz,
                             &mut dirty_chunks,
                         );
-                        dirty_chunks.insert((cx, cz));
-                        if rx == 0 {
-                            dirty_chunks.insert((cx - 1, cz));
-                        }
-                        if rx == 15 {
-                            dirty_chunks.insert((cx + 1, cz));
-                        }
-                        if rz == 0 {
-                            dirty_chunks.insert((cx, cz - 1));
-                        }
-                        if rz == 15 {
-                            dirty_chunks.insert((cx, cz + 1));
-                        }
+                        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
                         for (dcx, dcz) in dirty_chunks {
                             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
                                 mesh.dirty = true;
@@ -2114,6 +2124,7 @@ impl State {
                     position: [wx + corner[0], wy + corner[1], wz + corner[2]],
                     tex_coords: [u, v],
                     light_level: light_val,
+                    ao: 1.0,
                 });
             }
 
@@ -2302,24 +2313,7 @@ impl State {
             &mut dirty_chunks,
         );
 
-        let cx = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
-        let cz = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
-        let lx = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32);
-        let lz = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32);
-
-        dirty_chunks.insert((cx, cz));
-        if lx == 0 {
-            dirty_chunks.insert((cx - 1, cz));
-        }
-        if lx == 15 {
-            dirty_chunks.insert((cx + 1, cz));
-        }
-        if lz == 0 {
-            dirty_chunks.insert((cx, cz - 1));
-        }
-        if lz == 15 {
-            dirty_chunks.insert((cx, cz + 1));
-        }
+        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
 
         for (dcx, dcz) in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
@@ -2815,25 +2809,7 @@ impl State {
                 }
             }
 
-            // Mark the modified chunk and boundary neighbors dirty
-            let cx = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
-            let cz = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
-            let lx = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32);
-            let lz = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32);
-
-            dirty_chunks.insert((cx, cz));
-            if lx == 0 {
-                dirty_chunks.insert((cx - 1, cz));
-            }
-            if lx == 15 {
-                dirty_chunks.insert((cx + 1, cz));
-            }
-            if lz == 0 {
-                dirty_chunks.insert((cx, cz - 1));
-            }
-            if lz == 15 {
-                dirty_chunks.insert((cx, cz + 1));
-            }
+            mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
 
             for (dcx, dcz) in dirty_chunks {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
@@ -5297,6 +5273,17 @@ fn debug_chunk_coordinate(position: f32, chunk_size: usize) -> i32 {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
+
+    #[test]
+    fn terrain_vertex_layout_exposes_ambient_occlusion() {
+        let layout = Vertex::desc();
+        assert_eq!(std::mem::size_of::<Vertex>(), 28);
+        assert_eq!(layout.array_stride, 28);
+        assert_eq!(layout.attributes.len(), 4);
+        assert_eq!(layout.attributes[3].offset, 24);
+        assert_eq!(layout.attributes[3].shader_location, 3);
+        assert_eq!(layout.attributes[3].format, wgpu::VertexFormat::Float32);
+    }
 
     #[test]
     fn debug_chunk_coordinates_handle_negative_world_positions() {

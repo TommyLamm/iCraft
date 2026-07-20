@@ -89,6 +89,7 @@ pub fn add_cuboid(
             position: [final_pos.x, final_pos.y, final_pos.z],
             tex_coords: [u, v],
             light_level: light_val,
+            ao: 1.0,
         });
     }
 

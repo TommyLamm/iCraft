@@ -23,6 +23,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) tex_coords: vec2<f32>,
     @location(2) light_level: f32,
+    @location(3) ao: f32,
 };
 
 struct VertexOutput {
@@ -32,6 +33,7 @@ struct VertexOutput {
     // integer boundary and make floor() decode a completely different light.
     @location(1) @interpolate(flat) light_level: f32,
     @location(2) world_pos: vec3<f32>,
+    @location(3) ao: f32,
 };
 
 @vertex
@@ -56,6 +58,7 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     
     out.light_level = model.light_level;
     out.world_pos = model.position;
+    out.ao = model.ao;
     return out;
 }
 
@@ -96,7 +99,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let ambient = 0.08;
     let final_light = max(max_light / 15.0, ambient) * multiplier;
-    var fragment_color = color * final_light;
+    var fragment_color = color * (final_light * clamp(in.ao, 0.25, 1.0));
     if (is_hurt > 0.5) {
         fragment_color = mix(fragment_color, vec4<f32>(1.0, 0.0, 0.0, 1.0), 0.5);
     }
@@ -120,6 +123,7 @@ fn vs_crosshair(model: VertexInput) -> VertexOutput {
     out.tex_coords = model.tex_coords;
     out.light_level = model.light_level;
     out.world_pos = model.position;
+    out.ao = model.ao;
     return out;
 }
 

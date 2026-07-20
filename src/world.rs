@@ -721,6 +721,12 @@ impl BlockType {
         }
     }
 
+    /// Whether this block is a full, opaque cube that casts vertex ambient occlusion.
+    pub fn is_ao_occluder(self) -> bool {
+        let properties = self.properties();
+        properties.is_solid && properties.render_type == RenderType::Opaque
+    }
+
     pub fn get_face_tex_index(self, face_idx: usize) -> (u32, u32) {
         match self {
             BlockType::Grass => {
@@ -840,6 +846,153 @@ impl BlockType {
             BlockType::Pumpkin => (13, 12),
             BlockType::Melon => (14, 12),
         }
+    }
+}
+
+type FaceCorner = ([f32; 3], [f32; 2]);
+
+// Face order: south, north, west, east, up, down.
+const BLOCK_FACES: [([i32; 3], [FaceCorner; 4]); 6] = [
+    (
+        [0, 0, 1],
+        [
+            ([0.0, 0.0, 1.0], [0.0, 1.0]),
+            ([1.0, 0.0, 1.0], [1.0, 1.0]),
+            ([1.0, 1.0, 1.0], [1.0, 0.0]),
+            ([0.0, 1.0, 1.0], [0.0, 0.0]),
+        ],
+    ),
+    (
+        [0, 0, -1],
+        [
+            ([1.0, 0.0, 0.0], [0.0, 1.0]),
+            ([0.0, 0.0, 0.0], [1.0, 1.0]),
+            ([0.0, 1.0, 0.0], [1.0, 0.0]),
+            ([1.0, 1.0, 0.0], [0.0, 0.0]),
+        ],
+    ),
+    (
+        [-1, 0, 0],
+        [
+            ([0.0, 0.0, 0.0], [0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [1.0, 1.0]),
+            ([0.0, 1.0, 1.0], [1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0]),
+        ],
+    ),
+    (
+        [1, 0, 0],
+        [
+            ([1.0, 0.0, 1.0], [0.0, 1.0]),
+            ([1.0, 0.0, 0.0], [1.0, 1.0]),
+            ([1.0, 1.0, 0.0], [1.0, 0.0]),
+            ([1.0, 1.0, 1.0], [0.0, 0.0]),
+        ],
+    ),
+    (
+        [0, 1, 0],
+        [
+            ([0.0, 1.0, 1.0], [0.0, 1.0]),
+            ([1.0, 1.0, 1.0], [1.0, 1.0]),
+            ([1.0, 1.0, 0.0], [1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0]),
+        ],
+    ),
+    (
+        [0, -1, 0],
+        [
+            ([0.0, 0.0, 0.0], [0.0, 1.0]),
+            ([1.0, 0.0, 0.0], [1.0, 1.0]),
+            ([1.0, 0.0, 1.0], [1.0, 0.0]),
+            ([0.0, 0.0, 1.0], [0.0, 0.0]),
+        ],
+    ),
+];
+
+fn ambient_occlusion_value(occluders: u8) -> f32 {
+    match occluders.min(3) {
+        0 => 1.0,
+        1 => 0.75,
+        2 => 0.5,
+        _ => 0.25,
+    }
+}
+
+fn ao_sample_positions(
+    block_position: [i32; 3],
+    normal: [i32; 3],
+    corner: [f32; 3],
+) -> [[i32; 3]; 3] {
+    let tangent_axes = if normal[0] != 0 {
+        [1, 2]
+    } else if normal[1] != 0 {
+        [0, 2]
+    } else {
+        [0, 1]
+    };
+
+    let mut side_u = [0; 3];
+    let mut side_v = [0; 3];
+    side_u[tangent_axes[0]] = if corner[tangent_axes[0]] == 0.0 {
+        -1
+    } else {
+        1
+    };
+    side_v[tangent_axes[1]] = if corner[tangent_axes[1]] == 0.0 {
+        -1
+    } else {
+        1
+    };
+
+    let outside = [
+        block_position[0] + normal[0],
+        block_position[1] + normal[1],
+        block_position[2] + normal[2],
+    ];
+    [
+        [
+            outside[0] + side_u[0],
+            outside[1] + side_u[1],
+            outside[2] + side_u[2],
+        ],
+        [
+            outside[0] + side_v[0],
+            outside[1] + side_v[1],
+            outside[2] + side_v[2],
+        ],
+        [
+            outside[0] + side_u[0] + side_v[0],
+            outside[1] + side_u[1] + side_v[1],
+            outside[2] + side_u[2] + side_v[2],
+        ],
+    ]
+}
+
+fn ambient_occlusion_for_vertex<F>(
+    block_position: [i32; 3],
+    normal: [i32; 3],
+    corner: [f32; 3],
+    get_block_at: &F,
+) -> f32
+where
+    F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
+{
+    let occluders = ao_sample_positions(block_position, normal, corner)
+        .iter()
+        .filter(|position| {
+            get_block_at(position[0], position[1], position[2])
+                .0
+                .is_ao_occluder()
+        })
+        .count() as u8;
+    ambient_occlusion_value(occluders)
+}
+
+fn quad_indices_for_ao(ao: [f32; 4]) -> [u32; 6] {
+    if ao[0] + ao[2] > ao[1] + ao[3] {
+        [0, 1, 3, 1, 2, 3]
+    } else {
+        [0, 1, 2, 0, 2, 3]
     }
 }
 
@@ -1388,71 +1541,6 @@ impl Chunk {
         let mut trans_vertices = Vec::new();
         let mut trans_indices = Vec::new();
 
-        // 方塊的 6 個面法線偏移量與面頂點定義
-        // 順序：前、後、左、右、上、下
-        let faces = [
-            // 前面 (South) (0, 0, 1)
-            (
-                [0.0, 0.0, 1.0],
-                [
-                    ([0.0, 0.0, 1.0], [0.0, 1.0]),
-                    ([1.0, 0.0, 1.0], [1.0, 1.0]),
-                    ([1.0, 1.0, 1.0], [1.0, 0.0]),
-                    ([0.0, 1.0, 1.0], [0.0, 0.0]),
-                ],
-            ),
-            // 後面 (North) (0, 0, -1)
-            (
-                [0.0, 0.0, -1.0],
-                [
-                    ([1.0, 0.0, 0.0], [0.0, 1.0]),
-                    ([0.0, 0.0, 0.0], [1.0, 1.0]),
-                    ([0.0, 1.0, 0.0], [1.0, 0.0]),
-                    ([1.0, 1.0, 0.0], [0.0, 0.0]),
-                ],
-            ),
-            // 左面 (West) (-1, 0, 0)
-            (
-                [-1.0, 0.0, 0.0],
-                [
-                    ([0.0, 0.0, 0.0], [0.0, 1.0]),
-                    ([0.0, 0.0, 1.0], [1.0, 1.0]),
-                    ([0.0, 1.0, 1.0], [1.0, 0.0]),
-                    ([0.0, 1.0, 0.0], [0.0, 0.0]),
-                ],
-            ),
-            // 右面 (East) (1, 0, 0)
-            (
-                [1.0, 0.0, 0.0],
-                [
-                    ([1.0, 0.0, 1.0], [0.0, 1.0]),
-                    ([1.0, 0.0, 0.0], [1.0, 1.0]),
-                    ([1.0, 1.0, 0.0], [1.0, 0.0]),
-                    ([1.0, 1.0, 1.0], [0.0, 0.0]),
-                ],
-            ),
-            // 上面 (Up) (0, 1, 0)
-            (
-                [0.0, 1.0, 0.0],
-                [
-                    ([0.0, 1.0, 1.0], [0.0, 1.0]),
-                    ([1.0, 1.0, 1.0], [1.0, 1.0]),
-                    ([1.0, 1.0, 0.0], [1.0, 0.0]),
-                    ([0.0, 1.0, 0.0], [0.0, 0.0]),
-                ],
-            ),
-            // 下面 (Down) (0, -1, 0)
-            (
-                [0.0, -1.0, 0.0],
-                [
-                    ([0.0, 0.0, 0.0], [0.0, 1.0]),
-                    ([1.0, 0.0, 0.0], [1.0, 1.0]),
-                    ([1.0, 0.0, 1.0], [1.0, 0.0]),
-                    ([0.0, 0.0, 1.0], [0.0, 0.0]),
-                ],
-            ),
-        ];
-
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 let max_y = self.heightmap[x][z] as usize;
@@ -1466,10 +1554,10 @@ impl Chunk {
                     let world_y = y as i32;
                     let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
 
-                    for (face_idx, (normal, corner_data)) in faces.iter().enumerate() {
-                        let nx = world_x + normal[0] as i32;
-                        let ny = world_y + normal[1] as i32;
-                        let nz = world_z + normal[2] as i32;
+                    for (face_idx, (normal, corner_data)) in BLOCK_FACES.iter().enumerate() {
+                        let nx = world_x + normal[0];
+                        let ny = world_y + normal[1];
+                        let nz = world_z + normal[2];
 
                         let (
                             neighbor,
@@ -1545,7 +1633,17 @@ impl Chunk {
                                 1.0
                             };
 
-                            for (offset, uv) in corner_data.iter() {
+                            let mut ao = [1.0; 4];
+                            for (corner_idx, (offset, _)) in corner_data.iter().enumerate() {
+                                ao[corner_idx] = ambient_occlusion_for_vertex(
+                                    [world_x, world_y, world_z],
+                                    *normal,
+                                    *offset,
+                                    &get_block_at,
+                                );
+                            }
+
+                            for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
                                 // 256x256 atlas -> 16 columns of 16x16 pixel blocks
                                 // Apply half-pixel inset adjustment to prevent Nearest-neighbor coordinate bleeding
                                 let u_adj = if uv[0] == 0.0 { 0.005 } else { 0.995 };
@@ -1566,15 +1664,15 @@ impl Chunk {
                                     ],
                                     tex_coords: [u, v],
                                     light_level: light_val,
+                                    ao: ao[corner_idx],
                                 });
                             }
 
-                            i_list.push(start_idx + 0);
-                            i_list.push(start_idx + 1);
-                            i_list.push(start_idx + 2);
-                            i_list.push(start_idx + 0);
-                            i_list.push(start_idx + 2);
-                            i_list.push(start_idx + 3);
+                            i_list.extend(
+                                quad_indices_for_ao(ao)
+                                    .iter()
+                                    .map(|index| start_idx + index),
+                            );
                         }
                     }
                 }
@@ -1648,6 +1746,155 @@ impl BlockType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn triangle_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ]
+    }
+
+    #[test]
+    fn ambient_occlusion_levels_match_occluder_counts() {
+        assert_eq!(ambient_occlusion_value(0), 1.0);
+        assert_eq!(ambient_occlusion_value(1), 0.75);
+        assert_eq!(ambient_occlusion_value(2), 0.5);
+        assert_eq!(ambient_occlusion_value(3), 0.25);
+    }
+
+    #[test]
+    fn only_solid_opaque_blocks_cast_ambient_occlusion() {
+        assert!(BlockType::Stone.is_ao_occluder());
+        assert!(BlockType::Grass.is_ao_occluder());
+        for block in [
+            BlockType::Air,
+            BlockType::Water,
+            BlockType::Lava,
+            BlockType::Glass,
+            BlockType::OakLeaves,
+            BlockType::Torch,
+            BlockType::TallGrass,
+            BlockType::Cactus,
+        ] {
+            assert!(!block.is_ao_occluder(), "{block:?} should not cast AO");
+        }
+    }
+
+    #[test]
+    fn ao_samples_follow_every_face_and_corner_direction() {
+        let block = [10, 20, 30];
+        for (normal, corners) in BLOCK_FACES {
+            let normal_axis = (0..3).find(|&axis| normal[axis] != 0).unwrap();
+            let tangent_axes: Vec<usize> = (0..3).filter(|&axis| normal[axis] == 0).collect();
+            let outside = [
+                block[0] + normal[0],
+                block[1] + normal[1],
+                block[2] + normal[2],
+            ];
+
+            for (corner, _) in corners {
+                let samples = ao_sample_positions(block, normal, corner);
+                let sign_u = if corner[tangent_axes[0]] == 0.0 {
+                    -1
+                } else {
+                    1
+                };
+                let sign_v = if corner[tangent_axes[1]] == 0.0 {
+                    -1
+                } else {
+                    1
+                };
+
+                assert!(samples
+                    .iter()
+                    .all(|sample| sample[normal_axis] == outside[normal_axis]));
+                assert_eq!(
+                    samples[0][tangent_axes[0]],
+                    outside[tangent_axes[0]] + sign_u
+                );
+                assert_eq!(samples[0][tangent_axes[1]], outside[tangent_axes[1]]);
+                assert_eq!(samples[1][tangent_axes[0]], outside[tangent_axes[0]]);
+                assert_eq!(
+                    samples[1][tangent_axes[1]],
+                    outside[tangent_axes[1]] + sign_v
+                );
+                assert_eq!(
+                    samples[2][tangent_axes[0]],
+                    outside[tangent_axes[0]] + sign_u
+                );
+                assert_eq!(
+                    samples[2][tangent_axes[1]],
+                    outside[tangent_axes[1]] + sign_v
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ao_diagonal_selection_preserves_face_winding() {
+        let default_indices = quad_indices_for_ao([1.0, 0.75, 0.5, 0.75]);
+        let flipped_indices = quad_indices_for_ao([1.0, 0.25, 1.0, 0.25]);
+        let tie_indices = quad_indices_for_ao([1.0, 0.5, 0.5, 1.0]);
+        assert_eq!(default_indices, [0, 1, 2, 0, 2, 3]);
+        assert_eq!(flipped_indices, [0, 1, 3, 1, 2, 3]);
+        assert_eq!(tie_indices, [0, 1, 2, 0, 2, 3]);
+
+        for (normal, corners) in BLOCK_FACES {
+            for indices in [default_indices, flipped_indices] {
+                for triangle in indices.chunks_exact(3) {
+                    let face_normal = triangle_normal(
+                        corners[triangle[0] as usize].0,
+                        corners[triangle[1] as usize].0,
+                        corners[triangle[2] as usize].0,
+                    );
+                    let dot = face_normal[0] * normal[0] as f32
+                        + face_normal[1] * normal[1] as f32
+                        + face_normal[2] * normal[2] as f32;
+                    assert!(dot > 0.0, "triangle winding changed for face {normal:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_mesh_writes_ao_for_isolated_and_occluded_vertices() {
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                }
+            }
+            for z in 0..CHUNK_DEPTH {
+                chunk.heightmap[x][z] = 0;
+            }
+        }
+        chunk.blocks[8][1][8] = BlockType::Stone;
+        chunk.heightmap[8][8] = 1;
+
+        let empty_lookup = |_: i32, _: i32, _: i32| (BlockType::Air, 15, 0, 0, false);
+        let (vertices, indices, _, _) = chunk.generate_mesh(empty_lookup);
+        assert_eq!(vertices.len(), 24);
+        assert_eq!(indices.len(), 36);
+        assert!(vertices.iter().all(|vertex| vertex.ao == 1.0));
+
+        let occluders = HashSet::from([(7, 2, 8), (8, 2, 9)]);
+        let lookup = |x: i32, y: i32, z: i32| {
+            let block = if occluders.contains(&(x, y, z)) {
+                BlockType::Stone
+            } else {
+                BlockType::Air
+            };
+            (block, 15, 0, 0, false)
+        };
+        let (vertices, _, _, _) = chunk.generate_mesh(lookup);
+        assert_eq!(vertices[16].position, [8.0, 2.0, 9.0]);
+        assert_eq!(vertices[16].ao, 0.5);
+    }
 
     #[test]
     fn test_block_harvest_properties() {

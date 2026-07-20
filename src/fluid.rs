@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
 use std::collections::HashSet;
 
@@ -46,7 +46,7 @@ pub fn tick_fluids(
             other_type,
             is_lava,
         ) {
-            mark_mesh_boundaries_dirty(&mut dirty_chunks, wx, wz);
+            mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
         }
     }
 
@@ -204,26 +204,6 @@ fn set_fluid_state(
     chunk_manager.set_fluid_level(wx, wy, wz, level);
     chunk_manager.set_fluid_falling(wx, wy, wz, falling);
     true
-}
-
-fn mark_mesh_boundaries_dirty(dirty: &mut HashSet<(i32, i32)>, wx: i32, wz: i32) {
-    let cx = wx.div_euclid(CHUNK_WIDTH as i32);
-    let cz = wz.div_euclid(CHUNK_DEPTH as i32);
-    let lx = wx.rem_euclid(CHUNK_WIDTH as i32);
-    let lz = wz.rem_euclid(CHUNK_DEPTH as i32);
-    dirty.insert((cx, cz));
-    if lx == 0 {
-        dirty.insert((cx - 1, cz));
-    }
-    if lx == CHUNK_WIDTH as i32 - 1 {
-        dirty.insert((cx + 1, cz));
-    }
-    if lz == 0 {
-        dirty.insert((cx, cz - 1));
-    }
-    if lz == CHUNK_DEPTH as i32 - 1 {
-        dirty.insert((cx, cz + 1));
-    }
 }
 
 #[cfg(test)]

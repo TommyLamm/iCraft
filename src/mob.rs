@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
 use crate::entity::{Entity, EntityManager, EntityType};
 use crate::inventory::GameMode;
 use crate::physics::PlayerPhysics;
@@ -63,24 +63,7 @@ pub fn explode(
             &mut dirty_chunks,
         );
 
-        let chx = x.div_euclid(crate::world::CHUNK_WIDTH as i32);
-        let chz = z.div_euclid(crate::world::CHUNK_DEPTH as i32);
-        let lx = x.rem_euclid(crate::world::CHUNK_WIDTH as i32);
-        let lz = z.rem_euclid(crate::world::CHUNK_DEPTH as i32);
-
-        dirty_chunks.insert((chx, chz));
-        if lx == 0 {
-            dirty_chunks.insert((chx - 1, chz));
-        }
-        if lx == 15 {
-            dirty_chunks.insert((chx + 1, chz));
-        }
-        if lz == 0 {
-            dirty_chunks.insert((chx, chz - 1));
-        }
-        if lz == 15 {
-            dirty_chunks.insert((chx, chz + 1));
-        }
+        mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
     }
 
     // Mark chunk meshes dirty

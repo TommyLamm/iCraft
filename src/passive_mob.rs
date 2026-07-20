@@ -1,4 +1,4 @@
-use crate::chunk_manager::ChunkManager;
+use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
 use crate::entity::{Entity, EntityManager, EntityType};
 use crate::inventory::{GameMode, Item};
 use crate::physics::PlayerPhysics;
@@ -107,11 +107,12 @@ pub fn update_passive_mobs(
                     if chunk_manager.get_block(sx, sy, sz) == crate::world::BlockType::Grass {
                         chunk_manager.set_block(sx, sy, sz, crate::world::BlockType::Dirt);
 
-                        // Mark mesh dirty
-                        let chx = sx.div_euclid(crate::world::CHUNK_WIDTH as i32);
-                        let chz = sz.div_euclid(crate::world::CHUNK_DEPTH as i32);
-                        if let Some(mesh) = chunk_meshes.get_mut(&(chx, chz)) {
-                            mesh.dirty = true;
+                        let mut dirty_chunks = std::collections::HashSet::new();
+                        mark_block_mesh_dependencies(&mut dirty_chunks, sx, sz);
+                        for chunk_position in dirty_chunks {
+                            if let Some(mesh) = chunk_meshes.get_mut(&chunk_position) {
+                                mesh.dirty = true;
+                            }
                         }
                     }
                     entity_manager.entities[i].has_wool = true; // wool grows back!
