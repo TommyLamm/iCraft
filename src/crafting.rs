@@ -409,6 +409,113 @@ impl RecipeManager {
             ItemStack::new(Item::SpiderEye, 1),
         );
 
+        // Redstone components. A few substitutions keep every component
+        // craftable with the clone's currently obtainable resource set.
+        add_shapeless(
+            &mut recipes,
+            vec![Item::RedstoneDust],
+            ItemStack::new(Item::RedstoneWire, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["R", "S"],
+            &[("R", Item::RedstoneDust), ("S", Item::Stick)],
+            ItemStack::new(Item::RedstoneTorch, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["TRT", "SSS"],
+            &[
+                ("T", Item::RedstoneTorch),
+                ("R", Item::RedstoneDust),
+                ("S", Item::Stone),
+            ],
+            ItemStack::new(Item::Repeater, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec![" T ", "TRT", "SSS"],
+            &[
+                ("T", Item::RedstoneTorch),
+                ("R", Item::RedstoneDust),
+                ("S", Item::Stone),
+            ],
+            ItemStack::new(Item::Comparator, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Stone],
+            ItemStack::new(Item::StoneButton, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["S", "C"],
+            &[("S", Item::Stick), ("C", Item::Cobblestone)],
+            ItemStack::new(Item::Lever, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["SS"],
+            &[("S", Item::Stone)],
+            ItemStack::new(Item::PressurePlate, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["PPP", "CIC", "CRC"],
+            &[
+                ("P", Item::OakPlanks),
+                ("C", Item::Cobblestone),
+                ("I", Item::IronIngot),
+                ("R", Item::RedstoneDust),
+            ],
+            ItemStack::new(Item::Piston, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Piston, Item::SugarCane],
+            ItemStack::new(Item::StickyPiston, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec![" R ", "RGR", " R "],
+            &[("R", Item::RedstoneDust), ("G", Item::GlowstoneDust)],
+            ItemStack::new(Item::RedstoneLamp, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["PP", "PP", "PP"],
+            &[("P", Item::OakPlanks)],
+            ItemStack::new(Item::OakDoor, 3),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["PPP", "PPP"],
+            &[("P", Item::OakPlanks)],
+            ItemStack::new(Item::OakTrapdoor, 2),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["CCC", "CBC", "CRC"],
+            &[
+                ("C", Item::Cobblestone),
+                ("B", Item::Bow),
+                ("R", Item::RedstoneDust),
+            ],
+            ItemStack::new(Item::Dispenser, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["CCC", "C C", "CRC"],
+            &[("C", Item::Cobblestone), ("R", Item::RedstoneDust)],
+            ItemStack::new(Item::Dropper, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["PPP", "PRP", "PPP"],
+            &[("P", Item::OakPlanks), ("R", Item::RedstoneDust)],
+            ItemStack::new(Item::NoteBlock, 1),
+        );
+
         Self { recipes }
     }
 
@@ -534,5 +641,14 @@ mod tests {
         assert!(res.is_some());
         assert_eq!(res.unwrap().item, Item::Stick);
         assert_eq!(res.unwrap().count, 4);
+    }
+
+    #[test]
+    fn test_crafting_redstone_wire_from_dust() {
+        let manager = RecipeManager::new();
+        let mut grid = vec![None; 4];
+        grid[3] = Some(ItemStack::new(Item::RedstoneDust, 1));
+        let result = manager.match_recipe(&grid, 2).unwrap();
+        assert_eq!(result.item, Item::RedstoneWire);
     }
 }

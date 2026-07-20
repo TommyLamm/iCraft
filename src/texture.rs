@@ -1884,6 +1884,27 @@ impl TextureAtlas {
         draw_redstone_icon(&mut img, 6, 14);
         draw_noise(&mut img, 7, 14, [175, 175, 180], 8, &mut seed);
 
+        // Redstone components. The compact atlas intentionally shares a tile
+        // between each component's powered/unpowered block variants, except
+        // for the lamp where emissive state needs an obvious visual cue.
+        draw_noise(&mut img, 5, 2, [95, 30, 30], 8, &mut seed); // wire
+        draw_noise(&mut img, 6, 2, [150, 45, 35], 12, &mut seed); // redstone torch
+        draw_noise(&mut img, 7, 2, [175, 170, 165], 7, &mut seed); // repeater
+        draw_noise(&mut img, 8, 2, [155, 150, 145], 7, &mut seed); // comparator
+        draw_noise(&mut img, 9, 2, [110, 110, 110], 5, &mut seed); // button
+        draw_noise(&mut img, 10, 2, [95, 75, 55], 8, &mut seed); // lever
+        draw_noise(&mut img, 11, 2, [130, 130, 130], 5, &mut seed); // plate
+        draw_noise(&mut img, 12, 2, [125, 115, 95], 9, &mut seed); // piston
+        draw_noise(&mut img, 13, 2, [90, 135, 70], 9, &mut seed); // sticky piston
+        draw_noise(&mut img, 14, 2, [95, 70, 40], 12, &mut seed); // lamp off
+        draw_noise(&mut img, 15, 2, [235, 90, 25], 14, &mut seed); // lava
+        draw_noise(&mut img, 8, 14, [245, 185, 65], 10, &mut seed); // lamp lit
+        draw_planks(&mut img, 9, 14, [145, 95, 50], &mut seed); // door
+        draw_planks(&mut img, 10, 14, [125, 80, 42], &mut seed); // trapdoor
+        draw_noise(&mut img, 11, 14, [100, 105, 110], 8, &mut seed); // dispenser
+        draw_noise(&mut img, 12, 14, [85, 90, 95], 8, &mut seed); // dropper
+        draw_planks(&mut img, 13, 14, [115, 70, 45], &mut seed); // note block
+
         // Save to assets folder
         let _ = std::fs::create_dir_all("assets");
         let _ = img.save("assets/texture_atlas.png");

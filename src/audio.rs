@@ -30,6 +30,7 @@ pub enum SoundId {
     CreeperIgnition,
     Explosion,
     ArrowShoot,
+    Note(u8),
 }
 
 impl SoundId {
@@ -46,6 +47,7 @@ impl SoundId {
             SoundId::CreeperIgnition => "creeper_hiss.wav".to_string(),
             SoundId::Explosion => "explosion.wav".to_string(),
             SoundId::ArrowShoot => "bow_shoot.wav".to_string(),
+            SoundId::Note(note) => format!("note_{note}.wav"),
         }
     }
 }
@@ -142,6 +144,18 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
                     let t = i as f32 / sample_rate as f32;
                     let env = (1.0 - (t / 0.12)).powi(3);
                     val * env * 0.3
+                })
+                .collect()
+        }
+        SoundId::Note(note) => {
+            let duration = 0.35;
+            let frequency = 440.0 * 2.0f32.powf((note as f32 - 12.0) / 12.0);
+            let len = (duration * sample_rate as f32) as usize;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - t / duration).max(0.0).powi(2);
+                    (2.0 * std::f32::consts::PI * frequency * t).sin() * env * 0.45
                 })
                 .collect()
         }
@@ -284,6 +298,8 @@ impl AudioManager {
             SoundId::Land(SoundMaterial::Glass),
         ];
 
+        let sound_ids = sound_ids.into_iter().chain((0..25).map(SoundId::Note));
+
         for id in sound_ids {
             let filename = id.filename();
             let file_path = sound_dir.join(&filename);
@@ -302,8 +318,12 @@ impl AudioManager {
             if !successfully_loaded {
                 let samples = synth_sound(id);
                 let wav_bytes = create_wav_bytes(&samples, 22050);
-                if let Ok(mut f) = File::create(&file_path) {
-                    let _ = f.write_all(&wav_bytes);
+                // Note-block pitches are cheap procedural variants; keep them
+                // in memory instead of creating 25 generated files per world.
+                if !matches!(id, SoundId::Note(_)) {
+                    if let Ok(mut f) = File::create(&file_path) {
+                        let _ = f.write_all(&wav_bytes);
+                    }
                 }
                 loaded_bytes = wav_bytes;
             }

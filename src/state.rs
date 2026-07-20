@@ -233,6 +233,8 @@ pub struct State {
     pub brewing: crate::brewing::BrewingStandState,
     pub anvil: crate::enchantment::AnvilState,
     pub potion_effects: crate::brewing::EffectManager,
+    pub redstone: crate::redstone::RedstoneSystem,
+    redstone_tick_timer: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1103,6 +1105,8 @@ impl State {
             brewing: crate::brewing::BrewingStandState::default(),
             anvil: crate::enchantment::AnvilState::default(),
             potion_effects: crate::brewing::EffectManager::default(),
+            redstone: crate::redstone::RedstoneSystem::new(),
+            redstone_tick_timer: 0.0,
         }
     }
 
@@ -1528,6 +1532,31 @@ impl State {
         }
         if self.is_paused {
             return;
+        }
+
+        self.redstone_tick_timer += dt;
+        let mut redstone_steps = 0;
+        while self.redstone_tick_timer >= 0.05 && redstone_steps < 4 {
+            self.redstone_tick_timer -= 0.05;
+            redstone_steps += 1;
+            let mut occupants = Vec::with_capacity(self.entity_manager.entities.len() + 1);
+            occupants.push((
+                self.player_physics.position.x.floor() as i32,
+                self.player_physics.position.y.floor() as i32,
+                self.player_physics.position.z.floor() as i32,
+            ));
+            occupants.extend(self.entity_manager.entities.iter().map(|entity| {
+                (
+                    entity.position.x.floor() as i32,
+                    entity.position.y.floor() as i32,
+                    entity.position.z.floor() as i32,
+                )
+            }));
+            let update = self.redstone.tick(&mut self.chunk_manager, &occupants);
+            self.apply_redstone_update(update);
+        }
+        if redstone_steps == 4 {
+            self.redstone_tick_timer = self.redstone_tick_timer.min(0.05);
         }
 
         self.brewing.update(dt);
@@ -2263,6 +2292,131 @@ impl State {
         }
     }
 
+    fn apply_redstone_update(&mut self, update: crate::redstone::RedstoneUpdate) {
+        let mut dirty_chunks = std::collections::HashSet::new();
+        for mutation in update.mutations {
+            let (wx, wy, wz) = mutation.pos;
+            let old_properties = mutation.old_block.properties();
+            let new_properties = mutation.new_block.properties();
+
+            if old_properties.is_solid != new_properties.is_solid {
+                if new_properties.is_solid {
+                    crate::lighting::update_sky_light_after_placed(
+                        &mut self.chunk_manager,
+                        wx,
+                        wy,
+                        wz,
+                        &mut dirty_chunks,
+                    );
+                } else {
+                    crate::lighting::update_sky_light_after_removed(
+                        &mut self.chunk_manager,
+                        wx,
+                        wy,
+                        wz,
+                        &mut dirty_chunks,
+                    );
+                }
+            }
+            if old_properties.light_emission != new_properties.light_emission {
+                crate::lighting::update_block_light_after_removed(
+                    &mut self.chunk_manager,
+                    wx,
+                    wy,
+                    wz,
+                    old_properties.light_emission,
+                    &mut dirty_chunks,
+                );
+                if new_properties.light_emission > 0 {
+                    crate::lighting::update_block_light_after_placed(
+                        &mut self.chunk_manager,
+                        wx,
+                        wy,
+                        wz,
+                        new_properties.light_emission,
+                        &mut dirty_chunks,
+                    );
+                }
+            }
+            mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
+        }
+
+        for (dcx, dcz) in dirty_chunks {
+            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                mesh.dirty = true;
+            }
+        }
+
+        for action in update.actions {
+            match action {
+                crate::redstone::RedstoneAction::Explode { pos } => {
+                    let center =
+                        Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
+                    crate::mob::explode(
+                        center,
+                        4.0,
+                        &mut self.chunk_manager,
+                        &mut self.chunk_meshes,
+                        &mut self.player_physics,
+                        &mut self.player_state,
+                        self.game_mode,
+                        1.0,
+                    );
+                    self.audio_manager
+                        .play_sound(crate::audio::SoundId::Explosion);
+                }
+                crate::redstone::RedstoneAction::Dispense {
+                    pos,
+                    facing,
+                    dropper,
+                } => {
+                    let delta = facing.delta();
+                    let spawn_pos = Vec3::new(
+                        pos.0 as f32 + 0.5 + delta.0 as f32 * 0.7,
+                        pos.1 as f32 + 0.5,
+                        pos.2 as f32 + 0.5 + delta.2 as f32 * 0.7,
+                    );
+                    if dropper {
+                        self.spawn_dropped_item(Item::Redstone, spawn_pos);
+                    } else {
+                        let id = self
+                            .entity_manager
+                            .spawn(crate::entity::EntityType::Arrow, spawn_pos);
+                        if let Some(arrow) = self
+                            .entity_manager
+                            .entities
+                            .iter_mut()
+                            .find(|entity| entity.id == id)
+                        {
+                            arrow.velocity = Vec3::new(delta.0 as f32, 0.0, delta.2 as f32) * 18.0;
+                            arrow.friendly_projectile = true;
+                            arrow.projectile_damage = 4.0;
+                        }
+                        self.audio_manager
+                            .play_sound(crate::audio::SoundId::ArrowShoot);
+                    }
+                }
+                crate::redstone::RedstoneAction::PlayNote { pos, note } => {
+                    let sound_pos =
+                        Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
+                    let listener_right =
+                        Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
+                            .normalize_or_zero();
+                    self.audio_manager.play_sound_3d(
+                        crate::audio::SoundId::Note(note),
+                        sound_pos,
+                        self.camera.position,
+                        listener_right,
+                    );
+                }
+            }
+        }
+
+        if update.propagation_overflowed {
+            eprintln!("[Redstone] propagation pass limit reached; continuing next tick");
+        }
+    }
+
     pub fn break_block(&mut self, pos: glam::Vec3) {
         let wx = pos.x as i32;
         let wy = pos.y as i32;
@@ -2273,6 +2427,11 @@ impl State {
         }
 
         self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+        self.redstone.on_block_changed(
+            &self.chunk_manager,
+            (wx, wy, wz),
+            crate::redstone::Direction::North,
+        );
         println!("[Debug] Block mined at ({}, {}, {})", wx, wy, wz);
 
         let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
@@ -3051,6 +3210,29 @@ impl State {
                     self.open_station(kind, hit.block_pos);
                     return;
                 }
+                if matches!(
+                    clicked_block,
+                    BlockType::Lever
+                        | BlockType::LeverOn
+                        | BlockType::StoneButton
+                        | BlockType::StoneButtonPressed
+                        | BlockType::Repeater
+                        | BlockType::RepeaterPowered
+                        | BlockType::Comparator
+                        | BlockType::ComparatorPowered
+                        | BlockType::NoteBlock
+                ) {
+                    let pos = (
+                        hit.block_pos.x as i32,
+                        hit.block_pos.y as i32,
+                        hit.block_pos.z as i32,
+                    );
+                    let update = self.redstone.interact(&mut self.chunk_manager, pos);
+                    self.apply_redstone_update(update);
+                    self.audio_manager
+                        .play_sound(crate::audio::SoundId::UiClick);
+                    return;
+                }
                 hit.block_pos + hit.normal
             };
 
@@ -3063,6 +3245,11 @@ impl State {
                 let old_block = self.chunk_manager.get_block(wx, wy, wz);
                 if old_block != BlockType::Air {
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+                    self.redstone.on_block_changed(
+                        &self.chunk_manager,
+                        (wx, wy, wz),
+                        crate::redstone::Direction::North,
+                    );
 
                     let sound_pos =
                         glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
@@ -3115,6 +3302,11 @@ impl State {
             } else {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
                     self.chunk_manager.set_block(wx, wy, wz, placed_block);
+                    self.redstone.on_block_changed(
+                        &self.chunk_manager,
+                        (wx, wy, wz),
+                        crate::redstone::Direction::from_yaw(self.camera.yaw),
+                    );
 
                     let sound_pos =
                         glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);

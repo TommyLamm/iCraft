@@ -1,6 +1,6 @@
 # 🏗️ Minecraft Clone — 進度追蹤
 
-> **整體進度**: 21 / 30 任務完成
+> **整體進度**: 22 / 30 任務完成
 > **當前階段**: P3 — 進階功能
 
 ---
@@ -12,16 +12,16 @@
 | **P0 — 核心體驗** | 5/5 | 5 | 🟢 已完成 |
 | **P1 — 可玩性基礎** | 7/7 | 7 | 🟢 已完成 |
 | **P2 — 完善體驗** | 8/8 | 8 | 🟢 已完成 |
-| **P3 — 進階功能** | 1/9 | 1 | 🟡 進行中 |
+| **P3 — 進階功能** | 2/9 | 2 | 🟡 進行中 |
 
 ### 進度條
 ```
 P0 [██████████] 100%
 P1 [██████████] 100%
 P2 [██████████] 100%
-P3 [█░░░░░░░░░] 11.1%
+P3 [██░░░░░░░░] 22.2%
 ────────────────────
-總計 [███████░░░] 70.0%
+總計 [███████░░░] 73.3%
 ```
 
 ---
@@ -88,7 +88,7 @@ P3 [█░░░░░░░░░] 11.1%
 | # | 任務 | 狀態 | 開始日期 | 完成日期 | 備註 |
 |---|------|------|---------|---------|------|
 | 21 | [附魔 / 釀造系統](./p3/21_enchanting_brewing.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
-| 22 | [紅石系統](./p3/22_redstone.md) | ⬜ 待定 | — | — | |
+| 22 | [紅石系統](./p3/22_redstone.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 23 | [天氣系統](./p3/23_weather.md) | ⬜ 待定 | — | — | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | ⬜ 待定 | — | — | |
 | 25 | [多人遊戲](./p3/25_multiplayer.md) | ⬜ 待定 | — | — | |
@@ -104,6 +104,11 @@ P3 [█░░░░░░░░░] 11.1%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-20
+- ✅ 完成任務 #22 (By GPT-5.6 Sol High)：紅石系統
+  - 新增文件：`src/redstone.rs`
+  - 修改文件：`src/main.rs`, `src/world.rs`, `src/inventory.rs`, `src/crafting.rs`, `src/texture.rs`, `src/audio.rs`, `src/state.rs`, `assets/texture_atlas.png`, `ARCHITECTURE.md`
+  - 關鍵決策：以 20 Hz 確定性 tick、座標索引元件狀態及最多 64 輪的有界穩定傳播實作 0~15 紅石功率、弱／強充能、跨 Chunk 電路與循環保護。中繼器、按鈕和 TNT 使用統一 tick 排程；比較器支援比較／相減。執行器以方塊 mutation/action 回傳，由 `State` 統一處理光照、網格、爆炸、投射物與音效，涵蓋活塞／黏性活塞、紅石燈、門／活板門、TNT、發射器／投擲器及 25 音高音階盒。所有元件均加入材質、Creative 背包及 Survival 合成鏈。
+  - 驗證：`cargo fmt -- --check`、`cargo test --release`、`cargo check --release` 通過；72 項單元測試與 1 項整合測試全部通過。`cargo run --release` 實際啟動冒煙測試無 panic。
 - ✅ 完成任務 #21 (By GPT-5.6 Sol High)：附魔 / 釀造系統
   - 新增文件：`src/enchantment.rs`, `src/brewing.rs`
   - 修改文件：`src/main.rs`, `src/app.rs`, `src/inventory.rs`, `src/crafting.rs`, `src/world.rs`, `src/texture.rs`, `src/player.rs`, `src/entity.rs`, `src/mob.rs`, `src/mob_renderer.rs`, `src/passive_mob.rs`, `src/save.rs`, `src/state.rs`, `assets/texture_atlas.png`, `ARCHITECTURE.md`

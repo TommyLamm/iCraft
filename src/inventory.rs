@@ -135,6 +135,21 @@ pub enum Item {
     GlowstoneDust,
     RedstoneDust,
     Arrow,
+    RedstoneWire,
+    RedstoneTorch,
+    Repeater,
+    Comparator,
+    StoneButton,
+    Lever,
+    PressurePlate,
+    Piston,
+    StickyPiston,
+    RedstoneLamp,
+    OakDoor,
+    OakTrapdoor,
+    Dispenser,
+    Dropper,
+    NoteBlock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1023,6 +1038,49 @@ impl Item {
                 block_type: None,
                 tex_coords: (7, 14),
             },
+            item @ (Item::RedstoneWire
+            | Item::RedstoneTorch
+            | Item::Repeater
+            | Item::Comparator
+            | Item::StoneButton
+            | Item::Lever
+            | Item::PressurePlate
+            | Item::Piston
+            | Item::StickyPiston
+            | Item::RedstoneLamp
+            | Item::OakDoor
+            | Item::OakTrapdoor
+            | Item::Dispenser
+            | Item::Dropper
+            | Item::NoteBlock) => {
+                let (name, block_type, tex_coords) = match item {
+                    Item::RedstoneWire => ("Redstone Wire", BlockType::RedstoneWire, (5, 2)),
+                    Item::RedstoneTorch => ("Redstone Torch", BlockType::RedstoneTorch, (6, 2)),
+                    Item::Repeater => ("Redstone Repeater", BlockType::Repeater, (7, 2)),
+                    Item::Comparator => ("Redstone Comparator", BlockType::Comparator, (8, 2)),
+                    Item::StoneButton => ("Stone Button", BlockType::StoneButton, (9, 2)),
+                    Item::Lever => ("Lever", BlockType::Lever, (10, 2)),
+                    Item::PressurePlate => {
+                        ("Stone Pressure Plate", BlockType::PressurePlate, (11, 2))
+                    }
+                    Item::Piston => ("Piston", BlockType::Piston, (12, 2)),
+                    Item::StickyPiston => ("Sticky Piston", BlockType::StickyPiston, (13, 2)),
+                    Item::RedstoneLamp => ("Redstone Lamp", BlockType::RedstoneLamp, (14, 2)),
+                    Item::OakDoor => ("Oak Door", BlockType::OakDoor, (9, 14)),
+                    Item::OakTrapdoor => ("Oak Trapdoor", BlockType::OakTrapdoor, (10, 14)),
+                    Item::Dispenser => ("Dispenser", BlockType::Dispenser, (11, 14)),
+                    Item::Dropper => ("Dropper", BlockType::Dropper, (12, 14)),
+                    Item::NoteBlock => ("Note Block", BlockType::NoteBlock, (13, 14)),
+                    _ => unreachable!(),
+                };
+                ItemProperties {
+                    name,
+                    max_stack: 64,
+                    is_block: true,
+                    block_type: Some(block_type),
+                    tex_coords,
+                }
+            }
         }
     }
 
@@ -1077,6 +1135,21 @@ impl Item {
             BlockType::EnchantingTable => Item::EnchantingTable,
             BlockType::BrewingStand => Item::BrewingStand,
             BlockType::Anvil => Item::Anvil,
+            BlockType::RedstoneWire => Item::RedstoneWire,
+            BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => Item::RedstoneTorch,
+            BlockType::Repeater | BlockType::RepeaterPowered => Item::Repeater,
+            BlockType::Comparator | BlockType::ComparatorPowered => Item::Comparator,
+            BlockType::StoneButton | BlockType::StoneButtonPressed => Item::StoneButton,
+            BlockType::Lever | BlockType::LeverOn => Item::Lever,
+            BlockType::PressurePlate | BlockType::PressurePlatePowered => Item::PressurePlate,
+            BlockType::Piston | BlockType::PistonExtended => Item::Piston,
+            BlockType::StickyPiston | BlockType::StickyPistonExtended => Item::StickyPiston,
+            BlockType::RedstoneLamp | BlockType::RedstoneLampLit => Item::RedstoneLamp,
+            BlockType::OakDoor | BlockType::OakDoorOpen => Item::OakDoor,
+            BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => Item::OakTrapdoor,
+            BlockType::Dispenser => Item::Dispenser,
+            BlockType::Dropper => Item::Dropper,
+            BlockType::NoteBlock => Item::NoteBlock,
         }
     }
 }
@@ -1126,11 +1199,24 @@ impl Inventory {
         }
 
         let extra_items = [
+            Item::RedstoneWire,
+            Item::RedstoneTorch,
+            Item::Repeater,
+            Item::Comparator,
+            Item::StoneButton,
+            Item::Lever,
+            Item::PressurePlate,
+            Item::Piston,
+            Item::StickyPiston,
+            Item::RedstoneLamp,
+            Item::OakDoor,
+            Item::OakTrapdoor,
+            Item::Dispenser,
+            Item::Dropper,
+            Item::NoteBlock,
             Item::StoneSword,
             Item::IronPickaxe,
             Item::DiamondPickaxe,
-            Item::DiamondAxe,
-            Item::DiamondShovel,
             Item::Apple,
             Item::Bread,
             Item::Coal,
@@ -1138,20 +1224,7 @@ impl Inventory {
             Item::Diamond,
             Item::Redstone,
             Item::CraftingTable,
-            Item::Furnace,
-            Item::Chest,
             Item::TNT,
-            Item::Bookshelf,
-            Item::Sand,
-            Item::Lava,
-            Item::EnchantingTable,
-            Item::BrewingStand,
-            Item::Anvil,
-            Item::LapisLazuli,
-            Item::Potion,
-            Item::NetherWart,
-            Item::Sugar,
-            Item::BlazePowder,
         ];
         for (i, &item) in extra_items.iter().enumerate() {
             inv.main[i] = Some(ItemStack::new(item, 64));

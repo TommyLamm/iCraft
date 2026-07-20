@@ -16,6 +16,7 @@ mod particles;
 mod passive_mob;
 mod physics;
 mod player;
+mod redstone;
 pub mod save;
 mod state;
 mod texture;

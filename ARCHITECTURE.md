@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `e7fbb4f3b926635c693f171f88af613980c2a500` (`e7fbb4f`). This identifies the
+> `b7d5d6153a86bfcc4bca22b39ac074b9c8df1b8e` (`b7d5d61`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -51,7 +51,8 @@ src/main.rs
 - `src/state.rs::State` is the composition root and principal coupling hotspot.
   It owns the window/GPU resources, camera, chunks and mesh cache, player,
   inventory/crafting, enchanting/brewing workstations, potion effects,
-  entities, lightweight particles, audio, UI state, and timers.
+  entities, lightweight particles, audio, UI state, timers, and the 20 Hz
+  redstone scheduler.
 
 ## Runtime data flows
 
@@ -76,10 +77,13 @@ back to procedural generation when those assets are unavailable.
    emit footstep dust and periodic torch smoke, then
    collect nearby dropped items whose cooldown has expired when the inventory
    accepts them.
-5. Apply landing/fall/void/lava/hunger/drowning state and audio effects.
-6. Spawn/update hostile mobs, including dropped-item physics, then update/spawn
+5. Tick redstone at 20 Hz (up to four catch-up steps per frame), including
+   pressure-plate occupancy, delayed updates, bounded signal settling, actuator
+   mutations, TNT fuses, dispenser actions, and note sounds.
+6. Apply landing/fall/void/lava/hunger/drowning state and audio effects.
+7. Spawn/update hostile mobs, including dropped-item physics, then update/spawn
    passive mobs.
-7. Sync camera and `CameraUniform`, upload the uniform, and advance continuous
+8. Sync camera and `CameraUniform`, upload the uniform, and advance continuous
    survival-mode mining through `interaction::raycast`.
 
 `State::update_chunks` unloads out-of-range chunks, creates at most one missing
@@ -108,6 +112,14 @@ chunk corner also require the diagonal mesh because vertex AO samples diagonal
 blocks. `chunk_manager::mark_block_mesh_dependencies` is the shared source of
 truth for this invalidation, while chunk load/unload invalidates all eight
 surrounding loaded meshes.
+
+Redstone is the other major mutation path. `RedstoneSystem` returns explicit
+`BlockMutation` records plus side-effect actions instead of touching renderer,
+audio, or entity state. `State::apply_redstone_update` uses those records to
+update sky/block light and the shared mesh dependency set before executing
+explosions, dispenser/dropper output, and note sounds. Player placement/removal
+must call `RedstoneSystem::on_block_changed`; newly loaded chunks are scanned
+once to recover saved circuits.
 
 `Chunk::generate_mesh` reads neighboring block, sky-light, block-light, fluid
 level, and falling state through a closure supplied by `State`. It emits separate
@@ -171,6 +183,23 @@ underwater oxygen. Splash potions are transient projectile entities and apply
 within four blocks. Closing any workstation returns authoritative slot contents
 to the player inventory; workstation progress and active effects are transient.
 
+### Redstone
+
+`redstone.rs` owns coordinate-indexed component metadata, 0-15 power,
+weak/strong charge classification, facing, repeater delay, comparator mode,
+note pitch, scheduled ticks, and loaded-chunk discovery. Dust loses one power per
+wire hop; direct sources and directional repeater/comparator outputs can strongly
+charge solid blocks. Torch inversion reads the strong charge of its support.
+
+Each 20 Hz step applies due events, updates player/entity pressure plates,
+iterates the component graph to a fixed point with a 64-pass safety cap, then
+processes device transitions. Repeaters delay 1-4 ticks and restore power to 15;
+buttons release after 20 ticks; primed TNT explodes after 80 ticks. Pistons move
+one block, sticky pistons also pull one block, lamps change light emission,
+powered doors/trapdoors become passable, dispensers fire arrows, droppers emit
+items, and note blocks play one of 25 synthesized pitches. Dynamic metadata is
+rebuilt when chunks load; block variants remain part of normal chunk saves.
+
 ## Source routing table
 
 ### Runtime and rendering
@@ -193,6 +222,7 @@ to the player inventory; workstation progress and active effects are transient.
 | `src/chunk_manager.rs` | Loaded-chunk map, world/local coordinate conversion, block/light/fluid accessors, heightmap updates, deduplicated water/lava work queues. |
 | `src/lighting.rs` | Cross-chunk BFS propagation/removal for sky and emissive block light; initial chunk lighting and post-mutation updates. |
 | `src/fluid.rs` | Budgeted event-driven water/lava cells, falling/level propagation, draining, infinite water, and water/lava solidification. Returns dirty chunk coordinates. |
+| `src/redstone.rs` | 20 Hz redstone graph, 0-15 weak/strong power, component index, delayed ticks, comparator/repeater logic, actuator mutations, TNT/dispense/note actions, and loop protection. |
 | `src/physics.rs` | `AABB`, `PlayerPhysics`; movement, gravity, jumping/swimming, axis collision resolution, fall-distance result. |
 | `src/interaction.rs` | Grid DDA block `raycast` and `RaycastResult`; read-only world targeting. |
 | `src/save.rs` | `LevelData`, `PlayerData`, `ChunkSaveData`, `SaveManager`; Bincode serialization, Zlib compression, Region file management, and thread-based background saving. |
@@ -201,8 +231,8 @@ to the player inventory; workstation progress and active effects are transient.
 
 | File | Responsibility / key symbols |
 | --- | --- |
-| `src/inventory.rs` | `GameMode`, `Item`, tool/material metadata, `ItemStack`, `Inventory`; stacks, durability, hotbar/backpack/armor/craft slots, block-item mapping. |
-| `src/crafting.rs` | `Recipe`, `RecipeManager`; shaped/shapeless recipe definitions and grid matching. |
+| `src/inventory.rs` | `GameMode`, `Item`, tool/material metadata, `ItemStack`, `Inventory`; stacks, durability, hotbar/backpack/armor/craft slots, block-item mapping, and creative redstone components. |
+| `src/crafting.rs` | `Recipe`, `RecipeManager`; shaped/shapeless recipe definitions and grid matching, including the redstone component crafting chain. |
 | `src/enchantment.rs` | `Enchantment`, `EnchantmentSet`, `EnchantingState`, `AnvilState`; offer generation, compatibility, stat modifiers, repair/combine/rename rules. |
 | `src/brewing.rs` | `PotionKind`, `PotionData`, `PotionEffect`, `EffectManager`, `BrewingStandState`; recipes, timed brewing and active-effect queries. |
 | `src/player.rs` | `PlayerState`, `DamageSource`; health, hunger, saturation/exhaustion, regeneration, invulnerability, oxygen/drowning, death state. |
@@ -228,7 +258,7 @@ to the player inventory; workstation progress and active effects are transient.
 Most behavioral tests are inline `#[cfg(test)]` unit tests beside their modules,
 especially in `world.rs`, `lighting.rs`, `fluid.rs`, `physics.rs`,
 `interaction.rs`, `inventory.rs`, `crafting.rs`, `enchantment.rs`, `brewing.rs`,
-`player.rs`, `entity.rs`, `particles.rs`, `mob.rs`, and `audio.rs`.
+`player.rs`, `entity.rs`, `particles.rs`, `mob.rs`, `redstone.rs`, and `audio.rs`.
 
 `tests/passive_mob_tests.rs` is currently only a placeholder. Because the package
 has no `src/lib.rs`, integration tests cannot directly import the internal

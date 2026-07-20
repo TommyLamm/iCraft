@@ -301,6 +301,32 @@ pub enum BlockType {
     EnchantingTable = 45,
     BrewingStand = 46,
     Anvil = 47,
+    RedstoneWire = 48,
+    RedstoneTorch = 49,
+    RedstoneTorchOff = 50,
+    Repeater = 51,
+    RepeaterPowered = 52,
+    Comparator = 53,
+    ComparatorPowered = 54,
+    StoneButton = 55,
+    StoneButtonPressed = 56,
+    Lever = 57,
+    LeverOn = 58,
+    PressurePlate = 59,
+    PressurePlatePowered = 60,
+    Piston = 61,
+    PistonExtended = 62,
+    StickyPiston = 63,
+    StickyPistonExtended = 64,
+    RedstoneLamp = 65,
+    RedstoneLampLit = 66,
+    OakDoor = 67,
+    OakDoorOpen = 68,
+    OakTrapdoor = 69,
+    OakTrapdoorOpen = 70,
+    Dispenser = 71,
+    Dropper = 72,
+    NoteBlock = 73,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -321,7 +347,7 @@ pub struct BlockProperties {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= 47 {
+        if val <= 73 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -358,6 +384,11 @@ impl BlockType {
             BlockType::Ice => Some(crate::audio::SoundMaterial::Ice),
             BlockType::Glass => Some(crate::audio::SoundMaterial::Glass),
             BlockType::Anvil => Some(crate::audio::SoundMaterial::Stone),
+            BlockType::OakDoor
+            | BlockType::OakDoorOpen
+            | BlockType::OakTrapdoor
+            | BlockType::OakTrapdoorOpen
+            | BlockType::NoteBlock => Some(crate::audio::SoundMaterial::Wood),
             _ => Some(crate::audio::SoundMaterial::Stone),
         }
     }
@@ -748,6 +779,115 @@ impl BlockType {
                 is_passable: false,
                 light_emission: 0,
             },
+            BlockType::RedstoneWire => BlockProperties {
+                name: "Redstone Wire",
+                hardness: 0.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => BlockProperties {
+                name: "Redstone Torch",
+                hardness: 0.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: if self == BlockType::RedstoneTorch {
+                    7
+                } else {
+                    0
+                },
+            },
+            BlockType::Repeater
+            | BlockType::RepeaterPowered
+            | BlockType::Comparator
+            | BlockType::ComparatorPowered
+            | BlockType::StoneButton
+            | BlockType::StoneButtonPressed
+            | BlockType::Lever
+            | BlockType::LeverOn
+            | BlockType::PressurePlate
+            | BlockType::PressurePlatePowered => BlockProperties {
+                name: match self {
+                    BlockType::Repeater | BlockType::RepeaterPowered => "Redstone Repeater",
+                    BlockType::Comparator | BlockType::ComparatorPowered => "Redstone Comparator",
+                    BlockType::StoneButton | BlockType::StoneButtonPressed => "Stone Button",
+                    BlockType::Lever | BlockType::LeverOn => "Lever",
+                    _ => "Stone Pressure Plate",
+                },
+                hardness: 0.5,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::Piston
+            | BlockType::PistonExtended
+            | BlockType::StickyPiston
+            | BlockType::StickyPistonExtended => BlockProperties {
+                name: if matches!(
+                    self,
+                    BlockType::StickyPiston | BlockType::StickyPistonExtended
+                ) {
+                    "Sticky Piston"
+                } else {
+                    "Piston"
+                },
+                hardness: 1.5,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::RedstoneLamp | BlockType::RedstoneLampLit => BlockProperties {
+                name: "Redstone Lamp",
+                hardness: 0.3,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: if self == BlockType::RedstoneLampLit {
+                    15
+                } else {
+                    0
+                },
+            },
+            BlockType::OakDoor | BlockType::OakDoorOpen => BlockProperties {
+                name: "Oak Door",
+                hardness: 3.0,
+                render_type: RenderType::Cutout,
+                is_solid: self == BlockType::OakDoor,
+                is_passable: self == BlockType::OakDoorOpen,
+                light_emission: 0,
+            },
+            BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => BlockProperties {
+                name: "Oak Trapdoor",
+                hardness: 3.0,
+                render_type: RenderType::Cutout,
+                is_solid: self == BlockType::OakTrapdoor,
+                is_passable: self == BlockType::OakTrapdoorOpen,
+                light_emission: 0,
+            },
+            BlockType::Dispenser | BlockType::Dropper => BlockProperties {
+                name: if self == BlockType::Dispenser {
+                    "Dispenser"
+                } else {
+                    "Dropper"
+                },
+                hardness: 3.5,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::NoteBlock => BlockProperties {
+                name: "Note Block",
+                hardness: 0.8,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
         }
     }
 
@@ -878,6 +1018,22 @@ impl BlockType {
             BlockType::EnchantingTable => (0, 13),
             BlockType::BrewingStand => (1, 13),
             BlockType::Anvil => (2, 13),
+            BlockType::RedstoneWire => (5, 2),
+            BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => (6, 2),
+            BlockType::Repeater | BlockType::RepeaterPowered => (7, 2),
+            BlockType::Comparator | BlockType::ComparatorPowered => (8, 2),
+            BlockType::StoneButton | BlockType::StoneButtonPressed => (9, 2),
+            BlockType::Lever | BlockType::LeverOn => (10, 2),
+            BlockType::PressurePlate | BlockType::PressurePlatePowered => (11, 2),
+            BlockType::Piston | BlockType::PistonExtended => (12, 2),
+            BlockType::StickyPiston | BlockType::StickyPistonExtended => (13, 2),
+            BlockType::RedstoneLamp => (14, 2),
+            BlockType::RedstoneLampLit => (8, 14),
+            BlockType::OakDoor | BlockType::OakDoorOpen => (9, 14),
+            BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => (10, 14),
+            BlockType::Dispenser => (11, 14),
+            BlockType::Dropper => (12, 14),
+            BlockType::NoteBlock => (13, 14),
         }
     }
 }
