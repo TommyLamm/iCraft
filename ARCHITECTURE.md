@@ -51,8 +51,8 @@ src/main.rs
 - `src/state.rs::State` is the composition root and principal coupling hotspot.
   It owns the window/GPU resources, camera, chunks and mesh cache, player,
   inventory/crafting, enchanting/brewing workstations, potion effects,
-  entities, lightweight particles, audio, UI state, timers, and the 20 Hz
-  redstone scheduler.
+  entities, lightweight particles, audio, UI state, timers, the weather state
+  machine, and the 20 Hz redstone scheduler.
 
 ## Runtime data flows
 
@@ -71,7 +71,9 @@ back to procedural generation when those assets are unavailable.
 
 1. Tick water every 0.25 s and lava every 1.5 s; returned chunk coordinates mark
    cached meshes dirty. These ticks occur **before** the paused/dead early return.
-2. Advance world time and translate `KeyState` into movement.
+2. Advance world time and weather. Weather emits roof-clipped rain/snow
+   particles, maintains the rain loop, accumulates thin snow in cold biomes,
+   and dispatches thunder strikes before translating `KeyState` into movement.
 3. Run `PlayerPhysics::update`, then `State::update_chunks`.
 4. Tick brewing progress and active potion effects, update particle physics;
    emit footstep dust and periodic torch smoke, then
@@ -149,7 +151,11 @@ transient CPU simulation: `State::update` advances position, gravity, age, and
 expiry; emitter helpers assign small atlas UV sub-rects; `State::render` calls
 `compile_mesh` to write billboard vertices/indices into preallocated dynamic GPU
 buffers. Footstep dust reuses the block below the player, while torch smoke is
-emitted by a periodic loaded-chunk scan and shrinks over its lifetime.
+emitted by a periodic loaded-chunk scan and shrinks over its lifetime. Rain uses
+vertically stretched water-textured billboards, snow uses drifting snow
+billboards, and lightning chains short-lived fully lit stretched billboards.
+Precipitation lifetime is capped at each loaded column's heightmap, so it stops
+at terrain, foliage, and player-built roofs.
 
 Dropped items deliberately use `EntityManager`, not `ParticleSystem`. They carry
 an `inventory::Item`, use normal entity gravity/collision, skip hostile and
@@ -157,6 +163,20 @@ passive AI, and remain authoritative until collection. `mob_renderer::render_mob
 draws each as a small atlas-textured cuboid with time-based yaw and vertical
 bobbing. Both particles and dropped-item entities remain transient and are not
 included in world saves.
+
+### Weather
+
+`weather.rs::WeatherSystem` owns a deterministic clear -> rain -> thunder ->
+clear state machine. Each state lasts 12,000-24,000 world ticks. Its cached
+temperature/moisture/ocean Perlin samplers classify precipitation: deserts are
+dry, taiga and mountains receive snow, and other biomes receive rain. `State`
+applies the resulting effects: weather brightness scales sky colors and global
+sky light, `AudioManager` maintains an infinite rain loop, and thunder produces
+a white UI flash, a world-space bolt, positional thunder, nearby player/entity
+damage, burning, and an emissive fire block. Cold-biome accumulation places a
+passable `SnowLayer`; mesh generation lowers only its top vertices to 1/8 block.
+Weather timing itself is transient, while placed fire and snow are ordinary
+chunk blocks and therefore persist through chunk saves.
 
 ### Inventory and crafting
 
@@ -213,6 +233,7 @@ rebuilt when chunks load; block variants remain part of normal chunk saves.
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
 | `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
 | `src/audio.rs` | `SoundId`, `SoundMaterial`, `AudioManager`; load/cache WAV files, synthesize missing sounds, 2D/approximate 3D playback. |
+| `src/weather.rs` | `Weather`, `Precipitation`, `WeatherSystem`; timed transitions, biome precipitation, lightning/flash scheduling, and bounded effect budgets. |
 
 ### World and simulation
 
@@ -258,7 +279,8 @@ rebuilt when chunks load; block variants remain part of normal chunk saves.
 Most behavioral tests are inline `#[cfg(test)]` unit tests beside their modules,
 especially in `world.rs`, `lighting.rs`, `fluid.rs`, `physics.rs`,
 `interaction.rs`, `inventory.rs`, `crafting.rs`, `enchantment.rs`, `brewing.rs`,
-`player.rs`, `entity.rs`, `particles.rs`, `mob.rs`, `redstone.rs`, and `audio.rs`.
+`player.rs`, `entity.rs`, `particles.rs`, `weather.rs`, `mob.rs`, `redstone.rs`,
+and `audio.rs`.
 
 `tests/passive_mob_tests.rs` is currently only a placeholder. Because the package
 has no `src/lib.rs`, integration tests cannot directly import the internal

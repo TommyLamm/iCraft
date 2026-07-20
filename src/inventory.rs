@@ -1150,6 +1150,8 @@ impl Item {
             BlockType::Dispenser => Item::Dispenser,
             BlockType::Dropper => Item::Dropper,
             BlockType::NoteBlock => Item::NoteBlock,
+            BlockType::SnowLayer => Item::Snow,
+            BlockType::Fire => Item::Air,
         }
     }
 }

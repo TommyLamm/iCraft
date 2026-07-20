@@ -6,6 +6,7 @@ pub enum DamageSource {
     Mob,
     Explosion,
     Drowning,
+    Lightning,
 }
 
 pub struct PlayerState {

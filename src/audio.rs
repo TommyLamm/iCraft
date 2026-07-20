@@ -1,5 +1,5 @@
 use glam::Vec3;
-use rodio::{OutputStream, OutputStreamHandle, Sink, SpatialSink};
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source, SpatialSink};
 use std::collections::HashMap;
 use std::fs::{create_dir_all, File};
 use std::io::{Cursor, Write};
@@ -30,6 +30,8 @@ pub enum SoundId {
     CreeperIgnition,
     Explosion,
     ArrowShoot,
+    Rain,
+    Thunder,
     Note(u8),
 }
 
@@ -47,6 +49,8 @@ impl SoundId {
             SoundId::CreeperIgnition => "creeper_hiss.wav".to_string(),
             SoundId::Explosion => "explosion.wav".to_string(),
             SoundId::ArrowShoot => "bow_shoot.wav".to_string(),
+            SoundId::Rain => "rain.wav".to_string(),
+            SoundId::Thunder => "thunder.wav".to_string(),
             SoundId::Note(note) => format!("note_{note}.wav"),
         }
     }
@@ -144,6 +148,42 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
                     let t = i as f32 / sample_rate as f32;
                     let env = (1.0 - (t / 0.12)).powi(3);
                     val * env * 0.3
+                })
+                .collect()
+        }
+        SoundId::Rain => {
+            let duration = 4.0;
+            let raw_noise = synth_noise(duration, sample_rate, seed ^ 0x5241_494E);
+            let mut low = 0.0;
+            raw_noise
+                .into_iter()
+                .enumerate()
+                .map(|(i, sample)| {
+                    low = low * 0.82 + sample * 0.18;
+                    let hiss = sample - low * 0.35;
+                    let t = i as f32 / sample_rate as f32;
+                    let patter = (t * 37.0).sin().abs() * 0.08 + 0.22;
+                    hiss * patter
+                })
+                .collect()
+        }
+        SoundId::Thunder => {
+            let duration = 3.2;
+            let raw_noise = synth_noise(duration, sample_rate, seed ^ 0x5448_4E44);
+            let mut low = 0.0;
+            raw_noise
+                .into_iter()
+                .enumerate()
+                .map(|(i, sample)| {
+                    let t = i as f32 / sample_rate as f32;
+                    low = low * 0.965 + sample * 0.035;
+                    let crack = if t < 0.18 {
+                        sample * (1.0 - t / 0.18)
+                    } else {
+                        0.0
+                    };
+                    let rumble = low * (1.0 - t / duration).powi(2);
+                    (crack * 0.85 + rumble * 2.4).clamp(-1.0, 1.0)
                 })
                 .collect()
         }
@@ -264,6 +304,8 @@ impl AudioManager {
             SoundId::CreeperIgnition,
             SoundId::Explosion,
             SoundId::ArrowShoot,
+            SoundId::Rain,
+            SoundId::Thunder,
             SoundId::BlockBreak(SoundMaterial::Grass),
             SoundId::BlockBreak(SoundMaterial::Wood),
             SoundId::BlockBreak(SoundMaterial::Stone),
@@ -394,6 +436,9 @@ impl AudioManager {
     }
 
     pub fn start_looping_sound(&mut self, entity_id: u64, sound_id: SoundId, _pos: Vec3) {
+        if self.active_loops.contains_key(&entity_id) {
+            return;
+        }
         let handle = match &self.stream_handle {
             Some(h) => h,
             None => return,
@@ -401,7 +446,7 @@ impl AudioManager {
         if let Some(source) = self.get_source(sound_id) {
             if let Ok(sink) = Sink::try_new(handle) {
                 sink.set_volume(self.volume);
-                sink.append(source);
+                sink.append(source.repeat_infinite());
                 self.active_loops.insert(entity_id, sink);
             }
         }

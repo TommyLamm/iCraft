@@ -29,6 +29,26 @@ fn draw_noise(img: &mut RgbaImage, tx: u32, ty: u32, base: [u8; 3], noise: u8, s
     }
 }
 
+fn draw_fire(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let centered = (x as i32 - 8).abs();
+            let flame_width = 6 - y as i32 / 3 + ((x + y * 3) % 3) as i32;
+            let inside = centered <= flame_width.max(1) && y >= ((x * 7 + 3) % 5);
+            let color = if !inside {
+                [0, 0, 0, 0]
+            } else if y > 10 || centered <= 2 {
+                [255, 235, 70, 235]
+            } else if y > 5 {
+                [255, 145, 25, 225]
+            } else {
+                [220, 45, 10, 210]
+            };
+            img.put_pixel(tx * 16 + x, ty * 16 + (15 - y), Rgba(color));
+        }
+    }
+}
+
 fn draw_brick(
     img: &mut RgbaImage,
     tx: u32,
@@ -1858,6 +1878,7 @@ impl TextureAtlas {
         draw_sugar_cane(&mut img, 12, 12);
         draw_pumpkin(&mut img, 13, 12);
         draw_melon(&mut img, 14, 12);
+        draw_fire(&mut img, 15, 12);
 
         // Row 13-14: enchanting / brewing workstations and compact item icons.
         draw_noise(&mut img, 0, 13, [45, 20, 75], 12, &mut seed); // Enchanting table

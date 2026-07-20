@@ -327,6 +327,8 @@ pub enum BlockType {
     Dispenser = 71,
     Dropper = 72,
     NoteBlock = 73,
+    Fire = 74,
+    SnowLayer = 75,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -347,7 +349,7 @@ pub struct BlockProperties {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= 73 {
+        if val <= 75 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -356,7 +358,7 @@ impl BlockType {
 
     pub fn sound_material(self) -> Option<crate::audio::SoundMaterial> {
         match self {
-            BlockType::Air | BlockType::Water | BlockType::Lava => None,
+            BlockType::Air | BlockType::Water | BlockType::Lava | BlockType::Fire => None,
             BlockType::Grass
             | BlockType::OakLeaves
             | BlockType::BirchLeaves
@@ -380,7 +382,7 @@ impl BlockType {
             | BlockType::Melon => Some(crate::audio::SoundMaterial::Wood),
             BlockType::Sand | BlockType::Clay => Some(crate::audio::SoundMaterial::Sand),
             BlockType::Gravel | BlockType::Cactus => Some(crate::audio::SoundMaterial::Gravel),
-            BlockType::Snow => Some(crate::audio::SoundMaterial::Snow),
+            BlockType::Snow | BlockType::SnowLayer => Some(crate::audio::SoundMaterial::Snow),
             BlockType::Ice => Some(crate::audio::SoundMaterial::Ice),
             BlockType::Glass => Some(crate::audio::SoundMaterial::Glass),
             BlockType::Anvil => Some(crate::audio::SoundMaterial::Stone),
@@ -888,6 +890,22 @@ impl BlockType {
                 is_passable: false,
                 light_emission: 0,
             },
+            BlockType::Fire => BlockProperties {
+                name: "Fire",
+                hardness: 0.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 15,
+            },
+            BlockType::SnowLayer => BlockProperties {
+                name: "Snow Layer",
+                hardness: 0.1,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
         }
     }
 
@@ -1034,6 +1052,8 @@ impl BlockType {
             BlockType::Dispenser => (11, 14),
             BlockType::Dropper => (12, 14),
             BlockType::NoteBlock => (13, 14),
+            BlockType::Fire => (15, 12),
+            BlockType::SnowLayer => (3, 1),
         }
     }
 }
@@ -1818,6 +1838,8 @@ impl Chunk {
                                 } else {
                                     (8 - level) as f32 / 8.0 * 0.9
                                 }
+                            } else if block == BlockType::SnowLayer {
+                                0.125
                             } else {
                                 1.0
                             };
@@ -1841,7 +1863,7 @@ impl Chunk {
                                 let v = (v_adj + tx_row as f32) * 0.0625;
 
                                 let mut vy = world_y as f32 + offset[1];
-                                if is_fluid && offset[1] > 0.0 {
+                                if (is_fluid || block == BlockType::SnowLayer) && offset[1] > 0.0 {
                                     vy = world_y as f32 + h;
                                 }
 
@@ -1887,6 +1909,7 @@ impl BlockType {
             | BlockType::Sand
             | BlockType::Gravel
             | BlockType::Snow
+            | BlockType::SnowLayer
             | BlockType::Clay
             | BlockType::Sandstone => ToolType::Shovel,
             BlockType::Stone
@@ -2088,6 +2111,40 @@ mod tests {
         let (vertices, _, _, _) = chunk.generate_mesh(lookup);
         assert_eq!(vertices[16].position, [8.0, 2.0, 9.0]);
         assert_eq!(vertices[16].ao, 0.5);
+    }
+
+    #[test]
+    fn snow_layer_mesh_is_one_eighth_of_a_block_high() {
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                }
+            }
+            for z in 0..CHUNK_DEPTH {
+                chunk.heightmap[x][z] = 0;
+            }
+        }
+        chunk.blocks[8][1][8] = BlockType::SnowLayer;
+        chunk.heightmap[8][8] = 1;
+        let lookup = |_: i32, _: i32, _: i32| (BlockType::Air, 15, 0, 0, false);
+        let (vertices, _, _, _) = chunk.generate_mesh(lookup);
+        let max_y = vertices
+            .iter()
+            .map(|vertex| vertex.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((max_y - 1.125).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn weather_blocks_have_expected_collision_and_light() {
+        assert!(BlockType::SnowLayer.properties().is_passable);
+        assert!(!BlockType::SnowLayer.properties().is_solid);
+        assert_eq!(BlockType::Fire.properties().light_emission, 15);
+        assert!(BlockType::Fire.properties().is_passable);
+        assert_eq!(BlockType::from_u8(74), BlockType::Fire);
+        assert_eq!(BlockType::from_u8(75), BlockType::SnowLayer);
     }
 
     #[test]

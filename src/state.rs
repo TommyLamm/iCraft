@@ -14,6 +14,7 @@ use winit::window::Window;
 const UI_VERTEX_CAPACITY: usize = 4096;
 const UI_LINE_VERTEX_CAPACITY: usize = 16384;
 const DEBUG_STATS_INTERVAL: f32 = 0.5;
+const RAIN_LOOP_ID: u64 = u64::MAX - 1;
 
 pub struct ChunkMesh {
     pub opaque_vertex_buffer: wgpu::Buffer,
@@ -235,6 +236,7 @@ pub struct State {
     pub potion_effects: crate::brewing::EffectManager,
     pub redstone: crate::redstone::RedstoneSystem,
     redstone_tick_timer: f32,
+    pub weather: crate::weather::WeatherSystem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1023,6 +1025,7 @@ impl State {
         });
 
         let particles = crate::particles::ParticleSystem::new();
+        let weather = crate::weather::WeatherSystem::new(_seed as u32);
 
         Self {
             window,
@@ -1107,6 +1110,7 @@ impl State {
             potion_effects: crate::brewing::EffectManager::default(),
             redstone: crate::redstone::RedstoneSystem::new(),
             redstone_tick_timer: 0.0,
+            weather,
         }
     }
 
@@ -1528,9 +1532,11 @@ impl State {
             }
         }
         if self.player_state.is_dead {
+            self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
             return;
         }
         if self.is_paused {
+            self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
             return;
         }
 
@@ -1620,10 +1626,13 @@ impl State {
 
         // Update game time
         let speed_multiplier = if self.keys.t { 200.0 } else { 1.0 };
-        self.world_time.tick_accumulator += dt * 20.0 * speed_multiplier;
+        let elapsed_world_ticks = dt * 20.0 * speed_multiplier;
+        self.world_time.tick_accumulator += elapsed_world_ticks;
         let new_ticks = self.world_time.tick_accumulator.floor() as u64;
         self.world_time.ticks += new_ticks;
         self.world_time.tick_accumulator -= new_ticks as f32;
+        let weather_update = self.weather.update(elapsed_world_ticks, dt);
+        self.update_weather_effects(dt, weather_update.lightning_due);
         let mut move_dir = Vec3::ZERO;
         let yaw_cos = self.camera.yaw.cos();
         let yaw_sin = self.camera.yaw.sin();
@@ -2060,6 +2069,12 @@ impl State {
             self.total_time,
             is_underwater,
         );
+        let weather_brightness = self.weather.sky_brightness();
+        for channel in 0..3 {
+            self.camera_uniform.sky_color_top[channel] *= weather_brightness;
+            self.camera_uniform.sky_color_horizon[channel] *= weather_brightness;
+        }
+        self.camera_uniform.sun_dir[3] *= weather_brightness;
         if self.potion_effects.has_night_vision() {
             self.camera_uniform.sun_dir[3] = 1.0;
         }
@@ -2109,6 +2124,277 @@ impl State {
         } else if !self.left_mouse_pressed {
             self.mining_target = None;
             self.mining_progress = 0.0;
+        }
+    }
+
+    fn update_weather_effects(&mut self, dt: f32, lightning_due: bool) {
+        use crate::weather::Precipitation;
+
+        let player_x = self.player_physics.position.x.floor() as i32;
+        let player_z = self.player_physics.position.z.floor() as i32;
+        if self.weather.precipitation_at(player_x, player_z) == Precipitation::Rain {
+            self.audio_manager.start_looping_sound(
+                RAIN_LOOP_ID,
+                crate::audio::SoundId::Rain,
+                self.player_physics.position,
+            );
+        } else {
+            self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
+        }
+
+        let spawn_count = self.weather.take_precipitation_spawn_count(dt);
+        let rain_uv = weather_tile_uv(10, 0);
+        let snow_uv = weather_tile_uv(3, 1);
+        for _ in 0..spawn_count {
+            let wx = player_x + self.weather.random_offset(14);
+            let wz = player_z + self.weather.random_offset(14);
+            let precipitation = self.weather.precipitation_at(wx, wz);
+            if precipitation == Precipitation::None {
+                continue;
+            }
+            let Some(surface_y) = self.surface_height(wx, wz) else {
+                continue;
+            };
+            if surface_y >= CHUNK_HEIGHT as i32 - 2 {
+                continue;
+            }
+
+            // Start above both the camera and the highest block in this column.
+            // Lifetime ends at that height, so precipitation never passes through
+            // leaves, terrain, or a player-built roof.
+            let spawn_y = (self.camera.position.y + 14.0).max(surface_y as f32 + 10.0);
+            let stop_y = surface_y as f32 + 1.05;
+            match precipitation {
+                Precipitation::Rain => {
+                    let speed = 26.0 + self.weather.random_unit() * 8.0;
+                    let lifetime = ((spawn_y - stop_y) / speed).clamp(0.08, 2.5);
+                    self.particles.spawn_stretched(
+                        Vec3::new(wx as f32 + 0.5, spawn_y, wz as f32 + 0.5),
+                        Vec3::new(0.0, -speed, 0.0),
+                        0.075,
+                        lifetime,
+                        rain_uv,
+                        0.0,
+                        7.0,
+                    );
+                }
+                Precipitation::Snow => {
+                    let drift_x = (self.weather.random_unit() - 0.5) * 0.8;
+                    let drift_z = (self.weather.random_unit() - 0.5) * 0.8;
+                    let speed = 2.2 + self.weather.random_unit();
+                    let lifetime = ((spawn_y - stop_y) / speed).clamp(0.2, 8.0);
+                    self.particles.spawn(
+                        Vec3::new(wx as f32 + 0.5, spawn_y, wz as f32 + 0.5),
+                        Vec3::new(drift_x, -speed, drift_z),
+                        0.16,
+                        lifetime,
+                        snow_uv,
+                        0.0,
+                    );
+                }
+                Precipitation::None => {}
+            }
+        }
+
+        let accumulation_steps = self.weather.take_snow_accumulation_steps(dt);
+        for _ in 0..accumulation_steps * 6 {
+            let wx = player_x + self.weather.random_offset(24);
+            let wz = player_z + self.weather.random_offset(24);
+            if self.weather.precipitation_at(wx, wz) != Precipitation::Snow {
+                continue;
+            }
+            let Some(surface_y) = self.surface_height(wx, wz) else {
+                continue;
+            };
+            let target_y = surface_y + 1;
+            if target_y >= CHUNK_HEIGHT as i32
+                || self.chunk_manager.get_block(wx, target_y, wz) != BlockType::Air
+            {
+                continue;
+            }
+            let support = self.chunk_manager.get_block(wx, surface_y, wz);
+            if support.properties().is_solid
+                && !matches!(support, BlockType::Water | BlockType::Lava | BlockType::Ice)
+            {
+                self.apply_weather_block_change(wx, target_y, wz, BlockType::SnowLayer);
+            }
+        }
+
+        if lightning_due {
+            self.strike_lightning();
+        }
+    }
+
+    fn surface_height(&self, wx: i32, wz: i32) -> Option<i32> {
+        let ((cx, cz), (bx, _, bz)) = self.chunk_manager.world_to_local(wx, 0, wz)?;
+        self.chunk_manager
+            .chunks
+            .get(&(cx, cz))
+            .map(|chunk| chunk.heightmap[bx][bz] as i32)
+    }
+
+    fn strike_lightning(&mut self) {
+        use crate::entity::EntityType;
+
+        let player_pos = self.player_physics.position;
+        let living_target = self
+            .entity_manager
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.health > 0.0
+                    && matches!(
+                        entity.entity_type,
+                        EntityType::Zombie
+                            | EntityType::Skeleton
+                            | EntityType::Creeper
+                            | EntityType::Pig
+                            | EntityType::Cow
+                            | EntityType::Sheep
+                            | EntityType::Chicken
+                    )
+                    && entity.position.distance_squared(player_pos) <= 32.0 * 32.0
+            })
+            .min_by(|a, b| {
+                a.position
+                    .distance_squared(player_pos)
+                    .total_cmp(&b.position.distance_squared(player_pos))
+            })
+            .map(|entity| entity.position);
+
+        let (strike_x, strike_z) = if let Some(target) = living_target {
+            (target.x.floor() as i32, target.z.floor() as i32)
+        } else {
+            (
+                player_pos.x.floor() as i32 + self.weather.random_offset(30),
+                player_pos.z.floor() as i32 + self.weather.random_offset(30),
+            )
+        };
+        let Some(surface_y) = self.surface_height(strike_x, strike_z) else {
+            return;
+        };
+        let strike_pos = Vec3::new(
+            strike_x as f32 + 0.5,
+            surface_y as f32 + 1.0,
+            strike_z as f32 + 0.5,
+        );
+
+        let listener_right =
+            Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
+        self.audio_manager.play_sound_3d(
+            crate::audio::SoundId::Thunder,
+            strike_pos,
+            self.camera.position,
+            listener_right,
+        );
+
+        for entity in &mut self.entity_manager.entities {
+            let horizontal = glam::Vec2::new(
+                entity.position.x - strike_pos.x,
+                entity.position.z - strike_pos.z,
+            )
+            .length();
+            if entity.health > 0.0 && horizontal <= 3.5 {
+                entity.health -= 10.0;
+                entity.fire_aspect_timer = entity.fire_aspect_timer.max(5.0);
+            }
+        }
+        let player_horizontal =
+            glam::Vec2::new(player_pos.x - strike_pos.x, player_pos.z - strike_pos.z).length();
+        if player_horizontal <= 3.5 {
+            self.take_damage(10.0, DamageSource::Lightning);
+        }
+
+        // A short chain of bright, vertically stretched billboards forms the
+        // visible bolt and persists just long enough to accompany the flash.
+        let bolt_uv = weather_tile_uv(3, 1);
+        for segment in 0..12 {
+            let jitter_x = (self.weather.random_unit() - 0.5) * 0.55;
+            let jitter_z = (self.weather.random_unit() - 0.5) * 0.55;
+            self.particles.spawn_stretched(
+                strike_pos + Vec3::new(jitter_x, segment as f32 * 3.0 + 1.5, jitter_z),
+                Vec3::ZERO,
+                0.28,
+                0.32,
+                bolt_uv,
+                0.0,
+                12.0,
+            );
+        }
+
+        let fire_y = surface_y + 1;
+        let support = self.chunk_manager.get_block(strike_x, surface_y, strike_z);
+        if fire_y < CHUNK_HEIGHT as i32
+            && support.properties().is_solid
+            && !matches!(
+                support,
+                BlockType::Water | BlockType::Lava | BlockType::Ice | BlockType::Snow
+            )
+            && self.chunk_manager.get_block(strike_x, fire_y, strike_z) == BlockType::Air
+        {
+            self.apply_weather_block_change(strike_x, fire_y, strike_z, BlockType::Fire);
+        }
+    }
+
+    fn apply_weather_block_change(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
+        let old = self.chunk_manager.get_block(wx, wy, wz);
+        if old == block {
+            return;
+        }
+        self.chunk_manager.set_block(wx, wy, wz, block);
+        self.redstone.on_block_changed(
+            &self.chunk_manager,
+            (wx, wy, wz),
+            crate::redstone::Direction::North,
+        );
+
+        let old_properties = old.properties();
+        let new_properties = block.properties();
+        let mut dirty_chunks = std::collections::HashSet::new();
+        if old_properties.is_solid != new_properties.is_solid {
+            if new_properties.is_solid {
+                crate::lighting::update_sky_light_after_placed(
+                    &mut self.chunk_manager,
+                    wx,
+                    wy,
+                    wz,
+                    &mut dirty_chunks,
+                );
+            } else {
+                crate::lighting::update_sky_light_after_removed(
+                    &mut self.chunk_manager,
+                    wx,
+                    wy,
+                    wz,
+                    &mut dirty_chunks,
+                );
+            }
+        }
+        if old_properties.light_emission != new_properties.light_emission {
+            crate::lighting::update_block_light_after_removed(
+                &mut self.chunk_manager,
+                wx,
+                wy,
+                wz,
+                old_properties.light_emission,
+                &mut dirty_chunks,
+            );
+            if new_properties.light_emission > 0 {
+                crate::lighting::update_block_light_after_placed(
+                    &mut self.chunk_manager,
+                    wx,
+                    wy,
+                    wz,
+                    new_properties.light_emission,
+                    &mut dirty_chunks,
+                );
+            }
+        }
+        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
+        for chunk_pos in dirty_chunks {
+            if let Some(mesh) = self.chunk_meshes.get_mut(&chunk_pos) {
+                mesh.dirty = true;
+            }
         }
     }
 
@@ -4217,6 +4503,7 @@ impl State {
                 Some(DamageSource::Mob) => "WAS SLAIN BY ZOMBIE/SKELETON",
                 Some(DamageSource::Explosion) => "WAS BLOWN UP BY CREEPER",
                 Some(DamageSource::Drowning) => "DROWNED",
+                Some(DamageSource::Lightning) => "WAS STRUCK BY LIGHTNING",
                 None => "DIED",
             };
             draw_centered_text(
@@ -5653,6 +5940,24 @@ impl State {
                     });
                 }
 
+                let lightning_flash = self.weather.flash_intensity();
+                if lightning_flash > 0.0 {
+                    let flash_color = [1.0, 1.0, 1.0, lightning_flash * 0.82];
+                    for position in [
+                        [-1.0, 1.0, 0.0],
+                        [-1.0, -1.0, 0.0],
+                        [1.0, -1.0, 0.0],
+                        [-1.0, 1.0, 0.0],
+                        [1.0, -1.0, 0.0],
+                        [1.0, 1.0, 0.0],
+                    ] {
+                        ui_vertices.push(UiVertex {
+                            position,
+                            color: flash_color,
+                        });
+                    }
+                }
+
                 // F3 Debug Screen
                 if self.show_debug {
                     let frame_str = format!(
@@ -5680,17 +5985,11 @@ impl State {
                     let chunk_z = debug_chunk_coordinate(pos.z, CHUNK_DEPTH);
                     let chunk_str = format!("CHUNK: {} / {}", chunk_x, chunk_z);
 
-                    let temp_perlin = noise::Perlin::new(99999);
-                    let moist_perlin = noise::Perlin::new(88888);
-                    let ocean_perlin = noise::Perlin::new(77777);
-                    let biome = Biome::get_biome(
-                        pos.x.floor() as i32,
-                        pos.z.floor() as i32,
-                        &temp_perlin,
-                        &moist_perlin,
-                        &ocean_perlin,
-                    );
+                    let biome = self
+                        .weather
+                        .biome_at(pos.x.floor() as i32, pos.z.floor() as i32);
                     let biome_str = format!("BIOME: {}", biome_debug_name(biome));
+                    let weather_str = format!("WEATHER: {:?}", self.weather.current).to_uppercase();
                     let chunks_str = format!("CHUNKS LOADED: {}", self.chunk_manager.chunks.len());
                     let entities_str = format!(
                         "ENTITIES: {} / PARTICLES: {}",
@@ -5734,6 +6033,7 @@ impl State {
                         facing_str,
                         chunk_str,
                         biome_str,
+                        weather_str,
                         chunks_str,
                         entities_str,
                         render_str,
@@ -6216,6 +6516,16 @@ fn add_string_lines(
         add_char_lines(c, current_x, y, char_w, char_h, color, vertices);
         current_x += char_w + spacing;
     }
+}
+
+fn weather_tile_uv(column: u32, row: u32) -> [f32; 4] {
+    let inset = 0.08;
+    [
+        (column as f32 + inset) / 16.0,
+        (row as f32 + inset) / 16.0,
+        (column as f32 + 1.0 - inset) / 16.0,
+        (row as f32 + 1.0 - inset) / 16.0,
+    ]
 }
 
 impl Drop for State {

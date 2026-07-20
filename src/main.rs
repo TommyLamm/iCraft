@@ -20,6 +20,7 @@ mod redstone;
 pub mod save;
 mod state;
 mod texture;
+mod weather;
 mod world;
 
 use app::App;

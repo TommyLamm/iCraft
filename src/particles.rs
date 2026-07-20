@@ -20,6 +20,8 @@ pub struct Particle {
     /// Atlas UV rect: `[u0, v0, u1, v1]`.
     pub tex_coords: [f32; 4],
     pub gravity: f32,
+    /// Vertical size multiplier for streak-like particles such as rain and lightning.
+    pub stretch_y: f32,
     /// When true the particle shrinks as it ages (used for smoke).
     pub fade_scale: bool,
 }
@@ -50,6 +52,19 @@ impl ParticleSystem {
         tex_coords: [f32; 4],
         gravity: f32,
     ) {
+        self.spawn_stretched(position, velocity, size, lifetime, tex_coords, gravity, 1.0);
+    }
+
+    pub fn spawn_stretched(
+        &mut self,
+        position: Vec3,
+        velocity: Vec3,
+        size: f32,
+        lifetime: f32,
+        tex_coords: [f32; 4],
+        gravity: f32,
+        stretch_y: f32,
+    ) {
         if self.particles.len() >= MAX_PARTICLES {
             return;
         }
@@ -61,6 +76,7 @@ impl ParticleSystem {
             size,
             tex_coords,
             gravity,
+            stretch_y: stretch_y.max(0.05),
             fade_scale: false,
         });
     }
@@ -108,11 +124,12 @@ impl ParticleSystem {
                 1.0
             };
             let half_size = p.size * 0.5 * scale;
+            let half_height = half_size * p.stretch_y;
 
-            let c0 = p.position - cam_right * half_size - cam_up * half_size;
-            let c1 = p.position + cam_right * half_size - cam_up * half_size;
-            let c2 = p.position + cam_right * half_size + cam_up * half_size;
-            let c3 = p.position - cam_right * half_size + cam_up * half_size;
+            let c0 = p.position - cam_right * half_size - cam_up * half_height;
+            let c1 = p.position + cam_right * half_size - cam_up * half_height;
+            let c2 = p.position + cam_right * half_size + cam_up * half_height;
+            let c3 = p.position - cam_right * half_size + cam_up * half_height;
 
             let [u0, v0, u1, v1] = p.tex_coords;
 
@@ -365,5 +382,20 @@ mod tests {
         assert_eq!(sys.particles.len(), 1);
         // Age advanced.
         assert!((sys.particles[0].age - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn stretched_particles_preserve_the_requested_aspect() {
+        let mut sys = ParticleSystem::new();
+        sys.spawn_stretched(
+            Vec3::ZERO,
+            Vec3::ZERO,
+            0.1,
+            1.0,
+            [0.0, 0.0, 1.0, 1.0],
+            0.0,
+            8.0,
+        );
+        assert_eq!(sys.particles[0].stretch_y, 8.0);
     }
 }
