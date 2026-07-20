@@ -430,26 +430,26 @@ pub fn render_mobs(
                 let scale = if entity.age < 0.0 { 0.5f32 } else { 1.0f32 };
                 let head_scale = if entity.age < 0.0 { 0.75f32 } else { 1.0f32 };
 
-                // Pig Head (Row 10, Col 0)
+                // Pig Head (Row 10, Col 0) - offset forward
                 add_cuboid(
                     vertices,
                     indices,
                     Vec3::new(0.5, 0.5, 0.5) * head_scale,
-                    Vec3::new(0.0, 0.25, 0.0) * head_scale,
-                    entity.position + Vec3::new(0.0, 0.65 * scale, 0.0),
+                    Vec3::new(0.0, 0.15, 0.2) * head_scale,
+                    entity.position + Vec3::new(0.0, 0.8 * scale, 0.2 * scale),
                     entity.yaw,
                     entity.pitch,
                     [0, 0, 0, 0, 0, 0], // Col 0
                     10,
                     light_val,
                 );
-                // Torso (Row 10, Col 1)
+                // Torso (Row 10, Col 1) - horizontal: length = 0.8, height = 0.6, width = 0.6
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.6, 0.8, 0.6) * scale,
-                    Vec3::new(0.0, 0.4, 0.0) * scale,
-                    entity.position + Vec3::new(0.0, 0.1 * scale, 0.0),
+                    Vec3::new(0.6, 0.6, 0.8) * scale,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    entity.position + Vec3::new(0.0, 0.7 * scale, 0.0),
                     entity.yaw,
                     0.0,
                     [1; 6], // Col 1
@@ -463,7 +463,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.2, 0.4, 0.2) * scale,
                     Vec3::new(0.0, -0.2, 0.0) * scale,
-                    entity.position + Vec3::new(-0.25 * scale, 0.4 * scale, 0.2 * scale),
+                    entity.position + Vec3::new(-0.25 * scale, 0.4 * scale, 0.25 * scale),
                     entity.yaw,
                     swing,
                     [1; 6],
@@ -476,7 +476,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.2, 0.4, 0.2) * scale,
                     Vec3::new(0.0, -0.2, 0.0) * scale,
-                    entity.position + Vec3::new(0.25 * scale, 0.4 * scale, 0.2 * scale),
+                    entity.position + Vec3::new(0.25 * scale, 0.4 * scale, 0.25 * scale),
                     entity.yaw,
                     -swing,
                     [1; 6],
@@ -489,7 +489,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.2, 0.4, 0.2) * scale,
                     Vec3::new(0.0, -0.2, 0.0) * scale,
-                    entity.position + Vec3::new(-0.25 * scale, 0.4 * scale, -0.2 * scale),
+                    entity.position + Vec3::new(-0.25 * scale, 0.4 * scale, -0.25 * scale),
                     entity.yaw,
                     -swing,
                     [1; 6],
@@ -502,7 +502,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.2, 0.4, 0.2) * scale,
                     Vec3::new(0.0, -0.2, 0.0) * scale,
-                    entity.position + Vec3::new(0.25 * scale, 0.4 * scale, -0.2 * scale),
+                    entity.position + Vec3::new(0.25 * scale, 0.4 * scale, -0.25 * scale),
                     entity.yaw,
                     swing,
                     [1; 6],
@@ -514,26 +514,26 @@ pub fn render_mobs(
                 let scale = if entity.age < 0.0 { 0.5 } else { 1.0 };
                 let head_scale = if entity.age < 0.0 { 0.75 } else { 1.0 };
 
-                // Cow Head (Row 10, Col 2)
+                // Cow Head (Row 10, Col 2) - offset forward
                 add_cuboid(
                     vertices,
                     indices,
                     Vec3::new(0.5, 0.5, 0.5) * head_scale,
-                    Vec3::new(0.0, 0.25, 0.0) * head_scale,
-                    entity.position + Vec3::new(0.0, 1.0 * scale, 0.0),
+                    Vec3::new(0.0, 0.15, 0.2) * head_scale,
+                    entity.position + Vec3::new(0.0, 1.1 * scale, 0.35 * scale),
                     entity.yaw,
                     entity.pitch,
                     [2, 2, 2, 2, 2, 2],
                     10,
                     light_val,
                 );
-                // Torso (Row 10, Col 3)
+                // Torso (Row 10, Col 3) - horizontal: length = 1.0, height = 0.8, width = 0.7
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.65, 1.0, 0.7) * scale,
-                    Vec3::new(0.0, 0.5, 0.0) * scale,
-                    entity.position + Vec3::new(0.0, 0.4 * scale, 0.0),
+                    Vec3::new(0.7, 0.8, 1.0) * scale,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    entity.position + Vec3::new(0.0, 1.0 * scale, 0.0),
                     entity.yaw,
                     0.0,
                     [3; 6],
@@ -546,7 +546,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.22, 0.6, 0.22) * scale,
                     Vec3::new(0.0, -0.3, 0.0) * scale,
-                    entity.position + Vec3::new(-0.25 * scale, 0.6 * scale, 0.3 * scale),
+                    entity.position + Vec3::new(-0.25 * scale, 0.6 * scale, 0.35 * scale),
                     entity.yaw,
                     swing,
                     [3; 6],
@@ -558,7 +558,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.22, 0.6, 0.22) * scale,
                     Vec3::new(0.0, -0.3, 0.0) * scale,
-                    entity.position + Vec3::new(0.25 * scale, 0.6 * scale, 0.3 * scale),
+                    entity.position + Vec3::new(0.25 * scale, 0.6 * scale, 0.35 * scale),
                     entity.yaw,
                     -swing,
                     [3; 6],
@@ -570,7 +570,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.22, 0.6, 0.22) * scale,
                     Vec3::new(0.0, -0.3, 0.0) * scale,
-                    entity.position + Vec3::new(-0.25 * scale, 0.6 * scale, -0.3 * scale),
+                    entity.position + Vec3::new(-0.25 * scale, 0.6 * scale, -0.35 * scale),
                     entity.yaw,
                     -swing,
                     [3; 6],
@@ -582,7 +582,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.22, 0.6, 0.22) * scale,
                     Vec3::new(0.0, -0.3, 0.0) * scale,
-                    entity.position + Vec3::new(0.25 * scale, 0.6 * scale, -0.3 * scale),
+                    entity.position + Vec3::new(0.25 * scale, 0.6 * scale, -0.35 * scale),
                     entity.yaw,
                     swing,
                     [3; 6],
@@ -602,13 +602,13 @@ pub fn render_mobs(
                     entity.pitch
                 };
 
-                // Head (Row 10, Col 4)
+                // Head (Row 10, Col 4) - offset forward
                 add_cuboid(
                     vertices,
                     indices,
                     Vec3::new(0.45, 0.45, 0.45) * head_scale,
-                    Vec3::new(0.0, 0.225, 0.0) * head_scale,
-                    entity.position + Vec3::new(0.0, 0.9 * scale, 0.0),
+                    Vec3::new(0.0, 0.15, 0.2) * head_scale,
+                    entity.position + Vec3::new(0.0, 0.9 * scale, 0.3 * scale),
                     entity.yaw,
                     final_pitch,
                     [4, 4, 4, 4, 4, 4],
@@ -616,14 +616,14 @@ pub fn render_mobs(
                     light_val,
                 );
 
-                // Body (sheared skin Col 6 or wool layer Col 5)
+                // Body (sheared skin Col 6 or wool layer Col 5) - horizontal: length = 0.9, height = 0.6, width = 0.6
                 let body_col = if entity.has_wool { 5 } else { 6 };
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.6, 0.9, 0.6) * scale,
-                    Vec3::new(0.0, 0.45, 0.0) * scale,
-                    entity.position + Vec3::new(0.0, 0.3 * scale, 0.0),
+                    Vec3::new(0.6, 0.6, 0.9) * scale,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    entity.position + Vec3::new(0.0, 0.8 * scale, 0.0),
                     entity.yaw,
                     0.0,
                     [body_col; 6],
@@ -637,7 +637,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
                     Vec3::new(0.0, -0.25, 0.0) * scale,
-                    entity.position + Vec3::new(-0.25 * scale, 0.5 * scale, 0.25 * scale),
+                    entity.position + Vec3::new(-0.25 * scale, 0.5 * scale, 0.3 * scale),
                     entity.yaw,
                     swing,
                     [4; 6],
@@ -649,7 +649,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
                     Vec3::new(0.0, -0.25, 0.0) * scale,
-                    entity.position + Vec3::new(0.25 * scale, 0.5 * scale, 0.25 * scale),
+                    entity.position + Vec3::new(0.25 * scale, 0.5 * scale, 0.3 * scale),
                     entity.yaw,
                     -swing,
                     [4; 6],
@@ -661,7 +661,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
                     Vec3::new(0.0, -0.25, 0.0) * scale,
-                    entity.position + Vec3::new(-0.25 * scale, 0.5 * scale, -0.25 * scale),
+                    entity.position + Vec3::new(-0.25 * scale, 0.5 * scale, -0.3 * scale),
                     entity.yaw,
                     -swing,
                     [4; 6],
@@ -673,7 +673,7 @@ pub fn render_mobs(
                     indices,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
                     Vec3::new(0.0, -0.25, 0.0) * scale,
-                    entity.position + Vec3::new(0.25 * scale, 0.5 * scale, -0.25 * scale),
+                    entity.position + Vec3::new(0.25 * scale, 0.5 * scale, -0.3 * scale),
                     entity.yaw,
                     swing,
                     [4; 6],
@@ -690,26 +690,26 @@ pub fn render_mobs(
                     0.0
                 };
 
-                // Head (Row 10, Col 7)
+                // Head (Row 10, Col 7) - offset forward
                 add_cuboid(
                     vertices,
                     indices,
                     Vec3::new(0.25, 0.35, 0.25) * head_scale,
-                    Vec3::new(0.0, 0.175, 0.0) * head_scale,
-                    entity.position + Vec3::new(0.0, 0.4 * scale, 0.0),
+                    Vec3::new(0.0, 0.1, 0.15) * head_scale,
+                    entity.position + Vec3::new(0.0, 0.45 * scale, 0.1 * scale),
                     entity.yaw,
                     entity.pitch,
                     [7, 7, 7, 7, 7, 7],
                     10,
                     light_val,
                 );
-                // Body (Row 10, Col 8)
+                // Body (Row 10, Col 8) - horizontal: length = 0.4, height = 0.3, width = 0.3
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.3, 0.4, 0.3) * scale,
-                    Vec3::new(0.0, 0.2, 0.0) * scale,
-                    entity.position + Vec3::new(0.0, 0.15 * scale, 0.0),
+                    Vec3::new(0.3, 0.3, 0.4) * scale,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    entity.position + Vec3::new(0.0, 0.35 * scale, 0.0),
                     entity.yaw,
                     0.0,
                     [8; 6],
@@ -720,8 +720,8 @@ pub fn render_mobs(
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.05, 0.25, 0.2) * scale,
-                    Vec3::new(0.0, -0.125, 0.0) * scale,
+                    Vec3::new(0.05, 0.25, 0.25) * scale,
+                    Vec3::new(0.0, -0.1, 0.0) * scale,
                     entity.position + Vec3::new(-0.175 * scale, 0.35 * scale, 0.0),
                     entity.yaw,
                     flap, // Left wing rotation
@@ -732,8 +732,8 @@ pub fn render_mobs(
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.05, 0.25, 0.2) * scale,
-                    Vec3::new(0.0, -0.125, 0.0) * scale,
+                    Vec3::new(0.05, 0.25, 0.25) * scale,
+                    Vec3::new(0.0, -0.1, 0.0) * scale,
                     entity.position + Vec3::new(0.175 * scale, 0.35 * scale, 0.0),
                     entity.yaw,
                     -flap, // Right wing rotation
