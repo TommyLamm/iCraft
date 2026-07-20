@@ -210,8 +210,7 @@ pub fn update_mobs(
 
     // Despawn out-of-bounds mobs
     entity_manager.entities.retain(|entity| {
-        if entity.entity_type == EntityType::Arrow || entity.entity_type == EntityType::SplashPotion
-        {
+        if entity.entity_type.is_projectile() || entity.entity_type.is_persistent() {
             true
         } else {
             entity.position.distance(player_pos) <= 128.0
@@ -230,7 +229,19 @@ pub fn update_mobs(
             entity.invulnerable_time = (entity.invulnerable_time - dt).max(0.0);
         }
 
-        if entity.entity_type == EntityType::SplashPotion {
+        if matches!(
+            entity.entity_type,
+            EntityType::SplashPotion
+                | EntityType::Blaze
+                | EntityType::Piglin
+                | EntityType::Husk
+                | EntityType::Shulker
+                | EntityType::EnderDragon
+                | EntityType::Wither
+                | EntityType::EndCrystal
+                | EntityType::WitherSkull
+                | EntityType::DragonBreath
+        ) {
             continue;
         }
 
@@ -510,9 +521,19 @@ pub fn update_mobs(
     }
 
     // Clean up dead entities (health < 0 or health == 0)
-    entity_manager
-        .entities
-        .retain(|entity| entity.health >= 0.0);
+    entity_manager.entities.retain(|entity| {
+        entity.health >= 0.0
+            || matches!(
+                entity.entity_type,
+                EntityType::Blaze
+                    | EntityType::Piglin
+                    | EntityType::Husk
+                    | EntityType::Shulker
+                    | EntityType::EnderDragon
+                    | EntityType::Wither
+                    | EntityType::EndCrystal
+            )
+    });
 }
 
 #[cfg(test)]

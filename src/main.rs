@@ -1,9 +1,11 @@
 mod app;
 pub mod audio;
+mod boss;
 mod brewing;
 mod camera;
 mod chunk_manager;
 mod crafting;
+mod dimension;
 mod enchantment;
 mod entity;
 mod fluid;

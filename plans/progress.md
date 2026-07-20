@@ -1,6 +1,6 @@
 # 🏗️ iCraft — 進度追蹤
 
-> **整體進度**: 24 / 30 任務完成
+> **整體進度**: 25 / 30 任務完成
 > **當前階段**: P3 — 進階功能
 
 ---
@@ -12,16 +12,16 @@
 | **P0 — 核心體驗** | 5/5 | 5 | 🟢 已完成 |
 | **P1 — 可玩性基礎** | 7/7 | 7 | 🟢 已完成 |
 | **P2 — 完善體驗** | 8/8 | 8 | 🟢 已完成 |
-| **P3 — 進階功能** | 4/9 | 4 | 🟡 進行中 |
+| **P3 — 進階功能** | 5/9 | 5 | 🟡 進行中 |
 
 ### 進度條
 ```
 P0 [██████████] 100%
 P1 [██████████] 100%
 P2 [██████████] 100%
-P3 [████░░░░░░] 44.4%
+P3 [██████░░░░] 55.6%
 ────────────────────
-總計 [████████░░] 80.0%
+總計 [████████░░] 83.3%
 ```
 
 ---
@@ -92,7 +92,7 @@ P3 [████░░░░░░] 44.4%
 | 23 | [天氣系統](./p3/23_weather.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 25 | [多人遊戲](./p3/25_multiplayer.md) | ⬜ 待定 | — | — | |
-| 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | ⬜ 待定 | — | — | |
+| 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 28 | [成就 / 進度系統](./p3/28_advancements.md) | ⬜ 待定 | — | — | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ⬜ 待定 | — | — | |
 | 30 | [渲染優化](./p3/30_render_optimization.md) | ⬜ 待定 | — | — | |
@@ -102,6 +102,13 @@ P3 [████░░░░░░] 44.4%
 ## 📝 更新日誌
 
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
+
+### 2026-07-21
+- ✅ 完成任務 #26 (By GPT-5.6 Sol Extra High)：Nether / End + Boss
+  - 新增文件：`src/dimension.rs`, `src/boss.rs`
+  - 修改文件：`src/main.rs`, `src/state.rs`, `src/world.rs`, `src/chunk_manager.rs`, `src/save.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/mob_renderer.rs`, `src/inventory.rs`, `src/crafting.rs`, `src/texture.rs`, `src/shader.wgsl`, `ARCHITECTURE.md`
+  - 關鍵決策：新增 Overworld/Nether/End 維度模型，Chunk 生成與 Region 存檔依維度分流，`dimension.dat` 保存目前維度。Nether 具基岩天花板、地獄岩洞穴、岩漿海、靈魂沙與螢光石；地獄門採 8:1 水平座標縮放並建立連結門。End 具末地石島、起始噴泉、要塞末地門、末地城箱與鞘翅掉落。新增 Blaze/Piglin/Husk/Shulker/EndCrystal/EnderDragon/Wither 與投射物，Boss 邏輯集中於 `boss.rs`，支援末影龍階段、龍息、水晶回血、擊敗後回程門與龍蛋，以及凋零召喚、Boss 條、凋零效果、骷髏頭、衝刺爆炸與地獄之星掉落。
+  - 驗證：`cargo test --release` 通過；99 項單元測試與 1 項整合測試全部通過。
 
 ### 2026-07-20
 - ✅ 完成任務 #24 (By GPT-5.6 Sol High)：主選單 + 世界管理

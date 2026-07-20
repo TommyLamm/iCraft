@@ -50,15 +50,7 @@ pub fn update_passive_mobs(
             )
         };
 
-        // Skip arrow, zombie, skeleton, creeper, heart particles, dropped items
-        if entity_type == EntityType::Arrow
-            || entity_type == EntityType::Zombie
-            || entity_type == EntityType::Skeleton
-            || entity_type == EntityType::Creeper
-            || entity_type == EntityType::HeartParticle
-            || entity_type == EntityType::DroppedItem
-            || entity_type == EntityType::SplashPotion
-        {
+        if !entity_type.is_passive() {
             continue;
         }
 

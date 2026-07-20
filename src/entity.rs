@@ -15,6 +15,70 @@ pub enum EntityType {
     HeartParticle,
     DroppedItem,
     SplashPotion,
+    Blaze,
+    Piglin,
+    Husk,
+    Shulker,
+    EnderDragon,
+    Wither,
+    EndCrystal,
+    WitherSkull,
+    DragonBreath,
+}
+
+impl EntityType {
+    pub fn is_passive(self) -> bool {
+        matches!(self, Self::Pig | Self::Cow | Self::Sheep | Self::Chicken)
+    }
+
+    pub fn is_hostile(self) -> bool {
+        matches!(
+            self,
+            Self::Zombie
+                | Self::Skeleton
+                | Self::Creeper
+                | Self::Blaze
+                | Self::Piglin
+                | Self::Husk
+                | Self::Shulker
+                | Self::EnderDragon
+                | Self::Wither
+        )
+    }
+
+    pub fn is_projectile(self) -> bool {
+        matches!(
+            self,
+            Self::Arrow | Self::SplashPotion | Self::WitherSkull | Self::DragonBreath
+        )
+    }
+
+    pub fn is_boss(self) -> bool {
+        matches!(self, Self::EnderDragon | Self::Wither)
+    }
+
+    pub fn is_persistent(self) -> bool {
+        self.is_boss() || matches!(self, Self::EndCrystal | Self::Shulker)
+    }
+
+    pub fn uses_flying_physics(self) -> bool {
+        matches!(
+            self,
+            Self::Blaze | Self::EnderDragon | Self::Wither | Self::WitherSkull | Self::DragonBreath
+        )
+    }
+
+    pub fn is_anchored(self) -> bool {
+        matches!(self, Self::Shulker | Self::EndCrystal)
+    }
+
+    pub fn boss_name(self) -> Option<&'static str> {
+        match self {
+            Self::EnderDragon => Some("ENDER DRAGON"),
+            Self::Wither => Some("WITHER"),
+            _ => None,
+        }
+    }
 }
 
 pub struct Entity {
@@ -56,29 +120,50 @@ pub struct Entity {
     // DroppedItem fields
     pub dropped_item: Option<crate::inventory::Item>,
     pub pickup_cooldown: f32,
+    pub ai_phase: u8,
+    pub ai_timer: f32,
 }
 
 impl Entity {
     pub fn new(id: u64, entity_type: EntityType, position: Vec3) -> Self {
         let size = match entity_type {
-            EntityType::Zombie | EntityType::Skeleton => Vec3::new(0.6, 1.8, 0.6),
+            EntityType::Zombie | EntityType::Skeleton | EntityType::Blaze => {
+                Vec3::new(0.6, 1.8, 0.6)
+            }
+            EntityType::Piglin | EntityType::Husk => Vec3::new(0.6, 1.95, 0.6),
             EntityType::Creeper => Vec3::new(0.6, 1.7, 0.6),
-            EntityType::Arrow | EntityType::SplashPotion => Vec3::new(0.15, 0.15, 0.15),
+            EntityType::Arrow
+            | EntityType::SplashPotion
+            | EntityType::WitherSkull
+            | EntityType::DragonBreath => Vec3::new(0.25, 0.25, 0.25),
             EntityType::Pig => Vec3::new(0.9, 0.9, 0.9),
             EntityType::Cow => Vec3::new(0.9, 1.4, 0.9),
             EntityType::Sheep => Vec3::new(0.9, 1.3, 0.9),
             EntityType::Chicken => Vec3::new(0.4, 0.7, 0.4),
             EntityType::HeartParticle => Vec3::new(0.25, 0.25, 0.25),
             EntityType::DroppedItem => Vec3::new(0.25, 0.25, 0.25),
+            EntityType::Shulker => Vec3::ONE,
+            EntityType::EnderDragon => Vec3::new(8.0, 4.0, 8.0),
+            EntityType::Wither => Vec3::new(1.0, 3.5, 1.0),
+            EntityType::EndCrystal => Vec3::new(1.5, 2.0, 1.5),
         };
         let max_health = match entity_type {
             EntityType::Zombie | EntityType::Skeleton | EntityType::Creeper => 20.0,
+            EntityType::Blaze => 20.0,
+            EntityType::Piglin => 16.0,
+            EntityType::Husk => 20.0,
+            EntityType::Shulker => 30.0,
+            EntityType::EnderDragon => 200.0,
+            EntityType::Wither => 300.0,
+            EntityType::EndCrystal => 5.0,
             EntityType::Pig => 10.0,
             EntityType::Cow => 10.0,
             EntityType::Sheep => 8.0,
             EntityType::Chicken => 4.0,
             EntityType::Arrow
             | EntityType::SplashPotion
+            | EntityType::WitherSkull
+            | EntityType::DragonBreath
             | EntityType::HeartParticle
             | EntityType::DroppedItem => 0.0,
         };
@@ -113,6 +198,8 @@ impl Entity {
             life_time: 1.5,
             dropped_item: None,
             pickup_cooldown: 0.0,
+            ai_phase: 0,
+            ai_timer: 0.0,
         }
     }
 
@@ -127,6 +214,19 @@ impl Entity {
     pub fn update_physics(&mut self, dt: f32, chunk_manager: &ChunkManager) {
         if self.entity_type == EntityType::HeartParticle {
             self.position += self.velocity * dt;
+            return;
+        }
+        if self.entity_type.is_anchored() {
+            self.velocity = Vec3::ZERO;
+            return;
+        }
+        if self.entity_type.uses_flying_physics() {
+            self.position += self.velocity * dt;
+            if self.velocity.length_squared() > 0.0001 {
+                let dir = self.velocity.normalize_or_zero();
+                self.yaw = f32::atan2(-dir.x, -dir.z);
+                self.pitch = f32::asin(dir.y.clamp(-1.0, 1.0));
+            }
             return;
         }
         if self.entity_type == EntityType::Arrow || self.entity_type == EntityType::SplashPotion {

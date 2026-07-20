@@ -81,15 +81,22 @@ impl FluidUpdateQueue {
 pub struct ChunkManager {
     pub chunks: HashMap<(i32, i32), Chunk>,
     pub render_distance: i32,
+    pub dimension: crate::dimension::Dimension,
     water_updates: FluidUpdateQueue,
     lava_updates: FluidUpdateQueue,
 }
 
 impl ChunkManager {
+    #[cfg(test)]
     pub fn new(render_distance: i32) -> Self {
+        Self::new_in_dimension(render_distance, crate::dimension::Dimension::Overworld)
+    }
+
+    pub fn new_in_dimension(render_distance: i32, dimension: crate::dimension::Dimension) -> Self {
         Self {
             chunks: HashMap::new(),
             render_distance,
+            dimension,
             water_updates: FluidUpdateQueue::new(),
             lava_updates: FluidUpdateQueue::new(),
         }
@@ -181,7 +188,11 @@ impl ChunkManager {
             }
         }
         if wy >= CHUNK_HEIGHT as i32 {
-            return 15; // Above world is fully lit by sky
+            return if self.dimension.has_sky_light() {
+                15
+            } else {
+                0
+            };
         }
         0
     }

@@ -1926,6 +1926,29 @@ impl TextureAtlas {
         draw_noise(&mut img, 12, 14, [85, 90, 95], 8, &mut seed); // dropper
         draw_planks(&mut img, 13, 14, [115, 70, 45], &mut seed); // note block
 
+        // Dimensions and boss encounters. Crack stages occupy row 15 columns
+        // 0..=9; the remaining compact-atlas slots are reserved here.
+        draw_noise(&mut img, 10, 15, [105, 32, 34], 24, &mut seed); // netherrack
+        draw_noise(&mut img, 11, 15, [82, 64, 52], 16, &mut seed); // soul sand
+        draw_noise(&mut img, 12, 15, [238, 188, 72], 28, &mut seed); // glowstone
+        draw_noise(&mut img, 13, 15, [105, 25, 170], 30, &mut seed); // Nether portal
+        draw_noise(&mut img, 14, 15, [214, 220, 145], 13, &mut seed); // End stone
+        draw_noise(&mut img, 15, 15, [78, 108, 82], 16, &mut seed); // End frame
+        draw_noise(&mut img, 9, 10, [48, 18, 24], 10, &mut seed); // Nether brick
+        draw_noise(&mut img, 10, 10, [94, 65, 112], 16, &mut seed); // End City chest
+        draw_noise(&mut img, 14, 10, [12, 8, 24], 20, &mut seed); // End portal
+        draw_noise(&mut img, 15, 10, [168, 102, 190], 14, &mut seed); // purpur
+        draw_noise(&mut img, 14, 11, [28, 12, 36], 13, &mut seed); // dragon egg
+        draw_noise(&mut img, 15, 11, [38, 34, 38], 12, &mut seed); // wither skull
+        draw_noise(&mut img, 11, 10, [125, 130, 130], 22, &mut seed); // flint and steel
+        draw_noise(&mut img, 12, 10, [48, 185, 110], 25, &mut seed); // Eye of Ender
+        draw_noise(&mut img, 13, 10, [175, 145, 190], 18, &mut seed); // elytra
+        draw_noise(&mut img, 3, 4, [240, 245, 230], 14, &mut seed); // Nether Star
+        draw_noise(&mut img, 4, 4, [220, 80, 220], 25, &mut seed); // End Crystal
+        draw_noise(&mut img, 5, 4, [235, 165, 55], 18, &mut seed); // Blaze rod
+        draw_noise(&mut img, 6, 4, [90, 150, 95], 18, &mut seed); // filled End frame
+        draw_noise(&mut img, 14, 14, [118, 72, 150], 14, &mut seed); // Shulker shell
+
         // Save to assets folder
         let _ = std::fs::create_dir_all("assets");
         let _ = img.save("assets/texture_atlas.png");

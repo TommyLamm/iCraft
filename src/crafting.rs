@@ -409,6 +409,40 @@ impl RecipeManager {
             ItemStack::new(Item::SpiderEye, 1),
         );
 
+        // Dimension progression. Gravel stands in for a separate flint item,
+        // while Diamond is the clone's existing rare Ender catalyst.
+        add_shapeless(
+            &mut recipes,
+            vec![Item::IronIngot, Item::Gravel],
+            ItemStack::new(Item::FlintAndSteel, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["DD", "DD"],
+            &[("D", Item::GlowstoneDust)],
+            ItemStack::new(Item::Glowstone, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::BlazeRod],
+            ItemStack::new(Item::BlazePowder, 2),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Diamond, Item::BlazePowder],
+            ItemStack::new(Item::EyeOfEnder, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["GGG", "GEG", "GTG"],
+            &[
+                ("G", Item::Glass),
+                ("E", Item::EyeOfEnder),
+                ("T", Item::GhastTear),
+            ],
+            ItemStack::new(Item::EndCrystal, 1),
+        );
+
         // Redstone components. A few substitutions keep every component
         // craftable with the clone's currently obtainable resource set.
         add_shapeless(

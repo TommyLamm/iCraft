@@ -220,6 +220,15 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
     let h = max(view_dir.y, 0.0);
     var sky_color = mix(camera.sky_color_horizon, camera.sky_color_top, h);
 
+    if (camera.is_underwater > 0.5) {
+        return vec4<f32>(0.05, 0.15, 0.45, 1.0);
+    }
+    // camera_pos.w carries the active dimension (0 Overworld, 1 Nether,
+    // 2 End). Non-Overworld dimensions use their fixed, celestial-free sky.
+    if (camera.camera_pos.w > 0.5) {
+        return sky_color;
+    }
+
     // Sun
     let sun_dot = dot(view_dir, normalize(camera.sun_dir.xyz));
     if (sun_dot > 0.995) {
@@ -247,10 +256,6 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
     let star_intensity = smoothstep(0.1, -0.1, camera.sun_dir.y);
     let star_val = get_star(rotated_dir) * star_intensity;
     sky_color = sky_color + vec4<f32>(star_val, star_val, star_val, 0.0);
-
-    if (camera.is_underwater > 0.5) {
-        return vec4<f32>(0.05, 0.15, 0.45, 1.0);
-    }
 
     return sky_color;
 }

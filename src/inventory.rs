@@ -150,6 +150,23 @@ pub enum Item {
     Dispenser,
     Dropper,
     NoteBlock,
+    // Dimensions, structures, and bosses
+    Netherrack,
+    SoulSand,
+    Glowstone,
+    EndStone,
+    EndPortalFrame,
+    Purpur,
+    DragonEgg,
+    WitherSkeletonSkull,
+    NetherBrick,
+    FlintAndSteel,
+    EyeOfEnder,
+    Elytra,
+    NetherStar,
+    EndCrystal,
+    BlazeRod,
+    ShulkerShell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1081,6 +1098,66 @@ impl Item {
                     tex_coords,
                 }
             }
+            item @ (Item::Netherrack
+            | Item::SoulSand
+            | Item::Glowstone
+            | Item::EndStone
+            | Item::EndPortalFrame
+            | Item::Purpur
+            | Item::DragonEgg
+            | Item::WitherSkeletonSkull
+            | Item::NetherBrick) => {
+                let (name, block_type, tex_coords) = match item {
+                    Item::Netherrack => ("Netherrack", BlockType::Netherrack, (10, 15)),
+                    Item::SoulSand => ("Soul Sand", BlockType::SoulSand, (11, 15)),
+                    Item::Glowstone => ("Glowstone", BlockType::Glowstone, (12, 15)),
+                    Item::EndStone => ("End Stone", BlockType::EndStone, (14, 15)),
+                    Item::EndPortalFrame => {
+                        ("End Portal Frame", BlockType::EndPortalFrame, (15, 15))
+                    }
+                    Item::Purpur => ("Purpur Block", BlockType::Purpur, (15, 10)),
+                    Item::DragonEgg => ("Dragon Egg", BlockType::DragonEgg, (14, 11)),
+                    Item::WitherSkeletonSkull => (
+                        "Wither Skeleton Skull",
+                        BlockType::WitherSkeletonSkull,
+                        (15, 11),
+                    ),
+                    Item::NetherBrick => ("Nether Bricks", BlockType::NetherBrick, (9, 10)),
+                    _ => unreachable!(),
+                };
+                ItemProperties {
+                    name,
+                    max_stack: 64,
+                    is_block: true,
+                    block_type: Some(block_type),
+                    tex_coords,
+                }
+            }
+            item @ (Item::FlintAndSteel
+            | Item::EyeOfEnder
+            | Item::Elytra
+            | Item::NetherStar
+            | Item::EndCrystal
+            | Item::BlazeRod
+            | Item::ShulkerShell) => {
+                let (name, max_stack, tex_coords) = match item {
+                    Item::FlintAndSteel => ("Flint and Steel", 1, (11, 10)),
+                    Item::EyeOfEnder => ("Eye of Ender", 64, (12, 10)),
+                    Item::Elytra => ("Elytra", 1, (13, 10)),
+                    Item::NetherStar => ("Nether Star", 64, (3, 4)),
+                    Item::EndCrystal => ("End Crystal", 64, (4, 4)),
+                    Item::BlazeRod => ("Blaze Rod", 64, (5, 4)),
+                    Item::ShulkerShell => ("Shulker Shell", 64, (14, 14)),
+                    _ => unreachable!(),
+                };
+                ItemProperties {
+                    name,
+                    max_stack,
+                    is_block: false,
+                    block_type: None,
+                    tex_coords,
+                }
+            }
         }
     }
 
@@ -1152,6 +1229,18 @@ impl Item {
             BlockType::NoteBlock => Item::NoteBlock,
             BlockType::SnowLayer => Item::Snow,
             BlockType::Fire => Item::Air,
+            BlockType::Netherrack => Item::Netherrack,
+            BlockType::SoulSand => Item::SoulSand,
+            BlockType::Glowstone => Item::Glowstone,
+            BlockType::NetherPortal => Item::Air,
+            BlockType::EndStone => Item::EndStone,
+            BlockType::EndPortalFrame | BlockType::EndPortalFrameFilled => Item::EndPortalFrame,
+            BlockType::EndPortal => Item::Air,
+            BlockType::Purpur => Item::Purpur,
+            BlockType::DragonEgg => Item::DragonEgg,
+            BlockType::WitherSkeletonSkull => Item::WitherSkeletonSkull,
+            BlockType::NetherBrick => Item::NetherBrick,
+            BlockType::EndCityChest => Item::Air,
         }
     }
 }
@@ -1216,20 +1305,21 @@ impl Inventory {
             Item::Dispenser,
             Item::Dropper,
             Item::NoteBlock,
-            Item::StoneSword,
-            Item::IronPickaxe,
             Item::DiamondPickaxe,
-            Item::Apple,
-            Item::Bread,
-            Item::Coal,
-            Item::IronIngot,
-            Item::Diamond,
-            Item::Redstone,
-            Item::CraftingTable,
-            Item::TNT,
+            Item::FlintAndSteel,
+            Item::Netherrack,
+            Item::SoulSand,
+            Item::Glowstone,
+            Item::EndStone,
+            Item::EndPortalFrame,
+            Item::EyeOfEnder,
+            Item::WitherSkeletonSkull,
+            Item::EndCrystal,
+            Item::Elytra,
+            Item::NetherStar,
         ];
         for (i, &item) in extra_items.iter().enumerate() {
-            inv.main[i] = Some(ItemStack::new(item, 64));
+            inv.main[i] = Some(ItemStack::new(item, item.properties().max_stack));
         }
         inv
     }

@@ -1,10 +1,10 @@
 # Architecture
 
-> Last verified: 2026-07-20. This is a navigation map, not a replacement for
+> Last verified: 2026-07-21. This is a navigation map, not a replacement for
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `b7d5d6153a86bfcc4bca22b39ac074b9c8df1b8e` (`b7d5d61`). This identifies the
+> `7df488c26b61a69ce17fbbc162af6a47328975be` (`7df488c`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -19,8 +19,9 @@ Terrain, the texture atlas, and fallback sounds are generated procedurally.
 
 There is currently no server, networking layer, or database. Display/input/audio
 settings persist in `settings.txt`, while each world's data (including seed,
-metadata, game time, player status, inventory, and chunks) is stored under its
-own `saves/<world>/` directory. Entity state is still transient in-memory.
+metadata, game time, player status, inventory, current dimension, and
+dimension-namespaced chunks) is stored under its own `saves/<world>/` directory.
+Entity state, including bosses, is still transient in-memory.
 
 ## How agents should navigate
 
@@ -68,11 +69,12 @@ surface and procedural rotating panorama. Selecting or creating a world yields a
 `WorldLaunch`; `App` drops the menu surface, then calls `State::new` with the
 selected directory, seed, mode, difficulty, and current `GameSettings`.
 `State::new` initializes wgpu pipelines/buffers (including the dedicated crack
-pipeline and particle buffers) -> builds the texture atlas -> restores or creates
-spawn chunks from the selected world's seed -> propagates initial lighting ->
-generates chunk meshes -> initializes gameplay, entity, particle, UI, and audio
-state. Crack tiles prefer external `destroy_stage_*.png` files and fall back to
-procedural generation when those assets are unavailable.
+pipeline and particle buffers) -> builds the texture atlas -> restores the saved
+dimension -> restores or creates spawn chunks from the selected world's seed ->
+propagates initial lighting -> generates chunk meshes -> initializes gameplay,
+entity, particle, UI, and audio state. Crack tiles prefer external
+`destroy_stage_*.png` files and fall back to procedural generation when those
+assets are unavailable.
 
 ### Per-frame update
 
@@ -80,9 +82,10 @@ procedural generation when those assets are unavailable.
 
 1. Tick water every 0.25 s and lava every 1.5 s; returned chunk coordinates mark
    cached meshes dirty. These ticks occur **before** the paused/dead early return.
-2. Advance world time and weather. Weather emits roof-clipped rain/snow
-   particles, maintains the rain loop, accumulates thin snow in cold biomes,
-   and dispatches thunder strikes before translating `KeyState` into movement.
+2. Advance world time and, in the Overworld only, weather. Weather emits
+   roof-clipped rain/snow particles, maintains the rain loop, accumulates thin
+   snow in cold biomes, and dispatches thunder strikes before translating
+   `KeyState` into movement.
 3. Run `PlayerPhysics::update`, then `State::update_chunks`.
 4. Tick brewing progress and active potion effects, update particle physics;
    emit footstep dust and periodic torch smoke, then
@@ -92,8 +95,9 @@ procedural generation when those assets are unavailable.
    pressure-plate occupancy, delayed updates, bounded signal settling, actuator
    mutations, TNT fuses, dispenser actions, and note sounds.
 6. Apply landing/fall/void/lava/hunger/drowning state and audio effects.
-7. Spawn/update hostile mobs, including dropped-item physics, then update/spawn
-   passive mobs.
+7. Handle portal contact and dimension switches, run dimension-specific mobs and
+   bosses through `boss.rs`, then spawn/update ordinary hostile mobs, including
+   dropped-item physics. Passive mobs spawn/update only in the Overworld.
 8. Sync camera and `CameraUniform`, upload the uniform, and advance continuous
    survival-mode mining through `interaction::raycast`.
 
@@ -229,6 +233,31 @@ powered doors/trapdoors become passable, dispensers fire arrows, droppers emit
 items, and note blocks play one of 25 synthesized pitches. Dynamic metadata is
 rebuilt when chunks load; block variants remain part of normal chunk saves.
 
+### Dimensions, portals, and bosses
+
+`dimension.rs::Dimension` is the dimension identity used by generation, chunk
+loading, sky light, ambient light, portal scaling, and save paths. Overworld
+chunks still use the legacy `saves/<world>/regions/` directory; Nether and End
+chunks use `saves/<world>/dimensions/{nether,end}/regions/`. The active
+dimension is persisted separately in `dimension.dat`.
+
+`dimension::generate_chunk` dispatches to the Overworld generator, a deterministic
+Nether generator with bedrock roof/floor, netherrack caves, lava sea, soul sand,
+and glowstone, or an End generator with void islands and a reachable End City.
+The Overworld generator embeds a compact stronghold room with twelve empty End
+portal frames. Nether portal detection accepts either X/Z-oriented obsidian
+frames; Overworld <-> Nether switches apply the vanilla 8:1 horizontal scale and
+build a linked portal at the destination. Completed End portal frames switch the
+player to a safe End spawn near the origin.
+
+`boss.rs` owns dimension-specific hostile mobs and boss state transitions. It
+spawns bounded Nether mobs, the Ender Dragon plus healing crystals, End City
+shulkers, and Withers summoned from a soul-sand/skull T pattern. The module
+returns `BossEvents` instead of mutating `State` directly; `State::apply_boss_events`
+applies player damage, Wither effects, explosions, block placements, drops, and
+dragon completion XP. Boss HUD data is pulled from `boss::active_boss_hud` during
+UI construction.
+
 ## Source routing table
 
 ### Runtime and rendering
@@ -251,6 +280,7 @@ rebuilt when chunks load; block variants remain part of normal chunk saves.
 | --- | --- |
 | `src/world.rs` | `BlockType`, `BlockProperties`, `RenderType`, `Chunk`; 16x256x16 storage, deterministic terrain/caves/ores, block metadata/atlas coordinates, heightmap, CPU mesh generation. |
 | `src/chunk_manager.rs` | Loaded-chunk map, world/local coordinate conversion, block/light/fluid accessors, heightmap updates, deduplicated water/lava work queues. |
+| `src/dimension.rs` | `Dimension`, dimension-specific chunk generators, sky-light/ambient rules, Overworld-Nether coordinate scaling, Nether portal frame detection, End portal completion detection, and End exit fountain generation. |
 | `src/lighting.rs` | Cross-chunk BFS propagation/removal for sky and emissive block light; initial chunk lighting and post-mutation updates. |
 | `src/fluid.rs` | Budgeted event-driven water/lava cells, falling/level propagation, draining, infinite water, and water/lava solidification. Returns dirty chunk coordinates. |
 | `src/redstone.rs` | 20 Hz redstone graph, 0-15 weak/strong power, component index, delayed ticks, comparator/repeater logic, actuator mutations, TNT/dispense/note actions, and loop protection. |
@@ -268,6 +298,7 @@ rebuilt when chunks load; block variants remain part of normal chunk saves.
 | `src/brewing.rs` | `PotionKind`, `PotionData`, `PotionEffect`, `EffectManager`, `BrewingStandState`; recipes, timed brewing and active-effect queries. |
 | `src/player.rs` | `PlayerState`, `DamageSource`; health, hunger, saturation/exhaustion, regeneration, invulnerability, oxygen/drowning, death state. |
 | `src/entity.rs` | `EntityType`, `Entity`, `EntityManager`; shared hostile/passive/arrow/splash-potion/heart-particle/dropped-item data, AABBs, basic entity physics, IDs and spawn storage. |
+| `src/boss.rs` | Dimension mob population, Ender Dragon, Wither, End Crystal, Blaze/Piglin/Husk/Shulker behavior, boss deaths, drops, block-placement events, and Boss HUD summaries. |
 | `src/mob.rs` | Hostile spawn/AI/combat, arrows, sunlight burning, creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for them. |
 | `src/passive_mob.rs` | Pig/cow/sheep/chicken wandering, cliff avoidance, breeding/young, drops and species-specific behavior. |
 | `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
@@ -280,6 +311,9 @@ rebuilt when chunks load; block variants remain part of normal chunk saves.
 | `Cargo.toml` | Rust package and graphics/window/audio/noise dependencies. |
 | `settings.txt` | Working-directory-relative `key:value` settings. Defaults and parser/writer are `menu.rs::GameSettings`; includes display, three audio levels, difficulty, language, sensitivity, and key bindings. |
 | `saves/<world>/world.meta` | Human-readable world-list metadata: display name, generation seed, game mode, difficulty, and last-played timestamp. Legacy `world_001` saves are inferred and upgraded when selected. |
+| `saves/<world>/dimension.dat` | One-byte active-dimension sidecar. Missing files default to Overworld for old saves. |
+| `saves/<world>/regions/` | Legacy and current Overworld Region files. |
+| `saves/<world>/dimensions/{nether,end}/regions/` | Nether and End Region files, using the same compressed chunk payload format as Overworld regions. |
 | `assets/texture_atlas.png` | Generated diagnostic/runtime atlas output; `texture.rs` is the source of truth. |
 | `assets/sounds/*.wav` | Loaded by `AudioManager`; missing files are synthesized and written at startup. |
 | `plans/progress.md` | Feature roadmap/status. Useful for intent, not current runtime truth. |
@@ -290,8 +324,8 @@ rebuilt when chunks load; block variants remain part of normal chunk saves.
 Most behavioral tests are inline `#[cfg(test)]` unit tests beside their modules,
 especially in `world.rs`, `lighting.rs`, `fluid.rs`, `physics.rs`,
 `interaction.rs`, `inventory.rs`, `crafting.rs`, `enchantment.rs`, `brewing.rs`,
-`player.rs`, `entity.rs`, `particles.rs`, `weather.rs`, `mob.rs`, `redstone.rs`,
-`audio.rs`, and `menu.rs`.
+`player.rs`, `entity.rs`, `particles.rs`, `weather.rs`, `mob.rs`, `boss.rs`,
+`dimension.rs`, `redstone.rs`, `audio.rs`, and `menu.rs`.
 
 `tests/passive_mob_tests.rs` is currently only a placeholder. Because the package
 has no `src/lib.rs`, integration tests cannot directly import the internal
@@ -324,3 +358,4 @@ initialization degrades to silent operation when no default output device exists
   `EntityManager::entities`. Particle vertices are also derived each frame from
   `ParticleSystem::particles`.
 - Save/load is managed by `SaveManager` in `src/save.rs` utilizing Bincode and Zlib compression. The main thread spawns a background thread listening on `SaveCommand` for non-blocking autosaves (every 5 minutes) and chunk unloads, while a synchronous save is flushed on window close or "Save and Quit" action.
+- Dimension switching rebuilds chunk, mesh, entity, particle, and redstone runtime state around the target dimension. Keep portal placement, chunk saves, and `dimension.dat` updates together when changing this flow.

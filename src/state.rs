@@ -71,6 +71,280 @@ impl Vertex {
     }
 }
 
+impl State {
+    fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
+        let mut dirty_chunks = std::collections::HashSet::new();
+        for &((x, y, z), new_block) in changes {
+            let old_block = self.chunk_manager.get_block(x, y, z);
+            if old_block == new_block {
+                continue;
+            }
+            if old_block != BlockType::Air {
+                self.chunk_manager.set_block(x, y, z, BlockType::Air);
+                crate::lighting::update_sky_light_after_removed(
+                    &mut self.chunk_manager,
+                    x,
+                    y,
+                    z,
+                    &mut dirty_chunks,
+                );
+                crate::lighting::update_block_light_after_removed(
+                    &mut self.chunk_manager,
+                    x,
+                    y,
+                    z,
+                    old_block.properties().light_emission,
+                    &mut dirty_chunks,
+                );
+            }
+            self.chunk_manager.set_block(x, y, z, new_block);
+            crate::lighting::update_sky_light_after_placed(
+                &mut self.chunk_manager,
+                x,
+                y,
+                z,
+                &mut dirty_chunks,
+            );
+            crate::lighting::update_block_light_after_placed(
+                &mut self.chunk_manager,
+                x,
+                y,
+                z,
+                new_block.properties().light_emission,
+                &mut dirty_chunks,
+            );
+            mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
+            self.redstone.on_block_changed(
+                &self.chunk_manager,
+                (x, y, z),
+                crate::redstone::Direction::North,
+            );
+        }
+        for coord in dirty_chunks {
+            if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
+                mesh.dirty = true;
+            }
+        }
+    }
+
+    fn safe_dimension_spawn_y(&mut self, x: i32, z: i32) -> f32 {
+        let top = if self.current_dimension == crate::dimension::Dimension::Nether {
+            120
+        } else {
+            180
+        };
+        for y in (2..=top).rev() {
+            if self
+                .chunk_manager
+                .get_block(x, y - 1, z)
+                .properties()
+                .is_solid
+                && self
+                    .chunk_manager
+                    .get_block(x, y, z)
+                    .properties()
+                    .is_passable
+                && self
+                    .chunk_manager
+                    .get_block(x, y + 1, z)
+                    .properties()
+                    .is_passable
+            {
+                return y as f32;
+            }
+        }
+        let floor = match self.current_dimension {
+            crate::dimension::Dimension::Nether => BlockType::Netherrack,
+            crate::dimension::Dimension::End => BlockType::EndStone,
+            crate::dimension::Dimension::Overworld => BlockType::Stone,
+        };
+        self.apply_block_changes(&[
+            ((x, 63, z), floor),
+            ((x, 64, z), BlockType::Air),
+            ((x, 65, z), BlockType::Air),
+        ]);
+        64.0
+    }
+
+    fn build_linked_nether_portal(&mut self, chunk_x: i32, chunk_z: i32, spawn_y: i32) -> Vec3 {
+        let base_x = chunk_x * CHUNK_WIDTH as i32 + 6;
+        let base_z = chunk_z * CHUNK_DEPTH as i32 + 8;
+        let base_y = (spawn_y - 1).clamp(5, 116);
+        let mut changes = Vec::new();
+        for x in base_x..=base_x + 3 {
+            changes.push(((x, base_y, base_z), BlockType::Obsidian));
+            changes.push(((x, base_y + 4, base_z), BlockType::Obsidian));
+        }
+        for y in base_y + 1..=base_y + 3 {
+            changes.push(((base_x, y, base_z), BlockType::Obsidian));
+            changes.push(((base_x + 3, y, base_z), BlockType::Obsidian));
+            changes.push(((base_x + 1, y, base_z), BlockType::NetherPortal));
+            changes.push(((base_x + 2, y, base_z), BlockType::NetherPortal));
+        }
+        self.apply_block_changes(&changes);
+        Vec3::new(
+            base_x as f32 + 1.5,
+            base_y as f32 + 1.0,
+            base_z as f32 + 0.5,
+        )
+    }
+
+    fn switch_dimension(&mut self, target: crate::dimension::Dimension) {
+        if target == self.current_dimension {
+            return;
+        }
+        let source = self.current_dimension;
+        for chunk in self.chunk_manager.chunks.values() {
+            let data = crate::save::ChunkSaveData::from_chunk(chunk);
+            let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
+                dimension: source,
+                data,
+            });
+        }
+
+        let mut destination =
+            crate::dimension::transform_position(source, target, self.player_physics.position);
+        if target == crate::dimension::Dimension::End {
+            destination = Vec3::new(0.5, 80.0, 0.5);
+        } else if source == crate::dimension::Dimension::End {
+            destination = Vec3::new(8.5, 80.0, 8.5);
+        }
+
+        self.current_dimension = target;
+        let render_distance = self.chunk_manager.render_distance;
+        self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
+        self.chunk_meshes.clear();
+        self.entity_manager = crate::entity::EntityManager::new();
+        self.particles = crate::particles::ParticleSystem::new();
+        self.redstone = crate::redstone::RedstoneSystem::new();
+        self.redstone_tick_timer = 0.0;
+        self.mining_target = None;
+        self.mining_progress = 0.0;
+        self.left_mouse_pressed = false;
+        self.water_tick_timer = 0.0;
+        self.lava_tick_timer = 0.0;
+        self.lava_damage_timer = 0.0;
+        self.cactus_damage_timer = 0.0;
+        self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
+
+        let cx = (destination.x / CHUNK_WIDTH as f32).floor() as i32;
+        let cz = (destination.z / CHUNK_DEPTH as f32).floor() as i32;
+        let mut chunk = crate::dimension::generate_chunk(target, cx, cz, self.world_seed);
+        if let Some(saved) = self
+            .save_manager
+            .lock()
+            .unwrap()
+            .load_chunk_in(target, cx, cz)
+        {
+            saved.restore_to_chunk(&mut chunk);
+        }
+        self.chunk_manager.chunks.insert((cx, cz), chunk);
+        let mut dirty = std::collections::HashSet::new();
+        crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
+
+        let wx = destination.x.floor() as i32;
+        let wz = destination.z.floor() as i32;
+        destination.y = self.safe_dimension_spawn_y(wx, wz);
+        if matches!(
+            target,
+            crate::dimension::Dimension::Overworld | crate::dimension::Dimension::Nether
+        ) && matches!(
+            source,
+            crate::dimension::Dimension::Overworld | crate::dimension::Dimension::Nether
+        ) {
+            destination = self.build_linked_nether_portal(cx, cz, destination.y as i32);
+        }
+        self.player_physics.position = destination;
+        self.player_physics.velocity = Vec3::ZERO;
+        self.player_physics.on_ground = false;
+        self.player_physics.highest_y = destination.y;
+        self.camera.position = destination + Vec3::new(0.0, 1.6, 0.0);
+        self.portal_contact_time = 0.0;
+        self.portal_cooldown = 3.0;
+        let _ = self
+            .save_manager
+            .lock()
+            .unwrap()
+            .save_current_dimension(target);
+        println!("[Dimension] {} -> {}", source.name(), target.name());
+    }
+
+    fn update_portal_travel(&mut self, dt: f32) {
+        self.portal_cooldown = (self.portal_cooldown - dt).max(0.0);
+        if self.portal_cooldown > 0.0 {
+            self.portal_contact_time = 0.0;
+            return;
+        }
+        let pos = self.player_physics.position;
+        let x = pos.x.floor() as i32;
+        let y = pos.y.floor() as i32;
+        let z = pos.z.floor() as i32;
+        let feet = self.chunk_manager.get_block(x, y, z);
+        let body = self.chunk_manager.get_block(x, y + 1, z);
+        if feet == BlockType::EndPortal || body == BlockType::EndPortal {
+            let target = if self.current_dimension == crate::dimension::Dimension::End {
+                crate::dimension::Dimension::Overworld
+            } else {
+                crate::dimension::Dimension::End
+            };
+            self.switch_dimension(target);
+            return;
+        }
+        if feet == BlockType::NetherPortal || body == BlockType::NetherPortal {
+            self.portal_contact_time += dt;
+            if self.portal_contact_time >= 1.0 {
+                let target = if self.current_dimension == crate::dimension::Dimension::Nether {
+                    crate::dimension::Dimension::Overworld
+                } else {
+                    crate::dimension::Dimension::Nether
+                };
+                self.switch_dimension(target);
+            }
+        } else {
+            self.portal_contact_time = 0.0;
+        }
+    }
+
+    fn apply_boss_events(&mut self, events: crate::boss::BossEvents) {
+        for hit in events.player_damage {
+            self.take_damage(hit.amount, DamageSource::Mob);
+        }
+        for effect in events.apply_wither {
+            self.wither_effect_timer = self.wither_effect_timer.max(effect.duration);
+        }
+        for explosion in events.explosions {
+            if explosion.break_blocks {
+                crate::mob::explode(
+                    explosion.position,
+                    explosion.radius,
+                    &mut self.chunk_manager,
+                    &mut self.chunk_meshes,
+                    &mut self.player_physics,
+                    &mut self.player_state,
+                    GameMode::Creative,
+                    0.0,
+                );
+            }
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::Explosion);
+        }
+        for drop in events.drops {
+            for _ in 0..drop.count {
+                self.spawn_dropped_item(drop.item, drop.position);
+            }
+        }
+        let changes: Vec<_> = events
+            .block_placements
+            .into_iter()
+            .map(|placement| (placement.position, placement.block))
+            .collect();
+        self.apply_block_changes(&changes);
+        if events.dragon_completion.is_some() {
+            self.player_state.add_experience(120);
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct UiVertex {
@@ -241,6 +515,11 @@ pub struct State {
     pub settings: GameSettings,
     pub world_seed: u32,
     pub difficulty: Difficulty,
+    pub current_dimension: crate::dimension::Dimension,
+    portal_contact_time: f32,
+    portal_cooldown: f32,
+    wither_effect_timer: f32,
+    wither_damage_timer: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +625,7 @@ impl State {
         let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
             crate::save::SaveManager::new(&launch.world_dir),
         ));
+        let current_dimension = save_manager.lock().unwrap().load_current_dimension();
 
         // Spawn background worker thread
         let (save_tx, save_rx) = std::sync::mpsc::channel::<crate::save::SaveCommand>();
@@ -353,9 +633,9 @@ impl State {
         std::thread::spawn(move || {
             while let Ok(cmd) = save_rx.recv() {
                 match cmd {
-                    crate::save::SaveCommand::SaveChunk(data) => {
+                    crate::save::SaveCommand::SaveChunk { dimension, data } => {
                         let mut mgr = save_manager_clone.lock().unwrap();
-                        let _ = mgr.save_chunk(data.chunk_x, data.chunk_z, data);
+                        let _ = mgr.save_chunk_in(dimension, data.chunk_x, data.chunk_z, data);
                     }
                     crate::save::SaveCommand::SaveLevelAndPlayer(level, player) => {
                         let mgr = save_manager_clone.lock().unwrap();
@@ -757,7 +1037,7 @@ impl State {
 
         // Initialize ChunkManager and load spawn area chunks
         let render_distance = settings.render_distance;
-        let mut chunk_manager = ChunkManager::new(render_distance);
+        let mut chunk_manager = ChunkManager::new_in_dimension(render_distance, current_dimension);
         let mut chunk_meshes = std::collections::HashMap::new();
 
         // Load spawn chunks synchronously
@@ -765,10 +1045,11 @@ impl State {
         let player_chunk_z = (player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32;
         for cx in player_chunk_x - render_distance..=player_chunk_x + render_distance {
             for cz in player_chunk_z - render_distance..=player_chunk_z + render_distance {
-                let mut chunk = Chunk::new_with_seed(cx, cz, world_seed);
+                let mut chunk =
+                    crate::dimension::generate_chunk(current_dimension, cx, cz, world_seed);
                 let saved_chunk = {
                     let mut manager = save_manager.lock().unwrap();
-                    manager.load_chunk(cx, cz)
+                    manager.load_chunk_in(current_dimension, cx, cz)
                 };
                 if let Some(data) = saved_chunk {
                     data.restore_to_chunk(&mut chunk);
@@ -792,7 +1073,17 @@ impl State {
                     return (BlockType::Air, 0, 0, 0, false);
                 }
                 if wy >= crate::world::CHUNK_HEIGHT as i32 {
-                    return (BlockType::Air, 15, 0, 0, false);
+                    return (
+                        BlockType::Air,
+                        if current_dimension.has_sky_light() {
+                            15
+                        } else {
+                            0
+                        },
+                        0,
+                        0,
+                        false,
+                    );
                 }
                 let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                 let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
@@ -807,7 +1098,17 @@ impl State {
                         (c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x08) != 0,
                     )
                 } else {
-                    (BlockType::Air, 15, 0, 0, false)
+                    (
+                        BlockType::Air,
+                        if current_dimension.has_sky_light() {
+                            15
+                        } else {
+                            0
+                        },
+                        0,
+                        0,
+                        false,
+                    )
                 }
             });
 
@@ -1125,6 +1426,11 @@ impl State {
             difficulty: launch.difficulty,
             world_seed,
             settings,
+            current_dimension,
+            portal_contact_time: 0.0,
+            portal_cooldown: 0.0,
+            wither_effect_timer: 0.0,
+            wither_damage_timer: 0.0,
         }
     }
 
@@ -1168,10 +1474,16 @@ impl State {
 
         for chunk in self.chunk_manager.chunks.values() {
             let chunk_data = crate::save::ChunkSaveData::from_chunk(chunk);
-            let _ = self
-                .save_tx
-                .send(crate::save::SaveCommand::SaveChunk(chunk_data));
+            let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
+                dimension: self.current_dimension,
+                data: chunk_data,
+            });
         }
+        let _ = self
+            .save_manager
+            .lock()
+            .unwrap()
+            .save_current_dimension(self.current_dimension);
     }
 
     pub fn save_synchronously(&self) {
@@ -1194,8 +1506,14 @@ impl State {
 
         for chunk in self.chunk_manager.chunks.values() {
             let chunk_data = crate::save::ChunkSaveData::from_chunk(chunk);
-            let _ = mgr.save_chunk(chunk.chunk_x, chunk.chunk_z, chunk_data);
+            let _ = mgr.save_chunk_in(
+                self.current_dimension,
+                chunk.chunk_x,
+                chunk.chunk_z,
+                chunk_data,
+            );
         }
+        let _ = mgr.save_current_dimension(self.current_dimension);
         crate::menu::update_world_metadata(
             &mgr.world_dir,
             self.world_seed,
@@ -1221,9 +1539,10 @@ impl State {
         for &(cx, cz) in &to_unload {
             if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
                 let chunk_data = crate::save::ChunkSaveData::from_chunk(&chunk);
-                let _ = self
-                    .save_tx
-                    .send(crate::save::SaveCommand::SaveChunk(chunk_data));
+                let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
+                    dimension: self.current_dimension,
+                    data: chunk_data,
+                });
             }
         }
         for &(cx, cz) in &to_unload {
@@ -1258,10 +1577,11 @@ impl State {
 
         // 3. Load 1 chunk per frame
         if let Some(&(cx, cz)) = load_queue.first() {
-            let mut chunk = Chunk::new_with_seed(cx, cz, self.world_seed);
+            let mut chunk =
+                crate::dimension::generate_chunk(self.current_dimension, cx, cz, self.world_seed);
             let chunk_data = {
                 let mut mgr = self.save_manager.lock().unwrap();
-                mgr.load_chunk(cx, cz)
+                mgr.load_chunk_in(self.current_dimension, cx, cz)
             };
             if let Some(data) = chunk_data {
                 data.restore_to_chunk(&mut chunk);
@@ -1330,6 +1650,11 @@ impl State {
         to_rebuild.sort_by_key(|&(_, _, dist)| dist);
 
         let chunks_ref = &self.chunk_manager.chunks;
+        let default_sky_light = if self.current_dimension.has_sky_light() {
+            15
+        } else {
+            0
+        };
         for (cx, cz, _) in to_rebuild.into_iter().take(4) {
             let chunk = chunks_ref.get(&(cx, cz)).unwrap();
             let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
@@ -1337,7 +1662,7 @@ impl State {
                     return (BlockType::Air, 0, 0, 0, false);
                 }
                 if wy >= crate::world::CHUNK_HEIGHT as i32 {
-                    return (BlockType::Air, 15, 0, 0, false);
+                    return (BlockType::Air, default_sky_light, 0, 0, false);
                 }
                 let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
                 let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
@@ -1352,7 +1677,7 @@ impl State {
                         (c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x08) != 0,
                     )
                 } else {
-                    (BlockType::Air, 15, 0, 0, false)
+                    (BlockType::Air, default_sky_light, 0, 0, false)
                 }
             });
 
@@ -1570,6 +1895,7 @@ impl State {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
             return;
         }
+        self.update_portal_travel(dt);
 
         self.redstone_tick_timer += dt;
         let mut redstone_steps = 0;
@@ -1606,6 +1932,16 @@ impl State {
                 (-effect_health).min(self.player_state.health - 1.0),
                 DamageSource::Mob,
             );
+        }
+        if self.wither_effect_timer > 0.0 {
+            self.wither_effect_timer = (self.wither_effect_timer - dt).max(0.0);
+            self.wither_damage_timer += dt;
+            if self.wither_damage_timer >= 1.0 {
+                self.wither_damage_timer -= 1.0;
+                self.take_damage(1.0, DamageSource::Mob);
+            }
+        } else {
+            self.wither_damage_timer = 0.0;
         }
 
         // Advance lightweight particle simulation every frame.
@@ -1662,8 +1998,12 @@ impl State {
         let new_ticks = self.world_time.tick_accumulator.floor() as u64;
         self.world_time.ticks += new_ticks;
         self.world_time.tick_accumulator -= new_ticks as f32;
-        let weather_update = self.weather.update(elapsed_world_ticks, dt);
-        self.update_weather_effects(dt, weather_update.lightning_due);
+        if self.current_dimension == crate::dimension::Dimension::Overworld {
+            let weather_update = self.weather.update(elapsed_world_ticks, dt);
+            self.update_weather_effects(dt, weather_update.lightning_due);
+        } else {
+            self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
+        }
         let mut move_dir = Vec3::ZERO;
         let yaw_cos = self.camera.yaw.cos();
         let yaw_sin = self.camera.yaw.sin();
@@ -2040,15 +2380,10 @@ impl State {
         // Peaceful worlds keep passive creatures and dropped items, but remove
         // hostile actors immediately and do not schedule new hostile spawns.
         if self.difficulty == Difficulty::Peaceful {
-            self.entity_manager.entities.retain(|entity| {
-                !matches!(
-                    entity.entity_type,
-                    crate::entity::EntityType::Zombie
-                        | crate::entity::EntityType::Skeleton
-                        | crate::entity::EntityType::Creeper
-                )
-            });
-        } else {
+            self.entity_manager
+                .entities
+                .retain(|entity| !entity.entity_type.is_hostile());
+        } else if self.current_dimension == crate::dimension::Dimension::Overworld {
             crate::mob::spawn_mobs(
                 &mut self.entity_manager,
                 &self.chunk_manager,
@@ -2056,6 +2391,24 @@ impl State {
                 self.world_time.sky_light_level(),
                 self.total_time,
             );
+        }
+
+        if self.difficulty != Difficulty::Peaceful {
+            crate::boss::ensure_dimension_entities(
+                self.current_dimension,
+                &mut self.entity_manager,
+                &self.chunk_manager,
+                self.player_physics.position,
+                self.total_time,
+            );
+            let boss_events = crate::boss::update_dimension_entities(
+                self.current_dimension,
+                &mut self.entity_manager,
+                &self.chunk_manager,
+                self.player_physics.position,
+                dt,
+            );
+            self.apply_boss_events(boss_events);
         }
 
         // Update mobs
@@ -2088,13 +2441,15 @@ impl State {
         );
 
         // Spawn passive mobs (daytime spawn)
-        crate::passive_mob::spawn_passive_mobs(
-            &mut self.entity_manager,
-            &self.chunk_manager,
-            self.player_physics.position,
-            self.world_time.sky_light_level(),
-            self.total_time,
-        );
+        if self.current_dimension == crate::dimension::Dimension::Overworld {
+            crate::passive_mob::spawn_passive_mobs(
+                &mut self.entity_manager,
+                &self.chunk_manager,
+                self.player_physics.position,
+                self.world_time.sky_light_level(),
+                self.total_time,
+            );
+        }
 
         // Sync camera position to player position at eye height
         let eye_height = if self.keys.shift { 1.4 } else { 1.6 };
@@ -2112,12 +2467,23 @@ impl State {
             self.total_time,
             is_underwater,
         );
-        let weather_brightness = self.weather.sky_brightness();
-        for channel in 0..3 {
-            self.camera_uniform.sky_color_top[channel] *= weather_brightness;
-            self.camera_uniform.sky_color_horizon[channel] *= weather_brightness;
+        self.camera_uniform.camera_pos[3] = self.current_dimension as u8 as f32;
+        if self.current_dimension == crate::dimension::Dimension::Overworld {
+            let weather_brightness = self.weather.sky_brightness();
+            for channel in 0..3 {
+                self.camera_uniform.sky_color_top[channel] *= weather_brightness;
+                self.camera_uniform.sky_color_horizon[channel] *= weather_brightness;
+            }
+            self.camera_uniform.sun_dir[3] *= weather_brightness;
+        } else if self.current_dimension == crate::dimension::Dimension::Nether {
+            self.camera_uniform.sky_color_top = [0.16, 0.018, 0.012, 1.0];
+            self.camera_uniform.sky_color_horizon = [0.36, 0.055, 0.025, 1.0];
+            self.camera_uniform.sun_dir[3] = 0.55;
+        } else {
+            self.camera_uniform.sky_color_top = [0.003, 0.002, 0.009, 1.0];
+            self.camera_uniform.sky_color_horizon = [0.025, 0.006, 0.04, 1.0];
+            self.camera_uniform.sun_dir[3] = 0.35;
         }
-        self.camera_uniform.sun_dir[3] *= weather_brightness;
         if self.potion_effects.has_night_vision() {
             self.camera_uniform.sun_dir[3] = 1.0;
         }
@@ -3055,9 +3421,19 @@ impl State {
                 projectile.health = -1.0;
             }
         }
-        self.entity_manager
-            .entities
-            .retain(|entity| entity.health >= 0.0);
+        self.entity_manager.entities.retain(|entity| {
+            entity.health >= 0.0
+                || matches!(
+                    entity.entity_type,
+                    crate::entity::EntityType::Blaze
+                        | crate::entity::EntityType::Piglin
+                        | crate::entity::EntityType::Husk
+                        | crate::entity::EntityType::Shulker
+                        | crate::entity::EntityType::EnderDragon
+                        | crate::entity::EntityType::Wither
+                        | crate::entity::EntityType::EndCrystal
+                )
+        });
     }
 
     pub fn take_damage(&mut self, amount: f32, source: DamageSource) {
@@ -3094,6 +3470,9 @@ impl State {
     }
 
     pub fn respawn(&mut self) {
+        if self.current_dimension != crate::dimension::Dimension::Overworld {
+            self.switch_dimension(crate::dimension::Dimension::Overworld);
+        }
         // Reset player physics position to spawn point: (8.0, 80.0, 8.0)
         self.player_physics.position = glam::Vec3::new(8.0, 80.0, 8.0);
         self.player_physics.velocity = glam::Vec3::ZERO;
@@ -3511,6 +3890,65 @@ impl State {
                     hit.block_pos.z as i32,
                 );
                 let held = self.inventory.hotbar[self.inventory.selected];
+                let clicked_pos = (
+                    hit.block_pos.x as i32,
+                    hit.block_pos.y as i32,
+                    hit.block_pos.z as i32,
+                );
+                let held_item = held.map(|stack| stack.item).unwrap_or(Item::Air);
+                if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
+                    if let Some(interior) =
+                        crate::dimension::detect_nether_frame(clicked_pos, |x, y, z| {
+                            self.chunk_manager.get_block(x, y, z)
+                        })
+                    {
+                        let changes: Vec<_> = interior
+                            .into_iter()
+                            .map(|position| (position, BlockType::NetherPortal))
+                            .collect();
+                        self.apply_block_changes(&changes);
+                        self.inventory
+                            .use_selected_item(self.game_mode == GameMode::Creative);
+                        return;
+                    }
+                }
+                if clicked_block == BlockType::EndPortalFrame && held_item == Item::EyeOfEnder {
+                    self.apply_block_changes(&[(clicked_pos, BlockType::EndPortalFrameFilled)]);
+                    self.inventory
+                        .use_selected_item(self.game_mode == GameMode::Creative);
+                    if let Some(interior) =
+                        crate::dimension::detect_completed_end_portal(clicked_pos, |x, y, z| {
+                            self.chunk_manager.get_block(x, y, z)
+                        })
+                    {
+                        let changes: Vec<_> = interior
+                            .into_iter()
+                            .map(|position| (position, BlockType::EndPortal))
+                            .collect();
+                        self.apply_block_changes(&changes);
+                    }
+                    return;
+                }
+                if matches!(clicked_block, BlockType::Obsidian | BlockType::Bedrock)
+                    && held_item == Item::EndCrystal
+                {
+                    self.entity_manager.spawn(
+                        crate::entity::EntityType::EndCrystal,
+                        Vec3::new(
+                            clicked_pos.0 as f32 + 0.5,
+                            clicked_pos.1 as f32 + 1.0,
+                            clicked_pos.2 as f32 + 0.5,
+                        ),
+                    );
+                    self.inventory
+                        .use_selected_item(self.game_mode == GameMode::Creative);
+                    return;
+                }
+                if clicked_block == BlockType::EndCityChest {
+                    self.spawn_dropped_item(Item::Elytra, hit.block_pos + Vec3::Y);
+                    self.apply_block_changes(&[(clicked_pos, BlockType::Air)]);
+                    return;
+                }
                 if clicked_block == BlockType::Water
                     && held.is_some_and(|stack| stack.item == Item::GlassBottle)
                 {
@@ -3573,6 +4011,9 @@ impl State {
             if is_left_click {
                 let old_block = self.chunk_manager.get_block(wx, wy, wz);
                 if old_block != BlockType::Air {
+                    if old_block.properties().hardness < 0.0 {
+                        return;
+                    }
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
                     self.redstone.on_block_changed(
                         &self.chunk_manager,
@@ -3670,6 +4111,30 @@ impl State {
                         placed_block.properties().light_emission,
                         &mut dirty_chunks,
                     );
+
+                    if matches!(
+                        placed_block,
+                        BlockType::SoulSand | BlockType::WitherSkeletonSkull
+                    ) {
+                        if let Some(pattern) =
+                            crate::boss::detect_wither_pattern((wx, wy, wz), |position| {
+                                self.chunk_manager
+                                    .get_block(position.0, position.1, position.2)
+                            })
+                        {
+                            let spawn_pos = pattern.iter().fold(Vec3::ZERO, |sum, &(x, y, z)| {
+                                sum + Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)
+                            }) / pattern.len() as f32;
+                            let removals: Vec<_> = pattern
+                                .into_iter()
+                                .map(|position| (position, BlockType::Air))
+                                .collect();
+                            self.apply_block_changes(&removals);
+                            self.entity_manager
+                                .spawn(crate::entity::EntityType::Wither, spawn_pos);
+                            return;
+                        }
+                    }
                 } else {
                     return; // No block selected to place
                 }
@@ -6096,6 +6561,35 @@ impl State {
                         );
                     }
                 }
+            }
+
+            if let Some(boss) = crate::boss::active_boss_hud(&self.entity_manager) {
+                let x0 = -0.42;
+                let x1 = 0.42;
+                let y0 = 0.82;
+                let y1 = 0.875;
+                add_ui_quad(&mut ui_vertices, x0, x1, y0, y1, [0.05, 0.01, 0.07, 0.92]);
+                add_ui_quad(
+                    &mut ui_vertices,
+                    x0 + 0.008,
+                    x0 + 0.008 + (x1 - x0 - 0.016) * boss.progress,
+                    y0 + 0.009,
+                    y1 - 0.009,
+                    [0.55, 0.05, 0.65, 1.0],
+                );
+                let char_w = 0.010;
+                let spacing = 0.003;
+                let width = boss.title.len() as f32 * (char_w + spacing) - spacing;
+                add_string_lines(
+                    boss.title,
+                    -width / 2.0,
+                    0.895,
+                    char_w,
+                    0.02,
+                    spacing,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
             }
 
             // Write Buffers

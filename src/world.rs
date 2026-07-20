@@ -329,6 +329,19 @@ pub enum BlockType {
     NoteBlock = 73,
     Fire = 74,
     SnowLayer = 75,
+    Netherrack = 76,
+    SoulSand = 77,
+    Glowstone = 78,
+    NetherPortal = 79,
+    EndStone = 80,
+    EndPortalFrame = 81,
+    EndPortalFrameFilled = 82,
+    EndPortal = 83,
+    Purpur = 84,
+    DragonEgg = 85,
+    WitherSkeletonSkull = 86,
+    NetherBrick = 87,
+    EndCityChest = 88,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -349,7 +362,7 @@ pub struct BlockProperties {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= 75 {
+        if val <= BlockType::EndCityChest as u8 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -358,7 +371,12 @@ impl BlockType {
 
     pub fn sound_material(self) -> Option<crate::audio::SoundMaterial> {
         match self {
-            BlockType::Air | BlockType::Water | BlockType::Lava | BlockType::Fire => None,
+            BlockType::Air
+            | BlockType::Water
+            | BlockType::Lava
+            | BlockType::Fire
+            | BlockType::NetherPortal
+            | BlockType::EndPortal => None,
             BlockType::Grass
             | BlockType::OakLeaves
             | BlockType::BirchLeaves
@@ -380,7 +398,9 @@ impl BlockType {
             | BlockType::BrewingStand
             | BlockType::Pumpkin
             | BlockType::Melon => Some(crate::audio::SoundMaterial::Wood),
-            BlockType::Sand | BlockType::Clay => Some(crate::audio::SoundMaterial::Sand),
+            BlockType::Sand | BlockType::Clay | BlockType::SoulSand => {
+                Some(crate::audio::SoundMaterial::Sand)
+            }
             BlockType::Gravel | BlockType::Cactus => Some(crate::audio::SoundMaterial::Gravel),
             BlockType::Snow | BlockType::SnowLayer => Some(crate::audio::SoundMaterial::Snow),
             BlockType::Ice => Some(crate::audio::SoundMaterial::Ice),
@@ -906,6 +926,106 @@ impl BlockType {
                 is_passable: true,
                 light_emission: 0,
             },
+            BlockType::Netherrack => BlockProperties {
+                name: "Netherrack",
+                hardness: 0.4,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::SoulSand => BlockProperties {
+                name: "Soul Sand",
+                hardness: 0.5,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::Glowstone => BlockProperties {
+                name: "Glowstone",
+                hardness: 0.3,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 15,
+            },
+            BlockType::NetherPortal => BlockProperties {
+                name: "Nether Portal",
+                hardness: -1.0,
+                render_type: RenderType::Translucent,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 11,
+            },
+            BlockType::EndStone => BlockProperties {
+                name: "End Stone",
+                hardness: 3.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::EndPortalFrame | BlockType::EndPortalFrameFilled => BlockProperties {
+                name: "End Portal Frame",
+                hardness: -1.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: if self == BlockType::EndPortalFrameFilled {
+                    2
+                } else {
+                    0
+                },
+            },
+            BlockType::EndPortal => BlockProperties {
+                name: "End Portal",
+                hardness: -1.0,
+                render_type: RenderType::Translucent,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 15,
+            },
+            BlockType::Purpur => BlockProperties {
+                name: "Purpur Block",
+                hardness: 1.5,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::DragonEgg => BlockProperties {
+                name: "Dragon Egg",
+                hardness: 3.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 1,
+            },
+            BlockType::WitherSkeletonSkull => BlockProperties {
+                name: "Wither Skeleton Skull",
+                hardness: 1.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::NetherBrick => BlockProperties {
+                name: "Nether Bricks",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::EndCityChest => BlockProperties {
+                name: "End City Chest",
+                hardness: 2.5,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 3,
+            },
         }
     }
 
@@ -1054,6 +1174,19 @@ impl BlockType {
             BlockType::NoteBlock => (13, 14),
             BlockType::Fire => (15, 12),
             BlockType::SnowLayer => (3, 1),
+            BlockType::Netherrack => (10, 15),
+            BlockType::SoulSand => (11, 15),
+            BlockType::Glowstone => (12, 15),
+            BlockType::NetherPortal => (13, 15),
+            BlockType::EndStone => (14, 15),
+            BlockType::EndPortalFrame => (15, 15),
+            BlockType::EndPortalFrameFilled => (6, 4),
+            BlockType::EndPortal => (14, 10),
+            BlockType::Purpur => (15, 10),
+            BlockType::DragonEgg => (14, 11),
+            BlockType::WitherSkeletonSkull => (15, 11),
+            BlockType::NetherBrick => (9, 10),
+            BlockType::EndCityChest => (10, 10),
         }
     }
 }
@@ -1681,9 +1814,7 @@ impl Chunk {
                     }
                     sky_light[x][y][z] = direct_sky;
 
-                    if block == BlockType::Torch {
-                        block_light[x][y][z] = 14;
-                    }
+                    block_light[x][y][z] = block.properties().light_emission;
                 }
             }
         }
@@ -1929,7 +2060,16 @@ impl BlockType {
             | BlockType::Furnace
             | BlockType::EnchantingTable
             | BlockType::BrewingStand
-            | BlockType::Anvil => ToolType::Pickaxe,
+            | BlockType::Anvil
+            | BlockType::Netherrack
+            | BlockType::Glowstone
+            | BlockType::EndStone
+            | BlockType::EndPortalFrame
+            | BlockType::EndPortalFrameFilled
+            | BlockType::Purpur
+            | BlockType::DragonEgg
+            | BlockType::NetherBrick
+            | BlockType::EndCityChest => ToolType::Pickaxe,
             BlockType::OakLog
             | BlockType::OakPlanks
             | BlockType::BirchLog
@@ -1953,7 +2093,14 @@ impl BlockType {
             | BlockType::Furnace
             | BlockType::StoneBrick
             | BlockType::Sandstone => Some(ToolMaterial::Wood), // Stone tier tools or above
-            BlockType::BrewingStand | BlockType::Anvil => Some(ToolMaterial::Stone),
+            BlockType::BrewingStand
+            | BlockType::Anvil
+            | BlockType::Netherrack
+            | BlockType::Glowstone
+            | BlockType::EndStone
+            | BlockType::Purpur
+            | BlockType::NetherBrick
+            | BlockType::EndCityChest => Some(ToolMaterial::Stone),
             BlockType::EnchantingTable => Some(ToolMaterial::Diamond),
             BlockType::IronOre => Some(ToolMaterial::Stone),
             BlockType::GoldOre | BlockType::RedstoneOre | BlockType::DiamondOre => {
@@ -2159,6 +2306,10 @@ mod tests {
         assert!(BlockType::Fire.properties().is_passable);
         assert_eq!(BlockType::from_u8(74), BlockType::Fire);
         assert_eq!(BlockType::from_u8(75), BlockType::SnowLayer);
+        for id in 0..=BlockType::EndCityChest as u8 {
+            assert_eq!(BlockType::from_u8(id) as u8, id);
+        }
+        assert_eq!(BlockType::from_u8(255), BlockType::Air);
     }
 
     #[test]

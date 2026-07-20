@@ -251,7 +251,10 @@ impl ChunkSaveData {
 }
 
 pub enum SaveCommand {
-    SaveChunk(ChunkSaveData),
+    SaveChunk {
+        dimension: crate::dimension::Dimension,
+        data: ChunkSaveData,
+    },
     SaveLevelAndPlayer(LevelData, PlayerData),
 }
 
@@ -263,7 +266,7 @@ pub struct RegionData {
 
 pub struct SaveManager {
     pub world_dir: PathBuf,
-    region_cache: HashMap<(i32, i32), RegionData>,
+    region_cache: HashMap<(crate::dimension::Dimension, i32, i32), RegionData>,
 }
 
 pub fn compress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
@@ -286,29 +289,59 @@ impl SaveManager {
         if !regions_dir.exists() {
             fs::create_dir_all(&regions_dir).unwrap();
         }
+        for name in ["nether", "end"] {
+            let path = world_dir.join("dimensions").join(name).join("regions");
+            if !path.exists() {
+                fs::create_dir_all(path).unwrap();
+            }
+        }
         Self {
             world_dir,
             region_cache: HashMap::new(),
         }
     }
 
+    fn region_dir(&self, dimension: crate::dimension::Dimension) -> PathBuf {
+        match dimension {
+            crate::dimension::Dimension::Overworld => self.world_dir.join("regions"),
+            crate::dimension::Dimension::Nether => self
+                .world_dir
+                .join("dimensions")
+                .join("nether")
+                .join("regions"),
+            crate::dimension::Dimension::End => self
+                .world_dir
+                .join("dimensions")
+                .join("end")
+                .join("regions"),
+        }
+    }
+
     pub fn load_chunk(&mut self, cx: i32, cz: i32) -> Option<ChunkSaveData> {
+        self.load_chunk_in(crate::dimension::Dimension::Overworld, cx, cz)
+    }
+
+    pub fn load_chunk_in(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+    ) -> Option<ChunkSaveData> {
         let rx = cx.div_euclid(32);
         let rz = cz.div_euclid(32);
         let lx = cx.rem_euclid(32) as u8;
         let lz = cz.rem_euclid(32) as u8;
+        let region_file = self
+            .region_dir(dimension)
+            .join(format!("r.{}.{}.bin", rx, rz));
 
-        if !self.region_cache.contains_key(&(rx, rz)) {
-            let region_file = self
-                .world_dir
-                .join("regions")
-                .join(format!("r.{}.{}.bin", rx, rz));
+        if !self.region_cache.contains_key(&(dimension, rx, rz)) {
             if region_file.exists() {
                 if let Ok(mut file) = File::open(&region_file) {
                     let mut bytes = Vec::new();
                     if file.read_to_end(&mut bytes).is_ok() {
                         if let Ok(region_data) = bincode::deserialize::<RegionData>(&bytes) {
-                            self.region_cache.insert((rx, rz), region_data);
+                            self.region_cache.insert((dimension, rx, rz), region_data);
                         }
                     }
                 }
@@ -317,7 +350,7 @@ impl SaveManager {
 
         let region = self
             .region_cache
-            .entry((rx, rz))
+            .entry((dimension, rx, rz))
             .or_insert_with(|| RegionData {
                 chunks: HashMap::new(),
             });
@@ -330,22 +363,31 @@ impl SaveManager {
     }
 
     pub fn save_chunk(&mut self, cx: i32, cz: i32, data: ChunkSaveData) -> io::Result<()> {
+        self.save_chunk_in(crate::dimension::Dimension::Overworld, cx, cz, data)
+    }
+
+    pub fn save_chunk_in(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+        data: ChunkSaveData,
+    ) -> io::Result<()> {
         let rx = cx.div_euclid(32);
         let rz = cz.div_euclid(32);
         let lx = cx.rem_euclid(32) as u8;
         let lz = cz.rem_euclid(32) as u8;
+        let region_file = self
+            .region_dir(dimension)
+            .join(format!("r.{}.{}.bin", rx, rz));
 
-        if !self.region_cache.contains_key(&(rx, rz)) {
-            let region_file = self
-                .world_dir
-                .join("regions")
-                .join(format!("r.{}.{}.bin", rx, rz));
+        if !self.region_cache.contains_key(&(dimension, rx, rz)) {
             if region_file.exists() {
                 if let Ok(mut file) = File::open(&region_file) {
                     let mut bytes = Vec::new();
                     if file.read_to_end(&mut bytes).is_ok() {
                         if let Ok(region_data) = bincode::deserialize::<RegionData>(&bytes) {
-                            self.region_cache.insert((rx, rz), region_data);
+                            self.region_cache.insert((dimension, rx, rz), region_data);
                         }
                     }
                 }
@@ -354,7 +396,7 @@ impl SaveManager {
 
         let region = self
             .region_cache
-            .entry((rx, rz))
+            .entry((dimension, rx, rz))
             .or_insert_with(|| RegionData {
                 chunks: HashMap::new(),
             });
@@ -364,16 +406,27 @@ impl SaveManager {
 
         region.chunks.insert((lx, lz), serialized_chunk);
 
-        let region_file = self
-            .world_dir
-            .join("regions")
-            .join(format!("r.{}.{}.bin", rx, rz));
         let serialized_region =
             bincode::serialize(region).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let mut file = File::create(&region_file)?;
         file.write_all(&serialized_region)?;
         Ok(())
+    }
+
+    pub fn save_current_dimension(&self, dimension: crate::dimension::Dimension) -> io::Result<()> {
+        fs::write(self.world_dir.join("dimension.dat"), [dimension as u8])
+    }
+
+    pub fn load_current_dimension(&self) -> crate::dimension::Dimension {
+        match fs::read(self.world_dir.join("dimension.dat"))
+            .ok()
+            .and_then(|bytes| bytes.first().copied())
+        {
+            Some(1) => crate::dimension::Dimension::Nether,
+            Some(2) => crate::dimension::Dimension::End,
+            _ => crate::dimension::Dimension::Overworld,
+        }
     }
 
     pub fn save_player_and_level(&self, level: &LevelData, player: &PlayerData) -> io::Result<()> {
@@ -615,6 +668,77 @@ mod tests {
 
         assert_eq!(restored.blocks[8][100][8], BlockType::Brick);
 
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn dimension_chunk_namespaces_are_independent() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_dimension_save_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let mut manager = SaveManager::new(&world_dir);
+        let cases = [
+            (crate::dimension::Dimension::Overworld, BlockType::Brick),
+            (crate::dimension::Dimension::Nether, BlockType::Netherrack),
+            (crate::dimension::Dimension::End, BlockType::EndStone),
+        ];
+
+        for (dimension, marker) in cases {
+            let mut chunk = Chunk::new(4, -3);
+            chunk.blocks[7][90][11] = marker;
+            manager
+                .save_chunk_in(dimension, 4, -3, ChunkSaveData::from_chunk(&chunk))
+                .unwrap();
+        }
+
+        drop(manager);
+        let mut manager = SaveManager::new(&world_dir);
+        for (dimension, marker) in cases {
+            let saved = manager
+                .load_chunk_in(dimension, 4, -3)
+                .expect("dimension chunk should load");
+            let mut restored = Chunk::new(4, -3);
+            saved.restore_to_chunk(&mut restored);
+            assert_eq!(restored.blocks[7][90][11], marker);
+        }
+
+        assert!(world_dir.join("regions/r.0.-1.bin").exists());
+        assert!(world_dir
+            .join("dimensions/nether/regions/r.0.-1.bin")
+            .exists());
+        assert!(world_dir.join("dimensions/end/regions/r.0.-1.bin").exists());
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn current_dimension_sidecar_roundtrips_and_defaults_to_overworld() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_dimension_state_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let manager = SaveManager::new(&world_dir);
+        assert_eq!(
+            manager.load_current_dimension(),
+            crate::dimension::Dimension::Overworld
+        );
+        manager
+            .save_current_dimension(crate::dimension::Dimension::End)
+            .unwrap();
+        assert_eq!(
+            manager.load_current_dimension(),
+            crate::dimension::Dimension::End
+        );
         fs::remove_dir_all(world_dir).unwrap();
     }
 }

@@ -768,6 +768,490 @@ pub fn render_mobs(
                     light_val,
                 );
             }
+            EntityType::Piglin | EntityType::Husk => {
+                let is_piglin = entity.entity_type == EntityType::Piglin;
+                let (head_cols, body_col) = if is_piglin {
+                    ([12, 13, 13, 13, 13, 13], 13)
+                } else {
+                    ([14, 15, 15, 15, 15, 15], 15)
+                };
+
+                // Both mobs use the familiar humanoid silhouette. Husks hold
+                // their arms forward, while piglins walk with alternating arms.
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.5, 0.5, 0.5),
+                    Vec3::new(0.0, 0.25, 0.0),
+                    entity.position + Vec3::new(0.0, 1.45, 0.0),
+                    entity.yaw,
+                    entity.pitch,
+                    head_cols,
+                    15,
+                    light_val,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.5, 0.7, 0.28),
+                    Vec3::new(0.0, 0.35, 0.0),
+                    entity.position + Vec3::new(0.0, 0.75, 0.0),
+                    entity.yaw,
+                    0.0,
+                    [body_col; 6],
+                    15,
+                    light_val,
+                );
+
+                let (left_arm_pitch, right_arm_pitch) = if is_piglin {
+                    (-swing, swing)
+                } else {
+                    let raised = -std::f32::consts::FRAC_PI_2;
+                    (raised, raised)
+                };
+                for (x, pitch) in [(-0.35, left_arm_pitch), (0.35, right_arm_pitch)] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.2, 0.75, 0.2),
+                        Vec3::new(0.0, -0.325, 0.0),
+                        entity.position + Vec3::new(x, 1.4, 0.0),
+                        entity.yaw,
+                        pitch,
+                        [body_col; 6],
+                        15,
+                        light_val,
+                    );
+                }
+                for (x, pitch) in [(-0.13, swing), (0.13, -swing)] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.22, 0.75, 0.22),
+                        Vec3::new(0.0, -0.375, 0.0),
+                        entity.position + Vec3::new(x, 0.75, 0.0),
+                        entity.yaw,
+                        pitch,
+                        [body_col; 6],
+                        15,
+                        light_val,
+                    );
+                }
+
+                if is_piglin {
+                    // Wide ears and a protruding snout keep the piglin readable
+                    // even with the deliberately compact atlas treatment.
+                    for x in [-0.34, 0.34] {
+                        add_cuboid(
+                            vertices,
+                            indices,
+                            Vec3::new(0.18, 0.24, 0.08),
+                            Vec3::ZERO,
+                            entity.position + Vec3::new(x, 1.72, 0.0),
+                            entity.yaw,
+                            0.0,
+                            [12; 6],
+                            15,
+                            light_val,
+                        );
+                    }
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.2, 0.16, 0.12),
+                        Vec3::new(0.0, 0.0, 0.29),
+                        entity.position + Vec3::new(0.0, 1.68, 0.0),
+                        entity.yaw,
+                        entity.pitch,
+                        [12; 6],
+                        15,
+                        light_val,
+                    );
+                }
+            }
+            EntityType::Blaze => {
+                let hover = (time * 2.2).sin() * 0.08;
+                let blaze_light = light_val.max(255.0);
+
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.5, 0.5, 0.5),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 1.5 + hover, 0.0),
+                    entity.yaw,
+                    entity.pitch,
+                    [10, 11, 11, 11, 11, 11],
+                    15,
+                    blaze_light,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.34, 0.7, 0.34),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 0.92 + hover, 0.0),
+                    entity.yaw,
+                    0.0,
+                    [11; 6],
+                    15,
+                    blaze_light,
+                );
+
+                // Two counter-rotating rings of rods surround the hot core.
+                for ring in 0..2 {
+                    for rod in 0..4 {
+                        let direction = if ring == 0 { 1.0 } else { -1.0 };
+                        let angle = direction * time * 1.8
+                            + rod as f32 * std::f32::consts::FRAC_PI_2
+                            + ring as f32 * std::f32::consts::FRAC_PI_4;
+                        let radius = if ring == 0 { 0.62 } else { 0.48 };
+                        let y = if ring == 0 {
+                            1.18 + (angle * 2.0).sin() * 0.1
+                        } else {
+                            0.55 + (angle * 2.0).cos() * 0.1
+                        };
+                        add_cuboid(
+                            vertices,
+                            indices,
+                            Vec3::new(0.12, 0.62, 0.12),
+                            Vec3::ZERO,
+                            entity.position
+                                + Vec3::new(angle.cos() * radius, y + hover, angle.sin() * radius),
+                            angle,
+                            0.0,
+                            [10; 6],
+                            15,
+                            blaze_light,
+                        );
+                    }
+                }
+            }
+            EntityType::Shulker => {
+                let lid_gap = 0.08 + (time * 1.3).sin().abs() * 0.1;
+
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.95, 0.18, 0.95),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 0.09, 0.0),
+                    entity.yaw,
+                    0.0,
+                    [9; 6],
+                    10,
+                    light_val,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.88, 0.36, 0.88),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 0.35, 0.0),
+                    entity.yaw,
+                    0.0,
+                    [10; 6],
+                    10,
+                    light_val,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::splat(0.34),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 0.63, 0.0),
+                    entity.yaw,
+                    entity.pitch,
+                    [9; 6],
+                    10,
+                    light_val,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.9, 0.36, 0.9),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 0.82 + lid_gap, 0.0),
+                    entity.yaw,
+                    0.0,
+                    [10; 6],
+                    10,
+                    light_val,
+                );
+            }
+            EntityType::EnderDragon => {
+                let sin_yaw = entity.yaw.sin();
+                let cos_yaw = entity.yaw.cos();
+                let to_world = |local: Vec3| {
+                    entity.position
+                        + Vec3::new(
+                            local.x * cos_yaw + local.z * sin_yaw,
+                            local.y,
+                            -local.x * sin_yaw + local.z * cos_yaw,
+                        )
+                };
+                let flap = (time * 3.0).sin() * 0.22;
+
+                // Body, neck, head and jaw.
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(2.0, 1.65, 3.2),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 2.05, -0.35)),
+                    entity.yaw,
+                    0.0,
+                    [12; 6],
+                    10,
+                    light_val,
+                );
+                for (center, size) in [
+                    (Vec3::new(0.0, 2.3, 1.45), Vec3::new(1.25, 1.1, 1.15)),
+                    (Vec3::new(0.0, 2.48, 2.3), Vec3::new(1.05, 0.95, 1.0)),
+                ] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        size,
+                        Vec3::ZERO,
+                        to_world(center),
+                        entity.yaw,
+                        -0.12,
+                        [11; 6],
+                        10,
+                        light_val,
+                    );
+                }
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(1.45, 0.9, 1.35),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 2.62, 3.05)),
+                    entity.yaw,
+                    entity.pitch,
+                    [11, 12, 12, 12, 12, 12],
+                    10,
+                    light_val,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.95, 0.25, 0.85),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 2.22, 3.42)),
+                    entity.yaw,
+                    entity.pitch,
+                    [13; 6],
+                    10,
+                    light_val,
+                );
+                for x in [-0.48, 0.48] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.2, 0.38, 0.62),
+                        Vec3::ZERO,
+                        to_world(Vec3::new(x, 3.12, 2.75)),
+                        entity.yaw,
+                        0.35,
+                        [13; 6],
+                        10,
+                        light_val,
+                    );
+                }
+
+                // Four thin wing sections retain the broad silhouette without
+                // pushing a dragon beyond 800 generated vertices.
+                for side in [-1.0_f32, 1.0] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(2.8, 0.14, 1.35),
+                        Vec3::ZERO,
+                        to_world(Vec3::new(side * 2.05, 2.55 + flap, -0.2)),
+                        entity.yaw,
+                        -flap * side,
+                        [13; 6],
+                        10,
+                        light_val,
+                    );
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(2.2, 0.1, 0.95),
+                        Vec3::ZERO,
+                        to_world(Vec3::new(side * 4.25, 2.72 + flap * 1.6, -0.55)),
+                        entity.yaw,
+                        -flap * side,
+                        [13; 6],
+                        10,
+                        light_val,
+                    );
+                }
+
+                // Tapered, gently swaying tail.
+                for segment in 0..5 {
+                    let i = segment as f32;
+                    let curve = (time * 2.0 + i * 0.7).sin() * 0.13;
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.75 - i * 0.1, 0.65 - i * 0.07, 1.25 - i * 0.1),
+                        Vec3::ZERO,
+                        to_world(Vec3::new(
+                            curve * i * 0.55,
+                            2.0 - i * 0.12,
+                            -2.35 - i * 0.95,
+                        )),
+                        entity.yaw - curve,
+                        0.08 * i,
+                        [12; 6],
+                        10,
+                        light_val,
+                    );
+                }
+
+                for (x, z) in [(-0.68, 0.65), (0.68, 0.65), (-0.68, -0.8), (0.68, -0.8)] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.42, 1.0, 0.42),
+                        Vec3::ZERO,
+                        to_world(Vec3::new(x, 0.85, z)),
+                        entity.yaw,
+                        0.1,
+                        [12; 6],
+                        10,
+                        light_val,
+                    );
+                }
+            }
+            EntityType::Wither => {
+                let hover = (time * 1.8).sin() * 0.1;
+                let wither_light = light_val.max(192.0);
+
+                // Central spine and the signature three-headed shoulder bar.
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(2.25, 0.36, 0.4),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 2.25 + hover, 0.0),
+                    entity.yaw,
+                    0.0,
+                    [15; 6],
+                    10,
+                    wither_light,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.38, 1.5, 0.4),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 1.4 + hover, 0.0),
+                    entity.yaw,
+                    0.0,
+                    [15; 6],
+                    10,
+                    wither_light,
+                );
+                for (x, y, scale) in [(-0.92, 2.52, 0.82), (0.0, 2.7, 1.0), (0.92, 2.52, 0.82)] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.72, 0.62, 0.62) * scale,
+                        Vec3::ZERO,
+                        entity.position + Vec3::new(x, y + hover, 0.12),
+                        entity.yaw,
+                        entity.pitch,
+                        [14, 15, 15, 15, 15, 15],
+                        10,
+                        wither_light,
+                    );
+                }
+                for (y, width) in [(1.72, 1.45), (1.28, 1.05)] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(width, 0.2, 0.28),
+                        Vec3::ZERO,
+                        entity.position + Vec3::new(0.0, y + hover, 0.0),
+                        entity.yaw,
+                        0.0,
+                        [15; 6],
+                        10,
+                        wither_light,
+                    );
+                }
+            }
+            EntityType::EndCrystal => {
+                let crystal_light = light_val.max(255.0);
+                let spin = time * 1.7;
+
+                for (size, y) in [(1.25, 0.12), (0.95, 0.25), (0.65, 0.38)] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(size, 0.16, size),
+                        Vec3::ZERO,
+                        entity.position + Vec3::new(0.0, y, 0.0),
+                        entity.yaw,
+                        0.0,
+                        [3; 6],
+                        4,
+                        light_val,
+                    );
+                }
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.12, 0.85, 0.12),
+                    Vec3::ZERO,
+                    entity.position + Vec3::new(0.0, 0.85, 0.0),
+                    spin,
+                    0.0,
+                    [3; 6],
+                    4,
+                    crystal_light,
+                );
+                for (size, yaw, pitch) in [(0.72, spin, 0.65), (0.46, -spin * 1.4, -0.45)] {
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::splat(size),
+                        Vec3::ZERO,
+                        entity.position + Vec3::new(0.0, 1.35, 0.0),
+                        yaw,
+                        pitch,
+                        [4; 6],
+                        4,
+                        crystal_light,
+                    );
+                }
+            }
+            EntityType::WitherSkull | EntityType::DragonBreath => {
+                let is_skull = entity.entity_type == EntityType::WitherSkull;
+                let pulse = if is_skull {
+                    1.0
+                } else {
+                    0.85 + (time * 10.0).sin().abs() * 0.25
+                };
+                let col = if is_skull { 5 } else { 6 };
+                let size = if is_skull { 0.3 } else { 0.22 };
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::splat(size * pulse),
+                    Vec3::ZERO,
+                    entity.position,
+                    entity.yaw,
+                    entity.pitch,
+                    [col; 6],
+                    4,
+                    light_val.max(255.0),
+                );
+            }
             EntityType::HeartParticle => {
                 // Heart Particle billboard rendering
                 // Reuses Row 8, Col 0 Heart icon
