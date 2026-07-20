@@ -57,6 +57,7 @@ pub fn update_passive_mobs(
             || entity_type == EntityType::Creeper
             || entity_type == EntityType::HeartParticle
             || entity_type == EntityType::DroppedItem
+            || entity_type == EntityType::SplashPotion
         {
             continue;
         }

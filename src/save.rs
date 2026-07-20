@@ -20,6 +20,9 @@ pub struct ItemStackData {
     pub item: Item,
     pub count: u32,
     pub durability: u32,
+    pub enchantments: crate::enchantment::EnchantmentSet,
+    pub potion: Option<crate::brewing::PotionData>,
+    pub custom_name: crate::enchantment::ItemName,
 }
 
 impl ItemStackData {
@@ -28,6 +31,9 @@ impl ItemStackData {
             item: self.item,
             count: self.count,
             durability: self.durability,
+            enchantments: self.enchantments,
+            potion: self.potion,
+            custom_name: self.custom_name,
         }
     }
 }
@@ -38,6 +44,9 @@ impl From<&ItemStack> for ItemStackData {
             item: stack.item,
             count: stack.count,
             durability: stack.durability,
+            enchantments: stack.enchantments,
+            potion: stack.potion,
+            custom_name: stack.custom_name,
         }
     }
 }
@@ -107,6 +116,8 @@ pub struct PlayerData {
     pub saturation: f32,
     pub exhaustion: f32,
     pub oxygen: f32,
+    pub experience: u32,
+    pub experience_level: u32,
     pub game_mode: GameMode,
     pub inventory: InventoryData,
 }
@@ -131,6 +142,8 @@ impl PlayerData {
             saturation: state.saturation,
             exhaustion: state.exhaustion,
             oxygen: state.oxygen,
+            experience: state.experience,
+            experience_level: state.experience_level,
             game_mode,
             inventory: InventoryData::from(inventory),
         }
@@ -394,10 +407,98 @@ impl SaveManager {
         let mut pf = File::open(&player_file)?;
         let mut player_bytes = Vec::new();
         pf.read_to_end(&mut player_bytes)?;
-        let player = bincode::deserialize::<PlayerData>(&player_bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let player = match bincode::deserialize::<PlayerData>(&player_bytes) {
+            Ok(player) => player,
+            Err(current_error) => {
+                // Task 21 extended stack/player metadata. Keep worlds written by
+                // the pre-enchanting schema loadable by upgrading in memory.
+                bincode::deserialize::<LegacyPlayerData>(&player_bytes)
+                    .map(PlayerData::from)
+                    .map_err(|_| io::Error::new(io::ErrorKind::Other, current_error))?
+            }
+        };
 
         Ok((level, player))
+    }
+}
+
+#[derive(Deserialize)]
+struct LegacyItemStackData {
+    item: Item,
+    count: u32,
+    durability: u32,
+}
+
+#[derive(Deserialize)]
+struct LegacyInventoryData {
+    hotbar: Vec<Option<LegacyItemStackData>>,
+    main: Vec<Option<LegacyItemStackData>>,
+    armor: Vec<Option<LegacyItemStackData>>,
+    selected: usize,
+}
+
+#[derive(Deserialize)]
+struct LegacyPlayerData {
+    position: [f32; 3],
+    velocity: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    health: f32,
+    hunger: f32,
+    saturation: f32,
+    exhaustion: f32,
+    oxygen: f32,
+    game_mode: GameMode,
+    inventory: LegacyInventoryData,
+}
+
+impl From<LegacyItemStackData> for ItemStackData {
+    fn from(old: LegacyItemStackData) -> Self {
+        Self {
+            item: old.item,
+            count: old.count,
+            durability: old.durability,
+            enchantments: Default::default(),
+            potion: None,
+            custom_name: Default::default(),
+        }
+    }
+}
+
+impl From<LegacyInventoryData> for InventoryData {
+    fn from(old: LegacyInventoryData) -> Self {
+        let upgrade = |items: Vec<Option<LegacyItemStackData>>| {
+            items
+                .into_iter()
+                .map(|stack| stack.map(Into::into))
+                .collect()
+        };
+        Self {
+            hotbar: upgrade(old.hotbar),
+            main: upgrade(old.main),
+            armor: upgrade(old.armor),
+            selected: old.selected,
+        }
+    }
+}
+
+impl From<LegacyPlayerData> for PlayerData {
+    fn from(old: LegacyPlayerData) -> Self {
+        Self {
+            position: old.position,
+            velocity: old.velocity,
+            yaw: old.yaw,
+            pitch: old.pitch,
+            health: old.health,
+            hunger: old.hunger,
+            saturation: old.saturation,
+            exhaustion: old.exhaustion,
+            oxygen: old.oxygen,
+            experience: 0,
+            experience_level: 0,
+            game_mode: old.game_mode,
+            inventory: old.inventory.into(),
+        }
     }
 }
 
@@ -427,12 +528,17 @@ mod tests {
             saturation: 5.0,
             exhaustion: 0.0,
             oxygen: 300.0,
+            experience: 120,
+            experience_level: 12,
             game_mode: GameMode::Survival,
             inventory: InventoryData {
                 hotbar: vec![Some(ItemStackData {
                     item: Item::Stone,
                     count: 64,
                     durability: 0,
+                    enchantments: Default::default(),
+                    potion: None,
+                    custom_name: Default::default(),
                 })],
                 main: vec![None],
                 armor: vec![None],
@@ -460,6 +566,27 @@ mod tests {
             compressed_blocks.len(),
             original_blocks.len()
         );
+    }
+
+    #[test]
+    fn enchanted_potion_stack_metadata_roundtrips() {
+        let mut stack = ItemStack::new(Item::Potion, 1);
+        stack
+            .enchantments
+            .add_or_upgrade(crate::enchantment::Enchantment::Unbreaking(3));
+        stack.potion = Some(crate::brewing::PotionData {
+            kind: crate::brewing::PotionKind::Speed,
+            level: 2,
+            duration_seconds: 90,
+            splash: true,
+        });
+        stack.custom_name.set("Swift Brew");
+        let encoded = bincode::serialize(&ItemStackData::from(&stack)).unwrap();
+        let decoded: ItemStackData = bincode::deserialize(&encoded).unwrap();
+        let decoded = decoded.to_item_stack();
+        assert_eq!(decoded.enchantments, stack.enchantments);
+        assert_eq!(decoded.potion, stack.potion);
+        assert_eq!(decoded.custom_name.as_str(), "Swift Brew");
     }
 
     #[test]

@@ -144,6 +144,13 @@ pub struct KeyState {
     pub shift: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StationKind {
+    Enchanting,
+    Brewing,
+    Anvil,
+}
+
 pub struct State {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -221,6 +228,11 @@ pub struct State {
     debug_frame_samples: u32,
     debug_fps: f32,
     debug_frame_ms: f32,
+    pub active_station: Option<StationKind>,
+    pub enchanting: crate::enchantment::EnchantingState,
+    pub brewing: crate::brewing::BrewingStandState,
+    pub anvil: crate::enchantment::AnvilState,
+    pub potion_effects: crate::brewing::EffectManager,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +242,13 @@ pub enum SlotType {
     Armor(usize),
     CraftInput(usize),
     CraftOutput,
+    EnchantInput,
+    EnchantLapis,
+    BrewBottle(usize),
+    BrewIngredient,
+    AnvilLeft,
+    AnvilRight,
+    AnvilOutput,
 }
 
 impl State {
@@ -371,6 +390,8 @@ impl State {
             player_state.saturation = player.saturation;
             player_state.exhaustion = player.exhaustion;
             player_state.oxygen = player.oxygen;
+            player_state.experience = player.experience;
+            player_state.experience_level = player.experience_level;
             game_mode = player.game_mode;
             inventory = player.inventory.to_inventory();
         }
@@ -1077,6 +1098,11 @@ impl State {
             debug_frame_samples: 0,
             debug_fps: 0.0,
             debug_frame_ms: 0.0,
+            active_station: None,
+            enchanting: crate::enchantment::EnchantingState::default(),
+            brewing: crate::brewing::BrewingStandState::default(),
+            anvil: crate::enchantment::AnvilState::default(),
+            potion_effects: crate::brewing::EffectManager::default(),
         }
     }
 
@@ -1504,6 +1530,18 @@ impl State {
             return;
         }
 
+        self.brewing.update(dt);
+        let effect_health = self.potion_effects.update(dt);
+        if effect_health > 0.0 {
+            self.player_state.health =
+                (self.player_state.health + effect_health).min(self.player_state.max_health);
+        } else if effect_health < 0.0 && self.player_state.health > 1.0 {
+            self.take_damage(
+                (-effect_health).min(self.player_state.health - 1.0),
+                DamageSource::Mob,
+            );
+        }
+
         // Advance lightweight particle simulation every frame.
         self.particles.update(dt);
 
@@ -1575,7 +1613,7 @@ impl State {
         if self.keys.d {
             move_dir -= right;
         }
-        let mut movement = move_dir.normalize_or_zero();
+        let mut movement = move_dir.normalize_or_zero() * self.potion_effects.speed_multiplier();
         if self.keys.space {
             movement.y = 1.0;
         }
@@ -1765,7 +1803,7 @@ impl State {
         );
         let player_in_lava = block_at_feet == BlockType::Lava || block_at_eyes == BlockType::Lava;
 
-        if player_in_lava {
+        if player_in_lava && !self.potion_effects.has_fire_resistance() {
             self.lava_damage_timer += dt;
             if self.lava_damage_timer >= 0.5 {
                 self.lava_damage_timer = 0.0;
@@ -1907,7 +1945,24 @@ impl State {
 
         // Update player state timers & starvation
         let is_underwater = block_at_eyes == BlockType::Water;
-        if let Some((dmg, src)) = self.player_state.update(dt, is_underwater) {
+        let respiration_level: u8 = self
+            .inventory
+            .armor
+            .iter()
+            .flatten()
+            .map(|stack| {
+                stack
+                    .enchantments
+                    .level_of(crate::enchantment::Enchantment::Respiration(1))
+            })
+            .sum();
+        let water_breathing = self.potion_effects.has_water_breathing();
+        let oxygen_rate = 1.0 / (1.0 + respiration_level as f32);
+        if let Some((dmg, src)) = self.player_state.update_with_oxygen_rate(
+            dt,
+            is_underwater && !water_breathing,
+            oxygen_rate,
+        ) {
             self.take_damage(dmg, src);
         }
 
@@ -1923,6 +1978,7 @@ impl State {
         );
 
         // Update mobs
+        self.update_player_projectiles(dt);
         crate::mob::update_mobs(
             &mut self.entity_manager,
             &mut self.chunk_manager,
@@ -1934,6 +1990,8 @@ impl State {
             dt,
             &mut self.audio_manager,
             right,
+            self.potion_effects.has_invisibility(),
+            crate::enchantment::protection_multiplier(&self.inventory.armor, false),
         );
 
         // Update passive mobs
@@ -1973,6 +2031,9 @@ impl State {
             self.total_time,
             is_underwater,
         );
+        if self.potion_effects.has_night_vision() {
+            self.camera_uniform.sun_dir[3] = 1.0;
+        }
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
@@ -2153,9 +2214,8 @@ impl State {
             return f32::MAX; // Unbreakable (e.g. bedrock)
         }
 
-        let held_item = self.inventory.hotbar[self.inventory.selected]
-            .map(|s| s.item)
-            .unwrap_or(Item::Air);
+        let held_stack = self.inventory.hotbar[self.inventory.selected];
+        let held_item = held_stack.map(|s| s.item).unwrap_or(Item::Air);
         let preferred = block.preferred_tool();
 
         let mut speed_multiplier = 1.0;
@@ -2174,7 +2234,33 @@ impl State {
             hardness * 5.0
         };
 
-        base_time / speed_multiplier
+        let enchantment_multiplier = held_stack
+            .map(|stack| crate::enchantment::mining_speed_multiplier(&stack.enchantments))
+            .unwrap_or(1.0);
+        base_time / (speed_multiplier * enchantment_multiplier)
+    }
+
+    fn damage_selected_tool(&mut self, salt: u32) {
+        if self.game_mode == GameMode::Creative {
+            return;
+        }
+        let selected = self.inventory.selected;
+        let should_damage = self.inventory.hotbar[selected]
+            .filter(|stack| stack.item.tool_properties().is_some())
+            .is_some_and(|stack| {
+                crate::enchantment::should_consume_durability(&stack.enchantments, salt)
+            });
+        if !should_damage {
+            return;
+        }
+        if let Some(stack) = &mut self.inventory.hotbar[selected] {
+            if stack.durability > 1 {
+                stack.durability -= 1;
+            } else {
+                println!("[Debug] Tool broke: {:?}", stack.item);
+                self.inventory.hotbar[selected] = None;
+            }
+        }
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
@@ -2236,10 +2322,19 @@ impl State {
             }
 
             if eligible_to_harvest {
+                let held_enchantments = self.inventory.hotbar[self.inventory.selected]
+                    .map(|stack| stack.enchantments)
+                    .unwrap_or_default();
+                let silk_touch =
+                    held_enchantments.level_of(crate::enchantment::Enchantment::SilkTouch) > 0;
+                let fortune =
+                    held_enchantments.level_of(crate::enchantment::Enchantment::Fortune(1)) as u32;
                 let is_any_leaves = old_block == BlockType::OakLeaves
                     || old_block == BlockType::BirchLeaves
                     || old_block == BlockType::SpruceLeaves;
-                if is_any_leaves {
+                if silk_touch {
+                    self.spawn_dropped_item(Item::from_block(old_block), sound_pos);
+                } else if is_any_leaves {
                     let mut rng_seed = (wx as u32)
                         .wrapping_mul(31)
                         .wrapping_add(wy as u32)
@@ -2272,27 +2367,56 @@ impl State {
                         self.spawn_dropped_item(crate::inventory::Item::Seeds, sound_pos);
                     }
                 } else {
-                    self.spawn_dropped_item(
-                        crate::inventory::Item::from_block(old_block),
-                        sound_pos,
+                    let base_drop = match old_block {
+                        BlockType::CoalOre => Item::Coal,
+                        BlockType::DiamondOre => Item::Diamond,
+                        BlockType::RedstoneOre => Item::Redstone,
+                        _ => Item::from_block(old_block),
+                    };
+                    let fortune_eligible = matches!(
+                        old_block,
+                        BlockType::CoalOre | BlockType::DiamondOre | BlockType::RedstoneOre
                     );
+                    let bonus = if fortune_eligible && fortune > 0 {
+                        ((wx as u32)
+                            .wrapping_mul(31)
+                            .wrapping_add(wy as u32 * 17)
+                            .wrapping_add(wz as u32 * 13)
+                            % (fortune + 1))
+                            + fortune / 2
+                    } else {
+                        0
+                    };
+                    for _ in 0..(1 + bonus) {
+                        self.spawn_dropped_item(base_drop, sound_pos);
+                    }
+                }
+            }
+
+            if matches!(
+                old_block,
+                BlockType::CoalOre
+                    | BlockType::IronOre
+                    | BlockType::GoldOre
+                    | BlockType::DiamondOre
+                    | BlockType::RedstoneOre
+            ) {
+                let xp = if old_block == BlockType::DiamondOre {
+                    5
+                } else {
+                    2
+                };
+                self.player_state.add_experience(xp);
+                if old_block == BlockType::RedstoneOre && ((wx ^ wy ^ wz) & 1) == 0 {
+                    self.spawn_dropped_item(Item::LapisLazuli, sound_pos);
                 }
             }
 
             self.player_state.add_exhaustion(0.005);
 
-            // Deduct tool durability
-            if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
-                if stack.item.tool_properties().is_some() {
-                    if stack.durability > 1 {
-                        stack.durability -= 1;
-                    } else {
-                        // Destroy tool
-                        println!("[Debug] Tool broke: {:?}", stack.item);
-                        self.inventory.hotbar[self.inventory.selected] = None;
-                    }
-                }
-            }
+            self.damage_selected_tool(
+                (wx as u32) ^ (wy as u32).rotate_left(11) ^ (wz as u32).rotate_left(22),
+            );
         }
 
         // recalculate lighting and redraw chunk
@@ -2351,13 +2475,115 @@ impl State {
         }
     }
 
+    fn update_player_projectiles(&mut self, dt: f32) {
+        let mut splashes = Vec::new();
+        for projectile in &mut self.entity_manager.entities {
+            if projectile.entity_type != crate::entity::EntityType::SplashPotion {
+                continue;
+            }
+            projectile.update_physics(dt, &self.chunk_manager);
+            projectile.life_time -= dt;
+            let pos = projectile.position;
+            let hit_block = self
+                .chunk_manager
+                .get_block(
+                    pos.x.floor() as i32,
+                    pos.y.floor() as i32,
+                    pos.z.floor() as i32,
+                )
+                .properties()
+                .is_solid;
+            if hit_block || projectile.life_time <= 0.0 {
+                if let Some(potion) = projectile.potion {
+                    splashes.push((pos, potion));
+                }
+                projectile.health = -1.0;
+            }
+        }
+
+        for (position, potion) in splashes {
+            if position.distance(self.player_physics.position) <= 4.0 {
+                let healing = self.potion_effects.apply(potion);
+                self.player_state.health =
+                    (self.player_state.health + healing).min(self.player_state.max_health);
+            }
+            for entity in &mut self.entity_manager.entities {
+                if entity.position.distance(position) > 4.0 {
+                    continue;
+                }
+                match potion.kind {
+                    crate::brewing::PotionKind::Healing
+                    | crate::brewing::PotionKind::Regeneration => {
+                        entity.health =
+                            (entity.health + 4.0 * potion.level as f32).min(entity.max_health);
+                    }
+                    crate::brewing::PotionKind::Poison => {
+                        entity.health -= 2.0 * potion.level as f32
+                    }
+                    crate::brewing::PotionKind::Slowness => entity.velocity *= 0.4,
+                    _ => {}
+                }
+            }
+        }
+
+        let mut hits = Vec::new();
+        for projectile in &self.entity_manager.entities {
+            if projectile.entity_type != crate::entity::EntityType::Arrow
+                || !projectile.friendly_projectile
+            {
+                continue;
+            }
+            for target in &self.entity_manager.entities {
+                if target.id != projectile.id
+                    && !matches!(
+                        target.entity_type,
+                        crate::entity::EntityType::Arrow
+                            | crate::entity::EntityType::SplashPotion
+                            | crate::entity::EntityType::DroppedItem
+                            | crate::entity::EntityType::HeartParticle
+                    )
+                    && projectile.get_aabb().intersects(&target.get_aabb())
+                {
+                    hits.push((projectile.id, target.id, projectile.projectile_damage));
+                    break;
+                }
+            }
+        }
+        for (projectile_id, target_id, damage) in hits {
+            if let Some(target) = self
+                .entity_manager
+                .entities
+                .iter_mut()
+                .find(|entity| entity.id == target_id)
+            {
+                target.health -= damage;
+            }
+            if let Some(projectile) = self
+                .entity_manager
+                .entities
+                .iter_mut()
+                .find(|entity| entity.id == projectile_id)
+            {
+                projectile.health = -1.0;
+            }
+        }
+        self.entity_manager
+            .entities
+            .retain(|entity| entity.health >= 0.0);
+    }
+
     pub fn take_damage(&mut self, amount: f32, source: DamageSource) {
         if self.game_mode == GameMode::Creative {
             return;
         }
 
         let can_damage = !self.player_state.is_dead && self.player_state.invulnerable_time <= 0.0;
-        let died = self.player_state.take_damage(amount, source);
+        let reduced = amount
+            * crate::enchantment::protection_multiplier(
+                &self.inventory.armor,
+                source == DamageSource::Fall,
+            );
+        let died = self.player_state.take_damage(reduced, source);
 
         if can_damage {
             if died {
@@ -2422,9 +2648,83 @@ impl State {
 
     pub fn handle_click(&mut self, is_left_click: bool) {
         if !is_left_click {
-            let held_item = self.inventory.hotbar[self.inventory.selected]
+            let held_stack = self.inventory.hotbar[self.inventory.selected];
+            let held_item = held_stack
                 .map(|s| s.item)
                 .unwrap_or(crate::inventory::Item::Air);
+            if let Some(potion) = held_stack.and_then(|stack| stack.potion) {
+                if potion.splash || held_item == Item::SplashPotion {
+                    let dir = Vec3::new(
+                        self.camera.yaw.cos() * self.camera.pitch.cos(),
+                        self.camera.pitch.sin(),
+                        self.camera.yaw.sin() * self.camera.pitch.cos(),
+                    )
+                    .normalize_or_zero();
+                    let id = self.entity_manager.spawn(
+                        crate::entity::EntityType::SplashPotion,
+                        self.camera.position + dir * 0.5,
+                    );
+                    if let Some(projectile) = self
+                        .entity_manager
+                        .entities
+                        .iter_mut()
+                        .find(|entity| entity.id == id)
+                    {
+                        projectile.velocity = dir * 12.0;
+                        projectile.potion = Some(potion);
+                        projectile.life_time = 3.0;
+                    }
+                } else {
+                    let healing = self.potion_effects.apply(potion);
+                    self.player_state.health =
+                        (self.player_state.health + healing).min(self.player_state.max_health);
+                }
+                self.inventory
+                    .use_selected_item(self.game_mode == GameMode::Creative);
+                return;
+            }
+            if held_item == Item::MilkBucket {
+                self.potion_effects.active.clear();
+                if self.game_mode == GameMode::Survival {
+                    self.inventory.replace_selected_item(Item::Bucket);
+                }
+                return;
+            }
+            if held_item == Item::Bow {
+                let enchantments = held_stack
+                    .map(|stack| stack.enchantments)
+                    .unwrap_or_default();
+                let infinity = enchantments.level_of(crate::enchantment::Enchantment::Infinity) > 0;
+                if self.game_mode == GameMode::Creative
+                    || infinity
+                    || self.inventory.remove_one(Item::Arrow)
+                {
+                    let dir = Vec3::new(
+                        self.camera.yaw.cos() * self.camera.pitch.cos(),
+                        self.camera.pitch.sin(),
+                        self.camera.yaw.sin() * self.camera.pitch.cos(),
+                    )
+                    .normalize_or_zero();
+                    let id = self.entity_manager.spawn(
+                        crate::entity::EntityType::Arrow,
+                        self.camera.position + dir * 0.6,
+                    );
+                    if let Some(arrow) = self
+                        .entity_manager
+                        .entities
+                        .iter_mut()
+                        .find(|entity| entity.id == id)
+                    {
+                        arrow.velocity = dir * 22.0;
+                        arrow.friendly_projectile = true;
+                        arrow.projectile_damage = 4.0
+                            + enchantments.level_of(crate::enchantment::Enchantment::Power(1))
+                                as f32
+                                * 1.25;
+                    }
+                }
+                return;
+            }
             if held_item == crate::inventory::Item::Apple
                 || held_item == crate::inventory::Item::Bread
             {
@@ -2488,14 +2788,28 @@ impl State {
                     .find(|e| e.id == entity_id)
                 {
                     if entity.invulnerable_time <= 0.0 {
-                        let held_item = self.inventory.hotbar[self.inventory.selected]
+                        let held_stack = self.inventory.hotbar[self.inventory.selected];
+                        let held_item = held_stack
                             .map(|s| s.item)
                             .unwrap_or(crate::inventory::Item::Air);
-                        let damage = held_item.tool_properties().map(|t| t.damage).unwrap_or(1.0);
+                        let enchantments = held_stack.map(|s| s.enchantments).unwrap_or_default();
+                        let damage = held_item.tool_properties().map(|t| t.damage).unwrap_or(1.0)
+                            + crate::enchantment::attack_damage_bonus(&enchantments)
+                            + self.potion_effects.strength_bonus();
+                        let knockback = 8.0
+                            + enchantments.level_of(crate::enchantment::Enchantment::Knockback(1))
+                                as f32
+                                * 3.0;
 
                         entity.health -= damage;
                         entity.invulnerable_time = 0.4;
-                        entity.velocity += dir * 8.0 + Vec3::new(0.0, 3.0, 0.0);
+                        entity.velocity += dir * knockback + Vec3::new(0.0, 3.0, 0.0);
+                        let fire_level =
+                            enchantments.level_of(crate::enchantment::Enchantment::FireAspect(1));
+                        if fire_level > 0 {
+                            entity.fire_aspect_timer =
+                                entity.fire_aspect_timer.max(fire_level as f32 * 4.0);
+                        }
 
                         println!(
                             "[Debug] Hit {:?}, health={:.1}",
@@ -2505,73 +2819,81 @@ impl State {
                         if entity.health <= 0.0 {
                             println!("[Debug] Killed {:?}", entity.entity_type);
                             if self.game_mode == GameMode::Survival {
-                                match entity.entity_type {
-                                    crate::entity::EntityType::Zombie => {
-                                        self.inventory
-                                            .add_item(crate::inventory::Item::RottenFlesh);
-                                    }
-                                    crate::entity::EntityType::Skeleton => {
-                                        self.inventory.add_item(crate::inventory::Item::Bone);
-                                        let mut rng_seed = (entity.position.x as u32)
-                                            .wrapping_mul(31)
-                                            .wrapping_add(entity.position.z as u32);
-                                        let mut next_rand = || {
-                                            rng_seed = rng_seed
-                                                .wrapping_mul(1103515245)
-                                                .wrapping_add(12345);
-                                            (rng_seed / 65536) % 32768
-                                        };
-                                        if next_rand() % 10 == 0 {
-                                            self.inventory.add_item(crate::inventory::Item::Bow);
-                                        }
-                                    }
-                                    crate::entity::EntityType::Creeper => {
-                                        self.inventory.add_item(crate::inventory::Item::Gunpowder);
-                                    }
-                                    crate::entity::EntityType::Pig => {
-                                        let is_on_fire = entity.burn_timer > 0.0;
-                                        let drop = if is_on_fire {
-                                            crate::inventory::Item::CookedPorkchop
-                                        } else {
-                                            crate::inventory::Item::RawPorkchop
-                                        };
-                                        self.inventory.add_item(drop);
-                                    }
-                                    crate::entity::EntityType::Cow => {
-                                        self.inventory.add_item(crate::inventory::Item::RawBeef);
-                                        let rng = (entity.position.x as u32).wrapping_mul(31);
-                                        if rng % 2 == 0 {
+                                let looting = enchantments
+                                    .level_of(crate::enchantment::Enchantment::Looting(1));
+                                for _ in 0..=(looting / 2) {
+                                    match entity.entity_type {
+                                        crate::entity::EntityType::Zombie => {
                                             self.inventory
-                                                .add_item(crate::inventory::Item::Leather);
+                                                .add_item(crate::inventory::Item::RottenFlesh);
                                         }
-                                    }
-                                    crate::entity::EntityType::Sheep => {
-                                        self.inventory.add_item(crate::inventory::Item::RawMutton);
-                                        if entity.has_wool {
-                                            self.inventory.add_item(crate::inventory::Item::Wool);
+                                        crate::entity::EntityType::Skeleton => {
+                                            self.inventory.add_item(crate::inventory::Item::Bone);
+                                            self.inventory.add_item(crate::inventory::Item::Arrow);
+                                            let mut rng_seed = (entity.position.x as u32)
+                                                .wrapping_mul(31)
+                                                .wrapping_add(entity.position.z as u32);
+                                            let mut next_rand = || {
+                                                rng_seed = rng_seed
+                                                    .wrapping_mul(1103515245)
+                                                    .wrapping_add(12345);
+                                                (rng_seed / 65536) % 32768
+                                            };
+                                            if next_rand() % 10 == 0 {
+                                                self.inventory
+                                                    .add_item(crate::inventory::Item::Bow);
+                                            }
                                         }
+                                        crate::entity::EntityType::Creeper => {
+                                            self.inventory
+                                                .add_item(crate::inventory::Item::Gunpowder);
+                                        }
+                                        crate::entity::EntityType::Pig => {
+                                            let is_on_fire = entity.burn_timer > 0.0
+                                                || entity.fire_aspect_timer > 0.0;
+                                            let drop = if is_on_fire {
+                                                crate::inventory::Item::CookedPorkchop
+                                            } else {
+                                                crate::inventory::Item::RawPorkchop
+                                            };
+                                            self.inventory.add_item(drop);
+                                        }
+                                        crate::entity::EntityType::Cow => {
+                                            self.inventory
+                                                .add_item(crate::inventory::Item::RawBeef);
+                                            let rng = (entity.position.x as u32).wrapping_mul(31);
+                                            if rng % 2 == 0 {
+                                                self.inventory
+                                                    .add_item(crate::inventory::Item::Leather);
+                                            }
+                                        }
+                                        crate::entity::EntityType::Sheep => {
+                                            self.inventory
+                                                .add_item(crate::inventory::Item::RawMutton);
+                                            if entity.has_wool {
+                                                self.inventory
+                                                    .add_item(crate::inventory::Item::Wool);
+                                            }
+                                        }
+                                        crate::entity::EntityType::Chicken => {
+                                            self.inventory
+                                                .add_item(crate::inventory::Item::RawChicken);
+                                            self.inventory
+                                                .add_item(crate::inventory::Item::Feather);
+                                        }
+                                        _ => {}
                                     }
-                                    crate::entity::EntityType::Chicken => {
-                                        self.inventory.add_item(crate::inventory::Item::RawChicken);
-                                        self.inventory.add_item(crate::inventory::Item::Feather);
-                                    }
-                                    _ => {}
                                 }
+                                self.player_state.add_experience(match entity.entity_type {
+                                    crate::entity::EntityType::Zombie
+                                    | crate::entity::EntityType::Skeleton
+                                    | crate::entity::EntityType::Creeper => 5,
+                                    _ => 2,
+                                });
                             }
                         }
 
-                        if self.game_mode == GameMode::Survival {
-                            if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected]
-                            {
-                                if stack.item.tool_properties().is_some() {
-                                    if stack.durability > 1 {
-                                        stack.durability -= 1;
-                                    } else {
-                                        self.inventory.hotbar[self.inventory.selected] = None;
-                                    }
-                                }
-                            }
-                        }
+                        self.damage_selected_tool(entity_id as u32 ^ self.total_time.to_bits());
 
                         return;
                     }
@@ -2700,10 +3022,33 @@ impl State {
                     hit.block_pos.y as i32,
                     hit.block_pos.z as i32,
                 );
+                let held = self.inventory.hotbar[self.inventory.selected];
+                if clicked_block == BlockType::Water
+                    && held.is_some_and(|stack| stack.item == Item::GlassBottle)
+                {
+                    self.inventory
+                        .use_selected_item(self.game_mode == GameMode::Creative);
+                    let mut water_bottle = ItemStack::new(Item::Potion, 1);
+                    water_bottle.potion = Some(crate::brewing::PotionData::water());
+                    self.inventory.add_stack(water_bottle);
+                    return;
+                }
                 if clicked_block == BlockType::CraftingTable {
                     self.inventory.is_table_open = true;
                     self.inventory.craft_input = vec![None; 9];
                     self.open_inventory();
+                    return;
+                }
+                if matches!(
+                    clicked_block,
+                    BlockType::EnchantingTable | BlockType::BrewingStand | BlockType::Anvil
+                ) {
+                    let kind = match clicked_block {
+                        BlockType::EnchantingTable => StationKind::Enchanting,
+                        BlockType::BrewingStand => StationKind::Brewing,
+                        _ => StationKind::Anvil,
+                    };
+                    self.open_station(kind, hit.block_pos);
                     return;
                 }
                 hit.block_pos + hit.normal
@@ -2851,7 +3196,7 @@ impl State {
         }
 
         // 4. Crafting Grid & Output
-        if self.inventory.is_table_open {
+        if self.active_station.is_none() && self.inventory.is_table_open {
             // 3x3 table
             let x_start = -0.05;
             for r in 0..3 {
@@ -2866,7 +3211,7 @@ impl State {
             let x0 = x_start + 3.0 * (slot_w + gap) + 0.06;
             let y0 = -0.10 + 1.0 * (slot_h + gap);
             slots.push((SlotType::CraftOutput, x0, x0 + slot_w, y0, y0 + slot_h));
-        } else {
+        } else if self.active_station.is_none() {
             // 2x2 player craft
             let x_start = 0.05;
             for r in 0..2 {
@@ -2883,6 +3228,68 @@ impl State {
             slots.push((SlotType::CraftOutput, x0, x0 + slot_w, y0, y0 + slot_h));
         }
 
+        match self.active_station {
+            Some(StationKind::Enchanting) => {
+                slots.push((
+                    SlotType::EnchantInput,
+                    -0.18,
+                    -0.18 + slot_w,
+                    0.12,
+                    0.12 + slot_h,
+                ));
+                slots.push((
+                    SlotType::EnchantLapis,
+                    -0.18,
+                    -0.18 + slot_w,
+                    -0.02,
+                    -0.02 + slot_h,
+                ));
+            }
+            Some(StationKind::Brewing) => {
+                for i in 0..3 {
+                    let x0 = -0.18 + i as f32 * (slot_w + gap);
+                    slots.push((
+                        SlotType::BrewBottle(i),
+                        x0,
+                        x0 + slot_w,
+                        -0.02,
+                        -0.02 + slot_h,
+                    ));
+                }
+                slots.push((
+                    SlotType::BrewIngredient,
+                    -0.09,
+                    -0.09 + slot_w,
+                    0.17,
+                    0.17 + slot_h,
+                ));
+            }
+            Some(StationKind::Anvil) => {
+                slots.push((
+                    SlotType::AnvilLeft,
+                    -0.20,
+                    -0.20 + slot_w,
+                    0.10,
+                    0.10 + slot_h,
+                ));
+                slots.push((
+                    SlotType::AnvilRight,
+                    -0.05,
+                    -0.05 + slot_w,
+                    0.10,
+                    0.10 + slot_h,
+                ));
+                slots.push((
+                    SlotType::AnvilOutput,
+                    0.20,
+                    0.20 + slot_w,
+                    0.10,
+                    0.10 + slot_h,
+                ));
+            }
+            None => {}
+        }
+
         slots
     }
 
@@ -2893,6 +3300,13 @@ impl State {
             SlotType::Armor(i) => self.inventory.armor[i],
             SlotType::CraftInput(i) => self.inventory.craft_input.get(i).copied().flatten(),
             SlotType::CraftOutput => self.inventory.craft_output,
+            SlotType::EnchantInput => self.enchanting.input,
+            SlotType::EnchantLapis => self.enchanting.lapis,
+            SlotType::BrewBottle(i) => self.brewing.bottles[i],
+            SlotType::BrewIngredient => self.brewing.ingredient,
+            SlotType::AnvilLeft => self.anvil.left,
+            SlotType::AnvilRight => self.anvil.right,
+            SlotType::AnvilOutput => self.anvil.output,
         }
     }
 
@@ -2907,13 +3321,46 @@ impl State {
                 }
             }
             SlotType::CraftOutput => self.inventory.craft_output = stack,
+            SlotType::EnchantInput => self.enchanting.input = stack,
+            SlotType::EnchantLapis => self.enchanting.lapis = stack,
+            SlotType::BrewBottle(i) => self.brewing.bottles[i] = stack,
+            SlotType::BrewIngredient => self.brewing.ingredient = stack,
+            SlotType::AnvilLeft => self.anvil.left = stack,
+            SlotType::AnvilRight => self.anvil.right = stack,
+            SlotType::AnvilOutput => {}
         }
+    }
+
+    fn slot_accepts(&self, slot: SlotType, stack: ItemStack) -> bool {
+        match slot {
+            SlotType::EnchantInput => crate::enchantment::can_enchant(stack.item),
+            SlotType::EnchantLapis => stack.item == Item::LapisLazuli,
+            SlotType::BrewBottle(_) => stack.potion.is_some(),
+            SlotType::AnvilOutput | SlotType::CraftOutput => false,
+            _ => true,
+        }
+    }
+
+    fn refresh_workstations(&mut self) {
+        self.enchanting.refresh();
+        self.anvil.refresh();
     }
 
     pub fn handle_inventory_click(&mut self, is_left: bool) {
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
         let slots = self.get_inventory_slots();
+
+        if self.active_station == Some(StationKind::Enchanting) && is_left {
+            for index in 0..3 {
+                let y1 = 0.28 - index as f32 * 0.12;
+                let y0 = y1 - 0.09;
+                if mouse_x >= 0.02 && mouse_x <= 0.62 && mouse_y >= y0 && mouse_y <= y1 {
+                    self.perform_enchantment(index);
+                    return;
+                }
+            }
+        }
 
         let clicked_slot = slots.into_iter().find(|&(_, x0, x1, y0, y1)| {
             mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
@@ -2923,6 +3370,12 @@ impl State {
             self.audio_manager
                 .play_sound(crate::audio::SoundId::UiClick);
             let slot_item = self.get_item_at_slot(slot_type);
+
+            if let Some(dragged) = self.inventory.dragged {
+                if !self.slot_accepts(slot_type, dragged) {
+                    return;
+                }
+            }
 
             match slot_type {
                 SlotType::CraftOutput => {
@@ -2968,6 +3421,22 @@ impl State {
                         }
                     }
                 }
+                SlotType::AnvilOutput => {
+                    if let Some(output) = self.anvil.output {
+                        let affordable = self.game_mode == GameMode::Creative
+                            || self.player_state.experience_level >= self.anvil.cost as u32;
+                        if affordable && self.inventory.dragged.is_none() {
+                            if self.game_mode == GameMode::Survival {
+                                self.player_state.spend_levels(self.anvil.cost as u32);
+                            }
+                            self.inventory.dragged = Some(output);
+                            self.anvil.left = None;
+                            self.anvil.right = None;
+                            self.anvil.rename.clear();
+                            self.anvil.refresh();
+                        }
+                    }
+                }
                 _ => {
                     // Normal slots (Backpack, Hotbar, Armor, CraftInput)
                     let max_stack = slot_item
@@ -2988,16 +3457,14 @@ impl State {
                                     self.set_item_at_slot(
                                         slot_type,
                                         Some(ItemStack {
-                                            item: slot.item,
                                             count: new_slot_count,
-                                            durability: slot.durability,
+                                            ..slot
                                         }),
                                     );
                                     if new_drag_count > 0 {
                                         self.inventory.dragged = Some(ItemStack {
-                                            item: dragged.item,
                                             count: new_drag_count,
-                                            durability: dragged.durability,
+                                            ..dragged
                                         });
                                     } else {
                                         self.inventory.dragged = None;
@@ -3028,16 +3495,14 @@ impl State {
                                     self.set_item_at_slot(
                                         slot_type,
                                         Some(ItemStack {
-                                            item: slot.item,
                                             count: slot.count + 1,
-                                            durability: slot.durability,
+                                            ..slot
                                         }),
                                     );
                                     if dragged.count > 1 {
                                         self.inventory.dragged = Some(ItemStack {
-                                            item: dragged.item,
                                             count: dragged.count - 1,
-                                            durability: dragged.durability,
+                                            ..dragged
                                         });
                                     } else {
                                         self.inventory.dragged = None;
@@ -3052,16 +3517,14 @@ impl State {
                                 self.set_item_at_slot(
                                     slot_type,
                                     Some(ItemStack {
-                                        item: dragged.item,
                                         count: 1,
-                                        durability: dragged.durability,
+                                        ..dragged
                                     }),
                                 );
                                 if dragged.count > 1 {
                                     self.inventory.dragged = Some(ItemStack {
-                                        item: dragged.item,
                                         count: dragged.count - 1,
-                                        durability: dragged.durability,
+                                        ..dragged
                                     });
                                 } else {
                                     self.inventory.dragged = None;
@@ -3073,17 +3536,15 @@ impl State {
                                 let take = (slot.count + 1) / 2;
                                 let keep = slot.count - take;
                                 self.inventory.dragged = Some(ItemStack {
-                                    item: slot.item,
                                     count: take,
-                                    durability: slot.durability,
+                                    ..slot
                                 });
                                 if keep > 0 {
                                     self.set_item_at_slot(
                                         slot_type,
                                         Some(ItemStack {
-                                            item: slot.item,
                                             count: keep,
-                                            durability: slot.durability,
+                                            ..slot
                                         }),
                                     );
                                 } else {
@@ -3100,9 +3561,46 @@ impl State {
                             .recipe_manager
                             .match_recipe(&self.inventory.craft_input, grid_size);
                     }
+                    self.refresh_workstations();
                 }
             }
         }
+    }
+
+    fn perform_enchantment(&mut self, index: usize) {
+        let Some(mut input) = self.enchanting.input else {
+            return;
+        };
+        if !crate::enchantment::can_enchant(input.item) {
+            return;
+        }
+        let option = self.enchanting.options[index];
+        let lapis_available = self
+            .enchanting
+            .lapis
+            .filter(|stack| stack.item == Item::LapisLazuli)
+            .map(|stack| stack.count)
+            .unwrap_or(0);
+        let affordable = self.game_mode == GameMode::Creative
+            || (lapis_available >= option.lapis_cost as u32
+                && self.player_state.experience_level >= option.cost as u32);
+        if !affordable {
+            return;
+        }
+        input.enchantments.merge(&option.enchantments);
+        self.enchanting.input = Some(input);
+        if self.game_mode == GameMode::Survival {
+            self.player_state.spend_levels(option.cost as u32);
+            if let Some(lapis) = &mut self.enchanting.lapis {
+                if lapis.count > option.lapis_cost as u32 {
+                    lapis.count -= option.lapis_cost as u32;
+                } else {
+                    self.enchanting.lapis = None;
+                }
+            }
+        }
+        self.enchanting.seed = self.enchanting.seed.wrapping_add(0x9E37_79B9);
+        self.enchanting.refresh();
     }
 
     pub fn open_inventory(&mut self) {
@@ -3113,6 +3611,35 @@ impl State {
             .set_cursor_grab(winit::window::CursorGrabMode::None);
         self.window.set_cursor_visible(true);
         self.keys = KeyState::default();
+    }
+
+    fn open_station(&mut self, kind: StationKind, position: Vec3) {
+        self.active_station = Some(kind);
+        if kind == StationKind::Enchanting {
+            let wx = position.x as i32;
+            let wy = position.y as i32;
+            let wz = position.z as i32;
+            let mut shelves = 0;
+            for dx in -2i32..=2i32 {
+                for dz in -2i32..=2i32 {
+                    if dx.abs() != 2 && dz.abs() != 2 {
+                        continue;
+                    }
+                    for dy in 0..=1 {
+                        if self.chunk_manager.get_block(wx + dx, wy + dy, wz + dz)
+                            == BlockType::Bookshelf
+                        {
+                            shelves += 1;
+                        }
+                    }
+                }
+            }
+            self.enchanting.bookshelves = shelves.min(15);
+            self.enchanting.seed =
+                self.world_time.ticks as u32 ^ wx as u32 ^ (wz as u32).rotate_left(16);
+            self.enchanting.refresh();
+        }
+        self.open_inventory();
     }
 
     pub fn close_inventory(&mut self) {
@@ -3129,16 +3656,41 @@ impl State {
                 self.inventory.add_item(stack.item);
             }
         }
+        let station_items: Vec<ItemStack> = match self.active_station {
+            Some(StationKind::Enchanting) => {
+                [self.enchanting.input.take(), self.enchanting.lapis.take()]
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            }
+            Some(StationKind::Brewing) => self
+                .brewing
+                .bottles
+                .iter_mut()
+                .map(Option::take)
+                .chain(std::iter::once(self.brewing.ingredient.take()))
+                .flatten()
+                .collect(),
+            Some(StationKind::Anvil) => [self.anvil.left.take(), self.anvil.right.take()]
+                .into_iter()
+                .flatten()
+                .collect(),
+            None => Vec::new(),
+        };
+        for stack in station_items {
+            self.inventory.add_stack(stack);
+        }
+
         // Also return dragged item if any
         if let Some(dragged) = self.inventory.dragged.take() {
-            for _ in 0..dragged.count {
-                self.inventory.add_item(dragged.item);
-            }
+            self.inventory.add_stack(dragged);
         }
 
         self.inventory.is_table_open = false;
         self.inventory.craft_input = vec![None; 4];
         self.inventory.craft_output = None;
+        self.active_station = None;
+        self.anvil.rename.clear();
 
         // Re-lock cursor
         let _ = self
@@ -4020,7 +4572,12 @@ impl State {
                         let ty0 = y0 + margin_y;
                         let ty1 = y1 - margin_y;
 
-                        let c = [1.0, 1.0, 1.0, 1.0];
+                        let c = if stack.enchantments.is_empty() {
+                            [1.0, 1.0, 1.0, 1.0]
+                        } else {
+                            let pulse = 0.72 + (self.total_time * 3.0).sin() * 0.18;
+                            [0.82, pulse, 1.0, 1.0]
+                        };
                         ui_textured_vertices.push(TexturedUiVertex {
                             position: [tx0, ty1, 0.0],
                             tex_coords: [u0, v0],
@@ -4079,41 +4636,43 @@ impl State {
                 }
 
                 // 3. Draw crafting arrow symbol
-                let arrow_y = if self.inventory.is_table_open {
-                    -0.10 + 1.0 * (slot_h + gap) + slot_h / 2.0
-                } else {
-                    -0.05 + 0.5 * (slot_h + gap) + slot_h / 2.0
-                };
-                let arrow_x = if self.inventory.is_table_open {
-                    -0.05 + 3.0 * (slot_w + gap) + 0.015
-                } else {
-                    0.05 + 2.0 * (slot_w + gap) + 0.015
-                };
-                let ac = [0.8, 0.8, 0.8, 1.0];
-                ui_line_vertices.push(UiVertex {
-                    position: [arrow_x, arrow_y, 0.0],
-                    color: ac,
-                });
-                ui_line_vertices.push(UiVertex {
-                    position: [arrow_x + 0.03, arrow_y, 0.0],
-                    color: ac,
-                });
-                ui_line_vertices.push(UiVertex {
-                    position: [arrow_x + 0.03, arrow_y, 0.0],
-                    color: ac,
-                });
-                ui_line_vertices.push(UiVertex {
-                    position: [arrow_x + 0.02, arrow_y + 0.01 * aspect, 0.0],
-                    color: ac,
-                });
-                ui_line_vertices.push(UiVertex {
-                    position: [arrow_x + 0.03, arrow_y, 0.0],
-                    color: ac,
-                });
-                ui_line_vertices.push(UiVertex {
-                    position: [arrow_x + 0.02, arrow_y - 0.01 * aspect, 0.0],
-                    color: ac,
-                });
+                if self.active_station.is_none() {
+                    let arrow_y = if self.inventory.is_table_open {
+                        -0.10 + 1.0 * (slot_h + gap) + slot_h / 2.0
+                    } else {
+                        -0.05 + 0.5 * (slot_h + gap) + slot_h / 2.0
+                    };
+                    let arrow_x = if self.inventory.is_table_open {
+                        -0.05 + 3.0 * (slot_w + gap) + 0.015
+                    } else {
+                        0.05 + 2.0 * (slot_w + gap) + 0.015
+                    };
+                    let ac = [0.8, 0.8, 0.8, 1.0];
+                    ui_line_vertices.push(UiVertex {
+                        position: [arrow_x, arrow_y, 0.0],
+                        color: ac,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [arrow_x + 0.03, arrow_y, 0.0],
+                        color: ac,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [arrow_x + 0.03, arrow_y, 0.0],
+                        color: ac,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [arrow_x + 0.02, arrow_y + 0.01 * aspect, 0.0],
+                        color: ac,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [arrow_x + 0.03, arrow_y, 0.0],
+                        color: ac,
+                    });
+                    ui_line_vertices.push(UiVertex {
+                        position: [arrow_x + 0.02, arrow_y - 0.01 * aspect, 0.0],
+                        color: ac,
+                    });
+                }
 
                 // 4. Draw texts (Labels)
                 add_string_lines(
@@ -4126,26 +4685,191 @@ impl State {
                     [1.0, 1.0, 1.0, 1.0],
                     &mut ui_line_vertices,
                 );
-                let craft_lbl_x = if self.inventory.is_table_open {
-                    -0.05
-                } else {
-                    0.05
-                };
-                let craft_lbl_y = if self.inventory.is_table_open {
-                    -0.10 + 3.0 * (slot_h + gap) + 0.02
-                } else {
-                    -0.05 + 2.0 * (slot_h + gap) + 0.02
-                };
-                add_string_lines(
-                    "CRAFTING",
-                    craft_lbl_x,
-                    craft_lbl_y,
-                    0.008,
-                    0.016,
-                    0.003,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
+                if self.active_station.is_none() {
+                    let craft_lbl_x = if self.inventory.is_table_open {
+                        -0.05
+                    } else {
+                        0.05
+                    };
+                    let craft_lbl_y = if self.inventory.is_table_open {
+                        -0.10 + 3.0 * (slot_h + gap) + 0.02
+                    } else {
+                        -0.05 + 2.0 * (slot_h + gap) + 0.02
+                    };
+                    add_string_lines(
+                        "CRAFTING",
+                        craft_lbl_x,
+                        craft_lbl_y,
+                        0.008,
+                        0.016,
+                        0.003,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+                }
+
+                match self.active_station {
+                    Some(StationKind::Enchanting) => {
+                        add_string_lines(
+                            "ENCHANTING",
+                            -0.18,
+                            0.37,
+                            0.012,
+                            0.024,
+                            0.004,
+                            [0.75, 0.45, 1.0, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                        let level_text = format!(
+                            "LEVEL {}  BOOKSHELVES {}",
+                            self.player_state.experience_level, self.enchanting.bookshelves
+                        );
+                        add_string_lines(
+                            &level_text,
+                            -0.18,
+                            0.31,
+                            0.008,
+                            0.016,
+                            0.003,
+                            [0.5, 1.0, 0.5, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                        for (index, option) in self.enchanting.options.iter().enumerate() {
+                            let y1 = 0.28 - index as f32 * 0.12;
+                            let y0 = y1 - 0.09;
+                            let hovered = mouse_x >= 0.02
+                                && mouse_x <= 0.62
+                                && mouse_y >= y0
+                                && mouse_y <= y1;
+                            add_ui_quad(
+                                &mut ui_vertices,
+                                0.02,
+                                0.62,
+                                y0,
+                                y1,
+                                if hovered {
+                                    [0.30, 0.16, 0.42, 0.95]
+                                } else {
+                                    [0.14, 0.07, 0.20, 0.95]
+                                },
+                            );
+                            let enchantment =
+                                option.enchantments.entries.iter().flatten().next().copied();
+                            let label = enchantment
+                                .map(|e| {
+                                    format!(
+                                        "{} {}  COST {} + {} LAPIS",
+                                        e.short_name(),
+                                        e.level(),
+                                        option.cost,
+                                        option.lapis_cost
+                                    )
+                                })
+                                .unwrap_or_else(|| "NO ENCHANTMENT".to_string());
+                            add_string_lines(
+                                &label,
+                                0.04,
+                                y0 + 0.032,
+                                0.007,
+                                0.014,
+                                0.002,
+                                [0.8, 0.65, 1.0, 1.0],
+                                &mut ui_line_vertices,
+                            );
+                        }
+                    }
+                    Some(StationKind::Brewing) => {
+                        add_string_lines(
+                            "BREWING STAND",
+                            -0.18,
+                            0.37,
+                            0.012,
+                            0.024,
+                            0.004,
+                            [0.8, 0.6, 0.3, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                        let progress = (self.brewing.progress / 10.0).clamp(0.0, 1.0);
+                        add_ui_quad(
+                            &mut ui_vertices,
+                            0.04,
+                            0.54,
+                            0.20,
+                            0.24,
+                            [0.05, 0.05, 0.05, 1.0],
+                        );
+                        add_ui_quad(
+                            &mut ui_vertices,
+                            0.04,
+                            0.04 + 0.5 * progress,
+                            0.20,
+                            0.24,
+                            [0.85, 0.45, 0.1, 1.0],
+                        );
+                        let status = if self.brewing.can_brew() {
+                            format!("BREWING {:.0} PCT", progress * 100.0)
+                        } else {
+                            "ADD BOTTLES AND INGREDIENT".to_string()
+                        };
+                        add_string_lines(
+                            &status,
+                            0.04,
+                            0.28,
+                            0.008,
+                            0.016,
+                            0.003,
+                            [1.0, 0.85, 0.55, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                    }
+                    Some(StationKind::Anvil) => {
+                        add_string_lines(
+                            "ANVIL",
+                            -0.20,
+                            0.37,
+                            0.012,
+                            0.024,
+                            0.004,
+                            [0.8, 0.8, 0.8, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                        add_ui_quad(
+                            &mut ui_vertices,
+                            -0.20,
+                            0.45,
+                            0.25,
+                            0.31,
+                            [0.04, 0.04, 0.04, 0.95],
+                        );
+                        let rename = if self.anvil.rename.is_empty() {
+                            "TYPE A NAME"
+                        } else {
+                            &self.anvil.rename
+                        };
+                        add_string_lines(
+                            rename,
+                            -0.18,
+                            0.27,
+                            0.009,
+                            0.018,
+                            0.003,
+                            [1.0, 1.0, 1.0, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                        let cost = format!("COST {} LEVELS", self.anvil.cost);
+                        add_string_lines(
+                            &cost,
+                            0.20,
+                            0.05,
+                            0.008,
+                            0.016,
+                            0.003,
+                            [0.5, 1.0, 0.5, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                    }
+                    None => {}
+                }
 
                 // 5. Draw dragged item at cursor position
                 if let Some(dragged) = self.inventory.dragged {
@@ -4160,7 +4884,11 @@ impl State {
                     let dy0 = mouse_y - slot_h / 2.0 + 0.015 * aspect;
                     let dy1 = mouse_y + slot_h / 2.0 - 0.015 * aspect;
 
-                    let c = [1.0, 1.0, 1.0, 1.0];
+                    let c = if dragged.enchantments.is_empty() {
+                        [1.0, 1.0, 1.0, 1.0]
+                    } else {
+                        [0.82, 0.65 + (self.total_time * 3.0).sin() * 0.18, 1.0, 1.0]
+                    };
                     ui_textured_vertices.push(TexturedUiVertex {
                         position: [dx0, dy1, 0.0],
                         tex_coords: [u0, v0],
@@ -4218,7 +4946,13 @@ impl State {
                 if self.inventory.dragged.is_none() {
                     if let Some((slot_type, _, _, _, _)) = hovered_slot {
                         if let Some(stack) = self.get_item_at_slot(slot_type) {
-                            let name = stack.item.properties().name;
+                            let name = if !stack.custom_name.is_empty() {
+                                stack.custom_name.as_str().to_string()
+                            } else if let Some(potion) = stack.potion {
+                                potion.display_name().to_string()
+                            } else {
+                                stack.item.properties().name.to_string()
+                            };
                             let tw = name.len() as f32 * 0.014 + 0.02;
                             let th = 0.035 * aspect;
                             let tx = mouse_x + 0.02;
@@ -4285,7 +5019,7 @@ impl State {
                             });
 
                             add_string_lines(
-                                name,
+                                &name,
                                 tx + 0.01,
                                 ty + 0.01 * aspect,
                                 0.008,
@@ -4390,7 +5124,11 @@ impl State {
                         let ty0 = y0 + margin_y;
                         let ty1 = y1 - margin_y;
 
-                        let c = [1.0, 1.0, 1.0, 1.0];
+                        let c = if stack.enchantments.is_empty() {
+                            [1.0, 1.0, 1.0, 1.0]
+                        } else {
+                            [0.82, 0.65 + (self.total_time * 3.0).sin() * 0.18, 1.0, 1.0]
+                        };
                         ui_textured_vertices.push(TexturedUiVertex {
                             position: [tx0, ty1, 0.0],
                             tex_coords: [u0, v0],
@@ -4662,6 +5400,36 @@ impl State {
                     [1.0, 0.9, 0.4, 1.0],
                     &mut ui_line_vertices,
                 );
+
+                if self.game_mode == GameMode::Survival {
+                    let xp_text = format!("LEVEL {}", self.player_state.experience_level);
+                    let width = xp_text.len() as f32 * 0.009;
+                    add_string_lines(
+                        &xp_text,
+                        -width / 2.0,
+                        -0.66,
+                        0.009,
+                        0.018,
+                        0.003,
+                        [0.35, 1.0, 0.25, 1.0],
+                        &mut ui_line_vertices,
+                    );
+                }
+
+                for (index, effect) in self.potion_effects.active.iter().enumerate() {
+                    let seconds = effect.remaining().ceil() as u32;
+                    let text = format!("{} {}:{:02}", effect.name(), seconds / 60, seconds % 60);
+                    add_string_lines(
+                        &text,
+                        0.54,
+                        0.86 - index as f32 * 0.05,
+                        0.007,
+                        0.014,
+                        0.002,
+                        [0.75, 0.55, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+                }
 
                 // Damaged screen red flash overlay
                 if self.player_state.damaged_flash_time > 0.0 {
@@ -4966,6 +5734,19 @@ impl State {
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
+    }
+}
+
+fn add_ui_quad(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32, color: [f32; 4]) {
+    for position in [
+        [x0, y1, 0.0],
+        [x0, y0, 0.0],
+        [x1, y0, 0.0],
+        [x0, y1, 0.0],
+        [x1, y0, 0.0],
+        [x1, y1, 0.0],
+    ] {
+        vertices.push(UiVertex { position, color });
     }
 }
 

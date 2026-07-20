@@ -107,6 +107,7 @@ impl ApplicationHandler for App {
                     KeyEvent {
                         state,
                         physical_key,
+                        logical_key,
                         repeat,
                         ..
                     },
@@ -114,6 +115,31 @@ impl ApplicationHandler for App {
             } => {
                 let pressed = state == ElementState::Pressed;
                 if let Some(state) = &mut self.state {
+                    if pressed
+                        && state.active_station == Some(crate::state::StationKind::Anvil)
+                        && state.inventory.is_open
+                    {
+                        match &logical_key {
+                            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
+                                state.anvil.rename.pop();
+                                state.anvil.refresh();
+                                return;
+                            }
+                            winit::keyboard::Key::Character(text) if !repeat => {
+                                for ch in text
+                                    .chars()
+                                    .filter(|ch| ch.is_ascii_alphanumeric() || *ch == ' ')
+                                {
+                                    if state.anvil.rename.len() < 24 {
+                                        state.anvil.rename.push(ch);
+                                    }
+                                }
+                                state.anvil.refresh();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
                     match physical_key {
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => {
                             if pressed {

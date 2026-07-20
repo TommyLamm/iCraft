@@ -22,6 +22,8 @@ pub struct PlayerState {
     pub starve_timer: f32,       // in seconds
     pub oxygen: f32,             // 0.0 to 300.0
     pub drowning_timer: f32,     // in seconds
+    pub experience: u32,
+    pub experience_level: u32,
 }
 
 impl PlayerState {
@@ -40,6 +42,8 @@ impl PlayerState {
             starve_timer: 0.0,
             oxygen: 300.0,
             drowning_timer: 0.0,
+            experience: 0,
+            experience_level: 0,
         }
     }
 
@@ -76,7 +80,36 @@ impl PlayerState {
         }
     }
 
+    pub fn add_experience(&mut self, amount: u32) {
+        self.experience = self.experience.saturating_add(amount);
+        while self.experience >= self.experience_to_next_level() {
+            self.experience -= self.experience_to_next_level();
+            self.experience_level += 1;
+        }
+    }
+
+    pub fn experience_to_next_level(&self) -> u32 {
+        7 + self.experience_level * 2
+    }
+
+    pub fn spend_levels(&mut self, levels: u32) -> bool {
+        if self.experience_level < levels {
+            return false;
+        }
+        self.experience_level -= levels;
+        true
+    }
+
     pub fn update(&mut self, dt: f32, is_underwater: bool) -> Option<(f32, DamageSource)> {
+        self.update_with_oxygen_rate(dt, is_underwater, 1.0)
+    }
+
+    pub fn update_with_oxygen_rate(
+        &mut self,
+        dt: f32,
+        is_underwater: bool,
+        oxygen_rate: f32,
+    ) -> Option<(f32, DamageSource)> {
         if self.is_dead {
             return None;
         }
@@ -121,7 +154,7 @@ impl PlayerState {
         let mut drown_damage = None;
         if is_underwater {
             let prev_oxygen = self.oxygen;
-            self.oxygen = (self.oxygen - dt * 20.0).max(0.0);
+            self.oxygen = (self.oxygen - dt * 20.0 * oxygen_rate).max(0.0);
             if self.oxygen == 0.0 {
                 if prev_oxygen == 0.0 {
                     self.drowning_timer += dt;

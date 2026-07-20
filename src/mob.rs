@@ -22,6 +22,7 @@ pub fn explode(
     player_physics: &mut PlayerPhysics,
     player_state: &mut PlayerState,
     game_mode: GameMode,
+    damage_multiplier: f32,
 ) {
     let cx = center.x.floor() as i32;
     let cy = center.y.floor() as i32;
@@ -80,7 +81,10 @@ pub fn explode(
             let dmg = calculate_explosion_damage(center, player_physics.position);
             if dmg > 0.0 {
                 // Inflict damage using player's existing interface
-                player_state.take_damage(dmg, crate::player::DamageSource::Fall); // Fall is fine, or custom
+                player_state.take_damage(
+                    dmg * damage_multiplier,
+                    crate::player::DamageSource::Explosion,
+                );
                 let dir = (player_physics.position - center).normalize_or_zero();
                 player_physics.velocity += dir * 12.0 + Vec3::new(0.0, 5.0, 0.0);
             }
@@ -199,12 +203,15 @@ pub fn update_mobs(
     dt: f32,
     audio_manager: &mut crate::audio::AudioManager,
     listener_right: Vec3,
+    player_invisible: bool,
+    damage_multiplier: f32,
 ) {
     let player_pos = player_physics.position;
 
     // Despawn out-of-bounds mobs
     entity_manager.entities.retain(|entity| {
-        if entity.entity_type == EntityType::Arrow {
+        if entity.entity_type == EntityType::Arrow || entity.entity_type == EntityType::SplashPotion
+        {
             true
         } else {
             entity.position.distance(player_pos) <= 128.0
@@ -223,8 +230,23 @@ pub fn update_mobs(
             entity.invulnerable_time = (entity.invulnerable_time - dt).max(0.0);
         }
 
+        if entity.entity_type == EntityType::SplashPotion {
+            continue;
+        }
+
         // Apply physical update
         entity.update_physics(dt, chunk_manager);
+
+        if entity.fire_aspect_timer > 0.0 {
+            entity.fire_aspect_timer = (entity.fire_aspect_timer - dt).max(0.0);
+            entity.burn_damage_timer += dt;
+            if entity.burn_damage_timer >= 1.0 {
+                entity.burn_damage_timer -= 1.0;
+                entity.health -= 1.0;
+            }
+        } else {
+            entity.burn_damage_timer = 0.0;
+        }
 
         if entity.entity_type == EntityType::Arrow {
             // Check collision with solid blocks
@@ -239,7 +261,7 @@ pub fn update_mobs(
 
             // Check collision with player AABB
             let player_aabb = player_physics.get_aabb();
-            if entity.get_aabb().intersects(&player_aabb) {
+            if !entity.friendly_projectile && entity.get_aabb().intersects(&player_aabb) {
                 hit_player = true;
                 hit_player_amount = 4.0;
                 entity.health = -1.0; // Destroy arrow
@@ -271,7 +293,7 @@ pub fn update_mobs(
             || entity.entity_type == EntityType::Creeper;
 
         let dist = entity.position.distance(player_pos);
-        if is_hostile && dist <= 16.0 {
+        if is_hostile && dist <= 16.0 && !player_invisible {
             entity.target_player = true;
 
             // Turn towards player
@@ -457,6 +479,7 @@ pub fn update_mobs(
             player_physics,
             player_state,
             game_mode,
+            damage_multiplier,
         );
 
         let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
@@ -471,11 +494,14 @@ pub fn update_mobs(
     // Handle player taking damage
     if hit_player && game_mode != GameMode::Creative {
         // Player is hit, apply damage and small knockback
-        let died = player_state.take_damage(hit_player_amount, crate::player::DamageSource::Fall); // use Fall or custom
+        let died = player_state.take_damage(
+            hit_player_amount * damage_multiplier,
+            crate::player::DamageSource::Mob,
+        );
         if died {
             println!("[Debug] Player died from mob attack!");
             player_state.is_dead = true;
-            player_state.death_reason = Some(crate::player::DamageSource::Fall);
+            player_state.death_reason = Some(crate::player::DamageSource::Mob);
         } else {
             // Apply knockback
             let flat_dir = (player_pos - entity_manager.entities[0].position).normalize_or_zero(); // general direction

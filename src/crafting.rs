@@ -283,6 +283,132 @@ impl RecipeManager {
             ItemStack::new(Item::Bread, 1),
         );
 
+        // Enchanting / brewing / anvil workstations.
+        add_shaped(
+            &mut recipes,
+            vec![" B ", "D D", "OOO"],
+            &[
+                ("B", Item::Bookshelf),
+                ("D", Item::Diamond),
+                ("O", Item::Obsidian),
+            ],
+            ItemStack::new(Item::EnchantingTable, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec![" B ", "CCC"],
+            &[("B", Item::BlazePowder), ("C", Item::Cobblestone)],
+            ItemStack::new(Item::BrewingStand, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["III", " I ", "III"],
+            &[("I", Item::IronIngot)],
+            ItemStack::new(Item::Anvil, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["G G", " G "],
+            &[("G", Item::Glass)],
+            ItemStack::new(Item::GlassBottle, 3),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["III", "I I"],
+            &[("I", Item::IronIngot)],
+            ItemStack::new(Item::IronHelmet, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["I I", "III", "III"],
+            &[("I", Item::IronIngot)],
+            ItemStack::new(Item::IronChestplate, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["III", "I I", "I I"],
+            &[("I", Item::IronIngot)],
+            ItemStack::new(Item::IronLeggings, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["I I", "I I"],
+            &[("I", Item::IronIngot)],
+            ItemStack::new(Item::IronBoots, 1),
+        );
+        add_shaped(
+            &mut recipes,
+            vec!["G", "S", "F"],
+            &[
+                ("G", Item::Gravel),
+                ("S", Item::Stick),
+                ("F", Item::Feather),
+            ],
+            ItemStack::new(Item::Arrow, 4),
+        );
+
+        // Substitute recipes keep brewing ingredients obtainable before Nether exists.
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Seeds, Item::RottenFlesh],
+            ItemStack::new(Item::NetherWart, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Coal, Item::Gunpowder],
+            ItemStack::new(Item::BlazePowder, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::SugarCane],
+            ItemStack::new(Item::Sugar, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Melon, Item::GoldIngot],
+            ItemStack::new(Item::GlisteringMelon, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Apple, Item::GoldIngot],
+            ItemStack::new(Item::GoldenCarrot, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::SpiderEye, Item::Sugar, Item::RottenFlesh],
+            ItemStack::new(Item::FermentedSpiderEye, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Gunpowder, Item::BlazePowder],
+            ItemStack::new(Item::MagmaCream, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Redstone],
+            ItemStack::new(Item::RedstoneDust, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Torch, Item::Gunpowder],
+            ItemStack::new(Item::GlowstoneDust, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::Diamond, Item::RottenFlesh],
+            ItemStack::new(Item::GhastTear, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::RawChicken, Item::Water],
+            ItemStack::new(Item::Pufferfish, 1),
+        );
+        add_shapeless(
+            &mut recipes,
+            vec![Item::RottenFlesh, Item::Bone],
+            ItemStack::new(Item::SpiderEye, 1),
+        );
+
         Self { recipes }
     }
 

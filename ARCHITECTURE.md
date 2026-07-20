@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `580b736abb636a4ce2359390df26032568dbe5d7` (`580b736`). This identifies the
+> `e7fbb4f3b926635c693f171f88af613980c2a500` (`e7fbb4f`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -50,8 +50,8 @@ src/main.rs
   requests the next redraw, then calls `State::render`.
 - `src/state.rs::State` is the composition root and principal coupling hotspot.
   It owns the window/GPU resources, camera, chunks and mesh cache, player,
-  inventory/crafting, entities, lightweight particles, audio, UI state, and
-  timers.
+  inventory/crafting, enchanting/brewing workstations, potion effects,
+  entities, lightweight particles, audio, UI state, and timers.
 
 ## Runtime data flows
 
@@ -72,7 +72,8 @@ back to procedural generation when those assets are unavailable.
    cached meshes dirty. These ticks occur **before** the paused/dead early return.
 2. Advance world time and translate `KeyState` into movement.
 3. Run `PlayerPhysics::update`, then `State::update_chunks`.
-4. Update particle physics; emit footstep dust and periodic torch smoke, then
+4. Tick brewing progress and active potion effects, update particle physics;
+   emit footstep dust and periodic torch smoke, then
    collect nearby dropped items whose cooldown has expired when the inventory
    accepts them.
 5. Apply landing/fall/void/lava/hunger/drowning state and audio effects.
@@ -153,6 +154,23 @@ owns UI slot behavior. Data lives in `inventory::Inventory`; recipe definitions
 and matching live in `crafting::RecipeManager`. World interactions are handled by
 `State::{handle_click, break_block}` and `interaction::raycast`.
 
+### Enchanting, anvils, brewing, and effects
+
+`inventory::ItemStack` keeps a fixed six-entry `EnchantmentSet`, optional
+`PotionData`, and a fixed 24-byte custom name, so stacks remain `Copy` and still
+fit the existing immediate-mode drag/drop UI. `enchantment.rs` owns option
+generation and all stat helpers. An enchanting table scans a two-block ring for
+up to 15 bookshelves, derives three deterministic offers, and charges experience
+levels plus lapis in Survival. Anvils combine enchantments, repair equal tools,
+and accept keyboard text for renaming.
+
+`brewing.rs` owns potion recipes, ten effect variants, the 10-second brewing
+state machine, and `EffectManager`. State applies effects to movement, melee,
+regeneration/poison, night brightness, hostile targeting, lava damage, and
+underwater oxygen. Splash potions are transient projectile entities and apply
+within four blocks. Closing any workstation returns authoritative slot contents
+to the player inventory; workstation progress and active effects are transient.
+
 ## Source routing table
 
 ### Runtime and rendering
@@ -185,8 +203,10 @@ and matching live in `crafting::RecipeManager`. World interactions are handled b
 | --- | --- |
 | `src/inventory.rs` | `GameMode`, `Item`, tool/material metadata, `ItemStack`, `Inventory`; stacks, durability, hotbar/backpack/armor/craft slots, block-item mapping. |
 | `src/crafting.rs` | `Recipe`, `RecipeManager`; shaped/shapeless recipe definitions and grid matching. |
+| `src/enchantment.rs` | `Enchantment`, `EnchantmentSet`, `EnchantingState`, `AnvilState`; offer generation, compatibility, stat modifiers, repair/combine/rename rules. |
+| `src/brewing.rs` | `PotionKind`, `PotionData`, `PotionEffect`, `EffectManager`, `BrewingStandState`; recipes, timed brewing and active-effect queries. |
 | `src/player.rs` | `PlayerState`, `DamageSource`; health, hunger, saturation/exhaustion, regeneration, invulnerability, oxygen/drowning, death state. |
-| `src/entity.rs` | `EntityType`, `Entity`, `EntityManager`; shared hostile/passive/projectile/heart-particle/dropped-item data, AABBs, basic entity physics, IDs and spawn storage. |
+| `src/entity.rs` | `EntityType`, `Entity`, `EntityManager`; shared hostile/passive/arrow/splash-potion/heart-particle/dropped-item data, AABBs, basic entity physics, IDs and spawn storage. |
 | `src/mob.rs` | Hostile spawn/AI/combat, arrows, sunlight burning, creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for them. |
 | `src/passive_mob.rs` | Pig/cow/sheep/chicken wandering, cliff avoidance, breeding/young, drops and species-specific behavior. |
 | `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
@@ -207,8 +227,8 @@ and matching live in `crafting::RecipeManager`. World interactions are handled b
 
 Most behavioral tests are inline `#[cfg(test)]` unit tests beside their modules,
 especially in `world.rs`, `lighting.rs`, `fluid.rs`, `physics.rs`,
-`interaction.rs`, `inventory.rs`, `crafting.rs`, `player.rs`, `entity.rs`,
-`particles.rs`, `mob.rs`, and `audio.rs`.
+`interaction.rs`, `inventory.rs`, `crafting.rs`, `enchantment.rs`, `brewing.rs`,
+`player.rs`, `entity.rs`, `particles.rs`, `mob.rs`, and `audio.rs`.
 
 `tests/passive_mob_tests.rs` is currently only a placeholder. Because the package
 has no `src/lib.rs`, integration tests cannot directly import the internal

@@ -1859,6 +1859,31 @@ impl TextureAtlas {
         draw_pumpkin(&mut img, 13, 12);
         draw_melon(&mut img, 14, 12);
 
+        // Row 13-14: enchanting / brewing workstations and compact item icons.
+        draw_noise(&mut img, 0, 13, [45, 20, 75], 12, &mut seed); // Enchanting table
+        draw_noise(&mut img, 1, 13, [125, 80, 45], 12, &mut seed); // Brewing stand
+        draw_noise(&mut img, 2, 13, [70, 72, 78], 8, &mut seed); // Anvil
+        draw_noise(&mut img, 3, 13, [35, 55, 190], 25, &mut seed); // Lapis
+        for col in 4..=7 {
+            draw_noise(&mut img, col, 13, [190, 195, 200], 10, &mut seed);
+        }
+        draw_glass(&mut img, 8, 13);
+        draw_noise(&mut img, 9, 13, [65, 80, 220], 16, &mut seed);
+        draw_noise(&mut img, 10, 13, [135, 65, 210], 16, &mut seed);
+        draw_noise(&mut img, 11, 13, [120, 25, 35], 15, &mut seed);
+        draw_noise(&mut img, 12, 13, [235, 235, 225], 8, &mut seed);
+        draw_noise(&mut img, 13, 13, [240, 165, 35], 18, &mut seed);
+        draw_noise(&mut img, 14, 13, [245, 195, 40], 12, &mut seed);
+        draw_noise(&mut img, 15, 13, [225, 225, 235], 8, &mut seed);
+        draw_noise(&mut img, 0, 14, [235, 165, 30], 12, &mut seed);
+        draw_noise(&mut img, 1, 14, [100, 40, 55], 12, &mut seed);
+        draw_noise(&mut img, 2, 14, [210, 80, 35], 14, &mut seed);
+        draw_noise(&mut img, 3, 14, [75, 135, 90], 16, &mut seed);
+        draw_noise(&mut img, 4, 14, [110, 25, 30], 12, &mut seed);
+        draw_noise(&mut img, 5, 14, [235, 210, 85], 18, &mut seed);
+        draw_redstone_icon(&mut img, 6, 14);
+        draw_noise(&mut img, 7, 14, [175, 175, 180], 8, &mut seed);
+
         // Save to assets folder
         let _ = std::fs::create_dir_all("assets");
         let _ = img.save("assets/texture_atlas.png");

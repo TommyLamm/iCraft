@@ -110,6 +110,31 @@ pub enum Item {
     SugarCane,
     Pumpkin,
     Melon,
+    // Enchanting, armor, and brewing
+    EnchantingTable,
+    BrewingStand,
+    Anvil,
+    LapisLazuli,
+    IronHelmet,
+    IronChestplate,
+    IronLeggings,
+    IronBoots,
+    GlassBottle,
+    Potion,
+    SplashPotion,
+    NetherWart,
+    Sugar,
+    BlazePowder,
+    GlisteringMelon,
+    GhastTear,
+    GoldenCarrot,
+    FermentedSpiderEye,
+    MagmaCream,
+    Pufferfish,
+    SpiderEye,
+    GlowstoneDust,
+    RedstoneDust,
+    Arrow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +169,9 @@ pub struct ItemStack {
     pub item: Item,
     pub count: u32,
     pub durability: u32,
+    pub enchantments: crate::enchantment::EnchantmentSet,
+    pub potion: Option<crate::brewing::PotionData>,
+    pub custom_name: crate::enchantment::ItemName,
 }
 
 impl ItemStack {
@@ -153,6 +181,13 @@ impl ItemStack {
             item,
             count,
             durability,
+            enchantments: crate::enchantment::EnchantmentSet::default(),
+            potion: if item == Item::Potion {
+                Some(crate::brewing::PotionData::water())
+            } else {
+                None
+            },
+            custom_name: crate::enchantment::ItemName::default(),
         }
     }
 }
@@ -166,6 +201,13 @@ pub struct ItemProperties {
 }
 
 impl Item {
+    pub fn is_armor(self) -> bool {
+        matches!(
+            self,
+            Item::IronHelmet | Item::IronChestplate | Item::IronLeggings | Item::IronBoots
+        )
+    }
+
     pub fn tool_properties(self) -> Option<ToolProperties> {
         match self {
             Item::StoneSword => Some(ToolProperties {
@@ -907,6 +949,80 @@ impl Item {
                 block_type: Some(BlockType::Melon),
                 tex_coords: (14, 12),
             },
+            item @ (Item::EnchantingTable | Item::BrewingStand | Item::Anvil) => {
+                let (name, block_type, tex_coords) = match item {
+                    Item::EnchantingTable => {
+                        ("Enchanting Table", BlockType::EnchantingTable, (0, 13))
+                    }
+                    Item::BrewingStand => ("Brewing Stand", BlockType::BrewingStand, (1, 13)),
+                    _ => ("Anvil", BlockType::Anvil, (2, 13)),
+                };
+                ItemProperties {
+                    name,
+                    max_stack: 64,
+                    is_block: true,
+                    block_type: Some(block_type),
+                    tex_coords,
+                }
+            }
+            item @ (Item::LapisLazuli
+            | Item::IronHelmet
+            | Item::IronChestplate
+            | Item::IronLeggings
+            | Item::IronBoots
+            | Item::GlassBottle
+            | Item::Potion
+            | Item::SplashPotion
+            | Item::NetherWart
+            | Item::Sugar
+            | Item::BlazePowder
+            | Item::GlisteringMelon
+            | Item::GhastTear
+            | Item::GoldenCarrot
+            | Item::FermentedSpiderEye
+            | Item::MagmaCream
+            | Item::Pufferfish
+            | Item::SpiderEye
+            | Item::GlowstoneDust
+            | Item::RedstoneDust) => {
+                let (name, max_stack, tex_coords) = match item {
+                    Item::LapisLazuli => ("Lapis Lazuli", 64, (3, 13)),
+                    Item::IronHelmet => ("Iron Helmet", 1, (4, 13)),
+                    Item::IronChestplate => ("Iron Chestplate", 1, (5, 13)),
+                    Item::IronLeggings => ("Iron Leggings", 1, (6, 13)),
+                    Item::IronBoots => ("Iron Boots", 1, (7, 13)),
+                    Item::GlassBottle => ("Glass Bottle", 64, (8, 13)),
+                    Item::Potion => ("Potion", 1, (9, 13)),
+                    Item::SplashPotion => ("Splash Potion", 1, (10, 13)),
+                    Item::NetherWart => ("Nether Wart", 64, (11, 13)),
+                    Item::Sugar => ("Sugar", 64, (12, 13)),
+                    Item::BlazePowder => ("Blaze Powder", 64, (13, 13)),
+                    Item::GlisteringMelon => ("Glistering Melon", 64, (14, 13)),
+                    Item::GhastTear => ("Ghast Tear", 64, (15, 13)),
+                    Item::GoldenCarrot => ("Golden Carrot", 64, (0, 14)),
+                    Item::FermentedSpiderEye => ("Fermented Spider Eye", 64, (1, 14)),
+                    Item::MagmaCream => ("Magma Cream", 64, (2, 14)),
+                    Item::Pufferfish => ("Pufferfish", 64, (3, 14)),
+                    Item::SpiderEye => ("Spider Eye", 64, (4, 14)),
+                    Item::GlowstoneDust => ("Glowstone Dust", 64, (5, 14)),
+                    Item::RedstoneDust => ("Redstone Dust", 64, (6, 14)),
+                    _ => unreachable!(),
+                };
+                ItemProperties {
+                    name,
+                    max_stack,
+                    is_block: false,
+                    block_type: None,
+                    tex_coords,
+                }
+            }
+            Item::Arrow => ItemProperties {
+                name: "Arrow",
+                max_stack: 64,
+                is_block: false,
+                block_type: None,
+                tex_coords: (7, 14),
+            },
         }
     }
 
@@ -958,6 +1074,9 @@ impl Item {
             BlockType::SugarCane => Item::SugarCane,
             BlockType::Pumpkin => Item::Pumpkin,
             BlockType::Melon => Item::Melon,
+            BlockType::EnchantingTable => Item::EnchantingTable,
+            BlockType::BrewingStand => Item::BrewingStand,
+            BlockType::Anvil => Item::Anvil,
         }
     }
 }
@@ -1025,6 +1144,14 @@ impl Inventory {
             Item::Bookshelf,
             Item::Sand,
             Item::Lava,
+            Item::EnchantingTable,
+            Item::BrewingStand,
+            Item::Anvil,
+            Item::LapisLazuli,
+            Item::Potion,
+            Item::NetherWart,
+            Item::Sugar,
+            Item::BlazePowder,
         ];
         for (i, &item) in extra_items.iter().enumerate() {
             inv.main[i] = Some(ItemStack::new(item, 64));
@@ -1080,6 +1207,69 @@ impl Inventory {
         for slot in self.main.iter_mut() {
             if slot.is_none() {
                 *slot = Some(ItemStack::new(item, 1));
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn add_stack(&mut self, mut incoming: ItemStack) -> bool {
+        if incoming.item == Item::Air || incoming.count == 0 {
+            return false;
+        }
+        let max_stack = incoming.item.properties().max_stack;
+        for slot in self.hotbar.iter_mut().chain(self.main.iter_mut()) {
+            if let Some(existing) = slot {
+                if existing.item == incoming.item
+                    && existing.enchantments == incoming.enchantments
+                    && existing.potion == incoming.potion
+                    && existing.custom_name == incoming.custom_name
+                    && existing.count < max_stack
+                {
+                    let moved = (max_stack - existing.count).min(incoming.count);
+                    existing.count += moved;
+                    incoming.count -= moved;
+                    if incoming.count == 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+        for slot in self.hotbar.iter_mut().chain(self.main.iter_mut()) {
+            if slot.is_none() {
+                let moved = incoming.count.min(max_stack);
+                *slot = Some(ItemStack {
+                    count: moved,
+                    ..incoming
+                });
+                incoming.count -= moved;
+                if incoming.count == 0 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn count_item(&self, item: Item) -> u32 {
+        self.hotbar
+            .iter()
+            .chain(self.main.iter())
+            .flatten()
+            .filter(|stack| stack.item == item)
+            .map(|stack| stack.count)
+            .sum()
+    }
+
+    pub fn remove_one(&mut self, item: Item) -> bool {
+        for slot in self.hotbar.iter_mut().chain(self.main.iter_mut()) {
+            if slot.is_some_and(|stack| stack.item == item) {
+                let stack = slot.as_mut().unwrap();
+                if stack.count > 1 {
+                    stack.count -= 1;
+                } else {
+                    *slot = None;
+                }
                 return true;
             }
         }

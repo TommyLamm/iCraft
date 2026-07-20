@@ -1,7 +1,7 @@
 # 🏗️ Minecraft Clone — 進度追蹤
 
-> **整體進度**: 20 / 30 任務完成
-> **當前階段**: P2 已完成，下一階段為 P3 — 進階功能
+> **整體進度**: 21 / 30 任務完成
+> **當前階段**: P3 — 進階功能
 
 ---
 
@@ -12,16 +12,16 @@
 | **P0 — 核心體驗** | 5/5 | 5 | 🟢 已完成 |
 | **P1 — 可玩性基礎** | 7/7 | 7 | 🟢 已完成 |
 | **P2 — 完善體驗** | 8/8 | 8 | 🟢 已完成 |
-| **P3 — 進階功能** | 0/9 | — | ⬜ 待定 |
+| **P3 — 進階功能** | 1/9 | 1 | 🟡 進行中 |
 
 ### 進度條
 ```
 P0 [██████████] 100%
 P1 [██████████] 100%
 P2 [██████████] 100%
-P3 [░░░░░░░░░░] 0%
+P3 [█░░░░░░░░░] 11.1%
 ────────────────────
-總計 [███████░░░] 66.7%
+總計 [███████░░░] 70.0%
 ```
 
 ---
@@ -87,7 +87,7 @@ P3 [░░░░░░░░░░] 0%
 
 | # | 任務 | 狀態 | 開始日期 | 完成日期 | 備註 |
 |---|------|------|---------|---------|------|
-| 21 | [附魔 / 釀造系統](./p3/21_enchanting_brewing.md) | ⬜ 待定 | — | — | |
+| 21 | [附魔 / 釀造系統](./p3/21_enchanting_brewing.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 22 | [紅石系統](./p3/22_redstone.md) | ⬜ 待定 | — | — | |
 | 23 | [天氣系統](./p3/23_weather.md) | ⬜ 待定 | — | — | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | ⬜ 待定 | — | — | |
@@ -104,6 +104,11 @@ P3 [░░░░░░░░░░] 0%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-20
+- ✅ 完成任務 #21 (By GPT-5.6 Sol High)：附魔 / 釀造系統
+  - 新增文件：`src/enchantment.rs`, `src/brewing.rs`
+  - 修改文件：`src/main.rs`, `src/app.rs`, `src/inventory.rs`, `src/crafting.rs`, `src/world.rs`, `src/texture.rs`, `src/player.rs`, `src/entity.rs`, `src/mob.rs`, `src/mob_renderer.rs`, `src/passive_mob.rs`, `src/save.rs`, `src/state.rs`, `assets/texture_atlas.png`, `ARCHITECTURE.md`
+  - 關鍵決策：以固定容量附魔集合、藥水資料及固定長度名稱擴充可複製的 `ItemStack`，保留既有背包拖放架構並提供舊存檔升級。附魔台提供受最多 15 個書架影響的三個選項並消耗經驗／青金石；鐵砧支援修復、合併與鍵盤重命名。釀造台支援十種效果、延時／升級／噴濺修飾與 4 格範圍投射物，效果接入移動、戰鬥、AI、光照、火焰、氧氣及 HUD。效率、耐久、絲綢之觸、時運、鋒利、擊退、火焰附加、搶奪、保護、摔落保護、水下呼吸、力量與無限均已接入現有玩法。
+  - 驗證：`cargo fmt -- --check`、`cargo test --release`、`cargo check --release` 通過；64 項單元測試與 1 項整合測試全部通過。`cargo run --release` 實際啟動冒煙測試無 panic。
 - ✅ 完成任務 #20 (By GPT-5.6 Sol High)：環境光遮蔽 (Ambient Occlusion)
   - 修改文件：`src/world.rs`, `src/state.rs`, `src/shader.wgsl`, `src/chunk_manager.rs`, `src/fluid.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/mob_renderer.rs`, `src/particles.rs`, `ARCHITECTURE.md`
   - 關鍵決策：在 Chunk CPU 網格生成階段依每個面頂點外側的兩個側邊格及對角格計算四級 AO，只有 solid opaque 方塊遮擋；以獨立平滑插值頂點屬性在 Shader 中與既有 flat 打包光照相乘，並依對角 AO 總和選擇三角線。統一方塊網格依賴 helper，支援負座標、Chunk 邊角的對角失效，以及載入／卸載時八鄰居重建；非 Chunk 幾何固定使用 AO 1.0。

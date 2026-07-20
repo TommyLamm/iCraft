@@ -14,6 +14,7 @@ pub enum EntityType {
     Chicken,
     HeartParticle,
     DroppedItem,
+    SplashPotion,
 }
 
 pub struct Entity {
@@ -35,7 +36,12 @@ pub struct Entity {
     pub action_cooldown: f32,
     pub is_ignited: bool,
     pub burn_timer: f32,
+    pub fire_aspect_timer: f32,
+    pub burn_damage_timer: f32,
     pub invulnerable_time: f32,
+    pub friendly_projectile: bool,
+    pub projectile_damage: f32,
+    pub potion: Option<crate::brewing::PotionData>,
 
     // Passive mob fields
     pub age: f32,
@@ -57,7 +63,7 @@ impl Entity {
         let size = match entity_type {
             EntityType::Zombie | EntityType::Skeleton => Vec3::new(0.6, 1.8, 0.6),
             EntityType::Creeper => Vec3::new(0.6, 1.7, 0.6),
-            EntityType::Arrow => Vec3::new(0.15, 0.15, 0.15),
+            EntityType::Arrow | EntityType::SplashPotion => Vec3::new(0.15, 0.15, 0.15),
             EntityType::Pig => Vec3::new(0.9, 0.9, 0.9),
             EntityType::Cow => Vec3::new(0.9, 1.4, 0.9),
             EntityType::Sheep => Vec3::new(0.9, 1.3, 0.9),
@@ -71,7 +77,10 @@ impl Entity {
             EntityType::Cow => 10.0,
             EntityType::Sheep => 8.0,
             EntityType::Chicken => 4.0,
-            EntityType::Arrow | EntityType::HeartParticle | EntityType::DroppedItem => 0.0,
+            EntityType::Arrow
+            | EntityType::SplashPotion
+            | EntityType::HeartParticle
+            | EntityType::DroppedItem => 0.0,
         };
         Self {
             id,
@@ -88,7 +97,12 @@ impl Entity {
             action_cooldown: 0.0,
             is_ignited: false,
             burn_timer: 0.0,
+            fire_aspect_timer: 0.0,
+            burn_damage_timer: 0.0,
             invulnerable_time: 0.0,
+            friendly_projectile: false,
+            projectile_damage: 4.0,
+            potion: None,
             age: 0.0,
             breeding_timer: 0.0,
             breed_cooldown: 0.0,
@@ -115,7 +129,7 @@ impl Entity {
             self.position += self.velocity * dt;
             return;
         }
-        if self.entity_type == EntityType::Arrow {
+        if self.entity_type == EntityType::Arrow || self.entity_type == EntityType::SplashPotion {
             // Arrow physics: gravity only, no horizontal deceleration
             self.velocity.y -= 12.0 * dt;
             self.position += self.velocity * dt;

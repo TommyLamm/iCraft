@@ -412,7 +412,7 @@ pub fn render_mobs(
                     light_val,
                 );
             }
-            EntityType::Arrow => {
+            EntityType::Arrow | EntityType::SplashPotion => {
                 // Render arrow as a thin box (skin Col 8)
                 add_cuboid(
                     vertices,

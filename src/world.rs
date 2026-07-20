@@ -298,6 +298,9 @@ pub enum BlockType {
     SugarCane = 42,
     Pumpkin = 43,
     Melon = 44,
+    EnchantingTable = 45,
+    BrewingStand = 46,
+    Anvil = 47,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -318,7 +321,7 @@ pub struct BlockProperties {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= 44 {
+        if val <= 47 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -345,6 +348,8 @@ impl BlockType {
             | BlockType::Bookshelf
             | BlockType::CraftingTable
             | BlockType::Chest
+            | BlockType::EnchantingTable
+            | BlockType::BrewingStand
             | BlockType::Pumpkin
             | BlockType::Melon => Some(crate::audio::SoundMaterial::Wood),
             BlockType::Sand | BlockType::Clay => Some(crate::audio::SoundMaterial::Sand),
@@ -352,6 +357,7 @@ impl BlockType {
             BlockType::Snow => Some(crate::audio::SoundMaterial::Snow),
             BlockType::Ice => Some(crate::audio::SoundMaterial::Ice),
             BlockType::Glass => Some(crate::audio::SoundMaterial::Glass),
+            BlockType::Anvil => Some(crate::audio::SoundMaterial::Stone),
             _ => Some(crate::audio::SoundMaterial::Stone),
         }
     }
@@ -718,6 +724,30 @@ impl BlockType {
                 is_passable: false,
                 light_emission: 0,
             },
+            BlockType::EnchantingTable => BlockProperties {
+                name: "Enchanting Table",
+                hardness: 5.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 7,
+            },
+            BlockType::BrewingStand => BlockProperties {
+                name: "Brewing Stand",
+                hardness: 0.5,
+                render_type: RenderType::Cutout,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 1,
+            },
+            BlockType::Anvil => BlockProperties {
+                name: "Anvil",
+                hardness: 5.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
         }
     }
 
@@ -845,6 +875,9 @@ impl BlockType {
             BlockType::SugarCane => (12, 12),
             BlockType::Pumpkin => (13, 12),
             BlockType::Melon => (14, 12),
+            BlockType::EnchantingTable => (0, 13),
+            BlockType::BrewingStand => (1, 13),
+            BlockType::Anvil => (2, 13),
         }
     }
 }
@@ -1709,7 +1742,10 @@ impl BlockType {
             | BlockType::RedstoneOre
             | BlockType::StoneBrick
             | BlockType::Obsidian
-            | BlockType::Furnace => ToolType::Pickaxe,
+            | BlockType::Furnace
+            | BlockType::EnchantingTable
+            | BlockType::BrewingStand
+            | BlockType::Anvil => ToolType::Pickaxe,
             BlockType::OakLog
             | BlockType::OakPlanks
             | BlockType::BirchLog
@@ -1733,6 +1769,8 @@ impl BlockType {
             | BlockType::Furnace
             | BlockType::StoneBrick
             | BlockType::Sandstone => Some(ToolMaterial::Wood), // Stone tier tools or above
+            BlockType::BrewingStand | BlockType::Anvil => Some(ToolMaterial::Stone),
+            BlockType::EnchantingTable => Some(ToolMaterial::Diamond),
             BlockType::IronOre => Some(ToolMaterial::Stone),
             BlockType::GoldOre | BlockType::RedstoneOre | BlockType::DiamondOre => {
                 Some(ToolMaterial::Iron)
