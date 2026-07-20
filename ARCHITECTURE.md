@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `ffec6befc2d216eb3e6aab96907bfd13810aaf41` (`ffec6be`). This identifies the
+> `580b736abb636a4ce2359390df26032568dbe5d7` (`580b736`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -102,11 +102,19 @@ input / mob / fluid behavior
 
 Important invariant: `ChunkManager::set_block` does **not** update lighting or
 mark `State::chunk_meshes` dirty. Any non-fluid mutation path must explicitly do
-both. Mutations on a chunk edge may require the adjacent chunk mesh as well.
+both. Mutations on a chunk edge require the adjacent chunk mesh; mutations on a
+chunk corner also require the diagonal mesh because vertex AO samples diagonal
+blocks. `chunk_manager::mark_block_mesh_dependencies` is the shared source of
+truth for this invalidation, while chunk load/unload invalidates all eight
+surrounding loaded meshes.
 
 `Chunk::generate_mesh` reads neighboring block, sky-light, block-light, fluid
 level, and falling state through a closure supplied by `State`. It emits separate
-opaque/cutout and translucent vertex/index sets.
+opaque/cutout and translucent vertex/index sets. Each visible face receives
+four-level vertex ambient occlusion from three exterior neighbor samples per
+corner; the darker diagonal distribution selects the quad triangulation to
+avoid interpolation seams. Only solid opaque blocks cast AO, while every Chunk
+surface type can receive it.
 
 ### Rendering
 
@@ -116,7 +124,9 @@ opaque/cutout chunks -> mobs (including dropped items) -> translucent chunks ->
 alpha-blended particles -> multiply-blended mining crack overlay -> textured UI
 -> colored UI -> crosshair -> line/text UI -> present. The shader entrypoints
 and packed camera, lighting, fog, time, underwater, and damage behavior are in
-`src/shader.wgsl`.
+`src/shader.wgsl`. Terrain `Vertex` data carries AO as a smooth location-3
+attribute; packed sky/block/face lighting remains flat and the fragment shader
+multiplies both contributions before hurt tint and fog.
 
 ### Particles and dropped items
 
