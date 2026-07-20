@@ -1436,8 +1436,34 @@ impl TextureAtlas {
         draw_hunger(&mut img, 5, 8, 0.0); // Empty Hunger
 
         // Row 15: Crack overlays (cols 0..10)
-        for tx in 0..10 {
-            draw_crack_pattern(&mut img, tx, 15, tx);
+        // Prefer loading high-quality 10-stage destroy stage PNGs from disk; fall
+        // back to the procedural crack generator when files are missing or fail
+        // to load (e.g. self-contained single-binary mode).
+        for stage in 0..10u32 {
+            let path = format!("assets/textures/destroy_stages/destroy_stage_{}.png", stage);
+            let loaded = std::path::Path::new(&path)
+                .exists()
+                .then(|| image::open(&path).ok())
+                .flatten();
+            if let Some(loaded_img) = loaded {
+                let stage_img = loaded_img.to_rgba8();
+                let sw = stage_img.width();
+                let sh = stage_img.height();
+                let tx = stage;
+                let ty = 15u32;
+                for y in 0..16 {
+                    for x in 0..16 {
+                        let sx = (x as u32 * sw) / 16;
+                        let sy = (y as u32 * sh) / 16;
+                        let sx = sx.min(sw - 1);
+                        let sy = sy.min(sh - 1);
+                        let pixel = stage_img.get_pixel(sx, sy);
+                        img.put_pixel(tx * 16 + x, ty * 16 + y, *pixel);
+                    }
+                }
+            } else {
+                draw_crack_pattern(&mut img, stage, 15, stage);
+            }
         }
 
         // Row 9: Mob Skins

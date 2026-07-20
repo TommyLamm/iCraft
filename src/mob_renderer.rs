@@ -783,6 +783,30 @@ pub fn render_mobs(
                     light_val,
                 );
             }
+            EntityType::DroppedItem => {
+                // Floating + rotating dropped item. The entity is rendered as a
+                // small cuboid textured from the carried item's atlas tile.
+                let yaw = time * 2.0;
+                let y_offset = (time * 3.0).sin() * 0.1;
+
+                let (col, row) = entity
+                    .dropped_item
+                    .map(|item| item.properties().tex_coords)
+                    .unwrap_or((0, 0));
+
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.25, 0.25, 0.25),
+                    Vec3::new(0.0, 0.0, 0.0),
+                    entity.position + Vec3::new(0.0, 0.25 + y_offset, 0.0),
+                    yaw,
+                    0.0,
+                    [col; 6],
+                    row,
+                    light_val,
+                );
+            }
         }
     }
 }

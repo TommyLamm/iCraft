@@ -140,6 +140,7 @@ pub struct State {
     pub size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
     trans_pipeline: wgpu::RenderPipeline,
+    crack_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     pub camera: Camera,
     camera_uniform: CameraUniform,
@@ -182,6 +183,11 @@ pub struct State {
     mob_vertex_buffer: wgpu::Buffer,
     mob_index_buffer: wgpu::Buffer,
     mob_num_indices: u32,
+    pub particles: crate::particles::ParticleSystem,
+    particle_vertex_buffer: wgpu::Buffer,
+    particle_index_buffer: wgpu::Buffer,
+    particle_num_indices: u32,
+    torch_smoke_timer: f32,
     total_time: f32,
     pub audio_manager: crate::audio::AudioManager,
     pub footstep_accumulator: f32,
@@ -504,6 +510,54 @@ impl State {
                         alpha: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::One,
                             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        let crack_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Crack Overlay Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Dst,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::Zero,
                             operation: wgpu::BlendOperation::Add,
                         },
                     }),
@@ -907,6 +961,24 @@ impl State {
             mapped_at_creation: false,
         });
 
+        let particle_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Particle Vertex Buffer"),
+            size: (std::mem::size_of::<Vertex>() * crate::particles::MAX_PARTICLES * 4)
+                as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let particle_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Particle Index Buffer"),
+            size: (std::mem::size_of::<u32>() * crate::particles::MAX_PARTICLES * 6)
+                as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let particles = crate::particles::ParticleSystem::new();
+
         Self {
             window,
             surface,
@@ -916,6 +988,7 @@ impl State {
             size,
             render_pipeline,
             trans_pipeline,
+            crack_pipeline,
             sky_pipeline,
             camera,
             camera_uniform,
@@ -957,6 +1030,11 @@ impl State {
             mob_vertex_buffer,
             mob_index_buffer,
             mob_num_indices: 0,
+            particles,
+            particle_vertex_buffer,
+            particle_index_buffer,
+            particle_num_indices: 0,
+            torch_smoke_timer: 0.0,
             total_time: 0.0,
             audio_manager,
             footstep_accumulator: 0.0,
@@ -1376,6 +1454,9 @@ impl State {
             return;
         }
 
+        // Advance lightweight particle simulation every frame.
+        self.particles.update(dt);
+
         // Double click W logic
         if self.keys.w && !self.last_w_pressed {
             if self.w_click_timer > 0.0 && self.player_state.hunger > 6.0 {
@@ -1513,6 +1594,25 @@ impl State {
                         self.audio_manager
                             .play_sound(crate::audio::SoundId::Footstep(mat));
                     }
+
+                    // Spawn footstep dust particles at the player's feet.
+                    if under_block != BlockType::Air {
+                        let feet_pos = glam::Vec3::new(
+                            self.player_physics.position.x,
+                            (self.player_physics.position.y - 0.05).max(0.0),
+                            self.player_physics.position.z,
+                        );
+                        let mut rng = self
+                            .total_time
+                            .to_bits()
+                            .wrapping_add(self.player_physics.position.x.to_bits());
+                        crate::particles::spawn_footstep_dust(
+                            &mut self.particles,
+                            feet_pos,
+                            under_block,
+                            &mut rng,
+                        );
+                    }
                 }
             }
         } else {
@@ -1520,6 +1620,77 @@ impl State {
         }
 
         self.was_on_ground = self.player_physics.on_ground;
+
+        // Torch smoke: periodically scan loaded chunks for torch blocks and
+        // spawn a slowly rising smoke particle above each one.
+        self.torch_smoke_timer += dt;
+        if self.torch_smoke_timer >= 0.4 {
+            self.torch_smoke_timer = 0.0;
+            let mut rng = self.total_time.to_bits().wrapping_add(0x9E3779B9);
+            let chunks: Vec<(i32, i32)> = self.chunk_manager.chunks.keys().copied().collect();
+            for (cx, cz) in chunks {
+                let chunk = match self.chunk_manager.chunks.get(&(cx, cz)) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                // Scan a downsampled subset of columns for torches to keep the
+                // cost bounded per frame.
+                for bx in 0..16 {
+                    for bz in 0..16 {
+                        for by in (0..crate::world::CHUNK_HEIGHT).step_by(2) {
+                            if chunk.blocks[bx][by][bz] == BlockType::Torch {
+                                let wx = cx * crate::world::CHUNK_WIDTH as i32 + bx as i32;
+                                let wy = by as i32;
+                                let wz = cz * crate::world::CHUNK_DEPTH as i32 + bz as i32;
+                                let torch_pos = glam::Vec3::new(
+                                    wx as f32 + 0.5,
+                                    wy as f32 + 0.6,
+                                    wz as f32 + 0.5,
+                                );
+                                crate::particles::spawn_torch_smoke(
+                                    &mut self.particles,
+                                    torch_pos,
+                                    &mut rng,
+                                );
+                                rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Dropped item collection: collect any DroppedItem entity within 1.5
+        // meters of the player whose pickup cooldown has expired.
+        {
+            let player_pos = self.player_physics.position;
+            let mut to_collect: Vec<usize> = Vec::new();
+            for (i, entity) in self.entity_manager.entities.iter().enumerate() {
+                if entity.entity_type != crate::entity::EntityType::DroppedItem {
+                    continue;
+                }
+                if entity.pickup_cooldown > 0.0 {
+                    continue;
+                }
+                if entity.dropped_item.is_none() {
+                    continue;
+                }
+                let d = entity.position.distance(player_pos);
+                if d < 1.5 {
+                    to_collect.push(i);
+                }
+            }
+            // Collect in reverse so indices stay valid as we remove.
+            for &i in to_collect.iter().rev() {
+                let item = self.entity_manager.entities[i].dropped_item;
+                if let Some(item) = item {
+                    let added = self.inventory.add_item(item);
+                    if added {
+                        self.entity_manager.entities.remove(i);
+                    }
+                }
+            }
+        }
 
         // Void damage check
         if self.player_physics.position.y < -64.0 {
@@ -1991,6 +2162,25 @@ impl State {
             );
         }
 
+        // Spawn block-break debris particles (15-25 small quads textured from
+        // the broken block's atlas tile).
+        {
+            let mut rng = (wx as u32)
+                .wrapping_mul(2654435761)
+                .wrapping_add(wy as u32)
+                .wrapping_mul(40503)
+                .wrapping_add(wz as u32)
+                .wrapping_add(self.total_time.to_bits());
+            let count = 15 + (rng % 11) as usize;
+            crate::particles::spawn_block_debris(
+                &mut self.particles,
+                sound_pos,
+                old_block,
+                count,
+                &mut rng,
+            );
+        }
+
         // Survival drops check
         if self.game_mode == GameMode::Survival {
             let mut eligible_to_harvest = true;
@@ -2021,10 +2211,12 @@ impl State {
                         (rng_seed / 65536) % 32768
                     };
                     if next_rand() % 10 == 0 {
-                        self.inventory.add_item(crate::inventory::Item::Apple);
+                        self.spawn_dropped_item(crate::inventory::Item::Apple, sound_pos);
                     } else {
-                        self.inventory
-                            .add_item(crate::inventory::Item::from_block(old_block));
+                        self.spawn_dropped_item(
+                            crate::inventory::Item::from_block(old_block),
+                            sound_pos,
+                        );
                     }
                 } else if old_block == BlockType::TallGrass {
                     let mut rng_seed = (wx as u32)
@@ -2038,11 +2230,13 @@ impl State {
                     };
                     if next_rand() % 8 == 0 {
                         // 12.5% chance to drop seed
-                        self.inventory.add_item(crate::inventory::Item::Seeds);
+                        self.spawn_dropped_item(crate::inventory::Item::Seeds, sound_pos);
                     }
                 } else {
-                    self.inventory
-                        .add_item(crate::inventory::Item::from_block(old_block));
+                    self.spawn_dropped_item(
+                        crate::inventory::Item::from_block(old_block),
+                        sound_pos,
+                    );
                 }
             }
 
@@ -2103,6 +2297,35 @@ impl State {
             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
                 mesh.dirty = true;
             }
+        }
+    }
+
+    /// Spawn a `DroppedItem` entity in the world carrying the given `Item`.
+    /// The item is launched with a small random upward velocity and given a
+    /// brief pickup cooldown so it can't be instantly re-collected.
+    pub fn spawn_dropped_item(&mut self, item: crate::inventory::Item, pos: glam::Vec3) {
+        if item == Item::Air {
+            return;
+        }
+        let id = self
+            .entity_manager
+            .spawn(crate::entity::EntityType::DroppedItem, pos);
+        if let Some(entity) = self.entity_manager.entities.last_mut() {
+            entity.dropped_item = Some(item);
+            // Small random initial upward velocity plus a little horizontal
+            // scatter so stacks don't overlap perfectly.
+            let mut rng = self
+                .total_time
+                .to_bits()
+                .wrapping_add((id.wrapping_mul(2654435761)) as u32);
+            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+            let vx = ((rng / 65536) as f32 / 32768.0 - 0.5) * 1.5;
+            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+            let vz = ((rng / 65536) as f32 / 32768.0 - 0.5) * 1.5;
+            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+            let vy = 2.0 + ((rng / 65536) as f32 / 32768.0) * 1.0;
+            entity.velocity = glam::Vec3::new(vx, vy, vz);
+            entity.pickup_cooldown = 0.5;
         }
     }
 
@@ -2969,6 +3192,29 @@ impl State {
                 bytemuck::cast_slice(&mob_indices[..ind_limit]),
             );
         }
+
+        // Compile billboard particle quads into the dynamic particle buffers.
+        // Camera right/up vectors are derived from yaw/pitch so billboards face
+        // the viewer.
+        let cam_right =
+            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
+        let cam_up = glam::Vec3::new(
+            -self.camera.yaw.cos() * self.camera.pitch.sin(),
+            self.camera.pitch.cos(),
+            -self.camera.yaw.sin() * self.camera.pitch.sin(),
+        )
+        .normalize_or_zero();
+        self.particle_num_indices = self
+            .particles
+            .compile_mesh(
+                &self.device,
+                &self.queue,
+                cam_right,
+                cam_up,
+                &self.particle_vertex_buffer,
+                &self.particle_index_buffer,
+            )
+            .unwrap_or(0);
 
         if self.is_saving {
             let mut ui_vertices = Vec::new();
@@ -4588,12 +4834,23 @@ impl State {
                 }
             }
 
-            // Draw Block cracking animation overlay
+            // Draw billboard particles using the translucent (alpha-blend) pipeline.
+            if self.particle_num_indices > 0 {
+                render_pass.set_vertex_buffer(0, self.particle_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(
+                    self.particle_index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                render_pass.draw_indexed(0..self.particle_num_indices, 0, 0..1);
+            }
+
+            // Draw Block cracking animation overlay (multiply blend)
             if let Some(target) = self.mining_target {
                 if self.mining_progress > 0.0 {
                     if let Some((_num_vertices, num_indices)) =
                         self.update_crack_buffers(target, self.mining_progress)
                     {
+                        render_pass.set_pipeline(&self.crack_pipeline);
                         render_pass.set_vertex_buffer(0, self.crack_vertex_buffer.slice(..));
                         render_pass.set_index_buffer(
                             self.crack_index_buffer.slice(..),

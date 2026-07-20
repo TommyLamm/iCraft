@@ -10,6 +10,7 @@ mod inventory;
 mod lighting;
 mod mob;
 mod mob_renderer;
+mod particles;
 mod passive_mob;
 mod physics;
 mod player;

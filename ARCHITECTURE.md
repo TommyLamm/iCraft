@@ -1,7 +1,15 @@
 # Architecture
 
-> Last verified: 2026-07-19. This is a navigation map, not a replacement for
+> Last verified: 2026-07-20. This is a navigation map, not a replacement for
 > source code. Read it first, then inspect only the symbols named for the task.
+>
+> Git baseline: branch `master`, commit
+> `ffec6befc2d216eb3e6aab96907bfd13810aaf41` (`ffec6be`). This identifies the
+> committed revision on which the verified working tree is based; it is not a
+> self-reference to the commit that may later include this file.
+>
+> Maintenance rule: whenever this architecture map is updated, refresh the
+> verification date, branch, and baseline commit together.
 
 ## Project at a glance
 
@@ -42,16 +50,19 @@ src/main.rs
   requests the next redraw, then calls `State::render`.
 - `src/state.rs::State` is the composition root and principal coupling hotspot.
   It owns the window/GPU resources, camera, chunks and mesh cache, player,
-  inventory/crafting, entities, audio, UI state, and timers.
+  inventory/crafting, entities, lightweight particles, audio, UI state, and
+  timers.
 
 ## Runtime data flows
 
 ### Startup
 
 `main` -> `App::resumed` -> `State::new` -> load `GameSettings` -> initialize
-wgpu pipelines/buffers -> build procedural texture atlas -> create spawn chunks
--> propagate initial lighting -> generate chunk meshes -> initialize gameplay,
-entity, UI, and audio state.
+wgpu pipelines/buffers (including the dedicated crack pipeline and particle
+buffers) -> build the texture atlas -> create spawn chunks -> propagate initial
+lighting -> generate chunk meshes -> initialize gameplay, entity, particle, UI,
+and audio state. Crack tiles prefer external `destroy_stage_*.png` files and fall
+back to procedural generation when those assets are unavailable.
 
 ### Per-frame update
 
@@ -61,9 +72,13 @@ entity, UI, and audio state.
    cached meshes dirty. These ticks occur **before** the paused/dead early return.
 2. Advance world time and translate `KeyState` into movement.
 3. Run `PlayerPhysics::update`, then `State::update_chunks`.
-4. Apply landing/fall/void/lava/hunger/drowning state and audio effects.
-5. Spawn/update hostile mobs, then update/spawn passive mobs.
-6. Sync camera and `CameraUniform`, upload the uniform, and advance continuous
+4. Update particle physics; emit footstep dust and periodic torch smoke, then
+   collect nearby dropped items whose cooldown has expired when the inventory
+   accepts them.
+5. Apply landing/fall/void/lava/hunger/drowning state and audio effects.
+6. Spawn/update hostile mobs, including dropped-item physics, then update/spawn
+   passive mobs.
+7. Sync camera and `CameraUniform`, upload the uniform, and advance continuous
    survival-mode mining through `interaction::raycast`.
 
 `State::update_chunks` unloads out-of-range chunks, creates at most one missing
@@ -95,11 +110,30 @@ opaque/cutout and translucent vertex/index sets.
 
 ### Rendering
 
-`State::render` first generates mob mesh data and all immediate-mode UI vertices
-on the CPU. The render pass order is: sky -> opaque/cutout chunks -> mobs ->
-translucent chunks -> mining crack overlay -> textured UI -> colored UI ->
-crosshair -> line/text UI -> present. The shader entrypoints and packed camera,
-lighting, fog, time, underwater, and damage behavior are in `src/shader.wgsl`.
+`State::render` first generates mob mesh data, camera-facing particle quads, and
+all immediate-mode UI vertices on the CPU. The render pass order is: sky ->
+opaque/cutout chunks -> mobs (including dropped items) -> translucent chunks ->
+alpha-blended particles -> multiply-blended mining crack overlay -> textured UI
+-> colored UI -> crosshair -> line/text UI -> present. The shader entrypoints
+and packed camera, lighting, fog, time, underwater, and damage behavior are in
+`src/shader.wgsl`.
+
+### Particles and dropped items
+
+Block breaks call `particles::spawn_block_debris` and, for eligible survival
+drops, `State::spawn_dropped_item`. `ParticleSystem` is a bounded (4,096 entry),
+transient CPU simulation: `State::update` advances position, gravity, age, and
+expiry; emitter helpers assign small atlas UV sub-rects; `State::render` calls
+`compile_mesh` to write billboard vertices/indices into preallocated dynamic GPU
+buffers. Footstep dust reuses the block below the player, while torch smoke is
+emitted by a periodic loaded-chunk scan and shrinks over its lifetime.
+
+Dropped items deliberately use `EntityManager`, not `ParticleSystem`. They carry
+an `inventory::Item`, use normal entity gravity/collision, skip hostile and
+passive AI, and remain authoritative until collection. `mob_renderer::render_mobs`
+draws each as a small atlas-textured cuboid with time-based yaw and vertical
+bobbing. Both particles and dropped-item entities remain transient and are not
+included in world saves.
 
 ### Inventory and crafting
 
@@ -117,10 +151,10 @@ and matching live in `crafting::RecipeManager`. World interactions are handled b
 | --- | --- |
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
 | `src/app.rs` | `winit::ApplicationHandler`; OS events, key/mouse routing, redraw loop, resize and surface-error policy. |
-| `src/state.rs` | `State`, `ChunkMesh`, `KeyState`, `SlotType`, `GameSettings`; GPU setup, frame ordering, UI, mining/placement, damage/respawn, chunk streaming. Start with the exact method, not the whole file. |
+| `src/state.rs` | `State`, `ChunkMesh`, `KeyState`, `SlotType`, `GameSettings`; GPU setup, frame ordering, UI, mining/placement, particle emitters, dropped-item collection, damage/respawn, chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
-| `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
+| `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
 | `src/audio.rs` | `SoundId`, `SoundMaterial`, `AudioManager`; load/cache WAV files, synthesize missing sounds, 2D/approximate 3D playback. |
 
 ### World and simulation
@@ -142,10 +176,11 @@ and matching live in `crafting::RecipeManager`. World interactions are handled b
 | `src/inventory.rs` | `GameMode`, `Item`, tool/material metadata, `ItemStack`, `Inventory`; stacks, durability, hotbar/backpack/armor/craft slots, block-item mapping. |
 | `src/crafting.rs` | `Recipe`, `RecipeManager`; shaped/shapeless recipe definitions and grid matching. |
 | `src/player.rs` | `PlayerState`, `DamageSource`; health, hunger, saturation/exhaustion, regeneration, invulnerability, oxygen/drowning, death state. |
-| `src/entity.rs` | `EntityType`, `Entity`, `EntityManager`; shared hostile/passive/projectile/particle data, AABBs, basic entity physics, IDs and spawn storage. |
-| `src/mob.rs` | Hostile spawn/AI/combat, arrows, sunlight burning, creeper explosion and associated world/lighting/mesh mutations. |
+| `src/entity.rs` | `EntityType`, `Entity`, `EntityManager`; shared hostile/passive/projectile/heart-particle/dropped-item data, AABBs, basic entity physics, IDs and spawn storage. |
+| `src/mob.rs` | Hostile spawn/AI/combat, arrows, sunlight burning, creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for them. |
 | `src/passive_mob.rs` | Pig/cow/sheep/chicken wandering, cliff avoidance, breeding/young, drops and species-specific behavior. |
-| `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types; output is uploaded and drawn by `State::render`. |
+| `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
+| `src/particles.rs` | `Particle`, `ParticleSystem`, `MAX_PARTICLES`, emitter/atlas helpers; bounded particle physics and camera-facing billboard mesh compilation. |
 
 ## Data and configuration
 
@@ -163,7 +198,7 @@ and matching live in `crafting::RecipeManager`. World interactions are handled b
 Most behavioral tests are inline `#[cfg(test)]` unit tests beside their modules,
 especially in `world.rs`, `lighting.rs`, `fluid.rs`, `physics.rs`,
 `interaction.rs`, `inventory.rs`, `crafting.rs`, `player.rs`, `entity.rs`,
-`mob.rs`, and `audio.rs`.
+`particles.rs`, `mob.rs`, and `audio.rs`.
 
 `tests/passive_mob_tests.rs` is currently only a placeholder. Because the package
 has no `src/lib.rs`, integration tests cannot directly import the internal
@@ -186,12 +221,13 @@ initialization degrades to silent operation when no default output device exists
 - `src/state.rs` mixes composition, simulation orchestration, GPU setup, UI layout,
   and interactions. Locate an exact method before reading it.
 - Rendering types leak downward: `world.rs` imports `state::Vertex`, while hostile
-  and passive mob code can manipulate `state::ChunkMesh`. Changes to render data
-  can therefore affect nominally simulation-only modules.
+  and passive mob code can manipulate `state::ChunkMesh`, and `particles.rs`
+  imports `state::Vertex`. Changes to render data can therefore affect nominally
+  simulation-only modules.
 - Block changes have distributed follow-up work (lighting + dirty meshes). Search
   all callers of `ChunkManager::set_block` before changing mutation semantics.
 - Chunk meshes and mob meshes are derived caches, not authoritative state. The
   authoritative world is `ChunkManager::chunks`; authoritative entities are in
-  `EntityManager::entities`.
+  `EntityManager::entities`. Particle vertices are also derived each frame from
+  `ParticleSystem::particles`.
 - Save/load is managed by `SaveManager` in `src/save.rs` utilizing Bincode and Zlib compression. The main thread spawns a background thread listening on `SaveCommand` for non-blocking autosaves (every 5 minutes) and chunk unloads, while a synchronous save is flushed on window close or "Save and Quit" action.
-

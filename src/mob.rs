@@ -277,6 +277,11 @@ pub fn update_mobs(
             entity.burn_timer = 0.0;
         }
 
+        // Dropped items only need physics; skip all hostile AI.
+        if entity.entity_type == EntityType::DroppedItem {
+            continue;
+        }
+
         // AI decision logic
         let dist = entity.position.distance(player_pos);
         if dist <= 16.0 {

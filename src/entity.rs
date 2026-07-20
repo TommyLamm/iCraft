@@ -13,6 +13,7 @@ pub enum EntityType {
     Sheep,
     Chicken,
     HeartParticle,
+    DroppedItem,
 }
 
 pub struct Entity {
@@ -45,6 +46,10 @@ pub struct Entity {
     pub grass_eat_timer: f32,
     pub egg_lay_timer: f32,
     pub life_time: f32,
+
+    // DroppedItem fields
+    pub dropped_item: Option<crate::inventory::Item>,
+    pub pickup_cooldown: f32,
 }
 
 impl Entity {
@@ -58,6 +63,7 @@ impl Entity {
             EntityType::Sheep => Vec3::new(0.9, 1.3, 0.9),
             EntityType::Chicken => Vec3::new(0.4, 0.7, 0.4),
             EntityType::HeartParticle => Vec3::new(0.25, 0.25, 0.25),
+            EntityType::DroppedItem => Vec3::new(0.25, 0.25, 0.25),
         };
         let max_health = match entity_type {
             EntityType::Zombie | EntityType::Skeleton | EntityType::Creeper => 20.0,
@@ -65,7 +71,7 @@ impl Entity {
             EntityType::Cow => 10.0,
             EntityType::Sheep => 8.0,
             EntityType::Chicken => 4.0,
-            EntityType::Arrow | EntityType::HeartParticle => 0.0,
+            EntityType::Arrow | EntityType::HeartParticle | EntityType::DroppedItem => 0.0,
         };
         Self {
             id,
@@ -91,6 +97,8 @@ impl Entity {
             grass_eat_timer: 0.0,
             egg_lay_timer: 300.0 + (id % 300) as f32,
             life_time: 1.5,
+            dropped_item: None,
+            pickup_cooldown: 0.0,
         }
     }
 
@@ -117,6 +125,12 @@ impl Entity {
             self.yaw = f32::atan2(-dir.x, -dir.z);
             self.pitch = f32::asin(dir.y);
             return;
+        }
+
+        // Dropped items count down their pickup-cooldown so freshly-dropped
+        // stacks can't be instantly re-collected by the breaker.
+        if self.entity_type == EntityType::DroppedItem && self.pickup_cooldown > 0.0 {
+            self.pickup_cooldown = (self.pickup_cooldown - dt).max(0.0);
         }
 
         // Apply gravity
@@ -304,5 +318,131 @@ mod tests {
         let chunk_manager = ChunkManager::new(4);
         chicken.update_physics(0.1, &chunk_manager);
         assert!(chicken.velocity.y >= -2.01 && chicken.velocity.y <= -1.99);
+    }
+
+    #[test]
+    fn dropped_item_falls_with_gravity() {
+        let mut item = Entity::new(2, EntityType::DroppedItem, Vec3::new(0.5, 20.0, 0.5));
+        item.dropped_item = Some(crate::inventory::Item::Stone);
+        let chunk_manager = ChunkManager::new(4);
+        // No solid block below within the chunk; gravity should pull it down.
+        item.update_physics(0.5, &chunk_manager);
+        assert!(
+            item.velocity.y < 0.0,
+            "dropped item should be falling under gravity"
+        );
+        assert!(
+            item.position.y < 20.0,
+            "dropped item should have moved downward"
+        );
+    }
+
+    #[test]
+    fn dropped_item_lands_on_solid_block() {
+        // Build a chunk manager with a single solid stone block at world
+        // (0, 10, 0). We start from a generated chunk but clear it so the only
+        // solid block is our test floor.
+        let mut chunk_manager = ChunkManager::new(4);
+        let _ = chunk_manager.chunks.insert((0, 0), {
+            let mut c = crate::world::Chunk::new(0, 0);
+            for x in 0..crate::world::CHUNK_WIDTH {
+                for y in 0..crate::world::CHUNK_HEIGHT {
+                    for z in 0..crate::world::CHUNK_DEPTH {
+                        c.blocks[x][y][z] = crate::world::BlockType::Air;
+                    }
+                }
+            }
+            // Place a 2x2 stone floor at y=10 covering the item's footprint.
+            for fx in 0..2 {
+                for fz in 0..2 {
+                    c.blocks[fx][10][fz] = crate::world::BlockType::Stone;
+                }
+            }
+            c
+        });
+        let mut item = Entity::new(3, EntityType::DroppedItem, Vec3::new(0.5, 12.0, 0.5));
+        item.dropped_item = Some(crate::inventory::Item::Stone);
+        // Simulate several physics steps so the item falls onto the floor.
+        for _ in 0..400 {
+            item.update_physics(0.05, &chunk_manager);
+        }
+        assert!(
+            item.on_ground,
+            "dropped item should come to rest on the solid block"
+        );
+        // Entity is foot-positioned; on landing it should sit at the top of the
+        // block (y=11) since block AABB spans [10, 11].
+        assert!(
+            item.position.y >= 10.9 && item.position.y <= 11.1,
+            "dropped item should rest on top of y=10 (got y={})",
+            item.position.y
+        );
+    }
+
+    #[test]
+    fn dropped_item_pickup_cooldown_decreases() {
+        let mut item = Entity::new(4, EntityType::DroppedItem, Vec3::new(0.5, 20.0, 0.5));
+        item.pickup_cooldown = 0.5;
+        let chunk_manager = ChunkManager::new(4);
+        item.update_physics(0.3, &chunk_manager);
+        assert!(
+            (item.pickup_cooldown - 0.2).abs() < 1e-4,
+            "pickup cooldown should decrement by dt"
+        );
+    }
+
+    #[test]
+    fn dropped_item_collection_adds_to_inventory() {
+        // Standalone simulation of the collection logic: a player within 1.5m
+        // of a DroppedItem should pick it up into their inventory.
+        let mut em = EntityManager::new();
+        let id = em.spawn(EntityType::DroppedItem, Vec3::new(0.0, 0.0, 0.0));
+        {
+            let e = em.entities.last_mut().unwrap();
+            e.dropped_item = Some(crate::inventory::Item::Dirt);
+            e.pickup_cooldown = 0.0;
+        }
+        let player_pos = Vec3::new(0.5, 0.0, 0.0); // within 1.5m
+        assert_eq!(id, 1);
+
+        // Manual collection (mirrors State::update logic).
+        let mut inventory = crate::inventory::Inventory::new();
+        let mut to_collect: Vec<usize> = Vec::new();
+        for (i, e) in em.entities.iter().enumerate() {
+            if e.entity_type != EntityType::DroppedItem {
+                continue;
+            }
+            if e.pickup_cooldown > 0.0 {
+                continue;
+            }
+            if e.dropped_item.is_none() {
+                continue;
+            }
+            if e.position.distance(player_pos) < 1.5 {
+                to_collect.push(i);
+            }
+        }
+        for &i in to_collect.iter().rev() {
+            let item = em.entities[i].dropped_item;
+            if let Some(item) = item {
+                let added = inventory.add_item(item);
+                if added {
+                    em.entities.remove(i);
+                }
+            }
+        }
+
+        assert!(
+            em.entities.is_empty(),
+            "DroppedItem entity should be despawned after collection"
+        );
+        assert!(
+            inventory
+                .hotbar
+                .iter()
+                .any(|s| s.map(|s| s.item).unwrap_or(crate::inventory::Item::Air)
+                    == crate::inventory::Item::Dirt),
+            "Dirt should have been added to the inventory"
+        );
     }
 }
