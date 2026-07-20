@@ -5,11 +5,15 @@ use crate::interaction::raycast;
 use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
 use crate::physics::{PlayerPhysics, AABB};
 use crate::player::{DamageSource, PlayerState};
-use crate::world::{BlockType, Chunk, CHUNK_DEPTH, CHUNK_WIDTH};
+use crate::world::{Biome, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
 use glam::Vec3;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
+
+const UI_VERTEX_CAPACITY: usize = 4096;
+const UI_LINE_VERTEX_CAPACITY: usize = 16384;
+const DEBUG_STATS_INTERVAL: f32 = 0.5;
 
 pub struct ChunkMesh {
     pub opaque_vertex_buffer: wgpu::Buffer,
@@ -204,6 +208,10 @@ pub struct State {
     pub base_fov: f32,
     pub w_click_timer: f32,
     pub last_w_pressed: bool,
+    debug_frame_time_accumulator: f32,
+    debug_frame_samples: u32,
+    debug_fps: f32,
+    debug_frame_ms: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -914,14 +922,15 @@ impl State {
         // Initialize UI Buffers
         let ui_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("UI Vertex Buffer"),
-            size: (std::mem::size_of::<UiVertex>() * 4096) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<UiVertex>() * UI_VERTEX_CAPACITY) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let ui_line_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("UI Line Vertex Buffer"),
-            size: (std::mem::size_of::<UiVertex>() * 4096) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<UiVertex>() * UI_LINE_VERTEX_CAPACITY)
+                as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1051,6 +1060,10 @@ impl State {
             base_fov,
             w_click_timer: 0.0,
             last_w_pressed: false,
+            debug_frame_time_accumulator: 0.0,
+            debug_frame_samples: 0,
+            debug_fps: 0.0,
+            debug_frame_ms: 0.0,
         }
     }
 
@@ -1420,6 +1433,21 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
+        self.debug_frame_time_accumulator += dt;
+        self.debug_frame_samples += 1;
+        if self.debug_frame_time_accumulator >= DEBUG_STATS_INTERVAL {
+            let average_frame_time =
+                self.debug_frame_time_accumulator / self.debug_frame_samples as f32;
+            self.debug_frame_ms = average_frame_time * 1000.0;
+            self.debug_fps = if average_frame_time > f32::EPSILON {
+                1.0 / average_frame_time
+            } else {
+                0.0
+            };
+            self.debug_frame_time_accumulator = 0.0;
+            self.debug_frame_samples = 0;
+        }
+
         self.autosave_timer += dt;
         if self.autosave_timer >= 300.0 {
             self.autosave_timer = 0.0;
@@ -3158,6 +3186,44 @@ impl State {
         }
     }
 
+    fn estimated_debug_memory_bytes(&self) -> usize {
+        let chunk_volume = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH;
+        let chunk_heap_bytes = chunk_volume
+            * (std::mem::size_of::<BlockType>() + 3 * std::mem::size_of::<u8>())
+            + CHUNK_WIDTH * CHUNK_DEPTH * std::mem::size_of::<u16>();
+        let chunks_bytes = self
+            .chunk_manager
+            .chunks
+            .len()
+            .saturating_mul(std::mem::size_of::<Chunk>() + chunk_heap_bytes);
+
+        let mesh_indices: usize = self
+            .chunk_meshes
+            .values()
+            .map(|mesh| mesh.opaque_num_indices as usize + mesh.transparent_num_indices as usize)
+            .sum();
+        let mesh_vertices = mesh_indices.saturating_mul(2) / 3;
+        let mesh_bytes = mesh_vertices
+            .saturating_mul(std::mem::size_of::<Vertex>())
+            .saturating_add(mesh_indices.saturating_mul(std::mem::size_of::<u32>()));
+
+        let entities_bytes = self
+            .entity_manager
+            .entities
+            .capacity()
+            .saturating_mul(std::mem::size_of::<crate::entity::Entity>());
+        let particles_bytes = self
+            .particles
+            .particles
+            .capacity()
+            .saturating_mul(std::mem::size_of::<crate::particles::Particle>());
+
+        chunks_bytes
+            .saturating_add(mesh_bytes)
+            .saturating_add(entities_bytes)
+            .saturating_add(particles_bytes)
+    }
+
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
@@ -4653,34 +4719,69 @@ impl State {
 
                 // F3 Debug Screen
                 if self.show_debug {
+                    let frame_str = format!(
+                        "FPS: {:.1} / FRAME: {:.2} MS",
+                        self.debug_fps, self.debug_frame_ms
+                    );
+
                     let time_of_day = self.world_time.time_of_day_smooth();
                     let hour = ((time_of_day * 24.0 + 6.0) % 24.0).floor() as u32;
                     let minute = (((time_of_day * 24.0 + 6.0) % 1.0) * 60.0).floor() as u32;
                     let day = self.world_time.ticks / self.world_time.day_length;
                     let time_str = format!(
-                        "TIME: {:02}:{:02} (DAY {}, TICKS: {})",
+                        "TIME: {:02}:{:02} / DAY: {} / TICKS: {}",
                         hour, minute, day, self.world_time.ticks
                     );
 
                     let pos = self.player_physics.position;
-                    let pos_str = format!("XYZ: {:.3} / {:.5} / {:.3}", pos.x, pos.y, pos.z);
+                    let pos_str = format!("XYZ: {:.3} / {:.3} / {:.3}", pos.x, pos.y, pos.z);
+                    let facing_str = format!(
+                        "FACING: YAW {:.2} / PITCH {:.2}",
+                        self.camera.yaw.to_degrees().rem_euclid(360.0),
+                        self.camera.pitch.to_degrees()
+                    );
+                    let chunk_x = debug_chunk_coordinate(pos.x, CHUNK_WIDTH);
+                    let chunk_z = debug_chunk_coordinate(pos.z, CHUNK_DEPTH);
+                    let chunk_str = format!("CHUNK: {} / {}", chunk_x, chunk_z);
 
-                    let dir_x = self.camera.yaw.cos() * self.camera.pitch.cos();
-                    let dir_y = self.camera.pitch.sin();
-                    let dir_z = self.camera.yaw.sin() * self.camera.pitch.cos();
-                    let dir_str = format!("DIR: {:.2} / {:.2} / {:.2}", dir_x, dir_y, dir_z);
+                    let temp_perlin = noise::Perlin::new(99999);
+                    let moist_perlin = noise::Perlin::new(88888);
+                    let ocean_perlin = noise::Perlin::new(77777);
+                    let biome = Biome::get_biome(
+                        pos.x.floor() as i32,
+                        pos.z.floor() as i32,
+                        &temp_perlin,
+                        &moist_perlin,
+                        &ocean_perlin,
+                    );
+                    let biome_str = format!("BIOME: {}", biome_debug_name(biome));
+                    let chunks_str = format!("CHUNKS LOADED: {}", self.chunk_manager.chunks.len());
+                    let entities_str = format!(
+                        "ENTITIES: {} / PARTICLES: {}",
+                        self.entity_manager.entities.len(),
+                        self.particles.particles.len()
+                    );
 
-                    let light_lvl = self.world_time.sky_light_level();
-                    let light_str = format!(
-                        "SKY LIGHT: {} (DAYTIME: {})",
-                        light_lvl,
-                        if light_lvl == 15 {
-                            "YES"
-                        } else if light_lvl == 4 {
-                            "NO"
-                        } else {
-                            "TRANSITION"
-                        }
+                    let terrain_indices: u64 = self
+                        .chunk_meshes
+                        .values()
+                        .map(|mesh| {
+                            u64::from(mesh.opaque_num_indices)
+                                + u64::from(mesh.transparent_num_indices)
+                        })
+                        .sum();
+                    let rendered_indices = terrain_indices
+                        + u64::from(self.mob_num_indices)
+                        + u64::from(self.particle_num_indices);
+                    let rendered_triangles = rendered_indices / 3;
+                    let rendered_vertices = rendered_indices * 2 / 3;
+                    let render_str = format!(
+                        "RENDER: {} VERTICES / {} TRIANGLES",
+                        rendered_vertices, rendered_triangles
+                    );
+                    let memory_str = format!(
+                        "MEMORY EST: {:.1} MB",
+                        self.estimated_debug_memory_bytes() as f64 / (1024.0 * 1024.0)
                     );
 
                     let char_w = 0.007;
@@ -4691,53 +4792,37 @@ impl State {
                     let start_y = 0.95;
                     let line_gap = 0.025;
 
-                    add_string_lines(
-                        &time_str,
-                        start_x,
-                        start_y,
-                        char_w,
-                        char_h,
-                        spacing,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                    add_string_lines(
-                        &pos_str,
-                        start_x,
-                        start_y - line_gap,
-                        char_w,
-                        char_h,
-                        spacing,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                    add_string_lines(
-                        &dir_str,
-                        start_x,
-                        start_y - line_gap * 2.0,
-                        char_w,
-                        char_h,
-                        spacing,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
-                    add_string_lines(
-                        &light_str,
-                        start_x,
-                        start_y - line_gap * 3.0,
-                        char_w,
-                        char_h,
-                        spacing,
-                        [1.0, 1.0, 1.0, 1.0],
-                        &mut ui_line_vertices,
-                    );
+                    let debug_lines = [
+                        frame_str,
+                        pos_str,
+                        facing_str,
+                        chunk_str,
+                        biome_str,
+                        chunks_str,
+                        entities_str,
+                        render_str,
+                        memory_str,
+                        time_str,
+                    ];
+                    for (line_index, line) in debug_lines.iter().enumerate() {
+                        add_string_lines(
+                            line,
+                            start_x,
+                            start_y - line_gap * line_index as f32,
+                            char_w,
+                            char_h,
+                            spacing,
+                            [1.0, 1.0, 1.0, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                    }
                 }
             }
 
             // Write Buffers
-            let ui_vert_len = ui_vertices.len().min(4096);
-            let ui_line_vert_len = ui_line_vertices.len().min(4096);
-            let ui_textured_vert_len = ui_textured_vertices.len().min(4096);
+            let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
+            let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
+            let ui_textured_vert_len = ui_textured_vertices.len().min(UI_VERTEX_CAPACITY);
 
             self.queue.write_buffer(
                 &self.ui_vertex_buffer,
@@ -5048,6 +5133,34 @@ fn add_char_lines(
             add_line(x0, y1, x0, y0);
             add_line(x0, y0, x1, y0);
         }
+        'B' => {
+            add_line(x0, y0, x0, y1);
+            add_line(x0, y1, x1, y1);
+            add_line(x1, y1, x1, ym);
+            add_line(x1, ym, x0, ym);
+            add_line(x1, ym, x1, y0);
+            add_line(x1, y0, x0, y0);
+        }
+        'K' => {
+            add_line(x0, y0, x0, y1);
+            add_line(x0, ym, x1, y1);
+            add_line(x0, ym, x1, y0);
+        }
+        'W' => {
+            add_line(x0, y1, x0 + w * 0.2, y0);
+            add_line(x0 + w * 0.2, y0, xm, ym);
+            add_line(xm, ym, x0 + w * 0.8, y0);
+            add_line(x0 + w * 0.8, y0, x1, y1);
+        }
+        'X' => {
+            add_line(x0, y0, x1, y1);
+            add_line(x0, y1, x1, y0);
+        }
+        'Z' => {
+            add_line(x0, y1, x1, y1);
+            add_line(x1, y1, x0, y0);
+            add_line(x0, y0, x1, y0);
+        }
         '<' => {
             add_line(x1, y1, x0, ym);
             add_line(x0, ym, x1, y0);
@@ -5062,6 +5175,9 @@ fn add_char_lines(
         '+' => {
             add_line(x0, ym, x1, ym);
             add_line(xm, y0, xm, y1);
+        }
+        '/' => {
+            add_line(x0, y0, x1, y1);
         }
         ':' => {
             add_line(xm - w * 0.05, y0 + h * 0.7, xm + w * 0.05, y0 + h * 0.7);
@@ -5159,6 +5275,63 @@ impl Drop for State {
             .window
             .set_cursor_grab(winit::window::CursorGrabMode::None);
         self.window.set_cursor_visible(true);
+    }
+}
+
+fn biome_debug_name(biome: Biome) -> &'static str {
+    match biome {
+        Biome::Plains => "PLAINS",
+        Biome::Forest => "FOREST",
+        Biome::Desert => "DESERT",
+        Biome::Taiga => "TAIGA",
+        Biome::Swamp => "SWAMP",
+        Biome::Mountains => "MOUNTAINS",
+        Biome::Ocean => "OCEAN",
+    }
+}
+
+fn debug_chunk_coordinate(position: f32, chunk_size: usize) -> i32 {
+    (position.floor() as i32).div_euclid(chunk_size as i32)
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_chunk_coordinates_handle_negative_world_positions() {
+        assert_eq!(debug_chunk_coordinate(0.0, CHUNK_WIDTH), 0);
+        assert_eq!(debug_chunk_coordinate(15.999, CHUNK_WIDTH), 0);
+        assert_eq!(debug_chunk_coordinate(16.0, CHUNK_WIDTH), 1);
+        assert_eq!(debug_chunk_coordinate(-0.001, CHUNK_WIDTH), -1);
+        assert_eq!(debug_chunk_coordinate(-16.0, CHUNK_WIDTH), -1);
+        assert_eq!(debug_chunk_coordinate(-16.001, CHUNK_WIDTH), -2);
+    }
+
+    #[test]
+    fn debug_overlay_font_supports_every_required_character() {
+        let mut vertices = Vec::new();
+        for character in ['B', 'K', 'W', 'X', 'Z', '/'] {
+            let before = vertices.len();
+            add_char_lines(character, 0.0, 0.0, 0.1, 0.2, [1.0; 4], &mut vertices);
+            assert!(vertices.len() > before, "missing glyph for {character}");
+        }
+    }
+
+    #[test]
+    fn every_biome_has_a_debug_name() {
+        let biomes = [
+            Biome::Plains,
+            Biome::Forest,
+            Biome::Desert,
+            Biome::Taiga,
+            Biome::Swamp,
+            Biome::Mountains,
+            Biome::Ocean,
+        ];
+        assert!(biomes
+            .into_iter()
+            .all(|biome| !biome_debug_name(biome).is_empty()));
     }
 }
 
