@@ -104,11 +104,11 @@ P3 [░░░░░░░░░░] 0%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-20
-- ✅ 完成任務 #20 (By Codex)：環境光遮蔽 (Ambient Occlusion)
+- ✅ 完成任務 #20 (By GPT-5.6 Sol High)：環境光遮蔽 (Ambient Occlusion)
   - 修改文件：`src/world.rs`, `src/state.rs`, `src/shader.wgsl`, `src/chunk_manager.rs`, `src/fluid.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/mob_renderer.rs`, `src/particles.rs`, `ARCHITECTURE.md`
   - 關鍵決策：在 Chunk CPU 網格生成階段依每個面頂點外側的兩個側邊格及對角格計算四級 AO，只有 solid opaque 方塊遮擋；以獨立平滑插值頂點屬性在 Shader 中與既有 flat 打包光照相乘，並依對角 AO 總和選擇三角線。統一方塊網格依賴 helper，支援負座標、Chunk 邊角的對角失效，以及載入／卸載時八鄰居重建；非 Chunk 幾何固定使用 AO 1.0。
   - 驗證：`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過；56 項單元測試與 1 項整合測試全部通過。互動式遊戲視覺抽查項目保留於任務文件。
-- ✅ 完成任務 #19 (By Codex)：F3 Debug 畫面 (F3 Debug Overlay)
+- ✅ 完成任務 #19 (By GPT-5.6 Sol Medium)：F3 Debug 畫面 (F3 Debug Overlay)
   - 修改文件：`src/state.rs`, `src/app.rs`
   - 關鍵決策：在既有 F3 HUD 上加入每 0.5 秒平滑更新的 FPS 與平均幀時間，並完整顯示玩家座標、yaw/pitch、Chunk、生態群系、已載入 Chunk、實體與粒子、渲染頂點/三角形、估算記憶體及遊戲時間。記憶體估算涵蓋 Chunk 固定資料、活動網格、實體與粒子配置；F3 輸入忽略鍵盤 repeat，避免長按時反覆切換。擴充向量字體與文字頂點緩衝，確保新增欄位可完整顯示。
   - 驗證：`cargo fmt -- --check`、`cargo test --release` 通過；45 項單元測試與 1 項整合測試全部通過。
