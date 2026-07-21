@@ -380,14 +380,15 @@ pub fn update_mobs(
                         }
                     }
 
+                    let spawn_pos = entity.position + Vec3::new(0.0, 1.4, 0.0);
+                    let mut shoot_dir =
+                        (player_pos + Vec3::new(0.0, 1.0, 0.0) - spawn_pos).normalize_or_zero();
+                    // Add slight gravity correction
+                    shoot_dir.y += 0.08;
+                    entity.pitch = shoot_dir.y.clamp(-1.0, 1.0).asin();
+
                     // Shooting arrows
                     if entity.action_cooldown <= 0.0 {
-                        // Shoot Arrow
-                        let spawn_pos = entity.position + Vec3::new(0.0, 1.4, 0.0);
-                        let mut shoot_dir =
-                            (player_pos + Vec3::new(0.0, 1.0, 0.0) - spawn_pos).normalize_or_zero();
-                        // Add slight gravity correction
-                        shoot_dir.y += 0.08;
                         let arrow_vel = shoot_dir.normalize() * 18.0;
 
                         arrows_to_spawn.push((spawn_pos, arrow_vel));
