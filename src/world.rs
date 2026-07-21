@@ -376,6 +376,36 @@ impl BlockType {
         )
     }
 
+    pub fn can_stay_on(self, below: BlockType) -> bool {
+        match self {
+            BlockType::Dandelion | BlockType::Poppy | BlockType::TallGrass => {
+                matches!(below, BlockType::Grass | BlockType::Dirt)
+            }
+            BlockType::SugarCane => {
+                matches!(
+                    below,
+                    BlockType::Grass | BlockType::Dirt | BlockType::Sand | BlockType::SugarCane
+                )
+            }
+            BlockType::Cactus => {
+                matches!(below, BlockType::Sand | BlockType::Cactus)
+            }
+            BlockType::SnowLayer => below.properties().is_solid,
+            BlockType::Torch
+            | BlockType::RedstoneTorch
+            | BlockType::RedstoneTorchOff
+            | BlockType::RedstoneWire
+            | BlockType::Repeater
+            | BlockType::RepeaterPowered
+            | BlockType::Comparator
+            | BlockType::ComparatorPowered
+            | BlockType::PressurePlate
+            | BlockType::PressurePlatePowered => below.properties().is_solid,
+            _ => true,
+        }
+    }
+
+
     pub fn sound_material(self) -> Option<crate::audio::SoundMaterial> {
         match self {
             BlockType::Air
@@ -2632,4 +2662,28 @@ mod tests {
         place_spruce_tree(&mut blocks, 0, 0, 64, 7);
         assert_eq!(blocks[0][64][0], BlockType::SpruceLog);
     }
+
+    #[test]
+    fn test_plant_support_requirements() {
+        assert!(BlockType::Dandelion.can_stay_on(BlockType::Grass));
+        assert!(BlockType::Dandelion.can_stay_on(BlockType::Dirt));
+        assert!(!BlockType::Dandelion.can_stay_on(BlockType::Air));
+        assert!(!BlockType::Dandelion.can_stay_on(BlockType::Stone));
+        assert!(!BlockType::Dandelion.can_stay_on(BlockType::OakPlanks));
+
+        assert!(BlockType::Poppy.can_stay_on(BlockType::Grass));
+        assert!(!BlockType::Poppy.can_stay_on(BlockType::Sand));
+
+        assert!(BlockType::TallGrass.can_stay_on(BlockType::Grass));
+        assert!(!BlockType::TallGrass.can_stay_on(BlockType::Stone));
+
+        assert!(BlockType::SugarCane.can_stay_on(BlockType::Sand));
+        assert!(BlockType::SugarCane.can_stay_on(BlockType::SugarCane));
+        assert!(!BlockType::SugarCane.can_stay_on(BlockType::Air));
+
+        assert!(BlockType::Cactus.can_stay_on(BlockType::Sand));
+        assert!(BlockType::Cactus.can_stay_on(BlockType::Cactus));
+        assert!(!BlockType::Cactus.can_stay_on(BlockType::Dirt));
+    }
 }
+

@@ -269,6 +269,52 @@ impl ChunkManager {
             }
         }
     }
+
+    pub fn check_and_break_unsupported_above<F>(
+        &mut self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
+        mut on_break: F,
+    ) where
+        F: FnMut((i32, i32, i32), BlockType),
+    {
+        let mut current_y = wy + 1;
+        while current_y < CHUNK_HEIGHT as i32 {
+            let block_above = self.get_block(wx, current_y, wz);
+            if block_above == BlockType::Air {
+                break;
+            }
+            let block_below = self.get_block(wx, current_y - 1, wz);
+            if !block_above.can_stay_on(block_below) {
+                self.set_block(wx, current_y, wz, BlockType::Air);
+
+                crate::lighting::update_sky_light_after_removed(
+                    self,
+                    wx,
+                    current_y,
+                    wz,
+                    dirty_chunks,
+                );
+                crate::lighting::update_block_light_after_removed(
+                    self,
+                    wx,
+                    current_y,
+                    wz,
+                    block_above.properties().light_emission,
+                    dirty_chunks,
+                );
+                mark_block_mesh_dependencies(dirty_chunks, wx, wz);
+
+                on_break((wx, current_y, wz), block_above);
+
+                current_y += 1;
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -334,4 +380,26 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn test_check_and_break_unsupported_above() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.set_block(5, 64, 5, BlockType::Dirt);
+        manager.set_block(5, 65, 5, BlockType::Dandelion);
+        manager.set_block(5, 66, 5, BlockType::Air);
+
+        let mut dirty = HashSet::new();
+        let mut broken = Vec::new();
+
+        // Break dirt beneath dandelion
+        manager.set_block(5, 64, 5, BlockType::Air);
+        manager.check_and_break_unsupported_above(5, 64, 5, &mut dirty, |pos, block| {
+            broken.push((pos, block));
+        });
+
+        assert_eq!(manager.get_block(5, 65, 5), BlockType::Air);
+        assert_eq!(broken, vec![((5, 65, 5), BlockType::Dandelion)]);
+    }
 }
+

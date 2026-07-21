@@ -65,6 +65,7 @@ pub fn explode(
         );
 
         mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
+        chunk_manager.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks, |_, _| {});
     }
 
     // Mark chunk meshes dirty
@@ -309,7 +310,7 @@ pub fn update_mobs(
 
             // Turn towards player
             let dir = player_pos - entity.position;
-            entity.yaw = f32::atan2(-dir.x, -dir.z);
+            entity.yaw = f32::atan2(dir.x, dir.z);
 
             let walk_dir = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
 
@@ -555,5 +556,20 @@ mod tests {
         // Distance = 5.5: 0 damage
         let d3 = calculate_explosion_damage(center, Vec3::new(5.5, 0.0, 0.0));
         assert_eq!(d3, 0.0);
+    }
+
+    #[test]
+    fn test_mob_yaw_faces_player() {
+        let mob_pos = Vec3::new(0.0, 0.0, 0.0);
+        let player_pos = Vec3::new(0.0, 0.0, 5.0); // Player is at +Z relative to mob
+        let dir = player_pos - mob_pos;
+        let yaw = f32::atan2(dir.x, dir.z);
+
+        // Front face (+Z) in local coordinates transforms to (sin(yaw), 0, cos(yaw)) in world coordinates.
+        let facing_dir = Vec3::new(yaw.sin(), 0.0, yaw.cos()).normalize_or_zero();
+        let expected_dir = dir.normalize_or_zero();
+
+        assert!((facing_dir.x - expected_dir.x).abs() < 1e-5);
+        assert!((facing_dir.z - expected_dir.z).abs() < 1e-5);
     }
 }

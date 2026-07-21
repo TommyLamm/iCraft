@@ -224,7 +224,7 @@ impl Entity {
             self.position += self.velocity * dt;
             if self.velocity.length_squared() > 0.0001 {
                 let dir = self.velocity.normalize_or_zero();
-                self.yaw = f32::atan2(-dir.x, -dir.z);
+                self.yaw = f32::atan2(dir.x, dir.z);
                 self.pitch = f32::asin(dir.y.clamp(-1.0, 1.0));
             }
             return;
@@ -236,7 +236,7 @@ impl Entity {
 
             // Align orientation to velocity
             let dir = self.velocity.normalize_or_zero();
-            self.yaw = f32::atan2(-dir.x, -dir.z);
+            self.yaw = f32::atan2(dir.x, dir.z);
             self.pitch = f32::asin(dir.y);
             return;
         }

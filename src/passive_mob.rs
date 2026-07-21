@@ -6,8 +6,8 @@ use glam::Vec3;
 
 fn check_cliff_ahead(entity: &Entity, chunk_manager: &ChunkManager) -> bool {
     // Calculate walking direction unit vector
-    let dir_x = -entity.yaw.sin();
-    let dir_z = -entity.yaw.cos();
+    let dir_x = entity.yaw.sin();
+    let dir_z = entity.yaw.cos();
 
     let check_x = (entity.position.x + dir_x * 1.0).floor() as i32;
     let check_z = (entity.position.z + dir_z * 1.0).floor() as i32;
@@ -129,7 +129,7 @@ pub fn update_passive_mobs(
             speed = 4.0;
             // Run away from player
             let away_dir = (pos - player_pos).normalize_or_zero();
-            entity_manager.entities[i].yaw = f32::atan2(-away_dir.x, -away_dir.z);
+            entity_manager.entities[i].yaw = f32::atan2(away_dir.x, away_dir.z);
         } else if breed_timer > 0.0 {
             // Seeking mating partner
             let mut nearest_partner = None;
@@ -150,7 +150,7 @@ pub fn update_passive_mobs(
 
             if let Some(partner_pos) = nearest_partner {
                 let mate_dir = (partner_pos - pos).normalize_or_zero();
-                entity_manager.entities[i].yaw = f32::atan2(-mate_dir.x, -mate_dir.z);
+                entity_manager.entities[i].yaw = f32::atan2(mate_dir.x, mate_dir.z);
                 speed = 1.5;
 
                 // If touching, spawn offspring
@@ -197,7 +197,7 @@ pub fn update_passive_mobs(
             if let Some(adult_pos) = nearest_adult {
                 if nearest_dist > 2.0 {
                     let follow_dir = (adult_pos - pos).normalize_or_zero();
-                    entity_manager.entities[i].yaw = f32::atan2(-follow_dir.x, -follow_dir.z);
+                    entity_manager.entities[i].yaw = f32::atan2(follow_dir.x, follow_dir.z);
                     speed = 1.5;
                 } else {
                     speed = 0.0;
@@ -233,8 +233,8 @@ pub fn update_passive_mobs(
 
         // Set horizontal velocity based on current yaw and speed
         if speed > 0.0 {
-            let dir_x = -entity_manager.entities[i].yaw.sin();
-            let dir_z = -entity_manager.entities[i].yaw.cos();
+            let dir_x = entity_manager.entities[i].yaw.sin();
+            let dir_z = entity_manager.entities[i].yaw.cos();
             entity_manager.entities[i].velocity.x = dir_x * speed;
             entity_manager.entities[i].velocity.z = dir_z * speed;
 
@@ -274,7 +274,7 @@ pub fn update_passive_mobs(
 
             // Task 6 Step 2: Set heart particle rotation
             let to_player = (player_pos - h_pos).normalize_or_zero();
-            p.yaw = f32::atan2(-to_player.x, -to_player.z);
+            p.yaw = f32::atan2(to_player.x, to_player.z);
             p.pitch = f32::asin(to_player.y);
         }
     }

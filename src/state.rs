@@ -128,6 +128,7 @@ impl State {
                 (x, y, z),
                 crate::redstone::Direction::North,
             );
+            self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
         }
         for coord in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
@@ -135,6 +136,52 @@ impl State {
             }
         }
     }
+
+    pub fn check_and_break_unsupported_above(
+        &mut self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
+    ) {
+        let game_mode = self.game_mode;
+        let mut drops = Vec::new();
+        self.chunk_manager.check_and_break_unsupported_above(
+            wx,
+            wy,
+            wz,
+            dirty_chunks,
+            |(x, y, z), block| {
+                if game_mode == GameMode::Survival {
+                    let drop_item = match block {
+                        BlockType::TallGrass => {
+                            let rng = (x as u32)
+                                .wrapping_mul(31)
+                                .wrapping_add(y as u32 * 17)
+                                .wrapping_add(z as u32);
+                            if rng % 8 == 0 {
+                                Some(crate::inventory::Item::Seeds)
+                            } else {
+                                None
+                            }
+                        }
+                        BlockType::SnowLayer => None,
+                        _ => Some(crate::inventory::Item::from_block(block)),
+                    };
+                    if let Some(item) = drop_item {
+                        drops.push((
+                            item,
+                            glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                        ));
+                    }
+                }
+            },
+        );
+        for (item, pos) in drops {
+            self.spawn_dropped_item(item, pos);
+        }
+    }
+
 
     fn safe_dimension_spawn_y(&mut self, x: i32, z: i32) -> f32 {
         let top = if self.current_dimension == crate::dimension::Dimension::Nether {
@@ -3411,6 +3458,7 @@ impl State {
         );
 
         mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
+        self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
 
         for (dcx, dcz) in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
@@ -4190,9 +4238,15 @@ impl State {
                         old_block.properties().light_emission,
                         &mut dirty_chunks,
                     );
+                    self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
                 }
             } else {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
+                    let below_block = self.chunk_manager.get_block(wx, wy - 1, wz);
+                    if !placed_block.can_stay_on(below_block) {
+                        return;
+                    }
+
                     self.chunk_manager.set_block(wx, wy, wz, placed_block);
                     self.redstone.on_block_changed(
                         &self.chunk_manager,
@@ -4233,6 +4287,8 @@ impl State {
                         placed_block.properties().light_emission,
                         &mut dirty_chunks,
                     );
+
+                    self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
 
                     if matches!(
                         placed_block,
@@ -7660,4 +7716,26 @@ mod debug_tests {
             .into_iter()
             .all(|biome| !biome_debug_name(biome).is_empty()));
     }
+
+    #[test]
+    fn test_flower_breaks_and_pops_when_ground_is_destroyed() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.set_block(2, 10, 2, BlockType::Grass);
+        manager.set_block(2, 11, 2, BlockType::Dandelion);
+
+        let mut dirty = std::collections::HashSet::new();
+        let mut drops = Vec::new();
+
+        // Destroy the grass block
+        manager.set_block(2, 10, 2, BlockType::Air);
+        manager.check_and_break_unsupported_above(2, 10, 2, &mut dirty, |pos, block| {
+            drops.push((pos, block));
+        });
+
+        // Ground is Air now, flower above must be destroyed
+        assert_eq!(manager.get_block(2, 11, 2), BlockType::Air);
+        assert_eq!(drops, vec![((2, 11, 2), BlockType::Dandelion)]);
+    }
 }
+

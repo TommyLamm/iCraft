@@ -203,6 +203,8 @@ fn set_fluid_state(
     chunk_manager.set_block(wx, wy, wz, fluid_type);
     chunk_manager.set_fluid_level(wx, wy, wz, level);
     chunk_manager.set_fluid_falling(wx, wy, wz, falling);
+    let mut dirty = HashSet::new();
+    chunk_manager.check_and_break_unsupported_above(wx, wy, wz, &mut dirty, |_, _| {});
     true
 }
 
