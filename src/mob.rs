@@ -305,7 +305,7 @@ pub fn update_mobs(
             || entity.entity_type == EntityType::Creeper;
 
         let dist = entity.position.distance(player_pos);
-        if is_hostile && dist <= 16.0 && !player_invisible {
+        if is_hostile && dist <= 16.0 && !player_invisible && game_mode != GameMode::Creative {
             entity.target_player = true;
 
             // Turn towards player
@@ -463,6 +463,11 @@ pub fn update_mobs(
             }
         } else {
             entity.target_player = false;
+            if entity.entity_type == EntityType::Creeper && entity.is_ignited {
+                println!("[Debug] Creeper: fuse defused.");
+                entity.is_ignited = false;
+                entity.action_cooldown = 0.0;
+            }
         }
 
         // Tick down cooldowns
@@ -572,5 +577,45 @@ mod tests {
 
         assert!((facing_dir.x - expected_dir.x).abs() < 1e-5);
         assert!((facing_dir.z - expected_dir.z).abs() < 1e-5);
+    }
+
+    #[test]
+    fn creative_mode_mobs_do_not_target_player() {
+        let mut entity_manager = EntityManager::new();
+        entity_manager.spawn(EntityType::Zombie, Vec3::new(2.0, 1.0, 0.0));
+        entity_manager.spawn(EntityType::Creeper, Vec3::new(2.0, 1.0, 0.0));
+
+        let mut chunk_manager = ChunkManager::new(1);
+        let mut chunk_meshes = std::collections::HashMap::new();
+        let mut player_physics = PlayerPhysics::new(Vec3::new(0.0, 1.0, 0.0));
+        let mut player_state = PlayerState::new();
+        let mut audio_manager = crate::audio::AudioManager::new();
+
+        update_mobs(
+            &mut entity_manager,
+            &mut chunk_manager,
+            &mut chunk_meshes,
+            &mut player_physics,
+            &mut player_state,
+            GameMode::Creative,
+            15,
+            0.1,
+            &mut audio_manager,
+            Vec3::X,
+            false,
+            1.0,
+        );
+
+        for entity in &entity_manager.entities {
+            assert!(
+                !entity.target_player,
+                "Mob of type {:?} targeted player in Creative mode!",
+                entity.entity_type
+            );
+            assert!(
+                !entity.is_ignited,
+                "Creeper ignited in Creative mode!"
+            );
+        }
     }
 }

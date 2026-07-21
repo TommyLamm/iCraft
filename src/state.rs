@@ -2573,6 +2573,7 @@ impl State {
                 &self.chunk_manager,
                 self.player_physics.position,
                 dt,
+                self.game_mode,
             );
             self.apply_boss_events(boss_events);
         }

@@ -7,7 +7,7 @@
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::Dimension;
 use crate::entity::{EntityManager, EntityType};
-use crate::inventory::Item;
+use crate::inventory::{GameMode, Item};
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
 use glam::Vec3;
 
@@ -235,6 +235,7 @@ pub fn update_dimension_entities(
     chunks: &ChunkManager,
     player_pos: Vec3,
     dt: f32,
+    game_mode: GameMode,
 ) -> BossEvents {
     let dt = dt.max(0.0).min(0.25);
     let mut events = BossEvents::default();
@@ -248,6 +249,7 @@ pub fn update_dimension_entities(
         .collect();
     let mut pending_spawns = Vec::new();
     let mut removed_projectiles = Vec::new();
+    let is_creative = game_mode == GameMode::Creative;
 
     for entity in &mut entities.entities {
         entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
@@ -255,43 +257,52 @@ pub fn update_dimension_entities(
 
         match entity.entity_type {
             EntityType::Blaze => {
-                let delta = player_pos - entity.position;
-                let horizontal = Vec3::new(delta.x, 0.0, delta.z);
-                let desired_y = player_pos.y + 4.0;
-                entity.velocity =
-                    horizontal.normalize_or_zero() * if delta.length() > 12.0 { 2.5 } else { -1.2 };
-                entity.velocity.y = (desired_y - entity.position.y).clamp(-2.0, 2.0);
-                if delta.length_squared() <= 28.0 * 28.0 && entity.action_cooldown <= 0.0 {
-                    events.player_damage.push(PlayerDamageEvent {
-                        amount: 5.0,
-                        source_entity: Some(entity.id),
-                        kind: DamageKind::BlazeFireball,
-                    });
-                    entity.action_cooldown = 2.5;
+                if !is_creative {
+                    let delta = player_pos - entity.position;
+                    let horizontal = Vec3::new(delta.x, 0.0, delta.z);
+                    let desired_y = player_pos.y + 4.0;
+                    entity.velocity =
+                        horizontal.normalize_or_zero() * if delta.length() > 12.0 { 2.5 } else { -1.2 };
+                    entity.velocity.y = (desired_y - entity.position.y).clamp(-2.0, 2.0);
+                    if delta.length_squared() <= 28.0 * 28.0 && entity.action_cooldown <= 0.0 {
+                        events.player_damage.push(PlayerDamageEvent {
+                            amount: 5.0,
+                            source_entity: Some(entity.id),
+                            kind: DamageKind::BlazeFireball,
+                        });
+                        entity.action_cooldown = 2.5;
+                    }
+                } else {
+                    entity.velocity = Vec3::ZERO;
                 }
                 entity.update_physics(dt, chunks);
             }
             EntityType::Piglin | EntityType::Husk => {
-                let delta = player_pos - entity.position;
-                let horizontal = Vec3::new(delta.x, 0.0, delta.z);
-                entity.velocity.x = horizontal.normalize_or_zero().x * 3.0;
-                entity.velocity.z = horizontal.normalize_or_zero().z * 3.0;
-                if delta.length_squared() <= 2.2 * 2.2 && entity.action_cooldown <= 0.0 {
-                    events.player_damage.push(PlayerDamageEvent {
-                        amount: if entity.entity_type == EntityType::Piglin {
-                            5.0
-                        } else {
-                            4.0
-                        },
-                        source_entity: Some(entity.id),
-                        kind: DamageKind::Melee,
-                    });
-                    entity.action_cooldown = 1.0;
+                if !is_creative {
+                    let delta = player_pos - entity.position;
+                    let horizontal = Vec3::new(delta.x, 0.0, delta.z);
+                    entity.velocity.x = horizontal.normalize_or_zero().x * 3.0;
+                    entity.velocity.z = horizontal.normalize_or_zero().z * 3.0;
+                    if delta.length_squared() <= 2.2 * 2.2 && entity.action_cooldown <= 0.0 {
+                        events.player_damage.push(PlayerDamageEvent {
+                            amount: if entity.entity_type == EntityType::Piglin {
+                                5.0
+                            } else {
+                                4.0
+                            },
+                            source_entity: Some(entity.id),
+                            kind: DamageKind::Melee,
+                        });
+                        entity.action_cooldown = 1.0;
+                    }
+                } else {
+                    entity.velocity = Vec3::ZERO;
                 }
                 entity.update_physics(dt, chunks);
             }
             EntityType::Shulker => {
-                if entity.position.distance_squared(player_pos) <= 24.0 * 24.0
+                if !is_creative
+                    && entity.position.distance_squared(player_pos) <= 24.0 * 24.0
                     && entity.action_cooldown <= 0.0
                 {
                     events.player_damage.push(PlayerDamageEvent {
@@ -307,15 +318,16 @@ pub fn update_dimension_entities(
                 &crystal_positions,
                 player_pos,
                 dt,
+                game_mode,
                 &mut pending_spawns,
                 &mut events,
             ),
             EntityType::Wither => {
-                update_wither(entity, player_pos, dt, &mut pending_spawns, &mut events)
+                update_wither(entity, player_pos, dt, game_mode, &mut pending_spawns, &mut events)
             }
             EntityType::WitherSkull | EntityType::DragonBreath => {
                 entity.update_physics(dt, chunks);
-                if projectile_hit(entity, chunks, player_pos, &mut events) {
+                if projectile_hit(entity, chunks, player_pos, game_mode, &mut events) {
                     removed_projectiles.push(entity.id);
                 }
             }
@@ -342,6 +354,7 @@ fn update_dragon(
     crystals: &[Vec3],
     player_pos: Vec3,
     dt: f32,
+    game_mode: GameMode,
     pending_spawns: &mut Vec<(EntityType, Vec3, Vec3, f32)>,
     events: &mut BossEvents,
 ) {
@@ -350,7 +363,9 @@ fn update_dragon(
     } else {
         0.0
     };
-    dragon.ai_phase = if health_ratio > 0.60 {
+    dragon.ai_phase = if game_mode == GameMode::Creative {
+        0
+    } else if health_ratio > 0.60 {
         0 // high orbit
     } else if health_ratio > 0.30 {
         1 // dive
@@ -371,7 +386,8 @@ fn update_dragon(
         1 => {
             let target = player_pos + Vec3::new(0.0, 1.5, 0.0);
             dragon.velocity = (target - dragon.position).normalize_or_zero() * 18.0;
-            if dragon.position.distance_squared(player_pos) < 5.5 * 5.5
+            if game_mode != GameMode::Creative
+                && dragon.position.distance_squared(player_pos) < 5.5 * 5.5
                 && dragon.action_cooldown <= 0.0
             {
                 events.player_damage.push(PlayerDamageEvent {
@@ -386,7 +402,7 @@ fn update_dragon(
             let angle = dragon.ai_timer * 0.5;
             let target = player_pos + Vec3::new(angle.cos() * 18.0, 12.0, angle.sin() * 18.0);
             dragon.velocity = (target - dragon.position).normalize_or_zero() * 10.0;
-            if dragon.action_cooldown <= 0.0 {
+            if game_mode != GameMode::Creative && dragon.action_cooldown <= 0.0 {
                 let origin = dragon.position + Vec3::new(0.0, 1.0, 0.0);
                 let velocity = (player_pos + Vec3::Y - origin).normalize_or_zero() * 11.0;
                 pending_spawns.push((EntityType::DragonBreath, origin, velocity, 6.0));
@@ -401,48 +417,57 @@ fn update_wither(
     wither: &mut crate::entity::Entity,
     player_pos: Vec3,
     dt: f32,
+    game_mode: GameMode,
     pending_spawns: &mut Vec<(EntityType, Vec3, Vec3, f32)>,
     events: &mut BossEvents,
 ) {
     let low_health = wither.health <= wither.max_health * 0.5;
     wither.ai_phase = u8::from(low_health);
-    let target_height = if low_health { 2.5 } else { 8.0 };
-    let target = player_pos + Vec3::new(0.0, target_height, 0.0);
-    let speed = if low_health { 13.0 } else { 7.0 };
-    wither.velocity = (target - wither.position).normalize_or_zero() * speed;
+    let is_creative = game_mode == GameMode::Creative;
+
+    if !is_creative {
+        let target_height = if low_health { 2.5 } else { 8.0 };
+        let target = player_pos + Vec3::new(0.0, target_height, 0.0);
+        let speed = if low_health { 13.0 } else { 7.0 };
+        wither.velocity = (target - wither.position).normalize_or_zero() * speed;
+    } else {
+        wither.velocity = Vec3::ZERO;
+    }
     wither.position += wither.velocity * dt;
 
-    if low_health
-        && wither.position.distance_squared(player_pos) < 3.5 * 3.5
-        && wither.action_cooldown <= 0.0
-    {
-        events.player_damage.push(PlayerDamageEvent {
-            amount: 12.0,
-            source_entity: Some(wither.id),
-            kind: DamageKind::WitherCharge,
-        });
-        events.apply_wither.push(WitherEffectEvent {
-            duration: 10.0,
-            amplifier: 1,
-            source_entity: Some(wither.id),
-        });
-        events.explosions.push(ExplosionEvent {
-            position: wither.position,
-            radius: 3.0,
-            break_blocks: true,
-            source_entity: Some(wither.id),
-        });
-        wither.action_cooldown = 1.5;
-    } else if wither.action_cooldown <= 0.0 {
-        let origin = wither.position + Vec3::new(0.0, 2.2, 0.0);
-        let velocity = (player_pos + Vec3::Y - origin).normalize_or_zero() * 14.0;
-        pending_spawns.push((
-            EntityType::WitherSkull,
-            origin,
-            velocity,
-            if low_health { 10.0 } else { 8.0 },
-        ));
-        wither.action_cooldown = if low_health { 1.0 } else { 1.8 };
+    if !is_creative {
+        if low_health
+            && wither.position.distance_squared(player_pos) < 3.5 * 3.5
+            && wither.action_cooldown <= 0.0
+        {
+            events.player_damage.push(PlayerDamageEvent {
+                amount: 12.0,
+                source_entity: Some(wither.id),
+                kind: DamageKind::WitherCharge,
+            });
+            events.apply_wither.push(WitherEffectEvent {
+                duration: 10.0,
+                amplifier: 1,
+                source_entity: Some(wither.id),
+            });
+            events.explosions.push(ExplosionEvent {
+                position: wither.position,
+                radius: 3.0,
+                break_blocks: true,
+                source_entity: Some(wither.id),
+            });
+            wither.action_cooldown = 1.5;
+        } else if wither.action_cooldown <= 0.0 {
+            let origin = wither.position + Vec3::new(0.0, 2.2, 0.0);
+            let velocity = (player_pos + Vec3::Y - origin).normalize_or_zero() * 14.0;
+            pending_spawns.push((
+                EntityType::WitherSkull,
+                origin,
+                velocity,
+                if low_health { 10.0 } else { 8.0 },
+            ));
+            wither.action_cooldown = if low_health { 1.0 } else { 1.8 };
+        }
     }
 }
 
@@ -450,6 +475,7 @@ fn projectile_hit(
     projectile: &crate::entity::Entity,
     chunks: &ChunkManager,
     player_pos: Vec3,
+    game_mode: GameMode,
     events: &mut BossEvents,
 ) -> bool {
     let expired = projectile.ai_timer >= PROJECTILE_LIFETIME;
@@ -462,7 +488,8 @@ fn projectile_hit(
         .get_block(position.0, position.1, position.2)
         .properties()
         .is_solid;
-    let player_hit = projectile.position.distance_squared(player_pos) <= 1.35 * 1.35;
+    let player_hit = game_mode != GameMode::Creative
+        && projectile.position.distance_squared(player_pos) <= 1.35 * 1.35;
     if !expired && !block_hit && !player_hit {
         return false;
     }
@@ -728,7 +755,14 @@ mod tests {
         entities.entities[0].health = 100.0;
         let chunks = ChunkManager::new(1);
 
-        update_dimension_entities(Dimension::End, &mut entities, &chunks, Vec3::ZERO, 0.2);
+        update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            Vec3::ZERO,
+            0.2,
+            GameMode::Survival,
+        );
 
         let dragon = entities
             .entities
@@ -752,9 +786,39 @@ mod tests {
             &chunks,
             Vec3::ZERO,
             0.1,
+            GameMode::Survival,
         );
 
         assert_eq!(entities.entities[0].ai_phase, 1);
+    }
+
+    #[test]
+    fn creative_mode_bosses_do_not_attack_player() {
+        let mut entities = EntityManager::new();
+        entities.spawn(EntityType::Blaze, Vec3::new(5.0, 0.0, 0.0));
+        entities.spawn(EntityType::Piglin, Vec3::new(1.0, 0.0, 0.0));
+        entities.spawn(EntityType::EnderDragon, Vec3::new(0.0, 80.0, 0.0));
+        let chunks = ChunkManager::new(1);
+
+        let events = update_dimension_entities(
+            Dimension::Nether,
+            &mut entities,
+            &chunks,
+            Vec3::ZERO,
+            0.1,
+            GameMode::Creative,
+        );
+
+        assert!(
+            events.player_damage.is_empty(),
+            "Bosses emitted player damage events in Creative mode!"
+        );
+        let dragon = entities
+            .entities
+            .iter()
+            .find(|e| e.entity_type == EntityType::EnderDragon)
+            .unwrap();
+        assert_eq!(dragon.ai_phase, 0, "Dragon left phase 0 in Creative mode!");
     }
 
     #[test]
