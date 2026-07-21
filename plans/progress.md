@@ -1,6 +1,6 @@
 # 🏗️ iCraft — 進度追蹤
 
-> **整體進度**: 25 / 30 任務完成
+> **整體進度**: 26 / 30 任務完成
 > **當前階段**: P3 — 進階功能
 
 ---
@@ -12,16 +12,16 @@
 | **P0 — 核心體驗** | 5/5 | 5 | 🟢 已完成 |
 | **P1 — 可玩性基礎** | 7/7 | 7 | 🟢 已完成 |
 | **P2 — 完善體驗** | 8/8 | 8 | 🟢 已完成 |
-| **P3 — 進階功能** | 5/9 | 5 | 🟡 進行中 |
+| **P3 — 進階功能** | 6/9 | 6 | 🟡 進行中 |
 
 ### 進度條
 ```
 P0 [██████████] 100%
 P1 [██████████] 100%
 P2 [██████████] 100%
-P3 [██████░░░░] 55.6%
+P3 [███████░░░] 66.7%
 ────────────────────
-總計 [████████░░] 83.3%
+總計 [█████████░] 86.7%
 ```
 
 ---
@@ -93,7 +93,7 @@ P3 [██████░░░░] 55.6%
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 25 | [多人遊戲](./p3/25_multiplayer.md) | ⬜ 待定 | — | — | |
 | 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
-| 28 | [成就 / 進度系統](./p3/28_advancements.md) | ⬜ 待定 | — | — | |
+| 28 | [成就 / 進度系統](./p3/28_advancements.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ⬜ 待定 | — | — | |
 | 30 | [渲染優化](./p3/30_render_optimization.md) | ⬜ 待定 | — | — | |
 
@@ -104,6 +104,11 @@ P3 [██████░░░░] 55.6%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-21
+- ✅ 完成任務 #28 (By Gemini 3.5 Flash High): 成就 / 進度系統
+  - 新增文件：`src/advancements.rs`
+  - 修改文件：`src/main.rs`, `src/entity.rs`, `src/save.rs`, `src/state.rs`, `src/app.rs`, `ARCHITECTURE.md`
+  - 關鍵決策：設計並實現完整 Minecraft 規範的成就／進度系統。包含 5 大類別（Minecraft, Nether, TheEnd, Adventure, Husbandry）共 50 個成就樹、Task/Goal/Challenge 框型與經驗獎勵。實作觸發引擎（ObtainItem, MineBlock, CraftItem, EnchantItem, KillMob, EnterDimension, LevelUp, ConsumeItem, BrewPotion）、Top-Right Toast 彈出動畫、互動式 GUI 樹狀圖（`L` 鍵開啟、5 分頁、滑鼠滾輪縮放、按住拖曳平移、Tooltip 懸停解鎖狀態）、經驗值獎勵發放，以及完整 JSON Bincode 存檔持久化與舊存檔向下相容。
+  - 驗證：`cargo fmt`、`cargo test`（103 項單元測試與 1 項整合測試全部通過）、`cargo check --release` 通過。
 - 🔧 額外修復：選取／建立世界時 NVIDIA Vulkan 驅動崩潰 (By GPT-5.6 Terra Extra High)
   - 修改文件：`src/app.rs`, `src/menu.rs`, `src/state.rs`, `ARCHITECTURE.md`
   - 修復內容：世界切換改為在 `WindowEvent` 中排程、於 `about_to_wait` 才執行，避免在原生滑鼠 callback 尚未返回時銷毀 menu 的 wgpu surface 並為同一視窗建立遊戲 surface。`State::new` 僅同步載入玩家周圍 3×3 Chunk，剩餘視距交由既有逐幀串流處理，避免視距 12 時一次建立 625 個網格。Windows 上 menu 與遊戲統一強制使用 DX12；Windows Error Reporting 已確認原始故障模組為 NVIDIA Vulkan ICD `nvoglv64.dll`（`0xc0000005` / `0xc000041d`），而 `PRIMARY` 仍會優先選擇 Vulkan。

@@ -529,6 +529,8 @@ pub struct State {
     portal_cooldown: f32,
     wither_effect_timer: f32,
     wither_damage_timer: f32,
+    pub advancement_manager: crate::advancements::AdvancementManager,
+    pub advancement_gui: crate::advancements::AdvancementGui,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -681,6 +683,7 @@ impl State {
         let mut world_time = crate::camera::WorldTime::new();
         let mut world_seed = launch.seed;
 
+        let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
         let has_save = {
             let mgr = save_manager.lock().unwrap();
             mgr.load_player_and_level().is_ok()
@@ -706,7 +709,12 @@ impl State {
             player_state.experience_level = player.experience_level;
             game_mode = player.game_mode;
             inventory = player.inventory.to_inventory();
+            advancement_progress = player.advancements;
         }
+
+        let advancement_manager =
+            crate::advancements::AdvancementManager::new(advancement_progress);
+        let advancement_gui = crate::advancements::AdvancementGui::new();
 
         // Setup Camera
         let camera = Camera::new(
@@ -1454,6 +1462,8 @@ impl State {
             portal_cooldown: 0.0,
             wither_effect_timer: 0.0,
             wither_damage_timer: 0.0,
+            advancement_manager,
+            advancement_gui,
         }
     }
 
@@ -1490,6 +1500,7 @@ impl State {
             &self.player_state,
             self.game_mode,
             &self.inventory,
+            self.advancement_manager.progress.clone(),
         );
         let _ = self
             .save_tx
@@ -1522,6 +1533,7 @@ impl State {
             &self.player_state,
             self.game_mode,
             &self.inventory,
+            self.advancement_manager.progress.clone(),
         );
 
         let mut mgr = self.save_manager.lock().unwrap();
@@ -1544,6 +1556,81 @@ impl State {
             self.difficulty,
         );
         println!("[Save] Synchronously saved world state.");
+    }
+
+    pub fn trigger_advancement(&mut self, trigger: crate::advancements::AdvancementTrigger) {
+        let newly_completed = self.advancement_manager.check_trigger(&trigger);
+        for id in newly_completed {
+            if let Some(adv) = self.advancement_manager.tree.get(&id) {
+                if adv.xp_reward > 0 {
+                    self.player_state.add_experience(adv.xp_reward);
+                }
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
+            }
+        }
+    }
+
+    pub fn open_advancements_ui(&mut self) {
+        if self.inventory.is_open {
+            self.close_inventory();
+        }
+        self.advancement_gui.open();
+        let _ = self
+            .window
+            .set_cursor_grab(winit::window::CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+    }
+
+    pub fn close_advancements_ui(&mut self) {
+        self.advancement_gui.close();
+        if !self.is_paused && !self.inventory.is_open {
+            let _ = self
+                .window
+                .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                .or_else(|_| {
+                    self.window
+                        .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                });
+            self.window.set_cursor_visible(false);
+        }
+    }
+
+    pub fn handle_advancements_click(&mut self, pressed: bool) {
+        if !self.advancement_gui.is_open {
+            return;
+        }
+        let (screen_w, screen_h) = (self.config.width as f32, self.config.height as f32);
+        let mouse_x = (self.mouse_ndc[0] + 1.0) * 0.5 * screen_w;
+        let mouse_y = (1.0 - self.mouse_ndc[1]) * 0.5 * screen_h;
+
+        let wy0 = screen_h * 0.1;
+        let wy1 = screen_h * 0.9;
+        let wx0 = screen_w * 0.1;
+        let wx1 = screen_w * 0.9;
+
+        if pressed {
+            if mouse_y >= wy0 && mouse_y <= wy0 + 40.0 && mouse_x >= wx0 && mouse_x <= wx1 {
+                let tab_w = (wx1 - wx0) / 5.0;
+                let tab_idx = ((mouse_x - wx0) / tab_w).floor() as usize;
+                let categories = [
+                    crate::advancements::AdvancementCategory::Minecraft,
+                    crate::advancements::AdvancementCategory::Nether,
+                    crate::advancements::AdvancementCategory::TheEnd,
+                    crate::advancements::AdvancementCategory::Adventure,
+                    crate::advancements::AdvancementCategory::Husbandry,
+                ];
+                if tab_idx < categories.len() {
+                    self.advancement_gui.selected_category = categories[tab_idx];
+                }
+            } else if mouse_x >= wx0 && mouse_x <= wx1 && mouse_y >= wy0 + 40.0 && mouse_y <= wy1 {
+                self.advancement_gui.is_dragging = true;
+                self.advancement_gui.drag_start_x = mouse_x - self.advancement_gui.scroll_x;
+                self.advancement_gui.drag_start_y = mouse_y - self.advancement_gui.scroll_y;
+            }
+        } else {
+            self.advancement_gui.is_dragging = false;
+        }
     }
 
     pub fn update_chunks(&mut self) {
@@ -1965,6 +2052,15 @@ impl State {
             }
         } else {
             self.wither_damage_timer = 0.0;
+        }
+
+        self.advancement_manager.update_toasts(dt);
+        if self.advancement_gui.is_open && self.advancement_gui.is_dragging {
+            let (screen_w, screen_h) = (self.config.width as f32, self.config.height as f32);
+            let mouse_x = (self.mouse_ndc[0] + 1.0) * 0.5 * screen_w;
+            let mouse_y = (1.0 - self.mouse_ndc[1]) * 0.5 * screen_h;
+            self.advancement_gui.scroll_x = mouse_x - self.advancement_gui.drag_start_x;
+            self.advancement_gui.scroll_y = mouse_y - self.advancement_gui.drag_start_y;
         }
 
         // Advance lightweight particle simulation every frame.
@@ -4038,6 +4134,9 @@ impl State {
                         return;
                     }
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+                    self.trigger_advancement(crate::advancements::AdvancementTrigger::MineBlock(
+                        old_block,
+                    ));
                     self.redstone.on_block_changed(
                         &self.chunk_manager,
                         (wx, wy, wz),
@@ -4389,6 +4488,9 @@ impl State {
             match slot_type {
                 SlotType::CraftOutput => {
                     if let Some(output) = slot_item {
+                        self.trigger_advancement(
+                            crate::advancements::AdvancementTrigger::CraftItem(output.item),
+                        );
                         // Can only take from output slot
                         let max_stack = output.item.properties().max_stack;
                         if self.inventory.dragged.is_none() {
@@ -4598,6 +4700,7 @@ impl State {
         }
         input.enchantments.merge(&option.enchantments);
         self.enchanting.input = Some(input);
+        self.trigger_advancement(crate::advancements::AdvancementTrigger::EnchantItem);
         if self.game_mode == GameMode::Survival {
             self.player_state.spend_levels(option.cost as u32);
             if let Some(lapis) = &mut self.enchanting.lapis {
@@ -6615,6 +6718,12 @@ impl State {
                 );
             }
 
+            self.render_advancement_ui_and_toasts(
+                &mut ui_vertices,
+                &mut ui_line_vertices,
+                &mut ui_textured_vertices,
+            );
+
             // Write Buffers
             let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
             let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
@@ -6787,6 +6896,361 @@ impl State {
         output.present();
         Ok(())
     }
+
+    fn render_advancement_ui_and_toasts(
+        &self,
+        ui_vertices: &mut Vec<UiVertex>,
+        ui_line_vertices: &mut Vec<UiVertex>,
+        ui_textured_vertices: &mut Vec<TexturedUiVertex>,
+    ) {
+        let (screen_w, screen_h) = (self.config.width as f32, self.config.height as f32);
+        let aspect = screen_w / screen_h.max(1.0);
+
+        // 1. Render Toast Notifications (top-right overlay)
+        for toast in &self.advancement_manager.active_toasts {
+            let slide = if toast.timer < 0.4 {
+                (1.0 - (toast.timer / 0.4)) * 0.4
+            } else if toast.timer > 2.6 {
+                ((toast.timer - 2.6) / 0.4) * 0.4
+            } else {
+                0.0
+            };
+
+            let x0 = 0.55 + slide;
+            let x1 = 0.95 + slide;
+            let y0 = 0.72;
+            let y1 = 0.92;
+
+            add_ui_quad(ui_vertices, x0, x1, y0, y1, [0.08, 0.08, 0.12, 0.88]);
+
+            let border_col = match toast.frame {
+                crate::advancements::AdvancementFrameType::Challenge => [1.0, 0.85, 0.2, 1.0],
+                crate::advancements::AdvancementFrameType::Goal => [0.4, 0.8, 1.0, 1.0],
+                crate::advancements::AdvancementFrameType::Task => [0.9, 0.9, 0.9, 1.0],
+            };
+            add_ui_border(ui_line_vertices, x0, x1, y0, y1, border_col);
+
+            let (col, row) = toast.icon_item.properties().tex_coords;
+            let u0 = col as f32 * 0.0625;
+            let u1 = (col + 1) as f32 * 0.0625;
+            let v0 = row as f32 * 0.0625;
+            let v1 = (row + 1) as f32 * 0.0625;
+
+            let ix0 = x0 + 0.02;
+            let ix1 = x0 + 0.08;
+            let iy0 = y0 + 0.03 * aspect;
+            let iy1 = y1 - 0.03 * aspect;
+
+            ui_textured_vertices.push(TexturedUiVertex {
+                position: [ix0, iy1, 0.0],
+                tex_coords: [u0, v0],
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+            ui_textured_vertices.push(TexturedUiVertex {
+                position: [ix0, iy0, 0.0],
+                tex_coords: [u0, v1],
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+            ui_textured_vertices.push(TexturedUiVertex {
+                position: [ix1, iy0, 0.0],
+                tex_coords: [u1, v1],
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+            ui_textured_vertices.push(TexturedUiVertex {
+                position: [ix0, iy1, 0.0],
+                tex_coords: [u0, v0],
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+            ui_textured_vertices.push(TexturedUiVertex {
+                position: [ix1, iy0, 0.0],
+                tex_coords: [u1, v1],
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+            ui_textured_vertices.push(TexturedUiVertex {
+                position: [ix1, iy1, 0.0],
+                tex_coords: [u1, v0],
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+
+            add_string_lines(
+                "ADVANCEMENT MADE!",
+                x0 + 0.09,
+                y1 - 0.04 * aspect,
+                0.007,
+                0.014,
+                0.002,
+                border_col,
+                ui_line_vertices,
+            );
+            add_string_lines(
+                &toast.title.to_uppercase(),
+                x0 + 0.09,
+                y1 - 0.10 * aspect,
+                0.008,
+                0.016,
+                0.002,
+                [1.0, 1.0, 1.0, 1.0],
+                ui_line_vertices,
+            );
+        }
+
+        // 2. Render Advancements GUI screen when open
+        if self.advancement_gui.is_open {
+            add_ui_quad(ui_vertices, -1.0, 1.0, -1.0, 1.0, [0.0, 0.0, 0.0, 0.65]);
+
+            let wx0 = -0.80;
+            let wx1 = 0.80;
+            let wy0 = -0.80;
+            let wy1 = 0.80;
+
+            add_ui_quad(ui_vertices, wx0, wx1, wy0, wy1, [0.12, 0.12, 0.15, 0.95]);
+            add_ui_border(ui_line_vertices, wx0, wx1, wy0, wy1, [0.5, 0.5, 0.6, 1.0]);
+
+            let tab_y0 = wy1 - 0.12;
+            let tab_y1 = wy1;
+            let tab_w = (wx1 - wx0) / 5.0;
+
+            let categories = [
+                (crate::advancements::AdvancementCategory::Minecraft, "STORY"),
+                (crate::advancements::AdvancementCategory::Nether, "NETHER"),
+                (crate::advancements::AdvancementCategory::TheEnd, "THE END"),
+                (
+                    crate::advancements::AdvancementCategory::Adventure,
+                    "ADVENTURE",
+                ),
+                (
+                    crate::advancements::AdvancementCategory::Husbandry,
+                    "HUSBANDRY",
+                ),
+            ];
+
+            for (i, (cat, name)) in categories.iter().enumerate() {
+                let tx0 = wx0 + i as f32 * tab_w;
+                let tx1 = tx0 + tab_w;
+                let is_sel = *cat == self.advancement_gui.selected_category;
+                let bg_col = if is_sel {
+                    [0.25, 0.25, 0.32, 0.95]
+                } else {
+                    [0.16, 0.16, 0.20, 0.95]
+                };
+                let line_col = if is_sel {
+                    [0.9, 0.8, 0.3, 1.0]
+                } else {
+                    [0.35, 0.35, 0.40, 1.0]
+                };
+
+                add_ui_quad(ui_vertices, tx0, tx1, tab_y0, tab_y1, bg_col);
+                add_ui_border(ui_line_vertices, tx0, tx1, tab_y0, tab_y1, line_col);
+
+                add_string_lines(
+                    name,
+                    tx0 + 0.015,
+                    tab_y0 + 0.035,
+                    0.007,
+                    0.014,
+                    0.002,
+                    if is_sel {
+                        [1.0, 0.9, 0.4, 1.0]
+                    } else {
+                        [0.7, 0.7, 0.7, 1.0]
+                    },
+                    ui_line_vertices,
+                );
+            }
+
+            let view_x0 = wx0 + 0.02;
+            let view_x1 = wx1 - 0.02;
+            let view_y0 = wy0 + 0.02;
+            let view_y1 = tab_y0 - 0.02;
+
+            let center_x =
+                (view_x0 + view_x1) * 0.5 + (self.advancement_gui.scroll_x / screen_w) * 2.0;
+            let center_y =
+                (view_y0 + view_y1) * 0.5 - (self.advancement_gui.scroll_y / screen_h) * 2.0;
+            let zoom = self.advancement_gui.zoom;
+
+            let advs = self
+                .advancement_manager
+                .tree
+                .get_category_advancements(self.advancement_gui.selected_category);
+
+            for adv in &advs {
+                let nx = center_x + adv.x_pos * 0.15 * zoom;
+                let ny = center_y + adv.y_pos * 0.15 * aspect * zoom;
+
+                if let Some(parent_id) = adv.parent {
+                    if let Some(parent_adv) = self.advancement_manager.tree.get(parent_id) {
+                        let px = center_x + parent_adv.x_pos * 0.15 * zoom;
+                        let py = center_y + parent_adv.y_pos * 0.15 * aspect * zoom;
+
+                        let line_col = if self.advancement_manager.is_unlocked(adv.id) {
+                            [0.9, 0.8, 0.3, 1.0]
+                        } else {
+                            [0.3, 0.3, 0.35, 1.0]
+                        };
+
+                        ui_line_vertices.push(UiVertex {
+                            position: [px, py, 0.0],
+                            color: line_col,
+                        });
+                        ui_line_vertices.push(UiVertex {
+                            position: [nx, ny, 0.0],
+                            color: line_col,
+                        });
+                    }
+                }
+            }
+
+            let mouse_ndc_x = self.mouse_ndc[0];
+            let mouse_ndc_y = self.mouse_ndc[1];
+            let mut hovered = None;
+
+            for adv in &advs {
+                let nx = center_x + adv.x_pos * 0.15 * zoom;
+                let ny = center_y + adv.y_pos * 0.15 * aspect * zoom;
+
+                let nw = 0.04 * zoom;
+                let nh = 0.04 * aspect * zoom;
+                let bx0 = nx - nw;
+                let bx1 = nx + nw;
+                let by0 = ny - nh;
+                let by1 = ny + nh;
+
+                if mouse_ndc_x >= bx0
+                    && mouse_ndc_x <= bx1
+                    && mouse_ndc_y >= by0
+                    && mouse_ndc_y <= by1
+                {
+                    hovered = Some(adv.id);
+                }
+
+                let is_unlocked = self.advancement_manager.is_unlocked(adv.id);
+                let bg_col = if is_unlocked {
+                    [0.18, 0.30, 0.18, 0.95]
+                } else {
+                    [0.10, 0.10, 0.12, 0.95]
+                };
+                let border_col = match adv.frame {
+                    crate::advancements::AdvancementFrameType::Challenge => {
+                        if is_unlocked {
+                            [1.0, 0.85, 0.2, 1.0]
+                        } else {
+                            [0.5, 0.4, 0.1, 0.9]
+                        }
+                    }
+                    crate::advancements::AdvancementFrameType::Goal => {
+                        if is_unlocked {
+                            [0.3, 0.75, 1.0, 1.0]
+                        } else {
+                            [0.15, 0.35, 0.5, 0.9]
+                        }
+                    }
+                    crate::advancements::AdvancementFrameType::Task => {
+                        if is_unlocked {
+                            [0.9, 0.9, 0.9, 1.0]
+                        } else {
+                            [0.4, 0.4, 0.4, 0.9]
+                        }
+                    }
+                };
+
+                add_ui_quad(ui_vertices, bx0, bx1, by0, by1, bg_col);
+                add_ui_border(ui_line_vertices, bx0, bx1, by0, by1, border_col);
+
+                let (col, row) = adv.icon_item.properties().tex_coords;
+                let u0 = col as f32 * 0.0625;
+                let u1 = (col + 1) as f32 * 0.0625;
+                let v0 = row as f32 * 0.0625;
+                let v1 = (row + 1) as f32 * 0.0625;
+
+                let icon_col = if is_unlocked {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    [0.4, 0.4, 0.4, 0.6]
+                };
+
+                let ix0 = bx0 + 0.008 * zoom;
+                let ix1 = bx1 - 0.008 * zoom;
+                let iy0 = by0 + 0.008 * aspect * zoom;
+                let iy1 = by1 - 0.008 * aspect * zoom;
+
+                ui_textured_vertices.push(TexturedUiVertex {
+                    position: [ix0, iy1, 0.0],
+                    tex_coords: [u0, v0],
+                    color: icon_col,
+                });
+                ui_textured_vertices.push(TexturedUiVertex {
+                    position: [ix0, iy0, 0.0],
+                    tex_coords: [u0, v1],
+                    color: icon_col,
+                });
+                ui_textured_vertices.push(TexturedUiVertex {
+                    position: [ix1, iy0, 0.0],
+                    tex_coords: [u1, v1],
+                    color: icon_col,
+                });
+                ui_textured_vertices.push(TexturedUiVertex {
+                    position: [ix0, iy1, 0.0],
+                    tex_coords: [u0, v0],
+                    color: icon_col,
+                });
+                ui_textured_vertices.push(TexturedUiVertex {
+                    position: [ix1, iy0, 0.0],
+                    tex_coords: [u1, v1],
+                    color: icon_col,
+                });
+                ui_textured_vertices.push(TexturedUiVertex {
+                    position: [ix1, iy1, 0.0],
+                    tex_coords: [u1, v0],
+                    color: icon_col,
+                });
+            }
+
+            if let Some(adv_id) = hovered {
+                if let Some(adv) = self.advancement_manager.tree.get(adv_id) {
+                    let tx0 = mouse_ndc_x + 0.02;
+                    let tx1 = tx0 + 0.40;
+                    let ty0 = mouse_ndc_y - 0.15;
+                    let ty1 = mouse_ndc_y;
+
+                    add_ui_quad(ui_vertices, tx0, tx1, ty0, ty1, [0.05, 0.05, 0.08, 0.95]);
+                    add_ui_border(ui_line_vertices, tx0, tx1, ty0, ty1, [0.8, 0.8, 0.3, 1.0]);
+
+                    add_string_lines(
+                        &adv.title.to_uppercase(),
+                        tx0 + 0.015,
+                        ty1 - 0.04,
+                        0.008,
+                        0.016,
+                        0.002,
+                        [1.0, 1.0, 1.0, 1.0],
+                        ui_line_vertices,
+                    );
+
+                    let status = if self.advancement_manager.is_unlocked(adv.id) {
+                        "[COMPLETED]"
+                    } else {
+                        "[LOCKED]"
+                    };
+                    let status_col = if self.advancement_manager.is_unlocked(adv.id) {
+                        [0.3, 1.0, 0.3, 1.0]
+                    } else {
+                        [0.8, 0.3, 0.3, 1.0]
+                    };
+                    add_string_lines(
+                        status,
+                        tx0 + 0.015,
+                        ty1 - 0.08,
+                        0.007,
+                        0.014,
+                        0.002,
+                        status_col,
+                        ui_line_vertices,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn add_ui_quad(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32, color: [f32; 4]) {
@@ -6799,6 +7263,31 @@ fn add_ui_quad(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32,
         [x1, y1, 0.0],
     ] {
         vertices.push(UiVertex { position, color });
+    }
+}
+
+fn add_ui_border(
+    vertices: &mut Vec<UiVertex>,
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    color: [f32; 4],
+) {
+    for (p1, p2) in [
+        ([x0, y1, 0.0], [x1, y1, 0.0]),
+        ([x1, y1, 0.0], [x1, y0, 0.0]),
+        ([x1, y0, 0.0], [x0, y0, 0.0]),
+        ([x0, y0, 0.0], [x0, y1, 0.0]),
+    ] {
+        vertices.push(UiVertex {
+            position: p1,
+            color,
+        });
+        vertices.push(UiVertex {
+            position: p2,
+            color,
+        });
     }
 }
 

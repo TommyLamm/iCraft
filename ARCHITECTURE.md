@@ -309,6 +309,7 @@ UI construction.
 | `src/passive_mob.rs` | Pig/cow/sheep/chicken wandering, cliff avoidance, breeding/young, drops and species-specific behavior. |
 | `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
 | `src/particles.rs` | `Particle`, `ParticleSystem`, `MAX_PARTICLES`, emitter/atlas helpers; bounded particle physics and camera-facing billboard mesh compilation. |
+| `src/advancements.rs` | `AdvancementManager`, `AdvancementTree`, `AdvancementGui`; 50-advancement tree across 5 categories, trigger evaluation engine, toast notification slide overlay, and interactive GUI tree layout renderer. |
 
 ## Data and configuration
 

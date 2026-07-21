@@ -208,6 +208,10 @@ impl ApplicationHandler for App {
                             if pressed && button == MouseButton::Left {
                                 return_to_menu = state.handle_menu_click();
                             }
+                        } else if state.advancement_gui.is_open {
+                            if button == MouseButton::Left {
+                                state.handle_advancements_click(pressed);
+                            }
                         } else if state.inventory.is_open {
                             if pressed
                                 && (button == MouseButton::Left || button == MouseButton::Right)
@@ -260,6 +264,13 @@ impl ApplicationHandler for App {
                 };
                 match &mut self.runtime {
                     Some(Runtime::Menu(menu)) => menu.handle_scroll(scroll_dir),
+                    Some(Runtime::Game(state)) if state.advancement_gui.is_open => {
+                        if scroll_dir != 0 {
+                            state.advancement_gui.zoom = (state.advancement_gui.zoom
+                                - scroll_dir as f32 * 0.1)
+                                .clamp(0.5, 2.0);
+                        }
+                    }
                     Some(Runtime::Game(state)) if !state.is_paused && !state.inventory.is_open => {
                         if scroll_dir != 0 {
                             state.inventory.selected =
@@ -355,10 +366,20 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) {
         return;
     };
     if code == KeyCode::Escape && pressed {
-        if state.inventory.is_open {
+        if state.advancement_gui.is_open {
+            state.close_advancements_ui();
+        } else if state.inventory.is_open {
             state.close_inventory();
         } else {
             state.set_paused(!state.is_paused);
+        }
+        return;
+    }
+    if code == KeyCode::KeyL && pressed {
+        if state.advancement_gui.is_open {
+            state.close_advancements_ui();
+        } else if !state.is_paused {
+            state.open_advancements_ui();
         }
         return;
     }

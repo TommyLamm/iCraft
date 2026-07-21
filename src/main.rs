@@ -1,3 +1,4 @@
+pub mod advancements;
 mod app;
 pub mod audio;
 mod boss;

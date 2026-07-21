@@ -120,6 +120,8 @@ pub struct PlayerData {
     pub experience_level: u32,
     pub game_mode: GameMode,
     pub inventory: InventoryData,
+    #[serde(default)]
+    pub advancements: crate::advancements::AdvancementProgressData,
 }
 
 impl PlayerData {
@@ -131,6 +133,7 @@ impl PlayerData {
         state: &crate::player::PlayerState,
         game_mode: GameMode,
         inventory: &Inventory,
+        advancements: crate::advancements::AdvancementProgressData,
     ) -> Self {
         Self {
             position: [position.x, position.y, position.z],
@@ -146,6 +149,7 @@ impl PlayerData {
             experience_level: state.experience_level,
             game_mode,
             inventory: InventoryData::from(inventory),
+            advancements,
         }
     }
 }
@@ -551,6 +555,7 @@ impl From<LegacyPlayerData> for PlayerData {
             experience_level: 0,
             game_mode: old.game_mode,
             inventory: old.inventory.into(),
+            advancements: crate::advancements::AdvancementProgressData::default(),
         }
     }
 }
@@ -597,6 +602,7 @@ mod tests {
                 armor: vec![None],
                 selected: 0,
             },
+            advancements: Default::default(),
         };
         let encoded_player = bincode::serialize(&player).unwrap();
         let decoded_player: PlayerData = bincode::deserialize(&encoded_player).unwrap();
