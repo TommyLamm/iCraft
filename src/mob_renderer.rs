@@ -265,41 +265,117 @@ pub fn render_mobs(
                     light_val,
                 );
 
-                // Skeleton Arms: raised to aim bow if target_player is true, otherwise swing alternately
-                let left_arm_pitch = if entity.target_player {
-                    -std::f32::consts::FRAC_PI_2
+                // Aiming calculation
+                let target = entity.target_player;
+                let aim_pitch = if target { entity.pitch } else { 0.0 };
+
+                let left_arm_pitch = if target {
+                    -std::f32::consts::FRAC_PI_2 + aim_pitch
                 } else {
                     -swing
                 };
-                let right_arm_pitch = if entity.target_player {
-                    -std::f32::consts::FRAC_PI_2
+
+                // Draw animation progress: action_cooldown from 2.0 to 0.0
+                let draw_progress = if target {
+                    ((2.0 - entity.action_cooldown) / 2.0).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+
+                let right_arm_pitch = if target {
+                    -std::f32::consts::FRAC_PI_2 + aim_pitch + 0.2 * (1.0 - draw_progress)
                 } else {
                     swing
                 };
 
-                // Left Arm (Col 5)
+                // Left Arm (holding bow)
+                let left_shoulder = Vec3::new(-0.275, 1.3, 0.0);
                 add_cuboid(
                     vertices,
                     indices,
                     Vec3::new(0.15, 0.75, 0.15),
                     Vec3::new(0.0, -0.325, 0.0),
-                    to_world(Vec3::new(-0.275, 1.3, 0.0)),
+                    to_world(left_shoulder),
                     entity.yaw,
                     left_arm_pitch,
                     [5; 6],
                     9,
                     light_val,
                 );
-                // Right Arm (Col 5)
+
+                // Right Arm (drawing string)
+                let right_shoulder = Vec3::new(0.275, 1.3, 0.0);
                 add_cuboid(
                     vertices,
                     indices,
                     Vec3::new(0.15, 0.75, 0.15),
                     Vec3::new(0.0, -0.325, 0.0),
-                    to_world(Vec3::new(0.275, 1.3, 0.0)),
+                    to_world(right_shoulder),
                     entity.yaw,
                     right_arm_pitch,
                     [5; 6],
+                    9,
+                    light_val,
+                );
+
+                // 3D Bow Model attached to Left Hand
+                // Calculate left hand position in world space
+                let left_hand_local = left_shoulder + Vec3::new(0.0, -0.6, 0.3);
+                let bow_pivot = to_world(left_hand_local);
+
+                // Bow Grip (Center)
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.08, 0.3, 0.08),
+                    Vec3::ZERO,
+                    bow_pivot,
+                    entity.yaw,
+                    aim_pitch,
+                    [9; 6], // Bow texture at Col 9 Row 9
+                    9,
+                    light_val,
+                );
+
+                // Bow Upper Limb
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.06, 0.4, 0.06),
+                    Vec3::new(0.0, 0.3, -0.05),
+                    bow_pivot,
+                    entity.yaw,
+                    aim_pitch,
+                    [9; 6],
+                    9,
+                    light_val,
+                );
+
+                // Bow Lower Limb
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.06, 0.4, 0.06),
+                    Vec3::new(0.0, -0.3, -0.05),
+                    bow_pivot,
+                    entity.yaw,
+                    aim_pitch,
+                    [9; 6],
+                    9,
+                    light_val,
+                );
+
+                // Bow String (Center pull-back driven by draw_progress)
+                let string_offset_z = -0.1 - 0.25 * draw_progress;
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.02, 0.9, 0.02),
+                    Vec3::new(0.0, 0.0, string_offset_z),
+                    bow_pivot,
+                    entity.yaw,
+                    aim_pitch,
+                    [9; 6],
                     9,
                     light_val,
                 );
