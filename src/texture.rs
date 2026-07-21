@@ -1684,6 +1684,28 @@ impl TextureAtlas {
             }
         }
 
+        // Col 9: Bow (Row 9)
+        {
+            let ox = 9 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let is_bow_wood = (x >= 4 && x <= 11 && y >= 4 && y <= 11)
+                        && ((x == y) || (x == y + 1) || (x + 1 == y));
+                    let is_string = x == 12 && y >= 2 && y <= 13;
+                    let c = if is_bow_wood {
+                        let var = ((x * 7 + y * 13) % 20) as u8;
+                        Rgba([130 + var, 80 + var / 2, 40 + var / 2, 255])
+                    } else if is_string {
+                        Rgba([230, 230, 235, 255])
+                    } else {
+                        Rgba([0, 0, 0, 0])
+                    };
+                    img.put_pixel(ox + x, oy + y, c);
+                }
+            }
+        }
+
         // Row 10: Passive Mob Skins
         // Col 0: Pig Face, Col 1: Pig Body (pink)
         {
