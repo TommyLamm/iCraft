@@ -369,6 +369,13 @@ impl BlockType {
         }
     }
 
+    pub fn is_cross_model(self) -> bool {
+        matches!(
+            self,
+            BlockType::Dandelion | BlockType::Poppy | BlockType::TallGrass | BlockType::SugarCane
+        )
+    }
+
     pub fn sound_material(self) -> Option<crate::audio::SoundMaterial> {
         match self {
             BlockType::Air
@@ -1899,6 +1906,117 @@ impl Chunk {
                     let world_y = y as i32;
                     let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
 
+                    if block.is_cross_model() {
+                        let (v_list, i_list) = (&mut opaque_vertices, &mut opaque_indices);
+
+                        let sky_val = self.sky_light[x][y][z];
+                        let block_val = self.block_light[x][y][z];
+                        let light_val = (sky_val as f32) + (block_val as f32) * 16.0 + 1.0 * 256.0;
+
+                        let (tx_col, tx_row) = block.get_face_tex_index(0);
+
+                        let u0 = (0.005 + tx_col as f32) * 0.0625;
+                        let u1 = (0.995 + tx_col as f32) * 0.0625;
+                        let v0 = (0.005 + tx_row as f32) * 0.0625;
+                        let v1 = (0.995 + tx_row as f32) * 0.0625;
+
+                        let wx = world_x as f32;
+                        let wy = world_y as f32;
+                        let wz = world_z as f32;
+
+                        let min_off = 0.1464466;
+                        let max_off = 0.8535534;
+
+                        let plane1_p0 = [wx + min_off, wy, wz + min_off];
+                        let plane1_p1 = [wx + max_off, wy, wz + max_off];
+                        let plane1_p2 = [wx + max_off, wy + 1.0, wz + max_off];
+                        let plane1_p3 = [wx + min_off, wy + 1.0, wz + min_off];
+
+                        let plane2_p0 = [wx + max_off, wy, wz + min_off];
+                        let plane2_p1 = [wx + min_off, wy, wz + max_off];
+                        let plane2_p2 = [wx + min_off, wy + 1.0, wz + max_off];
+                        let plane2_p3 = [wx + max_off, wy + 1.0, wz + min_off];
+
+                        let planes = [
+                            (plane1_p0, plane1_p1, plane1_p2, plane1_p3),
+                            (plane2_p0, plane2_p1, plane2_p2, plane2_p3),
+                        ];
+
+                        for (p0, p1, p2, p3) in planes {
+                            // Front side
+                            let start_idx = v_list.len() as u32;
+                            v_list.push(Vertex {
+                                position: p0,
+                                tex_coords: [u0, v1],
+                                light_level: light_val,
+                                ao: 1.0,
+                            });
+                            v_list.push(Vertex {
+                                position: p1,
+                                tex_coords: [u1, v1],
+                                light_level: light_val,
+                                ao: 1.0,
+                            });
+                            v_list.push(Vertex {
+                                position: p2,
+                                tex_coords: [u1, v0],
+                                light_level: light_val,
+                                ao: 1.0,
+                            });
+                            v_list.push(Vertex {
+                                position: p3,
+                                tex_coords: [u0, v0],
+                                light_level: light_val,
+                                ao: 1.0,
+                            });
+                            i_list.extend_from_slice(&[
+                                start_idx,
+                                start_idx + 1,
+                                start_idx + 2,
+                                start_idx,
+                                start_idx + 2,
+                                start_idx + 3,
+                            ]);
+
+                            // Back side
+                            let start_idx_back = v_list.len() as u32;
+                            v_list.push(Vertex {
+                                position: p1,
+                                tex_coords: [u0, v1],
+                                light_level: light_val,
+                                ao: 1.0,
+                            });
+                            v_list.push(Vertex {
+                                position: p0,
+                                tex_coords: [u1, v1],
+                                light_level: light_val,
+                                ao: 1.0,
+                            });
+                            v_list.push(Vertex {
+                                position: p3,
+                                tex_coords: [u1, v0],
+                                light_level: light_val,
+                                ao: 1.0,
+                            });
+                            v_list.push(Vertex {
+                                position: p2,
+                                tex_coords: [u0, v0],
+                                light_level: light_val,
+                                ao: 1.0,
+                            });
+                            i_list.extend_from_slice(&[
+                                start_idx_back,
+                                start_idx_back + 1,
+                                start_idx_back + 2,
+                                start_idx_back,
+                                start_idx_back + 2,
+                                start_idx_back + 3,
+                            ]);
+                        }
+
+                        continue;
+                    }
+
                     for (face_idx, (normal, corner_data)) in BLOCK_FACES.iter().enumerate() {
                         let nx = world_x + normal[0];
                         let ny = world_y + normal[1];
@@ -2296,6 +2414,28 @@ mod tests {
             .map(|vertex| vertex.position[1])
             .fold(f32::NEG_INFINITY, f32::max);
         assert!((max_y - 1.125).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cross_model_blocks_generate_x_mesh() {
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                }
+            }
+            for z in 0..CHUNK_DEPTH {
+                chunk.heightmap[x][z] = 0;
+            }
+        }
+        chunk.blocks[8][1][8] = BlockType::Poppy;
+        chunk.heightmap[8][8] = 1;
+        let lookup = |_: i32, _: i32, _: i32| (BlockType::Air, 15, 0, 0, false);
+        let (vertices, indices, _, _) = chunk.generate_mesh(lookup);
+        // 2 planes * 2 sides = 4 quads = 16 vertices, 24 indices
+        assert_eq!(vertices.len(), 16);
+        assert_eq!(indices.len(), 24);
     }
 
     #[test]
