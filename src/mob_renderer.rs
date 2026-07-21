@@ -319,8 +319,11 @@ pub fn render_mobs(
                 );
 
                 // 3D Bow Model attached to Left Hand
-                // Calculate left hand position in world space
-                let left_hand_local = left_shoulder + Vec3::new(0.0, -0.6, 0.3);
+                // Calculate left hand position dynamically based on left_arm_pitch
+                let cos_lp = left_arm_pitch.cos();
+                let sin_lp = left_arm_pitch.sin();
+                let hand_rel_shoulder = Vec3::new(0.0, -0.65 * cos_lp, -0.65 * sin_lp);
+                let left_hand_local = left_shoulder + hand_rel_shoulder;
                 let bow_pivot = to_world(left_hand_local);
 
                 // Bow Grip (Center)
@@ -331,8 +334,8 @@ pub fn render_mobs(
                     Vec3::ZERO,
                     bow_pivot,
                     entity.yaw,
-                    aim_pitch,
-                    [9; 6], // Bow texture at Col 9 Row 9
+                    left_arm_pitch,
+                    [9; 6], // Bow Wood texture (Col 9 Row 9)
                     9,
                     light_val,
                 );
@@ -345,7 +348,7 @@ pub fn render_mobs(
                     Vec3::new(0.0, 0.3, -0.05),
                     bow_pivot,
                     entity.yaw,
-                    aim_pitch,
+                    left_arm_pitch,
                     [9; 6],
                     9,
                     light_val,
@@ -359,7 +362,7 @@ pub fn render_mobs(
                     Vec3::new(0.0, -0.3, -0.05),
                     bow_pivot,
                     entity.yaw,
-                    aim_pitch,
+                    left_arm_pitch,
                     [9; 6],
                     9,
                     light_val,
@@ -374,8 +377,8 @@ pub fn render_mobs(
                     Vec3::new(0.0, 0.0, string_offset_z),
                     bow_pivot,
                     entity.yaw,
-                    aim_pitch,
-                    [9; 6],
+                    left_arm_pitch,
+                    [10; 6], // Bow String texture (Col 10 Row 9)
                     9,
                     light_val,
                 );

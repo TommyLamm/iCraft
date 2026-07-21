@@ -1684,24 +1684,30 @@ impl TextureAtlas {
             }
         }
 
-        // Col 9: Bow (Row 9)
+        // Col 9: Bow Wood (Row 9) - Solid wood texture for 3D bow model
         {
             let ox = 9 * 16;
             let oy = 9 * 16;
             for y in 0..16 {
                 for x in 0..16 {
-                    let is_bow_wood = (x >= 4 && x <= 11 && y >= 4 && y <= 11)
-                        && ((x == y) || (x == y + 1) || (x + 1 == y));
-                    let is_string = x == 12 && y >= 2 && y <= 13;
-                    let c = if is_bow_wood {
-                        let var = ((x * 7 + y * 13) % 20) as u8;
-                        Rgba([130 + var, 80 + var / 2, 40 + var / 2, 255])
-                    } else if is_string {
-                        Rgba([230, 230, 235, 255])
-                    } else {
-                        Rgba([0, 0, 0, 0])
-                    };
-                    img.put_pixel(ox + x, oy + y, c);
+                    let var = ((x * 7 + y * 13) % 25) as u8;
+                    let r = 130 + var;
+                    let g = 80 + var / 2;
+                    let b = 40 + var / 2;
+                    img.put_pixel(ox + x, oy + y, Rgba([r, g, b, 255]));
+                }
+            }
+        }
+
+        // Col 10: Bow String (Row 9) - Solid white string texture for 3D bow string
+        {
+            let ox = 10 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let var = ((x * 3 + y * 5) % 15) as u8;
+                    let c = 230 + var;
+                    img.put_pixel(ox + x, oy + y, Rgba([c, c, c + 5, 255]));
                 }
             }
         }
