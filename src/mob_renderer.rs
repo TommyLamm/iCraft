@@ -330,11 +330,11 @@ pub fn render_mobs(
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.08, 0.3, 0.08),
+                    Vec3::new(0.08, 0.25, 0.08),
                     Vec3::ZERO,
                     bow_pivot,
                     entity.yaw,
-                    left_arm_pitch,
+                    aim_pitch,
                     [9; 6], // Bow Wood texture (Col 9 Row 9)
                     9,
                     light_val,
@@ -344,11 +344,11 @@ pub fn render_mobs(
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.06, 0.4, 0.06),
-                    Vec3::new(0.0, 0.3, -0.05),
+                    Vec3::new(0.06, 0.35, 0.06),
+                    Vec3::new(0.0, 0.25, 0.04),
                     bow_pivot,
                     entity.yaw,
-                    left_arm_pitch,
+                    aim_pitch,
                     [9; 6],
                     9,
                     light_val,
@@ -358,30 +358,47 @@ pub fn render_mobs(
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.06, 0.4, 0.06),
-                    Vec3::new(0.0, -0.3, -0.05),
+                    Vec3::new(0.06, 0.35, 0.06),
+                    Vec3::new(0.0, -0.25, 0.04),
                     bow_pivot,
                     entity.yaw,
-                    left_arm_pitch,
+                    aim_pitch,
                     [9; 6],
                     9,
                     light_val,
                 );
 
                 // Bow String (Center pull-back driven by draw_progress)
-                let string_offset_z = -0.1 - 0.25 * draw_progress;
+                let string_offset_z = -0.04 - 0.25 * draw_progress;
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.02, 0.9, 0.02),
+                    Vec3::new(0.02, 0.85, 0.02),
                     Vec3::new(0.0, 0.0, string_offset_z),
                     bow_pivot,
                     entity.yaw,
-                    left_arm_pitch,
+                    aim_pitch,
                     [10; 6], // Bow String texture (Col 10 Row 9)
                     9,
                     light_val,
                 );
+
+                // Arrow on Bow (when targeting player)
+                if target {
+                    let arrow_offset_z = 0.15 - 0.25 * draw_progress;
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.03, 0.03, 0.75),
+                        Vec3::new(0.0, 0.0, arrow_offset_z),
+                        bow_pivot,
+                        entity.yaw,
+                        aim_pitch,
+                        [8; 6], // Arrow texture (Col 8 Row 9)
+                        9,
+                        light_val,
+                    );
+                }
 
                 // Legs (Col 5)
                 // Left Leg
