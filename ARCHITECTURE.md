@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `2ad362f6643bdff66f6049aad72e90f0d5de20d6` (`2ad362f`). This identifies the
+> `0deafadcddbb78d4650823c9d943b30ba9fc1708` (`0deafad`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -26,10 +26,15 @@ through `WorldLaunch`; host simulation remains authoritative, while a joining
 client waits for `LoginSuccess` before generating terrain from the server seed.
 Player join/leave, 20 Hz pose/action fan-out, newcomer roster replay, and
 100 ms delayed remote-player interpolation are integrated with `State` and the
-shared entity/render path. Host-authoritative block mutations, client-side
+shared entity/render path. Remote players render as six-part cuboid avatars
+with projected name tags. `T` opens a bounded in-game chat history/input UI;
+the host resolves authenticated player IDs to roster usernames before reliably
+rebroadcasting chat. Host-authoritative block mutations, client-side
 lighting/remeshing, deferred changes for unloaded chunks, join-time chunk
-catch-up, and periodic world-time/weather correction are integrated. Detailed
-remote-avatar/chat/disconnect UI remains in multiplayer subtask 6.
+catch-up, and periodic world-time/weather correction are integrated. Client
+connection loss freezes input, removes remote entities, and presents a safe
+return-to-menu overlay without saving the client's transient copy.
+
 Display/input/audio
 settings persist in `settings.txt`, while each world's data (including seed,
 metadata, game time, player status, inventory, current dimension, advancement
@@ -133,6 +138,30 @@ assets are unavailable.
 chunk per frame, propagates its boundary lighting, and rebuilds at most four
 nearby dirty chunk meshes per frame.
 
+### Networking
+
+Host and joining-client networking use a listen-server model. `NetworkServer`
+and `NetworkClient` each own a Tokio runtime on a dedicated background thread;
+the main-thread `State` exchanges typed commands/events with them over
+`std::sync::mpsc` channels and drains inbound events at the start of every
+update. A client waits for `LoginSuccess`, then replaces its provisional seed
+and generates the same deterministic terrain as the host. The host remains the
+authority for block/world mutations and sends catch-up chunk payloads only for
+loaded chunks that differ from deterministic generation.
+
+Local poses are sent at 20 Hz. Remote poses retain two snapshots and render at
+a 100 ms delayed interpolation target; the resulting entity velocity drives the
+six-part player's arm/leg swing. Join/leave events bind stable player IDs to
+remote entities, while client disconnect removes all remote entities and stops
+outbound gameplay commands. Chat uses the existing `ChatMessage` packet: the
+server discards the sender string supplied on the wire, reports the authenticated
+player ID to host `State`, and reliably broadcasts the host-resolved username
+and sanitized message. `State::render` projects each remote head position into
+screen space for a clamped name tag and draws chat/disconnect surfaces through
+the existing colored-quad and vector-line UI pipelines. Client transport loss
+and host listener startup failure both enter the same non-destructive disconnect
+overlay and return-to-menu path.
+
 ### Block mutation and remeshing
 
 ```text
@@ -187,7 +216,8 @@ surface type can receive it.
 ### Rendering
 
 `State::render` first generates mob mesh data, camera-facing particle quads, and
-all immediate-mode UI vertices (including advancement toasts/screen) on the CPU.
+all immediate-mode UI vertices (including remote-player name tags, chat,
+disconnect UI, and advancement toasts/screen) on the CPU.
 The render pass order is: sky ->
 opaque/cutout chunks -> mobs (including dropped items) -> translucent chunks ->
 alpha-blended particles -> multiply-blended mining crack overlay -> textured UI
@@ -344,9 +374,9 @@ entity physics and world-side lifecycle events.
 | File | Responsibility / key symbols |
 | --- | --- |
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
-| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing, redraw loop, resize and surface-error policy. |
+| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing, chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
 | `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
-| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `KeyState`, `SlotType`; selected-world/network setup, frame ordering, in-game/advancement UI, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, mining/placement authority gates, 20 Hz local-pose/action sends, delayed remote-player interpolation, particle emitters, dropped-item collection, damage/respawn, and chunk streaming. Start with the exact method, not the whole file. |
+| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `KeyState`, `SlotType`; selected-world/network setup, frame ordering, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, mining/placement authority gates, 20 Hz local-pose/action sends, delayed remote-player interpolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
 | `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles and solid bow/string tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
@@ -380,7 +410,7 @@ entity physics and world-side lifecycle events.
 | `src/boss.rs` | Dimension mob population, Ender Dragon, Wither, End Crystal, Blaze/Piglin/Husk/Shulker behavior, Creative-mode attack suppression, boss deaths, drops, block-placement events, and Boss HUD summaries. |
 | `src/mob.rs` | Hostile spawn/AI/combat, skeleton aiming/arrows, Creative-mode targeting suppression, sunlight burning, Creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for dropped items and all physics/AI/despawn logic for snapshot-driven remote players. |
 | `src/passive_mob.rs` | Pig/cow/sheep/chicken wandering, cliff avoidance, breeding/young, drops and species-specific behavior. |
-| `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including the placeholder remote-player body, velocity-oriented arrows, the skeleton's hand-pivoted bow/draw animation, and rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
+| `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including the yaw/pitch-aware six-part remote-player avatar and walk swing, velocity-oriented arrows, the skeleton's hand-pivoted bow/draw animation, and rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
 | `src/particles.rs` | `Particle`, `ParticleSystem`, `MAX_PARTICLES`, emitter/atlas helpers; bounded particle physics and camera-facing billboard mesh compilation. |
 | `src/advancements.rs` | `AdvancementProgressData`, `AdvancementManager`, `AdvancementTree`, `AdvancementGui`; 50-node/5-category tree, parent-gated trigger evaluation, persisted completion IDs, transient toasts, and interactive GUI state. Rendering and event dispatch remain in `State`. |
 
@@ -389,9 +419,9 @@ entity physics and world-side lifecycle events.
 | File | Responsibility / key symbols |
 | --- | --- |
 | `src/network/mod.rs` | Module root; re-exports `client`, `protocol`, `server`, and `transport`. |
-| `src/network/client.rs` | `NetworkClient`, `ClientToGame`, `GameToClient`; background-thread Tokio connector, version handshake/login, block/chunk/time packet translation, keepalive replies, synchronous command polling, disconnect reporting, and clean shutdown. |
+| `src/network/client.rs` | `NetworkClient`, `ClientToGame`, `GameToClient`; background-thread Tokio connector, version handshake/login, block/chunk/time/chat packet translation, keepalive replies, synchronous command polling, disconnect reporting, and clean shutdown. |
 | `src/network/protocol.rs` | `PlayerId`, `PROTOCOL_VERSION`, `Action`, `Packet`; bincode `encode`/`decode` of the 12-variant versioned wire enum, including `BlockChange`, `ChunkData`, and `TimeSync` (each packet carries `protocol_version: u32`). No game-module dependencies. |
-| `src/network/server.rs` | `NetworkServer`, `ServerToHost`, `HostToServer`; background-thread Tokio listen server, handshake/login and monotonic player IDs, newcomer roster replay, bounded per-client send queues, reliable authoritative block/chunk delivery, best-effort pose/action fan-out, authenticated client event relay, keepalive/timeout handling, and disconnect cleanup. Host-mode `State` owns its channel ends and thread handle. |
+| `src/network/server.rs` | `NetworkServer`, `ServerToHost`, `HostToServer`; background-thread Tokio listen server, handshake/login and monotonic player IDs, newcomer roster replay, bounded per-client send queues, reliable authoritative block/chunk/chat delivery, best-effort pose/action fan-out, authenticated client event relay, keepalive/timeout handling, and disconnect cleanup. Host-mode `State` owns its channel ends and thread handle. |
 | `src/network/transport.rs` | `Connection`; async `tokio` TCP stream with 4-byte big-endian length-prefixed framing, a 2 MiB packet cap, `recv`/`send`, and a crate-internal owned read/write split used by server and client loops. |
 
 ## Data and configuration

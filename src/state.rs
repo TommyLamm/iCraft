@@ -7,7 +7,7 @@ use crate::menu::{Difficulty, GameSettings, MultiplayerRole, WorldLaunch};
 use crate::physics::{PlayerPhysics, AABB};
 use crate::player::{DamageSource, PlayerState};
 use crate::world::{Biome, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
-use glam::Vec3;
+use glam::{Mat4, Vec2, Vec3};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -16,6 +16,9 @@ const UI_VERTEX_CAPACITY: usize = 4096;
 const UI_LINE_VERTEX_CAPACITY: usize = 16384;
 const DEBUG_STATS_INTERVAL: f32 = 0.5;
 const RAIN_LOOP_ID: u64 = u64::MAX - 1;
+const CHAT_HISTORY_CAPACITY: usize = 50;
+const CHAT_VISIBLE_LINES: usize = 8;
+const CHAT_INPUT_CAPACITY: usize = 256;
 // Creating an entire render distance while handling a menu click blocks the
 // window event loop and can allocate hundreds of chunk meshes at once.  Start
 // with a safe area around the player; `update_chunks` streams the rest in over
@@ -605,7 +608,6 @@ pub struct KeyState {
     pub s: bool,
     pub d: bool,
     pub space: bool,
-    pub t: bool,
     pub ctrl: bool,
     pub shift: bool,
 }
@@ -665,6 +667,52 @@ fn interpolate_snapshot(
     }
 }
 
+fn normalized_chat_message(input: &str) -> Option<String> {
+    let message: String = input
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(CHAT_INPUT_CAPACITY)
+        .collect();
+    (!message.is_empty()).then_some(message)
+}
+
+fn push_chat_history(
+    history: &mut std::collections::VecDeque<(String, String)>,
+    sender: String,
+    message: String,
+) {
+    if history.len() == CHAT_HISTORY_CAPACITY {
+        history.pop_front();
+    }
+    history.push_back((sender, message));
+}
+
+fn clear_remote_players(
+    remote_players: &mut std::collections::HashMap<
+        crate::network::protocol::PlayerId,
+        RemotePlayerState,
+    >,
+    entity_manager: &mut crate::entity::EntityManager,
+) {
+    remote_players.clear();
+    entity_manager
+        .entities
+        .retain(|entity| entity.entity_type != crate::entity::EntityType::RemotePlayer);
+}
+
+fn project_name_tag(position: Vec3, view_proj: Mat4) -> Option<Vec2> {
+    let clip = view_proj * position.extend(1.0);
+    if clip.w <= f32::EPSILON {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !(0.0..=1.0).contains(&ndc.z) || ndc.y < -1.2 || ndc.y > 1.2 {
+        return None;
+    }
+    Some(Vec2::new(ndc.x, ndc.y))
+}
+
 enum NetworkInbound {
     Connected {
         player_id: crate::network::protocol::PlayerId,
@@ -704,7 +752,14 @@ enum NetworkInbound {
         ticks: u64,
         weather: u8,
     },
-    Chat,
+    ChatFromClient {
+        id: crate::network::protocol::PlayerId,
+        message: String,
+    },
+    Chat {
+        sender: String,
+        message: String,
+    },
 }
 
 impl NetworkHandle {
@@ -714,6 +769,9 @@ impl NetworkHandle {
             NetworkHandle::Host { server_to_host, .. } => server_to_host
                 .try_iter()
                 .map(|event| match event {
+                    crate::network::server::ServerToHost::Disconnected { reason } => {
+                        NetworkInbound::Disconnected(reason)
+                    }
                     crate::network::server::ServerToHost::ClientJoined { id, username } => {
                         NetworkInbound::PlayerJoin { id, username }
                     }
@@ -745,8 +803,8 @@ impl NetworkHandle {
                         block,
                         ..
                     } => NetworkInbound::BlockChange { x, y, z, block },
-                    crate::network::server::ServerToHost::ChatFromClient { .. } => {
-                        NetworkInbound::Chat
+                    crate::network::server::ServerToHost::ChatFromClient { id, message } => {
+                        NetworkInbound::ChatFromClient { id, message }
                     }
                 })
                 .collect(),
@@ -798,7 +856,9 @@ impl NetworkHandle {
                     crate::network::client::ClientToGame::TimeSync { ticks, weather } => {
                         NetworkInbound::TimeSync { ticks, weather }
                     }
-                    crate::network::client::ClientToGame::Chat { .. } => NetworkInbound::Chat,
+                    crate::network::client::ClientToGame::Chat { sender, message } => {
+                        NetworkInbound::Chat { sender, message }
+                    }
                 })
                 .collect(),
         }
@@ -893,6 +953,20 @@ impl NetworkHandle {
             NetworkHandle::Client { game_to_client, .. } => {
                 let _ = game_to_client
                     .send(crate::network::client::GameToClient::SendAction { action });
+            }
+            NetworkHandle::None => {}
+        }
+    }
+
+    fn send_chat(&self, sender: String, message: String) {
+        match self {
+            NetworkHandle::Host { host_to_server, .. } => {
+                let _ = host_to_server
+                    .send(crate::network::server::HostToServer::BroadcastChat { sender, message });
+            }
+            NetworkHandle::Client { game_to_client, .. } => {
+                let _ =
+                    game_to_client.send(crate::network::client::GameToClient::SendChat { message });
             }
             NetworkHandle::None => {}
         }
@@ -1033,6 +1107,10 @@ pub struct State {
     remote_players:
         std::collections::HashMap<crate::network::protocol::PlayerId, RemotePlayerState>,
     pub network_status: Option<String>,
+    pub chat_messages: std::collections::VecDeque<(String, String)>,
+    pub chat_input: String,
+    pub is_chat_open: bool,
+    pub connection_lost: bool,
     network_position_timer: f32,
     network_time_sync_timer: f32,
     network_time: f32,
@@ -2041,6 +2119,10 @@ impl State {
             local_player_id: None,
             remote_players: std::collections::HashMap::new(),
             network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
+            chat_messages: std::collections::VecDeque::new(),
+            chat_input: String::new(),
+            is_chat_open: false,
+            connection_lost: false,
             network_position_timer: 0.0,
             network_time_sync_timer: 0.0,
             network_time: 0.0,
@@ -2136,14 +2218,15 @@ impl State {
                     self.pending_block_changes.clear();
                     self.network_ready = true;
                     self.network_status = None;
+                    self.connection_lost = false;
                 }
                 NetworkInbound::Disconnected(reason) => {
                     self.network_ready = false;
                     self.network_status = Some(format!("CONNECTION LOST: {reason}"));
-                    self.remote_players.clear();
-                    self.entity_manager
-                        .entities
-                        .retain(|e| e.entity_type != crate::entity::EntityType::RemotePlayer);
+                    self.connection_lost = true;
+                    self.is_chat_open = false;
+                    self.chat_input.clear();
+                    clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
                     self.set_paused(true);
                 }
                 NetworkInbound::PlayerJoin { id, username } => {
@@ -2317,7 +2400,25 @@ impl State {
                         };
                     }
                 }
-                NetworkInbound::Chat => {}
+                NetworkInbound::ChatFromClient { id, message } => {
+                    let sender = self
+                        .remote_players
+                        .get(&id)
+                        .map(|remote| remote.username.clone())
+                        .filter(|username| !username.is_empty())
+                        .unwrap_or_else(|| format!("Player {id}"));
+                    let Some(message) = normalized_chat_message(&message) else {
+                        continue;
+                    };
+                    push_chat_history(&mut self.chat_messages, sender.clone(), message.clone());
+                    self.network.send_chat(sender, message);
+                }
+                NetworkInbound::Chat { sender, message } => {
+                    let Some(message) = normalized_chat_message(&message) else {
+                        continue;
+                    };
+                    push_chat_history(&mut self.chat_messages, sender, message);
+                }
             }
         }
     }
@@ -2351,6 +2452,79 @@ impl State {
 
     pub fn shutdown_network(&mut self) {
         self.network.shutdown();
+    }
+
+    pub fn open_chat(&mut self) {
+        if self.connection_lost
+            || self.is_paused
+            || self.inventory.is_open
+            || self.advancement_gui.is_open
+            || self.player_state.is_dead
+            || !self.network_ready
+        {
+            return;
+        }
+        self.chat_input.clear();
+        self.is_chat_open = true;
+        self.keys = KeyState::default();
+        self.left_mouse_pressed = false;
+        let _ = self
+            .window
+            .set_cursor_grab(winit::window::CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+    }
+
+    pub fn close_chat(&mut self) {
+        self.chat_input.clear();
+        if !self.is_chat_open {
+            return;
+        }
+        self.is_chat_open = false;
+        if !self.is_paused && !self.connection_lost && self.window.has_focus() {
+            let _ = self
+                .window
+                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                .or_else(|_| {
+                    self.window
+                        .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                });
+            self.window.set_cursor_visible(false);
+        }
+    }
+
+    pub fn submit_chat(&mut self) {
+        let message = normalized_chat_message(&self.chat_input);
+        self.close_chat();
+        let Some(message) = message else {
+            return;
+        };
+
+        let sender = match &self.role {
+            MultiplayerRole::Client { username, .. } => username.clone(),
+            MultiplayerRole::Host { .. } => "Host".to_string(),
+            MultiplayerRole::Singleplayer => "Player".to_string(),
+        };
+        if !matches!(self.role, MultiplayerRole::Client { .. }) {
+            push_chat_history(&mut self.chat_messages, sender.clone(), message.clone());
+        }
+        self.network.send_chat(sender, message);
+    }
+
+    pub fn handle_connection_lost_click(&mut self) -> bool {
+        if !self.connection_lost {
+            return false;
+        }
+        let [x, y] = self.mouse_ndc;
+        if !(-0.3..=0.3).contains(&x) || !(-0.10..=0.00).contains(&y) {
+            return false;
+        }
+        self.audio_manager
+            .play_sound(crate::audio::SoundId::UiClick);
+        self.shutdown_network();
+        if self.is_authoritative() {
+            self.save_synchronously();
+        }
+        true
     }
 
     pub fn trigger_background_save(&self) {
@@ -2871,10 +3045,14 @@ impl State {
                 } else {
                     interpolate_snapshot(remote.prev, remote.latest, target)
                 };
+                entity.velocity = if dt > f32::EPSILON {
+                    (snap.position - entity.position) / dt
+                } else {
+                    Vec3::ZERO
+                };
                 entity.position = snap.position;
                 entity.yaw = snap.yaw;
                 entity.pitch = snap.pitch;
-                entity.velocity = Vec3::ZERO;
                 entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
             }
         }
@@ -3051,12 +3229,7 @@ impl State {
         }
 
         // Update game time
-        let speed_multiplier = if self.is_authoritative() && self.keys.t {
-            200.0
-        } else {
-            1.0
-        };
-        let elapsed_world_ticks = dt * 20.0 * speed_multiplier;
+        let elapsed_world_ticks = dt * 20.0;
         self.world_time.tick_accumulator += elapsed_world_ticks;
         let new_ticks = self.world_time.tick_accumulator.floor() as u64;
         self.world_time.ticks += new_ticks;
@@ -6204,6 +6377,101 @@ impl State {
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
             self.num_ui_textured_vertices = 0;
+        } else if self.connection_lost {
+            let mut ui_vertices = Vec::new();
+            let mut ui_line_vertices = Vec::new();
+            let [mouse_x, mouse_y] = self.mouse_ndc;
+            let button_hover = (-0.3..=0.3).contains(&mouse_x) && (-0.10..=0.00).contains(&mouse_y);
+
+            add_ui_quad(
+                &mut ui_vertices,
+                -1.0,
+                1.0,
+                -1.0,
+                1.0,
+                [0.04, 0.02, 0.02, 0.82],
+            );
+            add_ui_quad(
+                &mut ui_vertices,
+                -0.3,
+                0.3,
+                -0.10,
+                0.00,
+                if button_hover {
+                    [0.45, 0.18, 0.14, 1.0]
+                } else {
+                    [0.22, 0.08, 0.07, 1.0]
+                },
+            );
+            add_ui_border(
+                &mut ui_line_vertices,
+                -0.3,
+                0.3,
+                -0.10,
+                0.00,
+                if button_hover {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    [0.75, 0.35, 0.3, 1.0]
+                },
+            );
+
+            let mut draw_centered =
+                |text: &str, y: f32, char_w: f32, char_h: f32, spacing: f32, color: [f32; 4]| {
+                    let text = text.to_uppercase();
+                    let width = text.chars().count() as f32 * (char_w + spacing) - spacing;
+                    add_string_lines(
+                        &text,
+                        -width / 2.0,
+                        y,
+                        char_w,
+                        char_h,
+                        spacing,
+                        color,
+                        &mut ui_line_vertices,
+                    );
+                };
+            draw_centered(
+                "CONNECTION LOST",
+                0.26,
+                0.030,
+                0.060,
+                0.010,
+                [1.0, 0.35, 0.28, 1.0],
+            );
+            if let Some(status) = &self.network_status {
+                let reason: String = status
+                    .strip_prefix("CONNECTION LOST: ")
+                    .unwrap_or(status)
+                    .chars()
+                    .take(64)
+                    .collect();
+                draw_centered(&reason, 0.12, 0.012, 0.024, 0.005, [0.92, 0.92, 0.92, 1.0]);
+            }
+            draw_centered(
+                "RETURN TO MENU",
+                -0.07,
+                0.020,
+                0.040,
+                0.008,
+                [1.0, 1.0, 1.0, 1.0],
+            );
+
+            let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
+            let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
+            self.queue.write_buffer(
+                &self.ui_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_vertices[..ui_vert_len]),
+            );
+            self.queue.write_buffer(
+                &self.ui_line_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
+            );
+            self.num_ui_vertices = ui_vert_len as u32;
+            self.num_ui_line_vertices = ui_line_vert_len as u32;
+            self.num_ui_textured_vertices = 0;
         } else if self.player_state.is_dead {
             let mut ui_vertices = Vec::new();
             let mut ui_line_vertices = Vec::new();
@@ -7910,6 +8178,133 @@ impl State {
                 }
             }
 
+            // Remote-player name tags use the same vector-line UI as the rest
+            // of the HUD. Project the point above each avatar into NDC, then
+            // keep the label readable at the horizontal screen edge.
+            let view_proj = self.camera.build_view_projection_matrix(aspect);
+            for remote in self.remote_players.values() {
+                if remote.username.trim().is_empty() {
+                    continue;
+                }
+                let Some(entity) = self
+                    .entity_manager
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == remote.entity_id)
+                else {
+                    continue;
+                };
+                if entity.position.distance_squared(self.camera.position) > 96.0 * 96.0 {
+                    continue;
+                }
+                let Some(projected) =
+                    project_name_tag(entity.position + Vec3::new(0.0, 2.05, 0.0), view_proj)
+                else {
+                    continue;
+                };
+                let label: String = remote.username.to_uppercase().chars().take(24).collect();
+                let char_w = 0.009;
+                let char_h = 0.018;
+                let spacing = 0.003;
+                let width = label.chars().count() as f32 * (char_w + spacing) - spacing;
+                let center_x = projected.x.clamp(-0.98 + width / 2.0, 0.98 - width / 2.0);
+                let y = (projected.y + 0.025).clamp(-0.94, 0.94);
+                add_ui_quad(
+                    &mut ui_vertices,
+                    center_x - width / 2.0 - 0.012,
+                    center_x + width / 2.0 + 0.012,
+                    y - 0.007,
+                    y + char_h + 0.007,
+                    [0.02, 0.02, 0.02, 0.68],
+                );
+                add_string_lines(
+                    &label,
+                    center_x - width / 2.0,
+                    y,
+                    char_w,
+                    char_h,
+                    spacing,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
+            }
+
+            // Chat history is deliberately a compact ring buffer. The newest
+            // line sits closest to the input box at the lower-left.
+            let visible_messages: Vec<_> = self
+                .chat_messages
+                .iter()
+                .rev()
+                .take(CHAT_VISIBLE_LINES)
+                .collect();
+            for (line_index, (sender, message)) in visible_messages.iter().enumerate() {
+                let line: String = format!("<{sender}> {message}")
+                    .to_uppercase()
+                    .chars()
+                    .take(96)
+                    .collect();
+                let y = -0.80 + line_index as f32 * 0.050;
+                let char_w = 0.008;
+                let char_h = 0.018;
+                let spacing = 0.002;
+                let width = line.chars().count() as f32 * (char_w + spacing) - spacing;
+                let alpha = 1.0 - line_index as f32 * 0.07;
+                add_ui_quad(
+                    &mut ui_vertices,
+                    -0.985,
+                    (-0.955 + width).min(0.985),
+                    y - 0.007,
+                    y + char_h + 0.007,
+                    [0.01, 0.01, 0.01, 0.52 * alpha],
+                );
+                add_string_lines(
+                    &line,
+                    -0.97,
+                    y,
+                    char_w,
+                    char_h,
+                    spacing,
+                    [1.0, 1.0, 1.0, alpha],
+                    &mut ui_line_vertices,
+                );
+            }
+
+            if self.is_chat_open {
+                add_ui_quad(
+                    &mut ui_vertices,
+                    -0.99,
+                    0.99,
+                    -0.97,
+                    -0.875,
+                    [0.01, 0.01, 0.01, 0.78],
+                );
+                add_ui_border(
+                    &mut ui_line_vertices,
+                    -0.99,
+                    0.99,
+                    -0.97,
+                    -0.875,
+                    [0.65, 0.65, 0.65, 0.9],
+                );
+                let mut visible_input: Vec<char> = self.chat_input.chars().rev().take(92).collect();
+                visible_input.reverse();
+                let mut input = String::from("> ");
+                input.extend(visible_input);
+                if (self.total_time * 2.0) as u32 % 2 == 0 {
+                    input.push('_');
+                }
+                add_string_lines(
+                    &input.to_uppercase(),
+                    -0.97,
+                    -0.935,
+                    0.008,
+                    0.024,
+                    0.002,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
+            }
+
             if let Some(boss) = crate::boss::active_boss_hud(&self.entity_manager) {
                 let x0 = -0.42;
                 let x1 = 0.42;
@@ -8691,6 +9086,9 @@ fn add_char_lines(
         '-' => {
             add_line(x0, ym, x1, ym);
         }
+        '_' => {
+            add_line(x0, y0, x1, y0);
+        }
         '+' => {
             add_line(x0, ym, x1, ym);
             add_line(xm, y0, xm, y1);
@@ -8860,11 +9258,121 @@ mod debug_tests {
     #[test]
     fn debug_overlay_font_supports_every_required_character() {
         let mut vertices = Vec::new();
-        for character in ['B', 'K', 'W', 'X', 'Z', '/'] {
+        for character in ['B', 'K', 'W', 'X', 'Z', '/', '_'] {
             let before = vertices.len();
             add_char_lines(character, 0.0, 0.0, 0.1, 0.2, [1.0; 4], &mut vertices);
             assert!(vertices.len() > before, "missing glyph for {character}");
         }
+    }
+
+    #[test]
+    fn chat_history_evicts_the_oldest_message() {
+        let mut history = std::collections::VecDeque::new();
+        for index in 0..=CHAT_HISTORY_CAPACITY {
+            push_chat_history(
+                &mut history,
+                "Player".to_string(),
+                format!("message {index}"),
+            );
+        }
+        assert_eq!(history.len(), CHAT_HISTORY_CAPACITY);
+        assert_eq!(history.front().unwrap().1, "message 1");
+        assert_eq!(history.back().unwrap().1, "message 50");
+    }
+
+    #[test]
+    fn chat_messages_are_trimmed_sanitized_and_bounded() {
+        assert_eq!(normalized_chat_message(" \n\t "), None);
+        assert_eq!(
+            normalized_chat_message("  hello\nworld  ").as_deref(),
+            Some("helloworld")
+        );
+        let oversized = "x".repeat(CHAT_INPUT_CAPACITY + 10);
+        assert_eq!(
+            normalized_chat_message(&oversized).unwrap().chars().count(),
+            CHAT_INPUT_CAPACITY
+        );
+    }
+
+    #[test]
+    fn name_tag_projection_rejects_invalid_clip_space() {
+        assert_eq!(
+            project_name_tag(Vec3::new(0.25, -0.5, 0.5), Mat4::IDENTITY),
+            Some(Vec2::new(0.25, -0.5))
+        );
+        assert_eq!(project_name_tag(Vec3::ZERO, Mat4::ZERO), None);
+        assert_eq!(
+            project_name_tag(Vec3::new(0.0, 0.0, 2.0), Mat4::IDENTITY),
+            None
+        );
+    }
+
+    #[test]
+    fn network_handle_preserves_client_chat_and_disconnect_payloads() {
+        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+        let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
+        let handle = NetworkHandle::Client {
+            client_to_game: inbound_rx,
+            game_to_client: outbound_tx,
+            thread: None,
+        };
+        inbound_tx
+            .send(crate::network::client::ClientToGame::Chat {
+                sender: "Alex".to_string(),
+                message: "hello".to_string(),
+            })
+            .unwrap();
+        inbound_tx
+            .send(crate::network::client::ClientToGame::Disconnected {
+                reason: "server stopped".to_string(),
+            })
+            .unwrap();
+
+        let events = handle.drain_inbound();
+        assert!(matches!(
+            &events[0],
+            NetworkInbound::Chat { sender, message }
+                if sender == "Alex" && message == "hello"
+        ));
+        assert!(matches!(
+            &events[1],
+            NetworkInbound::Disconnected(reason) if reason == "server stopped"
+        ));
+    }
+
+    #[test]
+    fn disconnect_cleanup_removes_only_remote_player_entities() {
+        let mut entities = crate::entity::EntityManager::new();
+        let remote_id = entities.spawn(crate::entity::EntityType::RemotePlayer, Vec3::ZERO);
+        let zombie_id = entities.spawn(crate::entity::EntityType::Zombie, Vec3::ZERO);
+        let snapshot = PlayerSnapshot {
+            position: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            time: 0.0,
+        };
+        let mut remote_players = std::collections::HashMap::new();
+        remote_players.insert(
+            7,
+            RemotePlayerState {
+                entity_id: remote_id,
+                prev: snapshot,
+                latest: snapshot,
+                username: "Alex".to_string(),
+            },
+        );
+
+        clear_remote_players(&mut remote_players, &mut entities);
+
+        assert!(remote_players.is_empty());
+        assert!(!entities
+            .entities
+            .iter()
+            .any(|entity| entity.id == remote_id));
+        assert!(entities
+            .entities
+            .iter()
+            .any(|entity| entity.id == zombie_id));
     }
 
     #[test]

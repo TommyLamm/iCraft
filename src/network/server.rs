@@ -18,6 +18,9 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub enum ServerToHost {
+    Disconnected {
+        reason: String,
+    },
     ClientJoined {
         id: PlayerId,
         username: String,
@@ -88,9 +91,6 @@ pub enum HostToServer {
         id: PlayerId,
         username: String,
     },
-    NotifyPlayerLeave {
-        id: PlayerId,
-    },
     Stop,
 }
 
@@ -119,13 +119,23 @@ impl NetworkServer {
         server_to_host: std_mpsc::Sender<ServerToHost>,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new()
-                .expect("failed to create the multiplayer server runtime");
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = server_to_host.send(ServerToHost::Disconnected {
+                        reason: format!("failed to create network runtime: {error}"),
+                    });
+                    return;
+                }
+            };
             runtime.block_on(async move {
                 let listener = match TcpListener::bind(&bind_addr).await {
                     Ok(listener) => listener,
                     Err(error) => {
-                        eprintln!("failed to bind multiplayer server to {bind_addr}: {error}");
+                        let reason =
+                            format!("failed to bind multiplayer server to {bind_addr}: {error}");
+                        eprintln!("{reason}");
+                        let _ = server_to_host.send(ServerToHost::Disconnected { reason });
                         return;
                     }
                 };
@@ -363,7 +373,10 @@ impl NetworkServer {
     }
 
     async fn handle_host_command(&self, command: HostToServer) {
-        let reliable_broadcast = matches!(&command, HostToServer::BroadcastBlockChange { .. });
+        let reliable_broadcast = matches!(
+            &command,
+            HostToServer::BroadcastBlockChange { .. } | HostToServer::BroadcastChat { .. }
+        );
         let (packet, recipient) = match command {
             HostToServer::BroadcastBlockChange { x, y, z, block } => (
                 Packet::BlockChange {
@@ -435,13 +448,6 @@ impl NetworkServer {
                 },
                 None,
             ),
-            HostToServer::NotifyPlayerLeave { id } => (
-                Packet::PlayerLeave {
-                    protocol_version: PROTOCOL_VERSION,
-                    id,
-                },
-                None,
-            ),
             HostToServer::Stop => return,
         };
 
@@ -474,8 +480,8 @@ impl NetworkServer {
             .map(|session| session.out_tx.clone())
             .collect();
         for tx in senders {
-            // Block mutations are ordered authoritative state, so applying
-            // backpressure is preferable to silently diverging a client.
+            // Block mutations and user chat are ordered authoritative state,
+            // so applying backpressure is preferable to silently dropping them.
             let _ = tx.send(packet.clone()).await;
         }
     }
@@ -612,6 +618,30 @@ mod tests {
         .expect("timed out waiting for packet")
     }
 
+    #[test]
+    fn bind_failure_notifies_host_and_thread_exits() {
+        let occupied = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = occupied.local_addr().unwrap().to_string();
+        let (host_tx, host_rx) = std_mpsc::channel();
+        let (event_tx, event_rx) = std_mpsc::channel();
+        let handle = NetworkServer::spawn(addr.clone(), 1, 0, host_rx, event_tx);
+
+        let event = match event_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = host_tx.send(HostToServer::Stop);
+                handle.join().unwrap();
+                panic!("server did not report bind failure for {addr}: {error}");
+            }
+        };
+        handle.join().unwrap();
+        assert!(matches!(
+            event,
+            ServerToHost::Disconnected { reason }
+                if reason.contains("failed to bind multiplayer server")
+        ));
+    }
+
     #[tokio::test]
     async fn connect_and_login() {
         let server = TestServer::start(0xCAFE_BABE, 1);
@@ -712,6 +742,53 @@ mod tests {
         assert!(
             matches!(packet, Packet::PlayerAction { id, action: Action::Break, .. } if id == id_a)
         );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn relays_chat_through_host_with_canonical_sender() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client_a, id_a) = server.connect("steve").await;
+        let (mut client_b, _) = server.connect("alex").await;
+
+        client_a
+            .send(&Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
+                sender: "spoofed".into(),
+                message: "hello".into(),
+            })
+            .await
+            .unwrap();
+
+        let event = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ChatFromClient { .. }))
+            .await;
+        assert!(matches!(
+            event,
+            ServerToHost::ChatFromClient { id, message }
+                if id == id_a && message == "hello"
+        ));
+
+        server
+            .host_tx
+            .send(HostToServer::BroadcastChat {
+                sender: "steve".into(),
+                message: "hello".into(),
+            })
+            .unwrap();
+
+        for client in [&mut client_a, &mut client_b] {
+            let packet = recv_matching(client, |packet| {
+                matches!(packet, Packet::ChatMessage { .. })
+            })
+            .await;
+            assert!(matches!(
+                packet,
+                Packet::ChatMessage { sender, message, .. }
+                    if sender == "steve" && message == "hello"
+            ));
+        }
+
         server.stop().await;
     }
 

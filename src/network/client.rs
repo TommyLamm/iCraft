@@ -403,6 +403,57 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn sends_and_receives_chat() {
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = mpsc::channel();
+        let (server_tx, server_rx) = mpsc::channel();
+        let server = NetworkServer::spawn(addr.clone(), 0xCAFE_BABE, 1, host_rx, server_tx);
+
+        let (game_tx, game_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let client = NetworkClient::spawn(addr, "steve".into(), game_rx, event_tx);
+        let player_id = match wait_for_event(&event_rx) {
+            ClientToGame::Connected { player_id, .. } => player_id,
+            other => panic!("expected Connected, got {other:?}"),
+        };
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            ServerToHost::ClientJoined { id, username }
+                if id == player_id && username == "steve"
+        ));
+
+        game_tx
+            .send(GameToClient::SendChat {
+                message: "hello".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            ServerToHost::ChatFromClient { id, message }
+                if id == player_id && message == "hello"
+        ));
+
+        host_tx
+            .send(HostToServer::BroadcastChat {
+                sender: "steve".into(),
+                message: "hello".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::Chat { sender, message }
+                if sender == "steve" && message == "hello"
+        ));
+
+        game_tx.send(GameToClient::Disconnect).unwrap();
+        client.join().unwrap();
+        host_tx.send(HostToServer::Stop).unwrap();
+        server.join().unwrap();
+    }
+
     /// Step 2 (Task 5) two-instance smoke test: when the host stops the server,
     /// the remaining client observes a `Disconnected` event and its background
     /// thread exits cleanly without hanging. This automates the "quitting either

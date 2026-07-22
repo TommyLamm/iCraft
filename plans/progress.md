@@ -1,6 +1,6 @@
 # 🏗️ iCraft — 進度追蹤
 
-> **整體進度**: 26 / 30 任務完成
+> **整體進度**: 27 / 30 任務完成
 > **當前階段**: P3 — 進階功能
 
 ---
@@ -12,16 +12,16 @@
 | **P0 — 核心體驗** | 5/5 | 5 | 🟢 已完成 |
 | **P1 — 可玩性基礎** | 7/7 | 7 | 🟢 已完成 |
 | **P2 — 完善體驗** | 8/8 | 8 | 🟢 已完成 |
-| **P3 — 進階功能** | 6/9 | 6 | 🟡 進行中 |
+| **P3 — 進階功能** | 7/9 | 7 | 🟡 進行中 |
 
 ### 進度條
 ```
 P0 [██████████] 100%
 P1 [██████████] 100%
 P2 [██████████] 100%
-P3 [███████░░░] 66.7%
+P3 [████████░░] 77.8%
 ────────────────────
-總計 [█████████░] 86.7%
+總計 [█████████░] 90.0%
 ```
 
 ---
@@ -91,7 +91,7 @@ P3 [███████░░░] 66.7%
 | 22 | [紅石系統](./p3/22_redstone.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 23 | [天氣系統](./p3/23_weather.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
-| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 5/6 完成 |
+| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟢 已完成 | 2026-07-22 | 2026-07-22 | 子任務 6/6 完成 |
 | 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 28 | [成就 / 進度系統](./p3/28_advancements.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ⬜ 待定 | — | — | |
@@ -104,6 +104,11 @@ P3 [███████░░░] 66.7%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-22
+- ✅ 完成任務 #25 (By Codex)：多人遊戲 - 子任務 6/6 聊天、遠端玩家渲染與斷線處理
+  - 修改文件：`src/state.rs`, `src/app.rs`, `src/mob_renderer.rs`, `src/network/server.rs`, `src/network/client.rs`, `ARCHITECTURE.md`, `plans/progress.md`, `docs/superpowers/plans/2026-07-22-multiplayer-06-chat-rendering-disconnect.md`
+  - 關鍵決策：`State` 維護 50 筆聊天 ring buffer、文字輸入與連線遺失狀態；`T`/`Enter`/`Esc` 透過既有 `winit` 路由開啟、送出與取消聊天，聊天期間清空移動鍵並抑制視角/互動。Server 不信任 client packet 內的 sender，而以已驗證 `PlayerId` 交由 Host roster 解析 username，再以可靠佇列廣播。`RemotePlayer` 使用共享 mob cuboid path 組成頭、身體、雙臂與雙腿，插值速度驅動步行擺動；名稱以 camera view-projection 投影到螢幕並水平 clamp。Client 斷線會停止網路 gameplay command、清除 remote entity、凍結世界並顯示可返回主選單的非破壞性 overlay，client 暫存世界不會寫回 host save。
+  - 驗證：`cargo fmt --check`、`cargo check --release`、`cargo test` 全部通過；149 項單元測試與 1 項整合測試通過。新增聊天 sender 防偽/可靠雙 client relay、client bridge 往返、聊天 ring buffer/清洗、名稱投影、斷線 entity 清理、host bind failure 回報與六部件 avatar mesh 測試；既有 position/action、block sync、host-stop 與 thread join 測試共同覆蓋多人驗收資料路徑。
+  - 備註：本環境未執行兩個實際遊戲視窗的人工視覺 smoke test；UI/網格、雙 client 資料流、斷線與清理均有自動測試覆蓋，仍建議發佈前以 Host + 2 Join 視窗確認視覺尺寸與操作手感。
 - 🟡 進度任務 #25 (By GPT-5.6 Sol)：多人遊戲 - 子任務 5/6 世界（方塊）同步
   - 修改文件：`src/world.rs`, `src/fluid.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/state.rs`, `src/network/protocol.rs`, `src/network/server.rs`, `src/network/client.rs`, `ARCHITECTURE.md`, `docs/superpowers/plans/2026-07-22-multiplayer-05-world-sync.md`, `track.md`
   - 關鍵決策：以穩定 `BlockType` wire 值及共享 seed 實作 mutation-only 同步；Host 對玩家、流體、紅石、爆炸、天氣、葉片衰減、支撐方塊連鎖破壞與羊吃草結果統一可靠廣播，Client 僅套用 block storage、光照與跨 Chunk/AO 網格失效，不執行衍生世界模擬。未載入 Chunk 的即時 mutation 會按座標合併延後，join 時另傳送本 session 或存檔中已偏離決定性生成的已載入 Chunk 壓縮 payload。新增 `TimeSync` 每秒校正遊戲 tick 與可見天氣，協議版本提升至 2；方塊與定向 Chunk payload 使用 backpressure 可靠傳送，pose/action 仍維持 bounded best-effort。

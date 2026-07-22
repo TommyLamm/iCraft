@@ -1393,19 +1393,108 @@ pub fn render_mobs(
                 );
             }
             EntityType::RemotePlayer => {
+                // Steve-like player avatar assembled from the existing atlas:
+                // sheep skin supplies a warm face/skin tone, while the zombie
+                // shirt and trousers provide the familiar teal-and-blue outfit.
                 add_cuboid(
                     vertices,
                     indices,
-                    Vec3::new(0.3, 0.9, 0.3),
-                    Vec3::ZERO,
-                    to_world(Vec3::new(0.0, 0.9, 0.0)),
+                    Vec3::new(0.5, 0.5, 0.5),
+                    Vec3::new(0.0, 0.25, 0.0),
+                    to_world(Vec3::new(0.0, 1.4, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [4; 6],
+                    10,
+                    light_val,
+                );
+
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.5, 0.75, 0.25),
+                    Vec3::new(0.0, 0.375, 0.0),
+                    to_world(Vec3::new(0.0, 0.65, 0.0)),
                     entity.yaw,
                     0.0,
-                    [1; 6],
-                    0,
+                    [2; 6],
+                    9,
+                    light_val,
+                );
+
+                // Arms counter-swing against the legs while walking.
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.25, 0.75, 0.25),
+                    Vec3::new(0.0, -0.325, 0.0),
+                    to_world(Vec3::new(-0.375, 1.3, 0.0)),
+                    entity.yaw,
+                    -swing,
+                    [4; 6],
+                    10,
+                    light_val,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.25, 0.75, 0.25),
+                    Vec3::new(0.0, -0.325, 0.0),
+                    to_world(Vec3::new(0.375, 1.3, 0.0)),
+                    entity.yaw,
+                    swing,
+                    [4; 6],
+                    10,
+                    light_val,
+                );
+
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.25, 0.75, 0.25),
+                    Vec3::new(0.0, -0.375, 0.0),
+                    to_world(Vec3::new(-0.125, 0.75, 0.0)),
+                    entity.yaw,
+                    swing,
+                    [3; 6],
+                    9,
+                    light_val,
+                );
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.25, 0.75, 0.25),
+                    Vec3::new(0.0, -0.375, 0.0),
+                    to_world(Vec3::new(0.125, 0.75, 0.0)),
+                    entity.yaw,
+                    -swing,
+                    [3; 6],
+                    9,
                     light_val,
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_player_renders_as_six_cuboids() {
+        let mut entities = EntityManager::new();
+        entities.spawn(EntityType::RemotePlayer, Vec3::new(4.0, 8.0, -2.0));
+        let chunks = ChunkManager::new(1);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        render_mobs(&entities, &chunks, &mut vertices, &mut indices, 0.0);
+
+        assert_eq!(vertices.len(), 6 * 24);
+        assert_eq!(indices.len(), 6 * 36);
+        assert!(vertices
+            .iter()
+            .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
     }
 }

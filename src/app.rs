@@ -132,7 +132,11 @@ impl ApplicationHandler for App {
             return;
         };
         if let DeviceEvent::MouseMotion { delta } = event {
-            if !state.is_paused && state.window.has_focus() {
+            if !state.is_paused
+                && !state.is_chat_open
+                && !state.connection_lost
+                && state.window.has_focus()
+            {
                 let sensitivity = state.sensitivity;
                 state.camera.yaw -= (delta.0 * sensitivity as f64) as f32;
                 state.camera.pitch -= (delta.1 * sensitivity as f64) as f32;
@@ -161,6 +165,9 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(focused) => {
                 if !focused {
                     if let Some(Runtime::Game(state)) = &mut self.runtime {
+                        if state.is_chat_open {
+                            state.close_chat();
+                        }
                         state.set_paused(true);
                     }
                 }
@@ -171,6 +178,7 @@ impl ApplicationHandler for App {
                 None => {}
             },
             WindowEvent::KeyboardInput { event, .. } => {
+                let mut return_to_menu = false;
                 let action = match &mut self.runtime {
                     Some(Runtime::Menu(menu)) => menu.handle_key(
                         event.state,
@@ -179,12 +187,16 @@ impl ApplicationHandler for App {
                         event.repeat,
                     ),
                     Some(Runtime::Game(state)) => {
-                        handle_game_keyboard(state, &event);
+                        return_to_menu = handle_game_keyboard(state, &event);
                         MenuAction::None
                     }
                     None => MenuAction::None,
                 };
-                self.defer_menu_action(action);
+                if return_to_menu {
+                    self.pending_transition = Some(PendingRuntimeTransition::ReturnToMainMenu);
+                } else {
+                    self.defer_menu_action(action);
+                }
             }
             WindowEvent::MouseInput {
                 state: element_state,
@@ -201,7 +213,13 @@ impl ApplicationHandler for App {
                     }
                     Some(Runtime::Game(state)) => {
                         let pressed = element_state == ElementState::Pressed;
-                        if state.player_state.is_dead {
+                        if state.connection_lost {
+                            if pressed && button == MouseButton::Left {
+                                return_to_menu = state.handle_connection_lost_click();
+                            }
+                        } else if state.is_chat_open {
+                            state.left_mouse_pressed = false;
+                        } else if state.player_state.is_dead {
                             if pressed && button == MouseButton::Left {
                                 state.handle_death_click();
                             }
@@ -265,6 +283,7 @@ impl ApplicationHandler for App {
                 };
                 match &mut self.runtime {
                     Some(Runtime::Menu(menu)) => menu.handle_scroll(scroll_dir),
+                    Some(Runtime::Game(state)) if state.is_chat_open || state.connection_lost => {}
                     Some(Runtime::Game(state)) if state.advancement_gui.is_open => {
                         if scroll_dir != 0 {
                             state.advancement_gui.zoom = (state.advancement_gui.zoom
@@ -335,8 +354,43 @@ impl ApplicationHandler for App {
     }
 }
 
-fn handle_game_keyboard(state: &mut State, event: &KeyEvent) {
+fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
     let pressed = event.state == ElementState::Pressed;
+
+    if state.connection_lost {
+        if pressed && event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
+            state.shutdown_network();
+            return true;
+        }
+        return false;
+    }
+
+    if state.is_chat_open {
+        if pressed {
+            match &event.logical_key {
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => {
+                    state.close_chat();
+                }
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
+                    state.submit_chat();
+                }
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
+                    state.chat_input.pop();
+                }
+                winit::keyboard::Key::Character(text) => {
+                    for ch in text.chars().filter(|ch| !ch.is_control()) {
+                        if state.chat_input.chars().count() >= 256 {
+                            break;
+                        }
+                        state.chat_input.push(ch);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return false;
+    }
+
     if pressed
         && state.active_station == Some(crate::state::StationKind::Anvil)
         && state.inventory.is_open
@@ -345,7 +399,7 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) {
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
                 state.anvil.rename.pop();
                 state.anvil.refresh();
-                return;
+                return false;
             }
             winit::keyboard::Key::Character(text) if !event.repeat => {
                 for ch in text
@@ -357,14 +411,14 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) {
                     }
                 }
                 state.anvil.refresh();
-                return;
+                return false;
             }
             _ => {}
         }
     }
 
     let PhysicalKey::Code(code) = event.physical_key else {
-        return;
+        return false;
     };
     if code == KeyCode::Escape && pressed {
         if state.advancement_gui.is_open {
@@ -374,7 +428,7 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) {
         } else {
             state.set_paused(!state.is_paused);
         }
-        return;
+        return false;
     }
     if code == KeyCode::KeyL && pressed {
         if state.advancement_gui.is_open {
@@ -382,7 +436,7 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) {
         } else if !state.is_paused {
             state.open_advancements_ui();
         }
-        return;
+        return false;
     }
     if code == state.settings.controls.inventory && pressed {
         if state.inventory.is_open {
@@ -390,18 +444,25 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) {
         } else if !state.is_paused {
             state.open_inventory();
         }
-        return;
+        return false;
     }
     if code == KeyCode::F3 && pressed && !event.repeat {
         state.show_debug = !state.show_debug;
-        return;
+        return false;
     }
-    if code == KeyCode::KeyT {
-        state.keys.t = pressed;
-        return;
+    if code == KeyCode::KeyT && pressed && !event.repeat {
+        if !state.is_paused
+            && !state.inventory.is_open
+            && !state.advancement_gui.is_open
+            && !state.player_state.is_dead
+        {
+            state.open_chat();
+            state.left_mouse_pressed = false;
+        }
+        return false;
     }
     if state.is_paused || state.inventory.is_open {
-        return;
+        return false;
     }
 
     let controls = &state.settings.controls;
@@ -439,4 +500,5 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) {
             _ => {}
         }
     }
+    false
 }
