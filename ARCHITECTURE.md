@@ -1,10 +1,10 @@
 # Architecture
 
-> Last verified: 2026-07-21. This is a navigation map, not a replacement for
+> Last verified: 2026-07-22. This is a navigation map, not a replacement for
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `fdd74d4369f70b05a838e2194fee0586148f3b04` (`fdd74d4`). This identifies the
+> `befc5276a0c888644820a4eb62f11c042b1657ac` (`befc527`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -19,9 +19,10 @@ Terrain, the texture atlas, and fallback sounds are generated procedurally.
 
 There is currently no server, networking layer, or database. Display/input/audio
 settings persist in `settings.txt`, while each world's data (including seed,
-metadata, game time, player status, inventory, current dimension, and
-dimension-namespaced chunks) is stored under its own `saves/<world>/` directory.
-Entity state, including bosses, is still transient in-memory.
+metadata, game time, player status, inventory, current dimension, advancement
+progress, and dimension-namespaced chunks) is stored under its own
+`saves/<world>/` directory. Entity state, including bosses and projectiles, is
+still transient in-memory.
 
 ## How agents should navigate
 
@@ -55,14 +56,16 @@ src/main.rs
   the same window re-entrantly. On Windows both runtimes explicitly use wgpu's
   DX12 backend; other platforms use the normal primary native backends.
   `window_event` routes configurable keyboard input, mouse, resize, pause,
-  inventory, menu actions, and redraw.
+  inventory, the advancement screen, menu actions, and redraw. Input priority
+  while playing is death screen -> pause menu -> advancements -> inventory ->
+  world interaction.
 - On `RedrawRequested`, `App` caps `dt` at 0.1 seconds, updates the active
   runtime, requests the next redraw, then renders its current surface.
 - `src/state.rs::State` is the composition root and principal coupling hotspot.
   It owns the window/GPU resources, camera, chunks and mesh cache, player,
   inventory/crafting, enchanting/brewing workstations, potion effects,
   entities, lightweight particles, audio, UI state, timers, the weather state
-  machine, and the 20 Hz redstone scheduler.
+  machine, advancement manager/GUI, and the 20 Hz redstone scheduler.
 
 ## Runtime data flows
 
@@ -77,8 +80,10 @@ pipelines/buffers (including the dedicated crack pipeline and particle buffers)
 -> builds the texture atlas -> restores the saved dimension -> restores or creates
 only the 3×3 spawn area from the selected world's seed -> propagates initial
 lighting -> generates its chunk meshes -> initializes gameplay, entity, particle,
-UI, and audio state. `State::update_chunks` streams the remainder of the selected
-render distance after the first frame. Crack tiles prefer external
+UI, advancement, and audio state. Existing `player.dat` data restores completed
+advancement IDs along with player/inventory state; new and legacy saves start
+with default progress. `State::update_chunks` streams the remainder of the
+selected render distance after the first frame. Crack tiles prefer external
 `destroy_stage_*.png` files and fall back to procedural generation when those
 assets are unavailable.
 
@@ -86,25 +91,29 @@ assets are unavailable.
 
 `State::update` performs these major stages:
 
-1. Tick water every 0.25 s and lava every 1.5 s; returned chunk coordinates mark
-   cached meshes dirty. These ticks occur **before** the paused/dead early return.
-2. Advance world time and, in the Overworld only, weather. Weather emits
+1. Accumulate debug/autosave timing, then tick water every 0.25 s and lava every
+   1.5 s; returned chunk coordinates mark cached meshes dirty. Autosave and fluid
+   ticks occur **before** the dead/paused early return.
+2. Handle portal contact/dimension switches, then tick redstone at 20 Hz (up to
+   four catch-up steps per frame), including pressure-plate occupancy, delayed
+   updates, bounded signal settling, actuator mutations, TNT fuses, dispenser
+   actions, and note sounds.
+3. Tick brewing and active potion/Wither effects, advance advancement toasts and
+   advancement-GUI dragging, update particle physics, and derive sprint/FOV state.
+4. Advance world time and, in the Overworld only, weather. Weather emits
    roof-clipped rain/snow particles, maintains the rain loop, accumulates thin
    snow in cold biomes, and dispatches thunder strikes before translating
    `KeyState` into movement.
-3. Run `PlayerPhysics::update`, then `State::update_chunks`.
-4. Tick brewing progress and active potion effects, update particle physics;
-   emit footstep dust and periodic torch smoke, then
-   collect nearby dropped items whose cooldown has expired when the inventory
-   accepts them.
-5. Tick redstone at 20 Hz (up to four catch-up steps per frame), including
-   pressure-plate occupancy, delayed updates, bounded signal settling, actuator
-   mutations, TNT fuses, dispenser actions, and note sounds.
-6. Apply landing/fall/void/lava/hunger/drowning state and audio effects.
-7. Handle portal contact and dimension switches, run dimension-specific mobs and
-   bosses through `boss.rs`, then spawn/update ordinary hostile mobs, including
-   dropped-item physics. Passive mobs spawn/update only in the Overworld.
-8. Sync camera and `CameraUniform`, upload the uniform, and advance continuous
+5. Run `PlayerPhysics::update`, then `State::update_chunks`; apply landing,
+   fall, void, lava, cactus, hunger, oxygen, and audio effects. Emit footstep
+   dust and periodic torch smoke, collect eligible dropped items, and run
+   bounded leaf-decay random ticks.
+6. Enforce difficulty rules, then ensure/update dimension-specific mobs and
+   bosses through `boss.rs`. Resolve player-owned projectiles before ordinary
+   hostile AI/projectiles and dropped-item physics; update passive mobs and
+   spawn them only in the Overworld. Creative mode suppresses hostile targeting,
+   Creeper ignition, boss attacks/movement, and boss-projectile player hits.
+7. Sync camera and `CameraUniform`, upload the uniform, and advance continuous
    survival-mode mining through `interaction::raycast`.
 
 `State::update_chunks` unloads out-of-range chunks, creates at most one missing
@@ -153,7 +162,8 @@ surface type can receive it.
 ### Rendering
 
 `State::render` first generates mob mesh data, camera-facing particle quads, and
-all immediate-mode UI vertices on the CPU. The render pass order is: sky ->
+all immediate-mode UI vertices (including advancement toasts/screen) on the CPU.
+The render pass order is: sky ->
 opaque/cutout chunks -> mobs (including dropped items) -> translucent chunks ->
 alpha-blended particles -> multiply-blended mining crack overlay -> textured UI
 -> colored UI -> crosshair -> line/text UI -> present. The shader entrypoints
@@ -183,6 +193,24 @@ draws each as a small atlas-textured cuboid with time-based yaw and vertical
 bobbing. Both particles and dropped-item entities remain transient and are not
 included in world saves.
 
+### Combat projectiles and mob animation
+
+Arrows are ordinary transient `Entity` records. `Entity::update_physics` applies
+gravity and derives yaw/pitch from velocity. Skeleton AI in `mob::update_mobs`
+keeps an 8-12 block firing distance, continuously aims at the player's upper
+body, and emits hostile arrows on a two-second cooldown. `mob_renderer` uses
+`target_player`, `pitch`, and `action_cooldown` to assemble the skeleton's arms,
+hand-anchored 3D bow, drawn string, and nocked arrow from cuboids.
+
+Right-clicking a bow spawns a friendly arrow from the camera. Survival consumes
+an arrow unless Infinity is present; Power increases the stored projectile
+damage. `State::update_player_projectiles` resolves friendly-arrow/entity hits
+and splash-potion effects, while `mob::update_mobs` advances all arrows, removes
+block impacts, and handles hostile-arrow/player hits. Dispensers also spawn
+friendly arrows through the redstone action bridge. The same entity collection
+and `mob_renderer::render_mobs` path therefore owns arrows from players,
+skeletons, and dispensers.
+
 ### Weather
 
 `weather.rs::WeatherSystem` owns a deterministic clear -> rain -> thunder ->
@@ -204,6 +232,23 @@ or world). `State::{open_inventory, handle_inventory_click, close_inventory}`
 owns UI slot behavior. Data lives in `inventory::Inventory`; recipe definitions
 and matching live in `crafting::RecipeManager`. World interactions are handled by
 `State::{handle_click, break_block}` and `interaction::raycast`.
+
+### Advancements
+
+`advancements.rs` defines a fixed 50-node tree split across Minecraft, Nether,
+The End, Adventure, and Husbandry. `AdvancementManager::check_trigger` enforces
+parent completion, records completed string IDs, queues three-second toasts, and
+returns newly completed IDs so `State::trigger_advancement` can grant XP and play
+the UI sound. Trigger variants exist for obtaining/crafting/eating items, mining,
+kills, dimension entry, brewing, enchanting, breeding, and category roots.
+
+Current runtime dispatch is narrower than the trigger model: `State` emits only
+`MineBlock`, `CraftItem`, and `EnchantItem`. Adding another advancement event
+requires an explicit `State::trigger_advancement` call at its authoritative
+mutation path. `AdvancementProgressData` is serialized inside `player.dat`;
+toast timers and `AdvancementGui` pan/zoom/category state are transient. The
+fixed `L` key opens the screen, mouse drag pans, the wheel zooms, and Escape
+closes it before affecting inventory or pause state.
 
 ### Enchanting, anvils, brewing, and effects
 
@@ -262,7 +307,10 @@ shulkers, and Withers summoned from a soul-sand/skull T pattern. The module
 returns `BossEvents` instead of mutating `State` directly; `State::apply_boss_events`
 applies player damage, Wither effects, explosions, block placements, drops, and
 dragon completion XP. Boss HUD data is pulled from `boss::active_boss_hud` during
-UI construction.
+UI construction. `GameMode` is passed into boss updates: Creative freezes the
+player-seeking movement of Blaze/Piglin/Husk/Wither actors, keeps the Dragon in
+its orbit phase, and suppresses player damage/projectile hits while preserving
+entity physics and world-side lifecycle events.
 
 ## Source routing table
 
@@ -273,10 +321,10 @@ UI construction.
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
 | `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing, redraw loop, resize and surface-error policy. |
 | `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, and `WorldLaunch`. |
-| `src/state.rs` | `State`, `ChunkMesh`, `KeyState`, `SlotType`; selected-world GPU setup, frame ordering, in-game UI, mining/placement, particle emitters, dropped-item collection, damage/respawn, chunk streaming. Start with the exact method, not the whole file. |
+| `src/state.rs` | `State`, `ChunkMesh`, `KeyState`, `SlotType`; selected-world GPU setup, frame ordering, in-game/advancement UI, mining/placement, friendly projectiles, particle emitters, dropped-item collection, damage/respawn, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
-| `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
+| `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles and solid bow/string tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
 | `src/audio.rs` | `SoundId`, `SoundMaterial`, `AudioManager`; load/cache WAV files, synthesize missing sounds, 2D/approximate 3D playback. |
 | `src/weather.rs` | `Weather`, `Precipitation`, `WeatherSystem`; timed transitions, biome precipitation, lightning/flash scheduling, and bounded effect budgets. |
 
@@ -292,7 +340,7 @@ UI construction.
 | `src/redstone.rs` | 20 Hz redstone graph, 0-15 weak/strong power, component index, delayed ticks, comparator/repeater logic, actuator mutations, TNT/dispense/note actions, and loop protection. |
 | `src/physics.rs` | `AABB`, `PlayerPhysics`; movement, gravity, jumping/swimming, axis collision resolution, fall-distance result. |
 | `src/interaction.rs` | Grid DDA block `raycast` and `RaycastResult`; read-only world targeting. |
-| `src/save.rs` | `LevelData`, `PlayerData`, `ChunkSaveData`, `SaveManager`; Bincode serialization, Zlib compression, Region file management, and thread-based background saving. |
+| `src/save.rs` | `LevelData`, `PlayerData`, `ChunkSaveData`, `SaveManager`; Bincode serialization of player/inventory/advancement data, Zlib chunk arrays, Region file management, legacy-player upgrade, and thread-based background saving. |
 
 ### Gameplay and entities
 
@@ -303,13 +351,13 @@ UI construction.
 | `src/enchantment.rs` | `Enchantment`, `EnchantmentSet`, `EnchantingState`, `AnvilState`; offer generation, compatibility, stat modifiers, repair/combine/rename rules. |
 | `src/brewing.rs` | `PotionKind`, `PotionData`, `PotionEffect`, `EffectManager`, `BrewingStandState`; recipes, timed brewing and active-effect queries. |
 | `src/player.rs` | `PlayerState`, `DamageSource`; health, hunger, saturation/exhaustion, regeneration, invulnerability, oxygen/drowning, death state. |
-| `src/entity.rs` | `EntityType`, `Entity`, `EntityManager`; shared hostile/passive/arrow/splash-potion/heart-particle/dropped-item data, AABBs, basic entity physics, IDs and spawn storage. |
-| `src/boss.rs` | Dimension mob population, Ender Dragon, Wither, End Crystal, Blaze/Piglin/Husk/Shulker behavior, boss deaths, drops, block-placement events, and Boss HUD summaries. |
-| `src/mob.rs` | Hostile spawn/AI/combat, arrows, sunlight burning, creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for them. |
+| `src/entity.rs` | `EntityType`, `Entity`, `EntityManager`; shared hostile/passive/projectile/particle/drop data, AABBs, gravity/flying physics, velocity-derived orientation, friendly-projectile metadata, IDs, and spawn storage. |
+| `src/boss.rs` | Dimension mob population, Ender Dragon, Wither, End Crystal, Blaze/Piglin/Husk/Shulker behavior, Creative-mode attack suppression, boss deaths, drops, block-placement events, and Boss HUD summaries. |
+| `src/mob.rs` | Hostile spawn/AI/combat, skeleton aiming/arrows, Creative-mode targeting suppression, sunlight burning, Creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for them. |
 | `src/passive_mob.rs` | Pig/cow/sheep/chicken wandering, cliff avoidance, breeding/young, drops and species-specific behavior. |
-| `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
+| `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including velocity-oriented arrows, the skeleton's hand-pivoted bow/draw animation, and rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
 | `src/particles.rs` | `Particle`, `ParticleSystem`, `MAX_PARTICLES`, emitter/atlas helpers; bounded particle physics and camera-facing billboard mesh compilation. |
-| `src/advancements.rs` | `AdvancementManager`, `AdvancementTree`, `AdvancementGui`; 50-advancement tree across 5 categories, trigger evaluation engine, toast notification slide overlay, and interactive GUI tree layout renderer. |
+| `src/advancements.rs` | `AdvancementProgressData`, `AdvancementManager`, `AdvancementTree`, `AdvancementGui`; 50-node/5-category tree, parent-gated trigger evaluation, persisted completion IDs, transient toasts, and interactive GUI state. Rendering and event dispatch remain in `State`. |
 
 ## Data and configuration
 
@@ -318,6 +366,8 @@ UI construction.
 | `Cargo.toml` | Rust package and graphics/window/audio/noise dependencies. |
 | `settings.txt` | Working-directory-relative `key:value` settings. Defaults and parser/writer are `menu.rs::GameSettings`; includes display, three audio levels, difficulty, language, sensitivity, and key bindings. |
 | `saves/<world>/world.meta` | Human-readable world-list metadata: display name, generation seed, game mode, difficulty, and last-played timestamp. Legacy `world_001` saves are inferred and upgraded when selected. |
+| `saves/<world>/level.dat` | Bincode `LevelData`: authoritative world seed and game-time ticks. |
+| `saves/<world>/player.dat` | Bincode `PlayerData`: transform, survival state, XP, game mode, inventory/item metadata, and advancement progress. Pre-enchanting player schemas are upgraded in memory with default newer fields. |
 | `saves/<world>/dimension.dat` | One-byte active-dimension sidecar. Missing files default to Overworld for old saves. |
 | `saves/<world>/regions/` | Legacy and current Overworld Region files. |
 | `saves/<world>/dimensions/{nether,end}/regions/` | Nether and End Region files, using the same compressed chunk payload format as Overworld regions. |
@@ -332,7 +382,7 @@ Most behavioral tests are inline `#[cfg(test)]` unit tests beside their modules,
 especially in `world.rs`, `lighting.rs`, `fluid.rs`, `physics.rs`,
 `interaction.rs`, `inventory.rs`, `crafting.rs`, `enchantment.rs`, `brewing.rs`,
 `player.rs`, `entity.rs`, `particles.rs`, `weather.rs`, `mob.rs`, `boss.rs`,
-`dimension.rs`, `redstone.rs`, `audio.rs`, and `menu.rs`.
+`dimension.rs`, `redstone.rs`, `advancements.rs`, `audio.rs`, and `menu.rs`.
 
 `tests/passive_mob_tests.rs` is currently only a placeholder. Because the package
 has no `src/lib.rs`, integration tests cannot directly import the internal
@@ -360,6 +410,9 @@ initialization degrades to silent operation when no default output device exists
   simulation-only modules.
 - Block changes have distributed follow-up work (lighting + dirty meshes). Search
   all callers of `ChunkManager::set_block` before changing mutation semantics.
+- Advancement definitions do not subscribe to gameplay events automatically.
+  Every new trigger producer must call `State::trigger_advancement` at the
+  authoritative mutation path; otherwise the definition remains unreachable.
 - Chunk meshes and mob meshes are derived caches, not authoritative state. The
   authoritative world is `ChunkManager::chunks`; authoritative entities are in
   `EntityManager::entities`. Particle vertices are also derived each frame from
@@ -368,5 +421,8 @@ initialization degrades to silent operation when no default output device exists
   the usual primary-backend selection. This avoids a verified NVIDIA Vulkan ICD
   crash (`nvoglv64.dll`) during the menu-to-world transition; do not switch this
   back to `PRIMARY` without testing the affected driver path.
-- Save/load is managed by `SaveManager` in `src/save.rs` utilizing Bincode and Zlib compression. The main thread spawns a background thread listening on `SaveCommand` for non-blocking autosaves (every 5 minutes) and chunk unloads, while a synchronous save is flushed on window close or "Save and Quit" action.
+- Save/load is managed by `SaveManager` in `src/save.rs` using Bincode and Zlib
+  compression. `State` spawns a background thread listening on `SaveCommand` for
+  non-blocking five-minute autosaves and chunk unloads, while window close and
+  "Save and Quit" flush synchronously.
 - Dimension switching rebuilds chunk, mesh, entity, particle, and redstone runtime state around the target dimension. Keep portal placement, chunk saves, and `dimension.dat` updates together when changing this flow.
