@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `befc5276a0c888644820a4eb62f11c042b1657ac` (`befc527`). This identifies the
+> `f8037dd6a633afe63a58990312a659bbc181dec5` (`f8037dd`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -17,7 +17,10 @@
 event loop, keeps the simulation on the main thread, and renders through `wgpu`.
 Terrain, the texture atlas, and fallback sounds are generated procedurally.
 
-There is currently no server, networking layer, or database. Display/input/audio
+There is currently no integrated server or database. A self-contained networking
+foundation (versioned `Packet` protocol and async TCP `Connection` transport
+under `src/network/`) exists but is not yet wired into the game loop.
+Display/input/audio
 settings persist in `settings.txt`, while each world's data (including seed,
 metadata, game time, player status, inventory, current dimension, advancement
 progress, and dimension-namespaced chunks) is stored under its own
@@ -359,11 +362,19 @@ entity physics and world-side lifecycle events.
 | `src/particles.rs` | `Particle`, `ParticleSystem`, `MAX_PARTICLES`, emitter/atlas helpers; bounded particle physics and camera-facing billboard mesh compilation. |
 | `src/advancements.rs` | `AdvancementProgressData`, `AdvancementManager`, `AdvancementTree`, `AdvancementGui`; 50-node/5-category tree, parent-gated trigger evaluation, persisted completion IDs, transient toasts, and interactive GUI state. Rendering and event dispatch remain in `State`. |
 
+### Networking
+
+| File | Responsibility / key symbols |
+| --- | --- |
+| `src/network/mod.rs` | Module root; re-exports `protocol` and `transport`. |
+| `src/network/protocol.rs` | `PlayerId`, `PROTOCOL_VERSION`, `Action`, `Packet`; bincode `encode`/`decode` of the 11-variant versioned wire enum (each packet carries `protocol_version: u32`). No game-module dependencies. |
+| `src/network/transport.rs` | `Connection`; async `tokio` TCP stream with 4-byte big-endian length-prefixed framing, a 2 MiB packet cap, and `recv`/`send`. Runtime-agnostic; not yet driven by the game loop. |
+
 ## Data and configuration
 
 | Path | Role |
 | --- | --- |
-| `Cargo.toml` | Rust package and graphics/window/audio/noise dependencies. |
+| `Cargo.toml` | Rust package and graphics/window/audio/noise/networking dependencies. |
 | `settings.txt` | Working-directory-relative `key:value` settings. Defaults and parser/writer are `menu.rs::GameSettings`; includes display, three audio levels, difficulty, language, sensitivity, and key bindings. |
 | `saves/<world>/world.meta` | Human-readable world-list metadata: display name, generation seed, game mode, difficulty, and last-played timestamp. Legacy `world_001` saves are inferred and upgraded when selected. |
 | `saves/<world>/level.dat` | Bincode `LevelData`: authoritative world seed and game-time ticks. |
