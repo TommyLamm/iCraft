@@ -24,6 +24,7 @@ pub enum EntityType {
     EndCrystal,
     WitherSkull,
     DragonBreath,
+    RemotePlayer,
 }
 
 impl EntityType {
@@ -84,6 +85,11 @@ impl EntityType {
 pub struct Entity {
     pub id: u64,
     pub entity_type: EntityType,
+    /// For RemotePlayer entities, the network player id; zero for local/mob entities.
+    pub player_id: u64,
+    /// Username shown for RemotePlayer entities. String allocation is intentional because
+    /// remote roster names are network-owned and Entity values are relatively few.
+    pub username: String,
 
     // Physics & movement
     pub position: Vec3,
@@ -146,6 +152,7 @@ impl Entity {
             EntityType::EnderDragon => Vec3::new(8.0, 4.0, 8.0),
             EntityType::Wither => Vec3::new(1.0, 3.5, 1.0),
             EntityType::EndCrystal => Vec3::new(1.5, 2.0, 1.5),
+            EntityType::RemotePlayer => Vec3::new(0.6, 1.8, 0.6),
         };
         let max_health = match entity_type {
             EntityType::Zombie | EntityType::Skeleton | EntityType::Creeper => 20.0,
@@ -166,10 +173,13 @@ impl Entity {
             | EntityType::DragonBreath
             | EntityType::HeartParticle
             | EntityType::DroppedItem => 0.0,
+            EntityType::RemotePlayer => 20.0,
         };
         Self {
             id,
             entity_type,
+            player_id: 0,
+            username: String::new(),
             position,
             velocity: Vec3::ZERO,
             size,
@@ -432,6 +442,14 @@ mod tests {
         let chunk_manager = ChunkManager::new(4);
         chicken.update_physics(0.1, &chunk_manager);
         assert!(chicken.velocity.y >= -2.01 && chicken.velocity.y <= -1.99);
+    }
+
+    #[test]
+    fn remote_player_representation_has_human_aabb_and_defaults() {
+        let entity = Entity::new(9, EntityType::RemotePlayer, Vec3::ZERO);
+        assert_eq!(entity.size, Vec3::new(0.6, 1.8, 0.6));
+        assert_eq!(entity.player_id, 0);
+        assert!(entity.username.is_empty());
     }
 
     #[test]

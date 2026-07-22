@@ -211,7 +211,10 @@ pub fn update_mobs(
 
     // Despawn out-of-bounds mobs
     entity_manager.entities.retain(|entity| {
-        if entity.entity_type.is_projectile() || entity.entity_type.is_persistent() {
+        if entity.entity_type == EntityType::RemotePlayer
+            || entity.entity_type.is_projectile()
+            || entity.entity_type.is_persistent()
+        {
             true
         } else {
             entity.position.distance(player_pos) <= 128.0
@@ -225,6 +228,10 @@ pub fn update_mobs(
     let mut hit_player_amount = 0.0;
 
     for entity in &mut entity_manager.entities {
+        if entity.entity_type == EntityType::RemotePlayer {
+            entity.velocity = Vec3::ZERO;
+            continue;
+        }
         // Invulnerable frame countdown
         if entity.invulnerable_time > 0.0 {
             entity.invulnerable_time = (entity.invulnerable_time - dt).max(0.0);
@@ -539,6 +546,7 @@ pub fn update_mobs(
                     | EntityType::EnderDragon
                     | EntityType::Wither
                     | EntityType::EndCrystal
+                    | EntityType::RemotePlayer
             )
     });
 }

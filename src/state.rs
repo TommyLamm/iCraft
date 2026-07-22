@@ -26,6 +26,35 @@ fn initial_chunk_radius(render_distance: i32) -> i32 {
     render_distance.clamp(0, INITIAL_WORLD_CHUNK_RADIUS)
 }
 
+#[cfg(test)]
+mod remote_sync_tests {
+    use super::*;
+
+    #[test]
+    fn interpolation_midpoint_and_clamps() {
+        let prev = PlayerSnapshot {
+            position: Vec3::ZERO,
+            yaw: 3.0,
+            pitch: 0.0,
+            time: 1.0,
+        };
+        let latest = PlayerSnapshot {
+            position: Vec3::new(10.0, 2.0, -4.0),
+            yaw: -3.0,
+            pitch: 1.0,
+            time: 1.05,
+        };
+        let mid = interpolate_snapshot(prev, latest, 1.025);
+        assert!((mid.position.x - 5.0).abs() < 1e-5);
+        assert!((mid.position.y - 1.0).abs() < 1e-5);
+        assert!((mid.position.z + 2.0).abs() < 1e-5);
+        let before = interpolate_snapshot(prev, latest, 0.0);
+        let after = interpolate_snapshot(prev, latest, 2.0);
+        assert_eq!(before.position, prev.position);
+        assert_eq!(after.position, latest.position);
+    }
+}
+
 pub struct ChunkMesh {
     pub opaque_vertex_buffer: wgpu::Buffer,
     pub opaque_index_buffer: wgpu::Buffer,
@@ -496,6 +525,40 @@ pub enum NetworkHandle {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PlayerSnapshot {
+    position: Vec3,
+    yaw: f32,
+    pitch: f32,
+    time: f32,
+}
+
+#[derive(Debug, Clone)]
+struct RemotePlayerState {
+    entity_id: u64,
+    prev: PlayerSnapshot,
+    latest: PlayerSnapshot,
+    username: String,
+}
+
+fn interpolate_snapshot(
+    prev: PlayerSnapshot,
+    latest: PlayerSnapshot,
+    target_time: f32,
+) -> PlayerSnapshot {
+    let span = (latest.time - prev.time).max(f32::EPSILON);
+    let t = ((target_time - prev.time) / span).clamp(0.0, 1.0);
+    PlayerSnapshot {
+        position: prev.position.lerp(latest.position, t),
+        yaw: prev.yaw
+            + ((latest.yaw - prev.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI)
+                * t,
+        pitch: prev.pitch + (latest.pitch - prev.pitch) * t,
+        time: target_time,
+    }
+}
+
 enum NetworkInbound {
     Connected {
         player_id: crate::network::protocol::PlayerId,
@@ -508,8 +571,18 @@ enum NetworkInbound {
         username: String,
     },
     PlayerLeave(crate::network::protocol::PlayerId),
-    PlayerPosition,
-    PlayerAction,
+    PlayerPosition {
+        id: crate::network::protocol::PlayerId,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+        pitch: f32,
+    },
+    PlayerAction {
+        id: crate::network::protocol::PlayerId,
+        action: crate::network::protocol::Action,
+    },
     BlockChange,
     ChunkData,
     Chat,
@@ -528,11 +601,23 @@ impl NetworkHandle {
                     crate::network::server::ServerToHost::ClientLeft { id } => {
                         NetworkInbound::PlayerLeave(id)
                     }
-                    crate::network::server::ServerToHost::ClientPosition { .. } => {
-                        NetworkInbound::PlayerPosition
-                    }
-                    crate::network::server::ServerToHost::ClientAction { .. } => {
-                        NetworkInbound::PlayerAction
+                    crate::network::server::ServerToHost::ClientPosition {
+                        id,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                    } => NetworkInbound::PlayerPosition {
+                        id,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                    },
+                    crate::network::server::ServerToHost::ClientAction { id, action } => {
+                        NetworkInbound::PlayerAction { id, action }
                     }
                     crate::network::server::ServerToHost::ClientBlockChange { .. } => {
                         NetworkInbound::BlockChange
@@ -563,11 +648,23 @@ impl NetworkHandle {
                     crate::network::client::ClientToGame::PlayerLeave { id } => {
                         NetworkInbound::PlayerLeave(id)
                     }
-                    crate::network::client::ClientToGame::PlayerPosition { .. } => {
-                        NetworkInbound::PlayerPosition
-                    }
-                    crate::network::client::ClientToGame::PlayerAction { .. } => {
-                        NetworkInbound::PlayerAction
+                    crate::network::client::ClientToGame::PlayerPosition {
+                        id,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                    } => NetworkInbound::PlayerPosition {
+                        id,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                    },
+                    crate::network::client::ClientToGame::PlayerAction { id, action } => {
+                        NetworkInbound::PlayerAction { id, action }
                     }
                     crate::network::client::ClientToGame::BlockChange { .. } => {
                         NetworkInbound::BlockChange
@@ -616,6 +713,21 @@ impl NetworkHandle {
                 z,
                 block,
             });
+        }
+    }
+
+    fn send_action(&self, action: crate::network::protocol::Action) {
+        match self {
+            NetworkHandle::Host { host_to_server, .. } => {
+                let _ = host_to_server.send(
+                    crate::network::server::HostToServer::BroadcastPlayerAction { id: 0, action },
+                );
+            }
+            NetworkHandle::Client { game_to_client, .. } => {
+                let _ = game_to_client
+                    .send(crate::network::client::GameToClient::SendAction { action });
+            }
+            NetworkHandle::None => {}
         }
     }
 
@@ -751,9 +863,11 @@ pub struct State {
     pub network: NetworkHandle,
     network_ready: bool,
     local_player_id: Option<crate::network::protocol::PlayerId>,
-    remote_players: std::collections::HashMap<crate::network::protocol::PlayerId, String>,
+    remote_players:
+        std::collections::HashMap<crate::network::protocol::PlayerId, RemotePlayerState>,
     pub network_status: Option<String>,
     network_position_timer: f32,
+    network_time: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1744,6 +1858,7 @@ impl State {
             remote_players: std::collections::HashMap::new(),
             network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
             network_position_timer: 0.0,
+            network_time: 0.0,
         }
     }
 
@@ -1792,24 +1907,157 @@ impl State {
                 NetworkInbound::Disconnected(reason) => {
                     self.network_ready = false;
                     self.network_status = Some(format!("CONNECTION LOST: {reason}"));
+                    self.remote_players.clear();
+                    self.entity_manager
+                        .entities
+                        .retain(|e| e.entity_type != crate::entity::EntityType::RemotePlayer);
                     self.set_paused(true);
                 }
                 NetworkInbound::PlayerJoin { id, username } => {
                     if self.local_player_id != Some(id) {
-                        self.remote_players.insert(id, username.clone());
+                        let now = self.network_time;
+                        if let Some(remote) = self.remote_players.get_mut(&id) {
+                            remote.username = username.clone();
+                            if let Some(entity) = self
+                                .entity_manager
+                                .entities
+                                .iter_mut()
+                                .find(|e| e.id == remote.entity_id)
+                            {
+                                entity.username = username.clone();
+                            }
+                        } else {
+                            let entity_id = self.entity_manager.spawn(
+                                crate::entity::EntityType::RemotePlayer,
+                                self.player_physics.position,
+                            );
+                            if let Some(entity) = self
+                                .entity_manager
+                                .entities
+                                .iter_mut()
+                                .find(|e| e.id == entity_id)
+                            {
+                                entity.player_id = id;
+                                entity.username = username.clone();
+                            }
+                            let snapshot = PlayerSnapshot {
+                                position: self.player_physics.position,
+                                yaw: 0.0,
+                                pitch: 0.0,
+                                time: now,
+                            };
+                            self.remote_players.insert(
+                                id,
+                                RemotePlayerState {
+                                    entity_id,
+                                    prev: snapshot,
+                                    latest: snapshot,
+                                    username: username.clone(),
+                                },
+                            );
+                        }
                     }
                     if matches!(self.role, MultiplayerRole::Host { .. }) {
                         self.network.notify_player_join(id, username);
                     }
                 }
                 NetworkInbound::PlayerLeave(id) => {
-                    self.remote_players.remove(&id);
+                    if let Some(remote) = self.remote_players.remove(&id) {
+                        self.entity_manager
+                            .entities
+                            .retain(|e| e.id != remote.entity_id);
+                    }
                 }
-                NetworkInbound::PlayerPosition
-                | NetworkInbound::PlayerAction
-                | NetworkInbound::BlockChange
-                | NetworkInbound::ChunkData
-                | NetworkInbound::Chat => {}
+                NetworkInbound::PlayerPosition {
+                    id,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                } => {
+                    if self.local_player_id == Some(id) {
+                        continue;
+                    }
+                    if !self.remote_players.contains_key(&id) {
+                        let username = String::new();
+                        let entity_id = self
+                            .entity_manager
+                            .spawn(crate::entity::EntityType::RemotePlayer, Vec3::new(x, y, z));
+                        if let Some(entity) = self
+                            .entity_manager
+                            .entities
+                            .iter_mut()
+                            .find(|e| e.id == entity_id)
+                        {
+                            entity.player_id = id;
+                        }
+                        let snap = PlayerSnapshot {
+                            position: Vec3::new(x, y, z),
+                            yaw,
+                            pitch,
+                            time: self.network_time,
+                        };
+                        self.remote_players.insert(
+                            id,
+                            RemotePlayerState {
+                                entity_id,
+                                prev: snap,
+                                latest: snap,
+                                username,
+                            },
+                        );
+                    } else if let Some(remote) = self.remote_players.get_mut(&id) {
+                        remote.prev = remote.latest;
+                        remote.latest = PlayerSnapshot {
+                            position: Vec3::new(x, y, z),
+                            yaw,
+                            pitch,
+                            time: self.network_time,
+                        };
+                    }
+                    if matches!(self.role, MultiplayerRole::Host { .. }) {
+                        if let NetworkHandle::Host { host_to_server, .. } = &self.network {
+                            let _ = host_to_server.send(
+                                crate::network::server::HostToServer::BroadcastPlayerPosition {
+                                    id,
+                                    x,
+                                    y,
+                                    z,
+                                    yaw,
+                                    pitch,
+                                },
+                            );
+                        }
+                    }
+                }
+                NetworkInbound::PlayerAction { id, action } => {
+                    if let Some(remote) = self.remote_players.get(&id) {
+                        if let Some(entity) = self
+                            .entity_manager
+                            .entities
+                            .iter_mut()
+                            .find(|e| e.id == remote.entity_id)
+                        {
+                            entity.action_cooldown = match action {
+                                crate::network::protocol::Action::Place
+                                | crate::network::protocol::Action::Break
+                                | crate::network::protocol::Action::Use => 0.25,
+                            };
+                        }
+                    }
+                    if matches!(self.role, MultiplayerRole::Host { .. }) {
+                        if let NetworkHandle::Host { host_to_server, .. } = &self.network {
+                            let _ = host_to_server.send(
+                                crate::network::server::HostToServer::BroadcastPlayerAction {
+                                    id,
+                                    action,
+                                },
+                            );
+                        }
+                    }
+                }
+                NetworkInbound::BlockChange | NetworkInbound::ChunkData | NetworkInbound::Chat => {}
             }
         }
     }
@@ -2323,7 +2571,30 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
+        self.network_time += dt;
         self.drain_network_events();
+        let target = self.network_time - 0.1;
+        for remote in self.remote_players.values() {
+            if let Some(entity) = self
+                .entity_manager
+                .entities
+                .iter_mut()
+                .find(|e| e.id == remote.entity_id)
+            {
+                let snap = if self.network_time - remote.latest.time > 10.0 {
+                    remote.latest
+                } else if remote.latest.time <= remote.prev.time {
+                    remote.latest
+                } else {
+                    interpolate_snapshot(remote.prev, remote.latest, target)
+                };
+                entity.position = snap.position;
+                entity.yaw = snap.yaw;
+                entity.pitch = snap.pitch;
+                entity.velocity = Vec3::ZERO;
+                entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
+            }
+        }
         self.update_network_position(dt);
         if !self.network_ready {
             return;
@@ -3196,6 +3467,9 @@ impl State {
         );
 
         for entity in &mut self.entity_manager.entities {
+            if entity.entity_type == crate::entity::EntityType::RemotePlayer {
+                continue;
+            }
             let horizontal = glam::Vec2::new(
                 entity.position.x - strike_pos.x,
                 entity.position.z - strike_pos.z,
@@ -3866,7 +4140,9 @@ impl State {
                     (self.player_state.health + healing).min(self.player_state.max_health);
             }
             for entity in &mut self.entity_manager.entities {
-                if entity.position.distance(position) > 4.0 {
+                if entity.entity_type == crate::entity::EntityType::RemotePlayer
+                    || entity.position.distance(position) > 4.0
+                {
                     continue;
                 }
                 match potion.kind {
@@ -3899,6 +4175,7 @@ impl State {
                             | crate::entity::EntityType::SplashPotion
                             | crate::entity::EntityType::DroppedItem
                             | crate::entity::EntityType::HeartParticle
+                            | crate::entity::EntityType::RemotePlayer
                     )
                     && projectile.get_aabb().intersects(&target.get_aabb())
                 {
@@ -3936,6 +4213,7 @@ impl State {
                         | crate::entity::EntityType::EnderDragon
                         | crate::entity::EntityType::Wither
                         | crate::entity::EntityType::EndCrystal
+                        | crate::entity::EntityType::RemotePlayer
                 )
         });
     }
@@ -4033,6 +4311,8 @@ impl State {
                         hit.block_pos.z as i32,
                         BlockType::Air as u32,
                     );
+                    self.network
+                        .send_action(crate::network::protocol::Action::Break);
                 } else if let Some(block) = self.inventory.get_selected_block() {
                     let target = hit.block_pos + hit.normal;
                     self.network.request_block_change(
@@ -4041,6 +4321,8 @@ impl State {
                         target.z as i32,
                         block as u32,
                     );
+                    self.network
+                        .send_action(crate::network::protocol::Action::Place);
                 }
             }
             return;
@@ -4160,7 +4442,10 @@ impl State {
         if is_left_click {
             let mut closest_entity: Option<(u64, f32)> = None;
             for entity in &self.entity_manager.entities {
-                if entity.entity_type == crate::entity::EntityType::Arrow {
+                if matches!(
+                    entity.entity_type,
+                    crate::entity::EntityType::Arrow | crate::entity::EntityType::RemotePlayer
+                ) {
                     continue;
                 }
                 let aabb = entity.get_aabb();
@@ -4547,6 +4832,8 @@ impl State {
                         return;
                     }
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
+                    self.network
+                        .send_action(crate::network::protocol::Action::Break);
                     self.trigger_advancement(crate::advancements::AdvancementTrigger::MineBlock(
                         old_block,
                     ));
@@ -4613,6 +4900,8 @@ impl State {
                     }
 
                     self.chunk_manager.set_block(wx, wy, wz, placed_block);
+                    self.network
+                        .send_action(crate::network::protocol::Action::Place);
                     self.redstone.on_block_changed(
                         &self.chunk_manager,
                         (wx, wy, wz),

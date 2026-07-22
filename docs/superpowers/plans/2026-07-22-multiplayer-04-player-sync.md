@@ -25,16 +25,16 @@
 **Files:**
 - Modify: `src/entity.rs`
 
-- [ ] **Step 1: Add `EntityType::RemotePlayer`**
+- [x] **Step 1: Add `EntityType::RemotePlayer`**
   Add the variant to the `EntityType` enum. Give it a human-sized AABB in `Entity::new` (e.g. `0.6 x 1.8 x 0.6`, matching `PlayerPhysics`).
 
-- [ ] **Step 2: Add remote-player fields to `Entity`**
+- [x] **Step 2: Add remote-player fields to `Entity`**
   Add `pub player_id: u64` (0 = none) and `pub username: String` (fixed-length `ArrayString` or a small heapless buffer to keep `Entity` movable; if a `String` is unavoidable, document the allocation). Default both for non-remote entities.
 
-- [ ] **Step 3: Add a unit test**
+- [x] **Step 3: Add a unit test**
   Verify an `Entity::new(EntityType::RemotePlayer, ...)` has the expected AABB and default fields.
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo check`
 
 ---
@@ -44,7 +44,7 @@
 **Files:**
 - Modify: `src/state.rs`
 
-- [ ] **Step 1: Define `RemotePlayerState`**
+- [x] **Step 1: Define `RemotePlayerState`**
   ```rust
   struct RemotePlayerState {
       entity_index: usize,                 // index into EntityManager
@@ -57,16 +57,16 @@
   ```
   Add `remote_players: std::collections::HashMap<PlayerId, RemotePlayerState>` to `State`.
 
-- [ ] **Step 2: Handle join/leave from the network drain**
+- [x] **Step 2: Handle join/leave from the network drain**
   In `State::drain_network_events` (added in Sub-task 3), on `PlayerJoin { id, username }`:
   - Spawn an `Entity` of type `RemotePlayer` in `EntityManager` with `player_id = id`, store its index and username into `remote_players`.
   - On `Host`: also broadcast `HostToServer::NotifyPlayerJoin` so all clients learn of the newcomer (and the newcomer learns of existing players via the same path).
   On `PlayerLeave { id }`: remove the `Entity` and drop the map entry. On `Host`: broadcast `HostToServer::NotifyPlayerLeave`.
 
-- [ ] **Step 3: Record position snapshots**
+- [x] **Step 3: Record position snapshots**
   On `PlayerPosition { id, ... }` (inbound), update `remote_players[id]`: shift `latest` into `prev`, set `latest` from the packet, stamp `latest_time`. If `id` is unknown (race), lazily create the entry.
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo check`
 
 ---
@@ -76,16 +76,16 @@
 **Files:**
 - Modify: `src/state.rs`
 
-- [ ] **Step 1: Implement interpolation in `State::update`**
+- [x] **Step 1: Implement interpolation in `State::update`**
   After draining network events and before rendering, for each `RemotePlayerState` compute an interpolated pose at `sim_time - INTERP_DELAY` (e.g. 0.1 s) by `lerp`-ing between `prev` and `latest` based on `(target - latest_time + dt) / (latest_time - prev_time)`. Clamp to `[0,1]`; if only one snapshot exists yet, hold `latest`. Write the interpolated `pos`/`yaw`/`pitch` back into the `Entity`.
 
-- [ ] **Step 2: Cap stale remote players**
+- [x] **Step 2: Cap stale remote players**
   If no snapshot has arrived for a remote player within e.g. 10 s, freeze it in place (do not remove - removal comes from `PlayerLeave`/disconnect in Sub-task 6). This prevents a frozen avatar from drifting due to extrapolation.
 
-- [ ] **Step 3: Add an interpolation unit test**
+- [x] **Step 3: Add an interpolation unit test**
   Construct two snapshots 50 ms apart and assert the interpolated position at the midpoint equals the average, and that clamping holds at/beyond the endpoints.
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo test` (new interpolation test passes).
 
 ---
@@ -95,32 +95,36 @@
 **Files:**
 - Modify: `src/state.rs`
 
-- [ ] **Step 1: Confirm the 20 Hz position send**
+- [x] **Step 1: Confirm the 20 Hz position send**
   Sub-task 3 already sends local position each tick (throttled to ~50 ms). Extend it to also include `yaw`/`pitch` from `self.camera`/`self.player_physics`. For the host, use `PlayerId(0)`.
 
-- [ ] **Step 2: Forward local actions**
+- [x] **Step 2: Forward local actions**
   When the local player performs an action that should be visible to others (initial scope: block place/break, which is wired in Sub-task 5), also emit the corresponding `PlayerAction` outbound so other clients can play a cosmetic cue (e.g. arm swing). Keep the action set minimal for "basic" multiplayer.
 
-- [ ] **Step 3: Skip remote-player AI**
+- [x] **Step 3: Skip remote-player AI**
   In the entity update dispatch (where `mob::update_mobs` / `passive_mob` ticks are called), skip any entity whose `EntityType == RemotePlayer`. Remote players are driven only by the interpolation above.
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo check --release`
 
 ---
 
 ### Task 5: Verification
 
-- [ ] **Step 1: Full check**
+- [x] **Step 1: Full check**
   Run: `cargo fmt --check && cargo check --release && cargo test`
 
-- [ ] **Step 2: Two-client position test**
+- [x] **Step 2: Two-client position test**
   With Host + 2 Clients connected:
   - Move client A; confirm client B's `remote_players` map receives `PlayerPosition` updates for A's `PlayerId` within ~100 ms.
   - Confirm the interpolated `Entity` position updates smoothly (no teleport snapping under normal latency).
   - Confirm the host sees both clients move.
 
   (Visual confirmation of the avatar is validated in Sub-task 6; here we verify the data path and `Entity` pose.)
+
+  Automated coverage uses the two-client server relay/roster tests plus the
+  snapshot interpolation test. The real multi-window visual smoke test remains
+  a manual follow-up for Sub-task 6.
 
 ---
 

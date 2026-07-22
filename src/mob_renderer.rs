@@ -1392,6 +1392,20 @@ pub fn render_mobs(
                     light_val,
                 );
             }
+            EntityType::RemotePlayer => {
+                add_cuboid(
+                    vertices,
+                    indices,
+                    Vec3::new(0.3, 0.9, 0.3),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.9, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [1; 6],
+                    0,
+                    light_val,
+                );
+            }
         }
     }
 }

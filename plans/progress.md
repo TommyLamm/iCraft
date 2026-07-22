@@ -91,7 +91,7 @@ P3 [███████░░░] 66.7%
 | 22 | [紅石系統](./p3/22_redstone.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 23 | [天氣系統](./p3/23_weather.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
-| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 3/6 完成 |
+| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 4/6 完成 |
 | 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 28 | [成就 / 進度系統](./p3/28_advancements.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ⬜ 待定 | — | — | |
@@ -104,7 +104,12 @@ P3 [███████░░░] 66.7%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-22
-- 🟡 進度任務 #25 (By Codex)：多人遊戲 - 子任務 3/6 客戶端橋接與 State 整合
+- 🟡 進度任務 #25 (By GPT-5.6 Sol High)：多人遊戲 - 子任務 4/6 玩家狀態同步
+  - 修改文件：`src/entity.rs`, `src/state.rs`, `src/mob.rs`, `src/mob_renderer.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `docs/superpowers/plans/2026-07-22-multiplayer-04-player-sync.md`
+  - 關鍵決策：新增 `EntityType::RemotePlayer` 與網路玩家 metadata；`State` 以穩定 entity ID 綁定 remote player，而非會受 `Vec` 刪除影響的 index。主機中繼 client pose/action 並以 `PlayerId(0)` 廣播本機狀態，server 在 newcomer 登入時重播既有 roster。remote pose 以獨立網路時鐘保留兩個 snapshot，採 100 ms 延遲、端點 clamp 與最短 yaw 路徑插值，10 秒未更新後固定在最新姿勢；join/leave/disconnect 會建立或清理相應 entity，remote player 不進入 mob physics、AI、despawn 或本機 combat damage path。成功的本機 block break/place 會送出最小 `PlayerAction` cosmetic cue。
+  - 驗證：`cargo fmt --check`、`cargo check --release`、`cargo test` 全部通過；完整測試為 133 項單元測試與 1 項整合測試，包含 remote-player AABB/default、插值中點與端點 clamp、雙 client position/action relay、newcomer roster replay 及斷線清理。
+  - 備註：本子任務提供 placeholder cuboid 以驗證共享 render path；完整玩家模型、名稱顯示、chat 與 disconnect UI 仍由子任務 6 完成。實際多視窗視覺 smoke test 仍需人工執行，資料路徑與 pose 計算已由自動測試覆蓋。
+- 🟡 進度任務 #25 (By GPT-5.6 Sol High)：多人遊戲 - 子任務 3/6 客戶端橋接與 State 整合
   - 新增文件：`src/network/client.rs`
   - 修改文件：`src/network/mod.rs`, `src/menu.rs`, `src/app.rs`, `src/state.rs`, `ARCHITECTURE.md`, `docs/superpowers/plans/2026-07-22-multiplayer-03-client-bridge.md`
   - 關鍵決策：新增背景執行緒 Tokio `NetworkClient`，將所有 wire packet 映射為 `ClientToGame` / `GameToClient` 同步通道事件，包含版本握手、登入、keepalive、斷線回報與乾淨關閉。主選單新增 Host/Join 面板與連線欄位，`MultiplayerRole` 隨 `WorldLaunch` 進入 `State`。`NetworkHandle` 統一封裝 host/client 通道與執行緒；`State::update` 每幀先 drain 網路事件並以 20 Hz 送出本機位置。Client 在收到伺服器 seed 前不生成 chunk，也不讀寫本機 chunk save；方塊破壞／放置改送請求，fluid 與 redstone 本機 mutation 被抑制。Host/Singleplayer 保持 authoritative。

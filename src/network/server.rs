@@ -72,6 +72,10 @@ pub enum HostToServer {
         yaw: f32,
         pitch: f32,
     },
+    BroadcastPlayerAction {
+        id: PlayerId,
+        action: Action,
+    },
     BroadcastChat {
         sender: String,
         message: String,
@@ -233,6 +237,7 @@ impl NetworkServer {
         }
 
         let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
+        let roster_tx = out_tx.clone();
         sessions.lock().await.insert(
             id,
             ClientSession {
@@ -241,6 +246,20 @@ impl NetworkServer {
                 out_tx,
             },
         );
+        let roster: Vec<(PlayerId, String)> = sessions
+            .lock()
+            .await
+            .values()
+            .filter(|session| session.id != id)
+            .map(|session| (session.id, session.username.clone()))
+            .collect();
+        for (existing_id, username) in roster {
+            let _ = roster_tx.try_send(Packet::PlayerJoin {
+                protocol_version: PROTOCOL_VERSION,
+                id: existing_id,
+                username,
+            });
+        }
         if server_to_host
             .send(ServerToHost::ClientJoined {
                 id,
@@ -376,6 +395,14 @@ impl NetworkServer {
                     z,
                     yaw,
                     pitch,
+                },
+                None,
+            ),
+            HostToServer::BroadcastPlayerAction { id, action } => (
+                Packet::PlayerAction {
+                    protocol_version: PROTOCOL_VERSION,
+                    id,
+                    action,
                 },
                 None,
             ),
@@ -637,6 +664,42 @@ mod tests {
                     && pitch == -0.25
         ));
 
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn relays_player_action_through_host() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (_client_a, id_a) = server.connect("steve").await;
+        let (mut client_b, _) = server.connect("alex").await;
+        server
+            .host_tx
+            .send(HostToServer::BroadcastPlayerAction {
+                id: id_a,
+                action: Action::Break,
+            })
+            .unwrap();
+        let packet =
+            recv_matching(&mut client_b, |p| matches!(p, Packet::PlayerAction { .. })).await;
+        assert!(
+            matches!(packet, Packet::PlayerAction { id, action: Action::Break, .. } if id == id_a)
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn newcomer_receives_existing_roster() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (_client_a, id_a) = server.connect("steve").await;
+        let (mut client_b, _) = server.connect("alex").await;
+        let packet = recv_matching(
+            &mut client_b,
+            |p| matches!(p, Packet::PlayerJoin { id, .. } if *id == id_a),
+        )
+        .await;
+        assert!(
+            matches!(packet, Packet::PlayerJoin { id, username, .. } if id == id_a && username == "steve")
+        );
         server.stop().await;
     }
 
