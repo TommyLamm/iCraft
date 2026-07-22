@@ -64,6 +64,10 @@ pub enum HostToServer {
         blocks: Vec<u8>,
         to: PlayerId,
     },
+    BroadcastTimeSync {
+        ticks: u64,
+        weather: u8,
+    },
     BroadcastPlayerPosition {
         id: PlayerId,
         x: f32,
@@ -359,6 +363,7 @@ impl NetworkServer {
     }
 
     async fn handle_host_command(&self, command: HostToServer) {
+        let reliable_broadcast = matches!(&command, HostToServer::BroadcastBlockChange { .. });
         let (packet, recipient) = match command {
             HostToServer::BroadcastBlockChange { x, y, z, block } => (
                 Packet::BlockChange {
@@ -378,6 +383,14 @@ impl NetworkServer {
                     blocks,
                 },
                 Some(to),
+            ),
+            HostToServer::BroadcastTimeSync { ticks, weather } => (
+                Packet::TimeSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    ticks,
+                    weather,
+                },
+                None,
             ),
             HostToServer::BroadcastPlayerPosition {
                 id,
@@ -434,6 +447,8 @@ impl NetworkServer {
 
         if let Some(id) = recipient {
             Self::send_to(&self.sessions, id, packet).await;
+        } else if reliable_broadcast {
+            Self::broadcast_reliably(&self.sessions, packet).await;
         } else {
             Self::broadcast_to(&self.sessions, packet).await;
         }
@@ -446,9 +461,22 @@ impl NetworkServer {
             .get(&id)
             .map(|session| session.out_tx.clone());
         if let Some(tx) = tx {
-            // A full queue marks this client as lagging; dropping this packet keeps
-            // the authoritative broadcast loop responsive for every other client.
-            let _ = tx.try_send(packet);
+            // Targeted packets are join catch-up data and must not be dropped.
+            let _ = tx.send(packet).await;
+        }
+    }
+
+    async fn broadcast_reliably(sessions: &Sessions, packet: Packet) {
+        let senders: Vec<_> = sessions
+            .lock()
+            .await
+            .values()
+            .map(|session| session.out_tx.clone())
+            .collect();
+        for tx in senders {
+            // Block mutations are ordered authoritative state, so applying
+            // backpressure is preferable to silently diverging a client.
+            let _ = tx.send(packet.clone()).await;
         }
     }
 

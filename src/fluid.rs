@@ -8,12 +8,18 @@ const HORIZONTAL_DIRECTIONS: [(i32, i32, i32); 4] = [(1, 0, 0), (-1, 0, 0), (0, 
 
 /// Advances only fluid cells affected by a block change. Work is capped so a
 /// large flow can span several frames without blocking rendering.
+///
+/// Returns the dirty chunk coordinates and the list of block mutations applied
+/// this tick. The mutation list lets a multiplayer host broadcast the exact
+/// cells that changed so connected clients render the same flow without running
+/// the fluid simulation themselves.
 pub fn tick_fluids(
     chunk_manager: &mut ChunkManager,
     is_lava: bool,
     max_updates: usize,
-) -> HashSet<(i32, i32)> {
+) -> (HashSet<(i32, i32)>, Vec<((i32, i32, i32), BlockType)>) {
     let mut dirty_chunks = HashSet::new();
+    let mut mutations: Vec<((i32, i32, i32), BlockType)> = Vec::new();
     let target_type = if is_lava {
         BlockType::Lava
     } else {
@@ -39,6 +45,7 @@ pub fn tick_fluids(
             continue;
         }
 
+        let before = chunk_manager.get_block(wx, wy, wz);
         if update_cell(
             chunk_manager,
             (wx, wy, wz),
@@ -47,10 +54,14 @@ pub fn tick_fluids(
             is_lava,
         ) {
             mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
+            let after = chunk_manager.get_block(wx, wy, wz);
+            if after != before {
+                mutations.push(((wx, wy, wz), after));
+            }
         }
     }
 
-    dirty_chunks
+    (dirty_chunks, mutations)
 }
 
 fn update_cell(
@@ -219,7 +230,7 @@ mod tests {
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
 
         assert_eq!(manager.pending_fluid_updates(false), 0);
-        assert!(tick_fluids(&mut manager, false, 64).is_empty());
+        assert!(tick_fluids(&mut manager, false, 64).0.is_empty());
         assert_eq!(manager.pending_fluid_updates(false), 0);
     }
 
@@ -230,11 +241,15 @@ mod tests {
         let source = (8, 120, 8);
         manager.set_block(source.0, source.1, source.2, BlockType::Water);
 
-        let dirty = tick_fluids(&mut manager, false, 128);
+        let (dirty, mutations) = tick_fluids(&mut manager, false, 128);
 
         assert!(!dirty.is_empty());
         assert_eq!(manager.get_block(8, 119, 8), BlockType::Water);
         assert!(manager.get_fluid_falling(8, 119, 8));
+        // A flowing cell should report its new block so a host can broadcast it.
+        assert!(mutations
+            .iter()
+            .any(|((x, y, z), b)| *x == 8 && *y == 119 && *z == 8 && *b == BlockType::Water));
     }
 
     #[test]

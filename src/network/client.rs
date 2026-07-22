@@ -48,6 +48,10 @@ pub enum ClientToGame {
         cz: i32,
         blocks: Vec<u8>,
     },
+    TimeSync {
+        ticks: u64,
+        weather: u8,
+    },
     Chat {
         sender: String,
         message: String,
@@ -198,6 +202,7 @@ async fn run_client(
                     Ok(Packet::PlayerAction { id, action, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerAction { id, action }); }
                     Ok(Packet::BlockChange { x, y, z, block, .. }) => { let _ = client_to_game.send(ClientToGame::BlockChange { x, y, z, block }); }
                     Ok(Packet::ChunkData { cx, cz, blocks, .. }) => { let _ = client_to_game.send(ClientToGame::ChunkData { cx, cz, blocks }); }
+                    Ok(Packet::TimeSync { ticks, weather, .. }) => { let _ = client_to_game.send(ClientToGame::TimeSync { ticks, weather }); }
                     Ok(Packet::ChatMessage { sender, message, .. }) => { let _ = client_to_game.send(ClientToGame::Chat { sender, message }); }
                     Ok(Packet::Keepalive { .. }) => {
                         if writer.send(&Packet::Keepalive { protocol_version: PROTOCOL_VERSION }).await.is_err() {
@@ -326,6 +331,76 @@ mod tests {
         host_tx.send(HostToServer::Stop).unwrap();
         let _ = server.join();
         assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn receives_targeted_chunk_catchup_and_time_sync() {
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = mpsc::channel();
+        let (server_tx, server_rx) = mpsc::channel();
+        let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
+
+        let (game_tx, game_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let client = NetworkClient::spawn(addr, "catchup".into(), game_rx, event_tx);
+        let player_id = match wait_for_event(&event_rx) {
+            ClientToGame::Connected { player_id, .. } => player_id,
+            other => panic!("expected Connected, got {other:?}"),
+        };
+        let _ = server_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("join event missing");
+
+        host_tx
+            .send(HostToServer::BroadcastBlockChange {
+                x: 7,
+                y: 80,
+                z: -9,
+                block: 3,
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::SendChunk {
+                cx: -2,
+                cz: 5,
+                blocks: vec![1, 2, 3, 4],
+                to: player_id,
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::BroadcastTimeSync {
+                ticks: 19_000,
+                weather: 2,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::BlockChange {
+                x: 7,
+                y: 80,
+                z: -9,
+                block: 3
+            }
+        ));
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::ChunkData { cx: -2, cz: 5, blocks } if blocks == vec![1, 2, 3, 4]
+        ));
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::TimeSync {
+                ticks: 19_000,
+                weather: 2
+            }
+        ));
+
+        game_tx.send(GameToClient::Disconnect).unwrap();
+        client.join().unwrap();
+        host_tx.send(HostToServer::Stop).unwrap();
+        server.join().unwrap();
     }
 
     /// Step 2 (Task 5) two-instance smoke test: when the host stops the server,

@@ -369,6 +369,29 @@ impl BlockType {
         }
     }
 
+    /// Wire encoding for multiplayer block sync.
+    ///
+    /// `BlockType` is `#[repr(u8)]` with explicit, stable discriminants, so the
+    /// numeric value is part of the network protocol contract. Adding a new
+    /// variant is allowed (append a new value), but never reuse an existing
+    /// wire value for a different block: older clients would misdecode it.
+    pub fn to_wire(&self) -> u32 {
+        *self as u32
+    }
+
+    /// Inverse of `to_wire`. Returns `None` for values that do not map to a
+    /// known variant so unknown (newer) blocks are dropped gracefully instead
+    /// of corrupting world state.
+    pub fn from_wire(val: u32) -> Option<Self> {
+        if val <= BlockType::EndCityChest as u32 {
+            // SAFETY: `BlockType` is `#[repr(u8)]`, so every value in
+            // `0..=EndCityChest` is a valid discriminant.
+            Some(unsafe { std::mem::transmute(val as u8) })
+        } else {
+            None
+        }
+    }
+
     pub fn is_cross_model(self) -> bool {
         matches!(
             self,
@@ -2262,6 +2285,23 @@ impl BlockType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_type_wire_roundtrip_covers_all_variants() {
+        // Walk every discriminant in `0..=EndCityChest` and confirm the
+        // wire helpers are exact inverses. This also guards against future
+        // reordering of the enum: any renumbering would surface here.
+        for raw in 0..=BlockType::EndCityChest as u32 {
+            let block = BlockType::from_wire(raw).expect("valid discriminant");
+            assert_eq!(block.to_wire(), raw, "to_wire/from_wire mismatch");
+        }
+    }
+
+    #[test]
+    fn block_type_from_wire_rejects_unknown_values() {
+        assert!(BlockType::from_wire(BlockType::EndCityChest as u32 + 1).is_none());
+        assert!(BlockType::from_wire(u32::MAX).is_none());
+    }
 
     #[test]
     fn world_seed_changes_generated_terrain() {

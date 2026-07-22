@@ -91,7 +91,7 @@ P3 [███████░░░] 66.7%
 | 22 | [紅石系統](./p3/22_redstone.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 23 | [天氣系統](./p3/23_weather.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
-| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 4/6 完成 |
+| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 5/6 完成 |
 | 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 28 | [成就 / 進度系統](./p3/28_advancements.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ⬜ 待定 | — | — | |
@@ -104,6 +104,11 @@ P3 [███████░░░] 66.7%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-22
+- 🟡 進度任務 #25 (By GPT-5.6 Sol)：多人遊戲 - 子任務 5/6 世界（方塊）同步
+  - 修改文件：`src/world.rs`, `src/fluid.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/state.rs`, `src/network/protocol.rs`, `src/network/server.rs`, `src/network/client.rs`, `ARCHITECTURE.md`, `docs/superpowers/plans/2026-07-22-multiplayer-05-world-sync.md`, `track.md`
+  - 關鍵決策：以穩定 `BlockType` wire 值及共享 seed 實作 mutation-only 同步；Host 對玩家、流體、紅石、爆炸、天氣、葉片衰減、支撐方塊連鎖破壞與羊吃草結果統一可靠廣播，Client 僅套用 block storage、光照與跨 Chunk/AO 網格失效，不執行衍生世界模擬。未載入 Chunk 的即時 mutation 會按座標合併延後，join 時另傳送本 session 或存檔中已偏離決定性生成的已載入 Chunk 壓縮 payload。新增 `TimeSync` 每秒校正遊戲 tick 與可見天氣，協議版本提升至 2；方塊與定向 Chunk payload 使用 backpressure 可靠傳送，pose/action 仍維持 bounded best-effort。
+  - 驗證：`cargo fmt --check`、`cargo check --release`、`cargo test` 通過；140 項單元測試與 1 項整合測試全部通過。新增 block wire roundtrip、遠端邊界 block 的光照/mesh dependency、權威/純視覺爆炸、可靠 `BlockChange`、定向 `ChunkData` 與 `TimeSync` 端到端測試。
+  - 備註：兩個實際遊戲視窗中的方塊/流體/爆炸視覺與 join-mid-game GUI smoke test 仍需人工互動驗證；資料協議、server/client relay 與 CPU mutation path 已由自動測試覆蓋。
 - 🔧 補完任務 #25 子任務 3/6 未完成驗證步驟 (By GLM-5.2)：Step 7 編譯冒煙與 Step 2 雙實例煙霧測試
   - 修改文件：`src/network/client.rs`, `docs/superpowers/plans/2026-07-22-multiplayer-03-client-bridge.md`, `plans/progress.md`
   - 關鍵決策：完成子任務 3 計畫中最後兩個未勾選 checkbox。Step 7 以 `cargo check --release` 通過（僅 2 項 Sub-tasks 4-6 預留變體的既有 dead-code 警告，無錯誤），並以 release binary 啟動單一與雙實例各持續 8 秒與 6 秒無 panic、無 stderr，覆蓋「binary 啟動且伺服器執行緒不崩潰」需求。Step 2 新增自動化整合測試 `host_stop_notifies_client_and_threads_join_without_hanging`，驗證主機停止伺服器後 client 收到 `ClientToGame::Disconnected` 且雙背景執行緒於 3 秒逾時內乾淨 join 無 panic，補足「quitting either side cleans up the background thread without hanging」需求；既有 `connects_and_receives_join_for_second_client` 已覆蓋 seed 傳播與 `PlayerJoin`。

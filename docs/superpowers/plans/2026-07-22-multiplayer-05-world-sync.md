@@ -25,13 +25,13 @@
 **Files:**
 - Modify: `src/world.rs`
 
-- [ ] **Step 1: Add discriminant conversion helpers**
+- [x] **Step 1: Add discriminant conversion helpers**
   Add `BlockType::to_wire(&self) -> u32` and `BlockType::from_wire(u32) -> Option<BlockType>` based on the enum's `as u32` discriminant (ensure `BlockType` derives or has a stable numeric mapping). Document that adding a new `BlockType` must not reuse an existing wire value.
 
-- [ ] **Step 2: Add a roundtrip unit test**
+- [x] **Step 2: Add a roundtrip unit test**
   Assert every `BlockType` variant round-trips through `to_wire`/`from_wire`.
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
   Run: `cargo test world`
 
 ---
@@ -41,16 +41,16 @@
 **Files:**
 - Modify: `src/state.rs`
 
-- [ ] **Step 1: Add `State::set_block_and_broadcast`**
+- [x] **Step 1: Add `State::set_block_and_broadcast`**
   A host-side helper that wraps the existing authoritative mutation:
   1. Call `ChunkManager::set_block` (or the existing `State` mutation entry that already does set_block + lighting + mesh dirty + redstone).
   2. If `NetworkHandle` is `Host`, emit `HostToServer::BroadcastBlockChange { x, y, z, block: block.to_wire() }`.
   This becomes the single call site for player-driven and host-derived mutations that should be visible to clients.
 
-- [ ] **Step 2: Route player place/break through the broadcaster**
+- [x] **Step 2: Route player place/break through the broadcaster**
   In `State::break_block` / `State::handle_click` (placement), when `is_authoritative()`, call `set_block_and_broadcast` instead of the raw `set_block` path. (Client-side these already send `RequestBlockChange` per Sub-task 3 and do nothing locally.)
 
-- [ ] **Step 3: Route host-derived mutations through the broadcaster**
+- [x] **Step 3: Route host-derived mutations through the broadcaster**
   Identify the host-side mutation call sites that produce visible block changes and ensure they go through `set_block_and_broadcast` (or emit `BroadcastBlockChange` directly if they use a batch path). Key sites from `ARCHITECTURE.md`:
   - `fluid.rs` returned dirty chunks already call `set_block`; ensure fluid-driven `set_block` on the host also broadcasts (or batch-broadcast at end of the fluid tick to limit packet volume).
   - `State::apply_redstone_update` actuator mutations (piston moves, lamp toggle, TNT explosion block damage, dispenser output).
@@ -58,7 +58,7 @@
   - `weather.rs` fire placement and snow-layer accumulation.
   For high-frequency sources (fluids), consider coalescing changes per chunk per tick to avoid packet storms.
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo check`
 
 ---
@@ -68,7 +68,7 @@
 **Files:**
 - Modify: `src/state.rs`
 
-- [ ] **Step 1: Implement `State::apply_remote_block_change`**
+- [x] **Step 1: Implement `State::apply_remote_block_change`**
   ```rust
   fn apply_remote_block_change(&mut self, x: i32, y: i32, z: i32, block_wire: u32) {
       let block = match BlockType::from_wire(block_wire) { Some(b) => b, None => return };
@@ -87,15 +87,15 @@
   ```
   Adjust the exact helper names/signatures to match the current source (`lighting` / `chunk_manager` APIs).
 
-- [ ] **Step 2: Wire it into the network drain**
+- [x] **Step 2: Wire it into the network drain**
   In `State::drain_network_events`, on `BlockChange { x, y, z, block }` (client) / `ServerToHost::ClientBlockChange` (host), call the appropriate path:
   - **Client:** `apply_remote_block_change(...)` directly.
   - **Host:** validate the requesting client's action is legal (basic sanity: position within loaded range, not obviously malformed), apply locally via `set_block_and_broadcast`, which re-broadcasts to all clients including the originator.
 
-- [ ] **Step 3: Add a unit test**
+- [x] **Step 3: Add a unit test**
   Using a minimal `ChunkManager`/`State` harness (or the existing test pattern in `src/lighting.rs`), apply a `BlockChange { Air -> Stone }` and assert the block, a boundary mesh dirty flag, and lighting all update correctly.
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo test`
 
 ---
@@ -105,7 +105,7 @@
 **Files:**
 - Modify: `src/state.rs`
 
-- [ ] **Step 1: Gate fluid/redstone/weather world mutation on authority**
+- [x] **Step 1: Gate fluid/redstone/weather world mutation on authority**
   In `State::update`, when `!is_authoritative()` (Client role):
   - Skip the fluid tick (water/lava) and its returned dirty-chunk handling.
   - Skip the 20 Hz redstone scheduler and `apply_redstone_update`.
@@ -113,10 +113,10 @@
   - Keep weather **visuals** (particles, sky darkening, audio) running locally since they're derived from the shared seed/time and don't mutate blocks on the client.
   - Keep local player physics, particles, and rendering fully active.
 
-- [ ] **Step 2: Reconcile time**
+- [x] **Step 2: Reconcile time**
   Ensure world time stays in sync: the host's game-time ticks should drive the clients. Add a lightweight `TimeSync` packet or piggyback the current game tick on `Keepalive`/`PlayerPosition` so the client can correct drift. (For "basic" scope, piggyback on an existing packet to avoid a new variant; if a new variant is cleaner, add `Packet::TimeSync` to `protocol.rs`.)
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
   Run: `cargo check --release`
 
 ---
@@ -127,20 +127,20 @@
 - Modify: `src/network/server.rs`
 - Modify: `src/state.rs`
 
-- [ ] **Step 1: Send mutated chunks to a newly joined client**
+- [x] **Step 1: Send mutated chunks to a newly joined client**
   When a client joins, the host should send `ChunkData` for any loaded chunks whose stored state differs from freshly-generated terrain (i.e. chunks with player/derived mutations). For "basic" scope, implement a simple version: on `ClientJoined`, the host iterates currently-loaded chunks and sends `ChunkData` for those that have been mutated (track a `mutated: bool` per chunk, or compare against a fresh generation). Full per-block diffing is out of scope.
 
-- [ ] **Step 2: Apply `ChunkData` on the client**
+- [x] **Step 2: Apply `ChunkData` on the client**
   In `State::drain_network_events`, on `ChunkData { cx, cz, blocks }`: decompress/decode the block array (reuse the existing `save.rs` chunk payload format if compatible), overwrite the local chunk's blocks, rebuild its heightmap, re-propagate boundary lighting, and mark the mesh dirty. If the chunk isn't loaded yet, buffer the payload and apply it when `update_chunks` loads that coordinate.
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
   Run: `cargo check`
 
 ---
 
 ### Task 6: Verification
 
-- [ ] **Step 1: Full check**
+- [x] **Step 1: Full check**
   Run: `cargo fmt --check && cargo check --release && cargo test`
 
 - [ ] **Step 2: Two-client block sync test**

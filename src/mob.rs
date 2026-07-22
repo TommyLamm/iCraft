@@ -21,9 +21,10 @@ pub fn explode(
     chunk_meshes: &mut std::collections::HashMap<(i32, i32), crate::state::ChunkMesh>,
     player_physics: &mut PlayerPhysics,
     player_state: &mut PlayerState,
+    break_blocks: bool,
     game_mode: GameMode,
     damage_multiplier: f32,
-) {
+) -> Vec<(i32, i32, i32)> {
     let cx = center.x.floor() as i32;
     let cy = center.y.floor() as i32;
     let cz = center.z.floor() as i32;
@@ -32,46 +33,64 @@ pub fn explode(
     let mut dirty_chunks = std::collections::HashSet::new();
     let mut blocks_removed = Vec::new();
 
-    // 1. Break blocks in radius
-    for x in (cx - r_ceil)..=(cx + r_ceil) {
-        for y in (cy - r_ceil)..=(cy + r_ceil) {
-            for z in (cz - r_ceil)..=(cz + r_ceil) {
-                let dx = x as f32 + 0.5 - center.x;
-                let dy = y as f32 + 0.5 - center.y;
-                let dz = z as f32 + 0.5 - center.z;
-                if dx * dx + dy * dy + dz * dz <= radius * radius {
-                    let block = chunk_manager.get_block(x, y, z);
-                    if block != crate::world::BlockType::Air
-                        && block != crate::world::BlockType::Bedrock
-                    {
-                        chunk_manager.set_block(x, y, z, crate::world::BlockType::Air);
-                        blocks_removed.push((x, y, z, block));
+    if break_blocks {
+        // 1. Break blocks in radius
+        for x in (cx - r_ceil)..=(cx + r_ceil) {
+            for y in (cy - r_ceil)..=(cy + r_ceil) {
+                for z in (cz - r_ceil)..=(cz + r_ceil) {
+                    let dx = x as f32 + 0.5 - center.x;
+                    let dy = y as f32 + 0.5 - center.y;
+                    let dz = z as f32 + 0.5 - center.z;
+                    if dx * dx + dy * dy + dz * dz <= radius * radius {
+                        let block = chunk_manager.get_block(x, y, z);
+                        if block != crate::world::BlockType::Air
+                            && block != crate::world::BlockType::Bedrock
+                        {
+                            chunk_manager.set_block(x, y, z, crate::world::BlockType::Air);
+                            blocks_removed.push((x, y, z, block));
+                        }
                     }
                 }
             }
         }
-    }
 
-    // 2. Recalculate lighting for affected spots
-    for (x, y, z, old_block) in blocks_removed {
-        crate::lighting::update_sky_light_after_removed(chunk_manager, x, y, z, &mut dirty_chunks);
-        crate::lighting::update_block_light_after_removed(
-            chunk_manager,
-            x,
-            y,
-            z,
-            old_block.properties().light_emission,
-            &mut dirty_chunks,
-        );
+        // 2. Recalculate lighting for affected spots. Unsupported plants and
+        // snow broken above the blast are part of the returned authoritative
+        // mutation list too.
+        let mut unsupported_removed = Vec::new();
+        for &(x, y, z, old_block) in &blocks_removed {
+            crate::lighting::update_sky_light_after_removed(
+                chunk_manager,
+                x,
+                y,
+                z,
+                &mut dirty_chunks,
+            );
+            crate::lighting::update_block_light_after_removed(
+                chunk_manager,
+                x,
+                y,
+                z,
+                old_block.properties().light_emission,
+                &mut dirty_chunks,
+            );
 
-        mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
-        chunk_manager.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks, |_, _| {});
-    }
+            mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
+            chunk_manager.check_and_break_unsupported_above(
+                x,
+                y,
+                z,
+                &mut dirty_chunks,
+                |pos, block| unsupported_removed.push((pos.0, pos.1, pos.2, block)),
+            );
+        }
+        blocks_removed.extend(unsupported_removed);
 
-    // Mark chunk meshes dirty
-    for (chx, chz) in dirty_chunks {
-        if let Some(mesh) = chunk_meshes.get_mut(&(chx, chz)) {
-            mesh.dirty = true;
+        // Mark chunk meshes dirty
+        for (chx, chz) in dirty_chunks {
+            if let Some(mesh) = chunk_meshes.get_mut(&(chx, chz)) {
+                mesh.dirty = true;
+            }
         }
     }
 
@@ -91,6 +110,11 @@ pub fn explode(
             }
         }
     }
+
+    blocks_removed
+        .into_iter()
+        .map(|(x, y, z, _)| (x, y, z))
+        .collect()
 }
 
 fn is_under_sun(chunk_manager: &ChunkManager, pos: Vec3, sky_light_level: u8) -> bool {
@@ -206,7 +230,8 @@ pub fn update_mobs(
     listener_right: Vec3,
     player_invisible: bool,
     damage_multiplier: f32,
-) {
+    break_blocks: bool,
+) -> Vec<(i32, i32, i32)> {
     let player_pos = player_physics.position;
 
     // Despawn out-of-bounds mobs
@@ -495,17 +520,19 @@ pub fn update_mobs(
     }
 
     // Trigger explosions
+    let mut blocks_removed = Vec::new();
     for exp_pos in explosions {
-        explode(
+        blocks_removed.extend(explode(
             exp_pos,
             3.0, // radius
             chunk_manager,
             chunk_meshes,
             player_physics,
             player_state,
+            break_blocks,
             game_mode,
             damage_multiplier,
-        );
+        ));
 
         let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
         audio_manager.play_sound_3d(
@@ -549,6 +576,8 @@ pub fn update_mobs(
                     | EntityType::RemotePlayer
             )
     });
+
+    blocks_removed
 }
 
 #[cfg(test)]
@@ -570,6 +599,47 @@ mod tests {
         // Distance = 5.5: 0 damage
         let d3 = calculate_explosion_damage(center, Vec3::new(5.5, 0.0, 0.0));
         assert_eq!(d3, 0.0);
+    }
+
+    #[test]
+    fn explosion_reports_authoritative_block_removals_and_can_be_visual_only() {
+        let mut manager = ChunkManager::new(1);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(2, 10, 2, crate::world::BlockType::Stone);
+        let mut meshes = std::collections::HashMap::new();
+        let mut physics = PlayerPhysics::new(Vec3::new(100.0, 100.0, 100.0));
+        let mut player = PlayerState::new();
+        let center = Vec3::new(2.5, 10.5, 2.5);
+
+        let visual_only = explode(
+            center,
+            1.0,
+            &mut manager,
+            &mut meshes,
+            &mut physics,
+            &mut player,
+            false,
+            GameMode::Creative,
+            0.0,
+        );
+        assert!(visual_only.is_empty());
+        assert_eq!(manager.get_block(2, 10, 2), crate::world::BlockType::Stone);
+
+        let authoritative = explode(
+            center,
+            1.0,
+            &mut manager,
+            &mut meshes,
+            &mut physics,
+            &mut player,
+            true,
+            GameMode::Creative,
+            0.0,
+        );
+        assert!(authoritative.contains(&(2, 10, 2)));
+        assert_eq!(manager.get_block(2, 10, 2), crate::world::BlockType::Air);
     }
 
     #[test]
@@ -612,6 +682,7 @@ mod tests {
             Vec3::X,
             false,
             1.0,
+            true,
         );
 
         for entity in &entity_manager.entities {

@@ -26,6 +26,72 @@ fn initial_chunk_radius(render_distance: i32) -> i32 {
     render_distance.clamp(0, INITIAL_WORLD_CHUNK_RADIUS)
 }
 
+/// Apply a network-visible block value to CPU world state and return every
+/// chunk whose mesh/light data depends on it. Redstone and gameplay side
+/// effects remain the caller's responsibility.
+fn apply_synced_block_change(
+    chunk_manager: &mut ChunkManager,
+    x: i32,
+    y: i32,
+    z: i32,
+    block: BlockType,
+) -> Option<std::collections::HashSet<(i32, i32)>> {
+    let ((cx, cz), _) = chunk_manager.world_to_local(x, y, z)?;
+    if !chunk_manager.chunks.contains_key(&(cx, cz)) {
+        return None;
+    }
+    let previous = chunk_manager.get_block(x, y, z);
+    if previous == block {
+        return None;
+    }
+
+    chunk_manager.set_block(x, y, z, block);
+    let old_properties = previous.properties();
+    let new_properties = block.properties();
+    let mut dirty_chunks = std::collections::HashSet::new();
+    if old_properties.is_solid != new_properties.is_solid {
+        if new_properties.is_solid {
+            crate::lighting::update_sky_light_after_placed(
+                chunk_manager,
+                x,
+                y,
+                z,
+                &mut dirty_chunks,
+            );
+        } else {
+            crate::lighting::update_sky_light_after_removed(
+                chunk_manager,
+                x,
+                y,
+                z,
+                &mut dirty_chunks,
+            );
+        }
+    }
+    if old_properties.light_emission != new_properties.light_emission {
+        crate::lighting::update_block_light_after_removed(
+            chunk_manager,
+            x,
+            y,
+            z,
+            old_properties.light_emission,
+            &mut dirty_chunks,
+        );
+        if new_properties.light_emission > 0 {
+            crate::lighting::update_block_light_after_placed(
+                chunk_manager,
+                x,
+                y,
+                z,
+                new_properties.light_emission,
+                &mut dirty_chunks,
+            );
+        }
+    }
+    mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
+    Some(dirty_chunks)
+}
+
 #[cfg(test)]
 mod remote_sync_tests {
     use super::*;
@@ -52,6 +118,22 @@ mod remote_sync_tests {
         let after = interpolate_snapshot(prev, latest, 2.0);
         assert_eq!(before.position, prev.position);
         assert_eq!(after.position, latest.position);
+    }
+
+    #[test]
+    fn remote_block_change_updates_light_and_boundary_mesh_dependencies() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.set_sky_light(15, 80, 8, 15);
+
+        let dirty = apply_synced_block_change(&mut manager, 15, 80, 8, BlockType::Stone)
+            .expect("loaded block should change");
+
+        assert_eq!(manager.get_block(15, 80, 8), BlockType::Stone);
+        assert_eq!(manager.get_sky_light(15, 80, 8), 0);
+        assert!(dirty.contains(&(0, 0)));
+        assert!(dirty.contains(&(1, 0)));
     }
 }
 
@@ -112,6 +194,7 @@ impl Vertex {
 impl State {
     fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
         let mut dirty_chunks = std::collections::HashSet::new();
+        let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
         for &((x, y, z), new_block) in changes {
             let old_block = self.chunk_manager.get_block(x, y, z);
             if old_block == new_block {
@@ -158,11 +241,16 @@ impl State {
                 crate::redstone::Direction::North,
             );
             self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
+            broadcast.push(((x, y, z), new_block));
         }
         for coord in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
                 mesh.dirty = true;
             }
+        }
+        // Fan each authoritative batch mutation out to connected clients.
+        for ((x, y, z), block) in broadcast {
+            self.broadcast_block_change(x, y, z, block);
         }
     }
 
@@ -175,12 +263,14 @@ impl State {
     ) {
         let game_mode = self.game_mode;
         let mut drops = Vec::new();
+        let mut broken_blocks = Vec::new();
         self.chunk_manager.check_and_break_unsupported_above(
             wx,
             wy,
             wz,
             dirty_chunks,
             |(x, y, z), block| {
+                broken_blocks.push((x, y, z));
                 if game_mode == GameMode::Survival {
                     let drop_item = match block {
                         BlockType::TallGrass => {
@@ -208,6 +298,9 @@ impl State {
         );
         for (item, pos) in drops {
             self.spawn_dropped_item(item, pos);
+        }
+        for (x, y, z) in broken_blocks {
+            self.broadcast_block_change(x, y, z, BlockType::Air);
         }
     }
 
@@ -302,6 +395,8 @@ impl State {
         self.particles = crate::particles::ParticleSystem::new();
         self.redstone = crate::redstone::RedstoneSystem::new();
         self.redstone_tick_timer = 0.0;
+        self.pending_chunk_payloads.clear();
+        self.pending_block_changes.clear();
         self.mining_target = None;
         self.mining_progress = 0.0;
         self.left_mouse_pressed = false;
@@ -320,6 +415,10 @@ impl State {
             .unwrap()
             .load_chunk_in(target, cx, cz)
         {
+            let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
+            if saved.blocks != generated_blocks {
+                self.mutated_chunks.insert((target, cx, cz));
+            }
             saved.restore_to_chunk(&mut chunk);
         }
         self.chunk_manager.chunks.insert((cx, cz), chunk);
@@ -390,6 +489,7 @@ impl State {
     }
 
     fn apply_boss_events(&mut self, events: crate::boss::BossEvents) {
+        let authoritative = self.is_authoritative();
         for hit in events.player_damage {
             self.take_damage(hit.amount, DamageSource::Mob);
         }
@@ -397,17 +497,21 @@ impl State {
             self.wither_effect_timer = self.wither_effect_timer.max(effect.duration);
         }
         for explosion in events.explosions {
-            if explosion.break_blocks {
-                crate::mob::explode(
+            if explosion.break_blocks && authoritative {
+                let removed = crate::mob::explode(
                     explosion.position,
                     explosion.radius,
                     &mut self.chunk_manager,
                     &mut self.chunk_meshes,
                     &mut self.player_physics,
                     &mut self.player_state,
+                    true,
                     GameMode::Creative,
                     0.0,
                 );
+                for (x, y, z) in removed {
+                    self.broadcast_block_change(x, y, z, BlockType::Air);
+                }
             }
             self.audio_manager
                 .play_sound(crate::audio::SoundId::Explosion);
@@ -422,7 +526,9 @@ impl State {
             .into_iter()
             .map(|placement| (placement.position, placement.block))
             .collect();
-        self.apply_block_changes(&changes);
+        if authoritative {
+            self.apply_block_changes(&changes);
+        }
         if events.dragon_completion.is_some() {
             self.player_state.add_experience(120);
         }
@@ -583,8 +689,21 @@ enum NetworkInbound {
         id: crate::network::protocol::PlayerId,
         action: crate::network::protocol::Action,
     },
-    BlockChange,
-    ChunkData,
+    BlockChange {
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+    },
+    ChunkData {
+        cx: i32,
+        cz: i32,
+        blocks: Vec<u8>,
+    },
+    TimeSync {
+        ticks: u64,
+        weather: u8,
+    },
     Chat,
 }
 
@@ -619,9 +738,13 @@ impl NetworkHandle {
                     crate::network::server::ServerToHost::ClientAction { id, action } => {
                         NetworkInbound::PlayerAction { id, action }
                     }
-                    crate::network::server::ServerToHost::ClientBlockChange { .. } => {
-                        NetworkInbound::BlockChange
-                    }
+                    crate::network::server::ServerToHost::ClientBlockChange {
+                        x,
+                        y,
+                        z,
+                        block,
+                        ..
+                    } => NetworkInbound::BlockChange { x, y, z, block },
                     crate::network::server::ServerToHost::ChatFromClient { .. } => {
                         NetworkInbound::Chat
                     }
@@ -666,11 +789,14 @@ impl NetworkHandle {
                     crate::network::client::ClientToGame::PlayerAction { id, action } => {
                         NetworkInbound::PlayerAction { id, action }
                     }
-                    crate::network::client::ClientToGame::BlockChange { .. } => {
-                        NetworkInbound::BlockChange
+                    crate::network::client::ClientToGame::BlockChange { x, y, z, block } => {
+                        NetworkInbound::BlockChange { x, y, z, block }
                     }
-                    crate::network::client::ClientToGame::ChunkData { .. } => {
-                        NetworkInbound::ChunkData
+                    crate::network::client::ClientToGame::ChunkData { cx, cz, blocks } => {
+                        NetworkInbound::ChunkData { cx, cz, blocks }
+                    }
+                    crate::network::client::ClientToGame::TimeSync { ticks, weather } => {
+                        NetworkInbound::TimeSync { ticks, weather }
                     }
                     crate::network::client::ClientToGame::Chat { .. } => NetworkInbound::Chat,
                 })
@@ -713,6 +839,47 @@ impl NetworkHandle {
                 z,
                 block,
             });
+        }
+    }
+
+    /// Host-only: fan a block mutation out to every connected client. The host
+    /// applies the mutation locally through the canonical path and then calls
+    /// this so peers render the same world state.
+    fn broadcast_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ =
+                host_to_server.send(crate::network::server::HostToServer::BroadcastBlockChange {
+                    x,
+                    y,
+                    z,
+                    block,
+                });
+        }
+    }
+
+    /// Host-only: push a full chunk payload to a specific joining client as
+    /// part of mid-game join catch-up.
+    fn send_chunk_to(
+        &self,
+        cx: i32,
+        cz: i32,
+        blocks: Vec<u8>,
+        to: crate::network::protocol::PlayerId,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.send(crate::network::server::HostToServer::SendChunk {
+                cx,
+                cz,
+                blocks,
+                to,
+            });
+        }
+    }
+
+    fn broadcast_time_sync(&self, ticks: u64, weather: u8) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server
+                .send(crate::network::server::HostToServer::BroadcastTimeSync { ticks, weather });
         }
     }
 
@@ -867,7 +1034,18 @@ pub struct State {
         std::collections::HashMap<crate::network::protocol::PlayerId, RemotePlayerState>,
     pub network_status: Option<String>,
     network_position_timer: f32,
+    network_time_sync_timer: f32,
     network_time: f32,
+    /// Client-only: chunk payloads that arrived from the host before the chunk
+    /// was streamed in. Applied when `update_chunks` loads the coordinate.
+    pending_chunk_payloads: std::collections::HashMap<(i32, i32), Vec<u8>>,
+    /// Client-only coalesced mutations for chunks that are not streamed in yet.
+    /// The latest authoritative value wins for each world-space block.
+    pending_block_changes:
+        std::collections::HashMap<(i32, i32), std::collections::HashMap<(i32, i32, i32), u32>>,
+    /// Host-only set of dimension-namespaced chunks that differ from their
+    /// deterministic generated form and therefore need join-time catch-up.
+    mutated_chunks: std::collections::HashSet<(crate::dimension::Dimension, i32, i32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1407,6 +1585,7 @@ impl State {
         let render_distance = settings.render_distance;
         let mut chunk_manager = ChunkManager::new_in_dimension(render_distance, current_dimension);
         let mut chunk_meshes = std::collections::HashMap::new();
+        let mut mutated_chunks = std::collections::HashSet::new();
 
         // Load only the immediate spawn area synchronously.  Loading every
         // chunk in a large render distance here used to create all CPU/GPU
@@ -1427,6 +1606,11 @@ impl State {
                         manager.load_chunk_in(current_dimension, cx, cz)
                     };
                     if let Some(data) = saved_chunk {
+                        let generated_blocks =
+                            crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
+                        if data.blocks != generated_blocks {
+                            mutated_chunks.insert((current_dimension, cx, cz));
+                        }
                         data.restore_to_chunk(&mut chunk);
                     }
                     chunk_manager.chunks.insert((cx, cz), chunk);
@@ -1858,7 +2042,11 @@ impl State {
             remote_players: std::collections::HashMap::new(),
             network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
             network_position_timer: 0.0,
+            network_time_sync_timer: 0.0,
             network_time: 0.0,
+            pending_chunk_payloads: std::collections::HashMap::new(),
+            pending_block_changes: std::collections::HashMap::new(),
+            mutated_chunks,
         }
     }
 
@@ -1877,6 +2065,49 @@ impl State {
 
     pub fn is_authoritative(&self) -> bool {
         !matches!(self.role, MultiplayerRole::Client { .. })
+    }
+
+    fn broadcast_block_change(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
+        if !matches!(self.role, MultiplayerRole::Host { .. }) {
+            return;
+        }
+        let cx = x.div_euclid(CHUNK_WIDTH as i32);
+        let cz = z.div_euclid(CHUNK_DEPTH as i32);
+        self.mutated_chunks.insert((self.current_dimension, cx, cz));
+        self.network
+            .broadcast_block_change(x, y, z, block.to_wire());
+    }
+
+    fn send_mutated_chunks_to(&self, player_id: crate::network::protocol::PlayerId) {
+        let payloads: Vec<_> = self
+            .mutated_chunks
+            .iter()
+            .filter_map(|&(dimension, cx, cz)| {
+                if dimension != self.current_dimension {
+                    return None;
+                }
+                self.chunk_manager.chunks.get(&(cx, cz)).map(|chunk| {
+                    let blocks = crate::save::ChunkSaveData::from_chunk(chunk).blocks;
+                    (cx, cz, blocks)
+                })
+            })
+            .collect();
+        for (cx, cz, blocks) in payloads {
+            self.network.send_chunk_to(cx, cz, blocks, player_id);
+        }
+    }
+
+    fn weather_wire_value(&self) -> u8 {
+        match self.weather.current {
+            crate::weather::Weather::Clear => 0,
+            crate::weather::Weather::Rain => 1,
+            crate::weather::Weather::Thunder => 2,
+        }
+    }
+
+    fn broadcast_time_sync(&self) {
+        self.network
+            .broadcast_time_sync(self.world_time.ticks, self.weather_wire_value());
     }
 
     fn drain_network_events(&mut self) {
@@ -1901,6 +2132,8 @@ impl State {
                     self.weather = crate::weather::WeatherSystem::new(self.world_seed);
                     self.chunk_manager.chunks.clear();
                     self.chunk_meshes.clear();
+                    self.pending_chunk_payloads.clear();
+                    self.pending_block_changes.clear();
                     self.network_ready = true;
                     self.network_status = None;
                 }
@@ -1959,6 +2192,8 @@ impl State {
                     }
                     if matches!(self.role, MultiplayerRole::Host { .. }) {
                         self.network.notify_player_join(id, username);
+                        self.send_mutated_chunks_to(id);
+                        self.broadcast_time_sync();
                     }
                 }
                 NetworkInbound::PlayerLeave(id) => {
@@ -2057,7 +2292,32 @@ impl State {
                         }
                     }
                 }
-                NetworkInbound::BlockChange | NetworkInbound::ChunkData | NetworkInbound::Chat => {}
+                NetworkInbound::BlockChange { x, y, z, block } => {
+                    if self.is_authoritative() {
+                        // A client requested a block change. Apply it through the
+                        // canonical broadcaster, which re-broadcasts the result
+                        // to every client (including the originator) so all
+                        // peers converge on the host's authoritative state.
+                        self.set_block_and_broadcast(x, y, z, block);
+                    } else {
+                        self.apply_remote_block_change(x, y, z, block);
+                    }
+                }
+                NetworkInbound::ChunkData { cx, cz, blocks } => {
+                    self.apply_remote_chunk_data(cx, cz, blocks);
+                }
+                NetworkInbound::TimeSync { ticks, weather } => {
+                    if !self.is_authoritative() {
+                        self.world_time.ticks = ticks;
+                        self.world_time.tick_accumulator = 0.0;
+                        self.weather.current = match weather {
+                            1 => crate::weather::Weather::Rain,
+                            2 => crate::weather::Weather::Thunder,
+                            _ => crate::weather::Weather::Clear,
+                        };
+                    }
+                }
+                NetworkInbound::Chat => {}
             }
         }
     }
@@ -2076,6 +2336,17 @@ impl State {
             self.camera.yaw,
             self.camera.pitch,
         );
+    }
+
+    fn update_network_time_sync(&mut self, dt: f32) {
+        if !matches!(self.role, MultiplayerRole::Host { .. }) || !self.network_ready {
+            return;
+        }
+        self.network_time_sync_timer += dt;
+        if self.network_time_sync_timer >= 1.0 {
+            self.network_time_sync_timer %= 1.0;
+            self.broadcast_time_sync();
+        }
     }
 
     pub fn shutdown_network(&mut self) {
@@ -2309,9 +2580,21 @@ impl State {
                 None
             };
             if let Some(data) = chunk_data {
+                let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
+                if data.blocks != generated_blocks {
+                    self.mutated_chunks.insert((self.current_dimension, cx, cz));
+                }
                 data.restore_to_chunk(&mut chunk);
             }
+            if let Some(blocks) = self.pending_chunk_payloads.remove(&(cx, cz)) {
+                Self::restore_chunk_payload(&mut chunk, &blocks);
+            }
             self.chunk_manager.chunks.insert((cx, cz), chunk);
+            if let Some(changes) = self.pending_block_changes.remove(&(cx, cz)) {
+                for ((x, y, z), block) in changes {
+                    self.apply_remote_block_change(x, y, z, block);
+                }
+            }
 
             let mut dirty = std::collections::HashSet::new();
             // Re-seed both sides of every newly available boundary. This lets
@@ -2624,22 +2907,30 @@ impl State {
         self.water_tick_timer += dt;
         if self.is_authoritative() && self.water_tick_timer >= 0.25 {
             self.water_tick_timer = 0.0;
-            let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
+            let (dirty, mutations) =
+                crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
             for (cx, cz) in dirty {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
                     mesh.dirty = true;
                 }
+            }
+            // Fan fluid-driven block changes out to connected clients.
+            for ((x, y, z), block) in mutations {
+                self.broadcast_block_change(x, y, z, block);
             }
         }
 
         self.lava_tick_timer += dt;
         if self.is_authoritative() && self.lava_tick_timer >= 1.5 {
             self.lava_tick_timer = 0.0;
-            let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
+            let (dirty, mutations) = crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
             for (cx, cz) in dirty {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
                     mesh.dirty = true;
                 }
+            }
+            for ((x, y, z), block) in mutations {
+                self.broadcast_block_change(x, y, z, block);
             }
         }
         if self.player_state.is_dead {
@@ -2760,7 +3051,11 @@ impl State {
         }
 
         // Update game time
-        let speed_multiplier = if self.keys.t { 200.0 } else { 1.0 };
+        let speed_multiplier = if self.is_authoritative() && self.keys.t {
+            200.0
+        } else {
+            1.0
+        };
         let elapsed_world_ticks = dt * 20.0 * speed_multiplier;
         self.world_time.tick_accumulator += elapsed_world_ticks;
         let new_ticks = self.world_time.tick_accumulator.floor() as u64;
@@ -2772,6 +3067,7 @@ impl State {
         } else {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
         }
+        self.update_network_time_sync(dt);
         let mut move_dir = Vec3::ZERO;
         let yaw_cos = self.camera.yaw.cos();
         let yaw_sin = self.camera.yaw.sin();
@@ -2992,7 +3288,7 @@ impl State {
 
         // Leaf Decay Random Ticks
         let chunk_keys: Vec<(i32, i32)> = self.chunk_manager.chunks.keys().cloned().collect();
-        if !chunk_keys.is_empty() {
+        if self.is_authoritative() && !chunk_keys.is_empty() {
             // Run 30 random ticks per frame
             let mut rng_seed = (self.total_time * 1000.0) as u32;
             let mut next_rand = |max: u32| -> u32 {
@@ -3077,6 +3373,7 @@ impl State {
                                 mesh.dirty = true;
                             }
                         }
+                        self.broadcast_block_change(wx, ry, wz, BlockType::Air);
                     }
                 }
             }
@@ -3182,7 +3479,8 @@ impl State {
 
         // Update mobs
         self.update_player_projectiles(dt);
-        crate::mob::update_mobs(
+        let authoritative = self.is_authoritative();
+        let exploded_blocks = crate::mob::update_mobs(
             &mut self.entity_manager,
             &mut self.chunk_manager,
             &mut self.chunk_meshes,
@@ -3195,10 +3493,14 @@ impl State {
             right,
             self.potion_effects.has_invisibility(),
             crate::enchantment::protection_multiplier(&self.inventory.armor, false),
+            authoritative,
         );
+        for (x, y, z) in exploded_blocks {
+            self.broadcast_block_change(x, y, z, BlockType::Air);
+        }
 
         // Update passive mobs
-        crate::passive_mob::update_passive_mobs(
+        let grazed_blocks = crate::passive_mob::update_passive_mobs(
             &mut self.entity_manager,
             &mut self.chunk_manager,
             &mut self.chunk_meshes,
@@ -3207,7 +3509,11 @@ impl State {
             self.game_mode,
             dt,
             self.total_time,
+            authoritative,
         );
+        for (x, y, z) in grazed_blocks {
+            self.broadcast_block_change(x, y, z, BlockType::Dirt);
+        }
 
         // Spawn passive mobs (daytime spawn)
         if self.current_dimension == crate::dimension::Dimension::Overworld {
@@ -3374,7 +3680,11 @@ impl State {
             }
         }
 
-        let accumulation_steps = self.weather.take_snow_accumulation_steps(dt);
+        let accumulation_steps = if self.is_authoritative() {
+            self.weather.take_snow_accumulation_steps(dt)
+        } else {
+            0
+        };
         for _ in 0..accumulation_steps * 6 {
             let wx = player_x + self.weather.random_offset(24);
             let wz = player_z + self.weather.random_offset(24);
@@ -3466,24 +3776,26 @@ impl State {
             listener_right,
         );
 
-        for entity in &mut self.entity_manager.entities {
-            if entity.entity_type == crate::entity::EntityType::RemotePlayer {
-                continue;
+        if self.is_authoritative() {
+            for entity in &mut self.entity_manager.entities {
+                if entity.entity_type == crate::entity::EntityType::RemotePlayer {
+                    continue;
+                }
+                let horizontal = glam::Vec2::new(
+                    entity.position.x - strike_pos.x,
+                    entity.position.z - strike_pos.z,
+                )
+                .length();
+                if entity.health > 0.0 && horizontal <= 3.5 {
+                    entity.health -= 10.0;
+                    entity.fire_aspect_timer = entity.fire_aspect_timer.max(5.0);
+                }
             }
-            let horizontal = glam::Vec2::new(
-                entity.position.x - strike_pos.x,
-                entity.position.z - strike_pos.z,
-            )
-            .length();
-            if entity.health > 0.0 && horizontal <= 3.5 {
-                entity.health -= 10.0;
-                entity.fire_aspect_timer = entity.fire_aspect_timer.max(5.0);
+            let player_horizontal =
+                glam::Vec2::new(player_pos.x - strike_pos.x, player_pos.z - strike_pos.z).length();
+            if player_horizontal <= 3.5 {
+                self.take_damage(10.0, DamageSource::Lightning);
             }
-        }
-        let player_horizontal =
-            glam::Vec2::new(player_pos.x - strike_pos.x, player_pos.z - strike_pos.z).length();
-        if player_horizontal <= 3.5 {
-            self.take_damage(10.0, DamageSource::Lightning);
         }
 
         // A short chain of bright, vertically stretched billboards forms the
@@ -3505,7 +3817,8 @@ impl State {
 
         let fire_y = surface_y + 1;
         let support = self.chunk_manager.get_block(strike_x, surface_y, strike_z);
-        if fire_y < CHUNK_HEIGHT as i32
+        if self.is_authoritative()
+            && fire_y < CHUNK_HEIGHT as i32
             && support.properties().is_solid
             && !matches!(
                 support,
@@ -3518,6 +3831,9 @@ impl State {
     }
 
     fn apply_weather_block_change(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
+        if !self.is_authoritative() {
+            return;
+        }
         let old = self.chunk_manager.get_block(wx, wy, wz);
         if old == block {
             return;
@@ -3577,6 +3893,8 @@ impl State {
                 mesh.dirty = true;
             }
         }
+        // Fan weather-driven block placement out to connected clients.
+        self.broadcast_block_change(wx, wy, wz, block);
     }
 
     pub fn update_crack_buffers(&self, target_pos: Vec3, progress: f32) -> Option<(u32, u32)> {
@@ -3761,6 +4079,7 @@ impl State {
 
     fn apply_redstone_update(&mut self, update: crate::redstone::RedstoneUpdate) {
         let mut dirty_chunks = std::collections::HashSet::new();
+        let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
         for mutation in update.mutations {
             let (wx, wy, wz) = mutation.pos;
             let old_properties = mutation.old_block.properties();
@@ -3806,6 +4125,7 @@ impl State {
                 }
             }
             mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
+            broadcast.push(((wx, wy, wz), mutation.new_block));
         }
 
         for (dcx, dcz) in dirty_chunks {
@@ -3814,21 +4134,30 @@ impl State {
             }
         }
 
+        // Fan the redstone-driven block mutations out to connected clients.
+        for ((x, y, z), block) in broadcast {
+            self.broadcast_block_change(x, y, z, block);
+        }
+
         for action in update.actions {
             match action {
                 crate::redstone::RedstoneAction::Explode { pos } => {
                     let center =
                         Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
-                    crate::mob::explode(
+                    let removed = crate::mob::explode(
                         center,
                         4.0,
                         &mut self.chunk_manager,
                         &mut self.chunk_meshes,
                         &mut self.player_physics,
                         &mut self.player_state,
+                        true,
                         self.game_mode,
                         1.0,
                     );
+                    for (x, y, z) in removed {
+                        self.broadcast_block_change(x, y, z, BlockType::Air);
+                    }
                     self.audio_manager
                         .play_sound(crate::audio::SoundId::Explosion);
                 }
@@ -3881,6 +4210,160 @@ impl State {
 
         if update.propagation_overflowed {
             eprintln!("[Redstone] propagation pass limit reached; continuing next tick");
+        }
+    }
+
+    /// Host-side canonical block mutation that also fans the result out to every
+    /// connected client. Used for client-initiated changes (relayed through the
+    /// server) and any host-derived mutation that should be visible to peers.
+    ///
+    /// This performs the full sequence the architecture mandates: `set_block`,
+    /// sky/block light update, mesh-dependency invalidation, and redstone
+    /// component rescan. It deliberately does **not** spawn drops, play sounds,
+    /// grant XP, or trigger advancements - those are local gameplay reactions
+    /// tied to the *player's* action, not to a relayed remote request.
+    pub fn set_block_and_broadcast(&mut self, x: i32, y: i32, z: i32, block_wire: u32) {
+        let block = match BlockType::from_wire(block_wire) {
+            Some(b) => b,
+            None => return,
+        };
+        let Some(((cx, cz), _)) = self.chunk_manager.world_to_local(x, y, z) else {
+            return;
+        };
+        if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+            return;
+        }
+        let prev = self.chunk_manager.get_block(x, y, z);
+        if prev == block {
+            // Echo the authoritative value to correct a requesting client's
+            // prediction, but do not mark an unchanged chunk as mutated.
+            self.network.broadcast_block_change(x, y, z, block_wire);
+            return;
+        }
+        let Some(mut dirty_chunks) =
+            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block)
+        else {
+            return;
+        };
+        self.redstone.on_block_changed(
+            &self.chunk_manager,
+            (x, y, z),
+            crate::redstone::Direction::North,
+        );
+        self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
+        for (dcx, dcz) in dirty_chunks {
+            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                mesh.dirty = true;
+            }
+        }
+        self.broadcast_block_change(x, y, z, block);
+    }
+
+    /// Client-side application of an authoritative block change received from
+    /// the host. Mirrors the mutation half of the canonical path: `set_block`,
+    /// lighting, mesh invalidation. Redstone is intentionally **not** rescanned
+    /// - the host runs the redstone simulation and broadcasts its actuator
+    /// effects as further `BlockChange`s, so running it here would double-apply
+    /// and could diverge.
+    fn apply_remote_block_change(&mut self, x: i32, y: i32, z: i32, block_wire: u32) {
+        let block = match BlockType::from_wire(block_wire) {
+            Some(b) => b,
+            None => return,
+        };
+        let Some(((cx, cz), _)) = self.chunk_manager.world_to_local(x, y, z) else {
+            return;
+        };
+        if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+            self.pending_block_changes
+                .entry((cx, cz))
+                .or_default()
+                .insert((x, y, z), block_wire);
+            return;
+        }
+        let Some(dirty_chunks) = apply_synced_block_change(&mut self.chunk_manager, x, y, z, block)
+        else {
+            return;
+        };
+        for (dcx, dcz) in dirty_chunks {
+            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                mesh.dirty = true;
+            }
+        }
+    }
+
+    /// Client-side application of a full chunk payload sent by the host during
+    /// mid-game join catch-up. The payload uses the same Zlib-compressed layout
+    /// as `save.rs::ChunkSaveData`. If the chunk is not loaded yet, the payload
+    /// is buffered and applied once `update_chunks` loads that coordinate.
+    fn apply_remote_chunk_data(&mut self, cx: i32, cz: i32, blocks: Vec<u8>) {
+        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
+            Self::restore_chunk_payload(chunk, &blocks);
+            if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
+                mesh.dirty = true;
+            }
+            // Re-seed boundary lighting so neighbors pick up the overwritten
+            // column heights and light values.
+            let mut dirty_chunks = std::collections::HashSet::new();
+            for (lighting_cx, lighting_cz) in [
+                (cx, cz),
+                (cx - 1, cz),
+                (cx + 1, cz),
+                (cx, cz - 1),
+                (cx, cz + 1),
+            ] {
+                if self
+                    .chunk_manager
+                    .chunks
+                    .contains_key(&(lighting_cx, lighting_cz))
+                {
+                    crate::lighting::propagate_chunk_lighting(
+                        &mut self.chunk_manager,
+                        lighting_cx,
+                        lighting_cz,
+                        &mut dirty_chunks,
+                    );
+                    if let Some(mesh) = self.chunk_meshes.get_mut(&(lighting_cx, lighting_cz)) {
+                        mesh.dirty = true;
+                    }
+                }
+            }
+            for coord in dirty_chunks {
+                if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
+                    mesh.dirty = true;
+                }
+            }
+        } else {
+            // Chunk not streamed in yet; buffer for deferred application.
+            self.pending_chunk_payloads.insert((cx, cz), blocks);
+        }
+    }
+
+    /// Decode a `ChunkSaveData`-style compressed payload into an existing
+    /// chunk. Reused by both the save loader and the network catch-up path so
+    /// the wire format stays identical to the on-disk format.
+    fn restore_chunk_payload(chunk: &mut crate::world::Chunk, blocks: &[u8]) {
+        let decoded = match crate::save::decompress_bytes(blocks) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        if decoded.len() == 16 * 256 * 16 {
+            let mut idx = 0;
+            for x in 0..16 {
+                for y in 0..256 {
+                    for z in 0..16 {
+                        chunk.blocks[x][y][z] = BlockType::from_u8(decoded[idx]);
+                        chunk.sky_light[x][y][z] = 0;
+                        chunk.block_light[x][y][z] = 0;
+                        chunk.fluid_levels[x][y][z] = 0;
+                        idx += 1;
+                    }
+                }
+            }
+        }
+        for x in 0..16 {
+            for z in 0..16 {
+                chunk.update_heightmap(x, z);
+            }
         }
     }
 
@@ -4076,6 +4559,9 @@ impl State {
                 mesh.dirty = true;
             }
         }
+
+        // Fan the authoritative break out to connected clients.
+        self.broadcast_block_change(wx, wy, wz, BlockType::Air);
     }
 
     /// Spawn a `DroppedItem` entity in the world carrying the given `Item`.
@@ -4825,6 +5311,10 @@ impl State {
             let wz = target.z as i32;
 
             let mut dirty_chunks = std::collections::HashSet::new();
+            // Resulting block at (wx, wy, wz) after this click, used to fan the
+            // authoritative mutation out to connected clients. `None` means the
+            // click did not mutate the world (e.g. broke nothing).
+            let mut result_block: Option<BlockType> = None;
             if is_left_click {
                 let old_block = self.chunk_manager.get_block(wx, wy, wz);
                 if old_block != BlockType::Air {
@@ -4891,6 +5381,7 @@ impl State {
                         &mut dirty_chunks,
                     );
                     self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
+                    result_block = Some(BlockType::Air);
                 }
             } else {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
@@ -4943,6 +5434,7 @@ impl State {
                     );
 
                     self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
+                    result_block = Some(placed_block);
 
                     if matches!(
                         placed_block,
@@ -4962,6 +5454,9 @@ impl State {
                                 .map(|position| (position, BlockType::Air))
                                 .collect();
                             self.apply_block_changes(&removals);
+                            // The wither ritual consumes the placed block too;
+                            // broadcast that final state before spawning.
+                            self.broadcast_block_change(wx, wy, wz, BlockType::Air);
                             self.entity_manager
                                 .spawn(crate::entity::EntityType::Wither, spawn_pos);
                             return;
@@ -4978,6 +5473,11 @@ impl State {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
                     mesh.dirty = true;
                 }
+            }
+
+            // Fan the authoritative player-driven mutation out to clients.
+            if let Some(block) = result_block {
+                self.broadcast_block_change(wx, wy, wz, block);
             }
         }
     }

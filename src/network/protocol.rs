@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
@@ -63,6 +63,11 @@ pub enum Packet {
         cz: i32,
         blocks: Vec<u8>,
     },
+    TimeSync {
+        protocol_version: u32,
+        ticks: u64,
+        weather: u8,
+    },
     ChatMessage {
         protocol_version: u32,
         sender: String,
@@ -101,6 +106,9 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::ChunkData {
+                protocol_version, ..
+            }
+            | Packet::TimeSync {
                 protocol_version, ..
             }
             | Packet::ChatMessage {
@@ -226,6 +234,17 @@ mod tests {
             cx: -3,
             cz: 4,
             blocks: vec![0u8; 4096],
+        };
+        let decoded = Packet::decode(&p.encode()).unwrap();
+        assert_eq!(p, decoded);
+    }
+
+    #[test]
+    fn time_sync_roundtrip() {
+        let p = Packet::TimeSync {
+            protocol_version: v(),
+            ticks: 18_500,
+            weather: 2,
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_eq!(p, decoded);

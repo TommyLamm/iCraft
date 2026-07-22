@@ -29,10 +29,12 @@ pub fn update_passive_mobs(
     game_mode: GameMode,
     dt: f32,
     time: f32,
-) {
+    authoritative: bool,
+) -> Vec<(i32, i32, i32)> {
     let player_pos = player_physics.position;
     let mut hearts_to_spawn = Vec::new();
     let mut baby_mobs_to_spawn = Vec::new();
+    let mut block_changes = Vec::new();
 
     // Collect entities and process their individual AI
     let entity_len = entity_manager.entities.len();
@@ -97,8 +99,11 @@ pub fn update_passive_mobs(
                     let sx = pos.x.floor() as i32;
                     let sy = (pos.y - 0.5).floor() as i32;
                     let sz = pos.z.floor() as i32;
-                    if chunk_manager.get_block(sx, sy, sz) == crate::world::BlockType::Grass {
+                    if authoritative
+                        && chunk_manager.get_block(sx, sy, sz) == crate::world::BlockType::Grass
+                    {
                         chunk_manager.set_block(sx, sy, sz, crate::world::BlockType::Dirt);
+                        block_changes.push((sx, sy, sz));
 
                         let mut dirty_chunks = std::collections::HashSet::new();
                         mark_block_mesh_dependencies(&mut dirty_chunks, sx, sz);
@@ -294,6 +299,8 @@ pub fn update_passive_mobs(
             entity.life_time -= dt;
         }
     }
+
+    block_changes
 }
 
 pub fn spawn_passive_mobs(
