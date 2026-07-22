@@ -91,7 +91,7 @@ P3 [███████░░░] 66.7%
 | 22 | [紅石系統](./p3/22_redstone.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 23 | [天氣系統](./p3/23_weather.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
-| 25 | [多人遊戲](./p3/25_multiplayer.md) | ⬜ 待定 | — | — | |
+| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 1/6 完成 |
 | 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 28 | [成就 / 進度系統](./p3/28_advancements.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ⬜ 待定 | — | — | |
@@ -102,6 +102,14 @@ P3 [███████░░░] 66.7%
 ## 📝 更新日誌
 
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
+
+### 2026-07-22
+- 🟡 進度任務 #25 (By GLM-5.2)：多人遊戲 - 子任務 1/6 網路協議與傳輸層
+  - 新增文件：`src/network/mod.rs`, `src/network/protocol.rs`, `src/network/transport.rs`
+  - 修改文件：`Cargo.toml`, `src/main.rs`
+  - 關鍵決策：建立獨立、可測試且不依賴任何遊戲模組的網路基礎層。`protocol.rs` 以既有 `bincode` 序列化版本化的 `Packet` 列舉（Handshake、LoginSuccess、Disconnect、PlayerPosition、PlayerAction、PlayerJoin、PlayerLeave、BlockChange、ChunkData、ChatMessage、Keepalive 共 11 種變體，每個封包攜帶 `protocol_version: u32` 以便未來拒絕不相容客戶端）。`transport.rs` 的 `Connection` 包裝 `tokio::net::TcpStream`，以 4 位元組大端長度前綴框架搭配 2 MiB 上限防護惡意對端，`recv`/`send` 為非同步並重用讀取緩衝區。Tokio runtime 不在此層啟動，沿用 `save.rs` 的背景執行緒 + mpsc 模式以保持主 winit 執行緒完全同步。`BlockType` 暫以 `u32` 刻面傳輸，與遊戲列舉內部佈局解耦（轉換輔助函式留待子任務 5）。
+  - 驗證：`cargo check --release` 通過（僅基金會層未使用的預期 dead-code 警告）；`cargo test` 共 125 項單元測試與 1 項整合測試全部通過（含新增 13 項 protocol 往返測試與 2 項 transport TCP 框架往返測試）。本環境修復了損壞遺失的 `rust-std` 與 `rustfmt` 元件。
+  - 備註：`cargo fmt --check` 於既有遊戲模組（`boss.rs`、`mob.rs`、`state.rs`、`world.rs`、`chunk_manager.rs`、`mob_renderer.rs`）存在先前的格式漂移，非本子任務引入；依計畫「no game module is touched」原則未一併處理，新增的 `network` 檔案已通過 fmt。
 
 ### 2026-07-21
 - ✅ 完成任務 #28 (By Gemini 3.5 Flash High): 成就 / 進度系統

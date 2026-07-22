@@ -16,6 +16,7 @@ mod lighting;
 mod menu;
 mod mob;
 mod mob_renderer;
+mod network;
 mod particles;
 mod passive_mob;
 mod physics;
