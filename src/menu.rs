@@ -119,6 +119,10 @@ pub struct GameSettings {
     pub difficulty: Difficulty,
     pub language: Language,
     pub controls: ControlBindings,
+    pub mp_host_port: String,
+    pub mp_server_address: String,
+    pub mp_join_port: String,
+    pub mp_username: String,
 }
 
 impl Default for GameSettings {
@@ -135,6 +139,10 @@ impl Default for GameSettings {
             difficulty: Difficulty::Normal,
             language: Language::English,
             controls: ControlBindings::default(),
+            mp_host_port: "25565".to_string(),
+            mp_server_address: "127.0.0.1".to_string(),
+            mp_join_port: "25565".to_string(),
+            mp_username: "PLAYER".to_string(),
         }
     }
 }
@@ -179,6 +187,10 @@ impl GameSettings {
                 "key_sprint" => set_key(&mut settings.controls.sprint, value),
                 "key_sneak" => set_key(&mut settings.controls.sneak, value),
                 "key_inventory" => set_key(&mut settings.controls.inventory, value),
+                "mp_host_port" => settings.mp_host_port = value.to_string(),
+                "mp_server_address" => settings.mp_server_address = value.to_string(),
+                "mp_join_port" => settings.mp_join_port = value.to_string(),
+                "mp_username" => settings.mp_username = value.to_string(),
                 _ => {}
             }
         }
@@ -211,7 +223,11 @@ impl GameSettings {
                 "key_jump:{}\n",
                 "key_sprint:{}\n",
                 "key_sneak:{}\n",
-                "key_inventory:{}\n"
+                "key_inventory:{}\n",
+                "mp_host_port:{}\n",
+                "mp_server_address:{}\n",
+                "mp_join_port:{}\n",
+                "mp_username:{}\n"
             ),
             self.fov,
             self.sensitivity,
@@ -231,6 +247,10 @@ impl GameSettings {
             key_name(self.controls.sprint),
             key_name(self.controls.sneak),
             key_name(self.controls.inventory),
+            self.mp_host_port,
+            self.mp_server_address,
+            self.mp_join_port,
+            self.mp_username,
         );
         if let Err(error) = fs::write(SETTINGS_FILE, contents) {
             eprintln!("[Settings] Could not save settings: {error}");
@@ -879,10 +899,10 @@ impl Menu {
             create_difficulty: settings.difficulty,
             multiplayer_mode: MultiplayerMode::Host,
             selected_role: MultiplayerRole::Singleplayer,
-            host_port: "25565".to_string(),
-            server_address: "127.0.0.1".to_string(),
-            join_port: "25565".to_string(),
-            username: "PLAYER".to_string(),
+            host_port: settings.mp_host_port.clone(),
+            server_address: settings.mp_server_address.clone(),
+            join_port: settings.mp_join_port.clone(),
+            username: settings.mp_username.clone(),
             active_field: None,
             rebinding: None,
             message: None,
@@ -1086,12 +1106,14 @@ impl Menu {
                         return MenuAction::None;
                     };
                     self.selected_role = role;
+                    self.sync_and_save_multiplayer_settings();
                     self.worlds = discover_worlds();
                     self.selected_world = (!self.worlds.is_empty()).then_some(0);
                     self.world_scroll = 0;
                     self.active_field = None;
                     self.screen = MenuScreen::Worlds;
                 } else if hit(x, y, 0.02, 0.52, -0.58, -0.45) {
+                    self.sync_and_save_multiplayer_settings();
                     self.active_field = None;
                     self.screen = MenuScreen::Main;
                 }
@@ -1202,7 +1224,18 @@ impl Menu {
         MenuAction::None
     }
 
+    fn sync_and_save_multiplayer_settings(&mut self) {
+        self.settings.mp_host_port = self.host_port.clone();
+        self.settings.mp_server_address = self.server_address.clone();
+        self.settings.mp_join_port = self.join_port.clone();
+        self.settings.mp_username = self.username.clone();
+        self.settings.save();
+    }
+
     fn back(&mut self) {
+        if self.screen == MenuScreen::Multiplayer {
+            self.sync_and_save_multiplayer_settings();
+        }
         self.active_field = None;
         self.rebinding = None;
         self.screen = match self.screen {
@@ -2391,5 +2424,24 @@ mod tests {
     fn difficulty_steps_both_directions() {
         assert_eq!(Difficulty::Peaceful.step(-1), Difficulty::Hard);
         assert_eq!(Difficulty::Normal.step(1), Difficulty::Hard);
+    }
+
+    #[test]
+    fn multiplayer_settings_defaults_and_mutation() {
+        let mut settings = GameSettings::default();
+        assert_eq!(settings.mp_host_port, "25565");
+        assert_eq!(settings.mp_server_address, "127.0.0.1");
+        assert_eq!(settings.mp_join_port, "25565");
+        assert_eq!(settings.mp_username, "PLAYER");
+
+        settings.mp_host_port = "25570".to_string();
+        settings.mp_server_address = "192.168.1.100".to_string();
+        settings.mp_join_port = "25571".to_string();
+        settings.mp_username = "TEST_USER".to_string();
+
+        assert_eq!(settings.mp_host_port, "25570");
+        assert_eq!(settings.mp_server_address, "192.168.1.100");
+        assert_eq!(settings.mp_join_port, "25571");
+        assert_eq!(settings.mp_username, "TEST_USER");
     }
 }
