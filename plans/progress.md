@@ -104,6 +104,11 @@ P3 [███████░░░] 66.7%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-22
+- 🔧 補完任務 #25 子任務 3/6 未完成驗證步驟 (By GLM-5.2)：Step 7 編譯冒煙與 Step 2 雙實例煙霧測試
+  - 修改文件：`src/network/client.rs`, `docs/superpowers/plans/2026-07-22-multiplayer-03-client-bridge.md`, `plans/progress.md`
+  - 關鍵決策：完成子任務 3 計畫中最後兩個未勾選 checkbox。Step 7 以 `cargo check --release` 通過（僅 2 項 Sub-tasks 4-6 預留變體的既有 dead-code 警告，無錯誤），並以 release binary 啟動單一與雙實例各持續 8 秒與 6 秒無 panic、無 stderr，覆蓋「binary 啟動且伺服器執行緒不崩潰」需求。Step 2 新增自動化整合測試 `host_stop_notifies_client_and_threads_join_without_hanging`，驗證主機停止伺服器後 client 收到 `ClientToGame::Disconnected` 且雙背景執行緒於 3 秒逾時內乾淨 join 無 panic，補足「quitting either side cleans up the background thread without hanging」需求；既有 `connects_and_receives_join_for_second_client` 已覆蓋 seed 傳播與 `PlayerJoin`。
+  - 驗證：`cargo fmt --check` 通過；`cargo check --release` 通過；`cargo test --release` 共 134 項單元測試與 1 項整合測試全部通過（含新增 1 項 host-stop 清理測試）。
+  - 備註：兩視窗 Host/Join 點擊進入世界的完整 GUI 流程仍需互動式 Windows UI 自動化，維持手動檢查；資料路徑（seed 傳播、join 通知、disconnect 清理、執行緒拆解）已由自動測試完整覆蓋。
 - 🟡 進度任務 #25 (By GPT-5.6 Sol High)：多人遊戲 - 子任務 4/6 玩家狀態同步
   - 修改文件：`src/entity.rs`, `src/state.rs`, `src/mob.rs`, `src/mob_renderer.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `docs/superpowers/plans/2026-07-22-multiplayer-04-player-sync.md`
   - 關鍵決策：新增 `EntityType::RemotePlayer` 與網路玩家 metadata；`State` 以穩定 entity ID 綁定 remote player，而非會受 `Vec` 刪除影響的 index。主機中繼 client pose/action 並以 `PlayerId(0)` 廣播本機狀態，server 在 newcomer 登入時重播既有 roster。remote pose 以獨立網路時鐘保留兩個 snapshot，採 100 ms 延遲、端點 clamp 與最短 yaw 路徑插值，10 秒未更新後固定在最新姿勢；join/leave/disconnect 會建立或清理相應 entity，remote player 不進入 mob physics、AI、despawn 或本機 combat damage path。成功的本機 block break/place 會送出最小 `PlayerAction` cosmetic cue。

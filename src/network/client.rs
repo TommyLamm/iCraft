@@ -327,4 +327,48 @@ mod tests {
         let _ = server.join();
         assert_ne!(first_id, second_id);
     }
+
+    /// Step 2 (Task 5) two-instance smoke test: when the host stops the server,
+    /// the remaining client observes a `Disconnected` event and its background
+    /// thread exits cleanly without hanging. This automates the "quitting either
+    /// side cleans up the background thread without hanging" requirement that
+    /// the two-window GUI scenario checks manually.
+    #[test]
+    fn host_stop_notifies_client_and_threads_join_without_hanging() {
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = mpsc::channel();
+        let (server_tx, server_rx) = mpsc::channel();
+        let server = NetworkServer::spawn(addr.clone(), 0xDEAD_BEEF, 0, host_rx, server_tx);
+
+        let (_game_tx, game_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let client = NetworkClient::spawn(addr, "host_quit_witness".into(), game_rx, event_tx);
+
+        match wait_for_event(&event_rx) {
+            ClientToGame::Connected { seed, gamemode, .. } => {
+                assert_eq!(seed, 0xDEAD_BEEF);
+                assert_eq!(gamemode, 0);
+            }
+            other => panic!("expected Connected, got {other:?}"),
+        }
+        let _ = server_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("join event missing");
+
+        // Host quits: stop the server. The client must be notified and exit.
+        host_tx.send(HostToServer::Stop).unwrap();
+        match event_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(ClientToGame::Disconnected { .. }) => {}
+            Ok(other) => panic!("expected Disconnected, got {other:?}"),
+            Err(_) => panic!("client did not observe disconnect after host stop"),
+        }
+        client
+            .join()
+            .expect("client thread panicked during host-stop shutdown");
+        server
+            .join()
+            .expect("server thread panicked during shutdown");
+    }
 }
