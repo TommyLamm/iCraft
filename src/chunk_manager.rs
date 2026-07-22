@@ -402,4 +402,3 @@ mod tests {
         assert_eq!(broken, vec![((5, 65, 5), BlockType::Dandelion)]);
     }
 }
-

@@ -261,8 +261,8 @@ pub fn update_dimension_entities(
                     let delta = player_pos - entity.position;
                     let horizontal = Vec3::new(delta.x, 0.0, delta.z);
                     let desired_y = player_pos.y + 4.0;
-                    entity.velocity =
-                        horizontal.normalize_or_zero() * if delta.length() > 12.0 { 2.5 } else { -1.2 };
+                    entity.velocity = horizontal.normalize_or_zero()
+                        * if delta.length() > 12.0 { 2.5 } else { -1.2 };
                     entity.velocity.y = (desired_y - entity.position.y).clamp(-2.0, 2.0);
                     if delta.length_squared() <= 28.0 * 28.0 && entity.action_cooldown <= 0.0 {
                         events.player_damage.push(PlayerDamageEvent {
@@ -322,9 +322,14 @@ pub fn update_dimension_entities(
                 &mut pending_spawns,
                 &mut events,
             ),
-            EntityType::Wither => {
-                update_wither(entity, player_pos, dt, game_mode, &mut pending_spawns, &mut events)
-            }
+            EntityType::Wither => update_wither(
+                entity,
+                player_pos,
+                dt,
+                game_mode,
+                &mut pending_spawns,
+                &mut events,
+            ),
             EntityType::WitherSkull | EntityType::DragonBreath => {
                 entity.update_physics(dt, chunks);
                 if projectile_hit(entity, chunks, player_pos, game_mode, &mut events) {

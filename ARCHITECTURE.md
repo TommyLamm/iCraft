@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `f89ccdb165d8d530676f4019eda37f4afc34dcab` (`f89ccdb`). This identifies the
+> `2ad362f6643bdff66f6049aad72e90f0d5de20d6` (`2ad362f`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -17,13 +17,15 @@
 event loop, keeps the simulation on the main thread, and renders through `wgpu`.
 Terrain, the texture atlas, and fallback sounds are generated procedurally.
 
-There is currently no database. A self-contained networking foundation under
-`src/network/` now includes a versioned `Packet` protocol, async TCP
-`Connection` transport, and an integrated listen-server core. `NetworkServer`
-runs Tokio on a dedicated background thread, authenticates client sessions, and
-bridges authoritative events and broadcasts through synchronous channels. It is
-not yet wired into the game loop; that bridge is reserved for the remaining
-multiplayer subtasks.
+There is currently no database. Networking under `src/network/` includes a
+versioned `Packet` protocol, async TCP `Connection` transport, listen-server
+core, and joining-client bridge. Both `NetworkServer` and `NetworkClient` run
+Tokio on dedicated background threads and exchange events with main-thread
+`State` through synchronous channels. The menu carries a `MultiplayerRole`
+through `WorldLaunch`; host simulation remains authoritative, while a joining
+client waits for `LoginSuccess` before generating terrain from the server seed.
+Remote-player rendering, authoritative block application, and chat UI remain in
+multiplayer subtasks 4-6.
 Display/input/audio
 settings persist in `settings.txt`, while each world's data (including seed,
 metadata, game time, player status, inventory, current dimension, advancement
@@ -327,8 +329,8 @@ entity physics and world-side lifecycle events.
 | --- | --- |
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
 | `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing, redraw loop, resize and surface-error policy. |
-| `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, and `WorldLaunch`. |
-| `src/state.rs` | `State`, `ChunkMesh`, `KeyState`, `SlotType`; selected-world GPU setup, frame ordering, in-game/advancement UI, mining/placement, friendly projectiles, particle emitters, dropped-item collection, damage/respawn, and chunk streaming. Start with the exact method, not the whole file. |
+| `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
+| `src/state.rs` | `State`, `NetworkHandle`, `ChunkMesh`, `KeyState`, `SlotType`; selected-world/network setup, frame ordering, in-game/advancement UI, mining/placement authority gates, 20 Hz local-position sends, particle emitters, dropped-item collection, damage/respawn, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
 | `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles and solid bow/string tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
@@ -370,10 +372,11 @@ entity physics and world-side lifecycle events.
 
 | File | Responsibility / key symbols |
 | --- | --- |
-| `src/network/mod.rs` | Module root; re-exports `protocol`, `server`, and `transport`. |
+| `src/network/mod.rs` | Module root; re-exports `client`, `protocol`, `server`, and `transport`. |
+| `src/network/client.rs` | `NetworkClient`, `ClientToGame`, `GameToClient`; background-thread Tokio connector, version handshake/login, packet/event translation, keepalive replies, synchronous command polling, disconnect reporting, and clean shutdown. |
 | `src/network/protocol.rs` | `PlayerId`, `PROTOCOL_VERSION`, `Action`, `Packet`; bincode `encode`/`decode` of the 11-variant versioned wire enum (each packet carries `protocol_version: u32`). No game-module dependencies. |
-| `src/network/server.rs` | `NetworkServer`, `ServerToHost`, `HostToServer`; background-thread Tokio listen server, handshake/login and monotonic player IDs, bounded per-client send queues, host-command fan-out, authenticated client event relay, keepalive/timeout handling, and disconnect cleanup. Still channel-driven only; `State` integration is pending. |
-| `src/network/transport.rs` | `Connection`; async `tokio` TCP stream with 4-byte big-endian length-prefixed framing, a 2 MiB packet cap, `recv`/`send`, and a crate-internal owned read/write split used by independent server session loops. Runtime-agnostic; not yet driven by the game loop. |
+| `src/network/server.rs` | `NetworkServer`, `ServerToHost`, `HostToServer`; background-thread Tokio listen server, handshake/login and monotonic player IDs, bounded per-client send queues, host-command fan-out, authenticated client event relay, keepalive/timeout handling, and disconnect cleanup. Host-mode `State` owns its channel ends and thread handle. |
+| `src/network/transport.rs` | `Connection`; async `tokio` TCP stream with 4-byte big-endian length-prefixed framing, a 2 MiB packet cap, `recv`/`send`, and a crate-internal owned read/write split used by server and client loops. |
 
 ## Data and configuration
 

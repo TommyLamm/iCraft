@@ -405,7 +405,6 @@ impl BlockType {
         }
     }
 
-
     pub fn sound_material(self) -> Option<crate::audio::SoundMaterial> {
         match self {
             BlockType::Air
@@ -2686,4 +2685,3 @@ mod tests {
         assert!(!BlockType::Cactus.can_stay_on(BlockType::Dirt));
     }
 }
-

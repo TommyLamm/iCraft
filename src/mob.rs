@@ -612,10 +612,7 @@ mod tests {
                 "Mob of type {:?} targeted player in Creative mode!",
                 entity.entity_type
             );
-            assert!(
-                !entity.is_ignited,
-                "Creeper ignited in Creative mode!"
-            );
+            assert!(!entity.is_ignited, "Creeper ignited in Creative mode!");
         }
     }
 }

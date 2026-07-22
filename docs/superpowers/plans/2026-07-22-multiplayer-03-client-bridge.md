@@ -26,10 +26,10 @@
 - Create: `src/network/client.rs`
 - Modify: `src/network/mod.rs`
 
-- [ ] **Step 1: Declare the submodule**
+- [x] **Step 1: Declare the submodule**
   Add `pub mod client;` to `src/network/mod.rs`.
 
-- [ ] **Step 2: Define `ClientToGame` (inbound events for `State`)**
+- [x] **Step 2: Define `ClientToGame` (inbound events for `State`)**
   ```rust
   pub enum ClientToGame {
       Connected { player_id: PlayerId, seed: u64, gamemode: u8 },
@@ -44,7 +44,7 @@
   }
   ```
 
-- [ ] **Step 3: Define `GameToClient` (outbound commands from `State`)**
+- [x] **Step 3: Define `GameToClient` (outbound commands from `State`)**
   ```rust
   pub enum GameToClient {
       SendPosition { x: f32, y: f32, z: f32, yaw: f32, pitch: f32 },
@@ -55,7 +55,7 @@
   }
   ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo check`
 
 ---
@@ -65,7 +65,7 @@
 **Files:**
 - Modify: `src/network/client.rs`
 
-- [ ] **Step 1: Implement the spawn signature**
+- [x] **Step 1: Implement the spawn signature**
   ```rust
   pub fn spawn(
       server_addr: String,
@@ -75,17 +75,17 @@
   ) -> std::thread::JoinHandle<()>
   ```
 
-- [ ] **Step 2: Implement the connect + handshake**
+- [x] **Step 2: Implement the connect + handshake**
   On a fresh `tokio::runtime::Runtime` (built on this thread), `TcpStream::connect`, wrap in `transport::Connection`, send `Packet::Handshake { protocol_version, username }`, and await `Packet::LoginSuccess`. On success emit `ClientToGame::Connected { player_id, seed, gamemode }`. On any failure emit `ClientToGame::Disconnected { reason }` and return.
 
-- [ ] **Step 3: Implement the recv loop**
+- [x] **Step 3: Implement the recv loop**
   Loop on `Connection::recv`, translating each `Packet` variant to the matching `ClientToGame`:
   - `PlayerJoin`/`PlayerLeave`/`PlayerPosition`/`PlayerAction`/`BlockChange`/`ChunkData`/`ChatMessage` -> direct mapping.
   - `Keepalive` -> reply with `Packet::Keepalive` (no game event).
   - `Disconnect` -> `ClientToGame::Disconnected { reason }`, then break.
   - `Err`/EOF -> `ClientToGame::Disconnected { reason: "connection lost" }`, then break.
 
-- [ ] **Step 4: Implement the send loop**
+- [x] **Step 4: Implement the send loop**
   Concurrently drain `game_to_client` (via `spawn_blocking` or `try_recv` on an interval, as chosen in Sub-task 2 Task 3 Step 2) and translate to outbound `Packet`s:
   - `SendPosition` -> `Packet::PlayerPosition` (id = own player_id).
   - `SendAction` -> `Packet::PlayerAction`.
@@ -93,10 +93,10 @@
   - `SendChat` -> `Packet::ChatMessage`.
   - `Disconnect` -> `Connection::send(Disconnect)`, then shut down.
 
-- [ ] **Step 5: Add an integration test**
+- [x] **Step 5: Add an integration test**
   In `#[cfg(test)]`, spin up `NetworkServer::spawn` (Sub-task 2) on `127.0.0.1:0`, spawn a `NetworkClient`, and assert `ClientToGame::Connected` arrives with the correct seed, then that a `PlayerJoin` for a second client is observed by the first.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
   Run: `cargo test network::client`
 
 ---
@@ -107,7 +107,7 @@
 - Modify: `src/menu.rs`
 - Modify: `src/app.rs`
 
-- [ ] **Step 1: Add `MultiplayerRole` to `src/menu.rs`**
+- [x] **Step 1: Add `MultiplayerRole` to `src/menu.rs`**
   ```rust
   #[derive(Debug, Clone)]
   pub enum MultiplayerRole {
@@ -118,16 +118,16 @@
   ```
   Add a `role: MultiplayerRole` field to `WorldLaunch` (default `Singleplayer`).
 
-- [ ] **Step 2: Add Host/Join UI to the main menu**
+- [x] **Step 2: Add Host/Join UI to the main menu**
   In `src/menu.rs`, add a simple **Multiplayer** panel with:
   - A **Host Game** toggle that reveals a port field (default `25565`).
   - A **Join Game** toggle that reveals server address + port + username fields.
   - Keep the existing singleplayer flow as the default. The selected role is stored into `WorldLaunch`.
 
-- [ ] **Step 3: Pass `role` through `App`**
+- [x] **Step 3: Pass `role` through `App`**
   In `src/app.rs`, ensure the queued `WorldLaunch` carries `role` into `State::new`. No event-routing logic changes yet beyond plumbing the value.
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo check`
 
 ---
@@ -138,7 +138,7 @@
 - Modify: `src/state.rs`
 - Modify: `src/main.rs` (only if a new module re-export is needed)
 
-- [ ] **Step 1: Define `NetworkHandle` in `src/state.rs`**
+- [x] **Step 1: Define `NetworkHandle` in `src/state.rs`**
   ```rust
   pub enum NetworkHandle {
       None,
@@ -157,33 +157,35 @@
   ```
   Add `pub network: NetworkHandle` (or `pub network: Option<NetworkHandle>`) and `pub role: MultiplayerRole` to `State`.
 
-- [ ] **Step 2: Start the network in `State::new`**
+- [x] **Step 2: Start the network in `State::new`**
   Branch on `role`:
   - `Singleplayer` -> `NetworkHandle::None`.
   - `Host` -> create the two `mpsc` channels, call `network::server::NetworkServer::spawn` passing the world seed and game mode, store the `NetworkHandle::Host`.
   - `Client` -> create the two `mpsc` channels, call `network::client::NetworkClient::spawn`, store the `NetworkHandle::Client`. **Defer** terrain/seed initialization until `ClientToGame::Connected` is drained on the first update (the seed comes from the server). Until then, skip chunk generation.
 
-- [ ] **Step 3: Drain inbound events in `State::update`**
+- [x] **Step 3: Drain inbound events in `State::update`**
   Add `State::drain_network_events(&mut self)` called early in `State::update` (before the simulation steps). For `Host`: map `ServerToHost` events into the same internal queues the client path uses (see Sub-task 4/5). For `Client`: map `ClientToGame` events. For now, handle only `Connected`/`Disconnected`/`PlayerJoin`/`PlayerLeave` (positions and blocks come in Sub-tasks 4 & 5). On `Disconnected`, show a transient message and return to a safe state (e.g. pause + "connection lost").
 
-- [ ] **Step 4: Gate local world authority on role**
+- [x] **Step 4: Gate local world authority on role**
   Add a helper `State::is_authoritative(&self) -> bool` returning `true` for `Singleplayer` and `Host`, `false` for `Client`. Use it in `State::break_block` / `handle_click` to either apply locally (authoritative) or send a `RequestBlockChange` to the server (client). **Do not** fully implement block application here - that is Sub-task 5; this step only adds the gate and the outbound send stub.
 
-- [ ] **Step 5: Send the local player's position each tick**
+- [x] **Step 5: Send the local player's position each tick**
   At the end of `State::update`, if `NetworkHandle` is active, send the current player position/yaw/pitch outbound (`HostToServer::BroadcastPlayerPosition` or `GameToClient::SendPosition`). Throttle to every ~50 ms (20 Hz) to limit bandwidth; the host sends its own position as `PlayerId(0)`.
 
-- [ ] **Step 6: Clean shutdown**
+- [x] **Step 6: Clean shutdown**
   In `State`'s quit path (the existing "SAVE AND QUIT" handler and `CloseRequested`), send `HostToServer::Stop` / `GameToClient::Disconnect` and join the background thread before exiting, alongside the existing synchronous save.
 
 - [ ] **Step 7: Verify it compiles and smoke-runs**
   Run: `cargo check --release`
   Then: `cargo run --release` - launch singleplayer and confirm no regressions; launch Host and confirm the server thread starts without panic.
 
+  **2026-07-22 status:** `cargo check --release` passed and the release binary remained running without panic at the main menu. Singleplayer/Host click-through was not executed because the Windows UI automation native pipe was unavailable.
+
 ---
 
 ### Task 5: Verification
 
-- [ ] **Step 1: Full check**
+- [x] **Step 1: Full check**
   Run: `cargo fmt --check && cargo check --release && cargo test`
   Expected: All existing tests + new network tests pass.
 
@@ -194,6 +196,8 @@
   - Quitting either side cleans up the background thread without hanging.
 
   (Player visibility and block sync are validated in Sub-tasks 4 & 5.)
+
+  **2026-07-22 status:** the automated two-client integration test verifies login seed propagation, `PlayerJoin`, and clean client/server thread joins. The two-window GUI scenario remains a manual check because Windows UI automation was unavailable in this environment.
 
 ---
 

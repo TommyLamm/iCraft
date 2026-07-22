@@ -348,11 +348,25 @@ fn parse_key(value: &str) -> Option<KeyCode> {
 }
 
 #[derive(Debug, Clone)]
+pub enum MultiplayerRole {
+    Singleplayer,
+    Host {
+        port: u16,
+    },
+    Client {
+        server_addr: String,
+        port: u16,
+        username: String,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct WorldLaunch {
     pub world_dir: PathBuf,
     pub seed: u32,
     pub game_mode: GameMode,
     pub difficulty: Difficulty,
+    pub role: MultiplayerRole,
 }
 
 #[derive(Debug, Clone)]
@@ -592,6 +606,7 @@ impl UiVertex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuScreen {
     Main,
+    Multiplayer,
     Worlds,
     CreateWorld,
     Options,
@@ -603,6 +618,16 @@ enum MenuScreen {
 enum TextField {
     WorldName,
     Seed,
+    HostPort,
+    ServerAddress,
+    JoinPort,
+    Username,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MultiplayerMode {
+    Host,
+    Join,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,6 +685,12 @@ pub struct Menu {
     create_seed: String,
     create_mode: GameMode,
     create_difficulty: Difficulty,
+    multiplayer_mode: MultiplayerMode,
+    selected_role: MultiplayerRole,
+    host_port: String,
+    server_address: String,
+    join_port: String,
+    username: String,
     active_field: Option<TextField>,
     rebinding: Option<ControlAction>,
     message: Option<String>,
@@ -846,6 +877,12 @@ impl Menu {
             create_seed: String::new(),
             create_mode: GameMode::Survival,
             create_difficulty: settings.difficulty,
+            multiplayer_mode: MultiplayerMode::Host,
+            selected_role: MultiplayerRole::Singleplayer,
+            host_port: "25565".to_string(),
+            server_address: "127.0.0.1".to_string(),
+            join_port: "25565".to_string(),
+            username: "PLAYER".to_string(),
             active_field: None,
             rebinding: None,
             message: None,
@@ -909,6 +946,18 @@ impl Menu {
                     TextField::Seed => {
                         self.create_seed.pop();
                     }
+                    TextField::HostPort => {
+                        self.host_port.pop();
+                    }
+                    TextField::ServerAddress => {
+                        self.server_address.pop();
+                    }
+                    TextField::JoinPort => {
+                        self.join_port.pop();
+                    }
+                    TextField::Username => {
+                        self.username.pop();
+                    }
                 },
                 Key::Named(NamedKey::Enter) => self.active_field = None,
                 Key::Character(text) if !repeat => {
@@ -927,6 +976,29 @@ impl Menu {
                                         || (ch == '-' && self.create_seed.is_empty())) =>
                             {
                                 self.create_seed.push(ch)
+                            }
+                            TextField::HostPort
+                                if self.host_port.len() < 5 && ch.is_ascii_digit() =>
+                            {
+                                self.host_port.push(ch)
+                            }
+                            TextField::ServerAddress
+                                if self.server_address.len() < 64
+                                    && (ch.is_ascii_alphanumeric()
+                                        || matches!(ch, '.' | '-' | ':' | '_')) =>
+                            {
+                                self.server_address.push(ch)
+                            }
+                            TextField::JoinPort
+                                if self.join_port.len() < 5 && ch.is_ascii_digit() =>
+                            {
+                                self.join_port.push(ch)
+                            }
+                            TextField::Username
+                                if self.username.len() < 16
+                                    && (ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')) =>
+                            {
+                                self.username.push(ch.to_ascii_uppercase())
                             }
                             _ => {}
                         }
@@ -947,15 +1019,81 @@ impl Menu {
         self.message = None;
         match self.screen {
             MenuScreen::Main => {
-                if hit(x, y, -0.34, 0.34, 0.12, 0.25) {
+                if hit(x, y, -0.34, 0.34, 0.21, 0.34) {
+                    self.selected_role = MultiplayerRole::Singleplayer;
                     self.worlds = discover_worlds();
                     self.selected_world = (!self.worlds.is_empty()).then_some(0);
                     self.world_scroll = 0;
                     self.screen = MenuScreen::Worlds;
-                } else if hit(x, y, -0.34, 0.34, -0.06, 0.07) {
+                } else if hit(x, y, -0.34, 0.34, 0.03, 0.16) {
+                    self.active_field = None;
+                    self.screen = MenuScreen::Multiplayer;
+                } else if hit(x, y, -0.34, 0.34, -0.15, -0.02) {
                     self.screen = MenuScreen::Options;
-                } else if hit(x, y, -0.34, 0.34, -0.24, -0.11) {
+                } else if hit(x, y, -0.34, 0.34, -0.33, -0.20) {
                     return MenuAction::Quit;
+                }
+            }
+            MenuScreen::Multiplayer => {
+                if hit(x, y, -0.52, -0.02, 0.45, 0.58) {
+                    self.multiplayer_mode = MultiplayerMode::Host;
+                    self.active_field = None;
+                } else if hit(x, y, 0.02, 0.52, 0.45, 0.58) {
+                    self.multiplayer_mode = MultiplayerMode::Join;
+                    self.active_field = None;
+                } else if self.multiplayer_mode == MultiplayerMode::Host
+                    && hit(x, y, -0.52, 0.52, 0.17, 0.30)
+                {
+                    self.active_field = Some(TextField::HostPort);
+                } else if self.multiplayer_mode == MultiplayerMode::Join
+                    && hit(x, y, -0.52, 0.52, 0.17, 0.30)
+                {
+                    self.active_field = Some(TextField::ServerAddress);
+                } else if self.multiplayer_mode == MultiplayerMode::Join
+                    && hit(x, y, -0.52, 0.52, -0.04, 0.09)
+                {
+                    self.active_field = Some(TextField::JoinPort);
+                } else if self.multiplayer_mode == MultiplayerMode::Join
+                    && hit(x, y, -0.52, 0.52, -0.25, -0.12)
+                {
+                    self.active_field = Some(TextField::Username);
+                } else if hit(x, y, -0.52, -0.02, -0.58, -0.45) {
+                    let role = match self.multiplayer_mode {
+                        MultiplayerMode::Host => self
+                            .host_port
+                            .parse::<u16>()
+                            .ok()
+                            .filter(|p| *p > 0)
+                            .map(|port| MultiplayerRole::Host { port }),
+                        MultiplayerMode::Join => {
+                            let address = self.server_address.trim();
+                            let username = self.username.trim();
+                            self.join_port
+                                .parse::<u16>()
+                                .ok()
+                                .filter(|port| {
+                                    *port > 0 && !address.is_empty() && !username.is_empty()
+                                })
+                                .map(|port| MultiplayerRole::Client {
+                                    server_addr: address.to_string(),
+                                    port,
+                                    username: username.to_string(),
+                                })
+                        }
+                    };
+                    let Some(role) = role else {
+                        self.message = Some("ENTER VALID MULTIPLAYER SETTINGS".to_string());
+                        return MenuAction::None;
+                    };
+                    self.selected_role = role;
+                    self.worlds = discover_worlds();
+                    self.selected_world = (!self.worlds.is_empty()).then_some(0);
+                    self.world_scroll = 0;
+                    self.active_field = None;
+                    self.screen = MenuScreen::Worlds;
+                } else if hit(x, y, 0.02, 0.52, -0.58, -0.45) {
+                    self.active_field = None;
+                    self.screen = MenuScreen::Main;
                 }
             }
             MenuScreen::Worlds => {
@@ -1069,7 +1207,7 @@ impl Menu {
         self.rebinding = None;
         self.screen = match self.screen {
             MenuScreen::Main => MenuScreen::Main,
-            MenuScreen::Worlds | MenuScreen::Options => MenuScreen::Main,
+            MenuScreen::Multiplayer | MenuScreen::Worlds | MenuScreen::Options => MenuScreen::Main,
             MenuScreen::CreateWorld | MenuScreen::ConfirmDelete => MenuScreen::Worlds,
             MenuScreen::Controls => MenuScreen::Options,
         };
@@ -1087,6 +1225,7 @@ impl Menu {
                 seed: world.metadata.seed,
                 game_mode: world.metadata.game_mode,
                 difficulty: world.metadata.difficulty,
+                role: self.selected_role.clone(),
             },
             self.settings.clone(),
         )
@@ -1127,6 +1266,7 @@ impl Menu {
                 seed,
                 game_mode: self.create_mode,
                 difficulty: self.create_difficulty,
+                role: self.selected_role.clone(),
             },
             self.settings.clone(),
         )
@@ -1278,38 +1418,47 @@ impl Menu {
                     vertices,
                     -0.34,
                     0.34,
-                    0.12,
-                    0.25,
-                    hovered(-0.34, 0.34, 0.12, 0.25),
+                    0.21,
+                    0.34,
+                    hovered(-0.34, 0.34, 0.21, 0.34),
                 );
                 draw_button(
                     vertices,
                     -0.34,
                     0.34,
-                    -0.06,
-                    0.07,
-                    hovered(-0.34, 0.34, -0.06, 0.07),
+                    0.03,
+                    0.16,
+                    hovered(-0.34, 0.34, 0.03, 0.16),
                 );
                 draw_button(
                     vertices,
                     -0.34,
                     0.34,
-                    -0.24,
-                    -0.11,
-                    hovered(-0.34, 0.34, -0.24, -0.11),
+                    -0.15,
+                    -0.02,
+                    hovered(-0.34, 0.34, -0.15, -0.02),
+                );
+                draw_button(
+                    vertices,
+                    -0.34,
+                    0.34,
+                    -0.33,
+                    -0.20,
+                    hovered(-0.34, 0.34, -0.33, -0.20),
                 );
                 draw_centered_text(
                     vertices,
                     tr(self.settings.language, "SINGLEPLAYER"),
-                    0.158,
+                    0.248,
                     0.010,
                     aspect,
                     [1.0; 4],
                 );
+                draw_centered_text(vertices, "MULTIPLAYER", 0.068, 0.010, aspect, [1.0; 4]);
                 draw_centered_text(
                     vertices,
                     tr(self.settings.language, "OPTIONS"),
-                    -0.022,
+                    -0.112,
                     0.010,
                     aspect,
                     [1.0; 4],
@@ -1317,7 +1466,7 @@ impl Menu {
                 draw_centered_text(
                     vertices,
                     tr(self.settings.language, "QUIT GAME"),
-                    -0.202,
+                    -0.292,
                     0.010,
                     aspect,
                     [1.0; 4],
@@ -1332,6 +1481,7 @@ impl Menu {
                     [0.8, 0.84, 0.86, 1.0],
                 );
             }
+            MenuScreen::Multiplayer => self.draw_multiplayer(vertices, aspect),
             MenuScreen::Worlds => self.draw_worlds(vertices, aspect),
             MenuScreen::CreateWorld => self.draw_create(vertices, aspect),
             MenuScreen::Options => self.draw_options(vertices, aspect),
@@ -1347,6 +1497,85 @@ impl Menu {
                 aspect,
                 [1.0, 0.35, 0.25, 1.0],
             );
+        }
+    }
+
+    fn draw_multiplayer(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
+        panel(vertices, -0.64, 0.64, -0.72, 0.78);
+        draw_centered_text(vertices, "MULTIPLAYER", 0.67, 0.012, aspect, [1.0; 4]);
+
+        for (x0, x1, label, selected) in [
+            (
+                -0.52,
+                -0.02,
+                "HOST GAME",
+                self.multiplayer_mode == MultiplayerMode::Host,
+            ),
+            (
+                0.02,
+                0.52,
+                "JOIN GAME",
+                self.multiplayer_mode == MultiplayerMode::Join,
+            ),
+        ] {
+            let hover = hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, 0.45, 0.58);
+            draw_button_state(vertices, x0, x1, 0.45, 0.58, hover, selected);
+            draw_centered_text_in(vertices, label, x0, x1, 0.488, 0.007, aspect, [1.0; 4]);
+        }
+
+        match self.multiplayer_mode {
+            MultiplayerMode::Host => draw_field(
+                vertices,
+                "PORT",
+                &self.host_port,
+                -0.52,
+                0.52,
+                0.17,
+                0.30,
+                self.active_field == Some(TextField::HostPort),
+                aspect,
+            ),
+            MultiplayerMode::Join => {
+                draw_field(
+                    vertices,
+                    "SERVER ADDRESS",
+                    &self.server_address,
+                    -0.52,
+                    0.52,
+                    0.17,
+                    0.30,
+                    self.active_field == Some(TextField::ServerAddress),
+                    aspect,
+                );
+                draw_field(
+                    vertices,
+                    "PORT",
+                    &self.join_port,
+                    -0.52,
+                    0.52,
+                    -0.04,
+                    0.09,
+                    self.active_field == Some(TextField::JoinPort),
+                    aspect,
+                );
+                draw_field(
+                    vertices,
+                    "USERNAME",
+                    &self.username,
+                    -0.52,
+                    0.52,
+                    -0.25,
+                    -0.12,
+                    self.active_field == Some(TextField::Username),
+                    aspect,
+                );
+            }
+        }
+
+        for (x0, x1, label) in [(-0.52, -0.02, "SELECT WORLD"), (0.02, 0.52, "BACK")] {
+            let hover = hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.58, -0.45);
+            draw_button(vertices, x0, x1, -0.58, -0.45, hover);
+            draw_centered_text_in(vertices, label, x0, x1, -0.542, 0.007, aspect, [1.0; 4]);
         }
     }
 

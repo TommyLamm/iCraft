@@ -91,7 +91,7 @@ P3 [███████░░░] 66.7%
 | 22 | [紅石系統](./p3/22_redstone.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 23 | [天氣系統](./p3/23_weather.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
-| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 2/6 完成 |
+| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 3/6 完成 |
 | 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 28 | [成就 / 進度系統](./p3/28_advancements.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ⬜ 待定 | — | — | |
@@ -104,6 +104,12 @@ P3 [███████░░░] 66.7%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-22
+- 🟡 進度任務 #25 (By Codex)：多人遊戲 - 子任務 3/6 客戶端橋接與 State 整合
+  - 新增文件：`src/network/client.rs`
+  - 修改文件：`src/network/mod.rs`, `src/menu.rs`, `src/app.rs`, `src/state.rs`, `ARCHITECTURE.md`, `docs/superpowers/plans/2026-07-22-multiplayer-03-client-bridge.md`
+  - 關鍵決策：新增背景執行緒 Tokio `NetworkClient`，將所有 wire packet 映射為 `ClientToGame` / `GameToClient` 同步通道事件，包含版本握手、登入、keepalive、斷線回報與乾淨關閉。主選單新增 Host/Join 面板與連線欄位，`MultiplayerRole` 隨 `WorldLaunch` 進入 `State`。`NetworkHandle` 統一封裝 host/client 通道與執行緒；`State::update` 每幀先 drain 網路事件並以 20 Hz 送出本機位置。Client 在收到伺服器 seed 前不生成 chunk，也不讀寫本機 chunk save；方塊破壞／放置改送請求，fluid 與 redstone 本機 mutation 被抑制。Host/Singleplayer 保持 authoritative。
+  - 驗證：`cargo fmt --check`、`cargo check --release` 通過；`cargo test network::client` 1/1 通過；完整 `cargo test` 為 129 項單元測試與 1 項整合測試全部通過。release binary 可啟動並在主選單持續運行而無 panic。自動雙 client 測試另驗證 server seed、第二位玩家 `PlayerJoin` 與三個背景執行緒乾淨 join。
+  - 備註：Windows UI automation native pipe 在此環境不可用，因此單人／Host 點擊流程及兩個實際視窗的 Host/Join smoke test 仍需手動執行；計畫中的這兩個 checkbox 保持未勾選。為滿足全域 fmt gate，一併套用了先前已記錄的 6 個遊戲模組純 rustfmt 修正。
 - 🟡 進度任務 #25 (By GPT-5.6 Sol High)：多人遊戲 - 子任務 2/6 整合式伺服器核心
   - 新增文件：`src/network/server.rs`
   - 修改文件：`src/network/mod.rs`, `src/network/transport.rs`, `ARCHITECTURE.md`, `docs/superpowers/plans/2026-07-22-multiplayer-02-server-core.md`

@@ -153,6 +153,7 @@ impl ApplicationHandler for App {
                 if let Some(Runtime::Game(state)) = &mut self.runtime {
                     state.is_saving = true;
                     let _ = state.render();
+                    state.shutdown_network();
                     state.save_synchronously();
                 }
                 event_loop.exit();

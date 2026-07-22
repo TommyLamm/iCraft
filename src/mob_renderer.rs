@@ -1023,7 +1023,11 @@ pub fn render_mobs(
                             indices,
                             Vec3::new(0.12, 0.62, 0.12),
                             Vec3::ZERO,
-                            to_world(Vec3::new(angle.cos() * radius, y + hover, angle.sin() * radius)),
+                            to_world(Vec3::new(
+                                angle.cos() * radius,
+                                y + hover,
+                                angle.sin() * radius,
+                            )),
                             angle,
                             0.0,
                             [10; 6],

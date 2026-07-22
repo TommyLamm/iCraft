@@ -3,7 +3,7 @@ use crate::chunk_manager::{mark_block_mesh_dependencies, surrounding_chunk_coord
 use crate::crafting::RecipeManager;
 use crate::interaction::raycast;
 use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
-use crate::menu::{Difficulty, GameSettings, WorldLaunch};
+use crate::menu::{Difficulty, GameSettings, MultiplayerRole, WorldLaunch};
 use crate::physics::{PlayerPhysics, AABB};
 use crate::player::{DamageSource, PlayerState};
 use crate::world::{Biome, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
@@ -181,7 +181,6 @@ impl State {
             self.spawn_dropped_item(item, pos);
         }
     }
-
 
     fn safe_dimension_spawn_y(&mut self, x: i32, z: i32) -> f32 {
         let top = if self.current_dimension == crate::dimension::Dimension::Nether {
@@ -483,6 +482,176 @@ pub enum StationKind {
     Anvil,
 }
 
+pub enum NetworkHandle {
+    None,
+    Host {
+        server_to_host: std::sync::mpsc::Receiver<crate::network::server::ServerToHost>,
+        host_to_server: std::sync::mpsc::Sender<crate::network::server::HostToServer>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    },
+    Client {
+        client_to_game: std::sync::mpsc::Receiver<crate::network::client::ClientToGame>,
+        game_to_client: std::sync::mpsc::Sender<crate::network::client::GameToClient>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    },
+}
+
+enum NetworkInbound {
+    Connected {
+        player_id: crate::network::protocol::PlayerId,
+        seed: u64,
+        gamemode: u8,
+    },
+    Disconnected(String),
+    PlayerJoin {
+        id: crate::network::protocol::PlayerId,
+        username: String,
+    },
+    PlayerLeave(crate::network::protocol::PlayerId),
+    PlayerPosition,
+    PlayerAction,
+    BlockChange,
+    ChunkData,
+    Chat,
+}
+
+impl NetworkHandle {
+    fn drain_inbound(&self) -> Vec<NetworkInbound> {
+        match self {
+            NetworkHandle::None => Vec::new(),
+            NetworkHandle::Host { server_to_host, .. } => server_to_host
+                .try_iter()
+                .map(|event| match event {
+                    crate::network::server::ServerToHost::ClientJoined { id, username } => {
+                        NetworkInbound::PlayerJoin { id, username }
+                    }
+                    crate::network::server::ServerToHost::ClientLeft { id } => {
+                        NetworkInbound::PlayerLeave(id)
+                    }
+                    crate::network::server::ServerToHost::ClientPosition { .. } => {
+                        NetworkInbound::PlayerPosition
+                    }
+                    crate::network::server::ServerToHost::ClientAction { .. } => {
+                        NetworkInbound::PlayerAction
+                    }
+                    crate::network::server::ServerToHost::ClientBlockChange { .. } => {
+                        NetworkInbound::BlockChange
+                    }
+                    crate::network::server::ServerToHost::ChatFromClient { .. } => {
+                        NetworkInbound::Chat
+                    }
+                })
+                .collect(),
+            NetworkHandle::Client { client_to_game, .. } => client_to_game
+                .try_iter()
+                .map(|event| match event {
+                    crate::network::client::ClientToGame::Connected {
+                        player_id,
+                        seed,
+                        gamemode,
+                    } => NetworkInbound::Connected {
+                        player_id,
+                        seed,
+                        gamemode,
+                    },
+                    crate::network::client::ClientToGame::Disconnected { reason } => {
+                        NetworkInbound::Disconnected(reason)
+                    }
+                    crate::network::client::ClientToGame::PlayerJoin { id, username } => {
+                        NetworkInbound::PlayerJoin { id, username }
+                    }
+                    crate::network::client::ClientToGame::PlayerLeave { id } => {
+                        NetworkInbound::PlayerLeave(id)
+                    }
+                    crate::network::client::ClientToGame::PlayerPosition { .. } => {
+                        NetworkInbound::PlayerPosition
+                    }
+                    crate::network::client::ClientToGame::PlayerAction { .. } => {
+                        NetworkInbound::PlayerAction
+                    }
+                    crate::network::client::ClientToGame::BlockChange { .. } => {
+                        NetworkInbound::BlockChange
+                    }
+                    crate::network::client::ClientToGame::ChunkData { .. } => {
+                        NetworkInbound::ChunkData
+                    }
+                    crate::network::client::ClientToGame::Chat { .. } => NetworkInbound::Chat,
+                })
+                .collect(),
+        }
+    }
+
+    fn send_position(&self, position: Vec3, yaw: f32, pitch: f32) {
+        match self {
+            NetworkHandle::Host { host_to_server, .. } => {
+                let _ = host_to_server.send(
+                    crate::network::server::HostToServer::BroadcastPlayerPosition {
+                        id: 0,
+                        x: position.x,
+                        y: position.y,
+                        z: position.z,
+                        yaw,
+                        pitch,
+                    },
+                );
+            }
+            NetworkHandle::Client { game_to_client, .. } => {
+                let _ = game_to_client.send(crate::network::client::GameToClient::SendPosition {
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                    yaw,
+                    pitch,
+                });
+            }
+            NetworkHandle::None => {}
+        }
+    }
+
+    fn request_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
+        if let NetworkHandle::Client { game_to_client, .. } = self {
+            let _ = game_to_client.send(crate::network::client::GameToClient::RequestBlockChange {
+                x,
+                y,
+                z,
+                block,
+            });
+        }
+    }
+
+    fn notify_player_join(&self, id: crate::network::protocol::PlayerId, username: String) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server
+                .send(crate::network::server::HostToServer::NotifyPlayerJoin { id, username });
+        }
+    }
+
+    fn shutdown(&mut self) {
+        let thread = match self {
+            NetworkHandle::None => None,
+            NetworkHandle::Host {
+                host_to_server,
+                thread,
+                ..
+            } => {
+                let _ = host_to_server.send(crate::network::server::HostToServer::Stop);
+                thread.take()
+            }
+            NetworkHandle::Client {
+                game_to_client,
+                thread,
+                ..
+            } => {
+                let _ = game_to_client.send(crate::network::client::GameToClient::Disconnect);
+                thread.take()
+            }
+        };
+        if let Some(thread) = thread {
+            let _ = thread.join();
+        }
+    }
+}
+
 pub struct State {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -578,6 +747,13 @@ pub struct State {
     wither_damage_timer: f32,
     pub advancement_manager: crate::advancements::AdvancementManager,
     pub advancement_gui: crate::advancements::AdvancementGui,
+    pub role: MultiplayerRole,
+    pub network: NetworkHandle,
+    network_ready: bool,
+    local_player_id: Option<crate::network::protocol::PlayerId>,
+    remote_players: std::collections::HashMap<crate::network::protocol::PlayerId, String>,
+    pub network_status: Option<String>,
+    network_position_timer: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,6 +795,8 @@ impl State {
     }
 
     pub async fn new(window: Arc<Window>, launch: WorldLaunch, settings: GameSettings) -> Self {
+        let role = launch.role.clone();
+        let is_client = matches!(role, MultiplayerRole::Client { .. });
         let size = window.inner_size();
         // The NVIDIA Vulkan ICD crashes during the menu-to-world transition on
         // this Windows setup. `PRIMARY` still chooses Vulkan first, so force
@@ -691,7 +869,11 @@ impl State {
         let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
             crate::save::SaveManager::new(&launch.world_dir),
         ));
-        let current_dimension = save_manager.lock().unwrap().load_current_dimension();
+        let current_dimension = if is_client {
+            crate::dimension::Dimension::Overworld
+        } else {
+            save_manager.lock().unwrap().load_current_dimension()
+        };
 
         // Spawn background worker thread
         let (save_tx, save_rx) = std::sync::mpsc::channel::<crate::save::SaveCommand>();
@@ -731,7 +913,7 @@ impl State {
         let mut world_seed = launch.seed;
 
         let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
-        let has_save = {
+        let has_save = !is_client && {
             let mgr = save_manager.lock().unwrap();
             mgr.load_player_and_level().is_ok()
         };
@@ -1120,19 +1302,21 @@ impl State {
         // frame is visible.
         let player_chunk_x = (player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32;
         let player_chunk_z = (player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32;
-        let initial_radius = initial_chunk_radius(render_distance);
-        for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
-            for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
-                let mut chunk =
-                    crate::dimension::generate_chunk(current_dimension, cx, cz, world_seed);
-                let saved_chunk = {
-                    let mut manager = save_manager.lock().unwrap();
-                    manager.load_chunk_in(current_dimension, cx, cz)
-                };
-                if let Some(data) = saved_chunk {
-                    data.restore_to_chunk(&mut chunk);
+        if !is_client {
+            let initial_radius = initial_chunk_radius(render_distance);
+            for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
+                for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
+                    let mut chunk =
+                        crate::dimension::generate_chunk(current_dimension, cx, cz, world_seed);
+                    let saved_chunk = {
+                        let mut manager = save_manager.lock().unwrap();
+                        manager.load_chunk_in(current_dimension, cx, cz)
+                    };
+                    if let Some(data) = saved_chunk {
+                        data.restore_to_chunk(&mut chunk);
+                    }
+                    chunk_manager.chunks.insert((cx, cz), chunk);
                 }
-                chunk_manager.chunks.insert((cx, cz), chunk);
             }
         }
 
@@ -1416,6 +1600,48 @@ impl State {
 
         let particles = crate::particles::ParticleSystem::new();
         let weather = crate::weather::WeatherSystem::new(world_seed);
+        let network = match &role {
+            MultiplayerRole::Singleplayer => NetworkHandle::None,
+            MultiplayerRole::Host { port } => {
+                let (host_to_server, host_commands) = std::sync::mpsc::channel();
+                let (server_events, server_to_host) = std::sync::mpsc::channel();
+                let gamemode = match game_mode {
+                    GameMode::Creative => 0,
+                    GameMode::Survival => 1,
+                };
+                let thread = crate::network::server::NetworkServer::spawn(
+                    format!("0.0.0.0:{port}"),
+                    u64::from(world_seed),
+                    gamemode,
+                    host_commands,
+                    server_events,
+                );
+                NetworkHandle::Host {
+                    server_to_host,
+                    host_to_server,
+                    thread: Some(thread),
+                }
+            }
+            MultiplayerRole::Client {
+                server_addr,
+                port,
+                username,
+            } => {
+                let (game_to_client, game_commands) = std::sync::mpsc::channel();
+                let (client_events, client_to_game) = std::sync::mpsc::channel();
+                let thread = crate::network::client::NetworkClient::spawn(
+                    format!("{server_addr}:{port}"),
+                    username.clone(),
+                    game_commands,
+                    client_events,
+                );
+                NetworkHandle::Client {
+                    client_to_game,
+                    game_to_client,
+                    thread: Some(thread),
+                }
+            }
+        };
 
         Self {
             window,
@@ -1511,6 +1737,13 @@ impl State {
             wither_damage_timer: 0.0,
             advancement_manager,
             advancement_gui,
+            role,
+            network,
+            network_ready: !is_client,
+            local_player_id: None,
+            remote_players: std::collections::HashMap::new(),
+            network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
+            network_position_timer: 0.0,
         }
     }
 
@@ -1527,7 +1760,84 @@ impl State {
         settings.save();
     }
 
+    pub fn is_authoritative(&self) -> bool {
+        !matches!(self.role, MultiplayerRole::Client { .. })
+    }
+
+    fn drain_network_events(&mut self) {
+        for event in self.network.drain_inbound() {
+            match event {
+                NetworkInbound::Connected {
+                    player_id,
+                    seed,
+                    gamemode,
+                } => {
+                    self.local_player_id = Some(player_id);
+                    self.world_seed = seed as u32;
+                    self.game_mode = if gamemode == 0 {
+                        GameMode::Creative
+                    } else {
+                        GameMode::Survival
+                    };
+                    self.inventory = match self.game_mode {
+                        GameMode::Creative => Inventory::new_creative(),
+                        GameMode::Survival => Inventory::new(),
+                    };
+                    self.weather = crate::weather::WeatherSystem::new(self.world_seed);
+                    self.chunk_manager.chunks.clear();
+                    self.chunk_meshes.clear();
+                    self.network_ready = true;
+                    self.network_status = None;
+                }
+                NetworkInbound::Disconnected(reason) => {
+                    self.network_ready = false;
+                    self.network_status = Some(format!("CONNECTION LOST: {reason}"));
+                    self.set_paused(true);
+                }
+                NetworkInbound::PlayerJoin { id, username } => {
+                    if self.local_player_id != Some(id) {
+                        self.remote_players.insert(id, username.clone());
+                    }
+                    if matches!(self.role, MultiplayerRole::Host { .. }) {
+                        self.network.notify_player_join(id, username);
+                    }
+                }
+                NetworkInbound::PlayerLeave(id) => {
+                    self.remote_players.remove(&id);
+                }
+                NetworkInbound::PlayerPosition
+                | NetworkInbound::PlayerAction
+                | NetworkInbound::BlockChange
+                | NetworkInbound::ChunkData
+                | NetworkInbound::Chat => {}
+            }
+        }
+    }
+
+    fn update_network_position(&mut self, dt: f32) {
+        if !self.network_ready || matches!(&self.network, NetworkHandle::None) {
+            return;
+        }
+        self.network_position_timer += dt;
+        if self.network_position_timer < 0.05 {
+            return;
+        }
+        self.network_position_timer %= 0.05;
+        self.network.send_position(
+            self.player_physics.position,
+            self.camera.yaw,
+            self.camera.pitch,
+        );
+    }
+
+    pub fn shutdown_network(&mut self) {
+        self.network.shutdown();
+    }
+
     pub fn trigger_background_save(&self) {
+        if !self.is_authoritative() {
+            return;
+        }
         let world_dir = self.save_manager.lock().unwrap().world_dir.clone();
         crate::menu::update_world_metadata(
             &world_dir,
@@ -1568,6 +1878,9 @@ impl State {
     }
 
     pub fn save_synchronously(&self) {
+        if !self.is_authoritative() {
+            return;
+        }
         let level = crate::save::LevelData {
             seed: self.world_seed,
             time: self.world_time.ticks,
@@ -1681,6 +1994,9 @@ impl State {
     }
 
     pub fn update_chunks(&mut self) {
+        if !self.network_ready {
+            return;
+        }
         let player_pos = self.player_physics.position;
         let px = (player_pos.x / 16.0).floor() as i32;
         let pz = (player_pos.z / 16.0).floor() as i32;
@@ -1695,11 +2011,13 @@ impl State {
         }
         for &(cx, cz) in &to_unload {
             if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                let chunk_data = crate::save::ChunkSaveData::from_chunk(&chunk);
-                let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
-                    dimension: self.current_dimension,
-                    data: chunk_data,
-                });
+                if self.is_authoritative() {
+                    let chunk_data = crate::save::ChunkSaveData::from_chunk(&chunk);
+                    let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
+                        dimension: self.current_dimension,
+                        data: chunk_data,
+                    });
+                }
             }
         }
         for &(cx, cz) in &to_unload {
@@ -1736,9 +2054,11 @@ impl State {
         if let Some(&(cx, cz)) = load_queue.first() {
             let mut chunk =
                 crate::dimension::generate_chunk(self.current_dimension, cx, cz, self.world_seed);
-            let chunk_data = {
+            let chunk_data = if self.is_authoritative() {
                 let mut mgr = self.save_manager.lock().unwrap();
                 mgr.load_chunk_in(self.current_dimension, cx, cz)
+            } else {
+                None
             };
             if let Some(data) = chunk_data {
                 data.restore_to_chunk(&mut chunk);
@@ -1994,6 +2314,7 @@ impl State {
                     .play_sound(crate::audio::SoundId::UiClick);
                 self.is_saving = true;
                 let _ = self.render();
+                self.shutdown_network();
                 self.save_synchronously();
                 return true;
             }
@@ -2002,6 +2323,12 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
+        self.drain_network_events();
+        self.update_network_position(dt);
+        if !self.network_ready {
+            return;
+        }
+
         self.debug_frame_time_accumulator += dt;
         self.debug_frame_samples += 1;
         if self.debug_frame_time_accumulator >= DEBUG_STATS_INTERVAL {
@@ -2018,13 +2345,13 @@ impl State {
         }
 
         self.autosave_timer += dt;
-        if self.autosave_timer >= 300.0 {
+        if self.is_authoritative() && self.autosave_timer >= 300.0 {
             self.autosave_timer = 0.0;
             self.trigger_background_save();
         }
 
         self.water_tick_timer += dt;
-        if self.water_tick_timer >= 0.25 {
+        if self.is_authoritative() && self.water_tick_timer >= 0.25 {
             self.water_tick_timer = 0.0;
             let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
             for (cx, cz) in dirty {
@@ -2035,7 +2362,7 @@ impl State {
         }
 
         self.lava_tick_timer += dt;
-        if self.lava_tick_timer >= 1.5 {
+        if self.is_authoritative() && self.lava_tick_timer >= 1.5 {
             self.lava_tick_timer = 0.0;
             let dirty = crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
             for (cx, cz) in dirty {
@@ -2052,11 +2379,15 @@ impl State {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
             return;
         }
-        self.update_portal_travel(dt);
+        if self.is_authoritative() {
+            self.update_portal_travel(dt);
+        }
 
-        self.redstone_tick_timer += dt;
+        if self.is_authoritative() {
+            self.redstone_tick_timer += dt;
+        }
         let mut redstone_steps = 0;
-        while self.redstone_tick_timer >= 0.05 && redstone_steps < 4 {
+        while self.is_authoritative() && self.redstone_tick_timer >= 0.05 && redstone_steps < 4 {
             self.redstone_tick_timer -= 0.05;
             redstone_steps += 1;
             let mut occupants = Vec::with_capacity(self.entity_manager.entities.len() + 1);
@@ -3287,6 +3618,11 @@ impl State {
         if old_block == BlockType::Air {
             return;
         }
+        if !self.is_authoritative() {
+            self.network
+                .request_block_change(wx, wy, wz, BlockType::Air as u32);
+            return;
+        }
 
         self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
         self.redstone.on_block_changed(
@@ -3682,6 +4018,34 @@ impl State {
     }
 
     pub fn handle_click(&mut self, is_left_click: bool) {
+        if !self.is_authoritative() {
+            let direction = Vec3::new(
+                self.camera.yaw.cos() * self.camera.pitch.cos(),
+                self.camera.pitch.sin(),
+                self.camera.yaw.sin() * self.camera.pitch.cos(),
+            )
+            .normalize_or_zero();
+            if let Some(hit) = raycast(self.camera.position, direction, 5.0, &self.chunk_manager) {
+                if is_left_click {
+                    self.network.request_block_change(
+                        hit.block_pos.x as i32,
+                        hit.block_pos.y as i32,
+                        hit.block_pos.z as i32,
+                        BlockType::Air as u32,
+                    );
+                } else if let Some(block) = self.inventory.get_selected_block() {
+                    let target = hit.block_pos + hit.normal;
+                    self.network.request_block_change(
+                        target.x as i32,
+                        target.y as i32,
+                        target.z as i32,
+                        block as u32,
+                    );
+                }
+            }
+            return;
+        }
+
         if !is_left_click {
             let held_stack = self.inventory.hotbar[self.inventory.selected];
             let held_item = held_stack
@@ -5430,6 +5794,17 @@ impl State {
                 text_color,
                 &mut ui_line_vertices,
             );
+            if let Some(status) = &self.network_status {
+                draw_centered_text(
+                    status,
+                    0.52,
+                    0.014,
+                    0.028,
+                    0.006,
+                    [1.0, 0.45, 0.35, 1.0],
+                    &mut ui_line_vertices,
+                );
+            }
             // "RESUME"
             draw_centered_text(
                 "RESUME",
@@ -7636,6 +8011,7 @@ fn weather_tile_uv(column: u32, row: u32) -> [f32; 4] {
 
 impl Drop for State {
     fn drop(&mut self) {
+        self.shutdown_network();
         let _ = self
             .window
             .set_cursor_grab(winit::window::CursorGrabMode::None);
@@ -7739,4 +8115,3 @@ mod debug_tests {
         assert_eq!(drops, vec![((2, 11, 2), BlockType::Dandelion)]);
     }
 }
-
