@@ -760,6 +760,7 @@ enum NetworkInbound {
         sender: String,
         message: String,
     },
+    StatusUpdate(String),
 }
 
 impl NetworkHandle {
@@ -858,6 +859,9 @@ impl NetworkHandle {
                     }
                     crate::network::client::ClientToGame::Chat { sender, message } => {
                         NetworkInbound::Chat { sender, message }
+                    }
+                    crate::network::client::ClientToGame::StatusUpdate { message } => {
+                        NetworkInbound::StatusUpdate(message)
                     }
                 })
                 .collect(),
@@ -2195,6 +2199,9 @@ impl State {
     fn drain_network_events(&mut self) {
         for event in self.network.drain_inbound() {
             match event {
+                NetworkInbound::StatusUpdate(msg) => {
+                    self.network_status = Some(msg);
+                }
                 NetworkInbound::Connected {
                     player_id,
                     seed,
@@ -2219,6 +2226,11 @@ impl State {
                     self.network_ready = true;
                     self.network_status = None;
                     self.connection_lost = false;
+                    push_chat_history(
+                        &mut self.chat_messages,
+                        "[Network]".into(),
+                        format!("Connected to server as player #{player_id}"),
+                    );
                 }
                 NetworkInbound::Disconnected(reason) => {
                     self.network_ready = false;
@@ -2228,6 +2240,11 @@ impl State {
                     self.chat_input.clear();
                     clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
                     self.set_paused(true);
+                    push_chat_history(
+                        &mut self.chat_messages,
+                        "[Network]".into(),
+                        format!("Disconnected: {reason}"),
+                    );
                 }
                 NetworkInbound::PlayerJoin { id, username } => {
                     if self.local_player_id != Some(id) {
@@ -2272,6 +2289,11 @@ impl State {
                                 },
                             );
                         }
+                        push_chat_history(
+                            &mut self.chat_messages,
+                            "[Network]".into(),
+                            format!("{username} joined the game"),
+                        );
                     }
                     if matches!(self.role, MultiplayerRole::Host { .. }) {
                         self.network.notify_player_join(id, username);
@@ -2281,9 +2303,20 @@ impl State {
                 }
                 NetworkInbound::PlayerLeave(id) => {
                     if let Some(remote) = self.remote_players.remove(&id) {
+                        push_chat_history(
+                            &mut self.chat_messages,
+                            "[Network]".into(),
+                            format!("{} left the game", remote.username),
+                        );
                         self.entity_manager
                             .entities
                             .retain(|e| e.id != remote.entity_id);
+                    } else {
+                        push_chat_history(
+                            &mut self.chat_messages,
+                            "[Network]".into(),
+                            format!("Player #{id} left the game"),
+                        );
                     }
                 }
                 NetworkInbound::PlayerPosition {
@@ -8142,6 +8175,28 @@ impl State {
                         self.estimated_debug_memory_bytes() as f64 / (1024.0 * 1024.0)
                     );
 
+                    let net_str = match &self.role {
+                        MultiplayerRole::Host { port } => {
+                            format!(
+                                "NET: HOST ON PORT {} | CLIENTS: {}",
+                                port,
+                                self.remote_players.len()
+                            )
+                        }
+                        MultiplayerRole::Client { server_addr, port, .. } => {
+                            format!(
+                                "NET: CLIENT @ {}:{} | LOCAL ID: {} | PLAYERS: {}",
+                                server_addr,
+                                port,
+                                self.local_player_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "?".to_string()),
+                                self.remote_players.len() + 1
+                            )
+                        }
+                        MultiplayerRole::Singleplayer => "NET: SINGLEPLAYER".to_string(),
+                    };
+
                     let char_w = 0.007;
                     let char_h = 0.014;
                     let spacing = 0.002;
@@ -8162,6 +8217,7 @@ impl State {
                         render_str,
                         memory_str,
                         time_str,
+                        net_str,
                     ];
                     for (line_index, line) in debug_lines.iter().enumerate() {
                         add_string_lines(

@@ -130,11 +130,14 @@ impl NetworkServer {
             };
             runtime.block_on(async move {
                 let listener = match TcpListener::bind(&bind_addr).await {
-                    Ok(listener) => listener,
+                    Ok(listener) => {
+                        eprintln!("[NetworkServer] Listening on {bind_addr} (Seed: {seed}, Gamemode: {gamemode})");
+                        listener
+                    }
                     Err(error) => {
                         let reason =
                             format!("failed to bind multiplayer server to {bind_addr}: {error}");
-                        eprintln!("{reason}");
+                        eprintln!("[NetworkServer] {reason}");
                         let _ = server_to_host.send(ServerToHost::Disconnected { reason });
                         return;
                     }
@@ -161,7 +164,8 @@ impl NetworkServer {
             tokio::select! {
                 accepted = listener.accept() => {
                     match accepted {
-                        Ok((stream, _)) => {
+                        Ok((stream, peer_addr)) => {
+                            eprintln!("[NetworkServer] Accepted TCP connection from {peer_addr}");
                             let sessions = Arc::clone(&self.sessions);
                             let next_player_id = Arc::clone(&self.next_player_id);
                             let server_to_host = self.server_to_host.clone();
@@ -180,7 +184,7 @@ impl NetworkServer {
                             });
                         }
                         Err(error) => {
-                            eprintln!("multiplayer server accept failed: {error}");
+                            eprintln!("[NetworkServer] Multiplayer server accept failed: {error}");
                         }
                     }
                 }
@@ -211,7 +215,9 @@ impl NetworkServer {
                 protocol_version,
                 username,
             })) => {
+                eprintln!("[NetworkServer] Received Handshake: username='{username}', protocol_version={protocol_version}");
                 if protocol_version != PROTOCOL_VERSION {
+                    eprintln!("[NetworkServer] Handshake rejected: version mismatch (expected {PROTOCOL_VERSION}, got {protocol_version})");
                     let _ = connection
                         .send(&Packet::Disconnect {
                             protocol_version: PROTOCOL_VERSION,
@@ -224,7 +230,8 @@ impl NetworkServer {
                 }
                 username
             }
-            Ok(Ok(_)) => {
+            Ok(Ok(packet)) => {
+                eprintln!("[NetworkServer] Handshake rejected: expected Packet::Handshake, got {packet:?}");
                 let _ = connection
                     .send(&Packet::Disconnect {
                         protocol_version: PROTOCOL_VERSION,
@@ -233,7 +240,14 @@ impl NetworkServer {
                     .await;
                 return;
             }
-            Ok(Err(_)) | Err(_) => return,
+            Ok(Err(err)) => {
+                eprintln!("[NetworkServer] Handshake receive error: {err}");
+                return;
+            }
+            Err(_) => {
+                eprintln!("[NetworkServer] Handshake timed out");
+                return;
+            }
         };
 
         let id = next_player_id.fetch_add(1, Ordering::Relaxed);
@@ -247,8 +261,11 @@ impl NetworkServer {
             .await
             .is_err()
         {
+            eprintln!("[NetworkServer] Failed to send LoginSuccess to '{handshake}' (Player ID: {id})");
             return;
         }
+
+        eprintln!("[NetworkServer] Sent LoginSuccess to '{handshake}' (Player ID: {id})");
 
         let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
         let roster_tx = out_tx.clone();
@@ -357,10 +374,11 @@ impl NetworkServer {
         server_to_host: &std_mpsc::Sender<ServerToHost>,
     ) {
         let removed = sessions.lock().await.remove(&id);
-        if removed.is_none() {
+        let Some(session) = removed else {
             return;
-        }
+        };
 
+        eprintln!("[NetworkServer] Client '{}' (Player ID: {}) disconnected", session.username, id);
         let _ = server_to_host.send(ServerToHost::ClientLeft { id });
         Self::broadcast_to(
             sessions,

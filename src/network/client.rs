@@ -56,6 +56,9 @@ pub enum ClientToGame {
         sender: String,
         message: String,
     },
+    StatusUpdate {
+        message: String,
+    },
 }
 
 #[derive(Debug)]
@@ -117,6 +120,11 @@ async fn run_client(
     game_to_client: Receiver<GameToClient>,
     client_to_game: Sender<ClientToGame>,
 ) {
+    eprintln!("[NetworkClient] Connecting to {server_addr}...");
+    let _ = client_to_game.send(ClientToGame::StatusUpdate {
+        message: format!("CONNECTING TO {server_addr}..."),
+    });
+
     let deadline = Instant::now() + Duration::from_secs(3);
     let stream = loop {
         match TcpStream::connect(&server_addr).await {
@@ -126,15 +134,25 @@ async fn run_client(
                 let _ = error;
             }
             Err(error) => {
-                let _ = client_to_game.send(ClientToGame::Disconnected {
-                    reason: format!("connection failed: {error}"),
-                });
+                let reason = format!("connection failed: {error}");
+                eprintln!("[NetworkClient] Connection failed: {error}");
+                let _ = client_to_game.send(ClientToGame::Disconnected { reason });
                 return;
             }
         }
     };
 
+    eprintln!("[NetworkClient] TCP connection established to {server_addr}");
+    let _ = client_to_game.send(ClientToGame::StatusUpdate {
+        message: "TCP CONNECTED. HANDSHAKING...".into(),
+    });
+
     let mut connection = Connection::new(stream);
+    eprintln!("[NetworkClient] Sent Handshake (user: {username}, v{PROTOCOL_VERSION})");
+    let _ = client_to_game.send(ClientToGame::StatusUpdate {
+        message: "HANDSHAKE SENT. WAITING FOR SERVER...".into(),
+    });
+
     if let Err(error) = connection
         .send(&Packet::Handshake {
             protocol_version: PROTOCOL_VERSION,
@@ -142,9 +160,9 @@ async fn run_client(
         })
         .await
     {
-        let _ = client_to_game.send(ClientToGame::Disconnected {
-            reason: error.to_string(),
-        });
+        let reason = error.to_string();
+        eprintln!("[NetworkClient] Handshake send error: {reason}");
+        let _ = client_to_game.send(ClientToGame::Disconnected { reason });
         return;
     }
 
@@ -155,6 +173,10 @@ async fn run_client(
             seed,
             gamemode,
         })) if protocol_version == PROTOCOL_VERSION => {
+            eprintln!("[NetworkClient] Login success! Assigned Player ID: {player_id}, Seed: {seed}, Gamemode: {gamemode}");
+            let _ = client_to_game.send(ClientToGame::StatusUpdate {
+                message: "LOGIN SUCCESS. LOADING WORLD...".into(),
+            });
             let _ = client_to_game.send(ClientToGame::Connected {
                 player_id,
                 seed,
@@ -163,25 +185,26 @@ async fn run_client(
             player_id
         }
         Ok(Ok(Packet::Disconnect { reason, .. })) => {
+            eprintln!("[NetworkClient] Server disconnected during login: {reason}");
             let _ = client_to_game.send(ClientToGame::Disconnected { reason });
             return;
         }
         Ok(Ok(packet)) => {
-            let _ = client_to_game.send(ClientToGame::Disconnected {
-                reason: format!("unexpected handshake response: {packet:?}"),
-            });
+            let reason = format!("unexpected handshake response: {packet:?}");
+            eprintln!("[NetworkClient] {reason}");
+            let _ = client_to_game.send(ClientToGame::Disconnected { reason });
             return;
         }
         Ok(Err(error)) => {
-            let _ = client_to_game.send(ClientToGame::Disconnected {
-                reason: error.to_string(),
-            });
+            let reason = error.to_string();
+            eprintln!("[NetworkClient] Connection recv error: {reason}");
+            let _ = client_to_game.send(ClientToGame::Disconnected { reason });
             return;
         }
         Err(_) => {
-            let _ = client_to_game.send(ClientToGame::Disconnected {
-                reason: "login timed out".into(),
-            });
+            let reason = "login timed out".to_string();
+            eprintln!("[NetworkClient] Login timed out after 5s");
+            let _ = client_to_game.send(ClientToGame::Disconnected { reason });
             return;
         }
     };
@@ -263,8 +286,14 @@ mod tests {
     use std::sync::mpsc;
 
     fn wait_for_event(rx: &Receiver<ClientToGame>) -> ClientToGame {
-        rx.recv_timeout(Duration::from_secs(3))
-            .expect("client event timed out")
+        loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("client event timed out");
+            if !matches!(event, ClientToGame::StatusUpdate { .. }) {
+                return event;
+            }
+        }
     }
 
     #[test]
