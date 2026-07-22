@@ -1,0 +1,666 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc as std_mpsc, Arc};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use tokio::net::TcpListener;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{self, Instant};
+
+use super::protocol::{Action, Packet, PlayerId, PROTOCOL_VERSION};
+use super::transport::Connection;
+
+const CLIENT_QUEUE_CAPACITY: usize = 64;
+const HOST_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug)]
+pub enum ServerToHost {
+    ClientJoined {
+        id: PlayerId,
+        username: String,
+    },
+    ClientLeft {
+        id: PlayerId,
+    },
+    ClientPosition {
+        id: PlayerId,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+        pitch: f32,
+    },
+    ClientAction {
+        id: PlayerId,
+        action: Action,
+    },
+    ClientBlockChange {
+        id: PlayerId,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+    },
+    ChatFromClient {
+        id: PlayerId,
+        message: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum HostToServer {
+    BroadcastBlockChange {
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+    },
+    SendChunk {
+        cx: i32,
+        cz: i32,
+        blocks: Vec<u8>,
+        to: PlayerId,
+    },
+    BroadcastPlayerPosition {
+        id: PlayerId,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+        pitch: f32,
+    },
+    BroadcastChat {
+        sender: String,
+        message: String,
+    },
+    NotifyPlayerJoin {
+        id: PlayerId,
+        username: String,
+    },
+    NotifyPlayerLeave {
+        id: PlayerId,
+    },
+    Stop,
+}
+
+struct ClientSession {
+    id: PlayerId,
+    username: String,
+    out_tx: mpsc::Sender<Packet>,
+}
+
+type Sessions = Arc<Mutex<HashMap<PlayerId, ClientSession>>>;
+
+pub struct NetworkServer {
+    seed: u64,
+    gamemode: u8,
+    next_player_id: Arc<AtomicU64>,
+    sessions: Sessions,
+    server_to_host: std_mpsc::Sender<ServerToHost>,
+}
+
+impl NetworkServer {
+    pub fn spawn(
+        bind_addr: String,
+        seed: u64,
+        gamemode: u8,
+        host_to_server: std_mpsc::Receiver<HostToServer>,
+        server_to_host: std_mpsc::Sender<ServerToHost>,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new()
+                .expect("failed to create the multiplayer server runtime");
+            runtime.block_on(async move {
+                let listener = match TcpListener::bind(&bind_addr).await {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        eprintln!("failed to bind multiplayer server to {bind_addr}: {error}");
+                        return;
+                    }
+                };
+
+                let server = NetworkServer {
+                    seed,
+                    gamemode,
+                    next_player_id: Arc::new(AtomicU64::new(1)),
+                    sessions: Arc::new(Mutex::new(HashMap::new())),
+                    server_to_host,
+                };
+                server.run(listener, host_to_server).await;
+            });
+        })
+    }
+
+    async fn run(self, listener: TcpListener, host_to_server: std_mpsc::Receiver<HostToServer>) {
+        // Polling try_recv keeps the blocking std receiver off Tokio's workers and,
+        // unlike spawn_blocking(recv), lets runtime shutdown finish immediately.
+        let mut command_tick = time::interval(HOST_COMMAND_POLL_INTERVAL);
+
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    match accepted {
+                        Ok((stream, _)) => {
+                            let sessions = Arc::clone(&self.sessions);
+                            let next_player_id = Arc::clone(&self.next_player_id);
+                            let server_to_host = self.server_to_host.clone();
+                            let seed = self.seed;
+                            let gamemode = self.gamemode;
+                            tokio::spawn(async move {
+                                Self::run_client(
+                                    Connection::new(stream),
+                                    seed,
+                                    gamemode,
+                                    next_player_id,
+                                    sessions,
+                                    server_to_host,
+                                )
+                                .await;
+                            });
+                        }
+                        Err(error) => {
+                            eprintln!("multiplayer server accept failed: {error}");
+                        }
+                    }
+                }
+                _ = command_tick.tick() => {
+                    loop {
+                        match host_to_server.try_recv() {
+                            Ok(HostToServer::Stop) => return,
+                            Ok(command) => self.handle_host_command(command).await,
+                            Err(std_mpsc::TryRecvError::Empty) => break,
+                            Err(std_mpsc::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_client(
+        mut connection: Connection,
+        seed: u64,
+        gamemode: u8,
+        next_player_id: Arc<AtomicU64>,
+        sessions: Sessions,
+        server_to_host: std_mpsc::Sender<ServerToHost>,
+    ) {
+        let handshake = match time::timeout(CLIENT_TIMEOUT, connection.recv()).await {
+            Ok(Ok(Packet::Handshake {
+                protocol_version,
+                username,
+            })) => {
+                if protocol_version != PROTOCOL_VERSION {
+                    let _ = connection
+                        .send(&Packet::Disconnect {
+                            protocol_version: PROTOCOL_VERSION,
+                            reason: format!(
+                                "protocol version mismatch: server {PROTOCOL_VERSION}, client {protocol_version}"
+                            ),
+                        })
+                        .await;
+                    return;
+                }
+                username
+            }
+            Ok(Ok(_)) => {
+                let _ = connection
+                    .send(&Packet::Disconnect {
+                        protocol_version: PROTOCOL_VERSION,
+                        reason: "expected handshake".into(),
+                    })
+                    .await;
+                return;
+            }
+            Ok(Err(_)) | Err(_) => return,
+        };
+
+        let id = next_player_id.fetch_add(1, Ordering::Relaxed);
+        if connection
+            .send(&Packet::LoginSuccess {
+                protocol_version: PROTOCOL_VERSION,
+                player_id: id,
+                seed,
+                gamemode,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
+        sessions.lock().await.insert(
+            id,
+            ClientSession {
+                id,
+                username: handshake.clone(),
+                out_tx,
+            },
+        );
+        if server_to_host
+            .send(ServerToHost::ClientJoined {
+                id,
+                username: handshake,
+            })
+            .is_err()
+        {
+            sessions.lock().await.remove(&id);
+            return;
+        }
+
+        let (mut reader, mut writer) = connection.into_split();
+        let mut send_task = tokio::spawn(async move {
+            let mut keepalive =
+                time::interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
+
+            loop {
+                tokio::select! {
+                    queued = out_rx.recv() => {
+                        match queued {
+                            Some(packet) if writer.send(&packet).await.is_ok() => {}
+                            Some(_) | None => break,
+                        }
+                    }
+                    _ = keepalive.tick() => {
+                        if writer.send(&Packet::Keepalive {
+                            protocol_version: PROTOCOL_VERSION,
+                        }).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        loop {
+            tokio::select! {
+                incoming = time::timeout(CLIENT_TIMEOUT, reader.recv()) => {
+                    match incoming {
+                        Ok(Ok(packet)) if packet.protocol_version() != PROTOCOL_VERSION => break,
+                        Ok(Ok(Packet::PlayerPosition { x, y, z, yaw, pitch, .. })) => {
+                            if server_to_host.send(ServerToHost::ClientPosition {
+                                id, x, y, z, yaw, pitch,
+                            }).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::PlayerAction { action, .. })) => {
+                            if server_to_host.send(ServerToHost::ClientAction { id, action }).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::BlockChange { x, y, z, block, .. })) => {
+                            if server_to_host.send(ServerToHost::ClientBlockChange {
+                                id, x, y, z, block,
+                            }).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::ChatMessage { message, .. })) => {
+                            if server_to_host.send(ServerToHost::ChatFromClient { id, message }).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::Keepalive { .. })) => {}
+                        Ok(Ok(Packet::Disconnect { .. })) | Ok(Err(_)) | Err(_) => break,
+                        Ok(Ok(_)) => {}
+                    }
+                }
+                _ = &mut send_task => break,
+            }
+        }
+
+        Self::remove_client(id, &sessions, &server_to_host).await;
+        send_task.abort();
+    }
+
+    async fn remove_client(
+        id: PlayerId,
+        sessions: &Sessions,
+        server_to_host: &std_mpsc::Sender<ServerToHost>,
+    ) {
+        let removed = sessions.lock().await.remove(&id);
+        if removed.is_none() {
+            return;
+        }
+
+        let _ = server_to_host.send(ServerToHost::ClientLeft { id });
+        Self::broadcast_to(
+            sessions,
+            Packet::PlayerLeave {
+                protocol_version: PROTOCOL_VERSION,
+                id,
+            },
+        )
+        .await;
+    }
+
+    async fn handle_host_command(&self, command: HostToServer) {
+        let (packet, recipient) = match command {
+            HostToServer::BroadcastBlockChange { x, y, z, block } => (
+                Packet::BlockChange {
+                    protocol_version: PROTOCOL_VERSION,
+                    x,
+                    y,
+                    z,
+                    block,
+                },
+                None,
+            ),
+            HostToServer::SendChunk { cx, cz, blocks, to } => (
+                Packet::ChunkData {
+                    protocol_version: PROTOCOL_VERSION,
+                    cx,
+                    cz,
+                    blocks,
+                },
+                Some(to),
+            ),
+            HostToServer::BroadcastPlayerPosition {
+                id,
+                x,
+                y,
+                z,
+                yaw,
+                pitch,
+            } => (
+                Packet::PlayerPosition {
+                    protocol_version: PROTOCOL_VERSION,
+                    id,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                },
+                None,
+            ),
+            HostToServer::BroadcastChat { sender, message } => (
+                Packet::ChatMessage {
+                    protocol_version: PROTOCOL_VERSION,
+                    sender,
+                    message,
+                },
+                None,
+            ),
+            HostToServer::NotifyPlayerJoin { id, username } => (
+                Packet::PlayerJoin {
+                    protocol_version: PROTOCOL_VERSION,
+                    id,
+                    username,
+                },
+                None,
+            ),
+            HostToServer::NotifyPlayerLeave { id } => (
+                Packet::PlayerLeave {
+                    protocol_version: PROTOCOL_VERSION,
+                    id,
+                },
+                None,
+            ),
+            HostToServer::Stop => return,
+        };
+
+        if let Some(id) = recipient {
+            Self::send_to(&self.sessions, id, packet).await;
+        } else {
+            Self::broadcast_to(&self.sessions, packet).await;
+        }
+    }
+
+    async fn send_to(sessions: &Sessions, id: PlayerId, packet: Packet) {
+        let tx = sessions
+            .lock()
+            .await
+            .get(&id)
+            .map(|session| session.out_tx.clone());
+        if let Some(tx) = tx {
+            // A full queue marks this client as lagging; dropping this packet keeps
+            // the authoritative broadcast loop responsive for every other client.
+            let _ = tx.try_send(packet);
+        }
+    }
+
+    async fn broadcast_to(sessions: &Sessions, packet: Packet) {
+        let senders: Vec<_> = sessions
+            .lock()
+            .await
+            .values()
+            .map(|session| session.out_tx.clone())
+            .collect();
+        for tx in senders {
+            let _ = tx.try_send(packet.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener as StdTcpListener;
+
+    struct TestServer {
+        addr: String,
+        host_tx: std_mpsc::Sender<HostToServer>,
+        event_rx: std_mpsc::Receiver<ServerToHost>,
+        handle: JoinHandle<()>,
+    }
+
+    impl TestServer {
+        fn start(seed: u64, gamemode: u8) -> Self {
+            let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+
+            let (host_tx, host_rx) = std_mpsc::channel();
+            let (event_tx, event_rx) = std_mpsc::channel();
+            let handle = NetworkServer::spawn(addr.clone(), seed, gamemode, host_rx, event_tx);
+            Self {
+                addr,
+                host_tx,
+                event_rx,
+                handle,
+            }
+        }
+
+        async fn connect(&self, username: &str) -> (Connection, PlayerId) {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let stream = loop {
+                match tokio::net::TcpStream::connect(&self.addr).await {
+                    Ok(stream) => break stream,
+                    Err(_) if Instant::now() < deadline => {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("server did not start: {error}"),
+                }
+            };
+            let mut connection = Connection::new(stream);
+            connection
+                .send(&Packet::Handshake {
+                    protocol_version: PROTOCOL_VERSION,
+                    username: username.into(),
+                })
+                .await
+                .unwrap();
+
+            match time::timeout(Duration::from_secs(2), connection.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                Packet::LoginSuccess {
+                    protocol_version,
+                    player_id,
+                    seed,
+                    gamemode,
+                } => {
+                    assert_eq!(protocol_version, PROTOCOL_VERSION);
+                    assert_ne!(player_id, 0);
+                    assert_eq!(seed, 0xCAFE_BABE);
+                    assert_eq!(gamemode, 1);
+                    (connection, player_id)
+                }
+                packet => panic!("expected login success, got {packet:?}"),
+            }
+        }
+
+        async fn next_event_matching(
+            &self,
+            predicate: impl Fn(&ServerToHost) -> bool,
+        ) -> ServerToHost {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                while let Ok(event) = self.event_rx.try_recv() {
+                    if predicate(&event) {
+                        return event;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for server event"
+                );
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn stop(self) {
+            let _ = self.host_tx.send(HostToServer::Stop);
+            time::timeout(
+                Duration::from_secs(2),
+                tokio::task::spawn_blocking(move || {
+                    self.handle.join().unwrap();
+                }),
+            )
+            .await
+            .expect("server thread did not stop")
+            .unwrap();
+        }
+    }
+
+    async fn recv_matching(
+        connection: &mut Connection,
+        predicate: impl Fn(&Packet) -> bool,
+    ) -> Packet {
+        time::timeout(Duration::from_secs(2), async {
+            loop {
+                let packet = connection.recv().await.unwrap();
+                if predicate(&packet) {
+                    return packet;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for packet")
+    }
+
+    #[tokio::test]
+    async fn connect_and_login() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (_client, id) = server.connect("steve").await;
+
+        let joined = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ClientJoined { .. }))
+            .await;
+        match joined {
+            ServerToHost::ClientJoined {
+                id: joined_id,
+                username,
+            } => {
+                assert_eq!(joined_id, id);
+                assert_eq!(username, "steve");
+            }
+            _ => unreachable!(),
+        }
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn relays_player_position_through_host() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client_a, id_a) = server.connect("steve").await;
+        let (mut client_b, _) = server.connect("alex").await;
+
+        client_a
+            .send(&Packet::PlayerPosition {
+                protocol_version: PROTOCOL_VERSION,
+                id: 999,
+                x: 10.0,
+                y: 65.0,
+                z: -4.0,
+                yaw: 1.5,
+                pitch: -0.25,
+            })
+            .await
+            .unwrap();
+        let event = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ClientPosition { .. }))
+            .await;
+        assert!(matches!(
+            event,
+            ServerToHost::ClientPosition { id, x, y, z, yaw, pitch }
+                if id == id_a
+                    && x == 10.0
+                    && y == 65.0
+                    && z == -4.0
+                    && yaw == 1.5
+                    && pitch == -0.25
+        ));
+
+        server
+            .host_tx
+            .send(HostToServer::BroadcastPlayerPosition {
+                id: id_a,
+                x: 10.0,
+                y: 65.0,
+                z: -4.0,
+                yaw: 1.5,
+                pitch: -0.25,
+            })
+            .unwrap();
+        let packet = recv_matching(&mut client_b, |packet| {
+            matches!(packet, Packet::PlayerPosition { .. })
+        })
+        .await;
+        assert!(matches!(
+            packet,
+            Packet::PlayerPosition { id, x, y, z, yaw, pitch, .. }
+                if id == id_a
+                    && x == 10.0
+                    && y == 65.0
+                    && z == -4.0
+                    && yaw == 1.5
+                    && pitch == -0.25
+        ));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_cleans_up_and_notifies_remaining_clients() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (client_a, id_a) = server.connect("steve").await;
+        let (mut client_b, _) = server.connect("alex").await;
+        drop(client_a);
+
+        let left = server
+            .next_event_matching(
+                |event| matches!(event, ServerToHost::ClientLeft { id } if *id == id_a),
+            )
+            .await;
+        assert!(matches!(left, ServerToHost::ClientLeft { id } if id == id_a));
+
+        let packet = recv_matching(
+            &mut client_b,
+            |packet| matches!(packet, Packet::PlayerLeave { id, .. } if *id == id_a),
+        )
+        .await;
+        assert!(matches!(packet, Packet::PlayerLeave { id, .. } if id == id_a));
+
+        server.stop().await;
+    }
+}

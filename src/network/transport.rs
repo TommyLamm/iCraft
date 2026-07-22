@@ -1,6 +1,7 @@
 use std::io;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
 use super::protocol::Packet;
@@ -9,18 +10,45 @@ const MAX_PACKET_SIZE: u32 = 2 * 1024 * 1024;
 const LEN_HEADER: usize = 4;
 
 pub struct Connection {
-    stream: TcpStream,
+    reader: ConnectionReader,
+    writer: ConnectionWriter,
+}
+
+pub(super) struct ConnectionReader {
+    stream: OwnedReadHalf,
     read_buf: Vec<u8>,
+}
+
+pub(super) struct ConnectionWriter {
+    stream: OwnedWriteHalf,
 }
 
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {
-        Connection {
-            stream,
-            read_buf: Vec::new(),
+        let (reader, writer) = stream.into_split();
+        Self {
+            reader: ConnectionReader {
+                stream: reader,
+                read_buf: Vec::new(),
+            },
+            writer: ConnectionWriter { stream: writer },
         }
     }
 
+    pub async fn recv(&mut self) -> io::Result<Packet> {
+        self.reader.recv().await
+    }
+
+    pub async fn send(&mut self, packet: &Packet) -> io::Result<()> {
+        self.writer.send(packet).await
+    }
+
+    pub(super) fn into_split(self) -> (ConnectionReader, ConnectionWriter) {
+        (self.reader, self.writer)
+    }
+}
+
+impl ConnectionReader {
     pub async fn recv(&mut self) -> io::Result<Packet> {
         let mut header = [0u8; LEN_HEADER];
         self.stream.read_exact(&mut header).await?;
@@ -37,7 +65,9 @@ impl Connection {
         self.stream.read_exact(&mut self.read_buf).await?;
         Packet::decode(&self.read_buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
+}
 
+impl ConnectionWriter {
     pub async fn send(&mut self, packet: &Packet) -> io::Result<()> {
         let payload = packet.encode();
         let len = u32::try_from(payload.len()).map_err(|_| {

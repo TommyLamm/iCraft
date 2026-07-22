@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `f8037dd6a633afe63a58990312a659bbc181dec5` (`f8037dd`). This identifies the
+> `f89ccdb165d8d530676f4019eda37f4afc34dcab` (`f89ccdb`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -17,9 +17,13 @@
 event loop, keeps the simulation on the main thread, and renders through `wgpu`.
 Terrain, the texture atlas, and fallback sounds are generated procedurally.
 
-There is currently no integrated server or database. A self-contained networking
-foundation (versioned `Packet` protocol and async TCP `Connection` transport
-under `src/network/`) exists but is not yet wired into the game loop.
+There is currently no database. A self-contained networking foundation under
+`src/network/` now includes a versioned `Packet` protocol, async TCP
+`Connection` transport, and an integrated listen-server core. `NetworkServer`
+runs Tokio on a dedicated background thread, authenticates client sessions, and
+bridges authoritative events and broadcasts through synchronous channels. It is
+not yet wired into the game loop; that bridge is reserved for the remaining
+multiplayer subtasks.
 Display/input/audio
 settings persist in `settings.txt`, while each world's data (including seed,
 metadata, game time, player status, inventory, current dimension, advancement
@@ -366,9 +370,10 @@ entity physics and world-side lifecycle events.
 
 | File | Responsibility / key symbols |
 | --- | --- |
-| `src/network/mod.rs` | Module root; re-exports `protocol` and `transport`. |
+| `src/network/mod.rs` | Module root; re-exports `protocol`, `server`, and `transport`. |
 | `src/network/protocol.rs` | `PlayerId`, `PROTOCOL_VERSION`, `Action`, `Packet`; bincode `encode`/`decode` of the 11-variant versioned wire enum (each packet carries `protocol_version: u32`). No game-module dependencies. |
-| `src/network/transport.rs` | `Connection`; async `tokio` TCP stream with 4-byte big-endian length-prefixed framing, a 2 MiB packet cap, and `recv`/`send`. Runtime-agnostic; not yet driven by the game loop. |
+| `src/network/server.rs` | `NetworkServer`, `ServerToHost`, `HostToServer`; background-thread Tokio listen server, handshake/login and monotonic player IDs, bounded per-client send queues, host-command fan-out, authenticated client event relay, keepalive/timeout handling, and disconnect cleanup. Still channel-driven only; `State` integration is pending. |
+| `src/network/transport.rs` | `Connection`; async `tokio` TCP stream with 4-byte big-endian length-prefixed framing, a 2 MiB packet cap, `recv`/`send`, and a crate-internal owned read/write split used by independent server session loops. Runtime-agnostic; not yet driven by the game loop. |
 
 ## Data and configuration
 

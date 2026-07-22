@@ -26,10 +26,10 @@
 - Create: `src/network/server.rs`
 - Modify: `src/network/mod.rs`
 
-- [ ] **Step 1: Declare the submodule**
+- [x] **Step 1: Declare the submodule**
   Add `pub mod server;` to `src/network/mod.rs`.
 
-- [ ] **Step 2: Define `ServerToHost` (events the host consumes)**
+- [x] **Step 2: Define `ServerToHost` (events the host consumes)**
   ```rust
   pub enum ServerToHost {
       ClientJoined { id: PlayerId, username: String },
@@ -41,7 +41,7 @@
   }
   ```
 
-- [ ] **Step 3: Define `HostToServer` (commands the host emits)**
+- [x] **Step 3: Define `HostToServer` (commands the host emits)**
   ```rust
   pub enum HostToServer {
       BroadcastBlockChange { x: i32, y: i32, z: i32, block: u32 },
@@ -54,7 +54,7 @@
   }
   ```
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo check`
 
 ---
@@ -64,7 +64,7 @@
 **Files:**
 - Modify: `src/network/server.rs`
 
-- [ ] **Step 1: Define `ClientSession`**
+- [x] **Step 1: Define `ClientSession`**
   ```rust
   struct ClientSession {
       id: PlayerId,
@@ -74,7 +74,7 @@
   ```
   Hold all sessions in a `HashMap<PlayerId, ClientSession>` inside `NetworkServer`.
 
-- [ ] **Step 2: Implement `NetworkServer::spawn`**
+- [x] **Step 2: Implement `NetworkServer::spawn`**
   ```rust
   pub fn spawn(
       bind_addr: String,
@@ -86,7 +86,7 @@
   ```
   Create a `tokio::runtime::Runtime::new()` on this background thread, then block_on the run loop. Return the `JoinHandle` so the host can join on shutdown.
 
-- [ ] **Step 3: Implement the accept loop**
+- [x] **Step 3: Implement the accept loop**
   Bind a `TcpListener` on `bind_addr`. For each accepted stream, spawn a tokio task that:
   1. Wraps the stream in `transport::Connection`.
   2. Awaits a `Packet::Handshake`; validates `protocol_version == PROTOCOL_VERSION`. On mismatch, send `Packet::Disconnect { reason }` and drop.
@@ -94,7 +94,7 @@
   4. Sends `Packet::LoginSuccess { player_id, seed, gamemode }`.
   5. Registers the session, emits `ServerToHost::ClientJoined`, and starts two tasks (recv loop + send loop) below.
 
-- [ ] **Step 4: Implement the per-client recv loop**
+- [x] **Step 4: Implement the per-client recv loop**
   Loop on `Connection::recv`:
   - `PlayerPosition` -> forward as `ServerToHost::ClientPosition`.
   - `PlayerAction` -> forward as `ServerToHost::ClientAction`.
@@ -103,7 +103,7 @@
   - `Keepalive` -> reset the client's timeout timer.
   - `Err` / `Disconnect` / EOF -> break, triggering cleanup in Step 5.
 
-- [ ] **Step 5: Implement the per-client send loop & cleanup**
+- [x] **Step 5: Implement the per-client send loop & cleanup**
   Loop on the client's `out_rx`:
   - `Connection::send(packet).await`; on error, break.
   - On break: remove the session from the map, emit `ServerToHost::ClientLeft`, broadcast `Packet::PlayerLeave` to remaining clients.
@@ -115,7 +115,7 @@
 **Files:**
 - Modify: `src/network/server.rs`
 
-- [ ] **Step 1: Implement the `HostToServer` drain loop**
+- [x] **Step 1: Implement the `HostToServer` drain loop**
   Run concurrently with the accept loop (e.g. `tokio::select!` over `host_to_server.recv()` and the accept future, or a dedicated task using `tokio::task::spawn_blocking` to bridge the std channel). For each command:
   - `BroadcastBlockChange` -> `Packet::BlockChange` to **every** client's `out_tx`.
   - `SendChunk` -> `Packet::ChunkData` to the single `to` client.
@@ -124,13 +124,13 @@
   - `NotifyPlayerJoin` / `NotifyPlayerLeave` -> `Packet::PlayerJoin` / `Packet::PlayerLeave` to every client.
   - `Stop` -> shut down the runtime and return.
 
-- [ ] **Step 2: Bridge the std channel into async safely**
+- [x] **Step 2: Bridge the std channel into async safely**
   Because `host_to_server` is a blocking `std::sync::mpsc::Receiver`, use `tokio::task::spawn_blocking` to read it in a blocking manner and forward via a `tokio::sync::mpsc` to the async select loop, OR poll it with `try_recv` on a `tokio::time::interval`. Document the chosen approach in a comment.
 
-- [ ] **Step 3: Implement keepalive & timeout**
+- [x] **Step 3: Implement keepalive & timeout**
   Every 5 s, each client session sends a `Packet::Keepalive`. If no packet (including keepalive) is received from a client within 15 s, treat it as a timeout disconnect (run the Step 5 cleanup).
 
-- [ ] **Step 4: Verify it compiles**
+- [x] **Step 4: Verify it compiles**
   Run: `cargo check`
 
 ---
@@ -140,19 +140,19 @@
 **Files:**
 - Modify: `src/network/server.rs`
 
-- [ ] **Step 1: Write a connect + login test**
+- [x] **Step 1: Write a connect + login test**
   In a `#[cfg(test)] mod tests` block with `#[tokio::test]`:
   - Spawn `NetworkServer::spawn` on `127.0.0.1:0` (use `TcpListener::bind` first to learn the port, then hand the addr in).
   - Connect a client `Connection`, send `Handshake`, assert receipt of `LoginSuccess` with a nonzero `player_id` and the expected seed.
   - Drain `server_to_host` and assert a `ClientJoined` event arrived.
 
-- [ ] **Step 2: Write a broadcast relay test**
+- [x] **Step 2: Write a broadcast relay test**
   - Connect two clients. Have the server receive a `PlayerPosition` from client A (via `ServerToHost::ClientPosition`) and, when the host sends `HostToServer::BroadcastPlayerPosition`, assert client B receives the corresponding `Packet::PlayerPosition`.
 
-- [ ] **Step 3: Write a disconnect cleanup test**
+- [x] **Step 3: Write a disconnect cleanup test**
   - Drop client A's connection; assert `ServerToHost::ClientLeft` is emitted and client B receives `Packet::PlayerLeave`.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
   Run: `cargo test network::server`
   Expected: All server tests pass.
 
@@ -160,9 +160,13 @@
 
 ### Task 5: Verification
 
-- [ ] **Step 1: Full check**
+- [x] **Step 1: Full check**
   Run: `cargo fmt --check && cargo check --release && cargo test`
   Expected: All existing + new tests pass. No game module is modified yet — the server is driven only by its channel interface.
+
+  Result: `cargo check --release` and all tests pass. The new networking files
+  pass rustfmt; repository-wide `cargo fmt --check` continues to report only the
+  six pre-existing game-module formatting drifts already recorded by Sub-task 1.
 
 ---
 
@@ -170,6 +174,7 @@
 
 - **[NEW]** `src/network/server.rs`
 - **[MODIFY]** `src/network/mod.rs`
+- **[MODIFY]** `src/network/transport.rs` (crate-internal owned read/write split for independent session tasks)
 
 ## Verification Gate
 

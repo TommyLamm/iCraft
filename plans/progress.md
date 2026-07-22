@@ -91,7 +91,7 @@ P3 [███████░░░] 66.7%
 | 22 | [紅石系統](./p3/22_redstone.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 23 | [天氣系統](./p3/23_weather.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
 | 24 | [主選單 + 世界管理](./p3/24_main_menu.md) | 🟢 已完成 | 2026-07-20 | 2026-07-20 | |
-| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 1/6 完成 |
+| 25 | [多人遊戲](./p3/25_multiplayer.md) | 🟡 進行中 | 2026-07-22 | — | 子任務 2/6 完成 |
 | 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 28 | [成就 / 進度系統](./p3/28_advancements.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ⬜ 待定 | — | — | |
@@ -104,6 +104,12 @@ P3 [███████░░░] 66.7%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-22
+- 🟡 進度任務 #25 (By GPT-5.6 Sol High)：多人遊戲 - 子任務 2/6 整合式伺服器核心
+  - 新增文件：`src/network/server.rs`
+  - 修改文件：`src/network/mod.rs`, `src/network/transport.rs`, `ARCHITECTURE.md`, `docs/superpowers/plans/2026-07-22-multiplayer-02-server-core.md`
+  - 關鍵決策：新增 `NetworkServer`，在專用背景執行緒建立 Tokio runtime，透過 `ServerToHost` / `HostToServer` 同步通道與尚未接線的主遊戲執行緒隔離。伺服器負責 TCP 接受、版本握手、從 1 開始的單調 `PlayerId`、登入、會話註冊、已驗證身分的玩家事件轉發、主機命令廣播、64 封包有界客戶端佇列、5 秒 keepalive、15 秒無輸入逾時及離線清理。`Connection` 新增 crate 內部 owned read/write split，使每個客戶端的接收/逾時與發送/keepalive 由獨立任務處理，慢速 socket 寫入不會凍結該會話的接收逾時。`std::sync::mpsc::Receiver` 以 10 ms `try_recv` 定時器橋接，避免阻塞 Tokio worker 或令 runtime 關閉卡在 `spawn_blocking`。
+  - 驗證：`cargo test network::server` 3/3 通過（登入、雙客戶端位置中繼、斷線清理）；`cargo check --release` 通過；完整 `cargo test` 共 128 項單元測試與 1 項整合測試全部通過。新增 network 文件通過 rustfmt，`git diff --check` 通過。
+  - 備註：全域 `cargo fmt --check` 仍只報子任務 1 已記錄的 6 個既有遊戲模組格式漂移；本子任務遵守「no game module is modified」範圍，未改寫無關檔案。
 - 🟡 進度任務 #25 (By GLM-5.2)：多人遊戲 - 子任務 1/6 網路協議與傳輸層
   - 新增文件：`src/network/mod.rs`, `src/network/protocol.rs`, `src/network/transport.rs`
   - 修改文件：`Cargo.toml`, `src/main.rs`
