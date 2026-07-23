@@ -15,8 +15,8 @@
 | 5 | [Add a proper 3D torch model](plans/implementation/05_torch_model.md) | Complete | `0ea9c8d` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (214 unit + 1 integration); exact bounds/count, UV, winding, AO/light, properties, support/light cleanup |
 | 6 | [Fix Survival attacks against mobs](plans/implementation/06_survival_combat.md) | Complete | `f9930d1` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (219 unit + 1 integration); hit/miss/latch routing, target filtering, invulnerability/impact, and zero-HP cleanup |
 | 7 | [Add adjustable weather/rain volume](plans/implementation/07_weather_volume.md) | Complete | `7fa3b6b` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (226 unit + 1 integration); legacy/clamp/roundtrip settings, category gain, live-loop refresh, and UI hit regions |
-| 8 | [Add a Creative item catalog on `E`](plans/implementation/08_creative_inventory.md) | Complete | pending commit | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (238 unit + 1 integration); exact catalog/partition, virtual supply/no-op, hotbar/cursor safety, wheel routing, SplashPotion metadata, and multi-aspect layout regressions |
-| 9 | [Stop camera rotation while inventory is open](plans/implementation/09_inventory_camera_lock.md) | Pending | — | — |
+| 8 | [Add a Creative item catalog on `E`](plans/implementation/08_creative_inventory.md) | Complete | `f5b69f8` | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (238 unit + 1 integration); exact catalog/partition, virtual supply/no-op, hotbar/cursor safety, wheel routing, SplashPotion metadata, and multi-aspect layout regressions |
+| 9 | [Stop camera rotation while inventory is open](plans/implementation/09_inventory_camera_lock.md) | Complete | pending commit | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (243 unit + 1 integration); seven-blocker predicate, disabled/enabled mouse deltas, sensitivity/pitch clamp, UI NDC, E repeat, and Creative wheel regression |
 | 10 | Last: find, list, and fix latent bugs | Pending | — | — |
 
 ## Working notes
@@ -80,6 +80,14 @@
   wheel input without changing the selected hotbar slot, and SplashPotion now
   starts with water+splash metadata. Interactive GPU/UI inspection remains
   manual.
+- Task 9 routes raw mouse motion through one seven-blocker camera-look
+  predicate covering pause, inventory, advancements, chat, disconnect, death,
+  and focus. CursorMoved still updates UI hover coordinates. Cursor grab and
+  visibility changes are centralized, use Locked with a Confined fallback for
+  pure gameplay, and release for every blocked state. Inventory/advancement
+  transitions are mutually exclusive without intermediate re-grabs, E ignores
+  key repeat, and focus/death/respawn use the same synchronization path.
+  Windows cursor-mode fallback and event timing remain an interactive check.
 
 ## Commit discipline
 

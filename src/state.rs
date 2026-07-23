@@ -1274,6 +1274,75 @@ pub struct KeyState {
     pub shift: bool,
 }
 
+pub(crate) fn allows_camera_look(
+    is_paused: bool,
+    inventory_open: bool,
+    advancements_open: bool,
+    chat_open: bool,
+    connection_lost: bool,
+    is_dead: bool,
+    has_focus: bool,
+) -> bool {
+    !is_paused
+        && !inventory_open
+        && !advancements_open
+        && !chat_open
+        && !connection_lost
+        && !is_dead
+        && has_focus
+}
+
+fn cursor_position_to_ndc(x: f64, y: f64, width: u32, height: u32) -> [f32; 2] {
+    [
+        (x as f32 / width.max(1) as f32) * 2.0 - 1.0,
+        1.0 - (y as f32 / height.max(1) as f32) * 2.0,
+    ]
+}
+
+#[cfg(test)]
+mod camera_input_tests {
+    use super::{allows_camera_look, cursor_position_to_ndc};
+
+    #[test]
+    fn every_gameplay_blocker_disables_camera_look() {
+        assert!(allows_camera_look(
+            false, false, false, false, false, false, true
+        ));
+
+        assert!(!allows_camera_look(
+            true, false, false, false, false, false, true
+        ));
+        assert!(!allows_camera_look(
+            false, true, false, false, false, false, true
+        ));
+        assert!(!allows_camera_look(
+            false, false, true, false, false, false, true
+        ));
+        assert!(!allows_camera_look(
+            false, false, false, true, false, false, true
+        ));
+        assert!(!allows_camera_look(
+            false, false, false, false, true, false, true
+        ));
+        assert!(!allows_camera_look(
+            false, false, false, false, false, true, true
+        ));
+        assert!(!allows_camera_look(
+            false, false, false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn cursor_position_still_maps_to_ui_coordinates() {
+        assert_eq!(cursor_position_to_ndc(0.0, 0.0, 1280, 720), [-1.0, 1.0]);
+        assert_eq!(cursor_position_to_ndc(640.0, 360.0, 1280, 720), [0.0, 0.0]);
+        assert_eq!(
+            cursor_position_to_ndc(1280.0, 720.0, 1280, 720),
+            [1.0, -1.0]
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 struct DoubleTapTracker {
     last_tap: Option<Instant>,
@@ -3710,6 +3779,36 @@ impl State {
         self.jump_taps.reset();
     }
 
+    pub fn camera_look_allowed(&self) -> bool {
+        allows_camera_look(
+            self.is_paused,
+            self.inventory.is_open,
+            self.advancement_gui.is_open,
+            self.is_chat_open,
+            self.connection_lost,
+            self.player_state.is_dead,
+            self.window.has_focus(),
+        )
+    }
+
+    pub fn sync_cursor_mode(&self) {
+        if self.camera_look_allowed() {
+            let _ = self
+                .window
+                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                .or_else(|_| {
+                    self.window
+                        .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                });
+            self.window.set_cursor_visible(false);
+        } else {
+            let _ = self
+                .window
+                .set_cursor_grab(winit::window::CursorGrabMode::None);
+            self.window.set_cursor_visible(true);
+        }
+    }
+
     pub fn handle_jump_pressed(&mut self, now: Instant, repeat: bool) {
         let can_fly = self.game_mode == GameMode::Creative && !self.player_state.is_dead;
         if self.jump_taps.register(now, can_fly, repeat) {
@@ -3740,10 +3839,7 @@ impl State {
         self.is_chat_open = true;
         self.clear_movement_input();
         self.left_mouse_pressed = false;
-        let _ = self
-            .window
-            .set_cursor_grab(winit::window::CursorGrabMode::None);
-        self.window.set_cursor_visible(true);
+        self.sync_cursor_mode();
     }
 
     pub fn close_chat(&mut self) {
@@ -3752,16 +3848,7 @@ impl State {
             return;
         }
         self.is_chat_open = false;
-        if !self.is_paused && !self.connection_lost && self.window.has_focus() {
-            let _ = self
-                .window
-                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                .or_else(|_| {
-                    self.window
-                        .set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                });
-            self.window.set_cursor_visible(false);
-        }
+        self.sync_cursor_mode();
     }
 
     pub fn submit_chat(&mut self) {
@@ -3897,29 +3984,17 @@ impl State {
     }
 
     pub fn open_advancements_ui(&mut self) {
+        self.advancement_gui.open();
         if self.inventory.is_open {
             self.close_inventory();
         }
-        self.advancement_gui.open();
         self.clear_movement_input();
-        let _ = self
-            .window
-            .set_cursor_grab(winit::window::CursorGrabMode::None);
-        self.window.set_cursor_visible(true);
+        self.sync_cursor_mode();
     }
 
     pub fn close_advancements_ui(&mut self) {
         self.advancement_gui.close();
-        if !self.is_paused && !self.inventory.is_open {
-            let _ = self
-                .window
-                .set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                .or_else(|_| {
-                    self.window
-                        .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                });
-            self.window.set_cursor_visible(false);
-        }
+        self.sync_cursor_mode();
     }
 
     pub fn handle_advancements_click(&mut self, pressed: bool) {
@@ -4306,29 +4381,13 @@ impl State {
         self.is_paused = paused;
         println!("[Debug] set_paused called with: {}", paused);
         if paused {
-            let res = self
-                .window
-                .set_cursor_grab(winit::window::CursorGrabMode::None);
-            println!("[Debug] Release grab result: {:?}", res);
-            self.window.set_cursor_visible(true);
             self.clear_movement_input();
-        } else {
-            let res = self
-                .window
-                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                .or_else(|_| {
-                    self.window
-                        .set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                });
-            println!("[Debug] Grab cursor result: {:?}", res);
-            self.window.set_cursor_visible(false);
         }
+        self.sync_cursor_mode();
     }
 
     pub fn handle_mouse_move(&mut self, x: f64, y: f64) {
-        let ndc_x = (x as f32 / self.size.width as f32) * 2.0 - 1.0;
-        let ndc_y = 1.0 - (y as f32 / self.size.height as f32) * 2.0;
-        self.mouse_ndc = [ndc_x, ndc_y];
+        self.mouse_ndc = cursor_position_to_ndc(x, y, self.size.width, self.size.height);
     }
 
     pub fn handle_menu_click(&mut self) -> bool {
@@ -6330,12 +6389,8 @@ impl State {
                 println!("[Debug] Player died due to: {:?}", source);
                 self.inventory.clear();
 
-                // Release cursor grab immediately on death so player can click Respawn
-                let _ = self
-                    .window
-                    .set_cursor_grab(winit::window::CursorGrabMode::None);
-                self.window.set_cursor_visible(true);
                 self.clear_movement_input();
+                self.sync_cursor_mode();
             } else {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::PlayerHurt);
@@ -6366,15 +6421,7 @@ impl State {
         self.player_state.damaged_flash_time = 0.0;
         self.void_damage_timer = 0.0;
 
-        // Grab cursor
-        let _ = self
-            .window
-            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-            .or_else(|_| {
-                self.window
-                    .set_cursor_grab(winit::window::CursorGrabMode::Confined)
-            });
-        self.window.set_cursor_visible(false);
+        self.sync_cursor_mode();
 
         println!("[Debug] Player respawned at spawn point");
     }
@@ -7593,15 +7640,14 @@ impl State {
 
     pub fn open_inventory(&mut self) {
         self.inventory.is_open = true;
+        if self.advancement_gui.is_open {
+            self.close_advancements_ui();
+        }
         if self.is_creative_catalog_open() {
             self.inventory.clamp_creative_scroll();
         }
-        // Release cursor grab
-        let _ = self
-            .window
-            .set_cursor_grab(winit::window::CursorGrabMode::None);
-        self.window.set_cursor_visible(true);
         self.clear_movement_input();
+        self.sync_cursor_mode();
     }
 
     fn open_station(&mut self, kind: StationKind, position: Vec3) {
@@ -7687,15 +7733,7 @@ impl State {
         self.active_station = None;
         self.anvil.rename.clear();
 
-        // Re-lock cursor
-        let _ = self
-            .window
-            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-            .or_else(|_| {
-                self.window
-                    .set_cursor_grab(winit::window::CursorGrabMode::Confined)
-            });
-        self.window.set_cursor_visible(false);
+        self.sync_cursor_mode();
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {

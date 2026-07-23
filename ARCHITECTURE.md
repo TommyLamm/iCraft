@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `7fa3b6bb588250d804988e2dc64c5db4a0ea4292` (`7fa3b6b`). This identifies the
+> `f5b69f815106c020df0b016550ca63976873408f` (`f5b69f8`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -87,7 +87,9 @@ src/main.rs
   the same window re-entrantly. On Windows both runtimes explicitly use wgpu's
   DX12 backend; other platforms use the normal primary native backends.
   `window_event` routes configurable keyboard input, mouse, resize, pause,
-  inventory, the advancement screen, menu actions, and redraw; wheel input
+  inventory, the advancement screen, menu actions, and redraw; raw mouse look
+  is gated by the complete gameplay/UI/focus state while CursorMoved remains
+  available for UI hover, and wheel input
   scrolls an open Creative catalog instead of changing the hotbar selection.
   Input priority
   while playing is death screen -> pause menu -> advancements -> inventory ->
@@ -418,9 +420,9 @@ entity physics and world-side lifecycle events.
 | File | Responsibility / key symbols |
 | --- | --- |
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
-| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing (including the primary-press/held-mining latch and Creative catalog wheel routing), chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
+| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing (including camera-look gating, non-repeating inventory toggle, the primary-press/held-mining latch, and Creative catalog wheel routing), chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
 | `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings` (including persistent Master/Music/Sound/Weather volumes), key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
-| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `DoubleTapTracker`, `PrimaryPressDecision`, `SlotType`; selected-world/network setup, frame ordering, Creative flight toggling/lifecycle, standard and Creative-catalog inventory layout/hit testing/rendering, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, melee-first primary-press routing, mining/placement authority gates, sequenced 20 Hz local-pose sends, bounded remote snapshot interpolation/extrapolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
+| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `DoubleTapTracker`, `PrimaryPressDecision`, `SlotType`; selected-world/network setup, frame ordering, Creative flight toggling/lifecycle, seven-blocker camera-look policy and centralized cursor-mode synchronization, standard and Creative-catalog inventory layout/hit testing/rendering, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, melee-first primary-press routing, mining/placement authority gates, sequenced 20 Hz local-pose sends, bounded remote snapshot interpolation/extrapolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/chunk_render.rs` | `TerrainVertex`, mesh bounds/data/bundles, wgpu-depth `Frustum`, sorted `DrawPlan`, and LOD threshold/selection helpers. Pure CPU structures and algorithms are unit tested without a window. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |

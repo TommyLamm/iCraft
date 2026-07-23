@@ -41,6 +41,27 @@ fn game_wheel_target(
     }
 }
 
+fn camera_angles_after_mouse_motion(
+    allowed: bool,
+    yaw: f32,
+    pitch: f32,
+    delta: (f64, f64),
+    sensitivity: f32,
+) -> Option<(f32, f32)> {
+    if !allowed {
+        return None;
+    }
+
+    let yaw = yaw - (delta.0 * sensitivity as f64) as f32;
+    let pitch = pitch - (delta.1 * sensitivity as f64) as f32;
+    let max_pitch = f32::to_radians(89.0);
+    Some((yaw, pitch.clamp(-max_pitch, max_pitch)))
+}
+
+fn inventory_toggle_requested(pressed: bool, repeat: bool) -> bool {
+    pressed && !repeat
+}
+
 pub struct App {
     runtime: Option<Runtime>,
     window: Option<Arc<Window>>,
@@ -153,16 +174,15 @@ impl ApplicationHandler for App {
             return;
         };
         if let DeviceEvent::MouseMotion { delta } = event {
-            if !state.is_paused
-                && !state.is_chat_open
-                && !state.connection_lost
-                && state.window.has_focus()
-            {
-                let sensitivity = state.sensitivity;
-                state.camera.yaw -= (delta.0 * sensitivity as f64) as f32;
-                state.camera.pitch -= (delta.1 * sensitivity as f64) as f32;
-                let max_pitch = f32::to_radians(89.0);
-                state.camera.pitch = state.camera.pitch.clamp(-max_pitch, max_pitch);
+            if let Some((yaw, pitch)) = camera_angles_after_mouse_motion(
+                state.camera_look_allowed(),
+                state.camera.yaw,
+                state.camera.pitch,
+                delta,
+                state.sensitivity,
+            ) {
+                state.camera.yaw = yaw;
+                state.camera.pitch = pitch;
             }
         }
     }
@@ -189,28 +209,9 @@ impl ApplicationHandler for App {
                         if state.is_chat_open {
                             state.close_chat();
                         }
-                        let _ = state
-                            .window
-                            .set_cursor_grab(winit::window::CursorGrabMode::None);
-                        state.window.set_cursor_visible(true);
                         state.clear_movement_input();
-                    } else if !state.is_paused
-                        && !state.inventory.is_open
-                        && !state.advancement_gui.is_open
-                        && !state.is_chat_open
-                        && !state.connection_lost
-                        && !state.player_state.is_dead
-                    {
-                        let _ = state
-                            .window
-                            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                            .or_else(|_| {
-                                state
-                                    .window
-                                    .set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                            });
-                        state.window.set_cursor_visible(false);
                     }
+                    state.sync_cursor_mode();
                 }
             }
             WindowEvent::CursorMoved { position, .. } => match &mut self.runtime {
@@ -486,7 +487,9 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
         }
         return false;
     }
-    if code == state.settings.controls.inventory && pressed {
+    if code == state.settings.controls.inventory
+        && inventory_toggle_requested(pressed, event.repeat)
+    {
         if state.inventory.is_open {
             state.close_inventory();
         } else if !state.is_paused {
@@ -579,5 +582,37 @@ mod tests {
             GameWheelTarget::Hotbar
         );
         assert_eq!(game_wheel_target(true, false, false), GameWheelTarget::None);
+    }
+
+    #[test]
+    fn blocked_mouse_motion_does_not_produce_camera_angles() {
+        assert_eq!(
+            camera_angles_after_mouse_motion(false, 1.0, 0.5, (40.0, -20.0), 0.25),
+            None
+        );
+    }
+
+    #[test]
+    fn mouse_motion_applies_sensitivity_and_clamps_pitch() {
+        let (yaw, pitch) =
+            camera_angles_after_mouse_motion(true, 1.0, 0.5, (4.0, -2.0), 0.25).unwrap();
+        assert_eq!(yaw, 0.0);
+        assert_eq!(pitch, 1.0);
+
+        let max_pitch = f32::to_radians(89.0);
+        let (_, upper) =
+            camera_angles_after_mouse_motion(true, 0.0, 0.0, (0.0, -1000.0), 1.0).unwrap();
+        let (_, lower) =
+            camera_angles_after_mouse_motion(true, 0.0, 0.0, (0.0, 1000.0), 1.0).unwrap();
+        assert_eq!(upper, max_pitch);
+        assert_eq!(lower, -max_pitch);
+    }
+
+    #[test]
+    fn inventory_toggle_ignores_repeated_and_release_events() {
+        assert!(inventory_toggle_requested(true, false));
+        assert!(!inventory_toggle_requested(true, true));
+        assert!(!inventory_toggle_requested(false, false));
+        assert!(!inventory_toggle_requested(false, true));
     }
 }

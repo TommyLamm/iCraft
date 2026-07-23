@@ -104,6 +104,12 @@ P3 [█████████░] 88.9%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-24
+- ✅ 修復開啟物品欄仍會旋轉視角 (By inventory-camera sub-agent, reviewed by Codex)
+  - 修改文件：`src/app.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/09_inventory_camera_lock.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：raw `DeviceEvent::MouseMotion` 統一先經純 `allows_camera_look`，pause、inventory、advancements、chat、connection lost、death 或失焦任一成立都不寫入 yaw/pitch；允許時才套 sensitivity 與 ±89° pitch clamp。`WindowEvent::CursorMoved` 仍無條件映射到 UI NDC，故物品欄 hover/click 不受影響。游標模式集中為單一路徑：純 gameplay 嘗試 Locked、失敗 fallback Confined 並隱藏，其餘狀態使用 None 並顯示；pause、chat、inventory、advancements、death、respawn 及 focus 轉換都呼叫同一同步函式。E 只在 pressed 且非 repeat 時切換，inventory 與 advancement 開啟時先建立目標 blocker 再關另一 UI，避免中途重抓與重疊。Task 8 的 Creative catalog wheel、scroll clamp 及 cursor cleanup 保持不變。
+  - 根審查：以 CodeGraph 追查 Focused/MouseMotion/Keyboard 到 camera/cursor 的資料流，核對七項 blocker、所有直接 grab/visible 呼叫、UI NDC、死亡／重生與 Creative catalog 回歸；析構時保留獨立安全釋放。
+  - 驗證：七項 blocker truth table、disabled/enabled mouse delta、sensitivity、上下 pitch clamp、UI NDC、E repeat 與 Creative catalog wheel regression 通過；`cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過，共 243 項單元測試與 1 項整合測試。
+  - 備註：Windows 實際 Locked→Confined fallback、E/L/Esc、失焦／回焦及死亡／重生的 winit grab/visible 時序保留為人工驗收。
 - ✅ 新增 Creative 原版式物品目錄 (By creative-inventory sub-agent, reviewed by Codex)
   - 修改文件：`src/inventory.rs`, `src/state.rs`, `src/app.rs`, `ARCHITECTURE.md`, `plans/implementation/08_creative_inventory.md`, `plans/progress.md`, `track.md`
   - 關鍵決策：Creative 在沒有開啟工作站時，以虛擬無限供應目錄取代不完整的預置背包；`CREATIVE_ITEMS` 精確列出全部 144 個非 Air 物品，並由 All、Blocks、Tools、Combat、Food & Brewing、Redstone、Misc 七個頁籤完整分割。介面顯示可逐列滾動的 9×5 目錄、自適應 scrollbar 與九個真實快捷欄格；左鍵取得該物品最大堆疊，右鍵取得一個，虛擬格不修改 main inventory。游標來源追蹤只丟棄 catalog 生成物，真實快捷欄物品必須無損回收，容量不足時保留游標，避免遺失或複製。物品欄開啟期間的滾輪只捲目錄，不切換快捷欄；SplashPotion 預設帶 water+splash metadata。Survival 與 Crafting Table、Enchanting、Brewing、Anvil 仍走原標準介面。
