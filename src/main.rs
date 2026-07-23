@@ -10,6 +10,7 @@ mod dimension;
 mod enchantment;
 mod entity;
 mod fluid;
+mod hand_renderer;
 mod interaction;
 mod inventory;
 mod lighting;

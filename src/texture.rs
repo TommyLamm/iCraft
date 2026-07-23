@@ -1841,6 +1841,23 @@ impl TextureAtlas {
             }
         }
 
+        // Col 9 (Row 10): Plain player skin (no face features). Used by the
+        // first-person arm so it does not inherit the sheep head's eye pixels.
+        {
+            let ox = 9 * 16;
+            let oy = 10 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let var = ((x * 5 + y * 9) % 8) as u8;
+                    img.put_pixel(
+                        ox + x,
+                        oy + y,
+                        Rgba([235 - var / 2, 215 - var / 2, 190 - var / 3, 255]),
+                    );
+                }
+            }
+        }
+
         // Row 11: Passive Mob items
         draw_shears_icon(&mut img, 0, 11);
         draw_bucket_icon(&mut img, 1, 11, None); // Empty bucket

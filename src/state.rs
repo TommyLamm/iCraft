@@ -1057,10 +1057,19 @@ pub struct State {
     pub void_damage_timer: f32,
     pub world_time: crate::camera::WorldTime,
     pub show_debug: bool,
+    /// F5 toggles third-person camera. When true the local player model is
+    /// rendered and the camera sits behind the player.
+    pub third_person: bool,
     pub entity_manager: crate::entity::EntityManager,
     mob_vertex_buffer: wgpu::Buffer,
     mob_index_buffer: wgpu::Buffer,
     mob_num_indices: u32,
+    hand_pipeline: wgpu::RenderPipeline,
+    hand_vertex_buffer: wgpu::Buffer,
+    hand_index_buffer: wgpu::Buffer,
+    hand_num_indices: u32,
+    hand_camera_buffer: wgpu::Buffer,
+    hand_camera_bind_group: wgpu::BindGroup,
     pub particles: crate::particles::ParticleSystem,
     particle_vertex_buffer: wgpu::Buffer,
     particle_index_buffer: wgpu::Buffer,
@@ -1442,6 +1451,46 @@ impl State {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        // First-person hand pipeline: same shaders and bind layout as the
+        // main world pipeline, but depth always passes so the hand stays on
+        // top of world geometry.
+        let hand_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("First Person Hand Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1962,6 +2011,56 @@ impl State {
             mapped_at_creation: false,
         });
 
+        // First-person hand buffers. Only a few dozen vertices are ever needed,
+        // so keep them small and preallocated.
+        let hand_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Hand Vertex Buffer"),
+            size: (std::mem::size_of::<Vertex>() * 1024) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let hand_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Hand Index Buffer"),
+            size: (std::mem::size_of::<u32>() * 1536) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Hand camera uses a very near plane so the view-space hand model is
+        // never clipped by world geometry.
+        let mut hand_camera_uniform = crate::camera::CameraUniform::new();
+        let aspect = config.width as f32 / config.height as f32;
+        let hand_proj = Mat4::perspective_lh(f32::to_radians(70.0), aspect, 0.01, 10.0);
+        hand_camera_uniform.view_proj = hand_proj.to_cols_array_2d();
+        hand_camera_uniform.inv_view_proj = hand_proj.inverse().to_cols_array_2d();
+        hand_camera_uniform.camera_pos = [0.0, 0.0, 0.0, 0.0];
+
+        let hand_camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Hand Camera Buffer"),
+            contents: bytemuck::cast_slice(&[hand_camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let hand_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: hand_camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&texture_atlas.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&texture_atlas.sampler),
+                },
+            ],
+            label: Some("hand_camera_bind_group"),
+        });
+
         let particle_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Particle Vertex Buffer"),
             size: (std::mem::size_of::<Vertex>() * crate::particles::MAX_PARTICLES * 4)
@@ -2070,10 +2169,17 @@ impl State {
             void_damage_timer: 0.0,
             world_time,
             show_debug,
+            third_person: false,
             entity_manager: crate::entity::EntityManager::new(),
             mob_vertex_buffer,
             mob_index_buffer,
             mob_num_indices: 0,
+            hand_pipeline,
+            hand_vertex_buffer,
+            hand_index_buffer,
+            hand_num_indices: 0,
+            hand_camera_buffer,
+            hand_camera_bind_group,
             particles,
             particle_vertex_buffer,
             particle_index_buffer,
@@ -3729,9 +3835,22 @@ impl State {
             );
         }
 
-        // Sync camera position to player position at eye height
+        // Sync camera position to player position at eye height. In third
+        // person the camera pulls back behind the player so the model is visible.
         let eye_height = if self.keys.shift { 1.4 } else { 1.6 };
-        self.camera.position = self.player_physics.position + Vec3::new(0.0, eye_height, 0.0);
+        if self.third_person {
+            let forward = Vec3::new(
+                self.camera.yaw.cos() * self.camera.pitch.cos(),
+                self.camera.pitch.sin(),
+                self.camera.yaw.sin() * self.camera.pitch.cos(),
+            )
+            .normalize_or_zero();
+            self.camera.position = self.player_physics.position
+                + Vec3::new(0.0, eye_height, 0.0)
+                - forward * 4.0;
+        } else {
+            self.camera.position = self.player_physics.position + Vec3::new(0.0, eye_height, 0.0);
+        }
         let is_underwater = self.chunk_manager.get_block(
             self.camera.position.x.floor() as i32,
             self.camera.position.y.floor() as i32,
@@ -3780,7 +3899,7 @@ impl State {
             )
             .normalize_or_zero();
 
-            if let Some(hit) = raycast(self.camera.position, dir, 5.0, &self.chunk_manager) {
+            if let Some(hit) = raycast(self.camera.position, dir, 5.0, &self.chunk_manager, true) {
                 let target = hit.block_pos;
                 let block =
                     self.chunk_manager
@@ -3790,8 +3909,14 @@ impl State {
                     if self.mining_target != Some(target) {
                         self.mining_target = Some(target);
                         self.mining_progress = 0.0;
+                    }
+                    let mining_time = self.calculate_mining_time(block);
+                    if mining_time <= 0.0 {
+                        // Instant-break blocks such as tall grass and flowers.
+                        self.break_block(target);
+                        self.mining_target = None;
+                        self.mining_progress = 0.0;
                     } else {
-                        let mining_time = self.calculate_mining_time(block);
                         self.mining_progress += dt / mining_time;
                         if self.mining_progress >= 1.0 {
                             let pos = target;
@@ -4992,7 +5117,13 @@ impl State {
                 self.camera.yaw.sin() * self.camera.pitch.cos(),
             )
             .normalize_or_zero();
-            if let Some(hit) = raycast(self.camera.position, direction, 5.0, &self.chunk_manager) {
+            if let Some(hit) = raycast(
+                self.camera.position,
+                direction,
+                5.0,
+                &self.chunk_manager,
+                is_left_click,
+            ) {
                 if is_left_click {
                     self.network.request_block_change(
                         hit.block_pos.x as i32,
@@ -5386,7 +5517,13 @@ impl State {
             }
         }
 
-        if let Some(hit) = raycast(self.camera.position, dir, 5.0, &self.chunk_manager) {
+        if let Some(hit) = raycast(
+            self.camera.position,
+            dir,
+            5.0,
+            &self.chunk_manager,
+            is_left_click,
+        ) {
             let target = if is_left_click {
                 hit.block_pos
             } else {
@@ -6293,6 +6430,21 @@ impl State {
             &mut mob_indices,
             self.total_time,
         );
+
+        // In third-person mode also render the local player avatar.
+        if self.third_person {
+            crate::mob_renderer::render_local_player(
+                self.player_physics.position,
+                self.camera.yaw,
+                self.camera.pitch,
+                &self.chunk_manager,
+                &mut mob_vertices,
+                &mut mob_indices,
+                self.total_time,
+                self.player_physics.velocity,
+            );
+        }
+
         let mob_indices_len = mob_indices.len();
         self.mob_num_indices = mob_indices_len as u32;
 
@@ -6334,6 +6486,47 @@ impl State {
                 &self.particle_index_buffer,
             )
             .unwrap_or(0);
+
+        // Compile first-person hand mesh in view space. Hidden in third-person.
+        if !self.third_person {
+            let speed_2d = Vec3::new(
+                self.player_physics.velocity.x,
+                0.0,
+                self.player_physics.velocity.z,
+            )
+            .length();
+            let walking = speed_2d > 0.1;
+            let walk_swing = if walking {
+                (self.total_time * 8.0).sin() * 0.6
+            } else {
+                0.0
+            };
+            let attack_swing = if self.left_mouse_pressed { 1.0 } else { 0.0 };
+            let (hand_vertices, hand_indices) = crate::hand_renderer::build_first_person_hand_mesh(
+                &self.inventory,
+                walk_swing,
+                attack_swing,
+            );
+            let hand_indices_len = hand_indices.len();
+            self.hand_num_indices = hand_indices_len as u32;
+            if hand_indices_len > 0 {
+                let vert_limit = hand_vertices.len().min(1024);
+                let ind_limit = hand_indices_len.min(1536);
+                self.hand_num_indices = ind_limit as u32;
+                self.queue.write_buffer(
+                    &self.hand_vertex_buffer,
+                    0,
+                    bytemuck::cast_slice(&hand_vertices[..vert_limit]),
+                );
+                self.queue.write_buffer(
+                    &self.hand_index_buffer,
+                    0,
+                    bytemuck::cast_slice(&hand_indices[..ind_limit]),
+                );
+            }
+        } else {
+            self.hand_num_indices = 0;
+        }
 
         if self.is_saving {
             let mut ui_vertices = Vec::new();
@@ -8520,6 +8713,21 @@ impl State {
                         render_pass.draw_indexed(0..num_indices, 0, 0..1);
                     }
                 }
+            }
+
+            // Draw first-person right hand and held item. Uses a dedicated
+            // camera with a very near plane so the view-space model never
+            // clips into world geometry. Hidden in third-person mode and when
+            // the game is paused.
+            if self.hand_num_indices > 0 && !self.third_person && !self.is_paused {
+                render_pass.set_pipeline(&self.hand_pipeline);
+                render_pass.set_bind_group(0, &self.hand_camera_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.hand_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(
+                    self.hand_index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                render_pass.draw_indexed(0..self.hand_num_indices, 0, 0..1);
             }
 
             if !self.is_paused {
