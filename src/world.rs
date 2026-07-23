@@ -1456,6 +1456,71 @@ fn push_terrain_quad(
     indices.extend(quad_indices_for_ao(ao).iter().map(|index| start + index));
 }
 
+const TORCH_MIN: f32 = 7.0 / 16.0;
+const TORCH_MAX: f32 = 9.0 / 16.0;
+const TORCH_HEIGHT: f32 = 10.0 / 16.0;
+const TORCH_ATLAS_TILE: (u32, u32) = (4, 2);
+
+// Tile-local UV rectangles with a half-texel inset. Side faces use the full
+// flame/stem artwork, the cap uses the flame, and the base stretches the final
+// stem texel across the otherwise unseen bottom face.
+const TORCH_SIDE_UV: [f32; 4] = [6.5 / 16.0, 2.5 / 16.0, 8.5 / 16.0, 13.5 / 16.0];
+const TORCH_TOP_UV: [f32; 4] = [6.5 / 16.0, 2.5 / 16.0, 8.5 / 16.0, 4.5 / 16.0];
+const TORCH_BOTTOM_UV: [f32; 4] = [7.5 / 16.0, 13.5 / 16.0, 7.5 / 16.0, 13.5 / 16.0];
+
+fn append_torch_mesh(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    sky_light: u8,
+    block_light: u8,
+) {
+    let light_level = sky_light as f32 + block_light as f32 * 16.0;
+
+    for (face_idx, (_, corner_data)) in BLOCK_FACES.iter().enumerate() {
+        let uv_rect = match face_idx {
+            0..=3 => TORCH_SIDE_UV,
+            4 => TORCH_TOP_UV,
+            5 => TORCH_BOTTOM_UV,
+            _ => unreachable!(),
+        };
+        let mut positions = [[0.0; 3]; 4];
+        let mut local_uvs = [[0.0; 2]; 4];
+
+        for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
+            positions[corner_idx] = [
+                origin[0]
+                    + if offset[0] == 0.0 {
+                        TORCH_MIN
+                    } else {
+                        TORCH_MAX
+                    },
+                origin[1] + if offset[1] == 0.0 { 0.0 } else { TORCH_HEIGHT },
+                origin[2]
+                    + if offset[2] == 0.0 {
+                        TORCH_MIN
+                    } else {
+                        TORCH_MAX
+                    },
+            ];
+            local_uvs[corner_idx] = [
+                if uv[0] == 0.0 { uv_rect[0] } else { uv_rect[2] },
+                if uv[1] == 0.0 { uv_rect[1] } else { uv_rect[3] },
+            ];
+        }
+
+        push_terrain_quad(
+            vertices,
+            indices,
+            positions,
+            local_uvs,
+            TORCH_ATLAS_TILE,
+            light_level,
+            [1.0; 4],
+        );
+    }
+}
+
 fn face_should_render(
     block: BlockType,
     face_idx: usize,
@@ -2078,6 +2143,17 @@ impl Chunk {
                     let world_x = self.chunk_x * CHUNK_WIDTH as i32 + x as i32;
                     let world_y = y as i32;
                     let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
+
+                    if block == BlockType::Torch {
+                        append_torch_mesh(
+                            &mut opaque_vertices,
+                            &mut opaque_indices,
+                            [world_x as f32, world_y as f32, world_z as f32],
+                            self.sky_light[x][y][z],
+                            self.block_light[x][y][z],
+                        );
+                        continue;
+                    }
 
                     if block.is_cross_model() {
                         let sky_val = self.sky_light[x][y][z];
@@ -2801,6 +2877,18 @@ mod tests {
         )
     }
 
+    fn single_torch_mesh(
+        sky_light: u8,
+        block_light: u8,
+    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>) {
+        let mut chunk = empty_test_chunk();
+        chunk.blocks[8][1][8] = BlockType::Torch;
+        chunk.sky_light[8][1][8] = sky_light;
+        chunk.block_light[8][1][8] = block_light;
+        chunk.heightmap[8][8] = 1;
+        chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z))
+    }
+
     #[test]
     fn block_type_wire_roundtrip_covers_all_variants() {
         // Walk every discriminant in `0..=EndCityChest` and confirm the
@@ -3116,6 +3204,154 @@ mod tests {
         // 2 planes * 2 sides = 4 quads = 16 vertices, 24 indices
         assert_eq!(vertices.len(), 16);
         assert_eq!(indices.len(), 24);
+    }
+
+    #[test]
+    fn torch_mesh_has_minecraft_bounds_and_six_outward_faces() {
+        let (vertices, indices, transparent_vertices, transparent_indices) =
+            single_torch_mesh(15, 14);
+
+        assert_eq!(vertices.len(), 24);
+        assert_eq!(indices.len(), 36);
+        assert!(transparent_vertices.is_empty());
+        assert!(transparent_indices.is_empty());
+
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for vertex in &vertices {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(vertex.position[axis]);
+                max[axis] = max[axis].max(vertex.position[axis]);
+            }
+        }
+        assert_eq!(
+            min,
+            [8.0 + TORCH_MIN, 1.0, 8.0 + TORCH_MIN],
+            "torch must start at the centered 7/16 inset"
+        );
+        assert_eq!(
+            max,
+            [8.0 + TORCH_MAX, 1.0 + TORCH_HEIGHT, 8.0 + TORCH_MAX],
+            "torch must occupy exactly a 2x2x10-pixel cuboid"
+        );
+
+        for face_idx in 0..6 {
+            let expected = BLOCK_FACES[face_idx].0.map(|component| component as f32);
+            for triangle in indices[face_idx * 6..face_idx * 6 + 6].chunks_exact(3) {
+                let normal = triangle_normal(
+                    vertices[triangle[0] as usize].position,
+                    vertices[triangle[1] as usize].position,
+                    vertices[triangle[2] as usize].position,
+                );
+                let dot =
+                    normal[0] * expected[0] + normal[1] * expected[1] + normal[2] * expected[2];
+                assert!(
+                    dot > 0.0,
+                    "torch face {face_idx} triangle {triangle:?} must wind outward"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn torch_mesh_uses_inset_face_uvs_inside_its_atlas_tile() {
+        let (vertices, _, _, _) = single_torch_mesh(15, 14);
+        let expected_rects = [
+            TORCH_SIDE_UV,
+            TORCH_SIDE_UV,
+            TORCH_SIDE_UV,
+            TORCH_SIDE_UV,
+            TORCH_TOP_UV,
+            TORCH_BOTTOM_UV,
+        ];
+
+        assert_eq!(
+            TORCH_SIDE_UV,
+            [6.5 / 16.0, 2.5 / 16.0, 8.5 / 16.0, 13.5 / 16.0]
+        );
+        assert_eq!(
+            TORCH_TOP_UV,
+            [6.5 / 16.0, 2.5 / 16.0, 8.5 / 16.0, 4.5 / 16.0]
+        );
+        assert_eq!(
+            TORCH_BOTTOM_UV,
+            [7.5 / 16.0, 13.5 / 16.0, 7.5 / 16.0, 13.5 / 16.0]
+        );
+
+        for (face_idx, quad) in vertices.chunks_exact(4).enumerate() {
+            let rect = expected_rects[face_idx];
+            let mut observed_min = [f32::INFINITY; 2];
+            let mut observed_max = [f32::NEG_INFINITY; 2];
+            for vertex in quad {
+                assert_eq!(vertex.atlas_tile, [4.0, 2.0]);
+                assert!(
+                    (0.0..1.0).contains(&vertex.local_uv[0])
+                        && (0.0..1.0).contains(&vertex.local_uv[1]),
+                    "torch UV must remain inside atlas tile (4, 2)"
+                );
+                observed_min[0] = observed_min[0].min(vertex.local_uv[0]);
+                observed_min[1] = observed_min[1].min(vertex.local_uv[1]);
+                observed_max[0] = observed_max[0].max(vertex.local_uv[0]);
+                observed_max[1] = observed_max[1].max(vertex.local_uv[1]);
+            }
+            assert_eq!(observed_min, [rect[0], rect[1]]);
+            assert_eq!(observed_max, [rect[2], rect[3]]);
+        }
+    }
+
+    #[test]
+    fn torch_mesh_uses_source_light_without_ao_or_face_shading() {
+        let sky_light = 9;
+        let block_light = 14;
+        let expected_packed_light = sky_light as f32 + block_light as f32 * 16.0;
+        let (vertices, _, _, _) = single_torch_mesh(sky_light, block_light);
+
+        assert!(vertices.iter().all(|vertex| vertex.ao == 1.0));
+        assert!(
+            vertices
+                .iter()
+                .all(|vertex| vertex.light_level == expected_packed_light),
+            "every torch face must use the source cell light without a face multiplier"
+        );
+    }
+
+    #[test]
+    fn torch_properties_and_floor_support_semantics_are_preserved() {
+        let properties = BlockType::Torch.properties();
+        assert_eq!(properties.render_type, RenderType::Cutout);
+        assert!(!properties.is_solid);
+        assert!(!properties.is_passable);
+        assert_eq!(properties.light_emission, 14);
+        assert!(BlockType::Torch.can_stay_on(BlockType::Stone));
+        assert!(!BlockType::Torch.can_stay_on(BlockType::Air));
+
+        let mut manager = crate::chunk_manager::ChunkManager::new(2);
+        manager.chunks.insert((0, 0), empty_test_chunk());
+        manager.set_block(8, 64, 8, BlockType::Stone);
+        manager.set_block(8, 65, 8, BlockType::Torch);
+
+        let mut dirty = HashSet::new();
+        crate::lighting::update_block_light_after_placed(
+            &mut manager,
+            8,
+            65,
+            8,
+            properties.light_emission,
+            &mut dirty,
+        );
+        assert_eq!(manager.get_block_light(8, 65, 8), 14);
+        assert_eq!(manager.get_block_light(9, 65, 8), 13);
+
+        manager.set_block(8, 64, 8, BlockType::Air);
+        let mut broken = Vec::new();
+        manager.check_and_break_unsupported_above(8, 64, 8, &mut dirty, |position, block| {
+            broken.push((position, block));
+        });
+
+        assert_eq!(manager.get_block(8, 65, 8), BlockType::Air);
+        assert_eq!(broken, vec![((8, 65, 8), BlockType::Torch)]);
+        assert_eq!(manager.get_block_light(8, 65, 8), 0);
+        assert_eq!(manager.get_block_light(9, 65, 8), 0);
     }
 
     #[test]

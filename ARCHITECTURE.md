@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `b6dcf9bacadb1e0ce10a5908e860d03b8b654f16` (`b6dcf9b`). This identifies the
+> `b8aaaf6444516a6fc33757861ea8b888aa8fa2ba` (`b8aaaf6`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -422,7 +422,7 @@ entity physics and world-side lifecycle events.
 
 | File | Responsibility / key symbols |
 | --- | --- |
-| `src/world.rs` | `BlockType`, `BlockProperties`, `RenderType`, `Chunk`; 16x256x16 storage, deterministic terrain/caves/ores, block metadata/atlas coordinates, heightmap, CPU mesh generation. |
+| `src/world.rs` | `BlockType`, `BlockProperties`, `RenderType`, `Chunk`, `append_torch_mesh`; 16x256x16 storage, deterministic terrain/caves/ores, block metadata/atlas coordinates, heightmap, greedy/special-model CPU mesh generation, and a dedicated ground-torch 2x2x10-pixel cuboid with face-specific inset UVs. |
 | `src/chunk_manager.rs` | Loaded-chunk map, world/local coordinate conversion, block/light/fluid accessors, heightmap updates, deduplicated water/lava work queues. |
 | `src/dimension.rs` | `Dimension`, dimension-specific chunk generators, sky-light/ambient rules, Overworld-Nether coordinate scaling, Nether portal frame detection, End portal completion detection, and End exit fountain generation. |
 | `src/lighting.rs` | Cross-chunk BFS propagation/removal for sky and emissive block light; initial chunk lighting and post-mutation updates. |

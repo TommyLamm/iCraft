@@ -104,6 +104,11 @@ P3 [█████████░] 88.9%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-24
+- ✅ 修復火把模型 (By torch-model sub-agent, reviewed by Codex)：加入正確 3D 地面火把
+  - 修改文件：`src/world.rs`, `ARCHITECTURE.md`, `plans/implementation/05_torch_model.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：在非完整 cube 的逐方塊 mesh 路徑加入專用 `append_torch_mesh`，生成置中的 X/Z `7/16..9/16`、Y `0..10/16` 六面 cuboid。沿用既有 outward CW face order，side/top/bottom 分別取 atlas `(4,2)` 內 half-texel inset 子區域；所有頂點以來源格 sky/block light、AO 1.0 送入 shader，不加入一般立方體面陰影。Cutout、非 solid、14 級光源、地面支撐及支撐移除清光保持不變；因缺少可存檔／同步的通用 facing state，本次不虛構壁掛火把。
+  - 驗證：精確 24 vertices／36 indices 與 2×2×10 bounds、六面 winding、三類 UV、AO/packed light、屬性、支撐移除與光照清理測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 214 項單元測試與 1 項整合測試。
+  - 備註：各角度實際查看模型及透明邊緣的視窗操作保留為人工驗收。
 - ✅ 修復方塊放置碰撞 (By placement sub-agent, reviewed by Codex)：禁止把 solid 方塊放進玩家
   - 修改文件：`src/physics.rs`, `src/state.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `plans/implementation/04_player_placement_collision.md`, `plans/progress.md`, `track.md`
   - 關鍵決策：抽出統一玩家／單位方塊 AABB 與純放置 policy，只拒絕三軸都有正體積重疊的 solid 方塊，因此面／邊／角接觸及 Torch 等 non-solid 方塊仍合法。本地與 joined client 都在放置副作用或送出 request 前預檢；Host 保留 server 驗證過的 session ID，以本地當前 AABB 及所有遠端玩家 `snapshots.back()` 的最新權威位置做最終裁決。Host request 與 client 收到的權威 block change 使用不同事件類型，client 不會以延遲 render pose 重驗 Host 結果。

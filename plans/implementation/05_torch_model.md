@@ -1,5 +1,9 @@
 # 實作計畫 05：火把立體模型
 
+## 狀態
+
+✅ 已完成（2026-07-24）
+
 ## 目標
 
 把目前完整方塊六面貼圖的 Torch 改成中央細柱立體模型，保留 cutout、
@@ -25,13 +29,16 @@
 
 ## 驗證
 
-- 單火把 24 vertices / 36 indices，bounds 精確符合 2×2×10 pixel。
-- side/top/bottom UV 不越出 `(4,2)`，winding 全部朝外。
-- AO/光照正確；移除支撐會移除火把和光源。
-- `cargo fmt -- --check`、`cargo test --release`、`cargo check --release`。
-- 人工從各角度查看，確認不再是完整方塊且無透明六面殘影。
+- [x] 單火把 24 vertices / 36 indices，bounds 精確符合 2×2×10 pixel。
+- [x] side/top/bottom UV 不越出 `(4,2)`，winding 全部朝外。
+- [x] AO/來源格光照正確且無面陰影；移除支撐會移除火把和光源。
+- [x] Cutout、非 solid、14 級發光與地面支撐語義不回歸。
+- [x] `cargo fmt -- --check`、`cargo test --release`、`cargo check --release`。
+- [ ] 人工從各角度查看，確認不再是完整方塊且無透明六面殘影。
+
+自動驗證結果：214 項單元測試與 1 項整合測試全部通過；唯一編譯
+警告是既有未使用的 `hand_camera_buffer`。
 
 ## Commit
 
 單一功能 commit：`fix(render): add proper torch model`
-
