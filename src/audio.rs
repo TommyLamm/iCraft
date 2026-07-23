@@ -248,7 +248,7 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
             let len = (dur * sample_rate as f32) as usize;
             let raw_noise = synth_noise(dur, sample_rate, seed);
             let filter_coef = match mat {
-                SoundMaterial::Grass => 0.94,
+                SoundMaterial::Grass => 0.85,
                 SoundMaterial::Wood => 0.70,
                 SoundMaterial::Sand => 0.40,
                 SoundMaterial::Gravel => 0.50,
@@ -258,7 +258,7 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
                 SoundMaterial::Glass => 0.20,
             };
             let amp = match mat {
-                SoundMaterial::Grass => 0.15,
+                SoundMaterial::Grass => 0.30,
                 SoundMaterial::Wood => 0.25,
                 SoundMaterial::Stone => 0.35,
                 SoundMaterial::Sand | SoundMaterial::Gravel => 0.20,
@@ -477,5 +477,15 @@ mod tests {
         let wav = create_wav_bytes(&samples, 22050);
         assert!(wav.starts_with(b"RIFF"));
         assert_eq!(&wav[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn test_grass_break_sound_is_audible() {
+        let samples = synth_sound(SoundId::BlockBreak(SoundMaterial::Grass));
+        assert!(!samples.is_empty());
+        let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        // Grass used to be heavily muffled and ~0.05 peak; ensure it is now
+        // clearly audible alongside other block materials.
+        assert!(peak > 0.08, "grass break peak was {peak}");
     }
 }

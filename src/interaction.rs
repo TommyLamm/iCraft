@@ -12,6 +12,7 @@ pub fn raycast(
     direction: Vec3,
     max_dist: f32,
     chunk_manager: &ChunkManager,
+    include_passable: bool,
 ) -> Option<RaycastResult> {
     // Avoid division by zero/NaN by ensuring direction components are non-zero
     let eps = 1e-8;
@@ -65,7 +66,7 @@ pub fn raycast(
     while t < max_dist {
         let block = chunk_manager.get_block(x, y, z);
         let props = block.properties();
-        if block != BlockType::Air && !props.is_passable {
+        if block != BlockType::Air && (include_passable || !props.is_passable) {
             return Some(RaycastResult {
                 block_pos: Vec3::new(x as f32, y as f32, z as f32),
                 normal: last_face,
@@ -119,6 +120,7 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
             10.0,
             &chunk_manager,
+            false,
         );
         assert!(hit.is_none());
     }
@@ -137,10 +139,48 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
             5.0,
             &chunk_manager,
+            false,
         );
         assert!(hit.is_some());
         let res = hit.unwrap();
         assert_eq!(res.block_pos, Vec3::new(8.0, 72.0, 8.0));
         assert_eq!(res.normal, Vec3::new(0.0, -1.0, 0.0)); // Ray hits bottom face, normal points down
+    }
+
+    #[test]
+    fn test_raycast_hits_passable_plants_when_breaking() {
+        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk = Chunk::new(0, 0);
+        chunk.blocks[8][72][8] = BlockType::TallGrass;
+        chunk_manager.chunks.insert((0, 0), chunk);
+
+        let hit = raycast(
+            Vec3::new(8.5, 70.5, 8.5),
+            Vec3::new(0.0, 1.0, 0.0),
+            5.0,
+            &chunk_manager,
+            true, // breaking: include passable plants
+        );
+        assert!(hit.is_some());
+        assert_eq!(hit.unwrap().block_pos, Vec3::new(8.0, 72.0, 8.0));
+    }
+
+    #[test]
+    fn test_raycast_ignores_passable_plants_when_placing() {
+        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk = Chunk::new(0, 0);
+        chunk.blocks[8][72][8] = BlockType::TallGrass;
+        chunk.blocks[8][73][8] = BlockType::Stone;
+        chunk_manager.chunks.insert((0, 0), chunk);
+
+        let hit = raycast(
+            Vec3::new(8.5, 70.5, 8.5),
+            Vec3::new(0.0, 1.0, 0.0),
+            5.0,
+            &chunk_manager,
+            false, // placing: ignore passable plants
+        );
+        assert!(hit.is_some());
+        assert_eq!(hit.unwrap().block_pos, Vec3::new(8.0, 73.0, 8.0));
     }
 }

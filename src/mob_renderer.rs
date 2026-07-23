@@ -1477,6 +1477,125 @@ pub fn render_mobs(
     }
 }
 
+/// Renders the local player as a Steve-like avatar in world space. Used when
+/// the camera is in third-person mode.
+pub fn render_local_player(
+    position: Vec3,
+    yaw: f32,
+    pitch: f32,
+    chunk_manager: &ChunkManager,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    time: f32,
+    velocity: Vec3,
+) {
+    let mx = position.x.floor() as i32;
+    let my = position.y.floor() as i32;
+    let mz = position.z.floor() as i32;
+    let sky_l = chunk_manager.get_sky_light(mx, my, mz);
+    let block_l = chunk_manager.get_block_light(mx, my, mz);
+    let light_val = (sky_l as f32) + (block_l as f32) * 16.0;
+
+    let speed_2d = Vec3::new(velocity.x, 0.0, velocity.z).length();
+    let walking = speed_2d > 0.1;
+    let swing = if walking {
+        (time * 8.0).sin() * 0.6
+    } else {
+        0.0
+    };
+
+    let sin_yaw = yaw.sin();
+    let cos_yaw = yaw.cos();
+    let to_world = |local: Vec3| {
+        position
+            + Vec3::new(
+                local.x * cos_yaw + local.z * sin_yaw,
+                local.y,
+                -local.x * sin_yaw + local.z * cos_yaw,
+            )
+    };
+
+    // Head (sheep skin face)
+    add_cuboid(
+        vertices,
+        indices,
+        Vec3::new(0.5, 0.5, 0.5),
+        Vec3::new(0.0, 0.25, 0.0),
+        to_world(Vec3::new(0.0, 1.4, 0.0)),
+        yaw,
+        pitch,
+        [4; 6],
+        10,
+        light_val,
+    );
+
+    // Torso (zombie teal shirt)
+    add_cuboid(
+        vertices,
+        indices,
+        Vec3::new(0.5, 0.75, 0.25),
+        Vec3::new(0.0, 0.375, 0.0),
+        to_world(Vec3::new(0.0, 0.65, 0.0)),
+        yaw,
+        0.0,
+        [2; 6],
+        9,
+        light_val,
+    );
+
+    // Arms counter-swing against the legs while walking.
+    add_cuboid(
+        vertices,
+        indices,
+        Vec3::new(0.25, 0.75, 0.25),
+        Vec3::new(0.0, -0.325, 0.0),
+        to_world(Vec3::new(-0.375, 1.3, 0.0)),
+        yaw,
+        -swing,
+        [4; 6],
+        10,
+        light_val,
+    );
+    add_cuboid(
+        vertices,
+        indices,
+        Vec3::new(0.25, 0.75, 0.25),
+        Vec3::new(0.0, -0.325, 0.0),
+        to_world(Vec3::new(0.375, 1.3, 0.0)),
+        yaw,
+        swing,
+        [4; 6],
+        10,
+        light_val,
+    );
+
+    // Legs (zombie dark blue pants)
+    add_cuboid(
+        vertices,
+        indices,
+        Vec3::new(0.25, 0.75, 0.25),
+        Vec3::new(0.0, -0.375, 0.0),
+        to_world(Vec3::new(-0.125, 0.75, 0.0)),
+        yaw,
+        swing,
+        [3; 6],
+        9,
+        light_val,
+    );
+    add_cuboid(
+        vertices,
+        indices,
+        Vec3::new(0.25, 0.75, 0.25),
+        Vec3::new(0.0, -0.375, 0.0),
+        to_world(Vec3::new(0.125, 0.75, 0.0)),
+        yaw,
+        -swing,
+        [3; 6],
+        9,
+        light_val,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1490,6 +1609,30 @@ mod tests {
         let mut indices = Vec::new();
 
         render_mobs(&entities, &chunks, &mut vertices, &mut indices, 0.0);
+
+        assert_eq!(vertices.len(), 6 * 24);
+        assert_eq!(indices.len(), 6 * 36);
+        assert!(vertices
+            .iter()
+            .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
+    }
+
+    #[test]
+    fn local_player_renders_as_six_cuboids() {
+        let chunks = ChunkManager::new(1);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        render_local_player(
+            Vec3::new(0.0, 64.0, 0.0),
+            0.0,
+            0.0,
+            &chunks,
+            &mut vertices,
+            &mut indices,
+            0.0,
+            Vec3::ZERO,
+        );
 
         assert_eq!(vertices.len(), 6 * 24);
         assert_eq!(indices.len(), 6 * 36);

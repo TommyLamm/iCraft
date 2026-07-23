@@ -450,6 +450,10 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
         state.show_debug = !state.show_debug;
         return false;
     }
+    if code == KeyCode::F5 && pressed && !event.repeat {
+        state.third_person = !state.third_person;
+        return false;
+    }
     if code == KeyCode::KeyT && pressed && !event.repeat {
         if !state.is_paused
             && !state.inventory.is_open
