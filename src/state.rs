@@ -23,6 +23,13 @@ const RAIN_LOOP_ID: u64 = u64::MAX - 1;
 const CHAT_HISTORY_CAPACITY: usize = 50;
 const CHAT_VISIBLE_LINES: usize = 8;
 const CHAT_INPUT_CAPACITY: usize = 256;
+const REMOTE_SNAPSHOT_CAPACITY: usize = 32;
+const REMOTE_INTERPOLATION_DELAY: f64 = 0.1;
+const REMOTE_MAX_EXTRAPOLATION: f64 = 0.1;
+const REMOTE_MAX_EXTRAPOLATION_SPEED: f32 = 40.0;
+const REMOTE_MAX_ANGULAR_SPEED: f32 = std::f32::consts::TAU * 2.0;
+const REMOTE_TELEPORT_DISTANCE: f32 = 8.0;
+const REMOTE_TELEPORT_GAP: f64 = 0.5;
 // Creating an entire render distance while handling a menu click blocks the
 // window event loop and can allocate hundreds of chunk meshes at once.  Start
 // with a safe area around the player; `update_chunks` streams the rest in over
@@ -110,12 +117,16 @@ mod remote_sync_tests {
             yaw: 3.0,
             pitch: 0.0,
             time: 1.0,
+            sequence: 1,
+            sender_time_millis: 1000,
         };
         let latest = PlayerSnapshot {
             position: Vec3::new(10.0, 2.0, -4.0),
             yaw: -3.0,
             pitch: 1.0,
             time: 1.05,
+            sequence: 2,
+            sender_time_millis: 1050,
         };
         let mid = interpolate_snapshot(prev, latest, 1.025);
         assert!((mid.position.x - 5.0).abs() < 1e-5);
@@ -125,6 +136,138 @@ mod remote_sync_tests {
         let after = interpolate_snapshot(prev, latest, 2.0);
         assert_eq!(before.position, prev.position);
         assert_eq!(after.position, latest.position);
+        assert!(
+            mid.yaw.abs() > 3.0,
+            "yaw should interpolate across the short wrap-around arc"
+        );
+    }
+
+    #[test]
+    fn sequence_order_handles_duplicates_old_packets_and_wraparound() {
+        assert!(sequence_is_newer(2, 1));
+        assert!(!sequence_is_newer(1, 1));
+        assert!(!sequence_is_newer(1, 2));
+        assert!(sequence_is_newer(0, u32::MAX));
+        assert!(!sequence_is_newer(u32::MAX, 0));
+    }
+
+    #[test]
+    fn batched_pose_arrivals_keep_sender_cadence() {
+        let mut remote = RemotePlayerState::new(1, "Alex".into());
+        for (sequence, sender_time_millis, x) in [(1, 1_000, 0.0), (2, 1_050, 1.0), (3, 1_100, 2.0)]
+        {
+            assert_ne!(
+                remote.push_snapshot(
+                    Vec3::new(x, 0.0, 0.0),
+                    0.0,
+                    0.0,
+                    sequence,
+                    sender_time_millis,
+                    2.0,
+                ),
+                SnapshotPushResult::Rejected
+            );
+        }
+
+        let times: Vec<_> = remote
+            .snapshots
+            .iter()
+            .map(|snapshot| snapshot.time)
+            .collect();
+        for (actual, expected) in times.iter().zip([2.0, 2.05, 2.1]) {
+            assert!((actual - expected).abs() < 1e-9);
+        }
+        let midpoint = remote.sample(2.075).unwrap();
+        assert!((midpoint.position.x - 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn buffered_twenty_hz_motion_samples_smoothly_at_high_frame_rate() {
+        let mut remote = RemotePlayerState::new(1, "Alex".into());
+        for index in 0..=10 {
+            let sender_time_millis = 1_000 + index * 50;
+            let arrival_jitter = match index % 4 {
+                0 => 0.008,
+                1 => 0.001,
+                2 => 0.012,
+                _ => 0.004,
+            };
+            remote.push_snapshot(
+                Vec3::new(index as f32 * 0.25, 0.0, 0.0),
+                0.0,
+                0.0,
+                index as u32 + 1,
+                sender_time_millis,
+                2.0 + index as f64 * 0.05 + arrival_jitter,
+            );
+        }
+
+        let mut previous_x = f32::NEG_INFINITY;
+        for frame in 0..=72 {
+            let target = 2.008 + frame as f64 / 144.0;
+            let sample = remote.sample(target).unwrap();
+            assert!(
+                sample.position.x + 1e-5 >= previous_x,
+                "sampled motion moved backwards at frame {frame}"
+            );
+            assert!(
+                sample.position.x - previous_x <= 0.06 || !previous_x.is_finite(),
+                "sampled motion jumped at frame {frame}"
+            );
+            previous_x = sample.position.x;
+        }
+    }
+
+    #[test]
+    fn snapshots_reject_invalid_duplicate_and_out_of_order_data() {
+        let mut remote = RemotePlayerState::new(1, "Alex".into());
+        assert_eq!(
+            remote.push_snapshot(Vec3::ZERO, 0.0, 0.0, 10, 1_000, 1.0),
+            SnapshotPushResult::Snapped
+        );
+        assert_eq!(
+            remote.push_snapshot(Vec3::X, 0.0, 0.0, 10, 1_050, 1.05),
+            SnapshotPushResult::Rejected
+        );
+        assert_eq!(
+            remote.push_snapshot(Vec3::X, 0.0, 0.0, 9, 1_050, 1.05),
+            SnapshotPushResult::Rejected
+        );
+        assert_eq!(
+            remote.push_snapshot(Vec3::new(f32::NAN, 0.0, 0.0), 0.0, 0.0, 11, 1_050, 1.05,),
+            SnapshotPushResult::Rejected
+        );
+        assert_eq!(remote.snapshots.len(), 1);
+    }
+
+    #[test]
+    fn extrapolation_is_speed_limited_and_stops_after_one_hundred_ms() {
+        let mut remote = RemotePlayerState::new(1, "Alex".into());
+        remote.push_snapshot(Vec3::ZERO, 0.0, 0.0, 1, 1_000, 1.0);
+        remote.push_snapshot(Vec3::new(2.5, 0.0, 0.0), 0.0, 0.0, 2, 1_050, 1.05);
+
+        let at_limit = remote.sample(1.15).unwrap();
+        let long_after = remote.sample(5.0).unwrap();
+        assert!((at_limit.position.x - 6.5).abs() < 1e-4);
+        assert_eq!(long_after.position, at_limit.position);
+    }
+
+    #[test]
+    fn teleport_or_long_gap_clears_history_and_snaps() {
+        let mut remote = RemotePlayerState::new(1, "Alex".into());
+        remote.push_snapshot(Vec3::ZERO, 0.0, 0.0, 1, 1_000, 1.0);
+        assert_eq!(
+            remote.push_snapshot(Vec3::new(20.0, 0.0, 0.0), 0.0, 0.0, 2, 1_050, 1.05),
+            SnapshotPushResult::Snapped
+        );
+        assert_eq!(remote.snapshots.len(), 1);
+        assert_eq!(remote.sample(0.0).unwrap().position.x, 20.0);
+
+        assert_eq!(
+            remote.push_snapshot(Vec3::new(21.0, 0.0, 0.0), 0.0, 0.0, 3, 2_000, 2.0),
+            SnapshotPushResult::Snapped
+        );
+        assert_eq!(remote.snapshots.len(), 1);
     }
 
     #[test]
@@ -1004,24 +1147,117 @@ struct PlayerSnapshot {
     position: Vec3,
     yaw: f32,
     pitch: f32,
-    time: f32,
+    time: f64,
+    sequence: u32,
+    sender_time_millis: u64,
 }
 
 #[derive(Debug, Clone)]
 struct RemotePlayerState {
     entity_id: u64,
-    prev: PlayerSnapshot,
-    latest: PlayerSnapshot,
+    snapshots: std::collections::VecDeque<PlayerSnapshot>,
     username: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotPushResult {
+    Accepted,
+    Snapped,
+    Rejected,
+}
+
+impl RemotePlayerState {
+    fn new(entity_id: u64, username: String) -> Self {
+        Self {
+            entity_id,
+            snapshots: std::collections::VecDeque::with_capacity(REMOTE_SNAPSHOT_CAPACITY),
+            username,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_snapshot(
+        &mut self,
+        position: Vec3,
+        yaw: f32,
+        pitch: f32,
+        sequence: u32,
+        sender_time_millis: u64,
+        arrival_time: f64,
+    ) -> SnapshotPushResult {
+        if !position.is_finite()
+            || !yaw.is_finite()
+            || !pitch.is_finite()
+            || !arrival_time.is_finite()
+        {
+            return SnapshotPushResult::Rejected;
+        }
+
+        let Some(latest) = self.snapshots.back().copied() else {
+            self.snapshots.push_back(PlayerSnapshot {
+                position,
+                yaw,
+                pitch,
+                time: arrival_time,
+                sequence,
+                sender_time_millis,
+            });
+            return SnapshotPushResult::Snapped;
+        };
+
+        if !sequence_is_newer(sequence, latest.sequence)
+            || sender_time_millis <= latest.sender_time_millis
+        {
+            return SnapshotPushResult::Rejected;
+        }
+
+        let sender_delta = (sender_time_millis - latest.sender_time_millis) as f64 / 1000.0;
+        let should_snap = sender_delta > REMOTE_TELEPORT_GAP
+            || position.distance(latest.position) > REMOTE_TELEPORT_DISTANCE;
+        let local_time = if should_snap {
+            arrival_time
+        } else {
+            latest.time + sender_delta
+        };
+
+        if should_snap {
+            self.snapshots.clear();
+        } else if self.snapshots.len() == REMOTE_SNAPSHOT_CAPACITY {
+            self.snapshots.pop_front();
+        }
+        self.snapshots.push_back(PlayerSnapshot {
+            position,
+            yaw,
+            pitch,
+            time: local_time,
+            sequence,
+            sender_time_millis,
+        });
+
+        if should_snap {
+            SnapshotPushResult::Snapped
+        } else {
+            SnapshotPushResult::Accepted
+        }
+    }
+
+    fn sample(&self, target_time: f64) -> Option<PlayerSnapshot> {
+        sample_snapshot_buffer(&self.snapshots, target_time)
+    }
+}
+
+fn sequence_is_newer(candidate: u32, previous: u32) -> bool {
+    let distance = candidate.wrapping_sub(previous);
+    distance != 0 && distance < (1 << 31)
 }
 
 fn interpolate_snapshot(
     prev: PlayerSnapshot,
     latest: PlayerSnapshot,
-    target_time: f32,
+    target_time: f64,
 ) -> PlayerSnapshot {
-    let span = (latest.time - prev.time).max(f32::EPSILON);
-    let t = ((target_time - prev.time) / span).clamp(0.0, 1.0);
+    let span = (latest.time - prev.time).max(f64::EPSILON);
+    let t = ((target_time - prev.time) / span).clamp(0.0, 1.0) as f32;
     PlayerSnapshot {
         position: prev.position.lerp(latest.position, t),
         yaw: prev.yaw
@@ -1030,7 +1266,66 @@ fn interpolate_snapshot(
                 * t,
         pitch: prev.pitch + (latest.pitch - prev.pitch) * t,
         time: target_time,
+        sequence: latest.sequence,
+        sender_time_millis: latest.sender_time_millis,
     }
+}
+
+fn sample_snapshot_buffer(
+    snapshots: &std::collections::VecDeque<PlayerSnapshot>,
+    target_time: f64,
+) -> Option<PlayerSnapshot> {
+    let first = snapshots.front().copied()?;
+    if snapshots.len() == 1 || target_time <= first.time {
+        return Some(PlayerSnapshot {
+            time: target_time,
+            ..first
+        });
+    }
+
+    for index in 1..snapshots.len() {
+        let next = snapshots[index];
+        if target_time <= next.time {
+            return Some(interpolate_snapshot(
+                snapshots[index - 1],
+                next,
+                target_time,
+            ));
+        }
+    }
+
+    let latest = snapshots.back().copied().unwrap();
+    let previous = snapshots[snapshots.len() - 2];
+    let span = latest.time - previous.time;
+    if span <= f64::EPSILON {
+        return Some(PlayerSnapshot {
+            time: target_time,
+            ..latest
+        });
+    }
+
+    let extrapolation = (target_time - latest.time).clamp(0.0, REMOTE_MAX_EXTRAPOLATION);
+    let mut velocity = (latest.position - previous.position) / span as f32;
+    let speed = velocity.length();
+    if speed > REMOTE_MAX_EXTRAPOLATION_SPEED {
+        velocity *= REMOTE_MAX_EXTRAPOLATION_SPEED / speed;
+    }
+    let yaw_delta = (latest.yaw - previous.yaw + std::f32::consts::PI)
+        .rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI;
+    let yaw_rate =
+        (yaw_delta / span as f32).clamp(-REMOTE_MAX_ANGULAR_SPEED, REMOTE_MAX_ANGULAR_SPEED);
+    let pitch_rate = ((latest.pitch - previous.pitch) / span as f32)
+        .clamp(-REMOTE_MAX_ANGULAR_SPEED, REMOTE_MAX_ANGULAR_SPEED);
+
+    Some(PlayerSnapshot {
+        position: latest.position + velocity * extrapolation as f32,
+        yaw: latest.yaw + yaw_rate * extrapolation as f32,
+        pitch: (latest.pitch + pitch_rate * extrapolation as f32)
+            .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2),
+        time: target_time,
+        ..latest
+    })
 }
 
 fn normalized_chat_message(input: &str) -> Option<String> {
@@ -1093,6 +1388,8 @@ enum NetworkInbound {
     PlayerLeave(crate::network::protocol::PlayerId),
     PlayerPosition {
         id: crate::network::protocol::PlayerId,
+        sequence: u32,
+        sender_time_millis: u64,
         x: f32,
         y: f32,
         z: f32,
@@ -1147,6 +1444,8 @@ impl NetworkHandle {
                     }
                     crate::network::server::ServerToHost::ClientPosition {
                         id,
+                        sequence,
+                        sender_time_millis,
                         x,
                         y,
                         z,
@@ -1154,6 +1453,8 @@ impl NetworkHandle {
                         pitch,
                     } => NetworkInbound::PlayerPosition {
                         id,
+                        sequence,
+                        sender_time_millis,
                         x,
                         y,
                         z,
@@ -1198,6 +1499,8 @@ impl NetworkHandle {
                     }
                     crate::network::client::ClientToGame::PlayerPosition {
                         id,
+                        sequence,
+                        sender_time_millis,
                         x,
                         y,
                         z,
@@ -1205,6 +1508,8 @@ impl NetworkHandle {
                         pitch,
                     } => NetworkInbound::PlayerPosition {
                         id,
+                        sequence,
+                        sender_time_millis,
                         x,
                         y,
                         z,
@@ -1234,12 +1539,21 @@ impl NetworkHandle {
         }
     }
 
-    fn send_position(&self, position: Vec3, yaw: f32, pitch: f32) {
+    fn send_position(
+        &self,
+        sequence: u32,
+        sender_time_millis: u64,
+        position: Vec3,
+        yaw: f32,
+        pitch: f32,
+    ) {
         match self {
             NetworkHandle::Host { host_to_server, .. } => {
                 let _ = host_to_server.send(
                     crate::network::server::HostToServer::BroadcastPlayerPosition {
                         id: 0,
+                        sequence,
+                        sender_time_millis,
                         x: position.x,
                         y: position.y,
                         z: position.z,
@@ -1250,6 +1564,8 @@ impl NetworkHandle {
             }
             NetworkHandle::Client { game_to_client, .. } => {
                 let _ = game_to_client.send(crate::network::client::GameToClient::SendPosition {
+                    sequence,
+                    sender_time_millis,
                     x: position.x,
                     y: position.y,
                     z: position.z,
@@ -1503,8 +1819,9 @@ pub struct State {
     pub is_chat_open: bool,
     pub connection_lost: bool,
     network_position_timer: f32,
+    network_pose_sequence: u32,
     network_time_sync_timer: f32,
-    network_time: f32,
+    network_time: f64,
     /// Client-only: chunk payloads that arrived from the host before the chunk
     /// was streamed in. Applied when `update_chunks` loads the coordinate.
     pending_chunk_payloads: std::collections::HashMap<(i32, i32), Vec<u8>>,
@@ -2633,6 +2950,7 @@ impl State {
             is_chat_open: false,
             connection_lost: false,
             network_position_timer: 0.0,
+            network_pose_sequence: 0,
             network_time_sync_timer: 0.0,
             network_time: 0.0,
             pending_chunk_payloads: std::collections::HashMap::new(),
@@ -2758,7 +3076,6 @@ impl State {
                 }
                 NetworkInbound::PlayerJoin { id, username } => {
                     if self.local_player_id != Some(id) {
-                        let now = self.network_time;
                         if let Some(remote) = self.remote_players.get_mut(&id) {
                             remote.username = username.clone();
                             if let Some(entity) = self
@@ -2783,21 +3100,8 @@ impl State {
                                 entity.player_id = id;
                                 entity.username = username.clone();
                             }
-                            let snapshot = PlayerSnapshot {
-                                position: self.player_physics.position,
-                                yaw: 0.0,
-                                pitch: 0.0,
-                                time: now,
-                            };
-                            self.remote_players.insert(
-                                id,
-                                RemotePlayerState {
-                                    entity_id,
-                                    prev: snapshot,
-                                    latest: snapshot,
-                                    username: username.clone(),
-                                },
-                            );
+                            self.remote_players
+                                .insert(id, RemotePlayerState::new(entity_id, username.clone()));
                         }
                         push_chat_history(
                             &mut self.chat_messages,
@@ -2831,6 +3135,8 @@ impl State {
                 }
                 NetworkInbound::PlayerPosition {
                     id,
+                    sequence,
+                    sender_time_millis,
                     x,
                     y,
                     z,
@@ -2853,35 +3159,33 @@ impl State {
                         {
                             entity.player_id = id;
                         }
-                        let snap = PlayerSnapshot {
-                            position: Vec3::new(x, y, z),
+                        let mut remote = RemotePlayerState::new(entity_id, username);
+                        remote.push_snapshot(
+                            Vec3::new(x, y, z),
                             yaw,
                             pitch,
-                            time: self.network_time,
-                        };
-                        self.remote_players.insert(
-                            id,
-                            RemotePlayerState {
-                                entity_id,
-                                prev: snap,
-                                latest: snap,
-                                username,
-                            },
+                            sequence,
+                            sender_time_millis,
+                            self.network_time,
                         );
+                        self.remote_players.insert(id, remote);
                     } else if let Some(remote) = self.remote_players.get_mut(&id) {
-                        remote.prev = remote.latest;
-                        remote.latest = PlayerSnapshot {
-                            position: Vec3::new(x, y, z),
+                        remote.push_snapshot(
+                            Vec3::new(x, y, z),
                             yaw,
                             pitch,
-                            time: self.network_time,
-                        };
+                            sequence,
+                            sender_time_millis,
+                            self.network_time,
+                        );
                     }
                     if matches!(self.role, MultiplayerRole::Host { .. }) {
                         if let NetworkHandle::Host { host_to_server, .. } = &self.network {
                             let _ = host_to_server.send(
                                 crate::network::server::HostToServer::BroadcastPlayerPosition {
                                     id,
+                                    sequence,
+                                    sender_time_millis,
                                     x,
                                     y,
                                     z,
@@ -2975,7 +3279,11 @@ impl State {
             return;
         }
         self.network_position_timer %= 0.05;
+        self.network_pose_sequence = self.network_pose_sequence.wrapping_add(1);
+        let sender_time_millis = (self.network_time * 1000.0).round() as u64;
         self.network.send_position(
+            self.network_pose_sequence,
+            sender_time_millis,
             self.player_physics.position,
             self.camera.yaw,
             self.camera.pitch,
@@ -3693,23 +4001,19 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
-        self.network_time += dt;
+        self.network_time += f64::from(dt);
         self.drain_network_events();
-        let target = self.network_time - 0.1;
+        let target = self.network_time - REMOTE_INTERPOLATION_DELAY;
         for remote in self.remote_players.values() {
+            let Some(snap) = remote.sample(target) else {
+                continue;
+            };
             if let Some(entity) = self
                 .entity_manager
                 .entities
                 .iter_mut()
                 .find(|e| e.id == remote.entity_id)
             {
-                let snap = if self.network_time - remote.latest.time > 10.0 {
-                    remote.latest
-                } else if remote.latest.time <= remote.prev.time {
-                    remote.latest
-                } else {
-                    interpolate_snapshot(remote.prev, remote.latest, target)
-                };
                 entity.velocity = if dt > f32::EPSILON {
                     (snap.position - entity.position) / dt
                 } else {
@@ -10184,22 +10488,8 @@ mod debug_tests {
         let mut entities = crate::entity::EntityManager::new();
         let remote_id = entities.spawn(crate::entity::EntityType::RemotePlayer, Vec3::ZERO);
         let zombie_id = entities.spawn(crate::entity::EntityType::Zombie, Vec3::ZERO);
-        let snapshot = PlayerSnapshot {
-            position: Vec3::ZERO,
-            yaw: 0.0,
-            pitch: 0.0,
-            time: 0.0,
-        };
         let mut remote_players = std::collections::HashMap::new();
-        remote_players.insert(
-            7,
-            RemotePlayerState {
-                entity_id: remote_id,
-                prev: snapshot,
-                latest: snapshot,
-                username: "Alex".to_string(),
-            },
-        );
+        remote_players.insert(7, RemotePlayerState::new(remote_id, "Alex".to_string()));
 
         clear_remote_players(&mut remote_players, &mut entities);
 

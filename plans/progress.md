@@ -103,6 +103,13 @@ P3 [█████████░] 88.9%
 
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
+### 2026-07-24
+- ✅ 修復任務 #25 後續問題 (By Codex)：低延遲多人遊戲的遠端玩家移動閃現
+  - 修改文件：`src/state.rs`, `src/mob.rs`, `src/network/protocol.rs`, `src/network/transport.rs`, `src/network/client.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `plans/implementation/02_multiplayer_smoothing.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：協議提升至 v3，pose 加入 wrapping sequence 與 sender timestamp；遠端玩家改用 32 筆有界快照，以 100 ms 延遲找真正包住 target 的兩點插值，批量到達仍保留 sender cadence，並拒絕非法、重複和亂序資料。短缺最新點時只做限速且最多 100 ms 的外推，長 gap 或大位移清空歷史並 snap。client 與 server 對尚未發送的 pose 採 latest-wins，但可靠 world/chat 資料仍逐筆傳送；TCP 啟用 `TCP_NODELAY` 並將 header/payload 合為一次 write。RemotePlayer 的採樣速度不再被 mob update 清除。
+  - 驗證：20 Hz→144 Hz 單調平滑採樣、sender cadence、yaw wrap、非法／重複／亂序、外推上限、teleport、protocol roundtrip、server relay/latest-wins、舊協議 handshake 拒絕、transport no-delay 與 RemotePlayer velocity 專項測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 191 項單元測試與 1 項整合測試。
+  - 備註：本環境未自動操作兩個實際遊戲視窗；Host + Join 的走動、衝刺、跳躍及急轉向視覺 smoke test 保留為發佈前人工驗收。
+
 ### 2026-07-23
 - ✅ 完成任務 #30 (By Codex)：渲染優化
   - 新增文件：`src/chunk_render.rs`

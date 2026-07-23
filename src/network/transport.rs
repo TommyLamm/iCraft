@@ -26,6 +26,9 @@ pub(super) struct ConnectionWriter {
 
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {
+        if let Err(error) = stream.set_nodelay(true) {
+            eprintln!("[Network] Failed to enable TCP_NODELAY: {error}");
+        }
         let (reader, writer) = stream.into_split();
         Self {
             reader: ConnectionReader {
@@ -62,9 +65,7 @@ impl ConnectionReader {
                     }
                     self.buf.extend_from_slice(&tmp[..n]);
                 }
-                let len = u32::from_be_bytes([
-                    self.buf[0], self.buf[1], self.buf[2], self.buf[3],
-                ]);
+                let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
                 if len > MAX_PACKET_SIZE {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -102,9 +103,10 @@ impl ConnectionWriter {
                 "packet payload exceeds u32 length",
             )
         })?;
-        self.stream.write_all(&len.to_be_bytes()).await?;
-        self.stream.write_all(&payload).await?;
-        self.stream.flush().await?;
+        let mut frame = Vec::with_capacity(LEN_HEADER + payload.len());
+        frame.extend_from_slice(&len.to_be_bytes());
+        frame.extend_from_slice(&payload);
+        self.stream.write_all(&frame).await?;
         Ok(())
     }
 }
@@ -127,6 +129,7 @@ mod tests {
 
         let client_stream = TcpStream::connect(addr).await.unwrap();
         let mut client = Connection::new(client_stream);
+        assert!(client.reader.stream.as_ref().nodelay().unwrap());
 
         let packet = Packet::Handshake {
             protocol_version: crate::network::protocol::PROTOCOL_VERSION,
@@ -163,6 +166,8 @@ mod tests {
         let pos = Packet::PlayerPosition {
             protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             id: 1,
+            sequence: 3,
+            sender_time_millis: 150,
             x: 12.5,
             y: 64.0,
             z: -7.25,
@@ -255,4 +260,3 @@ mod tests {
         assert_eq!(r2, p2);
     }
 }
-

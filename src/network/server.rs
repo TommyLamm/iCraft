@@ -5,7 +5,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{self, Instant};
 
 use super::protocol::{Action, Packet, PlayerId, PROTOCOL_VERSION};
@@ -30,6 +30,8 @@ pub enum ServerToHost {
     },
     ClientPosition {
         id: PlayerId,
+        sequence: u32,
+        sender_time_millis: u64,
         x: f32,
         y: f32,
         z: f32,
@@ -73,6 +75,8 @@ pub enum HostToServer {
     },
     BroadcastPlayerPosition {
         id: PlayerId,
+        sequence: u32,
+        sender_time_millis: u64,
         x: f32,
         y: f32,
         z: f32,
@@ -98,6 +102,7 @@ struct ClientSession {
     id: PlayerId,
     username: String,
     out_tx: mpsc::Sender<Packet>,
+    pose_tx: watch::Sender<Option<Packet>>,
 }
 
 type Sessions = Arc<Mutex<HashMap<PlayerId, ClientSession>>>;
@@ -189,13 +194,22 @@ impl NetworkServer {
                     }
                 }
                 _ = command_tick.tick() => {
+                    let mut latest_positions = HashMap::new();
                     loop {
                         match host_to_server.try_recv() {
                             Ok(HostToServer::Stop) => return,
+                            Ok(command @ HostToServer::BroadcastPlayerPosition { id, .. }) => {
+                                latest_positions.insert(id, command);
+                            }
                             Ok(command) => self.handle_host_command(command).await,
                             Err(std_mpsc::TryRecvError::Empty) => break,
                             Err(std_mpsc::TryRecvError::Disconnected) => return,
                         }
+                    }
+                    let mut latest_positions: Vec<_> = latest_positions.into_iter().collect();
+                    latest_positions.sort_by_key(|(id, _)| *id);
+                    for (_, command) in latest_positions {
+                        self.handle_host_command(command).await;
                     }
                 }
             }
@@ -270,6 +284,7 @@ impl NetworkServer {
         eprintln!("[NetworkServer] Sent LoginSuccess to '{handshake}' (Player ID: {id})");
 
         let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
+        let (pose_tx, mut pose_rx) = watch::channel(None);
         let roster_tx = out_tx.clone();
         sessions.lock().await.insert(
             id,
@@ -277,6 +292,7 @@ impl NetworkServer {
                 id,
                 username: handshake.clone(),
                 out_tx,
+                pose_tx,
             },
         );
         let roster: Vec<(PlayerId, String)> = sessions
@@ -325,6 +341,19 @@ impl NetworkServer {
                             }
                         }
                     }
+                    changed = pose_rx.changed() => {
+                        if changed.is_err() {
+                            eprintln!("[NetworkServer] Send task: pose channel closed");
+                            break;
+                        }
+                        let packet = pose_rx.borrow_and_update().clone();
+                        if let Some(packet) = packet {
+                            if writer.send(&packet).await.is_err() {
+                                eprintln!("[NetworkServer] Send task: writer send failed for pose");
+                                break;
+                            }
+                        }
+                    }
                     _ = keepalive.tick() => {
                         if writer.send(&Packet::Keepalive {
                             protocol_version: PROTOCOL_VERSION,
@@ -347,9 +376,25 @@ impl NetworkServer {
                             disconnect_reason = format!("protocol version mismatch (got {}, expected {})", packet.protocol_version(), PROTOCOL_VERSION);
                             break;
                         }
-                        Ok(Ok(Packet::PlayerPosition { x, y, z, yaw, pitch, .. })) => {
+                        Ok(Ok(Packet::PlayerPosition {
+                            sequence,
+                            sender_time_millis,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                            ..
+                        })) => {
                             if server_to_host.send(ServerToHost::ClientPosition {
-                                id, x, y, z, yaw, pitch,
+                                id,
+                                sequence,
+                                sender_time_millis,
+                                x,
+                                y,
+                                z,
+                                yaw,
+                                pitch,
                             }).is_err() {
                                 disconnect_reason = "host channel closed (ClientPosition)".into();
                                 break;
@@ -439,6 +484,35 @@ impl NetworkServer {
     }
 
     async fn handle_host_command(&self, command: HostToServer) {
+        if let HostToServer::BroadcastPlayerPosition {
+            id,
+            sequence,
+            sender_time_millis,
+            x,
+            y,
+            z,
+            yaw,
+            pitch,
+        } = &command
+        {
+            Self::broadcast_pose(
+                &self.sessions,
+                Packet::PlayerPosition {
+                    protocol_version: PROTOCOL_VERSION,
+                    id: *id,
+                    sequence: *sequence,
+                    sender_time_millis: *sender_time_millis,
+                    x: *x,
+                    y: *y,
+                    z: *z,
+                    yaw: *yaw,
+                    pitch: *pitch,
+                },
+            )
+            .await;
+            return;
+        }
+
         let reliable_broadcast = matches!(
             &command,
             HostToServer::BroadcastBlockChange { .. } | HostToServer::BroadcastChat { .. }
@@ -471,25 +545,9 @@ impl NetworkServer {
                 },
                 None,
             ),
-            HostToServer::BroadcastPlayerPosition {
-                id,
-                x,
-                y,
-                z,
-                yaw,
-                pitch,
-            } => (
-                Packet::PlayerPosition {
-                    protocol_version: PROTOCOL_VERSION,
-                    id,
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    pitch,
-                },
-                None,
-            ),
+            HostToServer::BroadcastPlayerPosition { .. } => {
+                unreachable!("player positions use the latest-wins pose channel")
+            }
             HostToServer::BroadcastPlayerAction { id, action } => (
                 Packet::PlayerAction {
                     protocol_version: PROTOCOL_VERSION,
@@ -552,6 +610,18 @@ impl NetworkServer {
         }
     }
 
+    async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
+        let senders: Vec<_> = sessions
+            .lock()
+            .await
+            .values()
+            .map(|session| session.pose_tx.clone())
+            .collect();
+        for tx in senders {
+            tx.send_replace(Some(packet.clone()));
+        }
+    }
+
     async fn broadcast_to(sessions: &Sessions, packet: Packet) {
         let senders: Vec<_> = sessions
             .lock()
@@ -594,9 +664,9 @@ mod tests {
             }
         }
 
-        async fn connect(&self, username: &str) -> (Connection, PlayerId) {
+        async fn connect_stream(&self) -> tokio::net::TcpStream {
             let deadline = Instant::now() + Duration::from_secs(2);
-            let stream = loop {
+            loop {
                 match tokio::net::TcpStream::connect(&self.addr).await {
                     Ok(stream) => break stream,
                     Err(_) if Instant::now() < deadline => {
@@ -604,8 +674,11 @@ mod tests {
                     }
                     Err(error) => panic!("server did not start: {error}"),
                 }
-            };
-            let mut connection = Connection::new(stream);
+            }
+        }
+
+        async fn connect(&self, username: &str) -> (Connection, PlayerId) {
+            let mut connection = Connection::new(self.connect_stream().await);
             connection
                 .send(&Packet::Handshake {
                     protocol_version: PROTOCOL_VERSION,
@@ -731,6 +804,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_old_protocol_during_handshake() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let mut connection = Connection::new(server.connect_stream().await);
+        connection
+            .send(&Packet::Handshake {
+                protocol_version: PROTOCOL_VERSION - 1,
+                username: "outdated-client".into(),
+            })
+            .await
+            .unwrap();
+
+        let packet = time::timeout(Duration::from_secs(2), connection.recv())
+            .await
+            .expect("server did not reject outdated protocol")
+            .expect("server closed without a disconnect packet");
+        assert!(matches!(
+            packet,
+            Packet::Disconnect {
+                protocol_version,
+                reason,
+            } if protocol_version == PROTOCOL_VERSION
+                && reason.contains("protocol version mismatch")
+        ));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
     async fn relays_player_position_through_host() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let (mut client_a, id_a) = server.connect("steve").await;
@@ -740,6 +841,8 @@ mod tests {
             .send(&Packet::PlayerPosition {
                 protocol_version: PROTOCOL_VERSION,
                 id: 999,
+                sequence: 12,
+                sender_time_millis: 600,
                 x: 10.0,
                 y: 65.0,
                 z: -4.0,
@@ -753,8 +856,19 @@ mod tests {
             .await;
         assert!(matches!(
             event,
-            ServerToHost::ClientPosition { id, x, y, z, yaw, pitch }
+            ServerToHost::ClientPosition {
+                id,
+                sequence,
+                sender_time_millis,
+                x,
+                y,
+                z,
+                yaw,
+                pitch,
+            }
                 if id == id_a
+                    && sequence == 12
+                    && sender_time_millis == 600
                     && x == 10.0
                     && y == 65.0
                     && z == -4.0
@@ -766,6 +880,8 @@ mod tests {
             .host_tx
             .send(HostToServer::BroadcastPlayerPosition {
                 id: id_a,
+                sequence: 12,
+                sender_time_millis: 600,
                 x: 10.0,
                 y: 65.0,
                 z: -4.0,
@@ -779,8 +895,20 @@ mod tests {
         .await;
         assert!(matches!(
             packet,
-            Packet::PlayerPosition { id, x, y, z, yaw, pitch, .. }
+            Packet::PlayerPosition {
+                id,
+                sequence,
+                sender_time_millis,
+                x,
+                y,
+                z,
+                yaw,
+                pitch,
+                ..
+            }
                 if id == id_a
+                    && sequence == 12
+                    && sender_time_millis == 600
                     && x == 10.0
                     && y == 65.0
                     && z == -4.0
@@ -789,6 +917,52 @@ mod tests {
         ));
 
         server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn unsent_pose_updates_are_latest_wins_per_client() {
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let (out_tx, _out_rx) = mpsc::channel(1);
+        let (pose_tx, mut pose_rx) = watch::channel(None);
+        sessions.lock().await.insert(
+            1,
+            ClientSession {
+                id: 1,
+                username: "alex".into(),
+                out_tx,
+                pose_tx,
+            },
+        );
+
+        for sequence in [4, 5] {
+            NetworkServer::broadcast_pose(
+                &sessions,
+                Packet::PlayerPosition {
+                    protocol_version: PROTOCOL_VERSION,
+                    id: 9,
+                    sequence,
+                    sender_time_millis: u64::from(sequence) * 50,
+                    x: sequence as f32,
+                    y: 64.0,
+                    z: 0.0,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            )
+            .await;
+        }
+
+        pose_rx.changed().await.unwrap();
+        let latest = pose_rx.borrow_and_update().clone().unwrap();
+        assert!(matches!(
+            latest,
+            Packet::PlayerPosition {
+                sequence: 5,
+                sender_time_millis: 250,
+                x: 5.0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

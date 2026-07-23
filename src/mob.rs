@@ -254,7 +254,6 @@ pub fn update_mobs(
 
     for entity in &mut entity_manager.entities {
         if entity.entity_type == EntityType::RemotePlayer {
-            entity.velocity = Vec3::ZERO;
             continue;
         }
         // Invulnerable frame countdown
@@ -693,5 +692,46 @@ mod tests {
             );
             assert!(!entity.is_ignited, "Creeper ignited in Creative mode!");
         }
+    }
+
+    #[test]
+    fn remote_player_velocity_survives_mob_update() {
+        let mut entity_manager = EntityManager::new();
+        let remote_id = entity_manager.spawn(EntityType::RemotePlayer, Vec3::new(2.0, 1.0, 0.0));
+        let expected_velocity = Vec3::new(4.0, 1.0, -2.0);
+        entity_manager
+            .entities
+            .iter_mut()
+            .find(|entity| entity.id == remote_id)
+            .unwrap()
+            .velocity = expected_velocity;
+
+        let mut chunk_manager = ChunkManager::new(1);
+        let mut chunk_meshes = std::collections::HashMap::new();
+        let mut player_physics = PlayerPhysics::new(Vec3::ZERO);
+        let mut player_state = PlayerState::new();
+        let mut audio_manager = crate::audio::AudioManager::new();
+        update_mobs(
+            &mut entity_manager,
+            &mut chunk_manager,
+            &mut chunk_meshes,
+            &mut player_physics,
+            &mut player_state,
+            GameMode::Creative,
+            15,
+            0.1,
+            &mut audio_manager,
+            Vec3::X,
+            false,
+            1.0,
+            true,
+        );
+
+        let remote = entity_manager
+            .entities
+            .iter()
+            .find(|entity| entity.id == remote_id)
+            .unwrap();
+        assert_eq!(remote.velocity, expected_velocity);
     }
 }

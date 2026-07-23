@@ -27,6 +27,8 @@ pub enum ClientToGame {
     },
     PlayerPosition {
         id: PlayerId,
+        sequence: u32,
+        sender_time_millis: u64,
         x: f32,
         y: f32,
         z: f32,
@@ -64,6 +66,8 @@ pub enum ClientToGame {
 #[derive(Debug)]
 pub enum GameToClient {
     SendPosition {
+        sequence: u32,
+        sender_time_millis: u64,
         x: f32,
         y: f32,
         z: f32,
@@ -222,7 +226,11 @@ async fn run_client(
                     }
                     Ok(Packet::PlayerJoin { id, username, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerJoin { id, username }); }
                     Ok(Packet::PlayerLeave { id, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerLeave { id }); }
-                    Ok(Packet::PlayerPosition { id, x, y, z, yaw, pitch, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerPosition { id, x, y, z, yaw, pitch }); }
+                    Ok(Packet::PlayerPosition { id, sequence, sender_time_millis, x, y, z, yaw, pitch, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::PlayerPosition {
+                            id, sequence, sender_time_millis, x, y, z, yaw, pitch,
+                        });
+                    }
                     Ok(Packet::PlayerAction { id, action, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerAction { id, action }); }
                     Ok(Packet::BlockChange { x, y, z, block, .. }) => { let _ = client_to_game.send(ClientToGame::BlockChange { x, y, z, block }); }
                     Ok(Packet::ChunkData { cx, cz, blocks, .. }) => { let _ = client_to_game.send(ClientToGame::ChunkData { cx, cz, blocks }); }
@@ -249,15 +257,26 @@ async fn run_client(
                 }
             }
             _ = tick.tick() => {
+                let mut latest_position = None;
                 loop {
                     match game_to_client.try_recv() {
-                        Ok(GameToClient::SendPosition { x, y, z, yaw, pitch }) => {
-                            if writer.send(&Packet::PlayerPosition { protocol_version: PROTOCOL_VERSION, id: player_id, x, y, z, yaw, pitch }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send PlayerPosition");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
-                                return;
-                            }
-                        }
+                        Ok(GameToClient::SendPosition {
+                            sequence,
+                            sender_time_millis,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                        }) => latest_position = Some((
+                            sequence,
+                            sender_time_millis,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                        )),
                         Ok(GameToClient::SendAction { action }) => {
                             if writer.send(&Packet::PlayerAction { protocol_version: PROTOCOL_VERSION, id: player_id, action }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send PlayerAction");
@@ -289,6 +308,38 @@ async fn run_client(
                             eprintln!("[NetworkClient] Disconnecting: game_to_client channel closed (State dropped?)");
                             return;
                         }
+                    }
+                }
+                if let Some((
+                    sequence,
+                    sender_time_millis,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                )) = latest_position
+                {
+                    if writer
+                        .send(&Packet::PlayerPosition {
+                            protocol_version: PROTOCOL_VERSION,
+                            id: player_id,
+                            sequence,
+                            sender_time_millis,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("[NetworkClient] Disconnecting: failed to send PlayerPosition");
+                        let _ = client_to_game.send(ClientToGame::Disconnected {
+                            reason: "connection lost".into(),
+                        });
+                        return;
                     }
                 }
             }

@@ -1,5 +1,7 @@
 # 實作計畫 02：多人玩家移動平滑
 
+> 狀態：已完成（2026-07-24；commit 待本項提交）
+
 ## 目標
 
 在穩定低延遲網路與一般 jitter 下，遠端玩家連續移動，不再以 20 Hz
@@ -33,15 +35,14 @@
 
 ## 驗證
 
-- 20 Hz snapshots 在 60/144 Hz sample 下位置連續且單調。
-- jitter、批量到達、丟包、外推上限、teleport、yaw wrap 回歸測試。
-- protocol roundtrip 與 server relay 保留 sequence/timestamp。
-- 舊協議在 handshake 明確拒絕。
-- RemotePlayer velocity 經 mob update 後仍存在。
-- `cargo fmt -- --check`、`cargo test --release`、`cargo check --release`。
-- 人工 Host + Join 雙視窗低延遲走動、衝刺、跳躍、急轉向。
+- [x] 20 Hz snapshots 在 60/144 Hz sample 下位置連續且單調。
+- [x] 批量到達、外推上限、teleport、yaw wrap、非法／重複／亂序資料回歸測試。
+- [x] protocol roundtrip 與 server relay 保留 sequence/timestamp。
+- [x] 舊協議在 handshake 明確拒絕。
+- [x] RemotePlayer velocity 經 mob update 後仍存在。
+- [x] `cargo fmt -- --check`、`cargo test --release`、`cargo check --release`。
+- [ ] 人工 Host + Join 雙視窗低延遲走動、衝刺、跳躍、急轉向（需互動式雙視窗）。
 
 ## Commit
 
 單一功能 commit：`fix(network): smooth remote player movement`
-

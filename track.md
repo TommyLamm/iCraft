@@ -1,15 +1,15 @@
 # Current Work Track
 
-> Last updated: 2026-07-23
-> Goal: finish render optimization and the six requested gameplay/network/audio fixes.
+> Last updated: 2026-07-24
+> Goal: complete tasks 1-9, then audit, list, and fix latent bugs as task 10.
 > Rule: complete, verify, and commit each task separately.
 
 ## Persistent checklist
 
 | # | Task | Status | Commit | Verification |
 |---|---|---|---|---|
-| 1 | [Complete render optimization](plans/implementation/01_render_optimization.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (182 unit + 1 integration); WGSL validation |
-| 2 | [Smooth remote-player movement](plans/implementation/02_multiplayer_smoothing.md) | Pending | — | — |
+| 1 | [Complete render optimization](plans/implementation/01_render_optimization.md) | Complete | `768c590` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (182 unit + 1 integration); WGSL validation |
+| 2 | [Smooth remote-player movement](plans/implementation/02_multiplayer_smoothing.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (191 unit + 1 integration); targeted interpolation, protocol, relay, latest-wins, transport, and velocity tests |
 | 3 | [Add Minecraft-style Creative flight](plans/implementation/03_creative_flight.md) | Pending | — | — |
 | 4 | [Reject placement intersecting a player](plans/implementation/04_player_placement_collision.md) | Pending | — | — |
 | 5 | [Add a proper 3D torch model](plans/implementation/05_torch_model.md) | Pending | — | — |
@@ -22,9 +22,6 @@
 ## Working notes
 
 - The repository was clean on `master` at `ac8f57e` before this work began.
-- `ARCHITECTURE.md` says remote poses are sent at 20 Hz and rendered using two
-  snapshots at a fixed 100 ms delay. This is the first suspected cause of the
-  visible stop/start motion and teleporting.
 - Sub-agents are investigating each task read-only. The root agent owns all
   edits, verification, and commits so commits remain isolated by task.
 - Task 10 must run only after tasks 1-9 are complete, per the user's ordering.
@@ -34,6 +31,13 @@
   draw plans, three terrain LODs, a render-distance-aware far plane, and
   submitted-geometry F3 statistics. The hardware-dependent Render Distance 16
   `60+ FPS` observation remains an explicit manual check in the task document.
+- Task 2 fixes the stop/start root cause by replacing the two-point pose state
+  with a bounded timestamped snapshot history. It adds protocol-v3
+  sequence/timestamps, real target bracketing, shortest-yaw interpolation,
+  100 ms bounded extrapolation, teleport snap, invalid/out-of-order rejection,
+  retained animation velocity, TCP no-delay/single-write framing, and
+  latest-wins pose delivery without weakening reliable world/chat traffic.
+  The interactive Host + Join visual check remains explicitly manual.
 
 ## Commit discipline
 

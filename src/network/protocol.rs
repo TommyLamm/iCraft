@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
@@ -30,6 +30,8 @@ pub enum Packet {
     PlayerPosition {
         protocol_version: u32,
         id: PlayerId,
+        sequence: u32,
+        sender_time_millis: u64,
         x: f32,
         y: f32,
         z: f32,
@@ -172,6 +174,8 @@ mod tests {
         let p = Packet::PlayerPosition {
             protocol_version: v(),
             id: 7,
+            sequence: 42,
+            sender_time_millis: 12_345,
             x: 1.5,
             y: 64.0,
             z: -2.25,
