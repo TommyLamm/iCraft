@@ -804,6 +804,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn block_change_reports_authenticated_session_id_to_host() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client, id) = server.connect("steve").await;
+
+        client
+            .send(&Packet::BlockChange {
+                protocol_version: PROTOCOL_VERSION,
+                x: 3,
+                y: 80,
+                z: -4,
+                block: 3,
+            })
+            .await
+            .unwrap();
+
+        let event = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ClientBlockChange { .. }))
+            .await;
+        assert!(matches!(
+            event,
+            ServerToHost::ClientBlockChange {
+                id: event_id,
+                x: 3,
+                y: 80,
+                z: -4,
+                block: 3,
+            } if event_id == id
+        ));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
     async fn rejects_old_protocol_during_handshake() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let mut connection = Connection::new(server.connect_stream().await);

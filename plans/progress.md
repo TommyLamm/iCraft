@@ -104,6 +104,11 @@ P3 [█████████░] 88.9%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-24
+- ✅ 修復方塊放置碰撞 (By placement sub-agent, reviewed by Codex)：禁止把 solid 方塊放進玩家
+  - 修改文件：`src/physics.rs`, `src/state.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `plans/implementation/04_player_placement_collision.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：抽出統一玩家／單位方塊 AABB 與純放置 policy，只拒絕三軸都有正體積重疊的 solid 方塊，因此面／邊／角接觸及 Torch 等 non-solid 方塊仍合法。本地與 joined client 都在放置副作用或送出 request 前預檢；Host 保留 server 驗證過的 session ID，以本地當前 AABB 及所有遠端玩家 `snapshots.back()` 的最新權威位置做最終裁決。Host request 與 client 收到的權威 block change 使用不同事件類型，client 不會以延遲 render pose 重驗 Host 結果。
+  - 驗證：AABB 座標、重疊／接觸邊界、non-solid、最新權威快照、未知姿勢、Host/Client 事件分流及 server authenticated ID 端到端測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 210 項單元測試與 1 項整合測試。
+  - 備註：單人腳下／頭部及 Host + Join 互相放置的實際視窗操作保留為人工驗收。
 - ✅ 新增額外功能 (By Codex)：Minecraft 式 Creative 飛行
   - 修改文件：`src/app.rs`, `src/physics.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/03_creative_flight.md`, `plans/progress.md`, `track.md`
   - 關鍵決策：以事件時間追蹤 300 ms、忽略 key repeat 的 Jump 雙擊；Creative 中雙擊切換 transient flight，WASD 維持相機 yaw 水平移動，Space／Shift 升降，同時按下不產生垂直速度，衝刺飛行為兩倍水平速度。飛行略過重力、流體阻力／浮力及摔落傷害，但沿用 X/Y/Z solid collision；下降碰地退出，撞天花板只停止上升。模式切 Survival、死亡、重生與切維度會安全退出並重設 fall-distance，暫停／背包／聊天／進度介面／失焦只清輸入與 pending tap，保留 hover。飛行狀態及速度不持久化，F3 會標示 `FLYING`。

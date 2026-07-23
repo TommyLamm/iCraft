@@ -10,8 +10,8 @@
 |---|---|---|---|---|
 | 1 | [Complete render optimization](plans/implementation/01_render_optimization.md) | Complete | `768c590` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (182 unit + 1 integration); WGSL validation |
 | 2 | [Smooth remote-player movement](plans/implementation/02_multiplayer_smoothing.md) | Complete | `2c72b82` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (191 unit + 1 integration); targeted interpolation, protocol, relay, latest-wins, transport, and velocity tests |
-| 3 | [Add Minecraft-style Creative flight](plans/implementation/03_creative_flight.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (201 unit + 1 integration); 10 flight/input/physics regressions |
-| 4 | [Reject placement intersecting a player](plans/implementation/04_player_placement_collision.md) | Pending | — | — |
+| 3 | [Add Minecraft-style Creative flight](plans/implementation/03_creative_flight.md) | Complete | `b6dcf9b` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (201 unit + 1 integration); 10 flight/input/physics regressions |
+| 4 | [Reject placement intersecting a player](plans/implementation/04_player_placement_collision.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (210 unit + 1 integration); placement AABB, latest authoritative pose, event classification, and authenticated-session regressions |
 | 5 | [Add a proper 3D torch model](plans/implementation/05_torch_model.md) | Pending | — | — |
 | 6 | [Fix Survival attacks against mobs](plans/implementation/06_survival_combat.md) | Pending | — | — |
 | 7 | [Add adjustable weather/rain volume](plans/implementation/07_weather_volume.md) | Pending | — | — |
@@ -22,8 +22,9 @@
 ## Working notes
 
 - The repository was clean on `master` at `ac8f57e` before this work began.
-- Sub-agents are investigating each task read-only. The root agent owns all
-  edits, verification, and commits so commits remain isolated by task.
+- Sub-agents implement each task without committing. The root agent reviews
+  their changes, requests corrections when needed, updates documentation, runs
+  final verification, and creates one isolated commit per task.
 - Task 10 must run only after tasks 1-9 are complete, per the user's ordering.
 - Task 1 implements conservative greedy terrain meshing, owned halo snapshots
   and bounded Rayon chunk load/remesh jobs, generation/lifetime/revision stale
@@ -45,6 +46,12 @@
   dimension travel exit safely, while UI/focus changes clear pending taps but
   preserve active hover. F3 identifies the flying state. Interactive camera
   and multiplayer visual checks remain manual.
+- Task 4 rejects any solid placement with positive-volume overlap against the
+  current local player AABB or the latest authoritative snapshot of any remote
+  player. Face/edge/corner contact and non-solid blocks remain legal. Joined
+  clients preflight before sending, while the Host preserves the authenticated
+  session ID and repeats the final check before world mutation or broadcast.
+  Interactive single-player and Host + Join placement checks remain manual.
 
 ## Commit discipline
 

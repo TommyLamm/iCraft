@@ -1,10 +1,10 @@
 # Architecture
 
-> Last verified: 2026-07-22. This is a navigation map, not a replacement for
+> Last verified: 2026-07-24. This is a navigation map, not a replacement for
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `0deafadcddbb78d4650823c9d943b30ba9fc1708` (`0deafad`). This identifies the
+> `b6dcf9bacadb1e0ce10a5908e860d03b8b654f16` (`b6dcf9b`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -32,7 +32,11 @@ with projected name tags. `T` opens a bounded in-game chat history/input UI;
 the host resolves authenticated player IDs to roster usernames before reliably
 rebroadcasting chat. Host-authoritative block mutations, client-side
 lighting/remeshing, deferred changes for unloaded chunks, join-time chunk
-catch-up, and periodic world-time/weather correction are integrated. Client
+catch-up, and periodic world-time/weather correction are integrated. Solid
+placement is preflighted locally and revalidated by the Host against its local
+player plus every remote player's newest authoritative snapshot; the server
+preserves the authenticated requester ID, and rejected placement has no world,
+inventory, sound, action, or broadcast side effects. Client
 connection loss freezes input, removes remote entities, and presents a safe
 return-to-menu overlay without saving the client's transient copy.
 
@@ -424,7 +428,7 @@ entity physics and world-side lifecycle events.
 | `src/lighting.rs` | Cross-chunk BFS propagation/removal for sky and emissive block light; initial chunk lighting and post-mutation updates. |
 | `src/fluid.rs` | Budgeted event-driven water/lava cells, falling/level propagation, draining, infinite water, and water/lava solidification. Returns dirty chunk coordinates plus changed block values for host broadcast. |
 | `src/redstone.rs` | 20 Hz redstone graph, 0-15 weak/strong power, component index, delayed ticks, comparator/repeater logic, actuator mutations, TNT/dispense/note actions, and loop protection. |
-| `src/physics.rs` | `AABB`, `PlayerPhysics`; walking/sprinting, gravity, jumping/swimming, transient Creative hover/flight, axis collision resolution, and fall-distance result. Flight is not serialized and exposes zero persistent velocity while active. |
+| `src/physics.rs` | `AABB`, `PlayerPhysics`, `player_aabb_at`, `unit_block_aabb`, `block_placement_decision`; walking/sprinting, gravity, jumping/swimming, transient Creative hover/flight, axis collision resolution, fall-distance result, and the pure positive-overlap placement policy shared by client preflight and Host authority. Flight is not serialized and exposes zero persistent velocity while active. |
 | `src/interaction.rs` | Grid DDA block `raycast` and `RaycastResult`; read-only world targeting. |
 | `src/save.rs` | `LevelData`, `PlayerData`, `ChunkSaveData`, `SaveManager`; Bincode serialization of player/inventory/advancement data, Zlib chunk arrays, Region file management, legacy-player upgrade, and thread-based background saving. |
 
@@ -452,7 +456,7 @@ entity physics and world-side lifecycle events.
 | `src/network/mod.rs` | Module root; re-exports `client`, `protocol`, `server`, and `transport`. |
 | `src/network/client.rs` | `NetworkClient`, `ClientToGame`, `GameToClient`; background-thread Tokio connector, version handshake/login, block/chunk/time/chat packet translation, latest-wins pose coalescing, keepalive replies, synchronous command polling, disconnect reporting, and clean shutdown. |
 | `src/network/protocol.rs` | `PlayerId`, `PROTOCOL_VERSION`, `Action`, `Packet`; bincode `encode`/`decode` of the 12-variant versioned wire enum. Protocol v3 gives `PlayerPosition` a sequence and sender timestamp; every packet carries `protocol_version: u32`. No game-module dependencies. |
-| `src/network/server.rs` | `NetworkServer`, `ServerToHost`, `HostToServer`; background-thread Tokio listen server, handshake/login and monotonic player IDs, newcomer roster replay, reliable authoritative block/chunk/chat delivery, coalesced latest-wins pose fan-out, authenticated client event relay, keepalive/timeout handling, and disconnect cleanup. Host-mode `State` owns its channel ends and thread handle. |
+| `src/network/server.rs` | `NetworkServer`, `ServerToHost`, `HostToServer`; background-thread Tokio listen server, handshake/login and monotonic player IDs, newcomer roster replay, reliable authoritative block/chunk/chat delivery, coalesced latest-wins pose fan-out, authenticated client event relay (including the requester ID for Host-side placement validation), keepalive/timeout handling, and disconnect cleanup. Host-mode `State` owns its channel ends and thread handle. |
 | `src/network/transport.rs` | `Connection`; async `tokio` TCP stream with `TCP_NODELAY`, 4-byte big-endian length-prefixed single-write framing, a 2 MiB packet cap, `recv`/`send`, and a crate-internal owned read/write split used by server and client loops. |
 
 ## Data and configuration

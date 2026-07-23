@@ -1,10 +1,14 @@
 use crate::chunk_manager::ChunkManager;
+use crate::world::BlockType;
 use glam::Vec3;
 
 const CREATIVE_FLY_SPEED: f32 = 10.0;
 const CREATIVE_FLY_SPRINT_MULTIPLIER: f32 = 2.0;
 const CREATIVE_FLY_VERTICAL_SPEED: f32 = 8.0;
+pub const PLAYER_WIDTH: f32 = 0.6;
+pub const PLAYER_STANDING_HEIGHT: f32 = 1.8;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AABB {
     pub min: Vec3,
     pub max: Vec3,
@@ -29,6 +33,59 @@ impl AABB {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockPlacementDecision {
+    Allowed,
+    BlockedByPlayer,
+}
+
+/// Build the standing player collision box from a foot-centred world position.
+///
+/// Remote movement snapshots use this canonical standing size because the
+/// multiplayer protocol does not currently transmit crouching state.
+pub fn player_aabb_at(feet_position: Vec3) -> AABB {
+    let size = Vec3::new(PLAYER_WIDTH, PLAYER_STANDING_HEIGHT, PLAYER_WIDTH);
+    AABB::new(
+        feet_position + Vec3::new(0.0, PLAYER_STANDING_HEIGHT * 0.5, 0.0),
+        size,
+    )
+}
+
+/// Build the full-cube collision box occupied by one world block cell.
+pub fn unit_block_aabb((x, y, z): (i32, i32, i32)) -> AABB {
+    AABB::new(
+        Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+        Vec3::ONE,
+    )
+}
+
+/// Pure placement policy shared by local preflight and host authority.
+///
+/// The current physics model treats every solid block as one full cube. A
+/// placement is blocked only when that cube and a player box have positive
+/// overlap on all three axes; merely touching a face, edge, or corner remains
+/// legal through `AABB::intersects`' strict comparisons. Non-solid blocks do
+/// not displace players and are therefore always allowed by this policy.
+pub fn block_placement_decision(
+    block: BlockType,
+    block_pos: (i32, i32, i32),
+    player_aabbs: impl IntoIterator<Item = AABB>,
+) -> BlockPlacementDecision {
+    if !block.properties().is_solid {
+        return BlockPlacementDecision::Allowed;
+    }
+
+    let block_aabb = unit_block_aabb(block_pos);
+    if player_aabbs
+        .into_iter()
+        .any(|player_aabb| player_aabb.intersects(&block_aabb))
+    {
+        BlockPlacementDecision::BlockedByPlayer
+    } else {
+        BlockPlacementDecision::Allowed
+    }
+}
+
 pub struct PlayerPhysics {
     pub position: Vec3,
     pub velocity: Vec3,
@@ -43,7 +100,7 @@ impl PlayerPhysics {
         Self {
             position,
             velocity: Vec3::ZERO,
-            size: Vec3::new(0.6, 1.8, 0.6), // Minecraft 玩家寬高
+            size: Vec3::new(PLAYER_WIDTH, PLAYER_STANDING_HEIGHT, PLAYER_WIDTH),
             on_ground: false,
             highest_y: position.y,
             is_flying: false,
@@ -227,10 +284,7 @@ impl PlayerPhysics {
                 for z in min_z..=max_z {
                     let block = chunk_manager.get_block(x, y, z);
                     if block.properties().is_solid {
-                        let block_aabb = AABB::new(
-                            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                            Vec3::ONE,
-                        );
+                        let block_aabb = unit_block_aabb((x, y, z));
 
                         if self.get_aabb().intersects(&block_aabb) {
                             if axis == 0 {
@@ -285,10 +339,7 @@ impl PlayerPhysics {
                 for z in min_z..=max_z {
                     let block = chunk_manager.get_block(x, y, z);
                     if block.properties().is_solid {
-                        let block_aabb = AABB::new(
-                            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                            Vec3::ONE,
-                        );
+                        let block_aabb = unit_block_aabb((x, y, z));
                         if check_aabb.intersects(&block_aabb) {
                             return true;
                         }
@@ -327,6 +378,72 @@ mod tests {
 
         assert!(box1.intersects(&box2));
         assert!(!box1.intersects(&box3));
+    }
+
+    #[test]
+    fn player_and_unit_block_aabbs_use_foot_and_cell_coordinates() {
+        let player = player_aabb_at(Vec3::new(4.5, 20.0, -2.5));
+        assert!((player.min.x - 4.2).abs() < 1.0e-6);
+        assert!((player.max.x - 4.8).abs() < 1.0e-6);
+        assert!((player.min.y - 20.0).abs() < 1.0e-6);
+        assert!((player.max.y - 21.8).abs() < 1.0e-6);
+        assert!((player.min.z + 2.8).abs() < 1.0e-6);
+        assert!((player.max.z + 2.2).abs() < 1.0e-6);
+
+        assert_eq!(
+            unit_block_aabb((-3, 7, 11)),
+            AABB {
+                min: Vec3::new(-3.0, 7.0, 11.0),
+                max: Vec3::new(-2.0, 8.0, 12.0),
+            }
+        );
+    }
+
+    #[test]
+    fn solid_placement_is_blocked_by_positive_player_overlap() {
+        assert_eq!(
+            block_placement_decision(
+                BlockType::Stone,
+                (0, 0, 0),
+                [player_aabb_at(Vec3::new(0.5, 0.0, 0.5))]
+            ),
+            BlockPlacementDecision::BlockedByPlayer
+        );
+    }
+
+    #[test]
+    fn solid_placement_allows_face_edge_and_corner_touching() {
+        let face_touch = AABB {
+            min: Vec3::new(0.2, 1.0, 0.2),
+            max: Vec3::new(0.8, 2.8, 0.8),
+        };
+        let edge_touch = AABB {
+            min: Vec3::new(1.0, 1.0, 0.2),
+            max: Vec3::new(1.6, 2.8, 0.8),
+        };
+        let corner_touch = AABB {
+            min: Vec3::new(1.0, 1.0, 1.0),
+            max: Vec3::new(1.6, 2.8, 1.6),
+        };
+
+        for player in [face_touch, edge_touch, corner_touch] {
+            assert_eq!(
+                block_placement_decision(BlockType::Stone, (0, 0, 0), [player]),
+                BlockPlacementDecision::Allowed
+            );
+        }
+    }
+
+    #[test]
+    fn non_solid_placement_is_allowed_inside_player_aabb() {
+        assert_eq!(
+            block_placement_decision(
+                BlockType::Torch,
+                (0, 0, 0),
+                [player_aabb_at(Vec3::new(0.5, 0.0, 0.5))]
+            ),
+            BlockPlacementDecision::Allowed
+        );
     }
 
     #[test]

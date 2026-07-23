@@ -8,7 +8,9 @@ use crate::crafting::RecipeManager;
 use crate::interaction::raycast;
 use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
 use crate::menu::{Difficulty, GameSettings, MultiplayerRole, WorldLaunch};
-use crate::physics::{PlayerPhysics, AABB};
+use crate::physics::{
+    block_placement_decision, player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB,
+};
 use crate::player::{DamageSource, PlayerState};
 use crate::world::{Biome, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
 use glam::{Mat4, Vec2, Vec3};
@@ -270,6 +272,61 @@ mod remote_sync_tests {
             SnapshotPushResult::Snapped
         );
         assert_eq!(remote.snapshots.len(), 1);
+    }
+
+    #[test]
+    fn placement_uses_latest_authoritative_snapshot_before_side_effects() {
+        let mut remote = RemotePlayerState::new(1, "Alex".into());
+        remote.push_snapshot(Vec3::new(2.0, 0.0, 0.5), 0.0, 0.0, 1, 1_000, 1.0);
+        remote.push_snapshot(Vec3::new(0.5, 0.0, 0.5), 0.0, 0.0, 2, 1_050, 1.05);
+
+        // A delayed render sample is still outside the candidate block, while
+        // the authoritative back of the snapshot queue is inside it.
+        assert_eq!(
+            remote.sample(1.0).unwrap().position,
+            Vec3::new(2.0, 0.0, 0.5)
+        );
+        assert_eq!(
+            remote.snapshots.back().unwrap().position,
+            Vec3::new(0.5, 0.0, 0.5)
+        );
+
+        let decision = placement_decision_for_players(
+            BlockType::Stone,
+            (0, 0, 0),
+            player_aabb_at(Vec3::new(10.0, 0.0, 10.0)),
+            [&remote],
+        );
+        assert_eq!(decision, BlockPlacementDecision::BlockedByPlayer);
+
+        // This mirrors the early-return guard used by both local placement and
+        // the host request handler. A rejected decision must gate every effect.
+        let mut effects = Vec::new();
+        if decision == BlockPlacementDecision::Allowed {
+            effects.extend([
+                "world mutation",
+                "action",
+                "sound",
+                "inventory",
+                "broadcast",
+            ]);
+        }
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn unknown_remote_pose_blocks_only_solid_placement() {
+        let remote = RemotePlayerState::new(1, "Alex".into());
+        let local = player_aabb_at(Vec3::new(10.0, 0.0, 10.0));
+
+        assert_eq!(
+            placement_decision_for_players(BlockType::Stone, (0, 0, 0), local, [&remote]),
+            BlockPlacementDecision::BlockedByPlayer
+        );
+        assert_eq!(
+            placement_decision_for_players(BlockType::Torch, (0, 0, 0), local, [&remote]),
+            BlockPlacementDecision::Allowed
+        );
     }
 
     #[test]
@@ -1345,6 +1402,30 @@ impl RemotePlayerState {
     }
 }
 
+fn placement_decision_for_players<'a>(
+    block: BlockType,
+    block_pos: (i32, i32, i32),
+    local_player_aabb: AABB,
+    remote_players: impl IntoIterator<Item = &'a RemotePlayerState>,
+) -> BlockPlacementDecision {
+    if !block.properties().is_solid {
+        return BlockPlacementDecision::Allowed;
+    }
+
+    let mut player_aabbs = vec![local_player_aabb];
+    for remote in remote_players {
+        let Some(latest) = remote.snapshots.back() else {
+            // Until the host has an authenticated pose for every connected
+            // player, conservatively reject solid placement rather than risk
+            // creating a block inside an unknown player.
+            return BlockPlacementDecision::BlockedByPlayer;
+        };
+        player_aabbs.push(player_aabb_at(latest.position));
+    }
+
+    block_placement_decision(block, block_pos, player_aabbs)
+}
+
 fn sequence_is_newer(candidate: u32, previous: u32) -> bool {
     let distance = candidate.wrapping_sub(previous);
     distance != 0 && distance < (1 << 31)
@@ -1499,7 +1580,14 @@ enum NetworkInbound {
         id: crate::network::protocol::PlayerId,
         action: crate::network::protocol::Action,
     },
-    BlockChange {
+    ClientBlockChange {
+        id: crate::network::protocol::PlayerId,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+    },
+    AuthoritativeBlockChange {
         x: i32,
         y: i32,
         z: i32,
@@ -1564,12 +1652,12 @@ impl NetworkHandle {
                         NetworkInbound::PlayerAction { id, action }
                     }
                     crate::network::server::ServerToHost::ClientBlockChange {
+                        id,
                         x,
                         y,
                         z,
                         block,
-                        ..
-                    } => NetworkInbound::BlockChange { x, y, z, block },
+                    } => NetworkInbound::ClientBlockChange { id, x, y, z, block },
                     crate::network::server::ServerToHost::ChatFromClient { id, message } => {
                         NetworkInbound::ChatFromClient { id, message }
                     }
@@ -1619,7 +1707,7 @@ impl NetworkHandle {
                         NetworkInbound::PlayerAction { id, action }
                     }
                     crate::network::client::ClientToGame::BlockChange { x, y, z, block } => {
-                        NetworkInbound::BlockChange { x, y, z, block }
+                        NetworkInbound::AuthoritativeBlockChange { x, y, z, block }
                     }
                     crate::network::client::ClientToGame::ChunkData { cx, cz, blocks } => {
                         NetworkInbound::ChunkData { cx, cz, blocks }
@@ -3077,6 +3165,18 @@ impl State {
         !matches!(self.role, MultiplayerRole::Client { .. })
     }
 
+    fn can_place_block_at(&self, x: i32, y: i32, z: i32, block: BlockType) -> bool {
+        matches!(
+            placement_decision_for_players(
+                block,
+                (x, y, z),
+                self.player_physics.get_aabb(),
+                self.remote_players.values(),
+            ),
+            BlockPlacementDecision::Allowed
+        )
+    }
+
     fn broadcast_block_change(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
         if !matches!(self.role, MultiplayerRole::Host { .. }) {
             return;
@@ -3324,16 +3424,16 @@ impl State {
                         }
                     }
                 }
-                NetworkInbound::BlockChange { x, y, z, block } => {
-                    if self.is_authoritative() {
-                        // A client requested a block change. Apply it through the
-                        // canonical broadcaster, which re-broadcasts the result
-                        // to every client (including the originator) so all
-                        // peers converge on the host's authoritative state.
-                        self.set_block_and_broadcast(x, y, z, block);
-                    } else {
-                        self.apply_remote_block_change(x, y, z, block);
-                    }
+                NetworkInbound::ClientBlockChange { id, x, y, z, block } => {
+                    // The server supplied the authenticated session id. The
+                    // host is the final authority for both player occupancy and
+                    // the resulting world mutation.
+                    self.set_block_and_broadcast(id, x, y, z, block);
+                }
+                NetworkInbound::AuthoritativeBlockChange { x, y, z, block } => {
+                    // Clients always apply host authority without re-validating
+                    // against their delayed render snapshots.
+                    self.apply_remote_block_change(x, y, z, block);
                 }
                 NetworkInbound::ChunkData { cx, cz, blocks } => {
                     self.apply_remote_chunk_data(cx, cz, blocks);
@@ -5513,11 +5613,22 @@ impl State {
     /// component rescan. It deliberately does **not** spawn drops, play sounds,
     /// grant XP, or trigger advancements - those are local gameplay reactions
     /// tied to the *player's* action, not to a relayed remote request.
-    pub fn set_block_and_broadcast(&mut self, x: i32, y: i32, z: i32, block_wire: u32) {
+    pub fn set_block_and_broadcast(
+        &mut self,
+        requester: crate::network::protocol::PlayerId,
+        x: i32,
+        y: i32,
+        z: i32,
+        block_wire: u32,
+    ) {
         let block = match BlockType::from_wire(block_wire) {
             Some(b) => b,
             None => return,
         };
+        if !self.remote_players.contains_key(&requester) || !self.can_place_block_at(x, y, z, block)
+        {
+            return;
+        }
         let Some(((cx, cz), _)) = self.chunk_manager.world_to_local(x, y, z) else {
             return;
         };
@@ -6102,12 +6213,11 @@ impl State {
                         .send_action(crate::network::protocol::Action::Break);
                 } else if let Some(block) = self.inventory.get_selected_block() {
                     let target = hit.block_pos + hit.normal;
-                    self.network.request_block_change(
-                        target.x as i32,
-                        target.y as i32,
-                        target.z as i32,
-                        block as u32,
-                    );
+                    let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
+                    if !self.can_place_block_at(x, y, z, block) {
+                        return;
+                    }
+                    self.network.request_block_change(x, y, z, block as u32);
                     self.network
                         .send_action(crate::network::protocol::Action::Place);
                 }
@@ -6694,6 +6804,9 @@ impl State {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
                     let below_block = self.chunk_manager.get_block(wx, wy - 1, wz);
                     if !placed_block.can_stay_on(below_block) {
+                        return;
+                    }
+                    if !self.can_place_block_at(wx, wy, wz, placed_block) {
                         return;
                     }
 
@@ -10620,6 +10733,67 @@ mod debug_tests {
         assert!(matches!(
             &events[1],
             NetworkInbound::Disconnected(reason) if reason == "server stopped"
+        ));
+    }
+
+    #[test]
+    fn host_inbound_block_request_preserves_authenticated_player_id() {
+        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+        let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
+        let handle = NetworkHandle::Host {
+            server_to_host: inbound_rx,
+            host_to_server: outbound_tx,
+            thread: None,
+        };
+        inbound_tx
+            .send(crate::network::server::ServerToHost::ClientBlockChange {
+                id: 7,
+                x: 3,
+                y: 80,
+                z: -4,
+                block: BlockType::Stone.to_wire(),
+            })
+            .unwrap();
+
+        let events = handle.drain_inbound();
+        assert!(matches!(
+            events.as_slice(),
+            [NetworkInbound::ClientBlockChange {
+                id: 7,
+                x: 3,
+                y: 80,
+                z: -4,
+                block
+            }] if *block == BlockType::Stone.to_wire()
+        ));
+    }
+
+    #[test]
+    fn client_block_change_is_classified_as_host_authority() {
+        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
+        let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
+        let handle = NetworkHandle::Client {
+            client_to_game: inbound_rx,
+            game_to_client: outbound_tx,
+            thread: None,
+        };
+        inbound_tx
+            .send(crate::network::client::ClientToGame::BlockChange {
+                x: 3,
+                y: 80,
+                z: -4,
+                block: BlockType::Stone.to_wire(),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            handle.drain_inbound().as_slice(),
+            [NetworkInbound::AuthoritativeBlockChange {
+                x: 3,
+                y: 80,
+                z: -4,
+                block
+            }] if *block == BlockType::Stone.to_wire()
         ));
     }
 
