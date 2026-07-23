@@ -1,5 +1,9 @@
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk_manager::{mark_block_mesh_dependencies, surrounding_chunk_coords, ChunkManager};
+use crate::chunk_render::{
+    build_draw_plan, select_lod_for_bounds, DrawCandidate, DrawLayer, Frustum, LodLevel,
+    LodThresholds, MeshBounds, TerrainVertex,
+};
 use crate::crafting::RecipeManager;
 use crate::interaction::raycast;
 use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
@@ -138,16 +142,330 @@ mod remote_sync_tests {
         assert!(dirty.contains(&(0, 0)));
         assert!(dirty.contains(&(1, 0)));
     }
+
+    #[test]
+    fn terrain_worker_tokens_reject_stale_generation_lifetime_and_revision() {
+        use crate::dimension::Dimension;
+
+        assert!(chunk_load_result_is_current(
+            Some(7),
+            7,
+            3,
+            3,
+            Dimension::Overworld,
+            Dimension::Overworld,
+        ));
+        assert!(!chunk_load_result_is_current(
+            Some(8),
+            7,
+            3,
+            3,
+            Dimension::Overworld,
+            Dimension::Overworld,
+        ));
+        assert!(!chunk_load_result_is_current(
+            Some(7),
+            7,
+            2,
+            3,
+            Dimension::Overworld,
+            Dimension::Overworld,
+        ));
+        assert!(!chunk_load_result_is_current(
+            Some(7),
+            7,
+            3,
+            3,
+            Dimension::Nether,
+            Dimension::Overworld,
+        ));
+
+        assert!(chunk_mesh_result_is_current(
+            Some((7, 11)),
+            7,
+            11,
+            3,
+            3,
+            Some(7),
+            Some(11),
+        ));
+        assert!(!chunk_mesh_result_is_current(
+            Some((7, 10)),
+            7,
+            11,
+            3,
+            3,
+            Some(7),
+            Some(11),
+        ));
+        assert!(!chunk_mesh_result_is_current(
+            Some((7, 11)),
+            7,
+            11,
+            3,
+            3,
+            Some(7),
+            Some(12),
+        ));
+        assert!(!chunk_mesh_result_is_current(
+            Some((7, 11)),
+            7,
+            11,
+            2,
+            3,
+            Some(7),
+            Some(11),
+        ));
+    }
+
+    #[test]
+    fn mesh_snapshot_owns_the_neighbor_halo() {
+        let mut chunks = std::collections::HashMap::new();
+        let mut center = Chunk::new(0, 0);
+        let mut east = Chunk::new(1, 0);
+        center.blocks[15][10][8] = BlockType::Stone;
+        east.blocks[0][10][8] = BlockType::Dirt;
+        east.sky_light[0][10][8] = 9;
+        chunks.insert((0, 0), center);
+        chunks.insert((1, 0), east);
+
+        let snapshot = MeshSnapshot::capture((0, 0), &chunks, 15).expect("center chunk exists");
+        assert_eq!(snapshot.get(15, 10, 8).0, BlockType::Stone);
+        assert_eq!(snapshot.get(16, 10, 8), (BlockType::Dirt, 9, 0, 0, false));
+        assert_eq!(snapshot.get(-1, 10, 8), (BlockType::Air, 15, 0, 0, false));
+    }
+
+    #[test]
+    fn terrain_shader_module_passes_wgpu_validation() {
+        let instance = wgpu::Instance::default();
+        let Some(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }))
+        else {
+            // Headless CI images are allowed to have no graphics adapter.
+            return;
+        };
+        let Ok((device, _queue)) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("Terrain shader validation device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+            },
+            None,
+        )) else {
+            return;
+        };
+
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Terrain shader validation"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+        let validation_error = pollster::block_on(device.pop_error_scope());
+        assert!(
+            validation_error.is_none(),
+            "terrain WGSL failed validation: {validation_error:?}"
+        );
+    }
+}
+
+const MAX_CHUNK_LOAD_JOBS: usize = 2;
+const MAX_CHUNK_MESH_JOBS: usize = 4;
+
+pub struct GpuMeshLayer {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
+    bounds: Option<MeshBounds>,
+}
+
+pub struct GpuMeshLevel {
+    opaque: GpuMeshLayer,
+    transparent: GpuMeshLayer,
+    bounds: Option<MeshBounds>,
 }
 
 pub struct ChunkMesh {
-    pub opaque_vertex_buffer: wgpu::Buffer,
-    pub opaque_index_buffer: wgpu::Buffer,
-    pub opaque_num_indices: u32,
-    pub transparent_vertex_buffer: wgpu::Buffer,
-    pub transparent_index_buffer: wgpu::Buffer,
-    pub transparent_num_indices: u32,
-    pub dirty: bool,
+    levels: Option<[GpuMeshLevel; 3]>,
+    revision: u64,
+    meshed_revision: u64,
+}
+
+impl ChunkMesh {
+    fn pending() -> Self {
+        Self {
+            levels: None,
+            revision: 0,
+            meshed_revision: u64::MAX,
+        }
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn needs_rebuild(&self) -> bool {
+        self.levels.is_none() || self.meshed_revision != self.revision
+    }
+
+    fn level(&self, lod: LodLevel) -> Option<&GpuMeshLevel> {
+        self.levels.as_ref().map(|levels| &levels[lod as usize])
+    }
+
+    fn finest_bounds(&self) -> Option<MeshBounds> {
+        self.level(LodLevel::L0).and_then(|level| level.bounds)
+    }
+
+    fn total_indices(&self) -> usize {
+        self.levels
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .map(|level| level.opaque.num_indices as usize + level.transparent.num_indices as usize)
+            .sum()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MeshVoxel {
+    block: BlockType,
+    sky_light: u8,
+    block_light: u8,
+    fluid: u8,
+}
+
+struct MeshSnapshot {
+    chunk: Chunk,
+    min_world_x: i32,
+    min_world_z: i32,
+    voxels: Vec<MeshVoxel>,
+    default_sky_light: u8,
+}
+
+impl MeshSnapshot {
+    const WIDTH: usize = CHUNK_WIDTH + 2;
+    const DEPTH: usize = CHUNK_DEPTH + 2;
+
+    fn capture(
+        coord: (i32, i32),
+        chunks: &std::collections::HashMap<(i32, i32), Chunk>,
+        default_sky_light: u8,
+    ) -> Option<Self> {
+        let chunk = chunks.get(&coord)?.clone();
+        let min_world_x = coord.0 * CHUNK_WIDTH as i32 - 1;
+        let min_world_z = coord.1 * CHUNK_DEPTH as i32 - 1;
+        let mut voxels = Vec::with_capacity(Self::WIDTH * CHUNK_HEIGHT * Self::DEPTH);
+        for x in 0..Self::WIDTH {
+            let world_x = min_world_x + x as i32;
+            let chunk_x = world_x.div_euclid(CHUNK_WIDTH as i32);
+            let local_x = world_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..Self::DEPTH {
+                    let world_z = min_world_z + z as i32;
+                    let chunk_z = world_z.div_euclid(CHUNK_DEPTH as i32);
+                    let local_z = world_z.rem_euclid(CHUNK_DEPTH as i32) as usize;
+                    let voxel = chunks
+                        .get(&(chunk_x, chunk_z))
+                        .map(|neighbor| MeshVoxel {
+                            block: neighbor.blocks[local_x][y][local_z],
+                            sky_light: neighbor.sky_light[local_x][y][local_z],
+                            block_light: neighbor.block_light[local_x][y][local_z],
+                            fluid: neighbor.fluid_levels[local_x][y][local_z],
+                        })
+                        .unwrap_or(MeshVoxel {
+                            block: BlockType::Air,
+                            sky_light: default_sky_light,
+                            block_light: 0,
+                            fluid: 0,
+                        });
+                    voxels.push(voxel);
+                }
+            }
+        }
+        Some(Self {
+            chunk,
+            min_world_x,
+            min_world_z,
+            voxels,
+            default_sky_light,
+        })
+    }
+
+    fn get(&self, world_x: i32, world_y: i32, world_z: i32) -> (BlockType, u8, u8, u8, bool) {
+        if world_y < 0 {
+            return (BlockType::Air, 0, 0, 0, false);
+        }
+        if world_y >= CHUNK_HEIGHT as i32 {
+            return (BlockType::Air, self.default_sky_light, 0, 0, false);
+        }
+        let x = world_x - self.min_world_x;
+        let z = world_z - self.min_world_z;
+        if x < 0 || x >= Self::WIDTH as i32 || z < 0 || z >= Self::DEPTH as i32 {
+            return (BlockType::Air, self.default_sky_light, 0, 0, false);
+        }
+        let index = (x as usize * CHUNK_HEIGHT + world_y as usize) * Self::DEPTH + z as usize;
+        let voxel = self.voxels[index];
+        (
+            voxel.block,
+            voxel.sky_light,
+            voxel.block_light,
+            voxel.fluid & 0x07,
+            voxel.fluid & 0x08 != 0,
+        )
+    }
+}
+
+struct ChunkLoadResult {
+    coord: (i32, i32),
+    dimension: crate::dimension::Dimension,
+    generation: u64,
+    lifetime: u64,
+    chunk: Chunk,
+    mutated: bool,
+}
+
+struct ChunkMeshResult {
+    coord: (i32, i32),
+    generation: u64,
+    lifetime: u64,
+    revision: u64,
+    bundle: crate::chunk_render::ChunkMeshBundle,
+}
+
+fn chunk_load_result_is_current(
+    expected_lifetime: Option<u64>,
+    result_lifetime: u64,
+    result_generation: u64,
+    current_generation: u64,
+    result_dimension: crate::dimension::Dimension,
+    current_dimension: crate::dimension::Dimension,
+) -> bool {
+    expected_lifetime == Some(result_lifetime)
+        && result_generation == current_generation
+        && result_dimension == current_dimension
+}
+
+fn chunk_mesh_result_is_current(
+    expected_job: Option<(u64, u64)>,
+    result_lifetime: u64,
+    result_revision: u64,
+    result_generation: u64,
+    current_generation: u64,
+    current_lifetime: Option<u64>,
+    current_revision: Option<u64>,
+) -> bool {
+    expected_job == Some((result_lifetime, result_revision))
+        && result_generation == current_generation
+        && current_lifetime == Some(result_lifetime)
+        && current_revision == Some(result_revision)
+}
+
+enum TerrainWorkerResult {
+    Loaded(ChunkLoadResult),
+    Meshed(ChunkMeshResult),
 }
 
 #[repr(C)]
@@ -187,6 +505,47 @@ impl Vertex {
                         + std::mem::size_of::<f32>())
                         as wgpu::BufferAddress,
                     shader_location: 3,
+                    format: wgpu::VertexFormat::Float32,
+                },
+            ],
+        }
+    }
+}
+
+impl TerrainVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<TerrainVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>())
+                        as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() + 2 * std::mem::size_of::<[f32; 2]>())
+                        as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>()
+                        + 2 * std::mem::size_of::<[f32; 2]>()
+                        + std::mem::size_of::<f32>())
+                        as wgpu::BufferAddress,
+                    shader_location: 4,
                     format: wgpu::VertexFormat::Float32,
                 },
             ],
@@ -248,7 +607,7 @@ impl State {
         }
         for coord in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
-                mesh.dirty = true;
+                mesh.mark_dirty();
             }
         }
         // Fan each authoritative batch mutation out to connected clients.
@@ -393,6 +752,10 @@ impl State {
         self.current_dimension = target;
         let render_distance = self.chunk_manager.render_distance;
         self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
+        self.terrain_generation = self.terrain_generation.wrapping_add(1);
+        self.chunk_load_in_flight.clear();
+        self.chunk_mesh_in_flight.clear();
+        self.chunk_lifetimes.clear();
         self.chunk_meshes.clear();
         self.entity_manager = crate::entity::EntityManager::new();
         self.particles = crate::particles::ParticleSystem::new();
@@ -425,6 +788,9 @@ impl State {
             saved.restore_to_chunk(&mut chunk);
         }
         self.chunk_manager.chunks.insert((cx, cz), chunk);
+        let lifetime = self.next_chunk_lifetime();
+        self.chunk_lifetimes.insert((cx, cz), lifetime);
+        self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
         let mut dirty = std::collections::HashSet::new();
         crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
 
@@ -1016,6 +1382,8 @@ pub struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
+    terrain_render_pipeline: wgpu::RenderPipeline,
+    terrain_trans_pipeline: wgpu::RenderPipeline,
     render_pipeline: wgpu::RenderPipeline,
     trans_pipeline: wgpu::RenderPipeline,
     crack_pipeline: wgpu::RenderPipeline,
@@ -1027,6 +1395,16 @@ pub struct State {
     depth_view: wgpu::TextureView,
     pub chunk_manager: ChunkManager,
     pub chunk_meshes: std::collections::HashMap<(i32, i32), ChunkMesh>,
+    terrain_worker_tx: std::sync::mpsc::Sender<TerrainWorkerResult>,
+    terrain_worker_rx: std::sync::mpsc::Receiver<TerrainWorkerResult>,
+    chunk_load_in_flight: std::collections::HashMap<(i32, i32), u64>,
+    chunk_mesh_in_flight: std::collections::HashMap<(i32, i32), (u64, u64)>,
+    chunk_lifetimes: std::collections::HashMap<(i32, i32), u64>,
+    next_chunk_lifetime: u64,
+    terrain_generation: u64,
+    submitted_terrain_triangles: u64,
+    submitted_terrain_draw_calls: usize,
+    visible_chunk_count: usize,
     pub player_physics: PlayerPhysics,
     pub keys: KeyState,
     #[allow(dead_code)]
@@ -1458,6 +1836,44 @@ impl State {
             multiview: None,
         });
 
+        let terrain_render_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Terrain Render Pipeline"),
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_terrain",
+                    buffers: &[TerrainVertex::desc()],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_terrain",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Cw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            });
+
         // First-person hand pipeline: same shaders and bind layout as the
         // main world pipeline, but depth always passes so the hand stays on
         // top of world geometry.
@@ -1545,6 +1961,51 @@ impl State {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+
+        let terrain_trans_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Terrain Translucent Render Pipeline"),
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_terrain",
+                    buffers: &[TerrainVertex::desc()],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_terrain",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent::OVER,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Cw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            });
 
         let crack_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Crack Overlay Render Pipeline"),
@@ -1716,6 +2177,9 @@ impl State {
         let render_distance = settings.render_distance;
         let mut chunk_manager = ChunkManager::new_in_dimension(render_distance, current_dimension);
         let mut chunk_meshes = std::collections::HashMap::new();
+        let (terrain_worker_tx, terrain_worker_rx) = std::sync::mpsc::channel();
+        let mut chunk_lifetimes = std::collections::HashMap::new();
+        let mut next_chunk_lifetime = 1u64;
         let mut mutated_chunks = std::collections::HashSet::new();
 
         // Load only the immediate spawn area synchronously.  Loading every
@@ -1756,90 +2220,13 @@ impl State {
             crate::lighting::propagate_chunk_lighting(&mut chunk_manager, cx, cz, &mut spawn_dirty);
         }
 
-        // Build meshes for spawn chunks synchronously
-        let chunks_ref = &chunk_manager.chunks;
-        for (&(cx, cz), chunk) in chunks_ref {
-            let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
-                if wy < 0 {
-                    return (BlockType::Air, 0, 0, 0, false);
-                }
-                if wy >= crate::world::CHUNK_HEIGHT as i32 {
-                    return (
-                        BlockType::Air,
-                        if current_dimension.has_sky_light() {
-                            15
-                        } else {
-                            0
-                        },
-                        0,
-                        0,
-                        false,
-                    );
-                }
-                let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
-                let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
-                let bx_neighbor = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32) as usize;
-                let bz_neighbor = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32) as usize;
-                if let Some(c) = chunks_ref.get(&(cx_neighbor, cz_neighbor)) {
-                    (
-                        c.blocks[bx_neighbor][wy as usize][bz_neighbor],
-                        c.sky_light[bx_neighbor][wy as usize][bz_neighbor],
-                        c.block_light[bx_neighbor][wy as usize][bz_neighbor],
-                        c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x07,
-                        (c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x08) != 0,
-                    )
-                } else {
-                    (
-                        BlockType::Air,
-                        if current_dimension.has_sky_light() {
-                            15
-                        } else {
-                            0
-                        },
-                        0,
-                        0,
-                        false,
-                    )
-                }
-            });
-
-            let opaque_vertex_buffer =
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Chunk Opaque Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&o_verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let opaque_index_buffer =
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Chunk Opaque Index Buffer"),
-                    contents: bytemuck::cast_slice(&o_inds),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-            let transparent_vertex_buffer =
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Chunk Translucent Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&t_verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let transparent_index_buffer =
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Chunk Translucent Index Buffer"),
-                    contents: bytemuck::cast_slice(&t_inds),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
-            chunk_meshes.insert(
-                (cx, cz),
-                ChunkMesh {
-                    opaque_vertex_buffer,
-                    opaque_index_buffer,
-                    opaque_num_indices: o_inds.len() as u32,
-                    transparent_vertex_buffer,
-                    transparent_index_buffer,
-                    transparent_num_indices: t_inds.len() as u32,
-                    dirty: false,
-                },
-            );
+        // Spawn-area meshes are also built by the background workers. The
+        // first frame can present immediately instead of blocking on nine CPU
+        // meshes and their three LODs.
+        for &coord in &chunk_keys {
+            chunk_meshes.insert(coord, ChunkMesh::pending());
+            chunk_lifetimes.insert(coord, next_chunk_lifetime);
+            next_chunk_lifetime = next_chunk_lifetime.wrapping_add(1).max(1);
         }
 
         // Initialize UI Pipelines
@@ -2129,6 +2516,8 @@ impl State {
             queue,
             config,
             size,
+            terrain_render_pipeline,
+            terrain_trans_pipeline,
             render_pipeline,
             trans_pipeline,
             crack_pipeline,
@@ -2140,6 +2529,16 @@ impl State {
             depth_view,
             chunk_manager,
             chunk_meshes,
+            terrain_worker_tx,
+            terrain_worker_rx,
+            chunk_load_in_flight: std::collections::HashMap::new(),
+            chunk_mesh_in_flight: std::collections::HashMap::new(),
+            chunk_lifetimes,
+            next_chunk_lifetime,
+            terrain_generation: 0,
+            submitted_terrain_triangles: 0,
+            submitted_terrain_draw_calls: 0,
+            visible_chunk_count: 0,
             player_physics,
             keys,
             texture_atlas,
@@ -2326,6 +2725,10 @@ impl State {
                     };
                     self.weather = crate::weather::WeatherSystem::new(self.world_seed);
                     self.chunk_manager.chunks.clear();
+                    self.terrain_generation = self.terrain_generation.wrapping_add(1);
+                    self.chunk_load_in_flight.clear();
+                    self.chunk_mesh_in_flight.clear();
+                    self.chunk_lifetimes.clear();
                     self.chunk_meshes.clear();
                     self.pending_chunk_payloads.clear();
                     self.pending_block_changes.clear();
@@ -2826,6 +3229,253 @@ impl State {
         }
     }
 
+    fn create_gpu_mesh_layer(
+        device: &wgpu::Device,
+        data: &crate::chunk_render::ChunkMeshData,
+        label: &'static str,
+    ) -> GpuMeshLayer {
+        const EMPTY_BYTES: [u8; 4] = [0; 4];
+        let vertex_bytes = bytemuck::cast_slice(&data.vertices);
+        let index_bytes = bytemuck::cast_slice(&data.indices);
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: if vertex_bytes.is_empty() {
+                &EMPTY_BYTES
+            } else {
+                vertex_bytes
+            },
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: if index_bytes.is_empty() {
+                &EMPTY_BYTES
+            } else {
+                index_bytes
+            },
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        GpuMeshLayer {
+            vertex_buffer,
+            index_buffer,
+            num_indices: data.indices.len() as u32,
+            bounds: data.bounds,
+        }
+    }
+
+    fn upload_mesh_bundle(
+        device: &wgpu::Device,
+        bundle: &crate::chunk_render::ChunkMeshBundle,
+    ) -> [GpuMeshLevel; 3] {
+        std::array::from_fn(|index| {
+            let data = &bundle.levels[index];
+            GpuMeshLevel {
+                opaque: Self::create_gpu_mesh_layer(
+                    device,
+                    &data.opaque,
+                    "Chunk Opaque Mesh Buffer",
+                ),
+                transparent: Self::create_gpu_mesh_layer(
+                    device,
+                    &data.transparent,
+                    "Chunk Translucent Mesh Buffer",
+                ),
+                bounds: data.bounds(),
+            }
+        })
+    }
+
+    fn next_chunk_lifetime(&mut self) -> u64 {
+        let lifetime = self.next_chunk_lifetime;
+        self.next_chunk_lifetime = self.next_chunk_lifetime.wrapping_add(1).max(1);
+        lifetime
+    }
+
+    fn process_terrain_worker_results(&mut self, player_chunk: (i32, i32)) {
+        while let Ok(result) = self.terrain_worker_rx.try_recv() {
+            match result {
+                TerrainWorkerResult::Loaded(result) => {
+                    let expected = self.chunk_load_in_flight.get(&result.coord).copied();
+                    if expected == Some(result.lifetime) {
+                        self.chunk_load_in_flight.remove(&result.coord);
+                    }
+                    let r = self.chunk_manager.render_distance;
+                    if !chunk_load_result_is_current(
+                        expected,
+                        result.lifetime,
+                        result.generation,
+                        self.terrain_generation,
+                        result.dimension,
+                        self.current_dimension,
+                    ) || (result.coord.0 - player_chunk.0).abs() > r
+                        || (result.coord.1 - player_chunk.1).abs() > r
+                        || self.chunk_manager.chunks.contains_key(&result.coord)
+                    {
+                        continue;
+                    }
+
+                    let (cx, cz) = result.coord;
+                    if result.mutated {
+                        self.mutated_chunks.insert((self.current_dimension, cx, cz));
+                    }
+                    self.chunk_manager.chunks.insert(result.coord, result.chunk);
+                    self.chunk_lifetimes.insert(result.coord, result.lifetime);
+                    self.chunk_meshes.insert(result.coord, ChunkMesh::pending());
+
+                    if let Some(blocks) = self.pending_chunk_payloads.remove(&result.coord) {
+                        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&result.coord) {
+                            Self::restore_chunk_payload(chunk, &blocks);
+                        }
+                        if let Some(mesh) = self.chunk_meshes.get_mut(&result.coord) {
+                            mesh.mark_dirty();
+                        }
+                    }
+                    if let Some(changes) = self.pending_block_changes.remove(&result.coord) {
+                        for ((x, y, z), block) in changes {
+                            self.apply_remote_block_change(x, y, z, block);
+                        }
+                    }
+
+                    let mut dirty = std::collections::HashSet::new();
+                    for (lighting_cx, lighting_cz) in [
+                        (cx, cz),
+                        (cx - 1, cz),
+                        (cx + 1, cz),
+                        (cx, cz - 1),
+                        (cx, cz + 1),
+                    ] {
+                        if self
+                            .chunk_manager
+                            .chunks
+                            .contains_key(&(lighting_cx, lighting_cz))
+                        {
+                            crate::lighting::propagate_chunk_lighting(
+                                &mut self.chunk_manager,
+                                lighting_cx,
+                                lighting_cz,
+                                &mut dirty,
+                            );
+                        }
+                    }
+                    for neighbor in surrounding_chunk_coords(cx, cz) {
+                        if let Some(mesh) = self.chunk_meshes.get_mut(&neighbor) {
+                            mesh.mark_dirty();
+                        }
+                    }
+                    for coord in dirty {
+                        if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
+                            mesh.mark_dirty();
+                        }
+                    }
+                }
+                TerrainWorkerResult::Meshed(result) => {
+                    let expected = self.chunk_mesh_in_flight.get(&result.coord).copied();
+                    if expected == Some((result.lifetime, result.revision)) {
+                        self.chunk_mesh_in_flight.remove(&result.coord);
+                    }
+                    let current_lifetime = self.chunk_lifetimes.get(&result.coord).copied();
+                    let current_revision = self
+                        .chunk_meshes
+                        .get(&result.coord)
+                        .map(|mesh| mesh.revision);
+                    if !chunk_mesh_result_is_current(
+                        expected,
+                        result.lifetime,
+                        result.revision,
+                        result.generation,
+                        self.terrain_generation,
+                        current_lifetime,
+                        current_revision,
+                    ) {
+                        continue;
+                    }
+                    let Some(mesh) = self.chunk_meshes.get_mut(&result.coord) else {
+                        continue;
+                    };
+                    mesh.levels = Some(Self::upload_mesh_bundle(&self.device, &result.bundle));
+                    mesh.meshed_revision = result.revision;
+                }
+            }
+        }
+    }
+
+    fn schedule_chunk_load(&mut self, coord: (i32, i32)) {
+        if self.chunk_load_in_flight.contains_key(&coord)
+            || self.chunk_manager.chunks.contains_key(&coord)
+            || self.chunk_load_in_flight.len() >= MAX_CHUNK_LOAD_JOBS
+        {
+            return;
+        }
+        let lifetime = self.next_chunk_lifetime();
+        self.chunk_load_in_flight.insert(coord, lifetime);
+        let sender = self.terrain_worker_tx.clone();
+        let generation = self.terrain_generation;
+        let dimension = self.current_dimension;
+        let world_seed = self.world_seed;
+        let authoritative = self.is_authoritative();
+        let save_manager = self.save_manager.clone();
+        rayon::spawn(move || {
+            let mut chunk =
+                crate::dimension::generate_chunk(dimension, coord.0, coord.1, world_seed);
+            let mut mutated = false;
+            if authoritative {
+                if let Some(saved) = save_manager
+                    .lock()
+                    .unwrap()
+                    .load_chunk_in(dimension, coord.0, coord.1)
+                {
+                    let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
+                    mutated = saved.blocks != generated_blocks;
+                    saved.restore_to_chunk(&mut chunk);
+                }
+            }
+            let _ = sender.send(TerrainWorkerResult::Loaded(ChunkLoadResult {
+                coord,
+                dimension,
+                generation,
+                lifetime,
+                chunk,
+                mutated,
+            }));
+        });
+    }
+
+    fn schedule_chunk_mesh(&mut self, coord: (i32, i32), default_sky_light: u8) {
+        if self.chunk_mesh_in_flight.contains_key(&coord)
+            || self.chunk_mesh_in_flight.len() >= MAX_CHUNK_MESH_JOBS
+        {
+            return;
+        }
+        let Some(mesh) = self.chunk_meshes.get(&coord) else {
+            return;
+        };
+        let Some(lifetime) = self.chunk_lifetimes.get(&coord).copied() else {
+            return;
+        };
+        let revision = mesh.revision;
+        let Some(snapshot) =
+            MeshSnapshot::capture(coord, &self.chunk_manager.chunks, default_sky_light)
+        else {
+            return;
+        };
+        self.chunk_mesh_in_flight
+            .insert(coord, (lifetime, revision));
+        let sender = self.terrain_worker_tx.clone();
+        let generation = self.terrain_generation;
+        rayon::spawn(move || {
+            let bundle = snapshot
+                .chunk
+                .generate_mesh_bundle(|x, y, z| snapshot.get(x, y, z));
+            let _ = sender.send(TerrainWorkerResult::Meshed(ChunkMeshResult {
+                coord,
+                generation,
+                lifetime,
+                revision,
+                bundle,
+            }));
+        });
+    }
+
     pub fn update_chunks(&mut self) {
         if !self.network_ready {
             return;
@@ -2834,6 +3484,7 @@ impl State {
         let px = (player_pos.x / 16.0).floor() as i32;
         let pz = (player_pos.z / 16.0).floor() as i32;
         let r = self.chunk_manager.render_distance;
+        self.process_terrain_worker_results((px, pz));
 
         // 1. Unload out-of-bounds chunks
         let mut to_unload = Vec::new();
@@ -2857,12 +3508,16 @@ impl State {
             for neighbor in surrounding_chunk_coords(cx, cz) {
                 if self.chunk_manager.chunks.contains_key(&neighbor) {
                     if let Some(mesh) = self.chunk_meshes.get_mut(&neighbor) {
-                        mesh.dirty = true;
+                        mesh.mark_dirty();
                     }
                 }
             }
+            self.chunk_lifetimes.remove(&(cx, cz));
+            self.chunk_mesh_in_flight.remove(&(cx, cz));
         }
         self.chunk_meshes
+            .retain(|&(cx, cz), _| (cx - px).abs() <= r && (cz - pz).abs() <= r);
+        self.chunk_load_in_flight
             .retain(|&(cx, cz), _| (cx - px).abs() <= r && (cz - pz).abs() <= r);
 
         // 2. Queue missing chunks
@@ -2871,7 +3526,9 @@ impl State {
             for dz in -r..=r {
                 let cx = px + dx;
                 let cz = pz + dz;
-                if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+                if !self.chunk_manager.chunks.contains_key(&(cx, cz))
+                    && !self.chunk_load_in_flight.contains_key(&(cx, cz))
+                {
                     load_queue.push((cx, cz));
                 }
             }
@@ -2883,85 +3540,17 @@ impl State {
             dx * dx + dz * dz
         });
 
-        // 3. Load 1 chunk per frame
-        if let Some(&(cx, cz)) = load_queue.first() {
-            let mut chunk =
-                crate::dimension::generate_chunk(self.current_dimension, cx, cz, self.world_seed);
-            let chunk_data = if self.is_authoritative() {
-                let mut mgr = self.save_manager.lock().unwrap();
-                mgr.load_chunk_in(self.current_dimension, cx, cz)
-            } else {
-                None
-            };
-            if let Some(data) = chunk_data {
-                let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
-                if data.blocks != generated_blocks {
-                    self.mutated_chunks.insert((self.current_dimension, cx, cz));
-                }
-                data.restore_to_chunk(&mut chunk);
-            }
-            if let Some(blocks) = self.pending_chunk_payloads.remove(&(cx, cz)) {
-                Self::restore_chunk_payload(&mut chunk, &blocks);
-            }
-            self.chunk_manager.chunks.insert((cx, cz), chunk);
-            if let Some(changes) = self.pending_block_changes.remove(&(cx, cz)) {
-                for ((x, y, z), block) in changes {
-                    self.apply_remote_block_change(x, y, z, block);
-                }
-            }
-
-            let mut dirty = std::collections::HashSet::new();
-            // Re-seed both sides of every newly available boundary. This lets
-            // light from an already-loaded neighboring cave enter the new
-            // chunk, as well as light from the new chunk flow outward.
-            for (lighting_cx, lighting_cz) in [
-                (cx, cz),
-                (cx - 1, cz),
-                (cx + 1, cz),
-                (cx, cz - 1),
-                (cx, cz + 1),
-            ] {
-                if self
-                    .chunk_manager
-                    .chunks
-                    .contains_key(&(lighting_cx, lighting_cz))
-                {
-                    crate::lighting::propagate_chunk_lighting(
-                        &mut self.chunk_manager,
-                        lighting_cx,
-                        lighting_cz,
-                        &mut dirty,
-                    );
-                }
-            }
-
-            // AO corner samples and face culling depend on all eight neighbors.
-            for neighbor in surrounding_chunk_coords(cx, cz) {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&neighbor) {
-                    mesh.dirty = true;
-                }
-            }
-
-            // Only mark dirty chunks within ±2 of the loaded chunk to limit cascade
-            for (dcx, dcz) in dirty {
-                if (dcx - cx).abs() <= 2 && (dcz - cz).abs() <= 2 {
-                    if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                        mesh.dirty = true;
-                    }
-                }
-            }
+        // 3. Deterministic terrain generation and save restore run on Rayon.
+        let available_load_slots =
+            MAX_CHUNK_LOAD_JOBS.saturating_sub(self.chunk_load_in_flight.len());
+        for coord in load_queue.into_iter().take(available_load_slots) {
+            self.schedule_chunk_load(coord);
         }
 
-        // 4. Rebuild at most 4 dirty meshes per frame, prioritize nearest
+        // 4. Snapshot and dispatch dirty meshes without waiting for workers.
         let mut to_rebuild = Vec::new();
-        for (&(cx, cz), _) in &self.chunk_manager.chunks {
-            let needs_mesh = !self.chunk_meshes.contains_key(&(cx, cz));
-            let is_dirty = self
-                .chunk_meshes
-                .get(&(cx, cz))
-                .map(|m| m.dirty)
-                .unwrap_or(false);
-            if needs_mesh || is_dirty {
+        for (&(cx, cz), mesh) in &self.chunk_meshes {
+            if mesh.needs_rebuild() && !self.chunk_mesh_in_flight.contains_key(&(cx, cz)) {
                 let dx = cx - px;
                 let dz = cz - pz;
                 to_rebuild.push((cx, cz, dx * dx + dz * dz));
@@ -2971,79 +3560,15 @@ impl State {
         // Sort by distance — rebuild closest chunks first
         to_rebuild.sort_by_key(|&(_, _, dist)| dist);
 
-        let chunks_ref = &self.chunk_manager.chunks;
         let default_sky_light = if self.current_dimension.has_sky_light() {
             15
         } else {
             0
         };
-        for (cx, cz, _) in to_rebuild.into_iter().take(4) {
-            let chunk = chunks_ref.get(&(cx, cz)).unwrap();
-            let (o_verts, o_inds, t_verts, t_inds) = chunk.generate_mesh(|wx, wy, wz| {
-                if wy < 0 {
-                    return (BlockType::Air, 0, 0, 0, false);
-                }
-                if wy >= crate::world::CHUNK_HEIGHT as i32 {
-                    return (BlockType::Air, default_sky_light, 0, 0, false);
-                }
-                let cx_neighbor = wx.div_euclid(crate::world::CHUNK_WIDTH as i32);
-                let cz_neighbor = wz.div_euclid(crate::world::CHUNK_DEPTH as i32);
-                let bx_neighbor = wx.rem_euclid(crate::world::CHUNK_WIDTH as i32) as usize;
-                let bz_neighbor = wz.rem_euclid(crate::world::CHUNK_DEPTH as i32) as usize;
-                if let Some(c) = chunks_ref.get(&(cx_neighbor, cz_neighbor)) {
-                    (
-                        c.blocks[bx_neighbor][wy as usize][bz_neighbor],
-                        c.sky_light[bx_neighbor][wy as usize][bz_neighbor],
-                        c.block_light[bx_neighbor][wy as usize][bz_neighbor],
-                        c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x07,
-                        (c.fluid_levels[bx_neighbor][wy as usize][bz_neighbor] & 0x08) != 0,
-                    )
-                } else {
-                    (BlockType::Air, default_sky_light, 0, 0, false)
-                }
-            });
-
-            let opaque_vertex_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Opaque Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&o_verts),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-            let opaque_index_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Opaque Index Buffer"),
-                        contents: bytemuck::cast_slice(&o_inds),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-            let transparent_vertex_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Translucent Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&t_verts),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-            let transparent_index_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Translucent Index Buffer"),
-                        contents: bytemuck::cast_slice(&t_inds),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-
-            self.chunk_meshes.insert(
-                (cx, cz),
-                ChunkMesh {
-                    opaque_vertex_buffer,
-                    opaque_index_buffer,
-                    opaque_num_indices: o_inds.len() as u32,
-                    transparent_vertex_buffer,
-                    transparent_index_buffer,
-                    transparent_num_indices: t_inds.len() as u32,
-                    dirty: false,
-                },
-            );
+        let available_mesh_slots =
+            MAX_CHUNK_MESH_JOBS.saturating_sub(self.chunk_mesh_in_flight.len());
+        for (cx, cz, _) in to_rebuild.into_iter().take(available_mesh_slots) {
+            self.schedule_chunk_mesh((cx, cz), default_sky_light);
         }
     }
 
@@ -3229,7 +3754,7 @@ impl State {
                 crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
             for (cx, cz) in dirty {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
-                    mesh.dirty = true;
+                    mesh.mark_dirty();
                 }
             }
             // Fan fluid-driven block changes out to connected clients.
@@ -3244,7 +3769,7 @@ impl State {
             let (dirty, mutations) = crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
             for (cx, cz) in dirty {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
-                    mesh.dirty = true;
+                    mesh.mark_dirty();
                 }
             }
             for ((x, y, z), block) in mutations {
@@ -3679,7 +4204,7 @@ impl State {
                         mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
                         for (dcx, dcz) in dirty_chunks {
                             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                                mesh.dirty = true;
+                                mesh.mark_dirty();
                             }
                         }
                         self.broadcast_block_change(wx, ry, wz, BlockType::Air);
@@ -3845,9 +4370,8 @@ impl State {
                 self.camera.yaw.sin() * self.camera.pitch.cos(),
             )
             .normalize_or_zero();
-            self.camera.position = self.player_physics.position
-                + Vec3::new(0.0, eye_height, 0.0)
-                - forward * 4.0;
+            self.camera.position =
+                self.player_physics.position + Vec3::new(0.0, eye_height, 0.0) - forward * 4.0;
         } else {
             self.camera.position = self.player_physics.position + Vec3::new(0.0, eye_height, 0.0);
         }
@@ -4218,7 +4742,7 @@ impl State {
         mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
         for chunk_pos in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&chunk_pos) {
-                mesh.dirty = true;
+                mesh.mark_dirty();
             }
         }
         // Fan weather-driven block placement out to connected clients.
@@ -4458,7 +4982,7 @@ impl State {
 
         for (dcx, dcz) in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                mesh.dirty = true;
+                mesh.mark_dirty();
             }
         }
 
@@ -4581,7 +5105,7 @@ impl State {
         self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
         for (dcx, dcz) in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                mesh.dirty = true;
+                mesh.mark_dirty();
             }
         }
         self.broadcast_block_change(x, y, z, block);
@@ -4614,7 +5138,7 @@ impl State {
         };
         for (dcx, dcz) in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                mesh.dirty = true;
+                mesh.mark_dirty();
             }
         }
     }
@@ -4627,7 +5151,7 @@ impl State {
         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
             Self::restore_chunk_payload(chunk, &blocks);
             if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
-                mesh.dirty = true;
+                mesh.mark_dirty();
             }
             // Re-seed boundary lighting so neighbors pick up the overwritten
             // column heights and light values.
@@ -4651,13 +5175,13 @@ impl State {
                         &mut dirty_chunks,
                     );
                     if let Some(mesh) = self.chunk_meshes.get_mut(&(lighting_cx, lighting_cz)) {
-                        mesh.dirty = true;
+                        mesh.mark_dirty();
                     }
                 }
             }
             for coord in dirty_chunks {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
-                    mesh.dirty = true;
+                    mesh.mark_dirty();
                 }
             }
         } else {
@@ -4884,7 +5408,7 @@ impl State {
 
         for (dcx, dcz) in dirty_chunks {
             if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                mesh.dirty = true;
+                mesh.mark_dirty();
             }
         }
 
@@ -5811,7 +6335,7 @@ impl State {
 
             for (dcx, dcz) in dirty_chunks {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                    mesh.dirty = true;
+                    mesh.mark_dirty();
                 }
             }
 
@@ -6390,11 +6914,11 @@ impl State {
         let mesh_indices: usize = self
             .chunk_meshes
             .values()
-            .map(|mesh| mesh.opaque_num_indices as usize + mesh.transparent_num_indices as usize)
+            .map(ChunkMesh::total_indices)
             .sum();
         let mesh_vertices = mesh_indices.saturating_mul(2) / 3;
         let mesh_bytes = mesh_vertices
-            .saturating_mul(std::mem::size_of::<Vertex>())
+            .saturating_mul(std::mem::size_of::<TerrainVertex>())
             .saturating_add(mesh_indices.saturating_mul(std::mem::size_of::<u32>()));
 
         let entities_bytes = self
@@ -6419,6 +6943,43 @@ impl State {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let view_projection = Mat4::from_cols_array_2d(&self.camera_uniform.view_proj);
+        let frustum = Frustum::from_view_projection(view_projection);
+        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
+        let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
+        let mut selected_lods = std::collections::HashMap::new();
+        let mut candidates = Vec::new();
+        for (&coord, mesh) in &self.chunk_meshes {
+            let Some(bounds) = mesh.finest_bounds() else {
+                continue;
+            };
+            let lod = select_lod_for_bounds(self.camera.position, bounds, lod_thresholds);
+            let Some(level) = mesh.level(lod) else {
+                continue;
+            };
+            selected_lods.insert(coord, lod);
+            if let Some(bounds) = level.opaque.bounds {
+                candidates.push(DrawCandidate::new(
+                    coord,
+                    bounds,
+                    level.opaque.num_indices,
+                    DrawLayer::Opaque,
+                ));
+            }
+            if let Some(bounds) = level.transparent.bounds {
+                candidates.push(DrawCandidate::new(
+                    coord,
+                    bounds,
+                    level.transparent.num_indices,
+                    DrawLayer::Transparent,
+                ));
+            }
+        }
+        let draw_plan = build_draw_plan(candidates, &frustum, self.camera.position);
+        self.submitted_terrain_triangles = draw_plan.submitted_triangle_count();
+        self.submitted_terrain_draw_calls = draw_plan.draw_call_count();
+        self.visible_chunk_count = draw_plan.visible_chunk_count();
 
         // Compile mob meshes
         let mut mob_vertices = Vec::new();
@@ -8336,21 +8897,19 @@ impl State {
                         .biome_at(pos.x.floor() as i32, pos.z.floor() as i32);
                     let biome_str = format!("BIOME: {}", biome_debug_name(biome));
                     let weather_str = format!("WEATHER: {:?}", self.weather.current).to_uppercase();
-                    let chunks_str = format!("CHUNKS LOADED: {}", self.chunk_manager.chunks.len());
+                    let chunks_str = format!(
+                        "CHUNKS: {} VISIBLE / {} LOADED / {} DRAWS",
+                        self.visible_chunk_count,
+                        self.chunk_manager.chunks.len(),
+                        self.submitted_terrain_draw_calls
+                    );
                     let entities_str = format!(
                         "ENTITIES: {} / PARTICLES: {}",
                         self.entity_manager.entities.len(),
                         self.particles.particles.len()
                     );
 
-                    let terrain_indices: u64 = self
-                        .chunk_meshes
-                        .values()
-                        .map(|mesh| {
-                            u64::from(mesh.opaque_num_indices)
-                                + u64::from(mesh.transparent_num_indices)
-                        })
-                        .sum();
+                    let terrain_indices = self.submitted_terrain_triangles.saturating_mul(3);
                     let rendered_indices = terrain_indices
                         + u64::from(self.mob_num_indices)
                         + u64::from(self.particle_num_indices);
@@ -8429,7 +8988,10 @@ impl State {
             // Remote-player name tags use the same vector-line UI as the rest
             // of the HUD. Project the point above each avatar into NDC, then
             // keep the label readable at the horizontal screen edge.
-            let view_proj = self.camera.build_view_projection_matrix(aspect);
+            let view_proj = self.camera.build_view_projection_matrix(
+                aspect,
+                crate::camera::render_far_plane(self.chunk_manager.render_distance as u32),
+            );
             for remote in self.remote_players.values() {
                 if remote.username.trim().is_empty() {
                     continue;
@@ -8654,21 +9216,29 @@ impl State {
             render_pass.draw(0..6, 0..1);
 
             // Pass 1: Opaque & Cutout
-            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_pipeline(&self.terrain_render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            for mesh in self.chunk_meshes.values() {
-                if mesh.opaque_num_indices > 0 {
-                    render_pass.set_vertex_buffer(0, mesh.opaque_vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(
-                        mesh.opaque_index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    render_pass.draw_indexed(0..mesh.opaque_num_indices, 0, 0..1);
-                }
+            for candidate in &draw_plan.opaque {
+                let Some(lod) = selected_lods.get(&candidate.chunk_coord).copied() else {
+                    continue;
+                };
+                let Some(layer) = self
+                    .chunk_meshes
+                    .get(&candidate.chunk_coord)
+                    .and_then(|mesh| mesh.level(lod))
+                    .map(|level| &level.opaque)
+                else {
+                    continue;
+                };
+                render_pass.set_vertex_buffer(0, layer.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(layer.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..layer.num_indices, 0, 0..1);
             }
 
             // Draw Mobs
             if self.mob_num_indices > 0 {
+                render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_vertex_buffer(0, self.mob_vertex_buffer.slice(..));
                 render_pass
                     .set_index_buffer(self.mob_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -8676,20 +9246,28 @@ impl State {
             }
 
             // Pass 2: Translucent (Water/Ice)
-            render_pass.set_pipeline(&self.trans_pipeline);
-            for mesh in self.chunk_meshes.values() {
-                if mesh.transparent_num_indices > 0 {
-                    render_pass.set_vertex_buffer(0, mesh.transparent_vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(
-                        mesh.transparent_index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    render_pass.draw_indexed(0..mesh.transparent_num_indices, 0, 0..1);
-                }
+            render_pass.set_pipeline(&self.terrain_trans_pipeline);
+            for candidate in &draw_plan.transparent {
+                let Some(lod) = selected_lods.get(&candidate.chunk_coord).copied() else {
+                    continue;
+                };
+                let Some(layer) = self
+                    .chunk_meshes
+                    .get(&candidate.chunk_coord)
+                    .and_then(|mesh| mesh.level(lod))
+                    .map(|level| &level.transparent)
+                else {
+                    continue;
+                };
+                render_pass.set_vertex_buffer(0, layer.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(layer.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..layer.num_indices, 0, 0..1);
             }
 
             // Draw billboard particles using the translucent (alpha-blend) pipeline.
             if self.particle_num_indices > 0 {
+                render_pass.set_pipeline(&self.trans_pipeline);
                 render_pass.set_vertex_buffer(0, self.particle_vertex_buffer.slice(..));
                 render_pass.set_index_buffer(
                     self.particle_index_buffer.slice(..),
@@ -8723,10 +9301,8 @@ impl State {
                 render_pass.set_pipeline(&self.hand_pipeline);
                 render_pass.set_bind_group(0, &self.hand_camera_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.hand_vertex_buffer.slice(..));
-                render_pass.set_index_buffer(
-                    self.hand_index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
+                render_pass
+                    .set_index_buffer(self.hand_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.hand_num_indices, 0, 0..1);
             }
 

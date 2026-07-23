@@ -69,11 +69,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
+    return shade_world_fragment(color, in.light_level, in.world_pos, in.ao);
+}
+
+fn shade_world_fragment(
+    color: vec4<f32>,
+    light_level: f32,
+    world_pos: vec3<f32>,
+    ao: f32,
+) -> vec4<f32> {
     // Unpack lighting
     // Vertex attributes are f32, but the encoded value is always integral.
     // Round defensively before unpacking so floating-point representation
     // cannot turn (for example) 256 into 255.99998.
-    let packed = round(in.light_level);
+    let packed = round(light_level);
     var is_hurt = 0.0;
     var rest_packed = packed;
     if (rest_packed >= 1024.0) {
@@ -99,12 +108,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let ambient = 0.08;
     let final_light = max(max_light / 15.0, ambient) * multiplier;
-    var fragment_color = color * (final_light * clamp(in.ao, 0.25, 1.0));
+    var fragment_color = color * (final_light * clamp(ao, 0.25, 1.0));
     if (is_hurt > 0.5) {
         fragment_color = mix(fragment_color, vec4<f32>(1.0, 0.0, 0.0, 1.0), 0.5);
     }
 
-    let dist = length(in.world_pos - camera.camera_pos.xyz);
+    let dist = length(world_pos - camera.camera_pos.xyz);
     let is_underwater = camera.is_underwater > 0.5;
     
     if (is_underwater) {
@@ -114,6 +123,55 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let fog_factor = clamp((dist - camera.fog_start) / (camera.fog_end - camera.fog_start), 0.0, 1.0);
         return mix(fragment_color, camera.sky_color_horizon, fog_factor);
     }
+}
+
+struct TerrainVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) local_uv: vec2<f32>,
+    @location(2) atlas_tile: vec2<f32>,
+    @location(3) light_level: f32,
+    @location(4) ao: f32,
+};
+
+struct TerrainVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) local_uv: vec2<f32>,
+    @location(1) @interpolate(flat) atlas_tile: vec2<f32>,
+    @location(2) @interpolate(flat) light_level: f32,
+    @location(3) world_pos: vec3<f32>,
+    @location(4) ao: f32,
+};
+
+@vertex
+fn vs_terrain(model: TerrainVertexInput) -> TerrainVertexOutput {
+    var out: TerrainVertexOutput;
+    out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
+    out.local_uv = model.local_uv;
+    out.atlas_tile = model.atlas_tile;
+    out.light_level = model.light_level;
+    out.world_pos = model.position;
+    out.ao = model.ao;
+    return out;
+}
+
+@fragment
+fn fs_terrain(in: TerrainVertexOutput) -> @location(0) vec4<f32> {
+    var local_uv = in.local_uv;
+    let is_water = all(in.atlas_tile == vec2<f32>(10.0, 0.0));
+    let is_lava = all(in.atlas_tile == vec2<f32>(15.0, 2.0));
+    if (is_water) {
+        local_uv.y = local_uv.y + camera.total_time * 0.8;
+    } else if (is_lava) {
+        local_uv.y = local_uv.y + camera.total_time * 0.2;
+    }
+
+    let repeated_uv = fract(local_uv);
+    let atlas_uv = (in.atlas_tile + vec2<f32>(0.005) + repeated_uv * 0.99) / 16.0;
+    let color = textureSample(t_diffuse, s_diffuse, atlas_uv);
+    if (color.a < 0.5) {
+        discard;
+    }
+    return shade_world_fragment(color, in.light_level, in.world_pos, in.ao);
 }
 
 @vertex

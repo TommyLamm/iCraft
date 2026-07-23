@@ -109,7 +109,7 @@ pub fn update_passive_mobs(
                         mark_block_mesh_dependencies(&mut dirty_chunks, sx, sz);
                         for chunk_position in dirty_chunks {
                             if let Some(mesh) = chunk_meshes.get_mut(&chunk_position) {
-                                mesh.dirty = true;
+                                mesh.mark_dirty();
                             }
                         }
                     }

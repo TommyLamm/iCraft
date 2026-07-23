@@ -1,4 +1,4 @@
-use crate::state::Vertex;
+use crate::chunk_render::{ChunkLodMeshData, ChunkMeshBundle, TerrainVertex};
 use noise::{NoiseFn, Perlin};
 
 pub const CHUNK_WIDTH: usize = 16;
@@ -1397,6 +1397,123 @@ fn quad_indices_for_ao(ao: [f32; 4]) -> [u32; 6] {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GreedyFace {
+    block: BlockType,
+    atlas_tile: (u32, u32),
+    light_level: u16,
+    ao_levels: [u8; 4],
+}
+
+impl GreedyFace {
+    fn can_merge_with(self, other: Self) -> bool {
+        self.ao_levels
+            .iter()
+            .all(|level| *level == self.ao_levels[0])
+            && other
+                .ao_levels
+                .iter()
+                .all(|level| *level == other.ao_levels[0])
+            && self == other
+    }
+
+    fn ao(self) -> [f32; 4] {
+        self.ao_levels.map(ambient_occlusion_value)
+    }
+}
+
+fn ao_level(value: f32) -> u8 {
+    if value >= 0.875 {
+        0
+    } else if value >= 0.625 {
+        1
+    } else if value >= 0.375 {
+        2
+    } else {
+        3
+    }
+}
+
+fn push_terrain_quad(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    positions: [[f32; 3]; 4],
+    local_uvs: [[f32; 2]; 4],
+    atlas_tile: (u32, u32),
+    light_level: f32,
+    ao: [f32; 4],
+) {
+    let start = vertices.len() as u32;
+    for corner in 0..4 {
+        vertices.push(TerrainVertex::new(
+            positions[corner],
+            local_uvs[corner],
+            [atlas_tile.0 as f32, atlas_tile.1 as f32],
+            light_level,
+            ao[corner],
+        ));
+    }
+    indices.extend(quad_indices_for_ao(ao).iter().map(|index| start + index));
+}
+
+fn face_should_render(
+    block: BlockType,
+    face_idx: usize,
+    level: u8,
+    falling: bool,
+    neighbor: BlockType,
+    neighbor_level: u8,
+    neighbor_falling: bool,
+) -> bool {
+    if neighbor == BlockType::Air {
+        return true;
+    }
+
+    if neighbor.properties().render_type == RenderType::Opaque {
+        return false;
+    }
+
+    let is_fluid = matches!(block, BlockType::Water | BlockType::Lava);
+    if !is_fluid || neighbor != block {
+        return true;
+    }
+
+    match face_idx {
+        4 | 5 => false,
+        _ if neighbor_falling => false,
+        _ if falling => true,
+        _ => neighbor_level > level,
+    }
+}
+
+fn is_greedy_cube(block: BlockType) -> bool {
+    block.properties().is_solid
+        && !block.is_cross_model()
+        && !matches!(
+            block,
+            BlockType::Water | BlockType::Lava | BlockType::SnowLayer
+        )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SurfaceCell {
+    height: i32,
+    block: BlockType,
+    top_tile: (u32, u32),
+    light_level: u16,
+}
+
+fn is_lod_surface(block: BlockType) -> bool {
+    block != BlockType::Air
+        && !block.is_cross_model()
+        && (block.properties().is_solid
+            || matches!(
+                block,
+                BlockType::Water | BlockType::Lava | BlockType::SnowLayer
+            ))
+}
+
+#[derive(Clone)]
 pub struct Chunk {
     pub chunk_x: i32,
     pub chunk_z: i32,
@@ -1932,11 +2049,13 @@ impl Chunk {
         self.blocks[x as usize][y as usize][z as usize]
     }
 
-    // 生成用於渲染的頂點和索引，區分為不透明與半透明網格
+    // Generate opaque/cutout and translucent terrain meshes. Full cube faces
+    // use conservative greedy merging: material/light must match and AO must
+    // be uniform so removing internal vertices cannot change shading.
     pub fn generate_mesh<F>(
         &self,
         get_block_at: F,
-    ) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>)
+    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
     {
@@ -1945,12 +2064,14 @@ impl Chunk {
         let mut trans_vertices = Vec::new();
         let mut trans_indices = Vec::new();
 
+        // Non-cubic geometry and non-solid decorative blocks retain the exact
+        // per-block path. They cannot be combined into rectangular cube faces.
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 let max_y = self.heightmap[x][z] as usize;
                 for y in 0..=max_y {
                     let block = self.blocks[x][y][z];
-                    if block == BlockType::Air {
+                    if block == BlockType::Air || is_greedy_cube(block) {
                         continue;
                     }
 
@@ -1959,18 +2080,11 @@ impl Chunk {
                     let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
 
                     if block.is_cross_model() {
-                        let (v_list, i_list) = (&mut opaque_vertices, &mut opaque_indices);
-
                         let sky_val = self.sky_light[x][y][z];
                         let block_val = self.block_light[x][y][z];
-                        let light_val = (sky_val as f32) + (block_val as f32) * 16.0 + 1.0 * 256.0;
+                        let light_val = sky_val as f32 + block_val as f32 * 16.0 + 1.0 * 256.0;
 
-                        let (tx_col, tx_row) = block.get_face_tex_index(0);
-
-                        let u0 = (0.005 + tx_col as f32) * 0.0625;
-                        let u1 = (0.995 + tx_col as f32) * 0.0625;
-                        let v0 = (0.005 + tx_row as f32) * 0.0625;
-                        let v1 = (0.995 + tx_row as f32) * 0.0625;
+                        let atlas_tile = block.get_face_tex_index(0);
 
                         let wx = world_x as f32;
                         let wy = world_y as f32;
@@ -1995,75 +2109,24 @@ impl Chunk {
                         ];
 
                         for (p0, p1, p2, p3) in planes {
-                            // Front side
-                            let start_idx = v_list.len() as u32;
-                            v_list.push(Vertex {
-                                position: p0,
-                                tex_coords: [u0, v1],
-                                light_level: light_val,
-                                ao: 1.0,
-                            });
-                            v_list.push(Vertex {
-                                position: p1,
-                                tex_coords: [u1, v1],
-                                light_level: light_val,
-                                ao: 1.0,
-                            });
-                            v_list.push(Vertex {
-                                position: p2,
-                                tex_coords: [u1, v0],
-                                light_level: light_val,
-                                ao: 1.0,
-                            });
-                            v_list.push(Vertex {
-                                position: p3,
-                                tex_coords: [u0, v0],
-                                light_level: light_val,
-                                ao: 1.0,
-                            });
-                            i_list.extend_from_slice(&[
-                                start_idx,
-                                start_idx + 1,
-                                start_idx + 2,
-                                start_idx,
-                                start_idx + 2,
-                                start_idx + 3,
-                            ]);
-
-                            // Back side
-                            let start_idx_back = v_list.len() as u32;
-                            v_list.push(Vertex {
-                                position: p1,
-                                tex_coords: [u0, v1],
-                                light_level: light_val,
-                                ao: 1.0,
-                            });
-                            v_list.push(Vertex {
-                                position: p0,
-                                tex_coords: [u1, v1],
-                                light_level: light_val,
-                                ao: 1.0,
-                            });
-                            v_list.push(Vertex {
-                                position: p3,
-                                tex_coords: [u1, v0],
-                                light_level: light_val,
-                                ao: 1.0,
-                            });
-                            v_list.push(Vertex {
-                                position: p2,
-                                tex_coords: [u0, v0],
-                                light_level: light_val,
-                                ao: 1.0,
-                            });
-                            i_list.extend_from_slice(&[
-                                start_idx_back,
-                                start_idx_back + 1,
-                                start_idx_back + 2,
-                                start_idx_back,
-                                start_idx_back + 2,
-                                start_idx_back + 3,
-                            ]);
+                            push_terrain_quad(
+                                &mut opaque_vertices,
+                                &mut opaque_indices,
+                                [p0, p1, p2, p3],
+                                [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+                                atlas_tile,
+                                light_val,
+                                [1.0; 4],
+                            );
+                            push_terrain_quad(
+                                &mut opaque_vertices,
+                                &mut opaque_indices,
+                                [p1, p0, p3, p2],
+                                [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+                                atlas_tile,
+                                light_val,
+                                [1.0; 4],
+                            );
                         }
 
                         continue;
@@ -2081,38 +2144,19 @@ impl Chunk {
                             neighbor_level,
                             neighbor_falling,
                         ) = get_block_at(nx, ny, nz);
-                        let neighbor_props = neighbor.properties();
-
                         let is_fluid = block == BlockType::Water || block == BlockType::Lava;
                         let level = self.fluid_levels[x][y][z] & 0x07;
                         let falling = (self.fluid_levels[x][y][z] & 0x08) != 0;
 
-                        // Face Culling: 只有鄰居非 Opaque 才渲染（且排除相同流體相鄰）
-                        let should_render = if neighbor == BlockType::Air {
-                            true
-                        } else if neighbor_props.render_type != RenderType::Opaque {
-                            if is_fluid && neighbor == block {
-                                if face_idx == 4 {
-                                    false
-                                } else if face_idx == 5 {
-                                    false
-                                } else {
-                                    if neighbor_falling {
-                                        false
-                                    } else if falling {
-                                        true
-                                    } else {
-                                        neighbor_level > level
-                                    }
-                                }
-                            } else {
-                                true
-                            }
-                        } else {
-                            false
-                        };
-
-                        if should_render {
+                        if face_should_render(
+                            block,
+                            face_idx,
+                            level,
+                            falling,
+                            neighbor,
+                            neighbor_level,
+                            neighbor_falling,
+                        ) {
                             let block_render_type = block.properties().render_type;
                             let is_translucent = block_render_type == RenderType::Translucent;
 
@@ -2122,8 +2166,7 @@ impl Chunk {
                                 (&mut opaque_vertices, &mut opaque_indices)
                             };
 
-                            let start_idx = v_list.len() as u32;
-                            let (tx_col, tx_row) = block.get_face_tex_index(face_idx);
+                            let atlas_tile = block.get_face_tex_index(face_idx);
 
                             let multiplier_code = match face_idx {
                                 4 => 0.0, // Top
@@ -2160,35 +2203,20 @@ impl Chunk {
                                 );
                             }
 
+                            let mut positions = [[0.0; 3]; 4];
+                            let mut local_uvs = [[0.0; 2]; 4];
                             for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
-                                // 256x256 atlas -> 16 columns of 16x16 pixel blocks
-                                // Apply half-pixel inset adjustment to prevent Nearest-neighbor coordinate bleeding
-                                let u_adj = if uv[0] == 0.0 { 0.005 } else { 0.995 };
-                                let v_adj = if uv[1] == 0.0 { 0.005 } else { 0.995 };
-                                let u = (u_adj + tx_col as f32) * 0.0625;
-                                let v = (v_adj + tx_row as f32) * 0.0625;
-
                                 let mut vy = world_y as f32 + offset[1];
                                 if (is_fluid || block == BlockType::SnowLayer) && offset[1] > 0.0 {
                                     vy = world_y as f32 + h;
                                 }
 
-                                v_list.push(Vertex {
-                                    position: [
-                                        world_x as f32 + offset[0],
-                                        vy,
-                                        world_z as f32 + offset[2],
-                                    ],
-                                    tex_coords: [u, v],
-                                    light_level: light_val,
-                                    ao: ao[corner_idx],
-                                });
+                                positions[corner_idx] =
+                                    [world_x as f32 + offset[0], vy, world_z as f32 + offset[2]];
+                                local_uvs[corner_idx] = *uv;
                             }
-
-                            i_list.extend(
-                                quad_indices_for_ao(ao)
-                                    .iter()
-                                    .map(|index| start_idx + index),
+                            push_terrain_quad(
+                                v_list, i_list, positions, local_uvs, atlas_tile, light_val, ao,
                             );
                         }
                     }
@@ -2196,7 +2224,447 @@ impl Chunk {
             }
         }
 
+        // Full cube faces are processed one direction/slice at a time. Each
+        // mask cell describes one visible face. Rectangles only grow across
+        // identical material/light and uniform AO.
+        let dimensions = [CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH];
+        for (face_idx, (normal, corner_data)) in BLOCK_FACES.iter().enumerate() {
+            let normal_axis = (0..3).find(|axis| normal[*axis] != 0).unwrap();
+            let u_axis = (0..3)
+                .find(|axis| corner_data[0].0[*axis] != corner_data[1].0[*axis])
+                .unwrap();
+            let v_axis = (0..3)
+                .find(|axis| corner_data[0].0[*axis] != corner_data[3].0[*axis])
+                .unwrap();
+            let u_len = dimensions[u_axis];
+            let v_len = dimensions[v_axis];
+
+            for slice in 0..dimensions[normal_axis] {
+                let mut mask = vec![None::<GreedyFace>; u_len * v_len];
+                for v in 0..v_len {
+                    for u in 0..u_len {
+                        let mut local = [0usize; 3];
+                        local[normal_axis] = slice;
+                        local[u_axis] = u;
+                        local[v_axis] = v;
+                        let [x, y, z] = local;
+                        if y > self.heightmap[x][z] as usize {
+                            continue;
+                        }
+                        let block = self.blocks[x][y][z];
+                        if !is_greedy_cube(block) {
+                            continue;
+                        }
+
+                        let world = [
+                            self.chunk_x * CHUNK_WIDTH as i32 + x as i32,
+                            y as i32,
+                            self.chunk_z * CHUNK_DEPTH as i32 + z as i32,
+                        ];
+                        let nx = world[0] + normal[0];
+                        let ny = world[1] + normal[1];
+                        let nz = world[2] + normal[2];
+                        let (
+                            neighbor,
+                            neighbor_sky,
+                            neighbor_block,
+                            neighbor_level,
+                            neighbor_falling,
+                        ) = get_block_at(nx, ny, nz);
+                        if !face_should_render(
+                            block,
+                            face_idx,
+                            0,
+                            false,
+                            neighbor,
+                            neighbor_level,
+                            neighbor_falling,
+                        ) {
+                            continue;
+                        }
+
+                        let multiplier_code = match face_idx {
+                            4 => 0u16,
+                            5 => 2u16,
+                            _ => 1u16,
+                        };
+                        let light_level = neighbor_sky as u16
+                            + neighbor_block as u16 * 16
+                            + multiplier_code * 256;
+                        let mut ao_levels = [0u8; 4];
+                        for (corner_idx, (offset, _)) in corner_data.iter().enumerate() {
+                            ao_levels[corner_idx] = ao_level(ambient_occlusion_for_vertex(
+                                world,
+                                *normal,
+                                *offset,
+                                &get_block_at,
+                            ));
+                        }
+
+                        let (tile_x, tile_y) = block.get_face_tex_index(face_idx);
+                        mask[v * u_len + u] = Some(GreedyFace {
+                            block,
+                            atlas_tile: (tile_x, tile_y),
+                            light_level,
+                            ao_levels,
+                        });
+                    }
+                }
+
+                for v in 0..v_len {
+                    let mut u = 0;
+                    while u < u_len {
+                        let index = v * u_len + u;
+                        let Some(face) = mask[index] else {
+                            u += 1;
+                            continue;
+                        };
+
+                        let mut width = 1;
+                        if face
+                            .ao_levels
+                            .iter()
+                            .all(|level| *level == face.ao_levels[0])
+                        {
+                            while u + width < u_len
+                                && mask[v * u_len + u + width]
+                                    .is_some_and(|other| face.can_merge_with(other))
+                            {
+                                width += 1;
+                            }
+                        }
+
+                        let mut height = 1;
+                        'grow_height: while v + height < v_len {
+                            for offset in 0..width {
+                                if !mask[(v + height) * u_len + u + offset]
+                                    .is_some_and(|other| face.can_merge_with(other))
+                                {
+                                    break 'grow_height;
+                                }
+                            }
+                            height += 1;
+                        }
+
+                        for row in 0..height {
+                            for column in 0..width {
+                                mask[(v + row) * u_len + u + column] = None;
+                            }
+                        }
+
+                        let mut min_local = [0.0f32; 3];
+                        min_local[normal_axis] = slice as f32;
+                        min_local[u_axis] = u as f32;
+                        min_local[v_axis] = v as f32;
+                        let mut max_local =
+                            [min_local[0] + 1.0, min_local[1] + 1.0, min_local[2] + 1.0];
+                        max_local[u_axis] = min_local[u_axis] + width as f32;
+                        max_local[v_axis] = min_local[v_axis] + height as f32;
+
+                        let world_origin = [
+                            (self.chunk_x * CHUNK_WIDTH as i32) as f32,
+                            0.0,
+                            (self.chunk_z * CHUNK_DEPTH as i32) as f32,
+                        ];
+                        let mut positions = [[0.0f32; 3]; 4];
+                        let mut local_uvs = [[0.0f32; 2]; 4];
+                        for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
+                            for axis in 0..3 {
+                                positions[corner_idx][axis] = world_origin[axis]
+                                    + if offset[axis] == 0.0 {
+                                        min_local[axis]
+                                    } else {
+                                        max_local[axis]
+                                    };
+                            }
+                            local_uvs[corner_idx] = [uv[0] * width as f32, uv[1] * height as f32];
+                        }
+
+                        let (vertices, indices) =
+                            if face.block.properties().render_type == RenderType::Translucent {
+                                (&mut trans_vertices, &mut trans_indices)
+                            } else {
+                                (&mut opaque_vertices, &mut opaque_indices)
+                            };
+                        push_terrain_quad(
+                            vertices,
+                            indices,
+                            positions,
+                            local_uvs,
+                            face.atlas_tile,
+                            face.light_level as f32,
+                            face.ao(),
+                        );
+                        u += width;
+                    }
+                }
+            }
+        }
+
         (
+            opaque_vertices,
+            opaque_indices,
+            trans_vertices,
+            trans_indices,
+        )
+    }
+
+    pub fn generate_mesh_bundle<F>(&self, get_block_at: F) -> ChunkMeshBundle
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
+    {
+        let (o0, oi0, t0, ti0) = self.generate_mesh(get_block_at);
+        let l1 = self.generate_surface_mesh(get_block_at, 1);
+        let l2 = self.generate_surface_mesh(get_block_at, 4);
+        ChunkMeshBundle {
+            levels: [ChunkLodMeshData::from_parts(o0, oi0, t0, ti0), l1, l2],
+        }
+    }
+
+    fn generate_surface_mesh<F>(&self, get_block_at: F, step: usize) -> ChunkLodMeshData
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
+    {
+        debug_assert!(step > 0 && CHUNK_WIDTH % step == 0 && CHUNK_DEPTH % step == 0);
+        let grid_width = CHUNK_WIDTH / step;
+        let grid_depth = CHUNK_DEPTH / step;
+        let mut cells = vec![None::<SurfaceCell>; grid_width * grid_depth];
+
+        for gz in 0..grid_depth {
+            for gx in 0..grid_width {
+                let mut best: Option<(usize, usize, usize, BlockType)> = None;
+                for dz in 0..step {
+                    for dx in 0..step {
+                        let x = gx * step + dx;
+                        let z = gz * step + dz;
+                        let mut y = self.heightmap[x][z] as usize;
+                        loop {
+                            let block = self.blocks[x][y][z];
+                            if is_lod_surface(block) {
+                                if best.map_or(true, |(_, best_y, _, _)| y > best_y) {
+                                    best = Some((x, y, z, block));
+                                }
+                                break;
+                            }
+                            if y == 0 {
+                                break;
+                            }
+                            y -= 1;
+                        }
+                    }
+                }
+
+                let Some((x, y, z, block)) = best else {
+                    continue;
+                };
+                let world_x = self.chunk_x * CHUNK_WIDTH as i32 + x as i32;
+                let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
+                let (_, sky, block_light, _, _) = get_block_at(world_x, y as i32 + 1, world_z);
+                cells[gz * grid_width + gx] = Some(SurfaceCell {
+                    height: y as i32,
+                    block,
+                    top_tile: block.get_face_tex_index(4),
+                    light_level: sky as u16 + block_light as u16 * 16,
+                });
+            }
+        }
+
+        let mut opaque_vertices = Vec::new();
+        let mut opaque_indices = Vec::new();
+        let mut trans_vertices = Vec::new();
+        let mut trans_indices = Vec::new();
+        let world_x0 = (self.chunk_x * CHUNK_WIDTH as i32) as f32;
+        let world_z0 = (self.chunk_z * CHUNK_DEPTH as i32) as f32;
+
+        // Greedily merge equal top surface cells.
+        let mut top_mask = cells.clone();
+        for gz in 0..grid_depth {
+            let mut gx = 0;
+            while gx < grid_width {
+                let index = gz * grid_width + gx;
+                let Some(cell) = top_mask[index] else {
+                    gx += 1;
+                    continue;
+                };
+                let mut width = 1;
+                while gx + width < grid_width
+                    && top_mask[gz * grid_width + gx + width] == Some(cell)
+                {
+                    width += 1;
+                }
+                let mut depth = 1;
+                'grow_depth: while gz + depth < grid_depth {
+                    for offset in 0..width {
+                        if top_mask[(gz + depth) * grid_width + gx + offset] != Some(cell) {
+                            break 'grow_depth;
+                        }
+                    }
+                    depth += 1;
+                }
+                for row in 0..depth {
+                    for column in 0..width {
+                        top_mask[(gz + row) * grid_width + gx + column] = None;
+                    }
+                }
+
+                let x0 = world_x0 + (gx * step) as f32;
+                let x1 = world_x0 + ((gx + width) * step) as f32;
+                let z0 = world_z0 + (gz * step) as f32;
+                let z1 = world_z0 + ((gz + depth) * step) as f32;
+                let y = cell.height as f32 + 1.0;
+                let (vertices, indices) =
+                    if cell.block.properties().render_type == RenderType::Translucent {
+                        (&mut trans_vertices, &mut trans_indices)
+                    } else {
+                        (&mut opaque_vertices, &mut opaque_indices)
+                    };
+                push_terrain_quad(
+                    vertices,
+                    indices,
+                    [[x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0]],
+                    [
+                        [0.0, (depth * step) as f32],
+                        [(width * step) as f32, (depth * step) as f32],
+                        [(width * step) as f32, 0.0],
+                        [0.0, 0.0],
+                    ],
+                    cell.top_tile,
+                    cell.light_level as f32,
+                    [1.0; 4],
+                );
+                gx += width;
+            }
+        }
+
+        // Add vertical skirts wherever a coarse cell is higher than its
+        // neighbor. Adjacent equal skirts are merged along their tangent axis
+        // so a flat 16x16 surface remains five quads instead of 65.
+        let side_at = |face_idx: usize, gx: usize, gz: usize| {
+            let cell = cells[gz * grid_width + gx]?;
+            let neighbor = match face_idx {
+                0 => (gx as i32, gz as i32 + 1),
+                1 => (gx as i32, gz as i32 - 1),
+                2 => (gx as i32 - 1, gz as i32),
+                _ => (gx as i32 + 1, gz as i32),
+            };
+            let neighbor_height = if neighbor.0 >= 0
+                && neighbor.0 < grid_width as i32
+                && neighbor.1 >= 0
+                && neighbor.1 < grid_depth as i32
+            {
+                cells[neighbor.1 as usize * grid_width + neighbor.0 as usize]
+                    .map(|neighbor| neighbor.height)
+                    .unwrap_or(-1)
+            } else {
+                -1
+            };
+            (neighbor_height < cell.height).then_some((cell, neighbor_height))
+        };
+
+        for face_idx in 0..4 {
+            let (line_count, line_length) = if face_idx < 2 {
+                (grid_depth, grid_width)
+            } else {
+                (grid_width, grid_depth)
+            };
+            for line in 0..line_count {
+                let mut cursor = 0;
+                while cursor < line_length {
+                    let (gx, gz) = if face_idx < 2 {
+                        (cursor, line)
+                    } else {
+                        (line, cursor)
+                    };
+                    let Some(side) = side_at(face_idx, gx, gz) else {
+                        cursor += 1;
+                        continue;
+                    };
+                    let mut run = 1;
+                    while cursor + run < line_length {
+                        let (next_gx, next_gz) = if face_idx < 2 {
+                            (cursor + run, line)
+                        } else {
+                            (line, cursor + run)
+                        };
+                        if side_at(face_idx, next_gx, next_gz) != Some(side) {
+                            break;
+                        }
+                        run += 1;
+                    }
+
+                    let (cell, neighbor_height) = side;
+                    let top = cell.height as f32 + 1.0;
+                    let bottom = neighbor_height as f32 + 1.0;
+                    let run_blocks = (run * step) as f32;
+                    let x0 = world_x0 + (gx * step) as f32;
+                    let z0 = world_z0 + (gz * step) as f32;
+                    let positions = match face_idx {
+                        0 => {
+                            let x1 = x0 + run_blocks;
+                            let z1 = z0 + step as f32;
+                            [
+                                [x0, bottom, z1],
+                                [x1, bottom, z1],
+                                [x1, top, z1],
+                                [x0, top, z1],
+                            ]
+                        }
+                        1 => {
+                            let x1 = x0 + run_blocks;
+                            [
+                                [x1, bottom, z0],
+                                [x0, bottom, z0],
+                                [x0, top, z0],
+                                [x1, top, z0],
+                            ]
+                        }
+                        2 => {
+                            let z1 = z0 + run_blocks;
+                            [
+                                [x0, bottom, z0],
+                                [x0, bottom, z1],
+                                [x0, top, z1],
+                                [x0, top, z0],
+                            ]
+                        }
+                        _ => {
+                            let x1 = x0 + step as f32;
+                            let z1 = z0 + run_blocks;
+                            [
+                                [x1, bottom, z1],
+                                [x1, bottom, z0],
+                                [x1, top, z0],
+                                [x1, top, z1],
+                            ]
+                        }
+                    };
+                    let side_tile = cell.block.get_face_tex_index(face_idx);
+                    let (vertices, indices) =
+                        if cell.block.properties().render_type == RenderType::Translucent {
+                            (&mut trans_vertices, &mut trans_indices)
+                        } else {
+                            (&mut opaque_vertices, &mut opaque_indices)
+                        };
+                    push_terrain_quad(
+                        vertices,
+                        indices,
+                        positions,
+                        [
+                            [0.0, top - bottom],
+                            [run_blocks, top - bottom],
+                            [run_blocks, 0.0],
+                            [0.0, 0.0],
+                        ],
+                        side_tile,
+                        cell.light_level as f32 + 256.0,
+                        [1.0; 4],
+                    );
+                    cursor += run;
+                }
+            }
+        }
+
+        ChunkLodMeshData::from_parts(
             opaque_vertices,
             opaque_indices,
             trans_vertices,
@@ -2285,6 +2753,53 @@ impl BlockType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
+
+    fn empty_test_chunk() -> Chunk {
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                    chunk.sky_light[x][y][z] = 15;
+                    chunk.block_light[x][y][z] = 0;
+                    chunk.fluid_levels[x][y][z] = 0;
+                }
+            }
+            for z in 0..CHUNK_DEPTH {
+                chunk.heightmap[x][z] = 0;
+            }
+        }
+        chunk
+    }
+
+    fn test_chunk_lookup(
+        chunk: &Chunk,
+        world_x: i32,
+        world_y: i32,
+        world_z: i32,
+    ) -> (BlockType, u8, u8, u8, bool) {
+        if world_x < 0
+            || world_x >= CHUNK_WIDTH as i32
+            || world_y < 0
+            || world_y >= CHUNK_HEIGHT as i32
+            || world_z < 0
+            || world_z >= CHUNK_DEPTH as i32
+        {
+            return (BlockType::Air, 15, 0, 0, false);
+        }
+        let x = world_x as usize;
+        let y = world_y as usize;
+        let z = world_z as usize;
+        let fluid = chunk.fluid_levels[x][y][z];
+        (
+            chunk.blocks[x][y][z],
+            chunk.sky_light[x][y][z],
+            chunk.block_light[x][y][z],
+            fluid & 0x07,
+            fluid & 0x08 != 0,
+        )
+    }
 
     #[test]
     fn block_type_wire_roundtrip_covers_all_variants() {
@@ -2459,6 +2974,102 @@ mod tests {
         let (vertices, _, _, _) = chunk.generate_mesh(lookup);
         assert_eq!(vertices[16].position, [8.0, 2.0, 9.0]);
         assert_eq!(vertices[16].ao, 0.5);
+    }
+
+    #[test]
+    fn greedy_meshing_merges_equal_faces_and_repeats_the_atlas_tile() {
+        let mut chunk = empty_test_chunk();
+        for x in 8..10 {
+            for z in 8..10 {
+                chunk.blocks[x][1][z] = BlockType::Stone;
+                chunk.heightmap[x][z] = 1;
+            }
+        }
+
+        let lookup = |x, y, z| test_chunk_lookup(&chunk, x, y, z);
+        let (vertices, indices, transparent_vertices, transparent_indices) =
+            chunk.generate_mesh(lookup);
+
+        // A 2x1x2 cuboid has six exterior rectangles after greedy merging.
+        assert_eq!(vertices.len(), 6 * 4);
+        assert_eq!(indices.len(), 6 * 6);
+        assert!(transparent_vertices.is_empty());
+        assert!(transparent_indices.is_empty());
+        assert_eq!(
+            vertices
+                .iter()
+                .flat_map(|vertex| vertex.local_uv)
+                .fold(0.0, f32::max),
+            2.0
+        );
+    }
+
+    #[test]
+    fn greedy_meshing_does_not_merge_different_light_or_material() {
+        let mut light_chunk = empty_test_chunk();
+        for x in 8..10 {
+            light_chunk.blocks[x][1][8] = BlockType::Stone;
+            light_chunk.heightmap[x][8] = 1;
+        }
+        light_chunk.sky_light[9][2][8] = 14;
+        let (light_vertices, _, _, _) =
+            light_chunk.generate_mesh(|x, y, z| test_chunk_lookup(&light_chunk, x, y, z));
+        let light_top_quads = light_vertices
+            .chunks_exact(4)
+            .filter(|quad| quad.iter().all(|vertex| vertex.position[1] == 2.0))
+            .count();
+        assert_eq!(light_top_quads, 2);
+
+        let mut material_chunk = empty_test_chunk();
+        material_chunk.blocks[8][1][8] = BlockType::Stone;
+        material_chunk.blocks[9][1][8] = BlockType::Dirt;
+        material_chunk.heightmap[8][8] = 1;
+        material_chunk.heightmap[9][8] = 1;
+        let (material_vertices, _, _, _) =
+            material_chunk.generate_mesh(|x, y, z| test_chunk_lookup(&material_chunk, x, y, z));
+        let material_top_quads = material_vertices
+            .chunks_exact(4)
+            .filter(|quad| quad.iter().all(|vertex| vertex.position[1] == 2.0))
+            .count();
+        assert_eq!(material_top_quads, 2);
+    }
+
+    #[test]
+    fn surface_lod_merges_flat_skirts_and_coarsens_varied_terrain() {
+        let mut flat = empty_test_chunk();
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                flat.blocks[x][1][z] = BlockType::Stone;
+                flat.heightmap[x][z] = 1;
+            }
+        }
+        let flat_l1 = flat.generate_surface_mesh(|x, y, z| test_chunk_lookup(&flat, x, y, z), 1);
+        let flat_l2 = flat.generate_surface_mesh(|x, y, z| test_chunk_lookup(&flat, x, y, z), 4);
+        // One top plus four merged boundary skirts at either resolution.
+        assert_eq!(flat_l1.opaque.indices.len(), 5 * 6);
+        assert_eq!(flat_l2.opaque.indices.len(), 5 * 6);
+        let bounds = flat_l2.opaque.bounds.expect("flat LOD should have bounds");
+        assert_eq!(bounds.min, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(bounds.max, Vec3::new(16.0, 2.0, 16.0));
+
+        let mut varied = empty_test_chunk();
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                let height = 1 + (x + z) % 2;
+                for y in 1..=height {
+                    varied.blocks[x][y][z] = BlockType::Stone;
+                }
+                varied.heightmap[x][z] = height as u16;
+            }
+        }
+        let varied_l1 =
+            varied.generate_surface_mesh(|x, y, z| test_chunk_lookup(&varied, x, y, z), 1);
+        let varied_l2 =
+            varied.generate_surface_mesh(|x, y, z| test_chunk_lookup(&varied, x, y, z), 4);
+        assert!(
+            varied_l2.opaque.indices.len() < varied_l1.opaque.indices.len(),
+            "coarse LOD should submit fewer indices"
+        );
     }
 
     #[test]

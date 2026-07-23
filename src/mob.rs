@@ -89,7 +89,7 @@ pub fn explode(
         // Mark chunk meshes dirty
         for (chx, chz) in dirty_chunks {
             if let Some(mesh) = chunk_meshes.get_mut(&(chx, chz)) {
-                mesh.dirty = true;
+                mesh.mark_dirty();
             }
         }
     }

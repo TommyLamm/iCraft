@@ -8,7 +8,7 @@
 
 | # | Task | Status | Commit | Verification |
 |---|---|---|---|---|
-| 1 | [Complete render optimization](plans/implementation/01_render_optimization.md) | In progress | — | — |
+| 1 | [Complete render optimization](plans/implementation/01_render_optimization.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (182 unit + 1 integration); WGSL validation |
 | 2 | [Smooth remote-player movement](plans/implementation/02_multiplayer_smoothing.md) | Pending | — | — |
 | 3 | [Add Minecraft-style Creative flight](plans/implementation/03_creative_flight.md) | Pending | — | — |
 | 4 | [Reject placement intersecting a player](plans/implementation/04_player_placement_collision.md) | Pending | — | — |
@@ -28,6 +28,12 @@
 - Sub-agents are investigating each task read-only. The root agent owns all
   edits, verification, and commits so commits remain isolated by task.
 - Task 10 must run only after tasks 1-9 are complete, per the user's ordering.
+- Task 1 implements conservative greedy terrain meshing, owned halo snapshots
+  and bounded Rayon chunk load/remesh jobs, generation/lifetime/revision stale
+  result rejection, actual-bounds frustum culling, sorted opaque/translucent
+  draw plans, three terrain LODs, a render-distance-aware far plane, and
+  submitted-geometry F3 statistics. The hardware-dependent Render Distance 16
+  `60+ FPS` observation remains an explicit manual check in the task document.
 
 ## Commit discipline
 

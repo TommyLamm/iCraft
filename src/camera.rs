@@ -17,7 +17,7 @@ impl Camera {
         }
     }
 
-    pub fn build_view_projection_matrix(&self, aspect: f32) -> Mat4 {
+    pub fn build_view_projection_matrix(&self, aspect: f32, far_plane: f32) -> Mat4 {
         let target = self.position
             + Vec3::new(
                 self.yaw.cos() * self.pitch.cos(),
@@ -25,9 +25,13 @@ impl Camera {
                 self.yaw.sin() * self.pitch.cos(),
             );
         let view = Mat4::look_at_lh(self.position, target, Vec3::Y);
-        let proj = Mat4::perspective_lh(f32::to_radians(self.fov), aspect, 0.1, 100.0);
+        let proj = Mat4::perspective_lh(f32::to_radians(self.fov), aspect, 0.1, far_plane.max(1.0));
         proj * view
     }
+}
+
+pub fn render_far_plane(render_distance: u32) -> f32 {
+    render_distance as f32 * 16.0 * std::f32::consts::SQRT_2 + 32.0
 }
 
 // 用於 Uniform 上傳的對齊結構體
@@ -71,7 +75,8 @@ impl CameraUniform {
         total_time: f32,
         is_underwater: bool,
     ) {
-        let view_proj = camera.build_view_projection_matrix(aspect);
+        let view_proj =
+            camera.build_view_projection_matrix(aspect, render_far_plane(render_distance));
         self.view_proj = view_proj.to_cols_array_2d();
         self.inv_view_proj = view_proj.inverse().to_cols_array_2d();
         self.camera_pos = [camera.position.x, camera.position.y, camera.position.z, 0.0];
@@ -177,3 +182,16 @@ const SUNSET_TOP: [f32; 4] = [0.05, 0.1, 0.25, 1.0];
 const SUNSET_HORIZON: [f32; 4] = [0.9, 0.4, 0.15, 1.0];
 const NIGHT_TOP: [f32; 4] = [0.01, 0.01, 0.03, 1.0];
 const NIGHT_HORIZON: [f32; 4] = [0.02, 0.02, 0.05, 1.0];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn far_plane_covers_the_render_distance_corner() {
+        for render_distance in [2, 8, 16, 32] {
+            let corner_distance = render_distance as f32 * 16.0 * std::f32::consts::SQRT_2;
+            assert!(render_far_plane(render_distance) >= corner_distance + 32.0);
+        }
+    }
+}

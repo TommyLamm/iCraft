@@ -1,6 +1,6 @@
 # 🏗️ iCraft — 進度追蹤
 
-> **整體進度**: 27 / 30 任務完成
+> **整體進度**: 28 / 30 任務完成
 > **當前階段**: P3 — 進階功能
 
 ---
@@ -12,16 +12,16 @@
 | **P0 — 核心體驗** | 5/5 | 5 | 🟢 已完成 |
 | **P1 — 可玩性基礎** | 7/7 | 7 | 🟢 已完成 |
 | **P2 — 完善體驗** | 8/8 | 8 | 🟢 已完成 |
-| **P3 — 進階功能** | 7/9 | 7 | 🟡 進行中 |
+| **P3 — 進階功能** | 8/9 | 8 | 🟡 進行中 |
 
 ### 進度條
 ```
 P0 [██████████] 100%
 P1 [██████████] 100%
 P2 [██████████] 100%
-P3 [████████░░] 77.8%
+P3 [█████████░] 88.9%
 ────────────────────
-總計 [█████████░] 90.0%
+總計 [█████████░] 93.3%
 ```
 
 ---
@@ -95,7 +95,7 @@ P3 [████████░░] 77.8%
 | 26 | [Nether / End + Boss](./p3/26_dimensions_bosses.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 28 | [成就 / 進度系統](./p3/28_advancements.md) | 🟢 已完成 | 2026-07-21 | 2026-07-21 | |
 | 29 | [資源包支持](./p3/29_resource_packs.md) | ❌ 廢案(不再實現) | — | — | |
-| 30 | [渲染優化](./p3/30_render_optimization.md) | ⬜ 待定 | — | — | |
+| 30 | [渲染優化](./p3/30_render_optimization.md) | 🟢 已完成 | 2026-07-23 | 2026-07-23 | 60+ FPS 留待實機量測 |
 
 ---
 
@@ -104,6 +104,12 @@ P3 [████████░░] 77.8%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-23
+- ✅ 完成任務 #30 (By Codex)：渲染優化
+  - 新增文件：`src/chunk_render.rs`
+  - 修改文件：`src/camera.rs`, `src/main.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/shader.wgsl`, `src/state.rs`, `src/world.rs`, `ARCHITECTURE.md`, `plans/p3/30_render_optimization.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：新增獨立 `TerrainVertex` 與 tile-local UV terrain shader，使完整立方體能按材質、光照與 uniform AO 保守合併並重複 atlas tile；特殊模型、流體與薄雪保留精確路徑。Chunk 生成和三層 LOD mesh 由有界 Rayon jobs 執行，主線程只建立一格 halo snapshot、整合光照和上傳 GPU；dimension generation、chunk lifetime 與 mesh revision 防止卸載、切維度或修改後的過期結果覆蓋新資料。渲染按實際 bounds 做 wgpu 0..1 深度視錐剔除，不透明前到後、透明後到前排序，並依距離選 L0 完整 greedy、L1 surface、L2 4×4 coarse surface；surface skirts 同樣合併。相機 far plane 覆蓋方形視距角落，F3 改報實際 visible chunks、submitted draw calls 與 triangles。
+  - 驗證：`cargo fmt -- --check`、`cargo check --release`、`cargo test --release`；182 項單元測試與 1 項整合測試全部通過。新增 terrain vertex layout、六平面視錐、near/far、剔除、透明/不透明排序、LOD 邊界/縮減、greedy 材質/光照/AO、UV 重複、halo snapshot、worker token 過期與 WGSL validation 測試。
+  - 備註：`Render distance = 16` 的 60+ FPS 為硬件／場景相關人工驗收，本環境未自動操作世界進行可靠 FPS 量測；非同步與提交量的功能路徑已由測試覆蓋。
 - ❌ 決定任務 #29 廢案 (By Tommy)
 
 

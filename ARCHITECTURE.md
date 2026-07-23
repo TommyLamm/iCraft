@@ -170,10 +170,12 @@ input / mob / fluid behavior
      -> Chunk.blocks + heightmap
      -> enqueue water/lava neighbor updates
   -> lighting::{update_*_after_placed, update_*_after_removed}
-  -> mark affected ChunkMesh entries dirty (including boundary neighbors)
+  -> increment affected ChunkMesh revisions (including boundary neighbors)
   -> State::update_chunks
-  -> Chunk::generate_mesh(neighbor lookup closure)
-  -> opaque/translucent wgpu buffers
+     -> capture owned Chunk + one-block neighbor halo
+     -> Rayon worker: Chunk::generate_mesh_bundle
+     -> discard stale generation/lifetime/revision results
+     -> main thread uploads opaque/translucent L0/L1/L2 wgpu buffers
   -> State::render
 ```
 
@@ -206,26 +208,41 @@ also deferred. `TimeSync` corrects client game ticks and visible weather once
 per second.
 
 `Chunk::generate_mesh` reads neighboring block, sky-light, block-light, fluid
-level, and falling state through a closure supplied by `State`. It emits separate
-opaque/cutout and translucent vertex/index sets. Each visible face receives
-four-level vertex ambient occlusion from three exterior neighbor samples per
-corner; the darker diagonal distribution selects the quad triangulation to
-avoid interpolation seams. Only solid opaque blocks cast AO, while every Chunk
-surface type can receive it.
+level, and falling state through a closure supplied by an owned `MeshSnapshot`.
+It emits separate opaque/cutout and translucent vertex/index sets. Full-cube
+faces use conservative greedy meshing keyed by block/tile, packed light, and
+uniform AO; non-cube, fluid, thin-snow, and cross-model geometry keeps its exact
+per-block path. `TerrainVertex` stores tile-local UV plus atlas-tile coordinates,
+so a merged quad repeats one tile in WGSL rather than stretching across the
+atlas. Each visible face receives four-level vertex ambient occlusion from three
+exterior neighbor samples per corner; the darker diagonal distribution selects
+the quad triangulation to avoid interpolation seams. Only solid opaque blocks
+cast AO, while every Chunk surface type can receive it.
 
 ### Rendering
 
-`State::render` first generates mob mesh data, camera-facing particle quads, and
-all immediate-mode UI vertices (including remote-player name tags, chat,
-disconnect UI, and advancement toasts/screen) on the CPU.
+`State::render` extracts a six-plane wgpu-depth frustum from the current
+view-projection matrix and builds a visible terrain draw plan from actual mesh
+bounds. L0 is the complete greedy mesh, L1 is a surface-only height field, and
+L2 is a four-block coarse surface; both surface LODs include greedily merged
+vertical skirts. Opaque draws are sorted front-to-back and translucent draws
+back-to-front, with stable chunk-coordinate tie breaks. The camera far plane
+covers the render-distance square's far corner. F3 reports visible/loaded chunks,
+submitted terrain draw calls, and submitted triangles rather than all cached
+geometry.
+
+The renderer then generates mob mesh data, camera-facing particle quads, and all
+immediate-mode UI vertices (including remote-player name tags, chat, disconnect
+UI, and advancement toasts/screen) on the CPU.
 The render pass order is: sky ->
 opaque/cutout chunks -> mobs (including dropped items) -> translucent chunks ->
 alpha-blended particles -> multiply-blended mining crack overlay -> textured UI
 -> colored UI -> crosshair -> line/text UI -> present. The shader entrypoints
 and packed camera, lighting, fog, time, underwater, and damage behavior are in
-`src/shader.wgsl`. Terrain `Vertex` data carries AO as a smooth location-3
-attribute; packed sky/block/face lighting remains flat and the fragment shader
-multiplies both contributions before hurt tint and fog.
+`src/shader.wgsl`. Terrain uses the separate `TerrainVertex` layout and
+`vs_terrain`/`fs_terrain`; AO remains smooth, while atlas tile and packed
+sky/block/face lighting remain flat. Mob, hand, particle, and UI geometry keep
+their existing vertex layouts.
 
 ### Particles and dropped items
 
@@ -376,8 +393,9 @@ entity physics and world-side lifecycle events.
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
 | `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing, chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
 | `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
-| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `KeyState`, `SlotType`; selected-world/network setup, frame ordering, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, mining/placement authority gates, 20 Hz local-pose/action sends, delayed remote-player interpolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, and chunk streaming. Start with the exact method, not the whole file. |
+| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `SlotType`; selected-world/network setup, frame ordering, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, mining/placement authority gates, 20 Hz local-pose/action sends, delayed remote-player interpolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
+| `src/chunk_render.rs` | `TerrainVertex`, mesh bounds/data/bundles, wgpu-depth `Frustum`, sorted `DrawPlan`, and LOD threshold/selection helpers. Pure CPU structures and algorithms are unit tested without a window. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
 | `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles and solid bow/string tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
 | `src/audio.rs` | `SoundId`, `SoundMaterial`, `AudioManager`; load/cache WAV files, synthesize missing sounds, 2D/approximate 3D playback. |
@@ -469,10 +487,10 @@ initialization degrades to silent operation when no default output device exists
 
 - `src/state.rs` mixes composition, simulation orchestration, GPU setup, UI layout,
   and interactions. Locate an exact method before reading it.
-- Rendering types leak downward: `world.rs` imports `state::Vertex`, while hostile
-  and passive mob code can manipulate `state::ChunkMesh`, and `particles.rs`
-  imports `state::Vertex`. Changes to render data can therefore affect nominally
-  simulation-only modules.
+- Terrain CPU render types live in `chunk_render.rs`; `world.rs` emits
+  `TerrainVertex`, while hostile/passive mob code still marks `state::ChunkMesh`
+  revisions and particles/mob geometry still uses `state::Vertex`. Changes to
+  cache invalidation or the shared non-terrain vertex remain cross-module.
 - Block changes have distributed follow-up work (lighting + dirty meshes). Search
   all callers of `ChunkManager::set_block` before changing mutation semantics.
 - Advancement definitions do not subscribe to gameplay events automatically.
