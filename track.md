@@ -9,8 +9,8 @@
 | # | Task | Status | Commit | Verification |
 |---|---|---|---|---|
 | 1 | [Complete render optimization](plans/implementation/01_render_optimization.md) | Complete | `768c590` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (182 unit + 1 integration); WGSL validation |
-| 2 | [Smooth remote-player movement](plans/implementation/02_multiplayer_smoothing.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (191 unit + 1 integration); targeted interpolation, protocol, relay, latest-wins, transport, and velocity tests |
-| 3 | [Add Minecraft-style Creative flight](plans/implementation/03_creative_flight.md) | Pending | — | — |
+| 2 | [Smooth remote-player movement](plans/implementation/02_multiplayer_smoothing.md) | Complete | `2c72b82` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (191 unit + 1 integration); targeted interpolation, protocol, relay, latest-wins, transport, and velocity tests |
+| 3 | [Add Minecraft-style Creative flight](plans/implementation/03_creative_flight.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (201 unit + 1 integration); 10 flight/input/physics regressions |
 | 4 | [Reject placement intersecting a player](plans/implementation/04_player_placement_collision.md) | Pending | — | — |
 | 5 | [Add a proper 3D torch model](plans/implementation/05_torch_model.md) | Pending | — | — |
 | 6 | [Fix Survival attacks against mobs](plans/implementation/06_survival_combat.md) | Pending | — | — |
@@ -38,6 +38,13 @@
   retained animation velocity, TCP no-delay/single-write framing, and
   latest-wins pose delivery without weakening reliable world/chat traffic.
   The interactive Host + Join visual check remains explicitly manual.
+- Task 3 adds non-repeat 300 ms Jump double-tap flight toggling, horizontal
+  camera-yaw movement, Space/Shift ascent/descent, sprint flight, hover, solid
+  collision, ceiling/landing handling, and fall-distance resets. Flight and
+  flight velocity are transient; Survival switching, death, respawn and
+  dimension travel exit safely, while UI/focus changes clear pending taps but
+  preserve active hover. F3 identifies the flying state. Interactive camera
+  and multiplayer visual checks remain manual.
 
 ## Commit discipline
 

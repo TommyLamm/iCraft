@@ -172,7 +172,7 @@ impl ApplicationHandler for App {
                             .window
                             .set_cursor_grab(winit::window::CursorGrabMode::None);
                         state.window.set_cursor_visible(true);
-                        state.keys = crate::state::KeyState::default();
+                        state.clear_movement_input();
                     } else if !state.is_paused
                         && !state.inventory.is_open
                         && !state.advancement_gui.is_open
@@ -482,7 +482,11 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
         }
         return false;
     }
-    if state.is_paused || state.inventory.is_open {
+    if state.is_paused
+        || state.inventory.is_open
+        || state.advancement_gui.is_open
+        || state.player_state.is_dead
+    {
         return false;
     }
 
@@ -496,6 +500,9 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
     } else if code == controls.right {
         state.keys.d = pressed;
     } else if code == controls.jump {
+        if pressed {
+            state.handle_jump_pressed(Instant::now(), event.repeat);
+        }
         state.keys.space = pressed;
     } else if code == controls.sprint {
         state.keys.ctrl = pressed;
@@ -512,11 +519,12 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
             KeyCode::Digit7 => state.inventory.selected = 6,
             KeyCode::Digit8 => state.inventory.selected = 7,
             KeyCode::Digit9 => state.inventory.selected = 8,
-            KeyCode::KeyG => {
-                state.game_mode = match state.game_mode {
+            KeyCode::KeyG if !event.repeat => {
+                let game_mode = match state.game_mode {
                     crate::inventory::GameMode::Creative => crate::inventory::GameMode::Survival,
                     crate::inventory::GameMode::Survival => crate::inventory::GameMode::Creative,
                 };
+                state.set_game_mode(game_mode);
             }
             _ => {}
         }

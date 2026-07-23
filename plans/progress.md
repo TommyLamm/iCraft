@@ -104,6 +104,11 @@ P3 [█████████░] 88.9%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-24
+- ✅ 新增額外功能 (By Codex)：Minecraft 式 Creative 飛行
+  - 修改文件：`src/app.rs`, `src/physics.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/03_creative_flight.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：以事件時間追蹤 300 ms、忽略 key repeat 的 Jump 雙擊；Creative 中雙擊切換 transient flight，WASD 維持相機 yaw 水平移動，Space／Shift 升降，同時按下不產生垂直速度，衝刺飛行為兩倍水平速度。飛行略過重力、流體阻力／浮力及摔落傷害，但沿用 X/Y/Z solid collision；下降碰地退出，撞天花板只停止上升。模式切 Survival、死亡、重生與切維度會安全退出並重設 fall-distance，暫停／背包／聊天／進度介面／失焦只清輸入與 pending tap，保留 hover。飛行狀態及速度不持久化，F3 會標示 `FLYING`。
+  - 驗證：雙擊邊界、repeat、停用/reset、新雙擊配對、落地退出、hover、升降、牆／頂／地碰撞、水／熔岩、衝刺速度、持久化速度與非飛行重力／摔落傷害回歸測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 201 項單元測試與 1 項整合測試。
+  - 備註：第一／第三人稱鏡頭、實際 Host + Join 位置同步與模式切換手感需在互動式遊戲視窗人工驗收。
 - ✅ 修復任務 #25 後續問題 (By Codex)：低延遲多人遊戲的遠端玩家移動閃現
   - 修改文件：`src/state.rs`, `src/mob.rs`, `src/network/protocol.rs`, `src/network/transport.rs`, `src/network/client.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `plans/implementation/02_multiplayer_smoothing.md`, `plans/progress.md`, `track.md`
   - 關鍵決策：協議提升至 v3，pose 加入 wrapping sequence 與 sender timestamp；遠端玩家改用 32 筆有界快照，以 100 ms 延遲找真正包住 target 的兩點插值，批量到達仍保留 sender cadence，並拒絕非法、重複和亂序資料。短缺最新點時只做限速且最多 100 ms 的外推，長 gap 或大位移清空歷史並 snap。client 與 server 對尚未發送的 pose 採 latest-wins，但可靠 world/chat 資料仍逐筆傳送；TCP 啟用 `TCP_NODELAY` 並將 header/payload 合為一次 write。RemotePlayer 的採樣速度不再被 mob update 清除。

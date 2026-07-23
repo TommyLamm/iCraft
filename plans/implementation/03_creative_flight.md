@@ -1,5 +1,7 @@
 # 實作計畫 03：Creative Minecraft 式飛行
 
+> 狀態：已完成（2026-07-24；commit 待本項提交）
+
 ## 目標
 
 Creative 模式雙擊 Jump 切換飛行；WASD 水平移動、Space 上升、Shift
@@ -24,13 +26,12 @@ Creative 模式雙擊 Jump 切換飛行；WASD 水平移動、Space 上升、Shi
 
 ## 驗證
 
-- Double tap window、repeat、reset、模式切換單元測試。
-- hover、上升、下降、雙鍵、牆/頂/地碰撞、水/熔岩與 fall damage 測試。
-- Survival 原有 jump/gravity/fall damage 不回歸。
-- `cargo fmt -- --check`、`cargo test --release`、`cargo check --release`。
-- 人工第一/第三人稱、聯機位置同步與模式切換。
+- [x] Double tap window、repeat、reset、模式停用與落地退出單元測試。
+- [x] hover、上升、下降、牆/頂/地碰撞、水/熔岩、衝刺與 fall damage 測試。
+- [x] Survival 原有 gravity/fall damage 不回歸；飛行速度不會寫入存檔。
+- [x] `cargo fmt -- --check`、`cargo test --release`、`cargo check --release`。
+- [ ] 人工第一/第三人稱、聯機位置同步與模式切換（需互動式遊戲視窗）。
 
 ## Commit
 
 單一功能 commit：`feat(creative): add minecraft-style flight`
-

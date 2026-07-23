@@ -122,11 +122,14 @@ assets are unavailable.
 4. Advance world time and, in the Overworld only, weather. Weather emits
    roof-clipped rain/snow particles, maintains the rain loop, accumulates thin
    snow in cold biomes, and dispatches thunder strikes before translating
-   `KeyState` into movement.
-5. Run `PlayerPhysics::update`, then `State::update_chunks`; apply landing,
-   fall, void, lava, cactus, hunger, oxygen, and audio effects. Emit footstep
-   dust and periodic torch smoke, collect eligible dropped items, and run
-   bounded leaf-decay random ticks.
+   `KeyState` into movement. In Creative, two non-repeat Jump presses within
+   300 ms toggle transient flight; Space/Shift provide vertical input.
+5. Run `PlayerPhysics::update`, then `State::update_chunks`. Creative flight
+   bypasses gravity, fluid drag/buoyancy and fall damage while retaining
+   three-axis solid collision; descending onto the ground exits flight. Normal
+   movement then applies landing, fall, void, lava, cactus, hunger, oxygen, and
+   audio effects. Emit footstep dust and periodic torch smoke, collect eligible
+   dropped items, and run bounded leaf-decay random ticks.
 6. Enforce difficulty rules, then ensure/update dimension-specific mobs and
    bosses through `boss.rs`. Resolve player-owned projectiles before ordinary
    hostile AI/projectiles and dropped-item physics; update passive mobs and
@@ -403,7 +406,7 @@ entity physics and world-side lifecycle events.
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
 | `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing, chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
 | `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
-| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `SlotType`; selected-world/network setup, frame ordering, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, mining/placement authority gates, sequenced 20 Hz local-pose sends, bounded remote snapshot interpolation/extrapolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
+| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `DoubleTapTracker`, `SlotType`; selected-world/network setup, frame ordering, Creative flight toggling/lifecycle, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, mining/placement authority gates, sequenced 20 Hz local-pose sends, bounded remote snapshot interpolation/extrapolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/chunk_render.rs` | `TerrainVertex`, mesh bounds/data/bundles, wgpu-depth `Frustum`, sorted `DrawPlan`, and LOD threshold/selection helpers. Pure CPU structures and algorithms are unit tested without a window. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
@@ -421,7 +424,7 @@ entity physics and world-side lifecycle events.
 | `src/lighting.rs` | Cross-chunk BFS propagation/removal for sky and emissive block light; initial chunk lighting and post-mutation updates. |
 | `src/fluid.rs` | Budgeted event-driven water/lava cells, falling/level propagation, draining, infinite water, and water/lava solidification. Returns dirty chunk coordinates plus changed block values for host broadcast. |
 | `src/redstone.rs` | 20 Hz redstone graph, 0-15 weak/strong power, component index, delayed ticks, comparator/repeater logic, actuator mutations, TNT/dispense/note actions, and loop protection. |
-| `src/physics.rs` | `AABB`, `PlayerPhysics`; movement, gravity, jumping/swimming, axis collision resolution, fall-distance result. |
+| `src/physics.rs` | `AABB`, `PlayerPhysics`; walking/sprinting, gravity, jumping/swimming, transient Creative hover/flight, axis collision resolution, and fall-distance result. Flight is not serialized and exposes zero persistent velocity while active. |
 | `src/interaction.rs` | Grid DDA block `raycast` and `RaycastResult`; read-only world targeting. |
 | `src/save.rs` | `LevelData`, `PlayerData`, `ChunkSaveData`, `SaveManager`; Bincode serialization of player/inventory/advancement data, Zlib chunk arrays, Region file management, legacy-player upgrade, and thread-based background saving. |
 

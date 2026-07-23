@@ -1,6 +1,10 @@
 use crate::chunk_manager::ChunkManager;
 use glam::Vec3;
 
+const CREATIVE_FLY_SPEED: f32 = 10.0;
+const CREATIVE_FLY_SPRINT_MULTIPLIER: f32 = 2.0;
+const CREATIVE_FLY_VERTICAL_SPEED: f32 = 8.0;
+
 pub struct AABB {
     pub min: Vec3,
     pub max: Vec3,
@@ -31,6 +35,7 @@ pub struct PlayerPhysics {
     pub size: Vec3,
     pub on_ground: bool,
     pub highest_y: f32,
+    is_flying: bool,
 }
 
 impl PlayerPhysics {
@@ -41,6 +46,31 @@ impl PlayerPhysics {
             size: Vec3::new(0.6, 1.8, 0.6), // Minecraft 玩家寬高
             on_ground: false,
             highest_y: position.y,
+            is_flying: false,
+        }
+    }
+
+    pub fn is_flying(&self) -> bool {
+        self.is_flying
+    }
+
+    pub fn persistent_velocity(&self) -> Vec3 {
+        if self.is_flying {
+            Vec3::ZERO
+        } else {
+            self.velocity
+        }
+    }
+
+    pub fn set_flying(&mut self, flying: bool) {
+        if self.is_flying == flying {
+            return;
+        }
+        self.is_flying = flying;
+        self.velocity.y = 0.0;
+        self.highest_y = self.position.y;
+        if flying {
+            self.on_ground = false;
         }
     }
 
@@ -67,6 +97,7 @@ impl PlayerPhysics {
         }
 
         let was_on_ground = self.on_ground;
+        let is_flying = self.is_flying;
 
         let px = self.position.x.floor() as i32;
         let py = self.position.y.floor() as i32;
@@ -81,23 +112,30 @@ impl PlayerPhysics {
             || block_at_eyes == crate::world::BlockType::Lava;
 
         // 1. 套用玩家移動控制
-        let mut speed = 8.0;
-        if is_sprinting {
-            speed *= 1.3;
-        } else if is_sneaking {
-            speed *= 0.3;
-        }
-
-        if is_in_water {
-            speed *= 0.6;
-        } else if is_in_lava {
-            speed *= 0.3;
+        let mut speed = if is_flying { CREATIVE_FLY_SPEED } else { 8.0 };
+        if is_flying {
+            if is_sprinting {
+                speed *= CREATIVE_FLY_SPRINT_MULTIPLIER;
+            }
+        } else {
+            if is_sprinting {
+                speed *= 1.3;
+            } else if is_sneaking {
+                speed *= 0.3;
+            }
+            if is_in_water {
+                speed *= 0.6;
+            } else if is_in_lava {
+                speed *= 0.3;
+            }
         }
         self.velocity.x = movement_input.x * speed;
         self.velocity.z = movement_input.z * speed;
 
         // 2. 套用重力與跳躍
-        if is_in_water {
+        if is_flying {
+            self.velocity.y = movement_input.y.clamp(-1.0, 1.0) * CREATIVE_FLY_VERTICAL_SPEED;
+        } else if is_in_water {
             if movement_input.y > 0.0 {
                 self.velocity.y = 2.5; // Swim up buoyancy
             } else {
@@ -125,7 +163,7 @@ impl PlayerPhysics {
         let old_x = self.position.x;
         self.position.x += self.velocity.x * dt;
         self.resolve_collisions(chunk_manager, 0);
-        if is_sneaking && self.on_ground {
+        if !is_flying && is_sneaking && self.on_ground {
             if !self.is_block_below(chunk_manager) {
                 self.position.x = old_x;
                 self.velocity.x = 0.0;
@@ -136,7 +174,7 @@ impl PlayerPhysics {
         let old_z = self.position.z;
         self.position.z += self.velocity.z * dt;
         self.resolve_collisions(chunk_manager, 2);
-        if is_sneaking && self.on_ground {
+        if !is_flying && is_sneaking && self.on_ground {
             if !self.is_block_below(chunk_manager) {
                 self.position.z = old_z;
                 self.velocity.z = 0.0;
@@ -147,6 +185,11 @@ impl PlayerPhysics {
         self.position.y += self.velocity.y * dt;
         self.on_ground = false;
         self.resolve_collisions(chunk_manager, 1);
+
+        if is_flying {
+            self.highest_y = self.position.y;
+            return 0.0;
+        }
 
         // Calculate fall damage on landing
         let mut fall_damage = 0.0;
@@ -262,6 +305,20 @@ mod tests {
     use super::*;
     use crate::world::{BlockType, Chunk};
 
+    fn empty_chunk_manager() -> ChunkManager {
+        let mut chunk_manager = ChunkManager::new(2);
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..16 {
+            for y in 0..256 {
+                for z in 0..16 {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                }
+            }
+        }
+        chunk_manager.chunks.insert((0, 0), chunk);
+        chunk_manager
+    }
+
     #[test]
     fn test_aabb_intersection() {
         let box1 = AABB::new(Vec3::new(0.0, 0.0, 0.0), Vec3::ONE);
@@ -298,19 +355,9 @@ mod tests {
 
     #[test]
     fn test_player_edge_guard() {
-        let mut chunk_manager = ChunkManager::new(2);
-        let mut chunk = Chunk::new(0, 0);
-        // Clear all blocks to Air to prevent procedural terrain interference
-        for x in 0..16 {
-            for y in 0..256 {
-                for z in 0..16 {
-                    chunk.blocks[x][y][z] = BlockType::Air;
-                }
-            }
-        }
+        let mut chunk_manager = empty_chunk_manager();
         // Set one stone block at (8, 70, 8)
-        chunk.blocks[8][70][8] = BlockType::Stone;
-        chunk_manager.chunks.insert((0, 0), chunk);
+        chunk_manager.chunks.get_mut(&(0, 0)).unwrap().blocks[8][70][8] = BlockType::Stone;
 
         let mut physics = PlayerPhysics::new(Vec3::new(8.5, 71.0, 8.5));
         physics.on_ground = true;
@@ -322,5 +369,127 @@ mod tests {
         physics.update(dt, &chunk_manager, Vec3::new(1.0, 0.0, 0.0), true, false);
         assert_eq!(physics.position.x, 8.5);
         assert_eq!(physics.velocity.x, 0.0);
+    }
+
+    #[test]
+    fn creative_flight_toggle_clears_vertical_momentum_and_fall_distance() {
+        let mut physics = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
+        physics.velocity.y = -30.0;
+        physics.highest_y = 120.0;
+        physics.on_ground = true;
+
+        physics.set_flying(true);
+        assert!(physics.is_flying());
+        assert_eq!(physics.velocity.y, 0.0);
+        physics.velocity = Vec3::new(10.0, 8.0, -4.0);
+        assert_eq!(physics.persistent_velocity(), Vec3::ZERO);
+        assert_eq!(physics.highest_y, 80.0);
+        assert!(!physics.on_ground);
+
+        physics.set_flying(false);
+        assert!(!physics.is_flying());
+        assert_eq!(physics.velocity.y, 0.0);
+        assert_eq!(physics.persistent_velocity(), Vec3::new(10.0, 0.0, -4.0));
+        assert_eq!(physics.highest_y, 80.0);
+    }
+
+    #[test]
+    fn creative_flight_hovers_and_moves_vertically_without_fall_damage() {
+        let mut chunk_manager = empty_chunk_manager();
+        chunk_manager.chunks.get_mut(&(0, 0)).unwrap().blocks[8][80][8] = BlockType::Water;
+        let mut physics = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
+        physics.set_flying(true);
+
+        let start = physics.position;
+        assert_eq!(
+            physics.update(0.25, &chunk_manager, Vec3::ZERO, false, false),
+            0.0
+        );
+        assert_eq!(physics.position, start);
+        assert_eq!(physics.velocity, Vec3::ZERO);
+
+        assert_eq!(
+            physics.update(0.25, &chunk_manager, Vec3::Y, false, false),
+            0.0
+        );
+        assert!((physics.position.y - (start.y + 2.0)).abs() < 1.0e-5);
+        assert_eq!(physics.velocity.y, CREATIVE_FLY_VERTICAL_SPEED);
+
+        assert_eq!(
+            physics.update(0.25, &chunk_manager, -Vec3::Y, false, false),
+            0.0
+        );
+        assert!((physics.position.y - start.y).abs() < 1.0e-5);
+        assert_eq!(physics.velocity.y, -CREATIVE_FLY_VERTICAL_SPEED);
+        assert_eq!(physics.highest_y, physics.position.y);
+    }
+
+    #[test]
+    fn creative_flight_keeps_solid_collision_on_every_axis() {
+        let mut chunk_manager = empty_chunk_manager();
+        let chunk = chunk_manager.chunks.get_mut(&(0, 0)).unwrap();
+        chunk.blocks[9][80][8] = BlockType::Stone;
+        chunk.blocks[9][81][8] = BlockType::Stone;
+        chunk.blocks[8][82][8] = BlockType::Stone;
+        chunk.blocks[8][79][8] = BlockType::Stone;
+
+        let mut wall = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
+        wall.set_flying(true);
+        wall.update(0.1, &chunk_manager, Vec3::X, false, false);
+        assert!((wall.position.x - 8.7).abs() < 1.0e-5);
+        assert_eq!(wall.velocity.x, 0.0);
+
+        let mut ceiling = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
+        ceiling.set_flying(true);
+        ceiling.update(0.1, &chunk_manager, Vec3::Y, false, false);
+        assert!((ceiling.position.y - 80.2).abs() < 1.0e-5);
+        assert_eq!(ceiling.velocity.y, 0.0);
+        assert!(ceiling.is_flying());
+        assert!(!ceiling.on_ground);
+
+        let mut landing = PlayerPhysics::new(Vec3::new(8.5, 80.1, 8.5));
+        landing.set_flying(true);
+        landing.update(0.05, &chunk_manager, -Vec3::Y, false, false);
+        assert!((landing.position.y - 80.0).abs() < 1.0e-5);
+        assert_eq!(landing.velocity.y, 0.0);
+        assert!(landing.on_ground);
+    }
+
+    #[test]
+    fn creative_flight_sprint_changes_horizontal_speed_without_fluid_drag() {
+        let mut chunk_manager = empty_chunk_manager();
+        chunk_manager.chunks.get_mut(&(0, 0)).unwrap().blocks[8][80][8] = BlockType::Lava;
+        let mut physics = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
+        physics.set_flying(true);
+
+        physics.update(0.0, &chunk_manager, Vec3::X, true, false);
+        assert_eq!(physics.velocity.x, CREATIVE_FLY_SPEED);
+
+        physics.update(0.0, &chunk_manager, Vec3::X, false, true);
+        assert_eq!(
+            physics.velocity.x,
+            CREATIVE_FLY_SPEED * CREATIVE_FLY_SPRINT_MULTIPLIER
+        );
+    }
+
+    #[test]
+    fn non_flying_gravity_and_fall_damage_are_unchanged() {
+        let mut chunk_manager = empty_chunk_manager();
+        chunk_manager.chunks.get_mut(&(0, 0)).unwrap().blocks[8][79][8] = BlockType::Stone;
+        let mut physics = PlayerPhysics::new(Vec3::new(8.5, 85.0, 8.5));
+        physics.highest_y = physics.position.y;
+
+        let mut fall_damage = 0.0;
+        for _ in 0..500 {
+            fall_damage = physics.update(0.01, &chunk_manager, Vec3::ZERO, false, false);
+            if physics.on_ground {
+                break;
+            }
+        }
+
+        assert!(!physics.is_flying());
+        assert!(physics.on_ground);
+        assert!((physics.position.y - 80.0).abs() < 1.0e-5);
+        assert!((fall_damage - 2.0).abs() < 0.05);
     }
 }

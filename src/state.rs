@@ -13,6 +13,7 @@ use crate::player::{DamageSource, PlayerState};
 use crate::world::{Biome, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
 use glam::{Mat4, Vec2, Vec3};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -30,6 +31,7 @@ const REMOTE_MAX_EXTRAPOLATION_SPEED: f32 = 40.0;
 const REMOTE_MAX_ANGULAR_SPEED: f32 = std::f32::consts::TAU * 2.0;
 const REMOTE_TELEPORT_DISTANCE: f32 = 8.0;
 const REMOTE_TELEPORT_GAP: f64 = 0.5;
+const CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 // Creating an entire render distance while handling a menu click blocks the
 // window event loop and can allocate hundreds of chunk meshes at once.  Start
 // with a safe area around the player; `update_chunks` streams the rest in over
@@ -875,6 +877,8 @@ impl State {
         if target == self.current_dimension {
             return;
         }
+        self.player_physics.set_flying(false);
+        self.jump_taps.reset();
         let source = self.current_dimension;
         for chunk in self.chunk_manager.chunks.values() {
             let data = crate::save::ChunkSaveData::from_chunk(chunk);
@@ -1119,6 +1123,101 @@ pub struct KeyState {
     pub space: bool,
     pub ctrl: bool,
     pub shift: bool,
+}
+
+#[derive(Debug, Default)]
+struct DoubleTapTracker {
+    last_tap: Option<Instant>,
+}
+
+impl DoubleTapTracker {
+    fn register(&mut self, now: Instant, enabled: bool, repeat: bool) -> bool {
+        if !enabled {
+            self.reset();
+            return false;
+        }
+        if repeat {
+            return false;
+        }
+
+        let is_double_tap = self
+            .last_tap
+            .and_then(|last| now.checked_duration_since(last))
+            .is_some_and(|elapsed| elapsed <= CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW);
+        if is_double_tap {
+            self.reset();
+        } else {
+            self.last_tap = Some(now);
+        }
+        is_double_tap
+    }
+
+    fn reset(&mut self) {
+        self.last_tap = None;
+    }
+}
+
+fn should_exit_creative_flight(was_flying: bool, vertical_input: f32, on_ground: bool) -> bool {
+    was_flying && vertical_input < 0.0 && on_ground
+}
+
+#[cfg(test)]
+mod creative_flight_input_tests {
+    use super::*;
+
+    #[test]
+    fn double_tap_toggles_only_inside_the_window() {
+        let start = Instant::now();
+        let mut tracker = DoubleTapTracker::default();
+
+        assert!(!tracker.register(start, true, false));
+        assert!(tracker.register(start + Duration::from_millis(300), true, false));
+
+        assert!(!tracker.register(start + Duration::from_secs(1), true, false));
+        assert!(!tracker.register(start + Duration::from_millis(1301), true, false));
+    }
+
+    #[test]
+    fn repeat_does_not_count_as_a_second_tap() {
+        let start = Instant::now();
+        let mut tracker = DoubleTapTracker::default();
+
+        assert!(!tracker.register(start, true, false));
+        assert!(!tracker.register(start + Duration::from_millis(50), true, true));
+        assert!(tracker.register(start + Duration::from_millis(100), true, false));
+    }
+
+    #[test]
+    fn disabled_or_reset_tracker_cannot_prearm_creative_flight() {
+        let start = Instant::now();
+        let mut tracker = DoubleTapTracker::default();
+
+        assert!(!tracker.register(start, false, false));
+        assert!(!tracker.register(start + Duration::from_millis(100), true, false));
+        tracker.reset();
+        assert!(!tracker.register(start + Duration::from_millis(200), true, false));
+        assert!(tracker.register(start + Duration::from_millis(250), true, false));
+    }
+
+    #[test]
+    fn successful_double_tap_starts_a_fresh_pair() {
+        let start = Instant::now();
+        let mut tracker = DoubleTapTracker::default();
+
+        assert!(!tracker.register(start, true, false));
+        assert!(tracker.register(start + Duration::from_millis(50), true, false));
+        assert!(!tracker.register(start + Duration::from_millis(100), true, false));
+        assert!(tracker.register(start + Duration::from_millis(150), true, false));
+    }
+
+    #[test]
+    fn only_descending_onto_the_ground_exits_flight() {
+        assert!(should_exit_creative_flight(true, -1.0, true));
+        assert!(!should_exit_creative_flight(true, 0.0, true));
+        assert!(!should_exit_creative_flight(true, 1.0, true));
+        assert!(!should_exit_creative_flight(true, -1.0, false));
+        assert!(!should_exit_creative_flight(false, -1.0, true));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1723,6 +1822,7 @@ pub struct State {
     visible_chunk_count: usize,
     pub player_physics: PlayerPhysics,
     pub keys: KeyState,
+    jump_taps: DoubleTapTracker,
     #[allow(dead_code)]
     texture_atlas: crate::texture::TextureAtlas,
     crosshair_pipeline: wgpu::RenderPipeline,
@@ -2858,6 +2958,7 @@ impl State {
             visible_chunk_count: 0,
             player_physics,
             keys,
+            jump_taps: DoubleTapTracker::default(),
             texture_atlas,
             crosshair_pipeline,
             crosshair_buffer,
@@ -3032,11 +3133,12 @@ impl State {
                 } => {
                     self.local_player_id = Some(player_id);
                     self.world_seed = seed as u32;
-                    self.game_mode = if gamemode == 0 {
+                    let game_mode = if gamemode == 0 {
                         GameMode::Creative
                     } else {
                         GameMode::Survival
                     };
+                    self.set_game_mode(game_mode);
                     self.inventory = match self.game_mode {
                         GameMode::Creative => Inventory::new_creative(),
                         GameMode::Survival => Inventory::new(),
@@ -3305,6 +3407,27 @@ impl State {
         self.network.shutdown();
     }
 
+    pub fn clear_movement_input(&mut self) {
+        self.keys = KeyState::default();
+        self.jump_taps.reset();
+    }
+
+    pub fn handle_jump_pressed(&mut self, now: Instant, repeat: bool) {
+        let can_fly = self.game_mode == GameMode::Creative && !self.player_state.is_dead;
+        if self.jump_taps.register(now, can_fly, repeat) {
+            let flying = !self.player_physics.is_flying();
+            self.player_physics.set_flying(flying);
+        }
+    }
+
+    pub fn set_game_mode(&mut self, game_mode: GameMode) {
+        self.jump_taps.reset();
+        if game_mode != GameMode::Creative {
+            self.player_physics.set_flying(false);
+        }
+        self.game_mode = game_mode;
+    }
+
     pub fn open_chat(&mut self) {
         if self.connection_lost
             || self.is_paused
@@ -3317,7 +3440,7 @@ impl State {
         }
         self.chat_input.clear();
         self.is_chat_open = true;
-        self.keys = KeyState::default();
+        self.clear_movement_input();
         self.left_mouse_pressed = false;
         let _ = self
             .window
@@ -3395,7 +3518,7 @@ impl State {
         };
         let player = crate::save::PlayerData::from_state(
             self.player_physics.position,
-            self.player_physics.velocity,
+            self.player_physics.persistent_velocity(),
             self.camera.yaw,
             self.camera.pitch,
             &self.player_state,
@@ -3431,7 +3554,7 @@ impl State {
         };
         let player = crate::save::PlayerData::from_state(
             self.player_physics.position,
-            self.player_physics.velocity,
+            self.player_physics.persistent_velocity(),
             self.camera.yaw,
             self.camera.pitch,
             &self.player_state,
@@ -3480,6 +3603,7 @@ impl State {
             self.close_inventory();
         }
         self.advancement_gui.open();
+        self.clear_movement_input();
         let _ = self
             .window
             .set_cursor_grab(winit::window::CursorGrabMode::None);
@@ -3889,7 +4013,7 @@ impl State {
                 .set_cursor_grab(winit::window::CursorGrabMode::None);
             println!("[Debug] Release grab result: {:?}", res);
             self.window.set_cursor_visible(true);
-            self.keys = KeyState::default();
+            self.clear_movement_input();
         } else {
             let res = self
                 .window
@@ -4225,12 +4349,19 @@ impl State {
             move_dir -= right;
         }
         let mut movement = move_dir.normalize_or_zero() * self.potion_effects.speed_multiplier();
-        if self.keys.space {
+        let was_flying = self.player_physics.is_flying();
+        if was_flying {
+            movement.y = match (self.keys.space, self.keys.shift) {
+                (true, false) => 1.0,
+                (false, true) => -1.0,
+                _ => 0.0,
+            };
+        } else if self.keys.space {
             movement.y = 1.0;
         }
 
         // Jump exhaustion check
-        let jumped = self.keys.space && self.player_physics.on_ground;
+        let jumped = !was_flying && self.keys.space && self.player_physics.on_ground;
         if jumped && self.game_mode == GameMode::Survival {
             self.player_state.add_exhaustion(0.05);
         }
@@ -4244,9 +4375,13 @@ impl State {
             dt,
             &self.chunk_manager,
             movement,
-            self.keys.shift,
+            self.keys.shift && !was_flying,
             self.is_sprinting,
         );
+        if should_exit_creative_flight(was_flying, movement.y, self.player_physics.on_ground) {
+            self.player_physics.set_flying(false);
+            self.jump_taps.reset();
+        }
         self.update_chunks();
 
         // Landing sound
@@ -5875,6 +6010,8 @@ impl State {
 
         if can_damage {
             if died {
+                self.player_physics.set_flying(false);
+                self.jump_taps.reset();
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::PlayerDeath);
                 println!("[Debug] Player died due to: {:?}", source);
@@ -5885,7 +6022,7 @@ impl State {
                     .window
                     .set_cursor_grab(winit::window::CursorGrabMode::None);
                 self.window.set_cursor_visible(true);
-                self.keys = KeyState::default();
+                self.clear_movement_input();
             } else {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::PlayerHurt);
@@ -5894,6 +6031,8 @@ impl State {
     }
 
     pub fn respawn(&mut self) {
+        self.player_physics.set_flying(false);
+        self.jump_taps.reset();
         if self.current_dimension != crate::dimension::Dimension::Overworld {
             self.switch_dimension(crate::dimension::Dimension::Overworld);
         }
@@ -7100,7 +7239,7 @@ impl State {
             .window
             .set_cursor_grab(winit::window::CursorGrabMode::None);
         self.window.set_cursor_visible(true);
-        self.keys = KeyState::default();
+        self.clear_movement_input();
     }
 
     fn open_station(&mut self, kind: StationKind, position: Vec3) {
@@ -9070,9 +9209,10 @@ impl State {
                 );
 
                 // Game Mode Status Text
-                let mode_text = match self.game_mode {
-                    GameMode::Creative => "CREATIVE MODE",
-                    GameMode::Survival => "SURVIVAL MODE",
+                let mode_text = match (self.game_mode, self.player_physics.is_flying()) {
+                    (GameMode::Creative, true) => "CREATIVE MODE - FLYING",
+                    (GameMode::Creative, false) => "CREATIVE MODE",
+                    (GameMode::Survival, _) => "SURVIVAL MODE",
                 };
                 let mode_w = 0.009;
                 let mode_h = 0.018;
