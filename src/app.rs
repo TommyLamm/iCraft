@@ -163,12 +163,32 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Focused(focused) => {
-                if !focused {
-                    if let Some(Runtime::Game(state)) = &mut self.runtime {
+                if let Some(Runtime::Game(state)) = &mut self.runtime {
+                    if !focused {
                         if state.is_chat_open {
                             state.close_chat();
                         }
-                        state.set_paused(true);
+                        let _ = state
+                            .window
+                            .set_cursor_grab(winit::window::CursorGrabMode::None);
+                        state.window.set_cursor_visible(true);
+                        state.keys = crate::state::KeyState::default();
+                    } else if !state.is_paused
+                        && !state.inventory.is_open
+                        && !state.advancement_gui.is_open
+                        && !state.is_chat_open
+                        && !state.connection_lost
+                        && !state.player_state.is_dead
+                    {
+                        let _ = state
+                            .window
+                            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                            .or_else(|_| {
+                                state
+                                    .window
+                                    .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                            });
+                        state.window.set_cursor_visible(false);
                     }
                 }
             }
@@ -325,9 +345,6 @@ impl ApplicationHandler for App {
                         }
                     }
                     Some(Runtime::Game(state)) => {
-                        if !state.window.has_focus() && !state.is_paused {
-                            state.set_paused(true);
-                        }
                         state.update(dt);
                         state.window.request_redraw();
                         match state.render() {

@@ -3149,10 +3149,6 @@ impl State {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
             return;
         }
-        if self.is_paused {
-            self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
-            return;
-        }
         if self.is_authoritative() {
             self.update_portal_travel(dt);
         }

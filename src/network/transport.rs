@@ -16,7 +16,8 @@ pub struct Connection {
 
 pub(super) struct ConnectionReader {
     stream: OwnedReadHalf,
-    read_buf: Vec<u8>,
+    buf: Vec<u8>,
+    frame_len: Option<usize>,
 }
 
 pub(super) struct ConnectionWriter {
@@ -29,7 +30,8 @@ impl Connection {
         Self {
             reader: ConnectionReader {
                 stream: reader,
-                read_buf: Vec::new(),
+                buf: Vec::new(),
+                frame_len: None,
             },
             writer: ConnectionWriter { stream: writer },
         }
@@ -50,20 +52,44 @@ impl Connection {
 
 impl ConnectionReader {
     pub async fn recv(&mut self) -> io::Result<Packet> {
-        let mut header = [0u8; LEN_HEADER];
-        self.stream.read_exact(&mut header).await?;
-        let len = u32::from_be_bytes(header);
-        if len > MAX_PACKET_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("packet length {len} exceeds maximum {MAX_PACKET_SIZE}"),
-            ));
+        loop {
+            if self.frame_len.is_none() {
+                while self.buf.len() < LEN_HEADER {
+                    let mut tmp = [0u8; 4096];
+                    let n = self.stream.read(&mut tmp).await?;
+                    if n == 0 {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
+                    }
+                    self.buf.extend_from_slice(&tmp[..n]);
+                }
+                let len = u32::from_be_bytes([
+                    self.buf[0], self.buf[1], self.buf[2], self.buf[3],
+                ]);
+                if len > MAX_PACKET_SIZE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("packet length {len} exceeds maximum {MAX_PACKET_SIZE}"),
+                    ));
+                }
+                self.buf.drain(0..LEN_HEADER);
+                self.frame_len = Some(len as usize);
+            }
+
+            let need = self.frame_len.unwrap();
+            while self.buf.len() < need {
+                let mut tmp = [0u8; 4096];
+                let n = self.stream.read(&mut tmp).await?;
+                if n == 0 {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
+                }
+                self.buf.extend_from_slice(&tmp[..n]);
+            }
+
+            let body: Vec<u8> = self.buf.drain(0..need).collect();
+            self.frame_len = None;
+            return Packet::decode(&body)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
         }
-        let len = len as usize;
-        self.read_buf.clear();
-        self.read_buf.resize(len, 0);
-        self.stream.read_exact(&mut self.read_buf).await?;
-        Packet::decode(&self.read_buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -157,4 +183,76 @@ mod tests {
         assert_eq!(second, act);
         assert_eq!(echoed, echo);
     }
+
+    #[tokio::test]
+    async fn recv_survives_cancellation_between_header_and_body() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+
+        let packet = Packet::Handshake {
+            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
+            username: "cancellation_test".into(),
+        };
+        let payload = packet.encode();
+        let len = u32::try_from(payload.len()).unwrap();
+        let len_bytes = len.to_be_bytes();
+
+        let (reader_half, _writer_half) = client_stream.into_split();
+        let mut reader = ConnectionReader {
+            stream: reader_half,
+            buf: Vec::new(),
+            frame_len: None,
+        };
+
+        let mut server_stream = server_stream;
+        server_stream.write_all(&len_bytes).await.unwrap();
+        server_stream.flush().await.unwrap();
+
+        tokio::select! {
+            _ = reader.recv() => panic!("Should not complete yet"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+
+        server_stream.write_all(&payload).await.unwrap();
+        server_stream.flush().await.unwrap();
+
+        let received = reader.recv().await.unwrap();
+        assert_eq!(received, packet);
+    }
+
+    #[tokio::test]
+    async fn recv_multiple_frames_in_one_segment() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(addr).await.unwrap();
+        let server_stream = listener.accept().await.unwrap().0;
+
+        let mut client = Connection::new(client_stream);
+        let mut server = Connection::new(server_stream);
+
+        let p1 = Packet::Handshake {
+            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
+            username: "p1".into(),
+        };
+        let p2 = Packet::Handshake {
+            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
+            username: "p2".into(),
+        };
+
+        client.send(&p1).await.unwrap();
+        client.send(&p2).await.unwrap();
+
+        let r1 = server.recv().await.unwrap();
+        let r2 = server.recv().await.unwrap();
+
+        assert_eq!(r1, p1);
+        assert_eq!(r2, p2);
+    }
 }
+
