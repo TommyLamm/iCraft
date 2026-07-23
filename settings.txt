@@ -16,3 +16,7 @@ key_jump:SPACE
 key_sprint:LCTRL
 key_sneak:LSHIFT
 key_inventory:E
+mp_host_port:25565
+mp_server_address:127.0.0.1
+mp_join_port:25565
+mp_username:PLAYER123

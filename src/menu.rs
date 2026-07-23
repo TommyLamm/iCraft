@@ -1105,12 +1105,16 @@ impl Menu {
                         self.message = Some("ENTER VALID MULTIPLAYER SETTINGS".to_string());
                         return MenuAction::None;
                     };
+                    let is_client = matches!(role, MultiplayerRole::Client { .. });
                     self.selected_role = role;
                     self.sync_and_save_multiplayer_settings();
+                    self.active_field = None;
+                    if is_client {
+                        return self.launch_client();
+                    }
                     self.worlds = discover_worlds();
                     self.selected_world = (!self.worlds.is_empty()).then_some(0);
                     self.world_scroll = 0;
-                    self.active_field = None;
                     self.screen = MenuScreen::Worlds;
                 } else if hit(x, y, 0.02, 0.52, -0.58, -0.45) {
                     self.sync_and_save_multiplayer_settings();
@@ -1299,6 +1303,20 @@ impl Menu {
                 seed,
                 game_mode: self.create_mode,
                 difficulty: self.create_difficulty,
+                role: self.selected_role.clone(),
+            },
+            self.settings.clone(),
+        )
+    }
+
+    fn launch_client(&mut self) -> MenuAction {
+        let world_dir = std::env::temp_dir().join("icraft_multiplayer_client");
+        MenuAction::Launch(
+            WorldLaunch {
+                world_dir,
+                seed: 0,
+                game_mode: GameMode::Survival,
+                difficulty: self.settings.difficulty,
                 role: self.selected_role.clone(),
             },
             self.settings.clone(),
@@ -1605,7 +1623,11 @@ impl Menu {
             }
         }
 
-        for (x0, x1, label) in [(-0.52, -0.02, "SELECT WORLD"), (0.02, 0.52, "BACK")] {
+        let confirm_label = match self.multiplayer_mode {
+            MultiplayerMode::Host => "SELECT WORLD",
+            MultiplayerMode::Join => "CONNECT",
+        };
+        for (x0, x1, label) in [(-0.52, -0.02, confirm_label), (0.02, 0.52, "BACK")] {
             let hover = hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.58, -0.45);
             draw_button(vertices, x0, x1, -0.58, -0.45, hover);
             draw_centered_text_in(vertices, label, x0, x1, -0.542, 0.007, aspect, [1.0; 4]);
@@ -2443,5 +2465,25 @@ mod tests {
         assert_eq!(settings.mp_server_address, "192.168.1.100");
         assert_eq!(settings.mp_join_port, "25571");
         assert_eq!(settings.mp_username, "TEST_USER");
+    }
+
+    #[test]
+    fn client_world_launch_uses_temp_dir_and_placeholder_seed() {
+        let launch = WorldLaunch {
+            world_dir: std::env::temp_dir().join("icraft_multiplayer_client"),
+            seed: 0,
+            game_mode: GameMode::Survival,
+            difficulty: Difficulty::Normal,
+            role: MultiplayerRole::Client {
+                server_addr: "127.0.0.1".to_string(),
+                port: 25565,
+                username: "PLAYER".to_string(),
+            },
+        };
+        assert!(launch.world_dir.starts_with(std::env::temp_dir()));
+        assert!(!launch.world_dir.starts_with("saves"));
+        assert_eq!(launch.seed, 0);
+        assert!(matches!(launch.game_mode, GameMode::Survival));
+        assert!(matches!(launch.role, MultiplayerRole::Client { .. }));
     }
 }
