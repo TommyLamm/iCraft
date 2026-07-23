@@ -233,6 +233,9 @@ impl ApplicationHandler for App {
                     }
                     Some(Runtime::Game(state)) => {
                         let pressed = element_state == ElementState::Pressed;
+                        if !pressed && button == MouseButton::Left {
+                            state.left_mouse_pressed = false;
+                        }
                         if state.connection_lost {
                             if pressed && button == MouseButton::Left {
                                 return_to_menu = state.handle_connection_lost_click();
@@ -259,13 +262,8 @@ impl ApplicationHandler for App {
                             }
                         } else {
                             match button {
-                                MouseButton::Left => {
-                                    state.left_mouse_pressed = pressed;
-                                    if pressed
-                                        && state.game_mode == crate::inventory::GameMode::Creative
-                                    {
-                                        state.handle_click(true);
-                                    }
+                                MouseButton::Left if pressed => {
+                                    state.left_mouse_pressed = state.handle_primary_press();
                                 }
                                 MouseButton::Right if pressed => state.handle_click(false),
                                 _ => {}

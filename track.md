@@ -12,8 +12,8 @@
 | 2 | [Smooth remote-player movement](plans/implementation/02_multiplayer_smoothing.md) | Complete | `2c72b82` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (191 unit + 1 integration); targeted interpolation, protocol, relay, latest-wins, transport, and velocity tests |
 | 3 | [Add Minecraft-style Creative flight](plans/implementation/03_creative_flight.md) | Complete | `b6dcf9b` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (201 unit + 1 integration); 10 flight/input/physics regressions |
 | 4 | [Reject placement intersecting a player](plans/implementation/04_player_placement_collision.md) | Complete | `b8aaaf6` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (210 unit + 1 integration); placement AABB, latest authoritative pose, event classification, and authenticated-session regressions |
-| 5 | [Add a proper 3D torch model](plans/implementation/05_torch_model.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (214 unit + 1 integration); exact bounds/count, UV, winding, AO/light, properties, support/light cleanup |
-| 6 | [Fix Survival attacks against mobs](plans/implementation/06_survival_combat.md) | Pending | — | — |
+| 5 | [Add a proper 3D torch model](plans/implementation/05_torch_model.md) | Complete | `0ea9c8d` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (214 unit + 1 integration); exact bounds/count, UV, winding, AO/light, properties, support/light cleanup |
+| 6 | [Fix Survival attacks against mobs](plans/implementation/06_survival_combat.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (219 unit + 1 integration); hit/miss/latch routing, target filtering, invulnerability/impact, and zero-HP cleanup |
 | 7 | [Add adjustable weather/rain volume](plans/implementation/07_weather_volume.md) | Pending | — | — |
 | 8 | [Add a Creative item catalog on `E`](plans/implementation/08_creative_inventory.md) | Pending | — | — |
 | 9 | [Stop camera rotation while inventory is open](plans/implementation/09_inventory_camera_lock.md) | Pending | — | — |
@@ -57,6 +57,14 @@
   atlas tile `(4,2)`, all faces keep source-cell light and AO 1.0 without
   directional shading, and existing cutout/light/support/non-solid behavior is
   unchanged. Interactive visual inspection from multiple angles remains manual.
+- Task 6 routes every left-button press through authoritative melee targeting
+  before mode-specific block interaction. Survival misses retain held mining,
+  while hits (including invulnerability-window interception) suppress mining
+  behind the target; Creative misses alone use instant break. Only living
+  combat entities can intercept the ray, and zero-HP ordinary mobs now leave
+  the entity list without disrupting nonliving or boss-owned lifecycles.
+  Joined clients remain block-authority-only because mob state replication is
+  not present. Interactive weapon/empty-hand combat remains manual.
 
 ## Commit discipline
 

@@ -34,6 +34,89 @@ const REMOTE_MAX_ANGULAR_SPEED: f32 = std::f32::consts::TAU * 2.0;
 const REMOTE_TELEPORT_DISTANCE: f32 = 8.0;
 const REMOTE_TELEPORT_GAP: f64 = 0.5;
 const CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
+const MELEE_REACH: f32 = 4.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrimaryPressDecision {
+    keep_held_mining: bool,
+    instant_break: bool,
+}
+
+fn primary_press_decision(game_mode: GameMode, melee_consumed: bool) -> PrimaryPressDecision {
+    if melee_consumed {
+        PrimaryPressDecision {
+            keep_held_mining: false,
+            instant_break: false,
+        }
+    } else if game_mode == GameMode::Creative {
+        PrimaryPressDecision {
+            keep_held_mining: false,
+            instant_break: true,
+        }
+    } else {
+        PrimaryPressDecision {
+            keep_held_mining: true,
+            instant_break: false,
+        }
+    }
+}
+
+fn is_legal_melee_target(entity: &crate::entity::Entity) -> bool {
+    entity.entity_type != crate::entity::EntityType::RemotePlayer
+        && entity.max_health > 0.0
+        && entity.health > 0.0
+}
+
+fn closest_melee_target(
+    entities: &[crate::entity::Entity],
+    origin: Vec3,
+    direction: Vec3,
+    reach: f32,
+) -> Option<u64> {
+    if direction.length_squared() <= f32::EPSILON {
+        return None;
+    }
+    let direction = direction.normalize();
+    entities
+        .iter()
+        .filter(|entity| is_legal_melee_target(entity))
+        .filter_map(|entity| {
+            crate::entity::ray_intersects_aabb(origin, direction, &entity.get_aabb())
+                .filter(|distance| distance.is_finite() && *distance <= reach.max(0.0))
+                .map(|distance| (entity.id, distance))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(id, _)| id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeleeImpact {
+    Invulnerable,
+    Damaged { killed: bool },
+}
+
+fn apply_melee_impact(
+    entity: &mut crate::entity::Entity,
+    direction: Vec3,
+    damage: f32,
+    knockback: f32,
+    fire_level: u8,
+) -> MeleeImpact {
+    if entity.invulnerable_time > 0.0 {
+        return MeleeImpact::Invulnerable;
+    }
+
+    entity.health -= damage;
+    entity.invulnerable_time = 0.4;
+    entity.velocity += direction.normalize_or_zero() * knockback + Vec3::new(0.0, 3.0, 0.0);
+    if fire_level > 0 {
+        entity.fire_aspect_timer = entity.fire_aspect_timer.max(fire_level as f32 * 4.0);
+    }
+
+    MeleeImpact::Damaged {
+        killed: entity.health <= 0.0,
+    }
+}
 // Creating an entire render distance while handling a menu click blocks the
 // window event loop and can allocate hundreds of chunk meshes at once.  Start
 // with a safe area around the player; `update_chunks` streams the rest in over
@@ -6187,6 +6270,139 @@ impl State {
         }
     }
 
+    pub fn handle_primary_press(&mut self) -> bool {
+        let melee_consumed = self.is_authoritative() && self.try_melee_attack();
+        let decision = primary_press_decision(self.game_mode, melee_consumed);
+        if decision.instant_break {
+            self.handle_click(true);
+        }
+        decision.keep_held_mining
+    }
+
+    fn try_melee_attack(&mut self) -> bool {
+        if !self.is_authoritative() {
+            return false;
+        }
+
+        let direction = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        )
+        .normalize_or_zero();
+        let Some(entity_id) = closest_melee_target(
+            &self.entity_manager.entities,
+            self.camera.position,
+            direction,
+            MELEE_REACH,
+        ) else {
+            return false;
+        };
+
+        let held_stack = self.inventory.hotbar[self.inventory.selected];
+        let held_item = held_stack
+            .map(|stack| stack.item)
+            .unwrap_or(crate::inventory::Item::Air);
+        let enchantments = held_stack
+            .map(|stack| stack.enchantments)
+            .unwrap_or_default();
+        let damage = held_item
+            .tool_properties()
+            .map(|tool| tool.damage)
+            .unwrap_or(1.0)
+            + crate::enchantment::attack_damage_bonus(&enchantments)
+            + self.potion_effects.strength_bonus();
+        let knockback =
+            8.0 + enchantments.level_of(crate::enchantment::Enchantment::Knockback(1)) as f32 * 3.0;
+        let fire_level = enchantments.level_of(crate::enchantment::Enchantment::FireAspect(1));
+
+        let Some(entity) = self
+            .entity_manager
+            .entities
+            .iter_mut()
+            .find(|entity| entity.id == entity_id)
+        else {
+            return false;
+        };
+        let impact = apply_melee_impact(entity, direction, damage, knockback, fire_level);
+        let MeleeImpact::Damaged { killed } = impact else {
+            return true;
+        };
+
+        println!(
+            "[Debug] Hit {:?}, health={:.1}",
+            entity.entity_type, entity.health
+        );
+
+        if killed {
+            println!("[Debug] Killed {:?}", entity.entity_type);
+            if self.game_mode == GameMode::Survival {
+                let looting = enchantments.level_of(crate::enchantment::Enchantment::Looting(1));
+                for _ in 0..=(looting / 2) {
+                    match entity.entity_type {
+                        crate::entity::EntityType::Zombie => {
+                            self.inventory.add_item(crate::inventory::Item::RottenFlesh);
+                        }
+                        crate::entity::EntityType::Skeleton => {
+                            self.inventory.add_item(crate::inventory::Item::Bone);
+                            self.inventory.add_item(crate::inventory::Item::Arrow);
+                            let mut rng_seed = (entity.position.x as u32)
+                                .wrapping_mul(31)
+                                .wrapping_add(entity.position.z as u32);
+                            let mut next_rand = || {
+                                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                                (rng_seed / 65536) % 32768
+                            };
+                            if next_rand() % 10 == 0 {
+                                self.inventory.add_item(crate::inventory::Item::Bow);
+                            }
+                        }
+                        crate::entity::EntityType::Creeper => {
+                            self.inventory.add_item(crate::inventory::Item::Gunpowder);
+                        }
+                        crate::entity::EntityType::Pig => {
+                            let is_on_fire =
+                                entity.burn_timer > 0.0 || entity.fire_aspect_timer > 0.0;
+                            let drop = if is_on_fire {
+                                crate::inventory::Item::CookedPorkchop
+                            } else {
+                                crate::inventory::Item::RawPorkchop
+                            };
+                            self.inventory.add_item(drop);
+                        }
+                        crate::entity::EntityType::Cow => {
+                            self.inventory.add_item(crate::inventory::Item::RawBeef);
+                            let rng = (entity.position.x as u32).wrapping_mul(31);
+                            if rng % 2 == 0 {
+                                self.inventory.add_item(crate::inventory::Item::Leather);
+                            }
+                        }
+                        crate::entity::EntityType::Sheep => {
+                            self.inventory.add_item(crate::inventory::Item::RawMutton);
+                            if entity.has_wool {
+                                self.inventory.add_item(crate::inventory::Item::Wool);
+                            }
+                        }
+                        crate::entity::EntityType::Chicken => {
+                            self.inventory.add_item(crate::inventory::Item::RawChicken);
+                            self.inventory.add_item(crate::inventory::Item::Feather);
+                        }
+                        _ => {}
+                    }
+                }
+                self.player_state.add_experience(match entity.entity_type {
+                    crate::entity::EntityType::Zombie
+                    | crate::entity::EntityType::Skeleton
+                    | crate::entity::EntityType::Creeper => 5,
+                    _ => 2,
+                });
+            }
+        }
+
+        self.damage_selected_tool(entity_id as u32 ^ self.total_time.to_bits());
+        true
+    }
+
     pub fn handle_click(&mut self, is_left_click: bool) {
         if !self.is_authoritative() {
             let direction = Vec3::new(
@@ -6334,153 +6550,6 @@ impl State {
             self.camera.yaw.sin() * self.camera.pitch.cos(),
         )
         .normalize_or_zero();
-
-        // 1. Raycast against entities first for left-clicks
-        if is_left_click {
-            let mut closest_entity: Option<(u64, f32)> = None;
-            for entity in &self.entity_manager.entities {
-                if matches!(
-                    entity.entity_type,
-                    crate::entity::EntityType::Arrow | crate::entity::EntityType::RemotePlayer
-                ) {
-                    continue;
-                }
-                let aabb = entity.get_aabb();
-                if let Some(dist) =
-                    crate::entity::ray_intersects_aabb(self.camera.position, dir, &aabb)
-                {
-                    if dist <= 4.0 {
-                        if let Some((_, closest_dist)) = closest_entity {
-                            if dist < closest_dist {
-                                closest_entity = Some((entity.id, dist));
-                            }
-                        } else {
-                            closest_entity = Some((entity.id, dist));
-                        }
-                    }
-                }
-            }
-
-            if let Some((entity_id, _)) = closest_entity {
-                if let Some(entity) = self
-                    .entity_manager
-                    .entities
-                    .iter_mut()
-                    .find(|e| e.id == entity_id)
-                {
-                    if entity.invulnerable_time <= 0.0 {
-                        let held_stack = self.inventory.hotbar[self.inventory.selected];
-                        let held_item = held_stack
-                            .map(|s| s.item)
-                            .unwrap_or(crate::inventory::Item::Air);
-                        let enchantments = held_stack.map(|s| s.enchantments).unwrap_or_default();
-                        let damage = held_item.tool_properties().map(|t| t.damage).unwrap_or(1.0)
-                            + crate::enchantment::attack_damage_bonus(&enchantments)
-                            + self.potion_effects.strength_bonus();
-                        let knockback = 8.0
-                            + enchantments.level_of(crate::enchantment::Enchantment::Knockback(1))
-                                as f32
-                                * 3.0;
-
-                        entity.health -= damage;
-                        entity.invulnerable_time = 0.4;
-                        entity.velocity += dir * knockback + Vec3::new(0.0, 3.0, 0.0);
-                        let fire_level =
-                            enchantments.level_of(crate::enchantment::Enchantment::FireAspect(1));
-                        if fire_level > 0 {
-                            entity.fire_aspect_timer =
-                                entity.fire_aspect_timer.max(fire_level as f32 * 4.0);
-                        }
-
-                        println!(
-                            "[Debug] Hit {:?}, health={:.1}",
-                            entity.entity_type, entity.health
-                        );
-
-                        if entity.health <= 0.0 {
-                            println!("[Debug] Killed {:?}", entity.entity_type);
-                            if self.game_mode == GameMode::Survival {
-                                let looting = enchantments
-                                    .level_of(crate::enchantment::Enchantment::Looting(1));
-                                for _ in 0..=(looting / 2) {
-                                    match entity.entity_type {
-                                        crate::entity::EntityType::Zombie => {
-                                            self.inventory
-                                                .add_item(crate::inventory::Item::RottenFlesh);
-                                        }
-                                        crate::entity::EntityType::Skeleton => {
-                                            self.inventory.add_item(crate::inventory::Item::Bone);
-                                            self.inventory.add_item(crate::inventory::Item::Arrow);
-                                            let mut rng_seed = (entity.position.x as u32)
-                                                .wrapping_mul(31)
-                                                .wrapping_add(entity.position.z as u32);
-                                            let mut next_rand = || {
-                                                rng_seed = rng_seed
-                                                    .wrapping_mul(1103515245)
-                                                    .wrapping_add(12345);
-                                                (rng_seed / 65536) % 32768
-                                            };
-                                            if next_rand() % 10 == 0 {
-                                                self.inventory
-                                                    .add_item(crate::inventory::Item::Bow);
-                                            }
-                                        }
-                                        crate::entity::EntityType::Creeper => {
-                                            self.inventory
-                                                .add_item(crate::inventory::Item::Gunpowder);
-                                        }
-                                        crate::entity::EntityType::Pig => {
-                                            let is_on_fire = entity.burn_timer > 0.0
-                                                || entity.fire_aspect_timer > 0.0;
-                                            let drop = if is_on_fire {
-                                                crate::inventory::Item::CookedPorkchop
-                                            } else {
-                                                crate::inventory::Item::RawPorkchop
-                                            };
-                                            self.inventory.add_item(drop);
-                                        }
-                                        crate::entity::EntityType::Cow => {
-                                            self.inventory
-                                                .add_item(crate::inventory::Item::RawBeef);
-                                            let rng = (entity.position.x as u32).wrapping_mul(31);
-                                            if rng % 2 == 0 {
-                                                self.inventory
-                                                    .add_item(crate::inventory::Item::Leather);
-                                            }
-                                        }
-                                        crate::entity::EntityType::Sheep => {
-                                            self.inventory
-                                                .add_item(crate::inventory::Item::RawMutton);
-                                            if entity.has_wool {
-                                                self.inventory
-                                                    .add_item(crate::inventory::Item::Wool);
-                                            }
-                                        }
-                                        crate::entity::EntityType::Chicken => {
-                                            self.inventory
-                                                .add_item(crate::inventory::Item::RawChicken);
-                                            self.inventory
-                                                .add_item(crate::inventory::Item::Feather);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                self.player_state.add_experience(match entity.entity_type {
-                                    crate::entity::EntityType::Zombie
-                                    | crate::entity::EntityType::Skeleton
-                                    | crate::entity::EntityType::Creeper => 5,
-                                    _ => 2,
-                                });
-                            }
-                        }
-
-                        self.damage_selected_tool(entity_id as u32 ^ self.total_time.to_bits());
-
-                        return;
-                    }
-                }
-            }
-        }
 
         if !is_left_click {
             let mut closest_entity: Option<(u64, f32)> = None;
@@ -10621,6 +10690,125 @@ fn debug_chunk_coordinate(position: f32, chunk_size: usize) -> i32 {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
+
+    #[test]
+    fn primary_press_decision_controls_block_fallback_and_held_mining_latch() {
+        assert_eq!(
+            primary_press_decision(GameMode::Survival, true),
+            PrimaryPressDecision {
+                keep_held_mining: false,
+                instant_break: false,
+            }
+        );
+        assert_eq!(
+            primary_press_decision(GameMode::Survival, false),
+            PrimaryPressDecision {
+                keep_held_mining: true,
+                instant_break: false,
+            }
+        );
+        assert_eq!(
+            primary_press_decision(GameMode::Creative, true),
+            PrimaryPressDecision {
+                keep_held_mining: false,
+                instant_break: false,
+            }
+        );
+        assert_eq!(
+            primary_press_decision(GameMode::Creative, false),
+            PrimaryPressDecision {
+                keep_held_mining: false,
+                instant_break: true,
+            }
+        );
+    }
+
+    #[test]
+    fn melee_targeting_filters_noncombat_entities_and_selects_the_nearest_living_target() {
+        use crate::entity::{Entity, EntityType};
+
+        let mut entities = vec![
+            Entity::new(1, EntityType::DroppedItem, Vec3::new(0.0, 0.0, 0.75)),
+            Entity::new(2, EntityType::HeartParticle, Vec3::new(0.0, 0.0, 0.9)),
+            Entity::new(3, EntityType::Arrow, Vec3::new(0.0, 0.0, 1.0)),
+            Entity::new(4, EntityType::SplashPotion, Vec3::new(0.0, 0.0, 1.1)),
+            Entity::new(5, EntityType::WitherSkull, Vec3::new(0.0, 0.0, 1.2)),
+            Entity::new(6, EntityType::DragonBreath, Vec3::new(0.0, 0.0, 1.3)),
+            Entity::new(7, EntityType::RemotePlayer, Vec3::new(0.0, 0.0, 1.4)),
+            Entity::new(8, EntityType::Zombie, Vec3::new(0.0, 0.0, 3.0)),
+            Entity::new(9, EntityType::Skeleton, Vec3::new(0.0, 0.0, 2.0)),
+        ];
+        let invalid_types = [
+            EntityType::DroppedItem,
+            EntityType::HeartParticle,
+            EntityType::Arrow,
+            EntityType::SplashPotion,
+            EntityType::WitherSkull,
+            EntityType::DragonBreath,
+            EntityType::RemotePlayer,
+        ];
+        for entity_type in invalid_types {
+            let entity = entities
+                .iter()
+                .find(|entity| entity.entity_type == entity_type)
+                .unwrap();
+            assert!(!is_legal_melee_target(entity));
+        }
+
+        assert_eq!(
+            closest_melee_target(&entities, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
+            Some(9)
+        );
+
+        entities
+            .iter_mut()
+            .find(|entity| entity.id == 9)
+            .unwrap()
+            .health = 0.0;
+        assert_eq!(
+            closest_melee_target(&entities, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn invulnerable_melee_target_consumes_impact_without_damage_or_knockback() {
+        let mut zombie = crate::entity::Entity::new(
+            1,
+            crate::entity::EntityType::Zombie,
+            Vec3::new(0.0, 0.0, 2.0),
+        );
+        zombie.invulnerable_time = 0.25;
+        let initial_health = zombie.health;
+        let initial_velocity = zombie.velocity;
+
+        assert_eq!(
+            apply_melee_impact(&mut zombie, Vec3::Z, 5.0, 8.0, 2),
+            MeleeImpact::Invulnerable
+        );
+        assert_eq!(zombie.health, initial_health);
+        assert_eq!(zombie.velocity, initial_velocity);
+        assert_eq!(zombie.fire_aspect_timer, 0.0);
+    }
+
+    #[test]
+    fn melee_impact_applies_damage_knockback_fire_and_reports_lethal_hits() {
+        let mut zombie = crate::entity::Entity::new(
+            1,
+            crate::entity::EntityType::Zombie,
+            Vec3::new(0.0, 0.0, 2.0),
+        );
+        zombie.health = 5.0;
+
+        assert_eq!(
+            apply_melee_impact(&mut zombie, Vec3::Z, 5.0, 8.0, 2),
+            MeleeImpact::Damaged { killed: true }
+        );
+        assert_eq!(zombie.health, 0.0);
+        assert_eq!(zombie.invulnerable_time, 0.4);
+        assert_eq!(zombie.velocity, Vec3::new(0.0, 3.0, 8.0));
+        assert_eq!(zombie.fire_aspect_timer, 8.0);
+    }
 
     #[test]
     fn terrain_vertex_layout_exposes_ambient_occlusion() {

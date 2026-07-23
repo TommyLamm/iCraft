@@ -5,6 +5,22 @@ use crate::physics::PlayerPhysics;
 use crate::player::PlayerState;
 use glam::Vec3;
 
+fn should_retain_after_health_cleanup(entity: &Entity) -> bool {
+    entity.health > 0.0
+        || (entity.max_health <= 0.0 && entity.health >= 0.0)
+        || matches!(
+            entity.entity_type,
+            EntityType::Blaze
+                | EntityType::Piglin
+                | EntityType::Husk
+                | EntityType::Shulker
+                | EntityType::EnderDragon
+                | EntityType::Wither
+                | EntityType::EndCrystal
+                | EntityType::RemotePlayer
+        )
+}
+
 pub fn calculate_explosion_damage(center: Vec3, player_pos: Vec3) -> f32 {
     let dist = center.distance(player_pos);
     if dist >= 5.0 {
@@ -561,20 +577,9 @@ pub fn update_mobs(
     }
 
     // Clean up dead entities (health < 0 or health == 0)
-    entity_manager.entities.retain(|entity| {
-        entity.health >= 0.0
-            || matches!(
-                entity.entity_type,
-                EntityType::Blaze
-                    | EntityType::Piglin
-                    | EntityType::Husk
-                    | EntityType::Shulker
-                    | EntityType::EnderDragon
-                    | EntityType::Wither
-                    | EntityType::EndCrystal
-                    | EntityType::RemotePlayer
-            )
-    });
+    entity_manager
+        .entities
+        .retain(should_retain_after_health_cleanup);
 
     blocks_removed
 }
@@ -582,6 +587,60 @@ pub fn update_mobs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_cleanup_removes_zero_hp_living_entities_but_preserves_nonliving_lifecycles() {
+        let mut entity_manager = EntityManager::new();
+        let zombie_id = entity_manager.spawn(EntityType::Zombie, Vec3::ZERO);
+        let dropped_item_id = entity_manager.spawn(EntityType::DroppedItem, Vec3::ZERO);
+        let active_arrow_id = entity_manager.spawn(EntityType::Arrow, Vec3::ZERO);
+        let expired_arrow_id = entity_manager.spawn(EntityType::Arrow, Vec3::ZERO);
+        let boss_owned_id = entity_manager.spawn(EntityType::Blaze, Vec3::ZERO);
+
+        entity_manager
+            .entities
+            .iter_mut()
+            .find(|entity| entity.id == zombie_id)
+            .unwrap()
+            .health = 0.0;
+        entity_manager
+            .entities
+            .iter_mut()
+            .find(|entity| entity.id == expired_arrow_id)
+            .unwrap()
+            .health = -1.0;
+        entity_manager
+            .entities
+            .iter_mut()
+            .find(|entity| entity.id == boss_owned_id)
+            .unwrap()
+            .health = 0.0;
+
+        entity_manager
+            .entities
+            .retain(should_retain_after_health_cleanup);
+
+        assert!(!entity_manager
+            .entities
+            .iter()
+            .any(|entity| entity.id == zombie_id));
+        assert!(entity_manager
+            .entities
+            .iter()
+            .any(|entity| entity.id == dropped_item_id));
+        assert!(entity_manager
+            .entities
+            .iter()
+            .any(|entity| entity.id == active_arrow_id));
+        assert!(!entity_manager
+            .entities
+            .iter()
+            .any(|entity| entity.id == expired_arrow_id));
+        assert!(entity_manager
+            .entities
+            .iter()
+            .any(|entity| entity.id == boss_owned_id));
+    }
 
     #[test]
     fn test_explosion_damage() {

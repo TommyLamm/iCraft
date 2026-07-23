@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `b8aaaf6444516a6fc33757861ea8b888aa8fa2ba` (`b8aaaf6`). This identifies the
+> `0ea9c8d8aa9862551a03c85e319bed50da61cdbe` (`0ea9c8d`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -408,9 +408,9 @@ entity physics and world-side lifecycle events.
 | File | Responsibility / key symbols |
 | --- | --- |
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
-| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing, chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
+| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing (including the primary-press/held-mining latch), chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
 | `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
-| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `DoubleTapTracker`, `SlotType`; selected-world/network setup, frame ordering, Creative flight toggling/lifecycle, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, mining/placement authority gates, sequenced 20 Hz local-pose sends, bounded remote snapshot interpolation/extrapolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
+| `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `DoubleTapTracker`, `PrimaryPressDecision`, `SlotType`; selected-world/network setup, frame ordering, Creative flight toggling/lifecycle, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, melee-first primary-press routing, mining/placement authority gates, sequenced 20 Hz local-pose sends, bounded remote snapshot interpolation/extrapolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/chunk_render.rs` | `TerrainVertex`, mesh bounds/data/bundles, wgpu-depth `Frustum`, sorted `DrawPlan`, and LOD threshold/selection helpers. Pure CPU structures and algorithms are unit tested without a window. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
@@ -443,7 +443,7 @@ entity physics and world-side lifecycle events.
 | `src/player.rs` | `PlayerState`, `DamageSource`; health, hunger, saturation/exhaustion, regeneration, invulnerability, oxygen/drowning, death state. |
 | `src/entity.rs` | `EntityType`, `Entity`, `EntityManager`; shared hostile/passive/projectile/particle/drop/remote-player data, AABBs, gravity/flying physics, velocity-derived orientation, network-player metadata, friendly-projectile metadata, stable entity IDs, and spawn storage. |
 | `src/boss.rs` | Dimension mob population, Ender Dragon, Wither, End Crystal, Blaze/Piglin/Husk/Shulker behavior, Creative-mode attack suppression, boss deaths, drops, block-placement events, and Boss HUD summaries. |
-| `src/mob.rs` | Hostile spawn/AI/combat, skeleton aiming/arrows, Creative-mode targeting suppression, sunlight burning, Creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for dropped items and all physics/AI/despawn logic for snapshot-driven remote players. |
+| `src/mob.rs` | Hostile spawn/AI/combat, skeleton aiming/arrows, Creative-mode targeting suppression, sunlight burning, Creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for dropped items and all physics/AI/despawn logic for snapshot-driven remote players. Its health cleanup removes zero-HP ordinary living mobs while preserving nonliving and boss-owned lifecycle semantics. |
 | `src/passive_mob.rs` | Pig/cow/sheep/chicken wandering, cliff avoidance, breeding/young, drops and species-specific behavior. |
 | `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including the yaw/pitch-aware six-part remote-player avatar and walk swing, velocity-oriented arrows, the skeleton's hand-pivoted bow/draw animation, and rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
 | `src/particles.rs` | `Particle`, `ParticleSystem`, `MAX_PARTICLES`, emitter/atlas helpers; bounded particle physics and camera-facing billboard mesh compilation. |

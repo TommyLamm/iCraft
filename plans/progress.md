@@ -104,6 +104,12 @@ P3 [█████████░] 88.9%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-24
+- ✅ 修復 Survival 怪物攻擊 (By combat sub-agent, reviewed by Codex)
+  - 修改文件：`src/app.rs`, `src/state.rs`, `src/mob.rs`, `ARCHITECTURE.md`, `plans/implementation/06_survival_combat.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：所有左鍵 press 統一先走 authoritative melee；只選 4 格內最近、仍存活且具生命值的合法 combat entity，因此 RemotePlayer、掉落物、粒子與非戰鬥投射物不會吞點擊。Survival miss 才保留 held-mining latch，命中或 invulnerability-window 攔截會消耗 press 並阻止挖到怪物身後方塊；Creative miss 才走瞬間破壞。傷害、擊退、Strength、Fire Aspect、Looting、掉落、XP 與工具耐久沿用既有路徑。一般活體恰好 0 HP 現在會清除，非活體與 boss-owned 實體仍由各自生命週期管理。joined client 因沒有權威 mob replication，不建立會分歧的本地傷害。
+  - Review 修正：初版雖攔截 press，App 仍預先鎖住 `left_mouse_pressed=true`，下一幀可能挖身後方塊；改由 `handle_primary_press()` 回傳是否保留 held mining，並在所有 UI gate 前處理 Left release。
+  - 驗證：Survival/Creative hit-miss-latch 決策、最近合法 target、死目標跳過、invulnerability、致死 damage/knockback/fire 及 0 HP living/nonliving cleanup 測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 219 項單元測試與 1 項整合測試。
+  - 備註：空手／武器攻擊敵對與被動怪物的實際視窗操作保留為人工驗收。
 - ✅ 修復火把模型 (By torch-model sub-agent, reviewed by Codex)：加入正確 3D 地面火把
   - 修改文件：`src/world.rs`, `ARCHITECTURE.md`, `plans/implementation/05_torch_model.md`, `plans/progress.md`, `track.md`
   - 關鍵決策：在非完整 cube 的逐方塊 mesh 路徑加入專用 `append_torch_mesh`，生成置中的 X/Z `7/16..9/16`、Y `0..10/16` 六面 cuboid。沿用既有 outward CW face order，side/top/bottom 分別取 atlas `(4,2)` 內 half-texel inset 子區域；所有頂點以來源格 sky/block light、AO 1.0 送入 shader，不加入一般立方體面陰影。Cutout、非 solid、14 級光源、地面支撐及支撐移除清光保持不變；因缺少可存檔／同步的通用 facing state，本次不虛構壁掛火把。
