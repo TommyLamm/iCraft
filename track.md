@@ -13,8 +13,8 @@
 | 3 | [Add Minecraft-style Creative flight](plans/implementation/03_creative_flight.md) | Complete | `b6dcf9b` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (201 unit + 1 integration); 10 flight/input/physics regressions |
 | 4 | [Reject placement intersecting a player](plans/implementation/04_player_placement_collision.md) | Complete | `b8aaaf6` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (210 unit + 1 integration); placement AABB, latest authoritative pose, event classification, and authenticated-session regressions |
 | 5 | [Add a proper 3D torch model](plans/implementation/05_torch_model.md) | Complete | `0ea9c8d` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (214 unit + 1 integration); exact bounds/count, UV, winding, AO/light, properties, support/light cleanup |
-| 6 | [Fix Survival attacks against mobs](plans/implementation/06_survival_combat.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (219 unit + 1 integration); hit/miss/latch routing, target filtering, invulnerability/impact, and zero-HP cleanup |
-| 7 | [Add adjustable weather/rain volume](plans/implementation/07_weather_volume.md) | Pending | — | — |
+| 6 | [Fix Survival attacks against mobs](plans/implementation/06_survival_combat.md) | Complete | `f9930d1` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (219 unit + 1 integration); hit/miss/latch routing, target filtering, invulnerability/impact, and zero-HP cleanup |
+| 7 | [Add adjustable weather/rain volume](plans/implementation/07_weather_volume.md) | Complete | pending commit | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (226 unit + 1 integration); legacy/clamp/roundtrip settings, category gain, live-loop refresh, and UI hit regions |
 | 8 | [Add a Creative item catalog on `E`](plans/implementation/08_creative_inventory.md) | Pending | — | — |
 | 9 | [Stop camera rotation while inventory is open](plans/implementation/09_inventory_camera_lock.md) | Pending | — | — |
 | 10 | Last: find, list, and fix latent bugs | Pending | — | — |
@@ -65,6 +65,11 @@
   the entity list without disrupting nonliving or boss-owned lifecycles.
   Joined clients remain block-authority-only because mob state replication is
   not present. Interactive weapon/empty-hand combat remains manual.
+- Task 7 adds a persistent Weather volume category with a quieter 40% default.
+  Rain and Thunder use `Master x Sound x Weather`; ordinary SFX remain on
+  `Master x Sound`. Master/Weather changes immediately refresh active loops,
+  and both main-menu Options and the pause menu edit the same settings source.
+  Interactive rainy-weather adjustment and restart persistence remain manual.
 
 ## Commit discipline
 

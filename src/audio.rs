@@ -60,8 +60,31 @@ pub struct AudioManager {
     _stream: Option<OutputStream>,
     stream_handle: Option<OutputStreamHandle>,
     pub volume: f32,
+    weather_volume: f32,
     sound_cache: HashMap<SoundId, Vec<u8>>,
-    active_loops: HashMap<u64, Sink>,
+    active_loops: HashMap<u64, ActiveLoop>,
+}
+
+struct ActiveLoop {
+    sound_id: SoundId,
+    sink: Sink,
+}
+
+fn clamp_volume(volume: f32) -> f32 {
+    if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn sound_gain(base_volume: f32, weather_volume: f32, sound_id: SoundId) -> f32 {
+    let category_gain = if matches!(sound_id, SoundId::Rain | SoundId::Thunder) {
+        clamp_volume(weather_volume)
+    } else {
+        1.0
+    };
+    clamp_volume(base_volume) * category_gain
 }
 
 fn create_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
@@ -377,15 +400,31 @@ impl AudioManager {
             _stream,
             stream_handle,
             volume: 1.0,
+            weather_volume: 1.0,
             sound_cache,
             active_loops: HashMap::new(),
         }
     }
 
     pub fn set_volume(&mut self, volume: f32) {
-        self.volume = volume.clamp(0.0, 1.0);
-        for sink in self.active_loops.values() {
-            sink.set_volume(self.volume);
+        self.volume = clamp_volume(volume);
+        self.refresh_active_loop_volumes();
+    }
+
+    pub fn set_weather_volume(&mut self, volume: f32) {
+        self.weather_volume = clamp_volume(volume);
+        self.refresh_active_loop_volumes();
+    }
+
+    fn gain_for(&self, sound_id: SoundId) -> f32 {
+        sound_gain(self.volume, self.weather_volume, sound_id)
+    }
+
+    fn refresh_active_loop_volumes(&self) {
+        for active_loop in self.active_loops.values() {
+            active_loop
+                .sink
+                .set_volume(self.gain_for(active_loop.sound_id));
         }
     }
 
@@ -401,7 +440,7 @@ impl AudioManager {
         };
         if let Some(source) = self.get_source(sound_id) {
             if let Ok(sink) = Sink::try_new(handle) {
-                sink.set_volume(self.volume);
+                sink.set_volume(self.gain_for(sound_id));
                 sink.append(source);
                 sink.detach();
             }
@@ -428,7 +467,7 @@ impl AudioManager {
                 [left_ear.x, left_ear.y, left_ear.z],
                 [right_ear.x, right_ear.y, right_ear.z],
             ) {
-                sink.set_volume(self.volume);
+                sink.set_volume(self.gain_for(sound_id));
                 sink.append(source);
                 sink.detach();
             }
@@ -445,9 +484,10 @@ impl AudioManager {
         };
         if let Some(source) = self.get_source(sound_id) {
             if let Ok(sink) = Sink::try_new(handle) {
-                sink.set_volume(self.volume);
+                sink.set_volume(self.gain_for(sound_id));
                 sink.append(source.repeat_infinite());
-                self.active_loops.insert(entity_id, sink);
+                self.active_loops
+                    .insert(entity_id, ActiveLoop { sound_id, sink });
             }
         }
     }
@@ -462,8 +502,8 @@ impl AudioManager {
     }
 
     pub fn stop_looping_sound(&mut self, entity_id: u64) {
-        if let Some(sink) = self.active_loops.remove(&entity_id) {
-            sink.stop();
+        if let Some(active_loop) = self.active_loops.remove(&entity_id) {
+            active_loop.sink.stop();
         }
     }
 }
@@ -487,5 +527,58 @@ mod tests {
         // Grass used to be heavily muffled and ~0.05 peak; ensure it is now
         // clearly audible alongside other block materials.
         assert!(peak > 0.08, "grass break peak was {peak}");
+    }
+
+    #[test]
+    fn weather_category_gain_only_affects_rain_and_thunder() {
+        assert!((sound_gain(0.8, 0.25, SoundId::Rain) - 0.2).abs() < f32::EPSILON);
+        assert!((sound_gain(0.8, 0.25, SoundId::Thunder) - 0.2).abs() < f32::EPSILON);
+        assert!(
+            (sound_gain(0.8, 0.25, SoundId::BlockBreak(SoundMaterial::Stone)) - 0.8).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (sound_gain(0.8, 0.25, SoundId::Footstep(SoundMaterial::Grass)) - 0.8).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn changing_weather_volume_refreshes_an_active_rain_loop() {
+        let mut manager = AudioManager {
+            _stream: None,
+            stream_handle: None,
+            volume: 0.8,
+            weather_volume: 0.5,
+            sound_cache: HashMap::new(),
+            active_loops: HashMap::new(),
+        };
+        let (rain_sink, _rain_output) = Sink::new_idle();
+        let (ordinary_sink, _ordinary_output) = Sink::new_idle();
+        manager.active_loops.insert(
+            1,
+            ActiveLoop {
+                sound_id: SoundId::Rain,
+                sink: rain_sink,
+            },
+        );
+        manager.active_loops.insert(
+            2,
+            ActiveLoop {
+                sound_id: SoundId::Footstep(SoundMaterial::Stone),
+                sink: ordinary_sink,
+            },
+        );
+
+        manager.set_weather_volume(0.0);
+        assert_eq!(manager.active_loops[&1].sink.volume(), 0.0);
+        assert!((manager.active_loops[&2].sink.volume() - 0.8).abs() < f32::EPSILON);
+
+        manager.set_weather_volume(2.0);
+        assert!((manager.active_loops[&1].sink.volume() - 0.8).abs() < f32::EPSILON);
+
+        manager.set_weather_volume(0.5);
+        assert!((manager.active_loops[&1].sink.volume() - 0.4).abs() < f32::EPSILON);
+        assert!((manager.active_loops[&2].sink.volume() - 0.8).abs() < f32::EPSILON);
     }
 }

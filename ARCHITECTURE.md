@@ -4,7 +4,7 @@
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `0ea9c8d8aa9862551a03c85e319bed50da61cdbe` (`0ea9c8d`). This identifies the
+> `f9930d134ce8d9a248ba0e0b7cbdf3545a34f9eb` (`f9930d1`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -40,8 +40,11 @@ inventory, sound, action, or broadcast side effects. Client
 connection loss freezes input, removes remote entities, and presents a safe
 return-to-menu overlay without saving the client's transient copy.
 
-Display/input/audio
-settings persist in `settings.txt`, while each world's data (including seed,
+Display/input/audio settings persist in `settings.txt`. Weather audio has an
+independent, backward-compatible 40% default and combines as
+`Master x Sound x Weather` for Rain/Thunder, while ordinary effects use
+`Master x Sound`; changing Master or Weather refreshes active loops
+immediately. Each world's data (including seed,
 metadata, game time, player status, inventory, current dimension, advancement
 progress, and dimension-namespaced chunks) is stored under its own
 `saves/<world>/` directory. Entity state, including bosses and projectiles, is
@@ -409,13 +412,13 @@ entity physics and world-side lifecycle events.
 | --- | --- |
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
 | `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing (including the primary-press/held-mining latch), chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
-| `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings`, key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
+| `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings` (including persistent Master/Music/Sound/Weather volumes), key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
 | `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `DoubleTapTracker`, `PrimaryPressDecision`, `SlotType`; selected-world/network setup, frame ordering, Creative flight toggling/lifecycle, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, melee-first primary-press routing, mining/placement authority gates, sequenced 20 Hz local-pose sends, bounded remote snapshot interpolation/extrapolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
 | `src/chunk_render.rs` | `TerrainVertex`, mesh bounds/data/bundles, wgpu-depth `Frustum`, sorted `DrawPlan`, and LOD threshold/selection helpers. Pure CPU structures and algorithms are unit tested without a window. |
 | `src/shader.wgsl` | Terrain/sky/UI shader entrypoints; lighting packing, fog, animated fluids, underwater and hurt effects. |
 | `src/texture.rs` | `TextureAtlas::new_procedural` and all 16x16 tile/icon drawing, including external-or-procedural 10-stage crack tiles and solid bow/string tiles. Writes `assets/texture_atlas.png`, then uploads it to the GPU. |
-| `src/audio.rs` | `SoundId`, `SoundMaterial`, `AudioManager`; load/cache WAV files, synthesize missing sounds, 2D/approximate 3D playback. |
+| `src/audio.rs` | `SoundId`, `SoundMaterial`, `AudioManager`, `ActiveLoop`; load/cache WAV files, synthesize missing sounds, 2D/approximate 3D playback, category-aware Rain/Thunder gain, and immediate active-loop volume refresh. |
 | `src/weather.rs` | `Weather`, `Precipitation`, `WeatherSystem`; timed transitions, biome precipitation, lightning/flash scheduling, and bounded effect budgets. |
 
 ### World and simulation

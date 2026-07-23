@@ -1,5 +1,9 @@
 # 實作計畫 07：可調雨聲音量
 
+## 狀態
+
+✅ 已完成（2026-07-24）
+
 ## 目標
 
 增加獨立的 Minecraft 式 Weather Volume，立即控制 Rain 與 Thunder；
@@ -25,13 +29,17 @@
 
 ## 驗證
 
-- 舊 settings 缺 key 使用 0.4；超界值 clamp；save 包含新 key。
-- Rain/Thunder gain 乘 weather，BlockBreak/footstep 不乘。
-- loop 播放中調 0 可即時靜音，再調高可恢復。
-- `cargo fmt -- --check`、`cargo test --release`、`cargo check --release`。
-- 人工雨天主選單/暫停調節與重啟持久化。
+- [x] 舊 settings 缺 key 使用 0.4；超界/NaN 安全正規化；save 包含新 key。
+- [x] Rain/Thunder gain 乘 weather，BlockBreak/footstep 不乘。
+- [x] loop 播放中調 0 可即時靜音，再調高可恢復。
+- [x] 主選單 Options 與 pause menu 都有不重疊的 Weather 控制。
+- [x] `GameSettings` 為 source-of-truth，保存時同步 mixer，不反推 master。
+- [x] `cargo fmt -- --check`、`cargo test --release`、`cargo check --release`。
+- [ ] 人工雨天主選單/暫停調節與重啟持久化。
+
+自動驗證結果：226 項單元測試與 1 項整合測試全部通過；唯一編譯
+警告是既有未使用的 `hand_camera_buffer`。
 
 ## Commit
 
 單一功能 commit：`feat(audio): add weather volume control`
-

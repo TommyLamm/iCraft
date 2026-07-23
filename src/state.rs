@@ -35,6 +35,12 @@ const REMOTE_TELEPORT_DISTANCE: f32 = 8.0;
 const REMOTE_TELEPORT_GAP: f64 = 0.5;
 const CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 const MELEE_REACH: f32 = 4.0;
+const PAUSE_WEATHER_VOLUME_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.46, -0.36];
+const PAUSE_QUIT_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.60, -0.50];
+
+fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
+    x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PrimaryPressDecision {
@@ -2248,6 +2254,7 @@ impl State {
 
         let mut audio_manager = crate::audio::AudioManager::new();
         audio_manager.set_volume(settings.effective_sound_volume());
+        audio_manager.set_weather_volume(settings.weather_volume);
 
         // Load save data if exists
         let mut game_mode = launch.game_mode;
@@ -3231,17 +3238,20 @@ impl State {
         }
     }
 
-    pub fn save_settings(&self) {
-        let mut settings = self.settings.clone();
-        settings.fov = self.camera.fov;
-        settings.sensitivity = self.sensitivity;
-        settings.render_distance = self.chunk_manager.render_distance;
-        settings.master_volume = if settings.sound_volume > 0.0 {
-            (self.audio_manager.volume / settings.sound_volume).clamp(0.0, 1.0)
-        } else {
-            settings.master_volume
-        };
-        settings.save();
+    fn sync_audio_settings(&mut self) {
+        self.settings.clamp_audio_volumes();
+        self.audio_manager
+            .set_volume(self.settings.effective_sound_volume());
+        self.audio_manager
+            .set_weather_volume(self.settings.weather_volume);
+    }
+
+    pub fn save_settings(&mut self) {
+        self.settings.fov = self.camera.fov;
+        self.settings.sensitivity = self.sensitivity;
+        self.settings.render_distance = self.chunk_manager.render_distance;
+        self.sync_audio_settings();
+        self.settings.save();
     }
 
     pub fn is_authoritative(&self) -> bool {
@@ -4280,21 +4290,25 @@ impl State {
                 }
                 self.save_settings();
             }
-            // Volume Button: X: [-0.3, 0.3], Y: [-0.32, -0.22]
+            // Master Volume Button: X: [-0.3, 0.3], Y: [-0.32, -0.22]
             else if x >= -0.3 && x <= 0.3 && y >= -0.32 && y <= -0.22 {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::UiClick);
-                let mut new_vol = self.audio_manager.volume;
-                if x < 0.0 {
-                    new_vol = (new_vol - 0.1).max(0.0);
-                } else {
-                    new_vol = (new_vol + 0.1).min(1.0);
-                }
-                self.audio_manager.set_volume(new_vol);
+                let delta = if x < 0.0 { -0.1 } else { 0.1 };
+                self.settings.master_volume = (self.settings.master_volume + delta).clamp(0.0, 1.0);
                 self.save_settings();
             }
-            // Quit Button bounds (Shifted): X: [-0.3, 0.3], Y: [-0.46, -0.36]
-            else if x >= -0.3 && x <= 0.3 && y >= -0.46 && y <= -0.36 {
+            // Weather Volume Button: X: [-0.3, 0.3], Y: [-0.46, -0.36]
+            else if point_in_bounds(x, y, PAUSE_WEATHER_VOLUME_BOUNDS) {
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
+                let delta = if x < 0.0 { -0.1 } else { 0.1 };
+                self.settings.weather_volume =
+                    (self.settings.weather_volume + delta).clamp(0.0, 1.0);
+                self.save_settings();
+            }
+            // Quit Button bounds: X: [-0.3, 0.3], Y: [-0.60, -0.50]
+            else if point_in_bounds(x, y, PAUSE_QUIT_BOUNDS) {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::UiClick);
                 self.is_saving = true;
@@ -8080,8 +8094,8 @@ impl State {
                 mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.18 && mouse_y <= -0.08;
             let vol_hover =
                 mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.32 && mouse_y <= -0.22;
-            let quit_hover =
-                mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.46 && mouse_y <= -0.36;
+            let weather_vol_hover = point_in_bounds(mouse_x, mouse_y, PAUSE_WEATHER_VOLUME_BOUNDS);
+            let quit_hover = point_in_bounds(mouse_x, mouse_y, PAUSE_QUIT_BOUNDS);
 
             // 1. Dark overlay (screen covers from -1.0 to 1.0)
             let bg_color = [0.1, 0.1, 0.1, 0.7];
@@ -8225,9 +8239,16 @@ impl State {
                 &mut ui_line_vertices,
             );
             draw_button(
+                weather_vol_hover,
+                PAUSE_WEATHER_VOLUME_BOUNDS[2],
+                PAUSE_WEATHER_VOLUME_BOUNDS[3],
+                &mut ui_vertices,
+                &mut ui_line_vertices,
+            );
+            draw_button(
                 quit_hover,
-                -0.46,
-                -0.36,
+                PAUSE_QUIT_BOUNDS[2],
+                PAUSE_QUIT_BOUNDS[3],
                 &mut ui_vertices,
                 &mut ui_line_vertices,
             );
@@ -8319,8 +8340,11 @@ impl State {
                 &mut ui_line_vertices,
             );
 
-            // "VOLUME < value >"
-            let vol_text = format!("VOLUME < {:.0}% >", self.audio_manager.volume * 100.0);
+            // "MASTER VOLUME < value >"
+            let vol_text = format!(
+                "MASTER VOLUME < {:.0}% >",
+                self.settings.master_volume * 100.0
+            );
             draw_centered_text(
                 &vol_text,
                 -0.28,
@@ -8331,10 +8355,25 @@ impl State {
                 &mut ui_line_vertices,
             );
 
+            // "WEATHER VOLUME < value >"
+            let weather_vol_text = format!(
+                "WEATHER VOLUME < {:.0}% >",
+                self.settings.weather_volume * 100.0
+            );
+            draw_centered_text(
+                &weather_vol_text,
+                -0.42,
+                0.02,
+                0.04,
+                0.008,
+                text_color,
+                &mut ui_line_vertices,
+            );
+
             // "SAVE AND QUIT"
             draw_centered_text(
                 "SAVE AND QUIT",
-                -0.42,
+                -0.56,
                 0.02,
                 0.04,
                 0.008,
@@ -11020,6 +11059,15 @@ mod debug_tests {
         assert!(biomes
             .into_iter()
             .all(|biome| !biome_debug_name(biome).is_empty()));
+    }
+
+    #[test]
+    fn pause_weather_volume_and_quit_hit_regions_do_not_overlap() {
+        assert!(point_in_bounds(0.0, -0.41, PAUSE_WEATHER_VOLUME_BOUNDS));
+        assert!(!point_in_bounds(0.0, -0.41, PAUSE_QUIT_BOUNDS));
+        assert!(point_in_bounds(0.0, -0.55, PAUSE_QUIT_BOUNDS));
+        assert!(!point_in_bounds(0.0, -0.55, PAUSE_WEATHER_VOLUME_BOUNDS));
+        assert!(!point_in_bounds(0.31, -0.41, PAUSE_WEATHER_VOLUME_BOUNDS));
     }
 
     #[test]

@@ -104,6 +104,11 @@ P3 [█████████░] 88.9%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-24
+- ✅ 新增可調 Weather 音量 (By rain-volume sub-agent, reviewed by Codex)
+  - 修改文件：`src/audio.rs`, `src/menu.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/07_weather_volume.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：`GameSettings` 新增向後相容的 `weather_volume`，舊設定缺鍵使用較安靜的 0.4，載入／保存會 clamp 超界值並安全處理 NaN。AudioManager 把已合成的 `Master×Sound` base 再按類別套用 Weather，故 Rain/Thunder 為 `Master×Sound×Weather`，其他 SFX 不受影響；active loop 保存 SoundId，Master 或 Weather 改動時立即刷新正在播放的雨聲。主選單 Options 與 pause menu 都加入 Weather 控制，State 只從 `self.settings` 同步 mixer，不再由 mixer 反推 master。
+  - 驗證：舊檔預設、超界/NaN、save/load roundtrip、Rain/Thunder 與普通 SFX gain、idle Sink active Rain loop 0→恢復、主選單行列及 pause Weather/Quit hit region 測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 226 項單元測試與 1 項整合測試。
+  - 備註：雨天主／暫停選單調整、聽感及重啟持久化的實際視窗操作保留為人工驗收。
 - ✅ 修復 Survival 怪物攻擊 (By combat sub-agent, reviewed by Codex)
   - 修改文件：`src/app.rs`, `src/state.rs`, `src/mob.rs`, `ARCHITECTURE.md`, `plans/implementation/06_survival_combat.md`, `plans/progress.md`, `track.md`
   - 關鍵決策：所有左鍵 press 統一先走 authoritative melee；只選 4 格內最近、仍存活且具生命值的合法 combat entity，因此 RemotePlayer、掉落物、粒子與非戰鬥投射物不會吞點擊。Survival miss 才保留 held-mining latch，命中或 invulnerability-window 攔截會消耗 press 並阻止挖到怪物身後方塊；Creative miss 才走瞬間破壞。傷害、擊退、Strength、Fire Aspect、Looting、掉落、XP 與工具耐久沿用既有路徑。一般活體恰好 0 HP 現在會清除，非活體與 boss-owned 實體仍由各自生命週期管理。joined client 因沒有權威 mob replication，不建立會分歧的本地傷害。

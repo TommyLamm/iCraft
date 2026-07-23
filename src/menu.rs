@@ -12,6 +12,15 @@ const UI_VERTEX_CAPACITY: usize = 65_536;
 const SETTINGS_FILE: &str = "settings.txt";
 const SAVES_DIR: &str = "saves";
 const META_FILE: &str = "world.meta";
+const OPTIONS_ROW_TOPS: [f32; 6] = [0.58, 0.38, 0.18, -0.02, -0.22, -0.42];
+
+fn clamp_setting_volume(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Difficulty {
@@ -116,6 +125,7 @@ pub struct GameSettings {
     pub master_volume: f32,
     pub music_volume: f32,
     pub sound_volume: f32,
+    pub weather_volume: f32,
     pub difficulty: Difficulty,
     pub language: Language,
     pub controls: ControlBindings,
@@ -136,6 +146,7 @@ impl Default for GameSettings {
             master_volume: 1.0,
             music_volume: 0.7,
             sound_volume: 1.0,
+            weather_volume: 0.4,
             difficulty: Difficulty::Normal,
             language: Language::English,
             controls: ControlBindings::default(),
@@ -149,10 +160,14 @@ impl Default for GameSettings {
 
 impl GameSettings {
     pub fn load() -> Self {
-        let mut settings = Self::default();
         let Ok(contents) = fs::read_to_string(SETTINGS_FILE) else {
-            return settings;
+            return Self::default();
         };
+        Self::from_file_contents(&contents)
+    }
+
+    fn from_file_contents(contents: &str) -> Self {
+        let mut settings = Self::default();
         for line in contents.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
@@ -177,6 +192,9 @@ impl GameSettings {
                 "sound_volume" => {
                     settings.sound_volume = value.parse().unwrap_or(settings.sound_volume)
                 }
+                "weather_volume" => {
+                    settings.weather_volume = value.parse().unwrap_or(settings.weather_volume)
+                }
                 "difficulty" => settings.difficulty = Difficulty::parse(value),
                 "language" => settings.language = Language::parse(value),
                 "key_forward" => set_key(&mut settings.controls.forward, value),
@@ -197,14 +215,20 @@ impl GameSettings {
         settings.fov = settings.fov.clamp(30.0, 120.0);
         settings.sensitivity = settings.sensitivity.clamp(0.0002, 0.006);
         settings.render_distance = settings.render_distance.clamp(2, 16);
-        settings.master_volume = settings.master_volume.clamp(0.0, 1.0);
-        settings.music_volume = settings.music_volume.clamp(0.0, 1.0);
-        settings.sound_volume = settings.sound_volume.clamp(0.0, 1.0);
+        settings.clamp_audio_volumes();
         settings
     }
 
     pub fn save(&self) {
-        let contents = format!(
+        if let Err(error) = fs::write(SETTINGS_FILE, self.to_file_contents()) {
+            eprintln!("[Settings] Could not save settings: {error}");
+        }
+    }
+
+    fn to_file_contents(&self) -> String {
+        let mut settings = self.clone();
+        settings.clamp_audio_volumes();
+        format!(
             concat!(
                 "fov:{}\n",
                 "sensitivity:{}\n",
@@ -214,6 +238,7 @@ impl GameSettings {
                 "master_volume:{}\n",
                 "music_volume:{}\n",
                 "sound_volume:{}\n",
+                "weather_volume:{}\n",
                 "difficulty:{}\n",
                 "language:{}\n",
                 "key_forward:{}\n",
@@ -229,36 +254,41 @@ impl GameSettings {
                 "mp_join_port:{}\n",
                 "mp_username:{}\n"
             ),
-            self.fov,
-            self.sensitivity,
-            self.render_distance,
-            self.fullscreen,
-            self.vsync,
-            self.master_volume,
-            self.music_volume,
-            self.sound_volume,
-            self.difficulty.as_str(),
-            self.language.as_str(),
-            key_name(self.controls.forward),
-            key_name(self.controls.backward),
-            key_name(self.controls.left),
-            key_name(self.controls.right),
-            key_name(self.controls.jump),
-            key_name(self.controls.sprint),
-            key_name(self.controls.sneak),
-            key_name(self.controls.inventory),
-            self.mp_host_port,
-            self.mp_server_address,
-            self.mp_join_port,
-            self.mp_username,
-        );
-        if let Err(error) = fs::write(SETTINGS_FILE, contents) {
-            eprintln!("[Settings] Could not save settings: {error}");
-        }
+            settings.fov,
+            settings.sensitivity,
+            settings.render_distance,
+            settings.fullscreen,
+            settings.vsync,
+            settings.master_volume,
+            settings.music_volume,
+            settings.sound_volume,
+            settings.weather_volume,
+            settings.difficulty.as_str(),
+            settings.language.as_str(),
+            key_name(settings.controls.forward),
+            key_name(settings.controls.backward),
+            key_name(settings.controls.left),
+            key_name(settings.controls.right),
+            key_name(settings.controls.jump),
+            key_name(settings.controls.sprint),
+            key_name(settings.controls.sneak),
+            key_name(settings.controls.inventory),
+            settings.mp_host_port,
+            settings.mp_server_address,
+            settings.mp_join_port,
+            settings.mp_username,
+        )
+    }
+
+    pub fn clamp_audio_volumes(&mut self) {
+        self.master_volume = clamp_setting_volume(self.master_volume, 1.0);
+        self.music_volume = clamp_setting_volume(self.music_volume, 0.7);
+        self.sound_volume = clamp_setting_volume(self.sound_volume, 1.0);
+        self.weather_volume = clamp_setting_volume(self.weather_volume, 0.4);
     }
 
     pub fn effective_sound_volume(&self) -> f32 {
-        self.master_volume * self.sound_volume
+        clamp_setting_volume(self.master_volume, 1.0) * clamp_setting_volume(self.sound_volume, 1.0)
     }
 }
 
@@ -1326,9 +1356,7 @@ impl Menu {
     fn handle_options_click(&mut self, x: f32, y: f32) {
         let left = x >= -0.82 && x <= -0.05;
         let right = x >= 0.05 && x <= 0.82;
-        let row = [0.58, 0.38, 0.18, -0.02, -0.22]
-            .iter()
-            .position(|top| y <= *top && y >= *top - 0.13);
+        let row = options_row_at(y);
         let delta = if x < -0.43 || (x > 0.05 && x < 0.43) {
             -1.0
         } else {
@@ -1375,8 +1403,12 @@ impl Menu {
                 self.settings.sound_volume =
                     (self.settings.sound_volume + delta * 0.1).clamp(0.0, 1.0)
             }
-            (_, true, Some(3)) => self.settings.language = self.settings.language.toggle(),
-            (_, true, Some(4)) => {
+            (_, true, Some(3)) => {
+                self.settings.weather_volume =
+                    (self.settings.weather_volume + delta * 0.1).clamp(0.0, 1.0)
+            }
+            (_, true, Some(4)) => self.settings.language = self.settings.language.toggle(),
+            (_, true, Some(5)) => {
                 self.screen = MenuScreen::Controls;
                 return;
             }
@@ -1887,38 +1919,68 @@ impl Menu {
             ),
             format!("MUSIC VOLUME: < {}% >", percent(self.settings.music_volume)),
             format!("SOUND VOLUME: < {}% >", percent(self.settings.sound_volume)),
+            format!(
+                "WEATHER VOLUME: < {}% >",
+                percent(self.settings.weather_volume)
+            ),
             format!("LANGUAGE: < {} >", self.settings.language.as_str()),
             "CONTROLS...".to_string(),
         ];
-        for row in 0..5 {
-            let top = 0.58 - row as f32 * 0.20;
-            for (x0, x1, label) in [(-0.82, -0.05, &left[row]), (0.05, 0.82, &right[row])] {
-                draw_button(
-                    vertices,
-                    x0,
-                    x1,
+        for (row, label) in left.iter().enumerate() {
+            let top = OPTIONS_ROW_TOPS[row];
+            draw_button(
+                vertices,
+                -0.82,
+                -0.05,
+                top - 0.13,
+                top,
+                hit(
+                    self.mouse_ndc[0],
+                    self.mouse_ndc[1],
+                    -0.82,
+                    -0.05,
                     top - 0.13,
                     top,
-                    hit(
-                        self.mouse_ndc[0],
-                        self.mouse_ndc[1],
-                        x0,
-                        x1,
-                        top - 0.13,
-                        top,
-                    ),
-                );
-                draw_centered_text_in(
-                    vertices,
-                    label,
-                    x0,
-                    x1,
-                    top - 0.092,
-                    0.0058,
-                    aspect,
-                    [1.0; 4],
-                );
-            }
+                ),
+            );
+            draw_centered_text_in(
+                vertices,
+                label,
+                -0.82,
+                -0.05,
+                top - 0.092,
+                0.0058,
+                aspect,
+                [1.0; 4],
+            );
+        }
+        for (row, label) in right.iter().enumerate() {
+            let top = OPTIONS_ROW_TOPS[row];
+            draw_button(
+                vertices,
+                0.05,
+                0.82,
+                top - 0.13,
+                top,
+                hit(
+                    self.mouse_ndc[0],
+                    self.mouse_ndc[1],
+                    0.05,
+                    0.82,
+                    top - 0.13,
+                    top,
+                ),
+            );
+            draw_centered_text_in(
+                vertices,
+                label,
+                0.05,
+                0.82,
+                top - 0.092,
+                0.0058,
+                aspect,
+                [1.0; 4],
+            );
         }
         draw_button(
             vertices,
@@ -2140,7 +2202,13 @@ fn relative_time(timestamp: u64) -> String {
 }
 
 fn percent(value: f32) -> u32 {
-    (value * 100.0).round() as u32
+    (value.clamp(0.0, 1.0) * 100.0).round() as u32
+}
+
+fn options_row_at(y: f32) -> Option<usize> {
+    OPTIONS_ROW_TOPS
+        .iter()
+        .position(|top| y <= *top && y >= *top - 0.13)
 }
 
 fn on_off(value: bool) -> &'static str {
@@ -2446,6 +2514,47 @@ mod tests {
     fn difficulty_steps_both_directions() {
         assert_eq!(Difficulty::Peaceful.step(-1), Difficulty::Hard);
         assert_eq!(Difficulty::Normal.step(1), Difficulty::Hard);
+    }
+
+    #[test]
+    fn legacy_settings_without_weather_volume_use_reduced_default() {
+        let settings = GameSettings::from_file_contents(
+            "master_volume:0.8\nsound_volume:0.6\nmusic_volume:0.2\n",
+        );
+
+        assert!((settings.weather_volume - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn weather_volume_load_clamps_out_of_range_values() {
+        let too_high = GameSettings::from_file_contents("weather_volume:4.5\n");
+        let too_low = GameSettings::from_file_contents("weather_volume:-2\n");
+        let not_finite = GameSettings::from_file_contents("weather_volume:NaN\n");
+
+        assert_eq!(too_high.weather_volume, 1.0);
+        assert_eq!(too_low.weather_volume, 0.0);
+        assert_eq!(not_finite.weather_volume, 0.4);
+    }
+
+    #[test]
+    fn settings_file_round_trip_includes_weather_volume() {
+        let mut original = GameSettings::default();
+        original.weather_volume = 0.3;
+
+        let contents = original.to_file_contents();
+        let loaded = GameSettings::from_file_contents(&contents);
+
+        assert!(contents.contains("weather_volume:0.3\n"));
+        assert!((loaded.weather_volume - original.weather_volume).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn weather_options_row_is_distinct_from_language_controls_and_back() {
+        assert_eq!(options_row_at(-0.08), Some(3));
+        assert_eq!(options_row_at(-0.28), Some(4));
+        assert_eq!(options_row_at(-0.48), Some(5));
+        assert_eq!(options_row_at(-0.70), None);
+        assert!(hit(0.4, -0.08, 0.05, 0.82, -0.15, -0.02));
     }
 
     #[test]
