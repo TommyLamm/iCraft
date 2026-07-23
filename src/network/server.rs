@@ -261,7 +261,9 @@ impl NetworkServer {
             .await
             .is_err()
         {
-            eprintln!("[NetworkServer] Failed to send LoginSuccess to '{handshake}' (Player ID: {id})");
+            eprintln!(
+                "[NetworkServer] Failed to send LoginSuccess to '{handshake}' (Player ID: {id})"
+            );
             return;
         }
 
@@ -311,14 +313,23 @@ impl NetworkServer {
                 tokio::select! {
                     queued = out_rx.recv() => {
                         match queued {
-                            Some(packet) if writer.send(&packet).await.is_ok() => {}
-                            Some(_) | None => break,
+                            Some(packet) => {
+                                if writer.send(&packet).await.is_err() {
+                                    eprintln!("[NetworkServer] Send task: writer send failed for queued packet");
+                                    break;
+                                }
+                            }
+                            None => {
+                                eprintln!("[NetworkServer] Send task: out_rx closed (session removed)");
+                                break;
+                            }
                         }
                     }
                     _ = keepalive.tick() => {
                         if writer.send(&Packet::Keepalive {
                             protocol_version: PROTOCOL_VERSION,
                         }).await.is_err() {
+                            eprintln!("[NetworkServer] Send task: keepalive send failed");
                             break;
                         }
                     }
@@ -326,20 +337,27 @@ impl NetworkServer {
             }
         });
 
+        #[allow(unused_assignments)]
+        let mut disconnect_reason = "unknown".to_string();
         loop {
             tokio::select! {
                 incoming = time::timeout(CLIENT_TIMEOUT, reader.recv()) => {
                     match incoming {
-                        Ok(Ok(packet)) if packet.protocol_version() != PROTOCOL_VERSION => break,
+                        Ok(Ok(packet)) if packet.protocol_version() != PROTOCOL_VERSION => {
+                            disconnect_reason = format!("protocol version mismatch (got {}, expected {})", packet.protocol_version(), PROTOCOL_VERSION);
+                            break;
+                        }
                         Ok(Ok(Packet::PlayerPosition { x, y, z, yaw, pitch, .. })) => {
                             if server_to_host.send(ServerToHost::ClientPosition {
                                 id, x, y, z, yaw, pitch,
                             }).is_err() {
+                                disconnect_reason = "host channel closed (ClientPosition)".into();
                                 break;
                             }
                         }
                         Ok(Ok(Packet::PlayerAction { action, .. })) => {
                             if server_to_host.send(ServerToHost::ClientAction { id, action }).is_err() {
+                                disconnect_reason = "host channel closed (ClientAction)".into();
                                 break;
                             }
                         }
@@ -347,24 +365,51 @@ impl NetworkServer {
                             if server_to_host.send(ServerToHost::ClientBlockChange {
                                 id, x, y, z, block,
                             }).is_err() {
+                                disconnect_reason = "host channel closed (ClientBlockChange)".into();
                                 break;
                             }
                         }
                         Ok(Ok(Packet::ChatMessage { message, .. })) => {
                             if server_to_host.send(ServerToHost::ChatFromClient { id, message }).is_err() {
+                                disconnect_reason = "host channel closed (ChatFromClient)".into();
                                 break;
                             }
                         }
                         Ok(Ok(Packet::Keepalive { .. })) => {}
-                        Ok(Ok(Packet::Disconnect { .. })) | Ok(Err(_)) | Err(_) => break,
+                        Ok(Ok(Packet::Disconnect { reason, .. })) => {
+                            disconnect_reason = format!("client sent Disconnect: {reason}");
+                            break;
+                        }
+                        Ok(Err(error)) => {
+                            disconnect_reason = format!("connection recv error: {error}");
+                            break;
+                        }
+                        Err(_) => {
+                            disconnect_reason = format!("timeout: no packet received within {CLIENT_TIMEOUT:?}");
+                            break;
+                        }
                         Ok(Ok(_)) => {}
                     }
                 }
-                _ = &mut send_task => break,
+                _ = &mut send_task => {
+                    disconnect_reason = "send task exited".into();
+                    break;
+                }
             }
         }
 
+        eprintln!(
+            "[NetworkServer] Client '{}' (Player ID: {}) disconnecting: {disconnect_reason}",
+            sessions
+                .lock()
+                .await
+                .get(&id)
+                .map(|s| s.username.clone())
+                .unwrap_or_default(),
+            id
+        );
         Self::remove_client(id, &sessions, &server_to_host).await;
+        send_task.abort();
         send_task.abort();
     }
 
@@ -378,7 +423,10 @@ impl NetworkServer {
             return;
         };
 
-        eprintln!("[NetworkServer] Client '{}' (Player ID: {}) disconnected", session.username, id);
+        eprintln!(
+            "[NetworkServer] Client '{}' (Player ID: {}) disconnected",
+            session.username, id
+        );
         let _ = server_to_host.send(ServerToHost::ClientLeft { id });
         Self::broadcast_to(
             sessions,

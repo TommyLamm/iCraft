@@ -216,6 +216,7 @@ async fn run_client(
             incoming = reader.recv() => {
                 match incoming {
                     Ok(packet) if packet.protocol_version() != PROTOCOL_VERSION => {
+                        eprintln!("[NetworkClient] Disconnecting: protocol version mismatch");
                         let _ = client_to_game.send(ClientToGame::Disconnected { reason: "protocol version mismatch".into() });
                         break;
                     }
@@ -229,13 +230,22 @@ async fn run_client(
                     Ok(Packet::ChatMessage { sender, message, .. }) => { let _ = client_to_game.send(ClientToGame::Chat { sender, message }); }
                     Ok(Packet::Keepalive { .. }) => {
                         if writer.send(&Packet::Keepalive { protocol_version: PROTOCOL_VERSION }).await.is_err() {
+                            eprintln!("[NetworkClient] Disconnecting: failed to reply to keepalive");
                             let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                             break;
                         }
                     }
-                    Ok(Packet::Disconnect { reason, .. }) => { let _ = client_to_game.send(ClientToGame::Disconnected { reason }); break; }
+                    Ok(Packet::Disconnect { reason, .. }) => {
+                        eprintln!("[NetworkClient] Disconnecting: server sent Disconnect: {reason}");
+                        let _ = client_to_game.send(ClientToGame::Disconnected { reason });
+                        break;
+                    }
                     Ok(_) => {}
-                    Err(_) => { let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() }); break; }
+                    Err(error) => {
+                        eprintln!("[NetworkClient] Disconnecting: reader recv error: {error}");
+                        let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                        break;
+                    }
                 }
             }
             _ = tick.tick() => {
@@ -243,34 +253,42 @@ async fn run_client(
                     match game_to_client.try_recv() {
                         Ok(GameToClient::SendPosition { x, y, z, yaw, pitch }) => {
                             if writer.send(&Packet::PlayerPosition { protocol_version: PROTOCOL_VERSION, id: player_id, x, y, z, yaw, pitch }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send PlayerPosition");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
                         }
                         Ok(GameToClient::SendAction { action }) => {
                             if writer.send(&Packet::PlayerAction { protocol_version: PROTOCOL_VERSION, id: player_id, action }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send PlayerAction");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
                         }
                         Ok(GameToClient::RequestBlockChange { x, y, z, block }) => {
                             if writer.send(&Packet::BlockChange { protocol_version: PROTOCOL_VERSION, x, y, z, block }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send BlockChange");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
                         }
                         Ok(GameToClient::SendChat { message }) => {
                             if writer.send(&Packet::ChatMessage { protocol_version: PROTOCOL_VERSION, sender: username.clone(), message }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send ChatMessage");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
                         }
                         Ok(GameToClient::Disconnect) => {
+                            eprintln!("[NetworkClient] Disconnecting: game thread requested disconnect");
                             let _ = writer.send(&Packet::Disconnect { protocol_version: PROTOCOL_VERSION, reason: "client disconnect".into() }).await;
                             return;
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            eprintln!("[NetworkClient] Disconnecting: game_to_client channel closed (State dropped?)");
+                            return;
+                        }
                     }
                 }
             }

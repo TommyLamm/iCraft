@@ -2233,6 +2233,7 @@ impl State {
                     );
                 }
                 NetworkInbound::Disconnected(reason) => {
+                    eprintln!("[State] Network disconnected: {reason}");
                     self.network_ready = false;
                     self.network_status = Some(format!("CONNECTION LOST: {reason}"));
                     self.connection_lost = true;
@@ -8183,7 +8184,9 @@ impl State {
                                 self.remote_players.len()
                             )
                         }
-                        MultiplayerRole::Client { server_addr, port, .. } => {
+                        MultiplayerRole::Client {
+                            server_addr, port, ..
+                        } => {
                             format!(
                                 "NET: CLIENT @ {}:{} | LOCAL ID: {} | PLAYERS: {}",
                                 server_addr,
