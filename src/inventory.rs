@@ -169,6 +169,198 @@ pub enum Item {
     ShulkerShell,
 }
 
+pub const CREATIVE_COLUMNS: usize = 9;
+pub const CREATIVE_ROWS: usize = 5;
+pub const CREATIVE_VISIBLE_SLOTS: usize = CREATIVE_COLUMNS * CREATIVE_ROWS;
+
+pub const CREATIVE_ITEMS: [Item; 144] = [
+    Item::Grass,
+    Item::Dirt,
+    Item::Stone,
+    Item::Sand,
+    Item::Gravel,
+    Item::OakLog,
+    Item::OakPlanks,
+    Item::OakLeaves,
+    Item::Cobblestone,
+    Item::Bedrock,
+    Item::Water,
+    Item::CoalOre,
+    Item::IronOre,
+    Item::GoldOre,
+    Item::DiamondOre,
+    Item::RedstoneOre,
+    Item::Glass,
+    Item::Brick,
+    Item::StoneBrick,
+    Item::Snow,
+    Item::Ice,
+    Item::Clay,
+    Item::Sandstone,
+    Item::Obsidian,
+    Item::CraftingTable,
+    Item::Furnace,
+    Item::Chest,
+    Item::TNT,
+    Item::Bookshelf,
+    Item::Torch,
+    Item::Lava,
+    Item::StoneSword,
+    Item::StonePickaxe,
+    Item::StoneAxe,
+    Item::StoneShovel,
+    Item::IronSword,
+    Item::IronPickaxe,
+    Item::IronAxe,
+    Item::IronShovel,
+    Item::DiamondSword,
+    Item::DiamondPickaxe,
+    Item::DiamondAxe,
+    Item::DiamondShovel,
+    Item::Stick,
+    Item::Coal,
+    Item::IronIngot,
+    Item::GoldIngot,
+    Item::Diamond,
+    Item::Redstone,
+    Item::Apple,
+    Item::Bread,
+    Item::RottenFlesh,
+    Item::Bone,
+    Item::Bow,
+    Item::Gunpowder,
+    Item::Wheat,
+    Item::Seeds,
+    Item::Carrot,
+    Item::Shears,
+    Item::Bucket,
+    Item::MilkBucket,
+    Item::RawPorkchop,
+    Item::CookedPorkchop,
+    Item::RawBeef,
+    Item::CookedBeef,
+    Item::RawMutton,
+    Item::CookedMutton,
+    Item::RawChicken,
+    Item::CookedChicken,
+    Item::Wool,
+    Item::Leather,
+    Item::Feather,
+    Item::Egg,
+    Item::RedDye,
+    Item::BlueDye,
+    Item::GreenDye,
+    Item::BirchLog,
+    Item::BirchPlanks,
+    Item::BirchLeaves,
+    Item::SpruceLog,
+    Item::SprucePlanks,
+    Item::SpruceLeaves,
+    Item::TallGrass,
+    Item::Dandelion,
+    Item::Poppy,
+    Item::Cactus,
+    Item::SugarCane,
+    Item::Pumpkin,
+    Item::Melon,
+    Item::EnchantingTable,
+    Item::BrewingStand,
+    Item::Anvil,
+    Item::LapisLazuli,
+    Item::IronHelmet,
+    Item::IronChestplate,
+    Item::IronLeggings,
+    Item::IronBoots,
+    Item::GlassBottle,
+    Item::Potion,
+    Item::SplashPotion,
+    Item::NetherWart,
+    Item::Sugar,
+    Item::BlazePowder,
+    Item::GlisteringMelon,
+    Item::GhastTear,
+    Item::GoldenCarrot,
+    Item::FermentedSpiderEye,
+    Item::MagmaCream,
+    Item::Pufferfish,
+    Item::SpiderEye,
+    Item::GlowstoneDust,
+    Item::RedstoneDust,
+    Item::Arrow,
+    Item::RedstoneWire,
+    Item::RedstoneTorch,
+    Item::Repeater,
+    Item::Comparator,
+    Item::StoneButton,
+    Item::Lever,
+    Item::PressurePlate,
+    Item::Piston,
+    Item::StickyPiston,
+    Item::RedstoneLamp,
+    Item::OakDoor,
+    Item::OakTrapdoor,
+    Item::Dispenser,
+    Item::Dropper,
+    Item::NoteBlock,
+    Item::Netherrack,
+    Item::SoulSand,
+    Item::Glowstone,
+    Item::EndStone,
+    Item::EndPortalFrame,
+    Item::Purpur,
+    Item::DragonEgg,
+    Item::WitherSkeletonSkull,
+    Item::NetherBrick,
+    Item::FlintAndSteel,
+    Item::EyeOfEnder,
+    Item::Elytra,
+    Item::NetherStar,
+    Item::EndCrystal,
+    Item::BlazeRod,
+    Item::ShulkerShell,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreativeTab {
+    All,
+    Blocks,
+    Tools,
+    Combat,
+    FoodAndBrewing,
+    Redstone,
+    Misc,
+}
+
+impl CreativeTab {
+    pub const TABS: [Self; 7] = [
+        Self::All,
+        Self::Blocks,
+        Self::Tools,
+        Self::Combat,
+        Self::FoodAndBrewing,
+        Self::Redstone,
+        Self::Misc,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "ALL",
+            Self::Blocks => "BLOCKS",
+            Self::Tools => "TOOLS",
+            Self::Combat => "COMBAT",
+            Self::FoodAndBrewing => "FOOD+BREW",
+            Self::Redstone => "REDSTONE",
+            Self::Misc => "MISC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreativeDragOrigin {
+    Catalog,
+    Inventory,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolType {
     None,
@@ -209,16 +401,21 @@ pub struct ItemStack {
 impl ItemStack {
     pub fn new(item: Item, count: u32) -> Self {
         let durability = item.tool_properties().map(|t| t.durability).unwrap_or(0);
+        let potion = match item {
+            Item::Potion => Some(crate::brewing::PotionData::water()),
+            Item::SplashPotion => {
+                let mut potion = crate::brewing::PotionData::water();
+                potion.splash = true;
+                Some(potion)
+            }
+            _ => None,
+        };
         Self {
             item,
             count,
             durability,
             enchantments: crate::enchantment::EnchantmentSet::default(),
-            potion: if item == Item::Potion {
-                Some(crate::brewing::PotionData::water())
-            } else {
-                None
-            },
+            potion,
             custom_name: crate::enchantment::ItemName::default(),
         }
     }
@@ -233,6 +430,156 @@ pub struct ItemProperties {
 }
 
 impl Item {
+    pub fn creative_tab(self) -> Option<CreativeTab> {
+        match self {
+            Item::Air => None,
+            Item::Grass
+            | Item::Dirt
+            | Item::Stone
+            | Item::Sand
+            | Item::Gravel
+            | Item::OakLog
+            | Item::OakPlanks
+            | Item::OakLeaves
+            | Item::Cobblestone
+            | Item::Bedrock
+            | Item::Water
+            | Item::CoalOre
+            | Item::IronOre
+            | Item::GoldOre
+            | Item::DiamondOre
+            | Item::RedstoneOre
+            | Item::Glass
+            | Item::Brick
+            | Item::StoneBrick
+            | Item::Snow
+            | Item::Ice
+            | Item::Clay
+            | Item::Sandstone
+            | Item::Obsidian
+            | Item::CraftingTable
+            | Item::Furnace
+            | Item::Chest
+            | Item::Bookshelf
+            | Item::Torch
+            | Item::Lava
+            | Item::BirchLog
+            | Item::BirchPlanks
+            | Item::BirchLeaves
+            | Item::SpruceLog
+            | Item::SprucePlanks
+            | Item::SpruceLeaves
+            | Item::TallGrass
+            | Item::Dandelion
+            | Item::Poppy
+            | Item::Cactus
+            | Item::SugarCane
+            | Item::Pumpkin
+            | Item::Melon
+            | Item::EnchantingTable
+            | Item::BrewingStand
+            | Item::Anvil
+            | Item::Netherrack
+            | Item::SoulSand
+            | Item::Glowstone
+            | Item::EndStone
+            | Item::EndPortalFrame
+            | Item::Purpur
+            | Item::DragonEgg
+            | Item::WitherSkeletonSkull
+            | Item::NetherBrick => Some(CreativeTab::Blocks),
+            Item::StonePickaxe
+            | Item::StoneAxe
+            | Item::StoneShovel
+            | Item::IronPickaxe
+            | Item::IronAxe
+            | Item::IronShovel
+            | Item::DiamondPickaxe
+            | Item::DiamondAxe
+            | Item::DiamondShovel
+            | Item::Shears
+            | Item::Bucket
+            | Item::MilkBucket
+            | Item::FlintAndSteel
+            | Item::Elytra => Some(CreativeTab::Tools),
+            Item::StoneSword
+            | Item::IronSword
+            | Item::DiamondSword
+            | Item::Bow
+            | Item::Arrow
+            | Item::IronHelmet
+            | Item::IronChestplate
+            | Item::IronLeggings
+            | Item::IronBoots
+            | Item::EndCrystal => Some(CreativeTab::Combat),
+            Item::Apple
+            | Item::Bread
+            | Item::Gunpowder
+            | Item::Wheat
+            | Item::Carrot
+            | Item::RawPorkchop
+            | Item::CookedPorkchop
+            | Item::RawBeef
+            | Item::CookedBeef
+            | Item::RawMutton
+            | Item::CookedMutton
+            | Item::RawChicken
+            | Item::CookedChicken
+            | Item::Egg
+            | Item::GlassBottle
+            | Item::Potion
+            | Item::SplashPotion
+            | Item::NetherWart
+            | Item::Sugar
+            | Item::BlazePowder
+            | Item::GlisteringMelon
+            | Item::GhastTear
+            | Item::GoldenCarrot
+            | Item::FermentedSpiderEye
+            | Item::MagmaCream
+            | Item::Pufferfish
+            | Item::SpiderEye
+            | Item::GlowstoneDust
+            | Item::RedstoneDust => Some(CreativeTab::FoodAndBrewing),
+            Item::TNT
+            | Item::Redstone
+            | Item::RedstoneWire
+            | Item::RedstoneTorch
+            | Item::Repeater
+            | Item::Comparator
+            | Item::StoneButton
+            | Item::Lever
+            | Item::PressurePlate
+            | Item::Piston
+            | Item::StickyPiston
+            | Item::RedstoneLamp
+            | Item::OakDoor
+            | Item::OakTrapdoor
+            | Item::Dispenser
+            | Item::Dropper
+            | Item::NoteBlock => Some(CreativeTab::Redstone),
+            Item::Stick
+            | Item::Coal
+            | Item::IronIngot
+            | Item::GoldIngot
+            | Item::Diamond
+            | Item::RottenFlesh
+            | Item::Bone
+            | Item::Seeds
+            | Item::Wool
+            | Item::Leather
+            | Item::Feather
+            | Item::RedDye
+            | Item::BlueDye
+            | Item::GreenDye
+            | Item::LapisLazuli
+            | Item::EyeOfEnder
+            | Item::NetherStar
+            | Item::BlazeRod
+            | Item::ShulkerShell => Some(CreativeTab::Misc),
+        }
+    }
+
     pub fn is_armor(self) -> bool {
         matches!(
             self,
@@ -1252,6 +1599,9 @@ pub struct Inventory {
     pub craft_input: Vec<Option<ItemStack>>, // 4 slots for 2x2, 9 slots for 3x3
     pub craft_output: Option<ItemStack>,
     pub dragged: Option<ItemStack>,
+    pub creative_drag_origin: Option<CreativeDragOrigin>,
+    pub creative_tab: CreativeTab,
+    pub creative_scroll_row: usize,
     pub selected: usize, // Selected hotbar slot: 0..8
     pub is_open: bool,
     pub is_table_open: bool,
@@ -1266,6 +1616,9 @@ impl Inventory {
             craft_input: vec![None; 4],
             craft_output: None,
             dragged: None,
+            creative_drag_origin: None,
+            creative_tab: CreativeTab::All,
+            creative_scroll_row: 0,
             selected: 0,
             is_open: false,
             is_table_open: false,
@@ -1324,6 +1677,219 @@ impl Inventory {
         inv
     }
 
+    pub fn creative_items_for_tab(tab: CreativeTab) -> Vec<Item> {
+        CREATIVE_ITEMS
+            .iter()
+            .copied()
+            .filter(|item| tab == CreativeTab::All || item.creative_tab() == Some(tab))
+            .collect()
+    }
+
+    pub fn creative_max_scroll_for_tab(tab: CreativeTab) -> usize {
+        let item_count = Self::creative_items_for_tab(tab).len();
+        let total_rows = item_count.div_ceil(CREATIVE_COLUMNS);
+        total_rows.saturating_sub(CREATIVE_ROWS)
+    }
+
+    pub fn creative_max_scroll(&self) -> usize {
+        Self::creative_max_scroll_for_tab(self.creative_tab)
+    }
+
+    pub fn creative_visible_items(&self) -> Vec<Item> {
+        let start = self.creative_scroll_row * CREATIVE_COLUMNS;
+        Self::creative_items_for_tab(self.creative_tab)
+            .into_iter()
+            .skip(start)
+            .take(CREATIVE_VISIBLE_SLOTS)
+            .collect()
+    }
+
+    pub fn select_creative_tab(&mut self, tab: CreativeTab) {
+        self.creative_tab = tab;
+        self.creative_scroll_row = 0;
+    }
+
+    pub fn clamp_creative_scroll(&mut self) {
+        self.creative_scroll_row = self.creative_scroll_row.min(self.creative_max_scroll());
+    }
+
+    pub fn scroll_creative(&mut self, direction: i32) {
+        let max_scroll = self.creative_max_scroll() as i32;
+        self.creative_scroll_row =
+            (self.creative_scroll_row as i32 + direction).clamp(0, max_scroll) as usize;
+    }
+
+    pub fn creative_supply(&mut self, item: Item, is_left: bool) -> bool {
+        if item == Item::Air {
+            return false;
+        }
+        if self.dragged.is_some()
+            && self.creative_drag_origin != Some(CreativeDragOrigin::Catalog)
+            && !self.try_return_dragged_to_storage()
+        {
+            return false;
+        }
+
+        let count = if is_left {
+            item.properties().max_stack
+        } else {
+            1
+        };
+        self.dragged = Some(ItemStack::new(item, count));
+        self.creative_drag_origin = Some(CreativeDragOrigin::Catalog);
+        true
+    }
+
+    pub fn write_creative_slot(&mut self, _item: Item, _stack: Option<ItemStack>) {
+        // Creative catalog slots are immutable, infinite-supply views.
+    }
+
+    pub fn click_creative_hotbar(&mut self, index: usize, is_left: bool) {
+        if index >= self.hotbar.len() {
+            return;
+        }
+        if self.dragged.is_some() && self.creative_drag_origin.is_none() {
+            self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+        }
+
+        let slot_item = self.hotbar[index];
+        let max_stack = slot_item
+            .map(|stack| stack.item.properties().max_stack)
+            .unwrap_or(64);
+
+        if is_left {
+            if let Some(dragged) = self.dragged {
+                if let Some(slot) = slot_item {
+                    if slot.item == dragged.item {
+                        let space = max_stack.saturating_sub(slot.count);
+                        let transfer = space.min(dragged.count);
+                        self.hotbar[index] = Some(ItemStack {
+                            count: slot.count + transfer,
+                            ..slot
+                        });
+                        let remaining = dragged.count - transfer;
+                        if remaining > 0 {
+                            self.dragged = Some(ItemStack {
+                                count: remaining,
+                                ..dragged
+                            });
+                        } else {
+                            self.dragged = None;
+                            self.creative_drag_origin = None;
+                        }
+                    } else {
+                        self.hotbar[index] = Some(dragged);
+                        self.dragged = Some(slot);
+                        self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+                    }
+                } else {
+                    self.hotbar[index] = Some(dragged);
+                    self.dragged = None;
+                    self.creative_drag_origin = None;
+                }
+            } else if let Some(slot) = slot_item {
+                self.dragged = Some(slot);
+                self.hotbar[index] = None;
+                self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+            }
+        } else if let Some(dragged) = self.dragged {
+            if let Some(slot) = slot_item {
+                if slot.item == dragged.item && slot.count < max_stack {
+                    self.hotbar[index] = Some(ItemStack {
+                        count: slot.count + 1,
+                        ..slot
+                    });
+                    if dragged.count > 1 {
+                        self.dragged = Some(ItemStack {
+                            count: dragged.count - 1,
+                            ..dragged
+                        });
+                    } else {
+                        self.dragged = None;
+                        self.creative_drag_origin = None;
+                    }
+                } else if slot.item != dragged.item {
+                    self.hotbar[index] = Some(dragged);
+                    self.dragged = Some(slot);
+                    self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+                }
+            } else {
+                self.hotbar[index] = Some(ItemStack {
+                    count: 1,
+                    ..dragged
+                });
+                if dragged.count > 1 {
+                    self.dragged = Some(ItemStack {
+                        count: dragged.count - 1,
+                        ..dragged
+                    });
+                } else {
+                    self.dragged = None;
+                    self.creative_drag_origin = None;
+                }
+            }
+        } else if let Some(slot) = slot_item {
+            let take = (slot.count + 1) / 2;
+            let keep = slot.count - take;
+            self.dragged = Some(ItemStack {
+                count: take,
+                ..slot
+            });
+            self.hotbar[index] = (keep > 0).then_some(ItemStack {
+                count: keep,
+                ..slot
+            });
+            self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+        }
+    }
+
+    pub fn finish_creative_cursor(&mut self) -> bool {
+        match self.creative_drag_origin {
+            Some(CreativeDragOrigin::Catalog) => {
+                self.dragged = None;
+                self.creative_drag_origin = None;
+                true
+            }
+            Some(CreativeDragOrigin::Inventory) | None => self.try_return_dragged_to_storage(),
+        }
+    }
+
+    fn try_return_dragged_to_storage(&mut self) -> bool {
+        let Some(stack) = self.dragged else {
+            self.creative_drag_origin = None;
+            return true;
+        };
+        if self.storage_capacity_for(stack) < stack.count {
+            return false;
+        }
+
+        self.dragged = None;
+        self.creative_drag_origin = None;
+        let stored = self.add_stack(stack);
+        debug_assert!(stored);
+        stored
+    }
+
+    fn storage_capacity_for(&self, incoming: ItemStack) -> u32 {
+        let max_stack = incoming.item.properties().max_stack;
+        self.hotbar
+            .iter()
+            .chain(self.main.iter())
+            .map(|slot| match slot {
+                Some(existing)
+                    if existing.item == incoming.item
+                        && existing.enchantments == incoming.enchantments
+                        && existing.potion == incoming.potion
+                        && existing.custom_name == incoming.custom_name =>
+                {
+                    max_stack.saturating_sub(existing.count)
+                }
+                None => max_stack,
+                _ => 0,
+            })
+            .sum()
+    }
+
     pub fn clear(&mut self) {
         self.hotbar = [None; 9];
         self.main = [None; 27];
@@ -1331,6 +1897,7 @@ impl Inventory {
         self.craft_input.fill(None);
         self.craft_output = None;
         self.dragged = None;
+        self.creative_drag_origin = None;
     }
 
     pub fn get_selected_block(&self) -> Option<BlockType> {
@@ -1472,6 +2039,7 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_inventory_creative_init() {
@@ -1506,5 +2074,159 @@ mod tests {
         let prop = flesh.properties();
         assert_eq!(prop.name, "Rotten Flesh");
         assert_eq!(prop.tex_coords, (8, 3));
+    }
+
+    #[test]
+    fn creative_catalog_contains_every_non_air_item_once() {
+        assert_eq!(CREATIVE_ITEMS.len(), 144);
+        assert!(!CREATIVE_ITEMS.contains(&Item::Air));
+        let unique: HashSet<_> = CREATIVE_ITEMS.iter().copied().collect();
+        assert_eq!(unique.len(), CREATIVE_ITEMS.len());
+    }
+
+    #[test]
+    fn creative_catalog_items_have_valid_properties() {
+        for item in CREATIVE_ITEMS {
+            let properties = item.properties();
+            assert!(!properties.name.is_empty(), "{item:?}");
+            assert!(properties.max_stack > 0, "{item:?}");
+            assert!(properties.tex_coords.0 < 16, "{item:?}");
+            assert!(properties.tex_coords.1 < 16, "{item:?}");
+            assert!(item.creative_tab().is_some(), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn creative_tabs_partition_catalog_without_duplicates() {
+        let mut partition = Vec::new();
+        for tab in CreativeTab::TABS
+            .into_iter()
+            .filter(|tab| *tab != CreativeTab::All)
+        {
+            let tab_items = Inventory::creative_items_for_tab(tab);
+            assert!(tab_items
+                .iter()
+                .all(|item| item.creative_tab() == Some(tab)));
+            partition.extend(tab_items);
+        }
+
+        let unique: HashSet<_> = partition.iter().copied().collect();
+        assert_eq!(partition.len(), CREATIVE_ITEMS.len());
+        assert_eq!(unique.len(), CREATIVE_ITEMS.len());
+        assert_eq!(
+            unique,
+            CREATIVE_ITEMS.iter().copied().collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn creative_window_scrolls_by_row_and_clamps() {
+        let mut inventory = Inventory::new();
+        inventory.selected = 4;
+        assert_eq!(inventory.creative_visible_items().len(), 45);
+        assert_eq!(inventory.creative_max_scroll(), 11);
+
+        inventory.scroll_creative(1);
+        assert_eq!(inventory.creative_scroll_row, 1);
+        assert_eq!(inventory.selected, 4);
+        assert_eq!(
+            inventory.creative_visible_items()[0],
+            CREATIVE_ITEMS[CREATIVE_COLUMNS]
+        );
+
+        inventory.scroll_creative(-999);
+        assert_eq!(inventory.creative_scroll_row, 0);
+        inventory.creative_scroll_row = usize::MAX;
+        inventory.clamp_creative_scroll();
+        assert_eq!(inventory.creative_scroll_row, 11);
+        assert_eq!(inventory.creative_visible_items().len(), 45);
+
+        inventory.select_creative_tab(CreativeTab::Tools);
+        assert_eq!(inventory.creative_scroll_row, 0);
+        assert_eq!(inventory.creative_visible_items().len(), 14);
+        assert_eq!(inventory.creative_max_scroll(), 0);
+    }
+
+    #[test]
+    fn creative_catalog_supplies_left_max_and_right_one() {
+        let mut inventory = Inventory::new();
+        assert!(inventory.creative_supply(Item::Stone, true));
+        assert_eq!(inventory.dragged.unwrap().count, 64);
+        assert_eq!(
+            inventory.creative_drag_origin,
+            Some(CreativeDragOrigin::Catalog)
+        );
+
+        assert!(inventory.creative_supply(Item::DiamondSword, false));
+        assert_eq!(inventory.dragged.unwrap().count, 1);
+        assert_eq!(inventory.dragged.unwrap().item, Item::DiamondSword);
+    }
+
+    #[test]
+    fn creative_virtual_slot_write_is_a_no_op() {
+        let mut inventory = Inventory::new_creative();
+        let hotbar = inventory.hotbar;
+        let main = inventory.main;
+        inventory.write_creative_slot(Item::Stone, None);
+        inventory.write_creative_slot(Item::Dirt, Some(ItemStack::new(Item::Diamond, 64)));
+        assert_eq!(inventory.hotbar, hotbar);
+        assert_eq!(inventory.main, main);
+        assert!(CREATIVE_ITEMS.contains(&Item::Stone));
+        assert!(CREATIVE_ITEMS.contains(&Item::Dirt));
+    }
+
+    #[test]
+    fn creative_hotbar_reuses_drag_drop_and_close_semantics() {
+        let mut inventory = Inventory::new();
+        assert!(inventory.creative_supply(Item::Stone, true));
+        inventory.click_creative_hotbar(0, true);
+        assert_eq!(inventory.hotbar[0].unwrap().item, Item::Stone);
+        assert_eq!(inventory.hotbar[0].unwrap().count, 64);
+        assert!(inventory.dragged.is_none());
+
+        inventory.click_creative_hotbar(0, false);
+        assert_eq!(inventory.hotbar[0].unwrap().count, 32);
+        assert_eq!(inventory.dragged.unwrap().count, 32);
+        assert_eq!(
+            inventory.creative_drag_origin,
+            Some(CreativeDragOrigin::Inventory)
+        );
+        assert!(inventory.finish_creative_cursor());
+        assert!(inventory.dragged.is_none());
+        assert_eq!(inventory.count_item(Item::Stone), 64);
+
+        assert!(inventory.creative_supply(Item::Dirt, true));
+        assert!(inventory.finish_creative_cursor());
+        assert!(inventory.dragged.is_none());
+        assert_eq!(inventory.count_item(Item::Dirt), 0);
+    }
+
+    #[test]
+    fn creative_close_keeps_real_cursor_when_storage_is_full() {
+        let mut inventory = Inventory::new();
+        inventory
+            .hotbar
+            .fill(Some(ItemStack::new(Item::DiamondSword, 1)));
+        inventory
+            .main
+            .fill(Some(ItemStack::new(Item::DiamondPickaxe, 1)));
+        inventory.dragged = Some(ItemStack::new(Item::Stone, 64));
+        inventory.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+
+        assert!(!inventory.finish_creative_cursor());
+        assert_eq!(inventory.dragged.unwrap().item, Item::Stone);
+        assert_eq!(inventory.dragged.unwrap().count, 64);
+        assert_eq!(
+            inventory.creative_drag_origin,
+            Some(CreativeDragOrigin::Inventory)
+        );
+    }
+
+    #[test]
+    fn splash_potion_stack_has_water_splash_metadata() {
+        let stack = ItemStack::new(Item::SplashPotion, 1);
+        let potion = stack.potion.expect("splash potion metadata");
+        assert_eq!(potion.kind, crate::brewing::PotionKind::Water);
+        assert!(potion.splash);
     }
 }

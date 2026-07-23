@@ -104,6 +104,12 @@ P3 [█████████░] 88.9%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-24
+- ✅ 新增 Creative 原版式物品目錄 (By creative-inventory sub-agent, reviewed by Codex)
+  - 修改文件：`src/inventory.rs`, `src/state.rs`, `src/app.rs`, `ARCHITECTURE.md`, `plans/implementation/08_creative_inventory.md`, `plans/progress.md`, `track.md`
+  - 關鍵決策：Creative 在沒有開啟工作站時，以虛擬無限供應目錄取代不完整的預置背包；`CREATIVE_ITEMS` 精確列出全部 144 個非 Air 物品，並由 All、Blocks、Tools、Combat、Food & Brewing、Redstone、Misc 七個頁籤完整分割。介面顯示可逐列滾動的 9×5 目錄、自適應 scrollbar 與九個真實快捷欄格；左鍵取得該物品最大堆疊，右鍵取得一個，虛擬格不修改 main inventory。游標來源追蹤只丟棄 catalog 生成物，真實快捷欄物品必須無損回收，容量不足時保留游標，避免遺失或複製。物品欄開啟期間的滾輪只捲目錄，不切換快捷欄；SplashPotion 預設帶 water+splash metadata。Survival 與 Crafting Table、Enchanting、Brewing、Anvil 仍走原標準介面。
+  - 根審查：以 CodeGraph 追查 catalog→slot→click/close→wheel 的完整資料流，核對清單／分類、虛擬格唯讀、快捷欄交換守恆、工作站 gate、關閉安全與 `FOOD+BREW` 向量字形。
+  - 驗證：catalog 唯一性／屬性／分類分割、9×5 window／scroll clamp、左右供應、虛擬格 no-op、hotbar merge/swap、真實游標容量不足、SplashPotion、wheel routing，以及 4:3／16:9／21:9 tabs/slots/scrollbar/hotbar 無重疊測試通過；`cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過，共 238 項單元測試與 1 項整合測試。
+  - 備註：實際 GPU 視窗中瀏覽 144 種物品、分類、滾動、tooltip 與拖到快捷欄仍保留為人工驗收。
 - ✅ 新增可調 Weather 音量 (By rain-volume sub-agent, reviewed by Codex)
   - 修改文件：`src/audio.rs`, `src/menu.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/07_weather_volume.md`, `plans/progress.md`, `track.md`
   - 關鍵決策：`GameSettings` 新增向後相容的 `weather_volume`，舊設定缺鍵使用較安靜的 0.4，載入／保存會 clamp 超界值並安全處理 NaN。AudioManager 把已合成的 `Master×Sound` base 再按類別套用 Weather，故 Rain/Thunder 為 `Master×Sound×Weather`，其他 SFX 不受影響；active loop 保存 SoundId，Master 或 Weather 改動時立即刷新正在播放的雨聲。主選單 Options 與 pause menu 都加入 Weather 控制，State 只從 `self.settings` 同步 mixer，不再由 mixer 反推 master。

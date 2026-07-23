@@ -20,6 +20,27 @@ enum PendingRuntimeTransition {
     ReturnToMainMenu,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GameWheelTarget {
+    CreativeCatalog,
+    Hotbar,
+    None,
+}
+
+fn game_wheel_target(
+    is_paused: bool,
+    inventory_open: bool,
+    creative_catalog_open: bool,
+) -> GameWheelTarget {
+    if !is_paused && creative_catalog_open {
+        GameWheelTarget::CreativeCatalog
+    } else if !is_paused && !inventory_open {
+        GameWheelTarget::Hotbar
+    } else {
+        GameWheelTarget::None
+    }
+}
+
 pub struct App {
     runtime: Option<Runtime>,
     window: Option<Arc<Window>>,
@@ -309,11 +330,23 @@ impl ApplicationHandler for App {
                                 .clamp(0.5, 2.0);
                         }
                     }
-                    Some(Runtime::Game(state)) if !state.is_paused && !state.inventory.is_open => {
-                        if scroll_dir != 0 {
-                            state.inventory.selected =
-                                (state.inventory.selected as i32 + scroll_dir).rem_euclid(9)
-                                    as usize;
+                    Some(Runtime::Game(state)) => {
+                        match game_wheel_target(
+                            state.is_paused,
+                            state.inventory.is_open,
+                            state.is_creative_catalog_open(),
+                        ) {
+                            GameWheelTarget::CreativeCatalog if scroll_dir != 0 => {
+                                state.inventory.scroll_creative(scroll_dir);
+                            }
+                            GameWheelTarget::Hotbar if scroll_dir != 0 => {
+                                state.inventory.selected =
+                                    (state.inventory.selected as i32 + scroll_dir).rem_euclid(9)
+                                        as usize;
+                            }
+                            GameWheelTarget::CreativeCatalog
+                            | GameWheelTarget::Hotbar
+                            | GameWheelTarget::None => {}
                         }
                     }
                     _ => {}
@@ -528,4 +561,23 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_target_keeps_creative_catalog_separate_from_hotbar() {
+        assert_eq!(
+            game_wheel_target(false, true, true),
+            GameWheelTarget::CreativeCatalog
+        );
+        assert_eq!(game_wheel_target(false, true, false), GameWheelTarget::None);
+        assert_eq!(
+            game_wheel_target(false, false, false),
+            GameWheelTarget::Hotbar
+        );
+        assert_eq!(game_wheel_target(true, false, false), GameWheelTarget::None);
+    }
 }

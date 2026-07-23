@@ -6,7 +6,10 @@ use crate::chunk_render::{
 };
 use crate::crafting::RecipeManager;
 use crate::interaction::raycast;
-use crate::inventory::{GameMode, Inventory, Item, ItemStack, ToolType};
+use crate::inventory::{
+    CreativeTab, GameMode, Inventory, Item, ItemStack, ToolType, CREATIVE_COLUMNS, CREATIVE_ROWS,
+    CREATIVE_VISIBLE_SLOTS,
+};
 use crate::menu::{Difficulty, GameSettings, MultiplayerRole, WorldLaunch};
 use crate::physics::{
     block_placement_decision, player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB,
@@ -2113,6 +2116,7 @@ pub struct State {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotType {
+    Creative(Item),
     Hotbar(usize),
     Backpack(usize),
     Armor(usize),
@@ -2125,6 +2129,107 @@ pub enum SlotType {
     AnvilLeft,
     AnvilRight,
     AnvilOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InventoryLayoutKind {
+    CreativeCatalog,
+    Standard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct InventoryUiRect {
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+}
+
+impl InventoryUiRect {
+    fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+}
+
+fn inventory_layout_kind(
+    game_mode: GameMode,
+    station_open: bool,
+    crafting_table_open: bool,
+) -> InventoryLayoutKind {
+    if game_mode == GameMode::Creative && !station_open && !crafting_table_open {
+        InventoryLayoutKind::CreativeCatalog
+    } else {
+        InventoryLayoutKind::Standard
+    }
+}
+
+fn creative_slot_metrics(aspect: f32) -> (f32, f32, f32, f32) {
+    let safe_aspect = aspect.max(0.1);
+    let slot_w = 0.08_f32.min(0.15 / safe_aspect);
+    let slot_h = slot_w * safe_aspect;
+    let gap = 0.01;
+    let grid_w = CREATIVE_COLUMNS as f32 * slot_w + (CREATIVE_COLUMNS - 1) as f32 * gap;
+    let start_x = -grid_w / 2.0;
+    (slot_w, slot_h, gap, start_x)
+}
+
+fn creative_catalog_slot_rect(index: usize, aspect: f32) -> InventoryUiRect {
+    let (slot_w, slot_h, gap, start_x) = creative_slot_metrics(aspect);
+    let row = index / CREATIVE_COLUMNS;
+    let column = index % CREATIVE_COLUMNS;
+    let x0 = start_x + column as f32 * (slot_w + gap);
+    let y1 = 0.64 - row as f32 * (slot_h + gap);
+    InventoryUiRect {
+        x0,
+        x1: x0 + slot_w,
+        y0: y1 - slot_h,
+        y1,
+    }
+}
+
+fn creative_hotbar_slot_rect(index: usize, aspect: f32) -> InventoryUiRect {
+    let (slot_w, slot_h, gap, start_x) = creative_slot_metrics(aspect);
+    let x0 = start_x + index as f32 * (slot_w + gap);
+    InventoryUiRect {
+        x0,
+        x1: x0 + slot_w,
+        y0: -0.85,
+        y1: -0.85 + slot_h,
+    }
+}
+
+fn creative_tab_rect(index: usize) -> InventoryUiRect {
+    let width = 0.125;
+    let gap = 0.005;
+    let start_x = -(CreativeTab::TABS.len() as f32 * width
+        + (CreativeTab::TABS.len() - 1) as f32 * gap)
+        / 2.0;
+    let x0 = start_x + index as f32 * (width + gap);
+    InventoryUiRect {
+        x0,
+        x1: x0 + width,
+        y0: 0.78,
+        y1: 0.88,
+    }
+}
+
+fn creative_scroll_track_rect(aspect: f32) -> InventoryUiRect {
+    let first = creative_catalog_slot_rect(0, aspect);
+    let last = creative_catalog_slot_rect(CREATIVE_VISIBLE_SLOTS - 1, aspect);
+    InventoryUiRect {
+        x0: first.x0
+            + CREATIVE_COLUMNS as f32
+                * (creative_slot_metrics(aspect).0 + creative_slot_metrics(aspect).2)
+            - creative_slot_metrics(aspect).2
+            + 0.02,
+        x1: first.x0
+            + CREATIVE_COLUMNS as f32
+                * (creative_slot_metrics(aspect).0 + creative_slot_metrics(aspect).2)
+            - creative_slot_metrics(aspect).2
+            + 0.045,
+        y0: last.y0,
+        y1: first.y1,
+    }
 }
 
 impl State {
@@ -6985,8 +7090,40 @@ impl State {
         }
     }
 
+    pub fn is_creative_catalog_open(&self) -> bool {
+        self.inventory.is_open
+            && inventory_layout_kind(
+                self.game_mode,
+                self.active_station.is_some(),
+                self.inventory.is_table_open,
+            ) == InventoryLayoutKind::CreativeCatalog
+    }
+
     pub fn get_inventory_slots(&self) -> Vec<(SlotType, f32, f32, f32, f32)> {
         let aspect = self.size.width as f32 / self.size.height as f32;
+        if inventory_layout_kind(
+            self.game_mode,
+            self.active_station.is_some(),
+            self.inventory.is_table_open,
+        ) == InventoryLayoutKind::CreativeCatalog
+        {
+            let mut slots = Vec::with_capacity(CREATIVE_VISIBLE_SLOTS + 9);
+            for (index, item) in self
+                .inventory
+                .creative_visible_items()
+                .into_iter()
+                .enumerate()
+            {
+                let rect = creative_catalog_slot_rect(index, aspect);
+                slots.push((SlotType::Creative(item), rect.x0, rect.x1, rect.y0, rect.y1));
+            }
+            for index in 0..9 {
+                let rect = creative_hotbar_slot_rect(index, aspect);
+                slots.push((SlotType::Hotbar(index), rect.x0, rect.x1, rect.y0, rect.y1));
+            }
+            return slots;
+        }
+
         let slot_w = 0.08;
         let slot_h = 0.08 * aspect;
         let gap = 0.01;
@@ -7116,6 +7253,7 @@ impl State {
 
     pub fn get_item_at_slot(&self, slot: SlotType) -> Option<ItemStack> {
         match slot {
+            SlotType::Creative(item) => Some(ItemStack::new(item, 1)),
             SlotType::Hotbar(i) => self.inventory.hotbar[i],
             SlotType::Backpack(i) => self.inventory.main[i],
             SlotType::Armor(i) => self.inventory.armor[i],
@@ -7133,6 +7271,7 @@ impl State {
 
     pub fn set_item_at_slot(&mut self, slot: SlotType, stack: Option<ItemStack>) {
         match slot {
+            SlotType::Creative(item) => self.inventory.write_creative_slot(item, stack),
             SlotType::Hotbar(i) => self.inventory.hotbar[i] = stack,
             SlotType::Backpack(i) => self.inventory.main[i] = stack,
             SlotType::Armor(i) => self.inventory.armor[i] = stack,
@@ -7154,6 +7293,7 @@ impl State {
 
     fn slot_accepts(&self, slot: SlotType, stack: ItemStack) -> bool {
         match slot {
+            SlotType::Creative(_) => false,
             SlotType::EnchantInput => crate::enchantment::can_enchant(stack.item),
             SlotType::EnchantLapis => stack.item == Item::LapisLazuli,
             SlotType::BrewBottle(_) => stack.potion.is_some(),
@@ -7170,6 +7310,17 @@ impl State {
     pub fn handle_inventory_click(&mut self, is_left: bool) {
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
+        let creative_catalog = self.is_creative_catalog_open();
+        if creative_catalog && is_left {
+            for (index, tab) in CreativeTab::TABS.into_iter().enumerate() {
+                if creative_tab_rect(index).contains(mouse_x, mouse_y) {
+                    self.audio_manager
+                        .play_sound(crate::audio::SoundId::UiClick);
+                    self.inventory.select_creative_tab(tab);
+                    return;
+                }
+            }
+        }
         let slots = self.get_inventory_slots();
 
         if self.active_station == Some(StationKind::Enchanting) && is_left {
@@ -7191,6 +7342,18 @@ impl State {
             self.audio_manager
                 .play_sound(crate::audio::SoundId::UiClick);
             let slot_item = self.get_item_at_slot(slot_type);
+
+            match slot_type {
+                SlotType::Creative(item) => {
+                    self.inventory.creative_supply(item, is_left);
+                    return;
+                }
+                SlotType::Hotbar(index) if creative_catalog => {
+                    self.inventory.click_creative_hotbar(index, is_left);
+                    return;
+                }
+                _ => {}
+            }
 
             if let Some(dragged) = self.inventory.dragged {
                 if !self.slot_accepts(slot_type, dragged) {
@@ -7430,6 +7593,9 @@ impl State {
 
     pub fn open_inventory(&mut self) {
         self.inventory.is_open = true;
+        if self.is_creative_catalog_open() {
+            self.inventory.clamp_creative_scroll();
+        }
         // Release cursor grab
         let _ = self
             .window
@@ -7468,6 +7634,7 @@ impl State {
     }
 
     pub fn close_inventory(&mut self) {
+        let creative_catalog = self.is_creative_catalog_open();
         self.inventory.is_open = false;
         // Return craft input items
         let inputs: Vec<ItemStack> = self
@@ -7506,8 +7673,11 @@ impl State {
             self.inventory.add_stack(stack);
         }
 
-        // Also return dragged item if any
-        if let Some(dragged) = self.inventory.dragged.take() {
+        // Catalog-created cursor stacks are disposable, while real stacks taken
+        // from the hotbar must only be returned when the full stack fits.
+        if creative_catalog || self.inventory.creative_drag_origin.is_some() {
+            self.inventory.finish_creative_cursor();
+        } else if let Some(dragged) = self.inventory.dragged.take() {
             self.inventory.add_stack(dragged);
         }
 
@@ -8496,6 +8666,7 @@ impl State {
                 };
 
             if self.inventory.is_open {
+                let creative_catalog = self.is_creative_catalog_open();
                 // 1. Dark overlay (screen covers from -1.0 to 1.0)
                 let bg_color = [0.08, 0.08, 0.08, 0.6];
                 ui_vertices.push(UiVertex {
@@ -8522,6 +8693,111 @@ impl State {
                     position: [1.0, 1.0, 0.0],
                     color: bg_color,
                 });
+
+                if creative_catalog {
+                    add_ui_quad(
+                        &mut ui_vertices,
+                        -0.49,
+                        0.51,
+                        -0.92,
+                        0.92,
+                        [0.10, 0.10, 0.10, 0.96],
+                    );
+                    add_ui_border(
+                        &mut ui_line_vertices,
+                        -0.49,
+                        0.51,
+                        -0.92,
+                        0.92,
+                        [0.52, 0.52, 0.52, 1.0],
+                    );
+
+                    for (index, tab) in CreativeTab::TABS.into_iter().enumerate() {
+                        let rect = creative_tab_rect(index);
+                        let hovered = rect.contains(self.mouse_ndc[0], self.mouse_ndc[1]);
+                        let selected = tab == self.inventory.creative_tab;
+                        add_ui_quad(
+                            &mut ui_vertices,
+                            rect.x0,
+                            rect.x1,
+                            rect.y0,
+                            rect.y1,
+                            if selected {
+                                [0.30, 0.42, 0.22, 1.0]
+                            } else if hovered {
+                                [0.34, 0.34, 0.34, 1.0]
+                            } else {
+                                [0.18, 0.18, 0.18, 1.0]
+                            },
+                        );
+                        add_ui_border(
+                            &mut ui_line_vertices,
+                            rect.x0,
+                            rect.x1,
+                            rect.y0,
+                            rect.y1,
+                            if selected || hovered {
+                                [0.95, 0.95, 0.95, 1.0]
+                            } else {
+                                [0.42, 0.42, 0.42, 1.0]
+                            },
+                        );
+                        let label = tab.label();
+                        let char_w = 0.005;
+                        let spacing = 0.0015;
+                        let label_w = label.chars().count() as f32 * (char_w + spacing) - spacing;
+                        add_string_lines(
+                            label,
+                            (rect.x0 + rect.x1 - label_w) * 0.5,
+                            rect.y0 + 0.035,
+                            char_w,
+                            0.020,
+                            spacing,
+                            [1.0, 1.0, 1.0, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                    }
+
+                    let track = creative_scroll_track_rect(aspect);
+                    add_ui_quad(
+                        &mut ui_vertices,
+                        track.x0,
+                        track.x1,
+                        track.y0,
+                        track.y1,
+                        [0.035, 0.035, 0.035, 1.0],
+                    );
+                    add_ui_border(
+                        &mut ui_line_vertices,
+                        track.x0,
+                        track.x1,
+                        track.y0,
+                        track.y1,
+                        [0.34, 0.34, 0.34, 1.0],
+                    );
+                    let max_scroll = self.inventory.creative_max_scroll();
+                    let total_rows = max_scroll + CREATIVE_ROWS;
+                    let track_height = track.y1 - track.y0;
+                    let thumb_height = if max_scroll == 0 {
+                        track_height
+                    } else {
+                        (track_height * CREATIVE_ROWS as f32 / total_rows as f32).max(0.06)
+                    };
+                    let progress = if max_scroll == 0 {
+                        0.0
+                    } else {
+                        self.inventory.creative_scroll_row as f32 / max_scroll as f32
+                    };
+                    let thumb_y1 = track.y1 - progress * (track_height - thumb_height);
+                    add_ui_quad(
+                        &mut ui_vertices,
+                        track.x0 + 0.004,
+                        track.x1 - 0.004,
+                        thumb_y1 - thumb_height,
+                        thumb_y1,
+                        [0.68, 0.68, 0.68, 1.0],
+                    );
+                }
 
                 // 2. Draw slots
                 let slots = self.get_inventory_slots();
@@ -8686,7 +8962,7 @@ impl State {
                 }
 
                 // 3. Draw crafting arrow symbol
-                if self.active_station.is_none() {
+                if !creative_catalog && self.active_station.is_none() {
                     let arrow_y = if self.inventory.is_table_open {
                         -0.10 + 1.0 * (slot_h + gap) + slot_h / 2.0
                     } else {
@@ -8725,37 +9001,60 @@ impl State {
                 }
 
                 // 4. Draw texts (Labels)
-                add_string_lines(
-                    "INVENTORY",
-                    -0.40,
-                    -0.70 + 3.0 * (slot_h + gap) + 0.02,
-                    0.008,
-                    0.016,
-                    0.003,
-                    [1.0, 1.0, 1.0, 1.0],
-                    &mut ui_line_vertices,
-                );
-                if self.active_station.is_none() {
-                    let craft_lbl_x = if self.inventory.is_table_open {
-                        -0.05
-                    } else {
-                        0.05
-                    };
-                    let craft_lbl_y = if self.inventory.is_table_open {
-                        -0.10 + 3.0 * (slot_h + gap) + 0.02
-                    } else {
-                        -0.05 + 2.0 * (slot_h + gap) + 0.02
-                    };
+                if creative_catalog {
                     add_string_lines(
-                        "CRAFTING",
-                        craft_lbl_x,
-                        craft_lbl_y,
+                        "CREATIVE INVENTORY",
+                        -0.45,
+                        0.70,
+                        0.010,
+                        0.020,
+                        0.003,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+                    add_string_lines(
+                        "HOTBAR",
+                        -0.45,
+                        -0.67,
                         0.008,
                         0.016,
                         0.003,
                         [1.0, 1.0, 1.0, 1.0],
                         &mut ui_line_vertices,
                     );
+                } else {
+                    add_string_lines(
+                        "INVENTORY",
+                        -0.40,
+                        -0.70 + 3.0 * (slot_h + gap) + 0.02,
+                        0.008,
+                        0.016,
+                        0.003,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+                    if self.active_station.is_none() {
+                        let craft_lbl_x = if self.inventory.is_table_open {
+                            -0.05
+                        } else {
+                            0.05
+                        };
+                        let craft_lbl_y = if self.inventory.is_table_open {
+                            -0.10 + 3.0 * (slot_h + gap) + 0.02
+                        } else {
+                            -0.05 + 2.0 * (slot_h + gap) + 0.02
+                        };
+                        add_string_lines(
+                            "CRAFTING",
+                            craft_lbl_x,
+                            craft_lbl_y,
+                            0.008,
+                            0.016,
+                            0.003,
+                            [1.0, 1.0, 1.0, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                    }
                 }
 
                 match self.active_station {
@@ -8923,16 +9222,22 @@ impl State {
 
                 // 5. Draw dragged item at cursor position
                 if let Some(dragged) = self.inventory.dragged {
+                    let (cursor_slot_w, cursor_slot_h) = if creative_catalog {
+                        let (width, height, _, _) = creative_slot_metrics(aspect);
+                        (width, height)
+                    } else {
+                        (slot_w, slot_h)
+                    };
                     let (col, row) = dragged.item.properties().tex_coords;
                     let u0 = col as f32 * 0.0625;
                     let u1 = (col + 1) as f32 * 0.0625;
                     let v0 = row as f32 * 0.0625;
                     let v1 = (row + 1) as f32 * 0.0625;
 
-                    let dx0 = mouse_x - slot_w / 2.0 + 0.015;
-                    let dx1 = mouse_x + slot_w / 2.0 - 0.015;
-                    let dy0 = mouse_y - slot_h / 2.0 + 0.015 * aspect;
-                    let dy1 = mouse_y + slot_h / 2.0 - 0.015 * aspect;
+                    let dx0 = mouse_x - cursor_slot_w / 2.0 + 0.015;
+                    let dx1 = mouse_x + cursor_slot_w / 2.0 - 0.015;
+                    let dy0 = mouse_y - cursor_slot_h / 2.0 + 0.015 * aspect;
+                    let dy1 = mouse_y + cursor_slot_h / 2.0 - 0.015 * aspect;
 
                     let c = if dragged.enchantments.is_empty() {
                         [1.0, 1.0, 1.0, 1.0]
@@ -8977,8 +9282,8 @@ impl State {
                         let cs = 0.003;
                         let n_chars = count_str.len() as f32;
                         let count_w = n_chars * cw + (n_chars - 1.0) * cs;
-                        let count_x = mouse_x + slot_w / 2.0 - count_w - 0.008;
-                        let count_y = mouse_y - slot_h / 2.0 + 0.01 * aspect;
+                        let count_x = mouse_x + cursor_slot_w / 2.0 - count_w - 0.008;
+                        let count_y = mouse_y - cursor_slot_h / 2.0 + 0.01 * aspect;
                         add_string_lines(
                             &count_str,
                             count_x,
@@ -10729,6 +11034,71 @@ fn debug_chunk_coordinate(position: f32, chunk_size: usize) -> i32 {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
+
+    fn rects_overlap(a: InventoryUiRect, b: InventoryUiRect) -> bool {
+        a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
+    }
+
+    #[test]
+    fn creative_layout_is_only_used_without_a_station_or_crafting_table() {
+        assert_eq!(
+            inventory_layout_kind(GameMode::Creative, false, false),
+            InventoryLayoutKind::CreativeCatalog
+        );
+        assert_eq!(
+            inventory_layout_kind(GameMode::Survival, false, false),
+            InventoryLayoutKind::Standard
+        );
+        assert_eq!(
+            inventory_layout_kind(GameMode::Creative, true, false),
+            InventoryLayoutKind::Standard
+        );
+        assert_eq!(
+            inventory_layout_kind(GameMode::Creative, false, true),
+            InventoryLayoutKind::Standard
+        );
+    }
+
+    #[test]
+    fn creative_tabs_catalog_scrollbar_and_hotbar_do_not_overlap() {
+        for aspect in [4.0 / 3.0, 16.0 / 9.0, 21.0 / 9.0] {
+            let catalog: Vec<_> = (0..CREATIVE_VISIBLE_SLOTS)
+                .map(|index| creative_catalog_slot_rect(index, aspect))
+                .collect();
+            let hotbar: Vec<_> = (0..9)
+                .map(|index| creative_hotbar_slot_rect(index, aspect))
+                .collect();
+            let tabs: Vec<_> = (0..CreativeTab::TABS.len())
+                .map(creative_tab_rect)
+                .collect();
+            let scrollbar = creative_scroll_track_rect(aspect);
+
+            for group in [&catalog, &hotbar, &tabs] {
+                for (index, rect) in group.iter().enumerate() {
+                    assert!(rect.x0 >= -1.0 && rect.x1 <= 1.0);
+                    assert!(rect.y0 >= -1.0 && rect.y1 <= 1.0);
+                    for other in group.iter().skip(index + 1) {
+                        assert!(!rects_overlap(*rect, *other), "{rect:?} {other:?}");
+                    }
+                }
+            }
+            for catalog_rect in &catalog {
+                assert!(!rects_overlap(*catalog_rect, scrollbar));
+                assert!(hotbar
+                    .iter()
+                    .all(|hotbar_rect| !rects_overlap(*catalog_rect, *hotbar_rect)));
+                assert!(tabs
+                    .iter()
+                    .all(|tab_rect| !rects_overlap(*catalog_rect, *tab_rect)));
+            }
+            assert!(hotbar
+                .iter()
+                .all(|hotbar_rect| !rects_overlap(*hotbar_rect, scrollbar)));
+            assert!(tabs
+                .iter()
+                .all(|tab_rect| !rects_overlap(*tab_rect, scrollbar)));
+        }
+    }
 
     #[test]
     fn primary_press_decision_controls_block_fallback_and_held_mining_latch() {
