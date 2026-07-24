@@ -67,6 +67,9 @@ pub struct App {
     window: Option<Arc<Window>>,
     last_render_time: Instant,
     pending_transition: Option<PendingRuntimeTransition>,
+    /// Latest keyboard modifier state, tracked so Shift+Q can be detected
+    /// even while UI screens swallow plain key events.
+    modifiers: winit::event::Modifiers,
 }
 
 impl App {
@@ -76,6 +79,7 @@ impl App {
             window: None,
             last_render_time: Instant::now(),
             pending_transition: None,
+            modifiers: winit::event::Modifiers::default(),
         }
     }
 
@@ -219,8 +223,12 @@ impl ApplicationHandler for App {
                 Some(Runtime::Game(state)) => state.handle_mouse_move(position.x, position.y),
                 None => {}
             },
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let mut return_to_menu = false;
+                let shift_held = self.modifiers.state().shift_key();
                 let action = match &mut self.runtime {
                     Some(Runtime::Menu(menu)) => menu.handle_key(
                         event.state,
@@ -229,7 +237,7 @@ impl ApplicationHandler for App {
                         event.repeat,
                     ),
                     Some(Runtime::Game(state)) => {
-                        return_to_menu = handle_game_keyboard(state, &event);
+                        return_to_menu = handle_game_keyboard(state, &event, shift_held);
                         MenuAction::None
                     }
                     None => MenuAction::None,
@@ -403,7 +411,7 @@ impl ApplicationHandler for App {
     }
 }
 
-fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
+fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -> bool {
     let pressed = event.state == ElementState::Pressed;
 
     if state.connection_lost {
@@ -503,6 +511,21 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
     }
     if code == KeyCode::F5 && pressed && !event.repeat {
         state.third_person = !state.third_person;
+        return false;
+    }
+    // Q throws items onto the ground: the held hotbar stack while playing, or
+    // the stack under the mouse cursor while the inventory is open. Holding
+    // Shift throws the whole stack instead of a single item. This runs before
+    // the gameplay gate below so it stays reachable with the inventory open.
+    if code == KeyCode::KeyQ && pressed && !event.repeat {
+        if state.is_paused || state.player_state.is_dead {
+            return false;
+        }
+        if state.inventory.is_open {
+            state.drop_hovered_item(shift_held);
+        } else if !state.advancement_gui.is_open {
+            state.drop_held_item(shift_held);
+        }
         return false;
     }
     if code == KeyCode::KeyT && pressed && !event.repeat {

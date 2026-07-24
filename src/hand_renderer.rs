@@ -54,31 +54,116 @@ pub fn build_first_person_hand_mesh(
         1.0,
     );
 
-    // Held item: small cube textured with the selected block, positioned
-    // slightly in front of the fist.
+    // Held item: full-cube blocks render as a small cube textured with the
+    // block's top face; flat items (flowers, seeds, tools, food, ...) render
+    // as a sprite quad. Both sit slightly in front of the fist.
     let held_item = inventory.hotbar[inventory.selected]
         .map(|stack| stack.item)
         .unwrap_or(Item::Air);
-    if let Some((tex_cols, tex_row)) = held_item_texture(held_item) {
+    if held_item != Item::Air {
         let item_offset = Vec3::new(-0.08, 0.06, 0.25);
         let item_pos = fist_pos + item_offset;
         let item_yaw = hand_yaw;
         let item_pitch = hand_pitch;
-        add_cuboid_view(
-            &mut vertices,
-            &mut indices,
-            Vec3::new(0.18, 0.18, 0.18),
-            Vec3::new(0.0, 0.0, 0.0),
-            item_pos,
-            item_yaw,
-            item_pitch,
-            tex_cols,
-            tex_row,
-            1.0,
-        );
+        if held_item.renders_flat() {
+            let (tex_col, tex_row) = held_item.properties().tex_coords;
+            add_sprite_view(
+                &mut vertices,
+                &mut indices,
+                0.3,
+                item_pos,
+                item_yaw,
+                item_pitch,
+                tex_col,
+                tex_row,
+                1.0,
+            );
+        } else if let Some((tex_cols, tex_row)) = held_item_texture(held_item) {
+            add_cuboid_view(
+                &mut vertices,
+                &mut indices,
+                Vec3::new(0.18, 0.18, 0.18),
+                Vec3::new(0.0, 0.0, 0.0),
+                item_pos,
+                item_yaw,
+                item_pitch,
+                tex_cols,
+                tex_row,
+                1.0,
+            );
+        }
     }
 
     (vertices, indices)
+}
+
+/// View-space flat sprite helper for held items that render flat (flowers,
+/// seeds, tools, ...). Emits a single double-sided quad in the local XY
+/// plane, rotated like `add_cuboid_view`.
+#[allow(clippy::too_many_arguments)]
+fn add_sprite_view(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    size: f32,
+    pivot: Vec3,
+    rot_yaw: f32,
+    rot_pitch: f32,
+    tex_col: u32,
+    tex_row: u32,
+    light_val: f32,
+) {
+    let half = size * 0.5;
+    let local_corners = [
+        (Vec3::new(-half, -half, 0.0), [0.0, 1.0]),
+        (Vec3::new(half, -half, 0.0), [1.0, 1.0]),
+        (Vec3::new(half, half, 0.0), [1.0, 0.0]),
+        (Vec3::new(-half, half, 0.0), [0.0, 0.0]),
+    ];
+
+    let cos_pitch = rot_pitch.cos();
+    let sin_pitch = rot_pitch.sin();
+    let cos_yaw = rot_yaw.cos();
+    let sin_yaw = rot_yaw.sin();
+
+    let start_idx = vertices.len() as u32;
+
+    for (local_pos, uv) in local_corners.iter() {
+        let v2 = Vec3::new(
+            local_pos.x,
+            local_pos.y * cos_pitch - local_pos.z * sin_pitch,
+            local_pos.y * sin_pitch + local_pos.z * cos_pitch,
+        );
+        let v3 = Vec3::new(
+            v2.x * cos_yaw + v2.z * sin_yaw,
+            v2.y,
+            -v2.x * sin_yaw + v2.z * cos_yaw,
+        );
+        let final_pos = v3 + pivot;
+
+        let u = (uv[0] + tex_col as f32) * 0.0625;
+        let v = (uv[1] + tex_row as f32) * 0.0625;
+
+        vertices.push(Vertex {
+            position: [final_pos.x, final_pos.y, final_pos.z],
+            tex_coords: [u, v],
+            light_level: light_val,
+            ao: 1.0,
+        });
+    }
+
+    // Double-sided quad: the pipeline culls back faces, so emit both windings.
+    indices.push(start_idx + 0);
+    indices.push(start_idx + 1);
+    indices.push(start_idx + 2);
+    indices.push(start_idx + 0);
+    indices.push(start_idx + 2);
+    indices.push(start_idx + 3);
+    indices.push(start_idx + 2);
+    indices.push(start_idx + 1);
+    indices.push(start_idx + 0);
+    indices.push(start_idx + 3);
+    indices.push(start_idx + 2);
+    indices.push(start_idx + 0);
 }
 
 /// View-space cuboid helper. Identical to `mob_renderer::add_cuboid` except
@@ -199,5 +284,36 @@ mod tests {
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
         assert!(indices.len() % 3 == 0);
+    }
+
+    #[test]
+    fn hand_mesh_renders_flat_item_as_sprite_quad() {
+        // The arm alone is a 24-vertex/36-index cuboid; a flat held item adds
+        // one double-sided quad (4 vertices/12 indices) instead of a cube.
+        let empty = Inventory::new();
+        let (empty_vertices, empty_indices) = build_first_person_hand_mesh(&empty, 0.0, 0.0);
+
+        let mut inv = Inventory::new();
+        inv.hotbar[0] = Some(ItemStack::new(crate::inventory::Item::Seeds, 1));
+        let (vertices, indices) = build_first_person_hand_mesh(&inv, 0.0, 0.0);
+        assert_eq!(vertices.len(), empty_vertices.len() + 4);
+        assert_eq!(indices.len(), empty_indices.len() + 12);
+        assert!(vertices
+            .iter()
+            .all(|v| v.position.into_iter().all(f32::is_finite)));
+
+        // A cross-model flower block uses the same flat sprite path.
+        let mut flower_inv = Inventory::new();
+        flower_inv.hotbar[0] = Some(ItemStack::new(crate::inventory::Item::Dandelion, 1));
+        let (flower_vertices, flower_indices) = build_first_person_hand_mesh(&flower_inv, 0.0, 0.0);
+        assert_eq!(flower_vertices.len(), empty_vertices.len() + 4);
+        assert_eq!(flower_indices.len(), empty_indices.len() + 12);
+
+        // A full-cube block still renders as a 24-vertex/36-index cuboid.
+        let mut block_inv = Inventory::new();
+        block_inv.hotbar[0] = Some(ItemStack::new(crate::inventory::Item::Stone, 1));
+        let (block_vertices, block_indices) = build_first_person_hand_mesh(&block_inv, 0.0, 0.0);
+        assert_eq!(block_vertices.len(), empty_vertices.len() + 24);
+        assert_eq!(block_indices.len(), empty_indices.len() + 36);
     }
 }

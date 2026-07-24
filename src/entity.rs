@@ -125,6 +125,10 @@ pub struct Entity {
 
     // DroppedItem fields
     pub dropped_item: Option<crate::inventory::Item>,
+    /// How many items of `dropped_item` this entity carries. Block-break and
+    /// mob drops stay at 1; player throws of a whole stack use a single
+    /// entity with a larger count.
+    pub dropped_count: u32,
     pub pickup_cooldown: f32,
     pub ai_phase: u8,
     pub ai_timer: f32,
@@ -207,6 +211,7 @@ impl Entity {
             egg_lay_timer: 300.0 + (id % 300) as f32,
             life_time: 1.5,
             dropped_item: None,
+            dropped_count: 1,
             pickup_cooldown: 0.0,
             ai_phase: 0,
             ai_timer: 0.0,

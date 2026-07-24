@@ -687,6 +687,17 @@ impl Item {
         }
     }
 
+    /// True when the item should be drawn as a flat sprite instead of a cube
+    /// in the hand and as a dropped item: every non-block item (seeds, tools,
+    /// food, ...) plus cross-model plant blocks (flowers, tall grass, sugar
+    /// cane).
+    pub fn renders_flat(self) -> bool {
+        match self.properties().block_type {
+            Some(block) => block.is_cross_model(),
+            None => self != Item::Air,
+        }
+    }
+
     pub fn properties(self) -> ItemProperties {
         match self {
             Item::Air => ItemProperties {
@@ -2066,6 +2077,25 @@ mod tests {
         assert_eq!(pick.durability, 131);
         let grass = ItemStack::new(Item::Grass, 64);
         assert_eq!(grass.durability, 0);
+    }
+
+    #[test]
+    fn test_renders_flat() {
+        // Non-block items render as flat sprites.
+        assert!(Item::Seeds.renders_flat());
+        assert!(Item::Wheat.renders_flat());
+        assert!(Item::StonePickaxe.renders_flat());
+        assert!(Item::Apple.renders_flat());
+        // Cross-model plant blocks render as flat sprites.
+        assert!(Item::Dandelion.renders_flat());
+        assert!(Item::Poppy.renders_flat());
+        assert!(Item::TallGrass.renders_flat());
+        assert!(Item::SugarCane.renders_flat());
+        // Full-cube block items keep cube rendering.
+        assert!(!Item::Stone.renders_flat());
+        assert!(!Item::Grass.renders_flat());
+        assert!(!Item::Torch.renders_flat());
+        assert!(!Item::Air.renders_flat());
     }
 
     #[test]

@@ -4879,9 +4879,16 @@ impl State {
             for &i in to_collect.iter().rev() {
                 let item = self.entity_manager.entities[i].dropped_item;
                 if let Some(item) = item {
-                    let added = self.inventory.add_item(item);
-                    if added {
+                    // A thrown stack rides in one entity; pull as many items
+                    // as fit and keep the remainder on the ground.
+                    let mut remaining = self.entity_manager.entities[i].dropped_count.max(1);
+                    while remaining > 0 && self.inventory.add_item(item) {
+                        remaining -= 1;
+                    }
+                    if remaining == 0 {
                         self.entity_manager.entities.remove(i);
+                    } else {
+                        self.entity_manager.entities[i].dropped_count = remaining;
                     }
                 }
             }
@@ -6254,6 +6261,113 @@ impl State {
             entity.velocity = glam::Vec3::new(vx, vy, vz);
             entity.pickup_cooldown = 0.5;
         }
+    }
+
+    /// Throw `count` of `item` out from the player's eye in the camera look
+    /// direction as a single `DroppedItem` entity. The thrower cannot
+    /// instantly re-collect it thanks to a longer pickup cooldown.
+    fn throw_dropped_item(&mut self, item: Item, count: u32) {
+        if item == Item::Air || count == 0 {
+            return;
+        }
+        let dir = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        )
+        .normalize_or_zero();
+        let spawn_pos = self.player_physics.position + Vec3::new(0.0, 1.5, 0.0) + dir * 0.5;
+        self.entity_manager
+            .spawn(crate::entity::EntityType::DroppedItem, spawn_pos);
+        if let Some(entity) = self.entity_manager.entities.last_mut() {
+            entity.dropped_item = Some(item);
+            entity.dropped_count = count;
+            entity.velocity = dir * 4.0 + Vec3::new(0.0, 1.5, 0.0);
+            entity.pickup_cooldown = 1.0;
+        }
+    }
+
+    /// Q pressed in the world: throw the selected hotbar item. One item is
+    /// thrown, or the whole stack when `whole_stack` (Shift) is held.
+    pub fn drop_held_item(&mut self, whole_stack: bool) {
+        let selected = self.inventory.selected;
+        let Some(stack) = self.inventory.hotbar[selected] else {
+            return;
+        };
+        let count = if whole_stack { stack.count } else { 1 };
+        self.throw_dropped_item(stack.item, count);
+        if stack.count > count {
+            self.inventory.hotbar[selected] = Some(ItemStack {
+                count: stack.count - count,
+                ..stack
+            });
+        } else {
+            self.inventory.hotbar[selected] = None;
+        }
+    }
+
+    /// Q pressed while the inventory is open: throw the item under the mouse
+    /// cursor (or the stack being dragged with the cursor). One item is
+    /// thrown, or the whole stack when `whole_stack` (Shift) is held.
+    pub fn drop_hovered_item(&mut self, whole_stack: bool) {
+        // A stack dragged with the cursor takes precedence, matching the
+        // vanilla behaviour of throwing what is held in the hand.
+        if let Some(dragged) = self.inventory.dragged {
+            let count = if whole_stack { dragged.count } else { 1 };
+            self.throw_dropped_item(dragged.item, count);
+            if dragged.count > count {
+                self.inventory.dragged = Some(ItemStack {
+                    count: dragged.count - count,
+                    ..dragged
+                });
+            } else {
+                self.inventory.dragged = None;
+            }
+            return;
+        }
+
+        let mouse_x = self.mouse_ndc[0];
+        let mouse_y = self.mouse_ndc[1];
+        let hovered_slot = self
+            .get_inventory_slots()
+            .into_iter()
+            .find(|&(_, x0, x1, y0, y1)| {
+                mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
+            });
+        let Some((slot_type, _, _, _, _)) = hovered_slot else {
+            return;
+        };
+        match slot_type {
+            // The Creative catalog is a virtual infinite supply, and output
+            // slots are take-out-only: none of them can be thrown from.
+            SlotType::Creative(_) | SlotType::CraftOutput | SlotType::AnvilOutput => return,
+            _ => {}
+        }
+        let Some(stack) = self.get_item_at_slot(slot_type) else {
+            return;
+        };
+        let count = if whole_stack { stack.count } else { 1 };
+        self.throw_dropped_item(stack.item, count);
+        if stack.count > count {
+            self.set_item_at_slot(
+                slot_type,
+                Some(ItemStack {
+                    count: stack.count - count,
+                    ..stack
+                }),
+            );
+        } else {
+            self.set_item_at_slot(slot_type, None);
+        }
+
+        // Keep derived state consistent when throwing out of an input slot.
+        if let SlotType::CraftInput(_) = slot_type {
+            let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
+            self.inventory.craft_output = self
+                .recipe_manager
+                .match_recipe(&self.inventory.craft_input, grid_size);
+        }
+        self.refresh_workstations();
     }
 
     fn update_player_projectiles(&mut self, dt: f32) {
@@ -7841,10 +7955,17 @@ impl State {
 
         // In third-person mode also render the local player avatar.
         if self.third_person {
+            // The avatar's local +Z "front" maps to (sin(yaw), 0, cos(yaw)),
+            // while the camera's horizontal forward is (cos(yaw), 0, sin(yaw)).
+            // Passing the camera yaw directly leaves the model rotated 90
+            // degrees (side-on to the camera); shift by 90 degrees so the
+            // avatar faces the camera direction and its back always faces the
+            // camera. Positive camera pitch looks up, but a positive head
+            // rotation tilts the face downward, so flip the sign.
             crate::mob_renderer::render_local_player(
                 self.player_physics.position,
-                self.camera.yaw,
-                self.camera.pitch,
+                std::f32::consts::FRAC_PI_2 - self.camera.yaw,
+                -self.camera.pitch,
                 &self.chunk_manager,
                 &mut mob_vertices,
                 &mut mob_indices,

@@ -1,10 +1,11 @@
 # Architecture
 
-> Last verified: 2026-07-24. This is a navigation map, not a replacement for
+> Last verified: 2026-07-25. This is a navigation map, not a replacement for
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `f5b69f815106c020df0b016550ca63976873408f` (`f5b69f8`). This identifies the
+> `1343834` plus uncommitted working-tree changes (third-person avatar
+> orientation fix, flat item sprites, Q item throwing). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -288,11 +289,13 @@ Precipitation lifetime is capped at each loaded column's heightmap, so it stops
 at terrain, foliage, and player-built roofs.
 
 Dropped items deliberately use `EntityManager`, not `ParticleSystem`. They carry
-an `inventory::Item`, use normal entity gravity/collision, skip hostile and
-passive AI, and remain authoritative until collection. `mob_renderer::render_mobs`
-draws each as a small atlas-textured cuboid with time-based yaw and vertical
-bobbing. Both particles and dropped-item entities remain transient and are not
-included in world saves.
+an `inventory::Item` plus a `dropped_count`, use normal entity gravity/collision,
+skip hostile and passive AI, and remain authoritative until collection (partial
+pickup leaves the remainder on the ground). `mob_renderer::render_mobs` draws
+full-cube block items as a small atlas-textured cuboid and flat items
+(`Item::renders_flat`: non-block items and cross-model plants) as a double-sided
+sprite quad, both with time-based yaw and vertical bobbing. Both particles and
+dropped-item entities remain transient and are not included in world saves.
 
 ### Combat projectiles and mob animation
 
@@ -332,7 +335,11 @@ chunk blocks and therefore persist through chunk saves.
 or world). `State::{open_inventory, handle_inventory_click, close_inventory}`
 owns UI slot behavior. Data lives in `inventory::Inventory`; recipe definitions
 and matching live in `crafting::RecipeManager`. World interactions are handled by
-`State::{handle_click, break_block}` and `interaction::raycast`.
+`State::{handle_click, break_block}` and `interaction::raycast`. Q throws items:
+`State::drop_held_item` throws the selected hotbar stack while playing, while
+`State::drop_hovered_item` throws the cursor-dragged stack or the hovered slot's
+stack when the inventory is open; both throw one item, or the whole stack with
+Shift held, via `State::throw_dropped_item`.
 
 ### Advancements
 
@@ -420,7 +427,7 @@ entity physics and world-side lifecycle events.
 | File | Responsibility / key symbols |
 | --- | --- |
 | `src/main.rs` | Crate module list and binary entrypoint `main`. |
-| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing (including camera-look gating, non-repeating inventory toggle, the primary-press/held-mining latch, and Creative catalog wheel routing), chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
+| `src/app.rs` | `winit::ApplicationHandler`; owns the `Menu` / `Game` runtime state machine, OS events, configurable key/mouse routing (including camera-look gating, non-repeating inventory toggle, the primary-press/held-mining latch, Creative catalog wheel routing, F5 third-person toggle, and Q/Shift+Q item throwing gated before the gameplay key block), keyboard modifier tracking for Shift detection while UI screens are open, chat text capture, disconnect return-to-menu routing, redraw loop, resize and surface-error policy. |
 | `src/menu.rs` | Main-menu renderer and UI state; procedural panorama, world discovery/create/delete metadata, `GameSettings` (including persistent Master/Music/Sound/Weather volumes), key bindings, localization choices, `MultiplayerRole`, Host/Join fields, and `WorldLaunch`. |
 | `src/state.rs` | `State`, `NetworkHandle`, `RemotePlayerState`, `PlayerSnapshot`, `ChunkMesh`, `MeshSnapshot`, `KeyState`, `DoubleTapTracker`, `PrimaryPressDecision`, `SlotType`; selected-world/network setup, frame ordering, Creative flight toggling/lifecycle, seven-blocker camera-look policy and centralized cursor-mode synchronization, standard and Creative-catalog inventory layout/hit testing/rendering, in-game/chat/disconnect/advancement UI, authenticated chat relay and bounded history, host-authoritative world mutation broadcast, remote block/chunk application and deferral, join catch-up, time/weather sync, melee-first primary-press routing, mining/placement authority gates, sequenced 20 Hz local-pose sends, bounded remote snapshot interpolation/extrapolation and name-tag projection, disconnect cleanup, particle emitters, dropped-item collection, damage/respawn, bounded Rayon chunk load/remesh dispatch, main-thread GPU upload, culling/LOD draw submission, and chunk streaming. Start with the exact method, not the whole file. |
 | `src/camera.rs` | `Camera`, `CameraUniform`, `WorldTime`; matrices, fog/sky uniform data, day/night clock and sky light. |
@@ -448,7 +455,7 @@ entity physics and world-side lifecycle events.
 
 | File | Responsibility / key symbols |
 | --- | --- |
-| `src/inventory.rs` | `GameMode`, `Item`, `CreativeTab`, `CreativeDragOrigin`, tool/material metadata, `ItemStack`, `Inventory`; stacks, durability, hotbar/backpack/armor/craft slots, block-item mapping, the exact 144-item Creative catalog and tab partition, row scrolling, infinite virtual supply, hotbar drag/merge, and lossless cursor-close handling. |
+| `src/inventory.rs` | `GameMode`, `Item` (including `Item::renders_flat` sprite-vs-cube classification), `CreativeTab`, `CreativeDragOrigin`, tool/material metadata, `ItemStack`, `Inventory`; stacks, durability, hotbar/backpack/armor/craft slots, block-item mapping, the exact 144-item Creative catalog and tab partition, row scrolling, infinite virtual supply, hotbar drag/merge, and lossless cursor-close handling. |
 | `src/crafting.rs` | `Recipe`, `RecipeManager`; shaped/shapeless recipe definitions and grid matching, including the redstone component crafting chain. |
 | `src/enchantment.rs` | `Enchantment`, `EnchantmentSet`, `EnchantingState`, `AnvilState`; offer generation, compatibility, stat modifiers, repair/combine/rename rules. |
 | `src/brewing.rs` | `PotionKind`, `PotionData`, `PotionEffect`, `EffectManager`, `BrewingStandState`; recipes, timed brewing and active-effect queries. |
@@ -457,7 +464,7 @@ entity physics and world-side lifecycle events.
 | `src/boss.rs` | Dimension mob population, Ender Dragon, Wither, End Crystal, Blaze/Piglin/Husk/Shulker behavior, Creative-mode attack suppression, boss deaths, drops, block-placement events, and Boss HUD summaries. |
 | `src/mob.rs` | Hostile spawn/AI/combat, skeleton aiming/arrows, Creative-mode targeting suppression, sunlight burning, Creeper explosion and associated world/lighting/mesh mutations; advances dropped-item physics but skips hostile AI for dropped items and all physics/AI/despawn logic for snapshot-driven remote players. Its health cleanup removes zero-HP ordinary living mobs while preserving nonliving and boss-owned lifecycle semantics. |
 | `src/passive_mob.rs` | Pig/cow/sheep/chicken wandering, cliff avoidance, breeding/young, drops and species-specific behavior. |
-| `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including the yaw/pitch-aware six-part remote-player avatar and walk swing, velocity-oriented arrows, the skeleton's hand-pivoted bow/draw animation, and rotating/bobbing dropped items; output is uploaded and drawn by `State::render`. |
+| `src/mob_renderer.rs` | CPU cuboid mesh construction for all entity types, including the yaw/pitch-aware six-part remote-player avatar and walk swing, the F5 local-player avatar (whose model-yaw convention faces `(sin yaw, 0, cos yaw)`, so callers pass `FRAC_PI_2 - camera_yaw` to keep its back to the camera), velocity-oriented arrows, the skeleton's hand-pivoted bow/draw animation, and rotating/bobbing dropped items (cuboid for blocks, flat sprite quad for `Item::renders_flat` items); output is uploaded and drawn by `State::render`. |
 | `src/particles.rs` | `Particle`, `ParticleSystem`, `MAX_PARTICLES`, emitter/atlas helpers; bounded particle physics and camera-facing billboard mesh compilation. |
 | `src/advancements.rs` | `AdvancementProgressData`, `AdvancementManager`, `AdvancementTree`, `AdvancementGui`; 50-node/5-category tree, parent-gated trigger evaluation, persisted completion IDs, transient toasts, and interactive GUI state. Rendering and event dispatch remain in `State`. |
 
