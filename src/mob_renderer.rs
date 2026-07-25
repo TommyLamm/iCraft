@@ -106,6 +106,67 @@ pub fn add_cuboid(
     }
 }
 
+/// Adds a flat, double-sided sprite quad centered at `center` and rotated
+/// around the Y axis by `yaw`. Used for dropped items that render as item
+/// sprites (flowers, seeds, tools, ...) instead of cubes. The transparent
+/// parts of the tile are discarded by the fragment shader's alpha test.
+fn add_flat_sprite(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    size: f32,
+    center: Vec3,
+    yaw: f32,
+    tex_col: u32,
+    tex_row: u32,
+    light_val: f32,
+) {
+    let half = size * 0.5;
+    let local_corners = [
+        (Vec3::new(-half, -half, 0.0), [0.0, 1.0]),
+        (Vec3::new(half, -half, 0.0), [1.0, 1.0]),
+        (Vec3::new(half, half, 0.0), [1.0, 0.0]),
+        (Vec3::new(-half, half, 0.0), [0.0, 0.0]),
+    ];
+
+    let sin_yaw = yaw.sin();
+    let cos_yaw = yaw.cos();
+
+    let start_idx = vertices.len() as u32;
+
+    for (local_pos, uv) in local_corners.iter() {
+        let rotated = Vec3::new(
+            local_pos.x * cos_yaw + local_pos.z * sin_yaw,
+            local_pos.y,
+            -local_pos.x * sin_yaw + local_pos.z * cos_yaw,
+        );
+        let final_pos = center + rotated;
+
+        let u = (uv[0] + tex_col as f32) * 0.0625;
+        let v = (uv[1] + tex_row as f32) * 0.0625;
+
+        vertices.push(Vertex {
+            position: [final_pos.x, final_pos.y, final_pos.z],
+            tex_coords: [u, v],
+            light_level: light_val,
+            ao: 1.0,
+        });
+    }
+
+    // Double-sided quad: the pipeline culls back faces, so emit both windings.
+    indices.push(start_idx + 0);
+    indices.push(start_idx + 1);
+    indices.push(start_idx + 2);
+    indices.push(start_idx + 0);
+    indices.push(start_idx + 2);
+    indices.push(start_idx + 3);
+    indices.push(start_idx + 2);
+    indices.push(start_idx + 1);
+    indices.push(start_idx + 0);
+    indices.push(start_idx + 3);
+    indices.push(start_idx + 2);
+    indices.push(start_idx + 0);
+}
+
 pub fn render_mobs(
     entity_manager: &EntityManager,
     chunk_manager: &ChunkManager,
@@ -1369,28 +1430,46 @@ pub fn render_mobs(
                 );
             }
             EntityType::DroppedItem => {
-                // Floating + rotating dropped item. The entity is rendered as a
-                // small cuboid textured from the carried item's atlas tile.
+                // Floating + rotating dropped item. Full-cube blocks render as
+                // a small cuboid textured from the item's atlas tile; flat
+                // items (flowers, seeds, tools, food, ...) render as a
+                // double-sided sprite quad, like their inventory icon.
                 let yaw = time * 2.0;
                 let y_offset = (time * 3.0).sin() * 0.1;
 
-                let (col, row) = entity
-                    .dropped_item
-                    .map(|item| item.properties().tex_coords)
-                    .unwrap_or((0, 0));
+                let item = entity.dropped_item.unwrap_or(crate::inventory::Item::Air);
 
-                add_cuboid(
-                    vertices,
-                    indices,
-                    Vec3::new(0.25, 0.25, 0.25),
-                    Vec3::new(0.0, 0.0, 0.0),
-                    to_world(Vec3::new(0.0, 0.25 + y_offset, 0.0)),
-                    yaw,
-                    0.0,
-                    [col; 6],
-                    row,
-                    light_val,
-                );
+                if item.renders_flat() {
+                    let (col, row) = item.properties().tex_coords;
+                    add_flat_sprite(
+                        vertices,
+                        indices,
+                        0.35,
+                        entity.position + Vec3::new(0.0, 0.3 + y_offset, 0.0),
+                        yaw,
+                        col,
+                        row,
+                        light_val,
+                    );
+                } else {
+                    let (col, row) = entity
+                        .dropped_item
+                        .map(|item| item.properties().tex_coords)
+                        .unwrap_or((0, 0));
+
+                    add_cuboid(
+                        vertices,
+                        indices,
+                        Vec3::new(0.25, 0.25, 0.25),
+                        Vec3::new(0.0, 0.0, 0.0),
+                        to_world(Vec3::new(0.0, 0.25 + y_offset, 0.0)),
+                        yaw,
+                        0.0,
+                        [col; 6],
+                        row,
+                        light_val,
+                    );
+                }
             }
             EntityType::RemotePlayer => {
                 // Steve-like player avatar assembled from the existing atlas:
@@ -1639,5 +1718,77 @@ mod tests {
         assert!(vertices
             .iter()
             .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
+    }
+
+    #[test]
+    fn local_player_faces_camera_direction_with_shifted_yaw() {
+        // Third-person caller passes model_yaw = FRAC_PI_2 - camera_yaw. The
+        // head's front face (the first four emitted vertices) must then point
+        // along the camera's horizontal forward so the camera sees the back.
+        let camera_yaw = 0.3_f32;
+        let model_yaw = std::f32::consts::FRAC_PI_2 - camera_yaw;
+        let position = Vec3::new(10.0, 64.0, -3.0);
+        let chunks = ChunkManager::new(1);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        render_local_player(
+            position,
+            model_yaw,
+            0.0,
+            &chunks,
+            &mut vertices,
+            &mut indices,
+            0.0,
+            Vec3::ZERO,
+        );
+
+        // Head front-face center relative to the head pivot at (0, 1.65, 0).
+        let front = &vertices[0..4];
+        let center = front.iter().fold(Vec3::ZERO, |acc, v| {
+            acc + Vec3::new(v.position[0], v.position[1], v.position[2])
+        }) / 4.0;
+        let pivot = position + Vec3::new(0.0, 1.65, 0.0);
+        let facing = (center - pivot).normalize_or_zero();
+
+        let expected = Vec3::new(camera_yaw.cos(), 0.0, camera_yaw.sin());
+        assert!(
+            facing.dot(expected) > 0.99,
+            "avatar should face the camera forward direction: facing={facing:?} expected={expected:?}"
+        );
+    }
+
+    #[test]
+    fn dropped_flat_item_renders_as_sprite_quad() {
+        let mut entities = EntityManager::new();
+        entities.spawn(EntityType::DroppedItem, Vec3::new(0.0, 64.0, 0.0));
+        entities.entities.last_mut().unwrap().dropped_item = Some(crate::inventory::Item::Seeds);
+
+        let chunks = ChunkManager::new(1);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        render_mobs(&entities, &chunks, &mut vertices, &mut indices, 1.0);
+
+        // Flat items render as one double-sided quad, not a cube.
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(indices.len(), 12);
+        assert!(vertices
+            .iter()
+            .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
+    }
+
+    #[test]
+    fn dropped_block_item_still_renders_as_cube() {
+        let mut entities = EntityManager::new();
+        entities.spawn(EntityType::DroppedItem, Vec3::new(0.0, 64.0, 0.0));
+        entities.entities.last_mut().unwrap().dropped_item = Some(crate::inventory::Item::Stone);
+
+        let chunks = ChunkManager::new(1);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        render_mobs(&entities, &chunks, &mut vertices, &mut indices, 1.0);
+
+        assert_eq!(vertices.len(), 24);
+        assert_eq!(indices.len(), 36);
     }
 }

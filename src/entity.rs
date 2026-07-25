@@ -143,6 +143,10 @@ pub struct Entity {
 
     // DroppedItem fields
     pub dropped_item: Option<crate::inventory::Item>,
+    /// How many items of `dropped_item` this entity carries. Block-break and
+    /// mob drops stay at 1; player throws of a whole stack use a single
+    /// entity with a larger count.
+    pub dropped_count: u32,
     pub pickup_cooldown: f32,
     pub ai_phase: u8,
     pub ai_timer: f32,
@@ -226,6 +230,7 @@ impl Entity {
             egg_lay_timer: 300.0 + (id % 300) as f32,
             life_time: 1.5,
             dropped_item: None,
+            dropped_count: 1,
             pickup_cooldown: 0.0,
             ai_phase: 0,
             ai_timer: 0.0,
@@ -400,6 +405,20 @@ impl EntityManager {
         self.entities.push(Entity::new(id, entity_type, pos));
         id
     }
+
+    pub fn count_passive(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|e| e.entity_type.is_passive())
+            .count()
+    }
+
+    pub fn count_hostile(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|e| e.entity_type.is_hostile())
+            .count()
+    }
 }
 
 pub fn ray_intersects_aabb(origin: Vec3, dir: Vec3, aabb: &AABB) -> Option<f32> {
@@ -451,6 +470,20 @@ pub fn ray_intersects_aabb(origin: Vec3, dir: Vec3, aabb: &AABB) -> Option<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_entity_manager_counts_passive_and_hostile() {
+        let mut em = EntityManager::new();
+        em.spawn(EntityType::Pig, Vec3::ZERO);
+        em.spawn(EntityType::Cow, Vec3::ZERO);
+        em.spawn(EntityType::Zombie, Vec3::ZERO);
+        em.spawn(EntityType::Skeleton, Vec3::ZERO);
+        em.spawn(EntityType::Creeper, Vec3::ZERO);
+        em.spawn(EntityType::DroppedItem, Vec3::ZERO);
+
+        assert_eq!(em.count_passive(), 2);
+        assert_eq!(em.count_hostile(), 3);
+    }
 
     #[test]
     fn test_ray_aabb_intersection() {

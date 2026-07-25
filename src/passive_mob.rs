@@ -332,8 +332,8 @@ pub fn spawn_passive_mobs(
     sky_light_level: u8,
     time: f32,
 ) {
-    // Limit total entities to prevent lag
-    if entity_manager.entities.len() >= 35 {
+    // Limit total passive mobs to prevent lag
+    if entity_manager.count_passive() >= 15 {
         return;
     }
 

@@ -206,7 +206,8 @@ pub fn spawn_mobs(
     sky_light_level: u8,
     time: f32,
 ) {
-    if entity_manager.entities.len() >= 25 {
+    // Limit total hostile mobs to prevent lag
+    if entity_manager.count_hostile() >= 20 {
         return;
     }
 
