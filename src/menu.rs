@@ -10,6 +10,7 @@ use winit::window::{Fullscreen, Window};
 
 const UI_VERTEX_CAPACITY: usize = 65_536;
 const SETTINGS_FILE: &str = "settings.txt";
+const CONTROLS_FILE: &str = "controls.config";
 const SAVES_DIR: &str = "saves";
 const META_FILE: &str = "world.meta";
 const OPTIONS_ROW_TOPS: [f32; 6] = [0.58, 0.38, 0.18, -0.02, -0.22, -0.42];
@@ -102,6 +103,22 @@ pub struct ControlBindings {
     pub sprint: KeyCode,
     pub sneak: KeyCode,
     pub inventory: KeyCode,
+    pub chat: KeyCode,
+    pub time_speed: KeyCode,
+    pub advancements: KeyCode,
+    pub debug: KeyCode,
+    pub perspective: KeyCode,
+    pub gamemode: KeyCode,
+    pub pause: KeyCode,
+    pub hotbar_1: KeyCode,
+    pub hotbar_2: KeyCode,
+    pub hotbar_3: KeyCode,
+    pub hotbar_4: KeyCode,
+    pub hotbar_5: KeyCode,
+    pub hotbar_6: KeyCode,
+    pub hotbar_7: KeyCode,
+    pub hotbar_8: KeyCode,
+    pub hotbar_9: KeyCode,
 }
 
 impl Default for ControlBindings {
@@ -115,6 +132,22 @@ impl Default for ControlBindings {
             sprint: KeyCode::ControlLeft,
             sneak: KeyCode::ShiftLeft,
             inventory: KeyCode::KeyE,
+            chat: KeyCode::KeyT,
+            time_speed: KeyCode::KeyF,
+            advancements: KeyCode::KeyL,
+            debug: KeyCode::F3,
+            perspective: KeyCode::F5,
+            gamemode: KeyCode::KeyG,
+            pause: KeyCode::Escape,
+            hotbar_1: KeyCode::Digit1,
+            hotbar_2: KeyCode::Digit2,
+            hotbar_3: KeyCode::Digit3,
+            hotbar_4: KeyCode::Digit4,
+            hotbar_5: KeyCode::Digit5,
+            hotbar_6: KeyCode::Digit6,
+            hotbar_7: KeyCode::Digit7,
+            hotbar_8: KeyCode::Digit8,
+            hotbar_9: KeyCode::Digit9,
         }
     }
 }
@@ -164,57 +197,12 @@ impl Default for GameSettings {
 
 impl GameSettings {
     pub fn load() -> Self {
-        let Ok(contents) = fs::read_to_string(SETTINGS_FILE) else {
-            return Self::default();
-        };
-        Self::from_file_contents(&contents)
-    }
-
-    fn from_file_contents(contents: &str) -> Self {
         let mut settings = Self::default();
-        for line in contents.lines() {
-            let Some((key, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            match key.trim() {
-                "fov" => settings.fov = value.parse().unwrap_or(settings.fov),
-                "sensitivity" => {
-                    settings.sensitivity = value.parse().unwrap_or(settings.sensitivity)
-                }
-                "render_distance" => {
-                    settings.render_distance = value.parse().unwrap_or(settings.render_distance)
-                }
-                "fullscreen" => settings.fullscreen = parse_bool(value, settings.fullscreen),
-                "vsync" => settings.vsync = parse_bool(value, settings.vsync),
-                "volume" | "master_volume" => {
-                    settings.master_volume = value.parse().unwrap_or(settings.master_volume)
-                }
-                "music_volume" => {
-                    settings.music_volume = value.parse().unwrap_or(settings.music_volume)
-                }
-                "sound_volume" => {
-                    settings.sound_volume = value.parse().unwrap_or(settings.sound_volume)
-                }
-                "weather_volume" => {
-                    settings.weather_volume = value.parse().unwrap_or(settings.weather_volume)
-                }
-                "difficulty" => settings.difficulty = Difficulty::parse(value),
-                "language" => settings.language = Language::parse(value),
-                "key_forward" => set_key(&mut settings.controls.forward, value),
-                "key_backward" => set_key(&mut settings.controls.backward, value),
-                "key_left" => set_key(&mut settings.controls.left, value),
-                "key_right" => set_key(&mut settings.controls.right, value),
-                "key_jump" => set_key(&mut settings.controls.jump, value),
-                "key_sprint" => set_key(&mut settings.controls.sprint, value),
-                "key_sneak" => set_key(&mut settings.controls.sneak, value),
-                "key_inventory" => set_key(&mut settings.controls.inventory, value),
-                "mp_host_port" => settings.mp_host_port = value.to_string(),
-                "mp_server_address" => settings.mp_server_address = value.to_string(),
-                "mp_join_port" => settings.mp_join_port = value.to_string(),
-                "mp_username" => settings.mp_username = value.to_string(),
-                _ => {}
-            }
+        if let Ok(contents) = fs::read_to_string(SETTINGS_FILE) {
+            settings.apply_file_contents(&contents);
+        }
+        if let Ok(contents) = fs::read_to_string(CONTROLS_FILE) {
+            settings.apply_file_contents(&contents);
         }
         settings.sanitize_view_settings();
         settings.render_distance = settings.render_distance.clamp(2, 16);
@@ -222,10 +210,183 @@ impl GameSettings {
         settings
     }
 
+    #[allow(dead_code)]
+    pub fn from_file_contents(contents: &str) -> Self {
+        let mut settings = Self::default();
+        settings.apply_file_contents(contents);
+        settings.sanitize_view_settings();
+        settings.render_distance = settings.render_distance.clamp(2, 16);
+        settings.clamp_audio_volumes();
+        settings
+    }
+
+    fn apply_file_contents(&mut self, contents: &str) {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.starts_with("//") || line.is_empty() {
+                continue;
+            }
+            let delimiter = if line.contains('=') { '=' } else { ':' };
+            let Some((key, value)) = line.split_once(delimiter) else {
+                continue;
+            };
+            let value = value.trim();
+            match key.trim() {
+                "fov" => self.fov = value.parse().unwrap_or(self.fov),
+                "sensitivity" => {
+                    self.sensitivity = value.parse().unwrap_or(self.sensitivity)
+                }
+                "render_distance" => {
+                    self.render_distance = value.parse().unwrap_or(self.render_distance)
+                }
+                "fullscreen" => self.fullscreen = parse_bool(value, self.fullscreen),
+                "vsync" => self.vsync = parse_bool(value, self.vsync),
+                "volume" | "master_volume" => {
+                    self.master_volume = value.parse().unwrap_or(self.master_volume)
+                }
+                "music_volume" => {
+                    self.music_volume = value.parse().unwrap_or(self.music_volume)
+                }
+                "sound_volume" => {
+                    self.sound_volume = value.parse().unwrap_or(self.sound_volume)
+                }
+                "weather_volume" => {
+                    self.weather_volume = value.parse().unwrap_or(self.weather_volume)
+                }
+                "difficulty" => self.difficulty = Difficulty::parse(value),
+                "language" => self.language = Language::parse(value),
+                "key_forward" => set_key(&mut self.controls.forward, value),
+                "key_backward" => set_key(&mut self.controls.backward, value),
+                "key_left" => set_key(&mut self.controls.left, value),
+                "key_right" => set_key(&mut self.controls.right, value),
+                "key_jump" => set_key(&mut self.controls.jump, value),
+                "key_sprint" => set_key(&mut self.controls.sprint, value),
+                "key_sneak" => set_key(&mut self.controls.sneak, value),
+                "key_inventory" => set_key(&mut self.controls.inventory, value),
+                "key_chat" => set_key(&mut self.controls.chat, value),
+                "key_time_speed" => set_key(&mut self.controls.time_speed, value),
+                "key_advancements" => set_key(&mut self.controls.advancements, value),
+                "key_debug" => set_key(&mut self.controls.debug, value),
+                "key_perspective" => set_key(&mut self.controls.perspective, value),
+                "key_gamemode" => set_key(&mut self.controls.gamemode, value),
+                "key_pause" => set_key(&mut self.controls.pause, value),
+                "key_hotbar_1" => set_key(&mut self.controls.hotbar_1, value),
+                "key_hotbar_2" => set_key(&mut self.controls.hotbar_2, value),
+                "key_hotbar_3" => set_key(&mut self.controls.hotbar_3, value),
+                "key_hotbar_4" => set_key(&mut self.controls.hotbar_4, value),
+                "key_hotbar_5" => set_key(&mut self.controls.hotbar_5, value),
+                "key_hotbar_6" => set_key(&mut self.controls.hotbar_6, value),
+                "key_hotbar_7" => set_key(&mut self.controls.hotbar_7, value),
+                "key_hotbar_8" => set_key(&mut self.controls.hotbar_8, value),
+                "key_hotbar_9" => set_key(&mut self.controls.hotbar_9, value),
+                "mp_host_port" => self.mp_host_port = value.to_string(),
+                "mp_server_address" => self.mp_server_address = value.to_string(),
+                "mp_join_port" => self.mp_join_port = value.to_string(),
+                "mp_username" => self.mp_username = value.to_string(),
+                _ => {}
+            }
+        }
+    }
+
     pub fn save(&self) {
         if let Err(error) = fs::write(SETTINGS_FILE, self.to_file_contents()) {
             eprintln!("[Settings] Could not save settings: {error}");
         }
+        if let Err(error) = fs::write(CONTROLS_FILE, self.to_controls_file_contents()) {
+            eprintln!("[Settings] Could not save controls config: {error}");
+        }
+    }
+
+    fn to_controls_file_contents(&self) -> String {
+        format!(
+            concat!(
+                "# =====================================================================\n",
+                "# iCraft 玩家按鍵設定檔 (Keybindings Configuration)\n",
+                "# =====================================================================\n",
+                "# 本檔案供玩家自由修改遊戲內的所有按鍵綁定。\n",
+                "# 修改存檔後，啟動遊戲將自動載入最新按鍵設定。\n",
+                "#\n",
+                "# 【支援的按鍵名稱 (Supported Key Names)】:\n",
+                "#   - 字母鍵: A, B, C, ..., Z\n",
+                "#   - 數字鍵: 0, 1, 2, ..., 9\n",
+                "#   - 方向鍵: UP, DOWN, LEFT, RIGHT\n",
+                "#   - 修飾鍵: SPACE, LCTRL, RCTRL, LSHIFT, RSHIFT\n",
+                "#   - 控制鍵: ESC, ENTER, TAB, BACKSPACE, F1 ~ F12\n",
+                "# =====================================================================\n\n",
+                "# ---------------------------------------------------------------------\n",
+                "# 1. 角色移動與基本操作 (Movement & Basic Actions)\n",
+                "# ---------------------------------------------------------------------\n\n",
+                "# 前進 (Move Forward)\n",
+                "key_forward = {}\n\n",
+                "# 後退 (Move Backward)\n",
+                "key_backward = {}\n\n",
+                "# 向左平移 (Move Left)\n",
+                "key_left = {}\n\n",
+                "# 向右平移 (Move Right)\n",
+                "key_right = {}\n\n",
+                "# 跳躍 / 創造模式向上飛行 (Jump / Ascend)\n",
+                "key_jump = {}\n\n",
+                "# 疾跑 (Sprint)\n",
+                "key_sprint = {}\n\n",
+                "# 潛行 / 創造模式向下滑行 (Sneak / Descend)\n",
+                "key_sneak = {}\n\n",
+                "# 開啟 / 關閉背包 (Toggle Inventory)\n",
+                "key_inventory = {}\n\n",
+                "# ---------------------------------------------------------------------\n",
+                "# 2. 系統功能與模式切換快捷鍵 (System & Gameplay Hotkeys)\n",
+                "# ---------------------------------------------------------------------\n\n",
+                "# 開啟 / 關閉聊天框 (Open Chat)\n",
+                "key_chat = {}\n\n",
+                "# 時間加速 (Accelerate Time)\n",
+                "key_time_speed = {}\n\n",
+                "# 開啟 / 關閉成就樹 (Advancements Screen)\n",
+                "key_advancements = {}\n\n",
+                "# 開啟 / 關閉 F3 偵錯 Overlay (Debug Info)\n",
+                "key_debug = {}\n\n",
+                "# 切換第一人稱 / 第三人稱視角 (Toggle Camera View)\n",
+                "key_perspective = {}\n\n",
+                "# 切換生存 / 創造遊戲模式 (Toggle Game Mode)\n",
+                "key_gamemode = {}\n\n",
+                "# 暫停選單 / 關閉界面 (Pause Menu / Close UI)\n",
+                "key_pause = {}\n\n",
+                "# ---------------------------------------------------------------------\n",
+                "# 3. 快捷欄物品選擇 1 - 9 (Hotbar Item Selection 1-9)\n",
+                "# ---------------------------------------------------------------------\n\n",
+                "key_hotbar_1 = {}\n",
+                "key_hotbar_2 = {}\n",
+                "key_hotbar_3 = {}\n",
+                "key_hotbar_4 = {}\n",
+                "key_hotbar_5 = {}\n",
+                "key_hotbar_6 = {}\n",
+                "key_hotbar_7 = {}\n",
+                "key_hotbar_8 = {}\n",
+                "key_hotbar_9 = {}\n"
+            ),
+            key_name(self.controls.forward),
+            key_name(self.controls.backward),
+            key_name(self.controls.left),
+            key_name(self.controls.right),
+            key_name(self.controls.jump),
+            key_name(self.controls.sprint),
+            key_name(self.controls.sneak),
+            key_name(self.controls.inventory),
+            key_name(self.controls.chat),
+            key_name(self.controls.time_speed),
+            key_name(self.controls.advancements),
+            key_name(self.controls.debug),
+            key_name(self.controls.perspective),
+            key_name(self.controls.gamemode),
+            key_name(self.controls.pause),
+            key_name(self.controls.hotbar_1),
+            key_name(self.controls.hotbar_2),
+            key_name(self.controls.hotbar_3),
+            key_name(self.controls.hotbar_4),
+            key_name(self.controls.hotbar_5),
+            key_name(self.controls.hotbar_6),
+            key_name(self.controls.hotbar_7),
+            key_name(self.controls.hotbar_8),
+            key_name(self.controls.hotbar_9),
+        )
     }
 
     fn to_file_contents(&self) -> String {
@@ -253,6 +414,12 @@ impl GameSettings {
                 "key_sprint:{}\n",
                 "key_sneak:{}\n",
                 "key_inventory:{}\n",
+                "key_chat:{}\n",
+                "key_advancements:{}\n",
+                "key_debug:{}\n",
+                "key_perspective:{}\n",
+                "key_gamemode:{}\n",
+                "key_pause:{}\n",
                 "mp_host_port:{}\n",
                 "mp_server_address:{}\n",
                 "mp_join_port:{}\n",
@@ -277,6 +444,12 @@ impl GameSettings {
             key_name(settings.controls.sprint),
             key_name(settings.controls.sneak),
             key_name(settings.controls.inventory),
+            key_name(settings.controls.chat),
+            key_name(settings.controls.advancements),
+            key_name(settings.controls.debug),
+            key_name(settings.controls.perspective),
+            key_name(settings.controls.gamemode),
+            key_name(settings.controls.pause),
             settings.mp_host_port,
             settings.mp_server_address,
             settings.mp_join_port,
@@ -343,6 +516,16 @@ fn key_name(code: KeyCode) -> &'static str {
         KeyCode::KeyX => "X",
         KeyCode::KeyY => "Y",
         KeyCode::KeyZ => "Z",
+        KeyCode::Digit0 => "0",
+        KeyCode::Digit1 => "1",
+        KeyCode::Digit2 => "2",
+        KeyCode::Digit3 => "3",
+        KeyCode::Digit4 => "4",
+        KeyCode::Digit5 => "5",
+        KeyCode::Digit6 => "6",
+        KeyCode::Digit7 => "7",
+        KeyCode::Digit8 => "8",
+        KeyCode::Digit9 => "9",
         KeyCode::Space => "SPACE",
         KeyCode::ControlLeft => "LCTRL",
         KeyCode::ControlRight => "RCTRL",
@@ -352,6 +535,22 @@ fn key_name(code: KeyCode) -> &'static str {
         KeyCode::ArrowDown => "DOWN",
         KeyCode::ArrowLeft => "LEFT",
         KeyCode::ArrowRight => "RIGHT",
+        KeyCode::Escape => "ESC",
+        KeyCode::Enter => "ENTER",
+        KeyCode::Tab => "TAB",
+        KeyCode::Backspace => "BACKSPACE",
+        KeyCode::F1 => "F1",
+        KeyCode::F2 => "F2",
+        KeyCode::F3 => "F3",
+        KeyCode::F4 => "F4",
+        KeyCode::F5 => "F5",
+        KeyCode::F6 => "F6",
+        KeyCode::F7 => "F7",
+        KeyCode::F8 => "F8",
+        KeyCode::F9 => "F9",
+        KeyCode::F10 => "F10",
+        KeyCode::F11 => "F11",
+        KeyCode::F12 => "F12",
         _ => "KEY",
     }
 }
@@ -391,6 +590,21 @@ fn parse_key(value: &str) -> Option<KeyCode> {
                 _ => return None,
             });
         }
+        if ch.is_ascii_digit() {
+            return Some(match ch {
+                b'0' => KeyCode::Digit0,
+                b'1' => KeyCode::Digit1,
+                b'2' => KeyCode::Digit2,
+                b'3' => KeyCode::Digit3,
+                b'4' => KeyCode::Digit4,
+                b'5' => KeyCode::Digit5,
+                b'6' => KeyCode::Digit6,
+                b'7' => KeyCode::Digit7,
+                b'8' => KeyCode::Digit8,
+                b'9' => KeyCode::Digit9,
+                _ => return None,
+            });
+        }
     }
     match value.as_str() {
         "SPACE" => Some(KeyCode::Space),
@@ -402,6 +616,22 @@ fn parse_key(value: &str) -> Option<KeyCode> {
         "DOWN" => Some(KeyCode::ArrowDown),
         "LEFT" => Some(KeyCode::ArrowLeft),
         "RIGHT" => Some(KeyCode::ArrowRight),
+        "ESC" | "ESCAPE" => Some(KeyCode::Escape),
+        "ENTER" | "RETURN" => Some(KeyCode::Enter),
+        "TAB" => Some(KeyCode::Tab),
+        "BACKSPACE" => Some(KeyCode::Backspace),
+        "F1" => Some(KeyCode::F1),
+        "F2" => Some(KeyCode::F2),
+        "F3" => Some(KeyCode::F3),
+        "F4" => Some(KeyCode::F4),
+        "F5" => Some(KeyCode::F5),
+        "F6" => Some(KeyCode::F6),
+        "F7" => Some(KeyCode::F7),
+        "F8" => Some(KeyCode::F8),
+        "F9" => Some(KeyCode::F9),
+        "F10" => Some(KeyCode::F10),
+        "F11" => Some(KeyCode::F11),
+        "F12" => Some(KeyCode::F12),
         _ => None,
     }
 }
@@ -2672,5 +2902,45 @@ mod tests {
         assert_eq!(launch.seed, 0);
         assert!(matches!(launch.game_mode, GameMode::Survival));
         assert!(matches!(launch.role, MultiplayerRole::Client { .. }));
+    }
+
+    #[test]
+    fn controls_config_parse_and_round_trip() {
+        let mut settings = GameSettings::default();
+        let config_text = r#"
+# Custom Controls Config Test
+key_forward = UP
+key_backward = DOWN
+key_left = LEFT
+key_right = RIGHT
+key_jump = SPACE
+key_sprint = LCTRL
+key_sneak = LSHIFT
+key_inventory = E
+key_chat = Y
+key_advancements = K
+key_debug = F1
+key_perspective = F2
+key_gamemode = M
+key_pause = ESC
+"#;
+        settings.apply_file_contents(config_text);
+        assert_eq!(settings.controls.forward, KeyCode::ArrowUp);
+        assert_eq!(settings.controls.backward, KeyCode::ArrowDown);
+        assert_eq!(settings.controls.left, KeyCode::ArrowLeft);
+        assert_eq!(settings.controls.right, KeyCode::ArrowRight);
+        assert_eq!(settings.controls.chat, KeyCode::KeyY);
+        assert_eq!(settings.controls.advancements, KeyCode::KeyK);
+        assert_eq!(settings.controls.debug, KeyCode::F1);
+        assert_eq!(settings.controls.perspective, KeyCode::F2);
+        assert_eq!(settings.controls.gamemode, KeyCode::KeyM);
+        assert_eq!(settings.controls.pause, KeyCode::Escape);
+
+        let exported = settings.to_controls_file_contents();
+        assert!(exported.contains("key_forward = UP"));
+        assert!(exported.contains("key_backward = DOWN"));
+        assert!(exported.contains("key_chat = Y"));
+        assert!(exported.contains("key_advancements = K"));
+        assert!(exported.contains("key_debug = F1"));
     }
 }

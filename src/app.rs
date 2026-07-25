@@ -471,7 +471,7 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
     let PhysicalKey::Code(code) = event.physical_key else {
         return false;
     };
-    if code == KeyCode::Escape {
+    if code == KeyCode::Escape || code == state.settings.controls.pause {
         if non_repeating_press(pressed, event.repeat) {
             if state.advancement_gui.is_open {
                 state.close_advancements_ui();
@@ -483,7 +483,7 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
         }
         return false;
     }
-    if code == KeyCode::KeyL {
+    if code == state.settings.controls.advancements {
         if non_repeating_press(pressed, event.repeat) {
             if state.advancement_gui.is_open {
                 state.close_advancements_ui();
@@ -501,15 +501,15 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
         }
         return false;
     }
-    if code == KeyCode::F3 && pressed && !event.repeat {
+    if code == state.settings.controls.debug && pressed && !event.repeat {
         state.show_debug = !state.show_debug;
         return false;
     }
-    if code == KeyCode::F5 && pressed && !event.repeat {
+    if code == state.settings.controls.perspective && pressed && !event.repeat {
         state.third_person = !state.third_person;
         return false;
     }
-    if code == KeyCode::KeyT && pressed && !event.repeat {
+    if code == state.settings.controls.chat && pressed && !event.repeat {
         if !state.is_paused
             && !state.inventory.is_open
             && !state.advancement_gui.is_open
@@ -546,25 +546,33 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
         state.keys.ctrl = pressed;
     } else if code == controls.sneak {
         state.keys.shift = pressed;
+    } else if code == controls.time_speed {
+        state.keys.f = pressed;
     } else if pressed {
-        match code {
-            KeyCode::Digit1 => state.inventory.selected = 0,
-            KeyCode::Digit2 => state.inventory.selected = 1,
-            KeyCode::Digit3 => state.inventory.selected = 2,
-            KeyCode::Digit4 => state.inventory.selected = 3,
-            KeyCode::Digit5 => state.inventory.selected = 4,
-            KeyCode::Digit6 => state.inventory.selected = 5,
-            KeyCode::Digit7 => state.inventory.selected = 6,
-            KeyCode::Digit8 => state.inventory.selected = 7,
-            KeyCode::Digit9 => state.inventory.selected = 8,
-            KeyCode::KeyG if !event.repeat => {
-                let game_mode = match state.game_mode {
-                    crate::inventory::GameMode::Creative => crate::inventory::GameMode::Survival,
-                    crate::inventory::GameMode::Survival => crate::inventory::GameMode::Creative,
-                };
-                state.set_game_mode(game_mode);
-            }
-            _ => {}
+        if code == controls.hotbar_1 {
+            state.inventory.selected = 0;
+        } else if code == controls.hotbar_2 {
+            state.inventory.selected = 1;
+        } else if code == controls.hotbar_3 {
+            state.inventory.selected = 2;
+        } else if code == controls.hotbar_4 {
+            state.inventory.selected = 3;
+        } else if code == controls.hotbar_5 {
+            state.inventory.selected = 4;
+        } else if code == controls.hotbar_6 {
+            state.inventory.selected = 5;
+        } else if code == controls.hotbar_7 {
+            state.inventory.selected = 6;
+        } else if code == controls.hotbar_8 {
+            state.inventory.selected = 7;
+        } else if code == controls.hotbar_9 {
+            state.inventory.selected = 8;
+        } else if code == controls.gamemode && !event.repeat {
+            let game_mode = match state.game_mode {
+                crate::inventory::GameMode::Creative => crate::inventory::GameMode::Survival,
+                crate::inventory::GameMode::Survival => crate::inventory::GameMode::Creative,
+            };
+            state.set_game_mode(game_mode);
         }
     }
     false

@@ -1474,6 +1474,7 @@ pub struct KeyState {
     pub space: bool,
     pub ctrl: bool,
     pub shift: bool,
+    pub f: bool,
 }
 
 pub(crate) fn allows_camera_look(
@@ -5081,7 +5082,8 @@ impl State {
         }
 
         // Update game time
-        let elapsed_world_ticks = dt * 20.0;
+        let speed_multiplier = if self.keys.f { 60.0 } else { 1.0 };
+        let elapsed_world_ticks = dt * 20.0 * speed_multiplier;
         self.world_time.tick_accumulator += elapsed_world_ticks;
         let new_ticks = self.world_time.tick_accumulator.floor() as u64;
         self.world_time.ticks += new_ticks;
