@@ -47,10 +47,27 @@ impl EntityType {
         )
     }
 
+    pub fn is_living(self) -> bool {
+        self.is_passive() || self.is_hostile()
+    }
+
     pub fn is_projectile(self) -> bool {
         matches!(
             self,
             Self::Arrow | Self::SplashPotion | Self::WitherSkull | Self::DragonBreath
+        )
+    }
+
+    pub fn uses_standard_player_kill_rewards(self) -> bool {
+        matches!(
+            self,
+            Self::Zombie
+                | Self::Skeleton
+                | Self::Creeper
+                | Self::Pig
+                | Self::Cow
+                | Self::Sheep
+                | Self::Chicken
         )
     }
 
@@ -109,6 +126,7 @@ pub struct Entity {
     pub fire_aspect_timer: f32,
     pub burn_damage_timer: f32,
     pub invulnerable_time: f32,
+    pub player_kill_rewarded: bool,
     pub friendly_projectile: bool,
     pub projectile_damage: f32,
     pub potion: Option<crate::brewing::PotionData>,
@@ -195,6 +213,7 @@ impl Entity {
             fire_aspect_timer: 0.0,
             burn_damage_timer: 0.0,
             invulnerable_time: 0.0,
+            player_kill_rewarded: false,
             friendly_projectile: false,
             projectile_damage: 4.0,
             potion: None,
@@ -219,6 +238,21 @@ impl Entity {
             self.position + Vec3::new(0.0, self.size.y * 0.5, 0.0),
             self.size,
         )
+    }
+
+    pub fn is_local_living_target(&self) -> bool {
+        self.entity_type.is_living() && self.health > 0.0
+    }
+
+    pub fn is_player_melee_target(&self) -> bool {
+        self.health > 0.0
+            && (self.entity_type.is_living() || self.entity_type == EntityType::EndCrystal)
+    }
+
+    /// Player arrows can destroy End Crystals, but status potions only target living entities.
+    pub fn is_player_projectile_target(&self) -> bool {
+        self.health > 0.0
+            && (self.entity_type.is_living() || self.entity_type == EntityType::EndCrystal)
     }
 
     pub fn update_physics(&mut self, dt: f32, chunk_manager: &ChunkManager) {

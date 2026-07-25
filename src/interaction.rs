@@ -2,6 +2,58 @@ use crate::chunk_manager::ChunkManager;
 use crate::world::BlockType;
 use glam::Vec3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaycastTargetPolicy {
+    /// Select the solid face that a newly placed block should attach to.
+    ///
+    /// Passable vegetation and environmental blocks do not provide that face,
+    /// so the ray continues through them.
+    Place,
+    /// Select blocks that the normal mining path is allowed to break.
+    ///
+    /// Passable decorations opt in explicitly. This keeps fluids, fire, and
+    /// portals out of mining without coupling breakability to collision.
+    Break,
+}
+
+impl RaycastTargetPolicy {
+    fn targets(self, block: BlockType) -> bool {
+        match self {
+            Self::Place => block != BlockType::Air && !block.properties().is_passable,
+            Self::Break => {
+                is_explicit_breakable_decoration(block)
+                    || (block != BlockType::Air && !block.properties().is_passable)
+            }
+        }
+    }
+}
+
+fn is_explicit_breakable_decoration(block: BlockType) -> bool {
+    matches!(
+        block,
+        BlockType::Torch
+            | BlockType::TallGrass
+            | BlockType::Dandelion
+            | BlockType::Poppy
+            | BlockType::SugarCane
+            | BlockType::RedstoneWire
+            | BlockType::RedstoneTorch
+            | BlockType::RedstoneTorchOff
+            | BlockType::Repeater
+            | BlockType::RepeaterPowered
+            | BlockType::Comparator
+            | BlockType::ComparatorPowered
+            | BlockType::StoneButton
+            | BlockType::StoneButtonPressed
+            | BlockType::Lever
+            | BlockType::LeverOn
+            | BlockType::PressurePlate
+            | BlockType::PressurePlatePowered
+            | BlockType::SnowLayer
+            | BlockType::WitherSkeletonSkull
+    )
+}
+
 pub struct RaycastResult {
     pub block_pos: Vec3, // 命中的方塊整數座標
     pub normal: Vec3,    // 命中的表面法線（用於放置新方塊）
@@ -12,7 +64,7 @@ pub fn raycast(
     direction: Vec3,
     max_dist: f32,
     chunk_manager: &ChunkManager,
-    include_passable: bool,
+    target_policy: RaycastTargetPolicy,
 ) -> Option<RaycastResult> {
     // Avoid division by zero/NaN by ensuring direction components are non-zero
     let eps = 1e-8;
@@ -65,8 +117,7 @@ pub fn raycast(
 
     while t < max_dist {
         let block = chunk_manager.get_block(x, y, z);
-        let props = block.properties();
-        if block != BlockType::Air && (include_passable || !props.is_passable) {
+        if target_policy.targets(block) {
             return Some(RaycastResult {
                 block_pos: Vec3::new(x as f32, y as f32, z as f32),
                 normal: last_face,
@@ -120,7 +171,7 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
             10.0,
             &chunk_manager,
-            false,
+            RaycastTargetPolicy::Place,
         );
         assert!(hit.is_none());
     }
@@ -139,7 +190,7 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
             5.0,
             &chunk_manager,
-            false,
+            RaycastTargetPolicy::Place,
         );
         assert!(hit.is_some());
         let res = hit.unwrap();
@@ -159,18 +210,125 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
             5.0,
             &chunk_manager,
-            true, // breaking: include passable plants
+            RaycastTargetPolicy::Break,
         );
         assert!(hit.is_some());
         assert_eq!(hit.unwrap().block_pos, Vec3::new(8.0, 72.0, 8.0));
     }
 
     #[test]
-    fn test_raycast_ignores_passable_plants_when_placing() {
+    fn break_policy_targets_decorations_but_not_environmental_passables() {
+        for block in [
+            BlockType::TallGrass,
+            BlockType::Dandelion,
+            BlockType::Poppy,
+            BlockType::SugarCane,
+            BlockType::Torch,
+            BlockType::RedstoneWire,
+            BlockType::RedstoneTorch,
+            BlockType::PressurePlate,
+            BlockType::SnowLayer,
+            BlockType::WitherSkeletonSkull,
+        ] {
+            assert!(
+                RaycastTargetPolicy::Break.targets(block),
+                "{block:?} should opt into break targeting"
+            );
+        }
+
+        for block in [
+            BlockType::Air,
+            BlockType::Water,
+            BlockType::Lava,
+            BlockType::Fire,
+            BlockType::NetherPortal,
+            BlockType::EndPortal,
+        ] {
+            assert!(
+                !RaycastTargetPolicy::Break.targets(block),
+                "{block:?} is environmental, not a mineable target"
+            );
+        }
+    }
+
+    #[test]
+    fn break_raycast_hits_each_explicit_passable_decoration() {
+        let mut chunk_manager = ChunkManager::new(8);
+        chunk_manager.chunks.insert((0, 0), Chunk::new(0, 0));
+
+        for block in [
+            BlockType::TallGrass,
+            BlockType::Dandelion,
+            BlockType::Poppy,
+            BlockType::SugarCane,
+            BlockType::RedstoneWire,
+            BlockType::RedstoneTorch,
+            BlockType::PressurePlate,
+            BlockType::SnowLayer,
+            BlockType::WitherSkeletonSkull,
+        ] {
+            chunk_manager.set_block(8, 72, 8, block);
+            let hit = raycast(
+                Vec3::new(8.5, 70.5, 8.5),
+                Vec3::Y,
+                5.0,
+                &chunk_manager,
+                RaycastTargetPolicy::Break,
+            )
+            .unwrap_or_else(|| panic!("{block:?} should be selected for breaking"));
+            assert_eq!(hit.block_pos, Vec3::new(8.0, 72.0, 8.0));
+        }
+    }
+
+    #[test]
+    fn break_raycast_skips_water_and_lava_for_solid_behind_them() {
         let mut chunk_manager = ChunkManager::new(8);
         let mut chunk = Chunk::new(0, 0);
-        chunk.blocks[8][72][8] = BlockType::TallGrass;
+        chunk.blocks[8][71][8] = BlockType::Water;
+        chunk.blocks[8][72][8] = BlockType::Lava;
         chunk.blocks[8][73][8] = BlockType::Stone;
+        chunk_manager.chunks.insert((0, 0), chunk);
+
+        let hit = raycast(
+            Vec3::new(8.5, 70.5, 8.5),
+            Vec3::Y,
+            5.0,
+            &chunk_manager,
+            RaycastTargetPolicy::Break,
+        )
+        .expect("solid behind fluids should remain mineable");
+
+        assert_eq!(hit.block_pos, Vec3::new(8.0, 73.0, 8.0));
+        assert_eq!(hit.normal, Vec3::NEG_Y);
+    }
+
+    #[test]
+    fn break_raycast_returns_none_for_only_environmental_passables() {
+        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk = Chunk::new(0, 0);
+        chunk.blocks[8][71][8] = BlockType::Water;
+        chunk.blocks[8][72][8] = BlockType::Lava;
+        chunk.blocks[8][73][8] = BlockType::Fire;
+        chunk_manager.chunks.insert((0, 0), chunk);
+
+        assert!(raycast(
+            Vec3::new(8.5, 70.5, 8.5),
+            Vec3::Y,
+            4.0,
+            &chunk_manager,
+            RaycastTargetPolicy::Break,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn place_raycast_ignores_passable_vegetation_and_fluids() {
+        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk = Chunk::new(0, 0);
+        chunk.blocks[8][71][8] = BlockType::TallGrass;
+        chunk.blocks[8][72][8] = BlockType::Water;
+        chunk.blocks[8][73][8] = BlockType::Lava;
+        chunk.blocks[8][74][8] = BlockType::Stone;
         chunk_manager.chunks.insert((0, 0), chunk);
 
         let hit = raycast(
@@ -178,9 +336,46 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
             5.0,
             &chunk_manager,
-            false, // placing: ignore passable plants
+            RaycastTargetPolicy::Place,
         );
         assert!(hit.is_some());
-        assert_eq!(hit.unwrap().block_pos, Vec3::new(8.0, 73.0, 8.0));
+        assert_eq!(hit.unwrap().block_pos, Vec3::new(8.0, 74.0, 8.0));
+    }
+
+    #[test]
+    fn dda_crosses_exact_boundary_into_negative_coordinates() {
+        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk = Chunk::new(-1, 0);
+        for x in 0..crate::world::CHUNK_WIDTH {
+            for y in 0..crate::world::CHUNK_HEIGHT {
+                for z in 0..crate::world::CHUNK_DEPTH {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                }
+            }
+        }
+        chunk_manager.chunks.insert((-1, 0), chunk);
+        chunk_manager.set_block(-1, 64, 0, BlockType::Stone);
+
+        let from_boundary = raycast(
+            Vec3::new(0.0, 64.5, 0.5),
+            Vec3::NEG_X,
+            2.0,
+            &chunk_manager,
+            RaycastTargetPolicy::Place,
+        )
+        .expect("negative cell touching the origin boundary should be visited");
+        assert_eq!(from_boundary.block_pos, Vec3::new(-1.0, 64.0, 0.0));
+        assert_eq!(from_boundary.normal, Vec3::X);
+
+        let from_negative_cell = raycast(
+            Vec3::new(-2.5, 64.5, 0.5),
+            Vec3::X,
+            3.0,
+            &chunk_manager,
+            RaycastTargetPolicy::Break,
+        )
+        .expect("DDA should traverse negative world cells using floor coordinates");
+        assert_eq!(from_negative_cell.block_pos, Vec3::new(-1.0, 64.0, 0.0));
+        assert_eq!(from_negative_cell.normal, Vec3::NEG_X);
     }
 }

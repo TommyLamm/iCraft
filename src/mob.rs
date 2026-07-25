@@ -21,6 +21,42 @@ fn should_retain_after_health_cleanup(entity: &Entity) -> bool {
         )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PlayerHitSource {
+    AttackerPosition(Vec3),
+    ProjectileVelocity(Vec3),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlayerHitEvent {
+    amount: f32,
+    source: PlayerHitSource,
+}
+
+impl PlayerHitEvent {
+    fn from_attacker(amount: f32, position: Vec3) -> Self {
+        Self {
+            amount,
+            source: PlayerHitSource::AttackerPosition(position),
+        }
+    }
+
+    fn from_projectile(amount: f32, velocity: Vec3) -> Self {
+        Self {
+            amount,
+            source: PlayerHitSource::ProjectileVelocity(velocity),
+        }
+    }
+
+    fn horizontal_knockback_direction(self, player_position: Vec3) -> Vec3 {
+        let direction = match self.source {
+            PlayerHitSource::AttackerPosition(position) => player_position - position,
+            PlayerHitSource::ProjectileVelocity(velocity) => velocity,
+        };
+        Vec3::new(direction.x, 0.0, direction.z).normalize_or_zero()
+    }
+}
+
 pub fn calculate_explosion_damage(center: Vec3, player_pos: Vec3) -> f32 {
     let dist = center.distance(player_pos);
     if dist >= 5.0 {
@@ -265,8 +301,7 @@ pub fn update_mobs(
     // We collect arrows to spawn, creeper explosions to trigger, and sound effects to print.
     let mut arrows_to_spawn = Vec::new();
     let mut explosions = Vec::new();
-    let mut hit_player = false;
-    let mut hit_player_amount = 0.0;
+    let mut player_hit = None;
 
     for entity in &mut entity_manager.entities {
         if entity.entity_type == EntityType::RemotePlayer {
@@ -321,8 +356,7 @@ pub fn update_mobs(
             // Check collision with player AABB
             let player_aabb = player_physics.get_aabb();
             if !entity.friendly_projectile && entity.get_aabb().intersects(&player_aabb) {
-                hit_player = true;
-                hit_player_amount = 4.0;
+                player_hit = Some(PlayerHitEvent::from_projectile(4.0, entity.velocity));
                 entity.health = -1.0; // Destroy arrow
             }
             continue;
@@ -386,8 +420,7 @@ pub fn update_mobs(
 
                     // Melee attack
                     if dist <= 1.2 && entity.action_cooldown <= 0.0 {
-                        hit_player = true;
-                        hit_player_amount = 3.0;
+                        player_hit = Some(PlayerHitEvent::from_attacker(3.0, entity.position));
                         entity.action_cooldown = 1.0; // Cooldown
                     }
                 }
@@ -559,10 +592,10 @@ pub fn update_mobs(
     }
 
     // Handle player taking damage
-    if hit_player && game_mode != GameMode::Creative {
+    if let Some(hit) = player_hit.filter(|_| game_mode != GameMode::Creative) {
         // Player is hit, apply damage and small knockback
         let died = player_state.take_damage(
-            hit_player_amount * damage_multiplier,
+            hit.amount * damage_multiplier,
             crate::player::DamageSource::Mob,
         );
         if died {
@@ -571,7 +604,7 @@ pub fn update_mobs(
             player_state.death_reason = Some(crate::player::DamageSource::Mob);
         } else {
             // Apply knockback
-            let flat_dir = (player_pos - entity_manager.entities[0].position).normalize_or_zero(); // general direction
+            let flat_dir = hit.horizontal_knockback_direction(player_pos);
             player_physics.velocity += flat_dir * 8.0 + Vec3::new(0.0, 3.0, 0.0);
         }
     }
@@ -713,6 +746,51 @@ mod tests {
 
         assert!((facing_dir.x - expected_dir.x).abs() < 1e-5);
         assert!((facing_dir.z - expected_dir.z).abs() < 1e-5);
+    }
+
+    #[test]
+    fn player_knockback_uses_actual_attacker_regardless_of_entity_order() {
+        fn run_update(decoy_first: bool) -> Vec3 {
+            let mut entity_manager = EntityManager::new();
+            if decoy_first {
+                entity_manager.spawn(EntityType::DroppedItem, Vec3::new(10.0, 1.0, 0.0));
+            }
+            entity_manager.spawn(EntityType::Zombie, Vec3::new(-1.0, 1.0, 0.0));
+            if !decoy_first {
+                entity_manager.spawn(EntityType::DroppedItem, Vec3::new(10.0, 1.0, 0.0));
+            }
+
+            let mut chunk_manager = ChunkManager::new(1);
+            let mut chunk_meshes = std::collections::HashMap::new();
+            let mut player_physics = PlayerPhysics::new(Vec3::new(0.0, 1.0, 0.0));
+            let mut player_state = PlayerState::new();
+            let mut audio_manager = crate::audio::AudioManager::new();
+
+            update_mobs(
+                &mut entity_manager,
+                &mut chunk_manager,
+                &mut chunk_meshes,
+                &mut player_physics,
+                &mut player_state,
+                GameMode::Survival,
+                0,
+                0.0,
+                &mut audio_manager,
+                Vec3::X,
+                false,
+                1.0,
+                true,
+            );
+            player_physics.velocity
+        }
+
+        let decoy_first = run_update(true);
+        let attacker_first = run_update(false);
+        assert!(
+            decoy_first.x > 0.0,
+            "knockback must move away from attacker"
+        );
+        assert_eq!(decoy_first, attacker_first);
     }
 
     #[test]

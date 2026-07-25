@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{self, Instant};
 
-use super::protocol::{Action, Packet, PlayerId, PROTOCOL_VERSION};
+use super::protocol::{Action, LightningStrike, Packet, PlayerId, PROTOCOL_VERSION};
 use super::transport::Connection;
 
 #[derive(Debug)]
@@ -53,7 +53,9 @@ pub enum ClientToGame {
     TimeSync {
         ticks: u64,
         weather: u8,
+        weather_remaining_ticks: f32,
     },
+    LightningStrike(LightningStrike),
     Chat {
         sender: String,
         message: String,
@@ -90,6 +92,23 @@ pub enum GameToClient {
 }
 
 pub struct NetworkClient;
+
+fn authoritative_weather_event(packet: &Packet) -> Option<ClientToGame> {
+    match packet {
+        Packet::TimeSync {
+            ticks,
+            weather,
+            weather_remaining_ticks,
+            ..
+        } => Some(ClientToGame::TimeSync {
+            ticks: *ticks,
+            weather: *weather,
+            weather_remaining_ticks: *weather_remaining_ticks,
+        }),
+        Packet::LightningStrike { strike, .. } => Some(ClientToGame::LightningStrike(*strike)),
+        _ => None,
+    }
+}
 
 impl NetworkClient {
     pub fn spawn(
@@ -234,7 +253,12 @@ async fn run_client(
                     Ok(Packet::PlayerAction { id, action, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerAction { id, action }); }
                     Ok(Packet::BlockChange { x, y, z, block, .. }) => { let _ = client_to_game.send(ClientToGame::BlockChange { x, y, z, block }); }
                     Ok(Packet::ChunkData { cx, cz, blocks, .. }) => { let _ = client_to_game.send(ClientToGame::ChunkData { cx, cz, blocks }); }
-                    Ok(Packet::TimeSync { ticks, weather, .. }) => { let _ = client_to_game.send(ClientToGame::TimeSync { ticks, weather }); }
+                    Ok(packet @ Packet::TimeSync { .. })
+                    | Ok(packet @ Packet::LightningStrike { .. }) => {
+                        if let Some(event) = authoritative_weather_event(&packet) {
+                            let _ = client_to_game.send(event);
+                        }
+                    }
                     Ok(Packet::ChatMessage { sender, message, .. }) => { let _ = client_to_game.send(ClientToGame::Chat { sender, message }); }
                     Ok(Packet::Keepalive { .. }) => {
                         if writer.send(&Packet::Keepalive { protocol_version: PROTOCOL_VERSION }).await.is_err() {
@@ -471,7 +495,17 @@ mod tests {
             .send(HostToServer::BroadcastTimeSync {
                 ticks: 19_000,
                 weather: 2,
+                weather_remaining_ticks: 8_000.5,
             })
+            .unwrap();
+        let strike = LightningStrike {
+            x: -7,
+            y: 90,
+            z: 13,
+            visual_seed: 77,
+        };
+        host_tx
+            .send(HostToServer::BroadcastLightningStrike { strike })
             .unwrap();
 
         assert!(matches!(
@@ -491,14 +525,51 @@ mod tests {
             wait_for_event(&event_rx),
             ClientToGame::TimeSync {
                 ticks: 19_000,
-                weather: 2
+                weather: 2,
+                weather_remaining_ticks: 8_000.5,
             }
+        ));
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::LightningStrike(received) if received == strike
         ));
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
         host_tx.send(HostToServer::Stop).unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn authoritative_weather_packets_map_to_pure_client_events() {
+        let sync = Packet::TimeSync {
+            protocol_version: PROTOCOL_VERSION,
+            ticks: 12_345,
+            weather: 1,
+            weather_remaining_ticks: 6_789.5,
+        };
+        assert!(matches!(
+            authoritative_weather_event(&sync),
+            Some(ClientToGame::TimeSync {
+                ticks: 12_345,
+                weather: 1,
+                weather_remaining_ticks: 6_789.5,
+            })
+        ));
+
+        let strike = LightningStrike {
+            x: 3,
+            y: 72,
+            z: -9,
+            visual_seed: 123,
+        };
+        assert!(matches!(
+            authoritative_weather_event(&Packet::LightningStrike {
+                protocol_version: PROTOCOL_VERSION,
+                strike,
+            }),
+            Some(ClientToGame::LightningStrike(received)) if received == strike
+        ));
     }
 
     #[test]

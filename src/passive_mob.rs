@@ -1,8 +1,30 @@
 use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
 use crate::entity::{Entity, EntityManager, EntityType};
-use crate::inventory::{GameMode, Item};
+use crate::inventory::{GameMode, Inventory, Item};
 use crate::physics::PlayerPhysics;
 use glam::Vec3;
+
+fn store_or_drop_chicken_egg(
+    inventory: &mut Inventory,
+    entity_manager: &mut EntityManager,
+    position: Vec3,
+) -> bool {
+    if inventory.add_item(Item::Egg) {
+        return true;
+    }
+
+    let id = entity_manager.spawn(EntityType::DroppedItem, position);
+    if let Some(egg) = entity_manager
+        .entities
+        .iter_mut()
+        .find(|entity| entity.id == id)
+    {
+        egg.dropped_item = Some(Item::Egg);
+        egg.velocity = Vec3::new(0.0, 1.0, 0.0);
+        egg.pickup_cooldown = 0.5;
+    }
+    false
+}
 
 fn check_cliff_ahead(entity: &Entity, chunk_manager: &ChunkManager) -> bool {
     // Calculate walking direction unit vector
@@ -82,7 +104,7 @@ pub fn update_passive_mobs(
                 entity_manager.entities[i].egg_lay_timer = 300.0 + (pos.x + pos.z) % 300.0;
                 if pos.distance(player_pos) <= 16.0 && game_mode == GameMode::Survival {
                     println!("[Debug] Chicken laid an egg in your pocket!");
-                    inventory.add_item(Item::Egg);
+                    store_or_drop_chicken_egg(inventory, entity_manager, pos);
                 }
             } else {
                 entity_manager.entities[i].egg_lay_timer = lay_timer;
@@ -379,5 +401,54 @@ pub fn spawn_passive_mobs(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inventory::ItemStack;
+
+    #[test]
+    fn full_inventory_drops_exactly_one_egg_at_the_chicken() {
+        let mut inventory = Inventory::new();
+        inventory
+            .hotbar
+            .fill(Some(ItemStack::new(Item::DiamondSword, 1)));
+        inventory
+            .main
+            .fill(Some(ItemStack::new(Item::DiamondPickaxe, 1)));
+        let original_hotbar = inventory.hotbar;
+        let original_main = inventory.main;
+        let position = Vec3::new(4.0, 70.0, -3.0);
+        let mut entities = EntityManager::new();
+
+        assert!(!store_or_drop_chicken_egg(
+            &mut inventory,
+            &mut entities,
+            position
+        ));
+        assert_eq!(inventory.hotbar, original_hotbar);
+        assert_eq!(inventory.main, original_main);
+        assert_eq!(entities.entities.len(), 1);
+        let egg = &entities.entities[0];
+        assert_eq!(egg.entity_type, EntityType::DroppedItem);
+        assert_eq!(egg.dropped_item, Some(Item::Egg));
+        assert_eq!(egg.position, position);
+        assert_eq!(egg.pickup_cooldown, 0.5);
+    }
+
+    #[test]
+    fn available_inventory_space_stores_egg_without_a_duplicate_drop() {
+        let mut inventory = Inventory::new();
+        let mut entities = EntityManager::new();
+
+        assert!(store_or_drop_chicken_egg(
+            &mut inventory,
+            &mut entities,
+            Vec3::ZERO
+        ));
+        assert_eq!(inventory.count_item(Item::Egg), 1);
+        assert!(entities.entities.is_empty());
     }
 }

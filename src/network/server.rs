@@ -1,20 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::time::{self, Instant};
 
-use super::protocol::{Action, Packet, PlayerId, PROTOCOL_VERSION};
+use super::protocol::{Action, LightningStrike, Packet, PlayerId, PROTOCOL_VERSION};
 use super::transport::Connection;
 
 const CLIENT_QUEUE_CAPACITY: usize = 64;
 const HOST_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
+const RELIABLE_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 pub enum ServerToHost {
@@ -72,6 +73,16 @@ pub enum HostToServer {
     BroadcastTimeSync {
         ticks: u64,
         weather: u8,
+        weather_remaining_ticks: f32,
+    },
+    SendTimeSync {
+        ticks: u64,
+        weather: u8,
+        weather_remaining_ticks: f32,
+        to: PlayerId,
+    },
+    BroadcastLightningStrike {
+        strike: LightningStrike,
     },
     BroadcastPlayerPosition {
         id: PlayerId,
@@ -102,10 +113,54 @@ struct ClientSession {
     id: PlayerId,
     username: String,
     out_tx: mpsc::Sender<Packet>,
-    pose_tx: watch::Sender<Option<Packet>>,
+    pose_mailbox: Arc<PoseMailbox>,
+    cancel_tx: watch::Sender<bool>,
 }
 
 type Sessions = Arc<Mutex<HashMap<PlayerId, ClientSession>>>;
+
+#[derive(Default)]
+struct PoseMailbox {
+    pending: Mutex<HashMap<PlayerId, Packet>>,
+    notify: Notify,
+}
+
+impl PoseMailbox {
+    async fn replace(&self, player_id: PlayerId, packet: Packet) {
+        self.pending.lock().await.insert(player_id, packet);
+        self.notify.notify_one();
+    }
+
+    async fn drain(&self) -> Vec<Packet> {
+        let mut packets: Vec<_> = self
+            .pending
+            .lock()
+            .await
+            .drain()
+            .map(|(_, packet)| packet)
+            .collect();
+        packets.sort_by_key(|packet| match packet {
+            Packet::PlayerPosition { id, .. } => *id,
+            _ => PlayerId::MAX,
+        });
+        packets
+    }
+}
+
+async fn queue_initial_roster(
+    tx: &mpsc::Sender<Packet>,
+    roster: impl IntoIterator<Item = (PlayerId, String)>,
+) -> Result<(), mpsc::error::SendError<Packet>> {
+    for (id, username) in roster {
+        tx.send(Packet::PlayerJoin {
+            protocol_version: PROTOCOL_VERSION,
+            id,
+            username,
+        })
+        .await?;
+    }
+    Ok(())
+}
 
 pub struct NetworkServer {
     seed: u64,
@@ -284,43 +339,11 @@ impl NetworkServer {
         eprintln!("[NetworkServer] Sent LoginSuccess to '{handshake}' (Player ID: {id})");
 
         let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
-        let (pose_tx, mut pose_rx) = watch::channel(None);
         let roster_tx = out_tx.clone();
-        sessions.lock().await.insert(
-            id,
-            ClientSession {
-                id,
-                username: handshake.clone(),
-                out_tx,
-                pose_tx,
-            },
-        );
-        let roster: Vec<(PlayerId, String)> = sessions
-            .lock()
-            .await
-            .values()
-            .filter(|session| session.id != id)
-            .map(|session| (session.id, session.username.clone()))
-            .collect();
-        for (existing_id, username) in roster {
-            let _ = roster_tx.try_send(Packet::PlayerJoin {
-                protocol_version: PROTOCOL_VERSION,
-                id: existing_id,
-                username,
-            });
-        }
-        if server_to_host
-            .send(ServerToHost::ClientJoined {
-                id,
-                username: handshake,
-            })
-            .is_err()
-        {
-            sessions.lock().await.remove(&id);
-            return;
-        }
-
+        let pose_mailbox = Arc::new(PoseMailbox::default());
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let (mut reader, mut writer) = connection.into_split();
+        let writer_pose_mailbox = Arc::clone(&pose_mailbox);
         let mut send_task = tokio::spawn(async move {
             let mut keepalive =
                 time::interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
@@ -341,16 +364,11 @@ impl NetworkServer {
                             }
                         }
                     }
-                    changed = pose_rx.changed() => {
-                        if changed.is_err() {
-                            eprintln!("[NetworkServer] Send task: pose channel closed");
-                            break;
-                        }
-                        let packet = pose_rx.borrow_and_update().clone();
-                        if let Some(packet) = packet {
+                    _ = writer_pose_mailbox.notify.notified() => {
+                        for packet in writer_pose_mailbox.drain().await {
                             if writer.send(&packet).await.is_err() {
                                 eprintln!("[NetworkServer] Send task: writer send failed for pose");
-                                break;
+                                return;
                             }
                         }
                     }
@@ -365,6 +383,45 @@ impl NetworkServer {
                 }
             }
         });
+
+        sessions.lock().await.insert(
+            id,
+            ClientSession {
+                id,
+                username: handshake.clone(),
+                out_tx,
+                pose_mailbox: Arc::clone(&pose_mailbox),
+                cancel_tx,
+            },
+        );
+        let mut roster: Vec<(PlayerId, String)> = sessions
+            .lock()
+            .await
+            .values()
+            .filter(|session| session.id != id)
+            .map(|session| (session.id, session.username.clone()))
+            .collect();
+        roster.sort_by_key(|(existing_id, _)| *existing_id);
+        if !matches!(
+            time::timeout(CLIENT_TIMEOUT, queue_initial_roster(&roster_tx, roster)).await,
+            Ok(Ok(()))
+        ) {
+            sessions.lock().await.remove(&id);
+            send_task.abort();
+            return;
+        }
+        drop(roster_tx);
+        if server_to_host
+            .send(ServerToHost::ClientJoined {
+                id,
+                username: handshake,
+            })
+            .is_err()
+        {
+            sessions.lock().await.remove(&id);
+            send_task.abort();
+            return;
+        }
 
         #[allow(unused_assignments)]
         let mut disconnect_reason = "unknown".to_string();
@@ -440,6 +497,14 @@ impl NetworkServer {
                     disconnect_reason = "send task exited".into();
                     break;
                 }
+                changed = cancel_rx.changed() => {
+                    disconnect_reason = if changed.is_ok() && *cancel_rx.borrow() {
+                        "session cancelled".into()
+                    } else {
+                        "session cancellation channel closed".into()
+                    };
+                    break;
+                }
             }
         }
 
@@ -468,12 +533,13 @@ impl NetworkServer {
             return;
         };
 
+        let _ = session.cancel_tx.send(true);
         eprintln!(
             "[NetworkServer] Client '{}' (Player ID: {}) disconnected",
             session.username, id
         );
         let _ = server_to_host.send(ServerToHost::ClientLeft { id });
-        Self::broadcast_to(
+        let failed = Self::broadcast_reliably(
             sessions,
             Packet::PlayerLeave {
                 protocol_version: PROTOCOL_VERSION,
@@ -481,6 +547,7 @@ impl NetworkServer {
             },
         )
         .await;
+        Self::evict_slow_clients(sessions, server_to_host, failed).await;
     }
 
     async fn handle_host_command(&self, command: HostToServer) {
@@ -515,7 +582,11 @@ impl NetworkServer {
 
         let reliable_broadcast = matches!(
             &command,
-            HostToServer::BroadcastBlockChange { .. } | HostToServer::BroadcastChat { .. }
+            HostToServer::BroadcastBlockChange { .. }
+                | HostToServer::BroadcastChat { .. }
+                | HostToServer::NotifyPlayerJoin { .. }
+                | HostToServer::BroadcastTimeSync { .. }
+                | HostToServer::BroadcastLightningStrike { .. }
         );
         let (packet, recipient) = match command {
             HostToServer::BroadcastBlockChange { x, y, z, block } => (
@@ -537,11 +608,37 @@ impl NetworkServer {
                 },
                 Some(to),
             ),
-            HostToServer::BroadcastTimeSync { ticks, weather } => (
+            HostToServer::BroadcastTimeSync {
+                ticks,
+                weather,
+                weather_remaining_ticks,
+            } => (
                 Packet::TimeSync {
                     protocol_version: PROTOCOL_VERSION,
                     ticks,
                     weather,
+                    weather_remaining_ticks,
+                },
+                None,
+            ),
+            HostToServer::SendTimeSync {
+                ticks,
+                weather,
+                weather_remaining_ticks,
+                to,
+            } => (
+                Packet::TimeSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    ticks,
+                    weather,
+                    weather_remaining_ticks,
+                },
+                Some(to),
+            ),
+            HostToServer::BroadcastLightningStrike { strike } => (
+                Packet::LightningStrike {
+                    protocol_version: PROTOCOL_VERSION,
+                    strike,
                 },
                 None,
             ),
@@ -575,50 +672,111 @@ impl NetworkServer {
             HostToServer::Stop => return,
         };
 
-        if let Some(id) = recipient {
-            Self::send_to(&self.sessions, id, packet).await;
+        let failed = if let Some(id) = recipient {
+            Self::send_to(&self.sessions, id, packet).await
         } else if reliable_broadcast {
-            Self::broadcast_reliably(&self.sessions, packet).await;
+            Self::broadcast_reliably(&self.sessions, packet).await
         } else {
             Self::broadcast_to(&self.sessions, packet).await;
-        }
+            Vec::new()
+        };
+        Self::evict_slow_clients(&self.sessions, &self.server_to_host, failed).await;
     }
 
-    async fn send_to(sessions: &Sessions, id: PlayerId, packet: Packet) {
+    async fn send_to(sessions: &Sessions, id: PlayerId, packet: Packet) -> Vec<PlayerId> {
         let tx = sessions
             .lock()
             .await
             .get(&id)
             .map(|session| session.out_tx.clone());
         if let Some(tx) = tx {
-            // Targeted packets are join catch-up data and must not be dropped.
-            let _ = tx.send(packet).await;
+            // Targeted catch-up data is reliable. Bound the wait so a client
+            // that has stopped draining its queue is disconnected instead of
+            // stalling the host command loop forever.
+            if !matches!(
+                time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.send(packet)).await,
+                Ok(Ok(()))
+            ) {
+                return vec![id];
+            }
         }
+        Vec::new()
     }
 
-    async fn broadcast_reliably(sessions: &Sessions, packet: Packet) {
+    async fn broadcast_reliably(sessions: &Sessions, packet: Packet) -> Vec<PlayerId> {
         let senders: Vec<_> = sessions
             .lock()
             .await
             .values()
-            .map(|session| session.out_tx.clone())
+            .map(|session| (session.id, session.out_tx.clone()))
             .collect();
-        for tx in senders {
-            // Block mutations and user chat are ordered authoritative state,
-            // so applying backpressure is preferable to silently dropping them.
-            let _ = tx.send(packet.clone()).await;
+        let mut sends = tokio::task::JoinSet::new();
+        for (id, tx) in senders {
+            let packet = packet.clone();
+            sends.spawn(async move {
+                let delivered = matches!(
+                    time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.send(packet)).await,
+                    Ok(Ok(()))
+                );
+                (!delivered).then_some(id)
+            });
+        }
+
+        let mut failed = Vec::new();
+        while let Some(result) = sends.join_next().await {
+            if let Ok(Some(id)) = result {
+                failed.push(id);
+            }
+        }
+        failed
+    }
+
+    async fn evict_slow_clients(
+        sessions: &Sessions,
+        server_to_host: &std_mpsc::Sender<ServerToHost>,
+        initial: Vec<PlayerId>,
+    ) {
+        let mut pending = initial;
+        let mut handled = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !handled.insert(id) {
+                continue;
+            }
+            let removed = sessions.lock().await.remove(&id);
+            let Some(session) = removed else {
+                continue;
+            };
+            let _ = session.cancel_tx.send(true);
+            eprintln!(
+                "[NetworkServer] Disconnecting slow client '{}' (Player ID: {}): reliable queue did not drain",
+                session.username, id
+            );
+            let _ = server_to_host.send(ServerToHost::ClientLeft { id });
+            let failed = Self::broadcast_reliably(
+                sessions,
+                Packet::PlayerLeave {
+                    protocol_version: PROTOCOL_VERSION,
+                    id,
+                },
+            )
+            .await;
+            pending.extend(failed);
         }
     }
 
     async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
-        let senders: Vec<_> = sessions
+        let player_id = match &packet {
+            Packet::PlayerPosition { id, .. } => *id,
+            _ => return,
+        };
+        let mailboxes: Vec<_> = sessions
             .lock()
             .await
             .values()
-            .map(|session| session.pose_tx.clone())
+            .map(|session| Arc::clone(&session.pose_mailbox))
             .collect();
-        for tx in senders {
-            tx.send_replace(Some(packet.clone()));
+        for mailbox in mailboxes {
+            mailbox.replace(player_id, packet.clone()).await;
         }
     }
 
@@ -953,26 +1111,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsent_pose_updates_are_latest_wins_per_client() {
+    async fn unsent_pose_updates_are_latest_wins_per_player() {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let (out_tx, _out_rx) = mpsc::channel(1);
-        let (pose_tx, mut pose_rx) = watch::channel(None);
+        let pose_mailbox = Arc::new(PoseMailbox::default());
         sessions.lock().await.insert(
             1,
             ClientSession {
                 id: 1,
                 username: "alex".into(),
                 out_tx,
-                pose_tx,
+                pose_mailbox: Arc::clone(&pose_mailbox),
+                cancel_tx: watch::channel(false).0,
             },
         );
 
-        for sequence in [4, 5] {
+        for (player_id, sequence) in [(9, 4), (12, 8), (9, 5)] {
             NetworkServer::broadcast_pose(
                 &sessions,
                 Packet::PlayerPosition {
                     protocol_version: PROTOCOL_VERSION,
-                    id: 9,
+                    id: player_id,
                     sequence,
                     sender_time_millis: u64::from(sequence) * 50,
                     x: sequence as f32,
@@ -985,17 +1144,411 @@ mod tests {
             .await;
         }
 
-        pose_rx.changed().await.unwrap();
-        let latest = pose_rx.borrow_and_update().clone().unwrap();
+        let pending = pose_mailbox.drain().await;
+        assert_eq!(pending.len(), 2);
         assert!(matches!(
-            latest,
+            pending[0],
             Packet::PlayerPosition {
+                id: 9,
                 sequence: 5,
                 sender_time_millis: 250,
                 x: 5.0,
                 ..
             }
         ));
+        assert!(matches!(
+            pending[1],
+            Packet::PlayerPosition {
+                id: 12,
+                sequence: 8,
+                sender_time_millis: 400,
+                x: 8.0,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn reliable_join_and_leave_wait_for_bounded_queue_capacity() {
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let (observer_out_tx, mut observer_out_rx) = mpsc::channel(1);
+        observer_out_tx
+            .try_send(Packet::Keepalive {
+                protocol_version: PROTOCOL_VERSION,
+            })
+            .unwrap();
+        sessions.lock().await.insert(
+            1,
+            ClientSession {
+                id: 1,
+                username: "observer".into(),
+                out_tx: observer_out_tx,
+                pose_mailbox: Arc::new(PoseMailbox::default()),
+                cancel_tx: watch::channel(false).0,
+            },
+        );
+
+        let (departing_out_tx, _departing_out_rx) = mpsc::channel(1);
+        sessions.lock().await.insert(
+            2,
+            ClientSession {
+                id: 2,
+                username: "departing".into(),
+                out_tx: departing_out_tx,
+                pose_mailbox: Arc::new(PoseMailbox::default()),
+                cancel_tx: watch::channel(false).0,
+            },
+        );
+
+        let (event_tx, _event_rx) = std_mpsc::channel();
+        let server = NetworkServer {
+            seed: 0,
+            gamemode: 1,
+            next_player_id: Arc::new(AtomicU64::new(3)),
+            sessions: Arc::clone(&sessions),
+            server_to_host: event_tx.clone(),
+        };
+
+        let observer = tokio::spawn(async move {
+            time::sleep(Duration::from_millis(25)).await;
+            let queued = observer_out_rx.recv().await.unwrap();
+            let joined = observer_out_rx.recv().await.unwrap();
+            let left = observer_out_rx.recv().await.unwrap();
+            (queued, joined, left)
+        });
+
+        time::timeout(
+            Duration::from_secs(1),
+            server.handle_host_command(HostToServer::NotifyPlayerJoin {
+                id: 3,
+                username: "joining".into(),
+            }),
+        )
+        .await
+        .expect("reliable join should be delivered when bounded capacity becomes available");
+
+        time::timeout(
+            Duration::from_secs(1),
+            NetworkServer::remove_client(2, &sessions, &event_tx),
+        )
+        .await
+        .expect("reliable leave should be delivered when bounded capacity becomes available");
+
+        let (queued, joined, left) = observer.await.unwrap();
+        assert!(matches!(queued, Packet::Keepalive { .. }));
+        assert!(matches!(
+            joined,
+            Packet::PlayerJoin {
+                id: 3,
+                username,
+                ..
+            } if username == "joining"
+        ));
+        assert!(matches!(left, Packet::PlayerLeave { id: 2, .. }));
+    }
+
+    #[tokio::test]
+    async fn full_reliable_queue_evicts_slow_client_without_ghost_session() {
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let (out_tx, _out_rx) = mpsc::channel(1);
+        out_tx
+            .try_send(Packet::Keepalive {
+                protocol_version: PROTOCOL_VERSION,
+            })
+            .unwrap();
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        sessions.lock().await.insert(
+            1,
+            ClientSession {
+                id: 1,
+                username: "slow-client".into(),
+                out_tx,
+                pose_mailbox: Arc::new(PoseMailbox::default()),
+                cancel_tx,
+            },
+        );
+
+        let (event_tx, event_rx) = std_mpsc::channel();
+        let server = NetworkServer {
+            seed: 0,
+            gamemode: 1,
+            next_player_id: Arc::new(AtomicU64::new(2)),
+            sessions: Arc::clone(&sessions),
+            server_to_host: event_tx,
+        };
+
+        time::timeout(
+            Duration::from_secs(1),
+            server.handle_host_command(HostToServer::NotifyPlayerJoin {
+                id: 2,
+                username: "joining".into(),
+            }),
+        )
+        .await
+        .expect("a permanently full reliable queue should be evicted deterministically");
+
+        assert!(!sessions.lock().await.contains_key(&1));
+        time::timeout(Duration::from_millis(100), cancel_rx.changed())
+            .await
+            .expect("eviction did not signal session cancellation")
+            .expect("session cancellation sender disappeared before signaling");
+        assert!(*cancel_rx.borrow());
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_millis(100)),
+            Ok(ServerToHost::ClientLeft { id: 1 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn evicted_client_task_exits_and_cannot_forward_gameplay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let task_sessions = Arc::clone(&sessions);
+        let next_player_id = Arc::new(AtomicU64::new(1));
+        let (event_tx, event_rx) = std_mpsc::channel();
+        let task_event_tx = event_tx.clone();
+        let client_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            NetworkServer::run_client(
+                Connection::new(stream),
+                0xCAFE_BABE,
+                1,
+                next_player_id,
+                task_sessions,
+                task_event_tx,
+            )
+            .await;
+        });
+
+        let mut client = Connection::new(tokio::net::TcpStream::connect(addr).await.unwrap());
+        client
+            .send(&Packet::Handshake {
+                protocol_version: PROTOCOL_VERSION,
+                username: "evicted".into(),
+            })
+            .await
+            .unwrap();
+        let id = match client.recv().await.unwrap() {
+            Packet::LoginSuccess { player_id, .. } => player_id,
+            packet => panic!("expected login success, got {packet:?}"),
+        };
+        time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    event_rx.try_recv(),
+                    Ok(ServerToHost::ClientJoined {
+                        id: joined_id,
+                        ..
+                    }) if joined_id == id
+                ) {
+                    break;
+                }
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("client did not finish joining");
+
+        NetworkServer::evict_slow_clients(&sessions, &event_tx, vec![id]).await;
+        time::timeout(Duration::from_millis(250), client_task)
+            .await
+            .expect("evicted client task did not observe cancellation")
+            .unwrap();
+
+        let _ = time::timeout(
+            Duration::from_millis(250),
+            client.send(&Packet::BlockChange {
+                protocol_version: PROTOCOL_VERSION,
+                x: 7,
+                y: 80,
+                z: -3,
+                block: 4,
+            }),
+        )
+        .await;
+        time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            event_rx
+                .try_iter()
+                .all(|event| !matches!(event, ServerToHost::ClientBlockChange { id: event_id, .. } if event_id == id)),
+            "evicted client forwarded a gameplay packet after cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn newcomer_receives_roster_larger_than_queue_capacity() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let player_count = CLIENT_QUEUE_CAPACITY + 1;
+        let mut existing_clients = Vec::with_capacity(player_count);
+        let mut expected_ids = HashSet::with_capacity(player_count);
+        for index in 0..player_count {
+            let (connection, id) = server.connect(&format!("player-{index}")).await;
+            existing_clients.push(connection);
+            expected_ids.insert(id);
+        }
+
+        let (mut newcomer, newcomer_id) = server.connect("newcomer").await;
+        let received_ids = time::timeout(Duration::from_secs(5), async {
+            let mut received_ids = HashSet::with_capacity(player_count);
+            while received_ids.len() < player_count {
+                if let Packet::PlayerJoin { id, .. } = newcomer.recv().await.unwrap() {
+                    received_ids.insert(id);
+                }
+            }
+            received_ids
+        })
+        .await
+        .expect("newcomer did not receive the complete roster");
+
+        assert_eq!(received_ids, expected_ids);
+        assert!(!received_ids.contains(&newcomer_id));
+        drop(existing_clients);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn weather_snapshot_can_target_only_the_joining_client() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut existing, _) = server.connect("existing").await;
+        let (mut joining, joining_id) = server.connect("joining").await;
+
+        server
+            .host_tx
+            .send(HostToServer::SendTimeSync {
+                ticks: 21_000,
+                weather: 2,
+                weather_remaining_ticks: 3_500.25,
+                to: joining_id,
+            })
+            .unwrap();
+
+        let packet = recv_matching(&mut joining, |packet| {
+            matches!(packet, Packet::TimeSync { .. })
+        })
+        .await;
+        assert!(matches!(
+            packet,
+            Packet::TimeSync {
+                ticks: 21_000,
+                weather: 2,
+                weather_remaining_ticks: 3_500.25,
+                ..
+            }
+        ));
+
+        let existing_received_snapshot = time::timeout(Duration::from_millis(150), async {
+            loop {
+                if matches!(existing.recv().await.unwrap(), Packet::TimeSync { .. }) {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            existing_received_snapshot.is_err(),
+            "targeted late-join weather snapshot leaked to an existing client"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn weather_snapshot_and_lightning_broadcast_in_reliable_order() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client, _) = server.connect("observer").await;
+        let strike = LightningStrike {
+            x: -8,
+            y: 77,
+            z: 19,
+            visual_seed: 0x1234_ABCD,
+        };
+
+        server
+            .host_tx
+            .send(HostToServer::BroadcastTimeSync {
+                ticks: 22_000,
+                weather: 2,
+                weather_remaining_ticks: 4_500.0,
+            })
+            .unwrap();
+        server
+            .host_tx
+            .send(HostToServer::BroadcastLightningStrike { strike })
+            .unwrap();
+
+        let weather_packets = time::timeout(Duration::from_secs(2), async {
+            let mut packets = Vec::new();
+            while packets.len() < 2 {
+                let packet = client.recv().await.unwrap();
+                if matches!(
+                    packet,
+                    Packet::TimeSync { .. } | Packet::LightningStrike { .. }
+                ) {
+                    packets.push(packet);
+                }
+            }
+            packets
+        })
+        .await
+        .expect("weather packets were not delivered");
+
+        assert!(matches!(
+            weather_packets[0],
+            Packet::TimeSync {
+                ticks: 22_000,
+                weather: 2,
+                weather_remaining_ticks: 4_500.0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            weather_packets[1],
+            Packet::LightningStrike {
+                strike: received,
+                ..
+            } if received == strike
+        ));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn client_cannot_inject_authoritative_lightning() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut attacker, _) = server.connect("attacker").await;
+        let (mut observer, _) = server.connect("observer").await;
+
+        attacker
+            .send(&Packet::LightningStrike {
+                protocol_version: PROTOCOL_VERSION,
+                strike: LightningStrike {
+                    x: 0,
+                    y: 255,
+                    z: 0,
+                    visual_seed: 1,
+                },
+            })
+            .await
+            .unwrap();
+
+        let forged_strike_relayed = time::timeout(Duration::from_millis(150), async {
+            loop {
+                if matches!(
+                    observer.recv().await.unwrap(),
+                    Packet::LightningStrike { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            forged_strike_relayed.is_err(),
+            "server relayed a client-authored lightning event"
+        );
+
+        server.stop().await;
     }
 
     #[tokio::test]

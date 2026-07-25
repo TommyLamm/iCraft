@@ -113,6 +113,21 @@ fn create_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     writer
 }
 
+fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
+    rodio::Decoder::new(Cursor::new(bytes.to_vec())).is_ok()
+}
+
+fn load_or_synthesize_sound(file_path: &Path, sound_id: SoundId) -> (Vec<u8>, bool) {
+    if let Ok(bytes) = std::fs::read(file_path) {
+        if sound_bytes_are_decodable(&bytes) {
+            return (bytes, false);
+        }
+    }
+
+    let samples = synth_sound(sound_id);
+    (create_wav_bytes(&samples, 22050), true)
+}
+
 fn synth_noise(duration: f32, sample_rate: u32, mut seed: u32) -> Vec<f32> {
     let len = (duration * sample_rate as f32) as usize;
     let mut samples = Vec::with_capacity(len);
@@ -368,29 +383,16 @@ impl AudioManager {
         for id in sound_ids {
             let filename = id.filename();
             let file_path = sound_dir.join(&filename);
-            let mut loaded_bytes = Vec::new();
-            let mut successfully_loaded = false;
+            let (loaded_bytes, synthesized) = load_or_synthesize_sound(&file_path, id);
 
-            if file_path.exists() {
-                if let Ok(mut f) = File::open(&file_path) {
-                    use std::io::Read;
-                    if f.read_to_end(&mut loaded_bytes).is_ok() {
-                        successfully_loaded = true;
-                    }
-                }
-            }
-
-            if !successfully_loaded {
-                let samples = synth_sound(id);
-                let wav_bytes = create_wav_bytes(&samples, 22050);
+            if synthesized {
                 // Note-block pitches are cheap procedural variants; keep them
                 // in memory instead of creating 25 generated files per world.
                 if !matches!(id, SoundId::Note(_)) {
                     if let Ok(mut f) = File::create(&file_path) {
-                        let _ = f.write_all(&wav_bytes);
+                        let _ = f.write_all(&loaded_bytes);
                     }
                 }
-                loaded_bytes = wav_bytes;
             }
 
             sound_cache.insert(id, loaded_bytes);
@@ -511,12 +513,68 @@ impl AudioManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_sound_path(filename: &str) -> (PathBuf, PathBuf) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos();
+        let sequence = NEXT_TEMP_PATH.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "icraft_audio_test_{}_{}_{}",
+            std::process::id(),
+            nonce,
+            sequence
+        ));
+        std::fs::create_dir(&directory).expect("temporary audio directory should be created");
+        let path = directory.join(filename);
+        (directory, path)
+    }
+
+    fn remove_temp_sound(directory: &Path, path: &Path) {
+        std::fs::remove_file(path).expect("temporary sound should be removed");
+        std::fs::remove_dir(directory).expect("temporary audio directory should be removed");
+    }
+
     #[test]
     fn test_wav_synthesis() {
         let samples = vec![0.0, 0.5, -0.5, 0.0];
         let wav = create_wav_bytes(&samples, 22050);
         assert!(wav.starts_with(b"RIFF"));
         assert_eq!(&wav[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn invalid_wav_uses_decodable_procedural_fallback() {
+        let (directory, path) = temp_sound_path("rain.wav");
+        let invalid_bytes: &[u8] = b"this is not a wave file";
+        std::fs::write(&path, invalid_bytes).expect("invalid fixture should be written");
+
+        let (loaded_bytes, synthesized) = load_or_synthesize_sound(&path, SoundId::Rain);
+
+        assert!(synthesized);
+        assert_ne!(loaded_bytes, invalid_bytes);
+        assert!(sound_bytes_are_decodable(&loaded_bytes));
+        remove_temp_sound(&directory, &path);
+    }
+
+    #[test]
+    fn valid_wav_is_loaded_without_replacing_its_bytes() {
+        let (directory, path) = temp_sound_path("click.wav");
+        let valid_bytes = create_wav_bytes(&[0.0, 0.25, -0.25, 0.0], 22050);
+        assert!(sound_bytes_are_decodable(&valid_bytes));
+        std::fs::write(&path, &valid_bytes).expect("valid fixture should be written");
+
+        let (loaded_bytes, synthesized) = load_or_synthesize_sound(&path, SoundId::UiClick);
+
+        assert!(!synthesized);
+        assert_eq!(loaded_bytes, valid_bytes);
+        remove_temp_sound(&directory, &path);
     }
 
     #[test]

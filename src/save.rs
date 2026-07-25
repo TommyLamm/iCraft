@@ -1,4 +1,4 @@
-use crate::inventory::{GameMode, Inventory, Item, ItemStack};
+use crate::inventory::{CreativeDragOrigin, GameMode, Inventory, Item, ItemStack};
 use crate::world::{BlockType, Chunk};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+
+const PLAYER_SAVE_MAGIC: &[u8; 8] = b"ICRPLR01";
+const PLAYER_SAVE_VERSION: u16 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LevelData {
@@ -57,10 +60,20 @@ pub struct InventoryData {
     pub main: Vec<Option<ItemStackData>>,
     pub armor: Vec<Option<ItemStackData>>,
     pub selected: usize,
+    pub dragged: Option<ItemStackData>,
+    pub creative_drag_origin: Option<CreativeDragOrigin>,
 }
 
 impl From<&Inventory> for InventoryData {
     fn from(inv: &Inventory) -> Self {
+        let (dragged, creative_drag_origin) = match inv.creative_drag_origin {
+            Some(CreativeDragOrigin::Catalog) => (None, None),
+            Some(CreativeDragOrigin::Inventory) => (
+                inv.dragged.as_ref().map(ItemStackData::from),
+                inv.dragged.map(|_| CreativeDragOrigin::Inventory),
+            ),
+            None => (inv.dragged.as_ref().map(ItemStackData::from), None),
+        };
         Self {
             hotbar: inv
                 .hotbar
@@ -78,6 +91,8 @@ impl From<&Inventory> for InventoryData {
                 .map(|o| o.as_ref().map(|s| ItemStackData::from(s)))
                 .collect(),
             selected: inv.selected,
+            dragged,
+            creative_drag_origin,
         }
     }
 }
@@ -101,6 +116,16 @@ impl InventoryData {
             }
         }
         inv.selected = self.selected;
+        match self.creative_drag_origin {
+            Some(CreativeDragOrigin::Catalog) => {}
+            Some(CreativeDragOrigin::Inventory) => {
+                inv.dragged = self.dragged.as_ref().map(ItemStackData::to_item_stack);
+                inv.creative_drag_origin = inv.dragged.map(|_| CreativeDragOrigin::Inventory);
+            }
+            None => {
+                inv.dragged = self.dragged.as_ref().map(ItemStackData::to_item_stack);
+            }
+        }
         inv
     }
 }
@@ -151,6 +176,44 @@ impl PlayerData {
             inventory: InventoryData::from(inventory),
             advancements,
         }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PlayerSaveEnvelope {
+    version: u16,
+    player: PlayerData,
+}
+
+fn serialize_player_data(player: &PlayerData) -> bincode::Result<Vec<u8>> {
+    let envelope = PlayerSaveEnvelope {
+        version: PLAYER_SAVE_VERSION,
+        player: player.clone(),
+    };
+    let payload = bincode::serialize(&envelope)?;
+    let mut encoded = Vec::with_capacity(PLAYER_SAVE_MAGIC.len() + payload.len());
+    encoded.extend_from_slice(PLAYER_SAVE_MAGIC);
+    encoded.extend_from_slice(&payload);
+    Ok(encoded)
+}
+
+fn deserialize_player_data(bytes: &[u8]) -> bincode::Result<PlayerData> {
+    if let Some(payload) = bytes.strip_prefix(PLAYER_SAVE_MAGIC) {
+        let envelope: PlayerSaveEnvelope = bincode::deserialize(payload)?;
+        if envelope.version != PLAYER_SAVE_VERSION {
+            return Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "unsupported player save version {}",
+                envelope.version
+            ))));
+        }
+        return Ok(envelope.player);
+    }
+
+    match bincode::deserialize::<PreviousPlayerData>(bytes) {
+        Ok(previous) => Ok(previous.into()),
+        Err(previous_error) => bincode::deserialize::<LegacyPlayerData>(bytes)
+            .map(PlayerData::from)
+            .map_err(|_| previous_error),
     }
 }
 
@@ -440,7 +503,7 @@ impl SaveManager {
         let serialized_level =
             bincode::serialize(level).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         let serialized_player =
-            bincode::serialize(player).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            serialize_player_data(player).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let mut lf = File::create(&level_file)?;
         lf.write_all(&serialized_level)?;
@@ -464,18 +527,70 @@ impl SaveManager {
         let mut pf = File::open(&player_file)?;
         let mut player_bytes = Vec::new();
         pf.read_to_end(&mut player_bytes)?;
-        let player = match bincode::deserialize::<PlayerData>(&player_bytes) {
-            Ok(player) => player,
-            Err(current_error) => {
-                // Task 21 extended stack/player metadata. Keep worlds written by
-                // the pre-enchanting schema loadable by upgrading in memory.
-                bincode::deserialize::<LegacyPlayerData>(&player_bytes)
-                    .map(PlayerData::from)
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, current_error))?
-            }
-        };
+        let player = deserialize_player_data(&player_bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
 
         Ok((level, player))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PreviousInventoryData {
+    hotbar: Vec<Option<ItemStackData>>,
+    main: Vec<Option<ItemStackData>>,
+    armor: Vec<Option<ItemStackData>>,
+    selected: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PreviousPlayerData {
+    position: [f32; 3],
+    velocity: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    health: f32,
+    hunger: f32,
+    saturation: f32,
+    exhaustion: f32,
+    oxygen: f32,
+    experience: u32,
+    experience_level: u32,
+    game_mode: GameMode,
+    inventory: PreviousInventoryData,
+    advancements: crate::advancements::AdvancementProgressData,
+}
+
+impl From<PreviousInventoryData> for InventoryData {
+    fn from(old: PreviousInventoryData) -> Self {
+        Self {
+            hotbar: old.hotbar,
+            main: old.main,
+            armor: old.armor,
+            selected: old.selected,
+            dragged: None,
+            creative_drag_origin: None,
+        }
+    }
+}
+
+impl From<PreviousPlayerData> for PlayerData {
+    fn from(old: PreviousPlayerData) -> Self {
+        Self {
+            position: old.position,
+            velocity: old.velocity,
+            yaw: old.yaw,
+            pitch: old.pitch,
+            health: old.health,
+            hunger: old.hunger,
+            saturation: old.saturation,
+            exhaustion: old.exhaustion,
+            oxygen: old.oxygen,
+            experience: old.experience,
+            experience_level: old.experience_level,
+            game_mode: old.game_mode,
+            inventory: old.inventory.into(),
+            advancements: old.advancements,
+        }
     }
 }
 
@@ -535,6 +650,8 @@ impl From<LegacyInventoryData> for InventoryData {
             main: upgrade(old.main),
             armor: upgrade(old.armor),
             selected: old.selected,
+            dragged: None,
+            creative_drag_origin: None,
         }
     }
 }
@@ -601,6 +718,8 @@ mod tests {
                 main: vec![None],
                 armor: vec![None],
                 selected: 0,
+                dragged: None,
+                creative_drag_origin: None,
             },
             advancements: Default::default(),
         };
@@ -646,6 +765,156 @@ mod tests {
         assert_eq!(decoded.enchantments, stack.enchantments);
         assert_eq!(decoded.potion, stack.potion);
         assert_eq!(decoded.custom_name.as_str(), "Swift Brew");
+    }
+
+    #[test]
+    fn real_cursors_roundtrip_and_catalog_cursors_do_not_persist() {
+        let mut stack = ItemStack::new(Item::Dirt, 17);
+        stack.custom_name.set("Travel Stack");
+        stack
+            .enchantments
+            .add_or_upgrade(crate::enchantment::Enchantment::Unbreaking(2));
+
+        for origin in [None, Some(CreativeDragOrigin::Inventory)] {
+            let mut inventory = Inventory::new();
+            inventory.dragged = Some(stack);
+            inventory.creative_drag_origin = origin;
+
+            let restored = InventoryData::from(&inventory).to_inventory();
+            assert_eq!(restored.dragged, Some(stack));
+            assert_eq!(restored.creative_drag_origin, origin);
+        }
+
+        let mut catalog_inventory = Inventory::new();
+        catalog_inventory.dragged = Some(stack);
+        catalog_inventory.creative_drag_origin = Some(CreativeDragOrigin::Catalog);
+        let saved = InventoryData::from(&catalog_inventory);
+        assert!(saved.dragged.is_none());
+        assert!(saved.creative_drag_origin.is_none());
+        let restored = saved.to_inventory();
+        assert!(restored.dragged.is_none());
+        assert!(restored.creative_drag_origin.is_none());
+    }
+
+    #[test]
+    fn versioned_player_codec_preserves_real_cursor_metadata_and_provenance() {
+        let mut inventory = Inventory::new();
+        let mut cursor = ItemStack::new(Item::Potion, 1);
+        cursor.custom_name.set("Exit Safe");
+        cursor.potion = Some(crate::brewing::PotionData {
+            kind: crate::brewing::PotionKind::Strength,
+            level: 2,
+            duration_seconds: 90,
+            splash: false,
+        });
+        inventory.dragged = Some(cursor);
+        inventory.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+        let player = PlayerData {
+            position: [1.0, 2.0, 3.0],
+            velocity: [0.0; 3],
+            yaw: 0.5,
+            pitch: -0.25,
+            health: 20.0,
+            hunger: 18.0,
+            saturation: 4.0,
+            exhaustion: 1.0,
+            oxygen: 300.0,
+            experience: 10,
+            experience_level: 2,
+            game_mode: GameMode::Creative,
+            inventory: InventoryData::from(&inventory),
+            advancements: Default::default(),
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_cursor_player_save_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let manager = SaveManager::new(&world_dir);
+        manager
+            .save_player_and_level(
+                &LevelData {
+                    seed: 99,
+                    time: 1234,
+                },
+                &player,
+            )
+            .unwrap();
+        let encoded = fs::read(world_dir.join("player.dat")).unwrap();
+        assert!(encoded.starts_with(PLAYER_SAVE_MAGIC));
+
+        let (_, decoded) = manager.load_player_and_level().unwrap();
+        let restored = decoded.inventory.to_inventory();
+        assert_eq!(restored.dragged, Some(cursor));
+        assert_eq!(
+            restored.creative_drag_origin,
+            Some(CreativeDragOrigin::Inventory)
+        );
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn previous_bincode_player_fixture_migrates_without_a_cursor() {
+        let previous = PreviousPlayerData {
+            position: [4.0, 5.0, 6.0],
+            velocity: [0.1, 0.2, 0.3],
+            yaw: 1.0,
+            pitch: 0.2,
+            health: 17.0,
+            hunger: 12.0,
+            saturation: 3.0,
+            exhaustion: 2.0,
+            oxygen: 250.0,
+            experience: 42,
+            experience_level: 5,
+            game_mode: GameMode::Survival,
+            inventory: PreviousInventoryData {
+                hotbar: vec![Some(ItemStackData::from(&ItemStack::new(Item::Stone, 32)))],
+                main: vec![None],
+                armor: vec![None],
+                selected: 0,
+            },
+            advancements: Default::default(),
+        };
+        let legacy_fixture = bincode::serialize(&previous).unwrap();
+        assert!(!legacy_fixture.starts_with(PLAYER_SAVE_MAGIC));
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_previous_player_save_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&world_dir).unwrap();
+        fs::write(
+            world_dir.join("level.dat"),
+            bincode::serialize(&LevelData {
+                seed: 7,
+                time: 9000,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(world_dir.join("player.dat"), legacy_fixture).unwrap();
+
+        let manager = SaveManager::new(&world_dir);
+        let (_, migrated) = manager.load_player_and_level().unwrap();
+        assert_eq!(migrated.experience, 42);
+        assert_eq!(
+            migrated.inventory.hotbar[0].as_ref().unwrap().item,
+            Item::Stone
+        );
+        assert!(migrated.inventory.dragged.is_none());
+        assert!(migrated.inventory.creative_drag_origin.is_none());
+        fs::remove_dir_all(world_dir).unwrap();
     }
 
     #[test]

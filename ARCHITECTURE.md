@@ -1,10 +1,10 @@
 # Architecture
 
-> Last verified: 2026-07-24. This is a navigation map, not a replacement for
+> Last verified: 2026-07-25. This is a navigation map, not a replacement for
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit
-> `f5b69f815106c020df0b016550ca63976873408f` (`f5b69f8`). This identifies the
+> `13438345c0ed41c45009fd07f9513314ce88377c` (`1343834`). This identifies the
 > committed revision on which the verified working tree is based; it is not a
 > self-reference to the commit that may later include this file.
 >
@@ -31,8 +31,9 @@ Remote players render as six-part cuboid avatars
 with projected name tags. `T` opens a bounded in-game chat history/input UI;
 the host resolves authenticated player IDs to roster usernames before reliably
 rebroadcasting chat. Host-authoritative block mutations, client-side
-lighting/remeshing, deferred changes for unloaded chunks, join-time chunk
-catch-up, and periodic world-time/weather correction are integrated. Solid
+lighting/remeshing including diagonal halo invalidation, deferred changes for
+unloaded chunks, join-time chunk catch-up, and authoritative world-time/weather
+phase plus lightning event correction are integrated. Solid
 placement is preflighted locally and revalidated by the Host against its local
 player plus every remote player's newest authoritative snapshot; the server
 preserves the authenticated requester ID, and rejected placement has no world,
@@ -40,7 +41,8 @@ inventory, sound, action, or broadcast side effects. Client
 connection loss freezes input, removes remote entities, and presents a safe
 return-to-menu overlay without saving the client's transient copy.
 
-Display/input/audio settings persist in `settings.txt`. Weather audio has an
+Display/input/audio settings persist in `settings.txt`; non-finite FOV and mouse
+sensitivity values are sanitized on load/save. Weather audio has an
 independent, backward-compatible 40% default and combines as
 `Master x Sound x Weather` for Rain/Thunder, while ordinary effects use
 `Master x Sound`; changing Master or Weather refreshes active loops
@@ -54,6 +56,8 @@ Creative mode's plain `E` inventory is a virtual infinite-supply catalog of all
 144 non-Air items, with seven category tabs, a row-scrolled 9x5 view, scrollbar,
 and the nine real hotbar slots. It does not populate the backpack. Survival,
 Crafting Table, Enchanting, Brewing, and Anvil keep the standard slot layout.
+Inventory stack merging compares item metadata, and close/cursor recovery is
+transactional so real items are not lost when storage is full.
 
 ## How agents should navigate
 

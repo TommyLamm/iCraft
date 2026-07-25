@@ -15,8 +15,12 @@ const META_FILE: &str = "world.meta";
 const OPTIONS_ROW_TOPS: [f32; 6] = [0.58, 0.38, 0.18, -0.02, -0.22, -0.42];
 
 fn clamp_setting_volume(value: f32, fallback: f32) -> f32 {
+    finite_clamped_setting(value, fallback, 0.0, 1.0)
+}
+
+fn finite_clamped_setting(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
     if value.is_finite() {
-        value.clamp(0.0, 1.0)
+        value.clamp(min, max)
     } else {
         fallback
     }
@@ -212,8 +216,7 @@ impl GameSettings {
                 _ => {}
             }
         }
-        settings.fov = settings.fov.clamp(30.0, 120.0);
-        settings.sensitivity = settings.sensitivity.clamp(0.0002, 0.006);
+        settings.sanitize_view_settings();
         settings.render_distance = settings.render_distance.clamp(2, 16);
         settings.clamp_audio_volumes();
         settings
@@ -227,6 +230,7 @@ impl GameSettings {
 
     fn to_file_contents(&self) -> String {
         let mut settings = self.clone();
+        settings.sanitize_view_settings();
         settings.clamp_audio_volumes();
         format!(
             concat!(
@@ -285,6 +289,11 @@ impl GameSettings {
         self.music_volume = clamp_setting_volume(self.music_volume, 0.7);
         self.sound_volume = clamp_setting_volume(self.sound_volume, 1.0);
         self.weather_volume = clamp_setting_volume(self.weather_volume, 0.4);
+    }
+
+    fn sanitize_view_settings(&mut self) {
+        self.fov = finite_clamped_setting(self.fov, 70.0, 30.0, 120.0);
+        self.sensitivity = finite_clamped_setting(self.sensitivity, 0.002, 0.0002, 0.006);
     }
 
     pub fn effective_sound_volume(&self) -> f32 {
@@ -705,6 +714,20 @@ impl ControlAction {
             Self::Inventory => "INVENTORY",
         }
     }
+}
+
+fn back_transition(
+    screen: MenuScreen,
+    _active_field: Option<TextField>,
+    _rebinding: Option<ControlAction>,
+) -> (MenuScreen, Option<TextField>, Option<ControlAction>) {
+    let screen = match screen {
+        MenuScreen::Main => MenuScreen::Main,
+        MenuScreen::Multiplayer | MenuScreen::Worlds | MenuScreen::Options => MenuScreen::Main,
+        MenuScreen::CreateWorld | MenuScreen::ConfirmDelete => MenuScreen::Worlds,
+        MenuScreen::Controls => MenuScreen::Options,
+    };
+    (screen, None, None)
 }
 
 pub enum MenuAction {
@@ -1232,7 +1255,7 @@ impl Menu {
                     }
                 }
                 if hit(x, y, -0.25, 0.25, -0.78, -0.64) {
-                    self.screen = MenuScreen::Options;
+                    self.back();
                 }
             }
             MenuScreen::ConfirmDelete => {
@@ -1270,14 +1293,11 @@ impl Menu {
         if self.screen == MenuScreen::Multiplayer {
             self.sync_and_save_multiplayer_settings();
         }
-        self.active_field = None;
-        self.rebinding = None;
-        self.screen = match self.screen {
-            MenuScreen::Main => MenuScreen::Main,
-            MenuScreen::Multiplayer | MenuScreen::Worlds | MenuScreen::Options => MenuScreen::Main,
-            MenuScreen::CreateWorld | MenuScreen::ConfirmDelete => MenuScreen::Worlds,
-            MenuScreen::Controls => MenuScreen::Options,
-        };
+        let (screen, active_field, rebinding) =
+            back_transition(self.screen, self.active_field, self.rebinding);
+        self.screen = screen;
+        self.active_field = active_field;
+        self.rebinding = rebinding;
     }
 
     fn launch_existing(&mut self, index: usize) -> MenuAction {
@@ -2549,6 +2569,51 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_view_settings_fall_back_during_load() {
+        for value in ["NaN", "inf", "-inf"] {
+            let settings =
+                GameSettings::from_file_contents(&format!("fov:{value}\nsensitivity:{value}\n"));
+
+            assert_eq!(settings.fov, 70.0, "fov should reject {value}");
+            assert_eq!(
+                settings.sensitivity, 0.002,
+                "sensitivity should reject {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_finite_view_settings_are_sanitized_before_save() {
+        let mut settings = GameSettings::default();
+        settings.fov = f32::NAN;
+        settings.sensitivity = f32::INFINITY;
+
+        let contents = settings.to_file_contents();
+        let loaded = GameSettings::from_file_contents(&contents);
+
+        assert!(contents.contains("fov:70\n"));
+        assert!(contents.contains("sensitivity:0.002\n"));
+        assert!(!contents.contains("NaN"));
+        assert!(!contents.contains("inf"));
+        assert_eq!(loaded.fov, 70.0);
+        assert_eq!(loaded.sensitivity, 0.002);
+    }
+
+    #[test]
+    fn view_setting_boundaries_round_trip_without_drift() {
+        for (fov, sensitivity) in [(30.0, 0.0002), (120.0, 0.006)] {
+            let mut settings = GameSettings::default();
+            settings.fov = fov;
+            settings.sensitivity = sensitivity;
+
+            let loaded = GameSettings::from_file_contents(&settings.to_file_contents());
+
+            assert_eq!(loaded.fov, fov);
+            assert_eq!(loaded.sensitivity, sensitivity);
+        }
+    }
+
+    #[test]
     fn weather_options_row_is_distinct_from_language_controls_and_back() {
         assert_eq!(options_row_at(-0.08), Some(3));
         assert_eq!(options_row_at(-0.28), Some(4));
@@ -2574,6 +2639,19 @@ mod tests {
         assert_eq!(settings.mp_server_address, "192.168.1.100");
         assert_eq!(settings.mp_join_port, "25571");
         assert_eq!(settings.mp_username, "TEST_USER");
+    }
+
+    #[test]
+    fn leaving_controls_clears_pending_rebind() {
+        let (screen, active_field, rebinding) = back_transition(
+            MenuScreen::Controls,
+            Some(TextField::WorldName),
+            Some(ControlAction::Forward),
+        );
+
+        assert_eq!(screen, MenuScreen::Options);
+        assert_eq!(active_field, None);
+        assert_eq!(rebinding, None);
     }
 
     #[test]

@@ -351,6 +351,13 @@ pub enum RenderType {
     Translucent,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BlockSupportStatus {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
 pub struct BlockProperties {
     pub name: &'static str,
     pub hardness: f32,
@@ -425,6 +432,107 @@ impl BlockType {
             | BlockType::PressurePlate
             | BlockType::PressurePlatePowered => below.properties().is_solid,
             _ => true,
+        }
+    }
+
+    /// Validates support using loaded world context. `None` means the queried
+    /// position belongs to a chunk whose data is not currently available.
+    ///
+    /// Existing blocks are only removed for `Unsupported`; `Unknown` preserves
+    /// them until the missing neighbor loads. New player placements require
+    /// `Supported`, so they never assume an unloaded neighbor contains water or
+    /// empty space.
+    pub fn support_status_at<F>(
+        self,
+        position: (i32, i32, i32),
+        mut get_loaded_block: F,
+    ) -> BlockSupportStatus
+    where
+        F: FnMut(i32, i32, i32) -> Option<BlockType>,
+    {
+        let (x, y, z) = position;
+
+        match self {
+            BlockType::SugarCane => {
+                if y <= 0 {
+                    return BlockSupportStatus::Unsupported;
+                }
+                let Some(below) = get_loaded_block(x, y - 1, z) else {
+                    return BlockSupportStatus::Unknown;
+                };
+                if below == BlockType::SugarCane {
+                    return BlockSupportStatus::Supported;
+                }
+                if !matches!(below, BlockType::Grass | BlockType::Dirt | BlockType::Sand) {
+                    return BlockSupportStatus::Unsupported;
+                }
+
+                let mut has_unknown_neighbor = false;
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    match get_loaded_block(x + dx, y - 1, z + dz) {
+                        Some(BlockType::Water) => return BlockSupportStatus::Supported,
+                        Some(_) => {}
+                        None => has_unknown_neighbor = true,
+                    }
+                }
+                if has_unknown_neighbor {
+                    BlockSupportStatus::Unknown
+                } else {
+                    BlockSupportStatus::Unsupported
+                }
+            }
+            BlockType::Cactus => {
+                if y <= 0 {
+                    return BlockSupportStatus::Unsupported;
+                }
+                let Some(below) = get_loaded_block(x, y - 1, z) else {
+                    return BlockSupportStatus::Unknown;
+                };
+                if !matches!(below, BlockType::Sand | BlockType::Cactus) {
+                    return BlockSupportStatus::Unsupported;
+                }
+
+                let mut has_unknown_neighbor = false;
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    match get_loaded_block(x + dx, y, z + dz) {
+                        Some(block) if block.properties().is_solid || block == BlockType::Lava => {
+                            return BlockSupportStatus::Unsupported;
+                        }
+                        Some(_) => {}
+                        None => has_unknown_neighbor = true,
+                    }
+                }
+                if has_unknown_neighbor {
+                    BlockSupportStatus::Unknown
+                } else {
+                    BlockSupportStatus::Supported
+                }
+            }
+            BlockType::Dandelion
+            | BlockType::Poppy
+            | BlockType::TallGrass
+            | BlockType::SnowLayer
+            | BlockType::Torch
+            | BlockType::RedstoneTorch
+            | BlockType::RedstoneTorchOff
+            | BlockType::RedstoneWire
+            | BlockType::Repeater
+            | BlockType::RepeaterPowered
+            | BlockType::Comparator
+            | BlockType::ComparatorPowered
+            | BlockType::PressurePlate
+            | BlockType::PressurePlatePowered => {
+                if y <= 0 {
+                    BlockSupportStatus::Unsupported
+                } else {
+                    match get_loaded_block(x, y - 1, z) {
+                        Some(below) if self.can_stay_on(below) => BlockSupportStatus::Supported,
+                        Some(_) => BlockSupportStatus::Unsupported,
+                        None => BlockSupportStatus::Unknown,
+                    }
+                }
+            }
+            _ => BlockSupportStatus::Supported,
         }
     }
 
@@ -1460,6 +1568,7 @@ const TORCH_MIN: f32 = 7.0 / 16.0;
 const TORCH_MAX: f32 = 9.0 / 16.0;
 const TORCH_HEIGHT: f32 = 10.0 / 16.0;
 const TORCH_ATLAS_TILE: (u32, u32) = (4, 2);
+const REDSTONE_TORCH_ATLAS_TILE: (u32, u32) = (6, 2);
 
 // Tile-local UV rectangles with a half-texel inset. Side faces use the full
 // flame/stem artwork, the cap uses the flame, and the base stretches the final
@@ -1474,6 +1583,7 @@ fn append_torch_mesh(
     origin: [f32; 3],
     sky_light: u8,
     block_light: u8,
+    atlas_tile: (u32, u32),
 ) {
     let light_level = sky_light as f32 + block_light as f32 * 16.0;
 
@@ -1514,7 +1624,7 @@ fn append_torch_mesh(
             indices,
             positions,
             local_uvs,
-            TORCH_ATLAS_TILE,
+            atlas_tile,
             light_level,
             [1.0; 4],
         );
@@ -2000,27 +2110,16 @@ impl Chunk {
                     && surface_y > 0
                 {
                     let mut near_water = false;
-                    for dx in -1..=1 {
-                        for dz in -1..=1 {
-                            if dx == 0 && dz == 0 {
-                                continue;
-                            }
-                            let nx = x as i32 + dx;
-                            let nz = z as i32 + dz;
-                            if nx >= 0
-                                && nx < CHUNK_WIDTH as i32
-                                && nz >= 0
-                                && nz < CHUNK_DEPTH as i32
-                            {
-                                let b = blocks[nx as usize][surface_y][nz as usize];
-                                let b_below = blocks[nx as usize][surface_y - 1][nz as usize];
-                                if b == BlockType::Water || b_below == BlockType::Water {
-                                    near_water = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if near_water {
+                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let nx = x as i32 + dx;
+                        let nz = z as i32 + dz;
+                        if nx >= 0
+                            && nx < CHUNK_WIDTH as i32
+                            && nz >= 0
+                            && nz < CHUNK_DEPTH as i32
+                            && blocks[nx as usize][surface_y][nz as usize] == BlockType::Water
+                        {
+                            near_water = true;
                             break;
                         }
                     }
@@ -2144,13 +2243,21 @@ impl Chunk {
                     let world_y = y as i32;
                     let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
 
-                    if block == BlockType::Torch {
+                    let torch_atlas_tile = match block {
+                        BlockType::Torch => Some(TORCH_ATLAS_TILE),
+                        BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
+                            Some(REDSTONE_TORCH_ATLAS_TILE)
+                        }
+                        _ => None,
+                    };
+                    if let Some(atlas_tile) = torch_atlas_tile {
                         append_torch_mesh(
                             &mut opaque_vertices,
                             &mut opaque_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
                             self.sky_light[x][y][z],
                             self.block_light[x][y][z],
+                            atlas_tile,
                         );
                         continue;
                     }
@@ -2878,11 +2985,12 @@ mod tests {
     }
 
     fn single_torch_mesh(
+        block: BlockType,
         sky_light: u8,
         block_light: u8,
     ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>) {
         let mut chunk = empty_test_chunk();
-        chunk.blocks[8][1][8] = BlockType::Torch;
+        chunk.blocks[8][1][8] = block;
         chunk.sky_light[8][1][8] = sky_light;
         chunk.block_light[8][1][8] = block_light;
         chunk.heightmap[8][8] = 1;
@@ -3209,7 +3317,7 @@ mod tests {
     #[test]
     fn torch_mesh_has_minecraft_bounds_and_six_outward_faces() {
         let (vertices, indices, transparent_vertices, transparent_indices) =
-            single_torch_mesh(15, 14);
+            single_torch_mesh(BlockType::Torch, 15, 14);
 
         assert_eq!(vertices.len(), 24);
         assert_eq!(indices.len(), 36);
@@ -3255,7 +3363,7 @@ mod tests {
 
     #[test]
     fn torch_mesh_uses_inset_face_uvs_inside_its_atlas_tile() {
-        let (vertices, _, _, _) = single_torch_mesh(15, 14);
+        let (vertices, _, _, _) = single_torch_mesh(BlockType::Torch, 15, 14);
         let expected_rects = [
             TORCH_SIDE_UV,
             TORCH_SIDE_UV,
@@ -3304,7 +3412,7 @@ mod tests {
         let sky_light = 9;
         let block_light = 14;
         let expected_packed_light = sky_light as f32 + block_light as f32 * 16.0;
-        let (vertices, _, _, _) = single_torch_mesh(sky_light, block_light);
+        let (vertices, _, _, _) = single_torch_mesh(BlockType::Torch, sky_light, block_light);
 
         assert!(vertices.iter().all(|vertex| vertex.ao == 1.0));
         assert!(
@@ -3313,6 +3421,65 @@ mod tests {
                 .all(|vertex| vertex.light_level == expected_packed_light),
             "every torch face must use the source cell light without a face multiplier"
         );
+    }
+
+    #[test]
+    fn redstone_torch_variants_use_thin_torch_mesh_and_redstone_tile() {
+        let expected_rects = [
+            TORCH_SIDE_UV,
+            TORCH_SIDE_UV,
+            TORCH_SIDE_UV,
+            TORCH_SIDE_UV,
+            TORCH_TOP_UV,
+            TORCH_BOTTOM_UV,
+        ];
+
+        for block in [BlockType::RedstoneTorch, BlockType::RedstoneTorchOff] {
+            let (vertices, indices, transparent_vertices, transparent_indices) =
+                single_torch_mesh(block, 15, block.properties().light_emission);
+
+            assert_eq!(vertices.len(), 24, "{block:?} must have six quads");
+            assert_eq!(indices.len(), 36, "{block:?} must have twelve triangles");
+            assert!(transparent_vertices.is_empty());
+            assert!(transparent_indices.is_empty());
+
+            let mut min = [f32::INFINITY; 3];
+            let mut max = [f32::NEG_INFINITY; 3];
+            for vertex in &vertices {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(vertex.position[axis]);
+                    max[axis] = max[axis].max(vertex.position[axis]);
+                }
+            }
+            assert_eq!(min, [8.0 + TORCH_MIN, 1.0, 8.0 + TORCH_MIN]);
+            assert_eq!(max, [8.0 + TORCH_MAX, 1.0 + TORCH_HEIGHT, 8.0 + TORCH_MAX]);
+            assert_eq!(
+                [max[0] - min[0], max[1] - min[1], max[2] - min[2]],
+                [2.0 / 16.0, 10.0 / 16.0, 2.0 / 16.0],
+                "{block:?} must not fall back to full-cube geometry"
+            );
+
+            for (face_idx, quad) in vertices.chunks_exact(4).enumerate() {
+                let rect = expected_rects[face_idx];
+                let mut observed_min = [f32::INFINITY; 2];
+                let mut observed_max = [f32::NEG_INFINITY; 2];
+                for vertex in quad {
+                    assert_eq!(
+                        vertex.atlas_tile,
+                        [
+                            REDSTONE_TORCH_ATLAS_TILE.0 as f32,
+                            REDSTONE_TORCH_ATLAS_TILE.1 as f32,
+                        ]
+                    );
+                    observed_min[0] = observed_min[0].min(vertex.local_uv[0]);
+                    observed_min[1] = observed_min[1].min(vertex.local_uv[1]);
+                    observed_max[0] = observed_max[0].max(vertex.local_uv[0]);
+                    observed_max[1] = observed_max[1].max(vertex.local_uv[1]);
+                }
+                assert_eq!(observed_min, [rect[0], rect[1]]);
+                assert_eq!(observed_max, [rect[2], rect[3]]);
+            }
+        }
     }
 
     #[test]
@@ -3570,5 +3737,82 @@ mod tests {
         assert!(BlockType::Cactus.can_stay_on(BlockType::Sand));
         assert!(BlockType::Cactus.can_stay_on(BlockType::Cactus));
         assert!(!BlockType::Cactus.can_stay_on(BlockType::Dirt));
+    }
+
+    #[test]
+    fn contextual_plant_support_enforces_water_and_lateral_clearance() {
+        let position = (8, 100, 8);
+        let mut blocks = std::collections::HashMap::new();
+        blocks.insert((8, 99, 8), BlockType::Sand);
+        let lookup = |x, y, z| Some(*blocks.get(&(x, y, z)).unwrap_or(&BlockType::Air));
+
+        assert_eq!(
+            BlockType::SugarCane.support_status_at(position, lookup),
+            BlockSupportStatus::Unsupported
+        );
+
+        blocks.insert((9, 99, 8), BlockType::Water);
+        assert_eq!(
+            BlockType::SugarCane.support_status_at(position, |x, y, z| {
+                Some(*blocks.get(&(x, y, z)).unwrap_or(&BlockType::Air))
+            }),
+            BlockSupportStatus::Supported
+        );
+
+        blocks.insert((8, 99, 8), BlockType::SugarCane);
+        blocks.remove(&(9, 99, 8));
+        assert_eq!(
+            BlockType::SugarCane.support_status_at(position, |x, y, z| {
+                Some(*blocks.get(&(x, y, z)).unwrap_or(&BlockType::Air))
+            }),
+            BlockSupportStatus::Supported,
+            "upper cane inherits support from the cane below"
+        );
+
+        blocks.insert((8, 99, 8), BlockType::Sand);
+        assert_eq!(
+            BlockType::Cactus.support_status_at(position, |x, y, z| {
+                Some(*blocks.get(&(x, y, z)).unwrap_or(&BlockType::Air))
+            }),
+            BlockSupportStatus::Supported
+        );
+        blocks.insert((9, 100, 8), BlockType::Stone);
+        assert_eq!(
+            BlockType::Cactus.support_status_at(position, |x, y, z| {
+                Some(*blocks.get(&(x, y, z)).unwrap_or(&BlockType::Air))
+            }),
+            BlockSupportStatus::Unsupported
+        );
+        blocks.insert((9, 100, 8), BlockType::Lava);
+        assert_eq!(
+            BlockType::Cactus.support_status_at(position, |x, y, z| {
+                Some(*blocks.get(&(x, y, z)).unwrap_or(&BlockType::Air))
+            }),
+            BlockSupportStatus::Unsupported,
+            "lava is a forbidden lateral cactus neighbor despite being non-solid"
+        );
+    }
+
+    #[test]
+    fn contextual_plant_support_reports_unknown_for_missing_neighbor_chunks() {
+        let position = (15, 100, 8);
+        let lookup = |x, y, z| {
+            if x >= 16 {
+                None
+            } else if (x, y, z) == (15, 99, 8) {
+                Some(BlockType::Sand)
+            } else {
+                Some(BlockType::Air)
+            }
+        };
+
+        assert_eq!(
+            BlockType::SugarCane.support_status_at(position, lookup),
+            BlockSupportStatus::Unknown
+        );
+        assert_eq!(
+            BlockType::Cactus.support_status_at(position, lookup),
+            BlockSupportStatus::Unknown
+        );
     }
 }

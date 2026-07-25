@@ -1,6 +1,6 @@
 # Current Work Track
 
-> Last updated: 2026-07-24
+> Last updated: 2026-07-25
 > Goal: complete tasks 1-9, then audit, list, and fix latent bugs as task 10.
 > Rule: complete, verify, and commit each task separately.
 
@@ -16,8 +16,8 @@
 | 6 | [Fix Survival attacks against mobs](plans/implementation/06_survival_combat.md) | Complete | `f9930d1` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (219 unit + 1 integration); hit/miss/latch routing, target filtering, invulnerability/impact, and zero-HP cleanup |
 | 7 | [Add adjustable weather/rain volume](plans/implementation/07_weather_volume.md) | Complete | `7fa3b6b` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (226 unit + 1 integration); legacy/clamp/roundtrip settings, category gain, live-loop refresh, and UI hit regions |
 | 8 | [Add a Creative item catalog on `E`](plans/implementation/08_creative_inventory.md) | Complete | `f5b69f8` | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (238 unit + 1 integration); exact catalog/partition, virtual supply/no-op, hotbar/cursor safety, wheel routing, SplashPotion metadata, and multi-aspect layout regressions |
-| 9 | [Stop camera rotation while inventory is open](plans/implementation/09_inventory_camera_lock.md) | Complete | pending commit | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (243 unit + 1 integration); seven-blocker predicate, disabled/enabled mouse deltas, sensitivity/pitch clamp, UI NDC, E repeat, and Creative wheel regression |
-| 10 | Last: find, list, and fix latent bugs | Pending | — | — |
+| 9 | [Stop camera rotation while inventory is open](plans/implementation/09_inventory_camera_lock.md) | Complete | `1343834` | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (243 unit + 1 integration); seven-blocker predicate, disabled/enabled mouse deltas, sensitivity/pitch clamp, UI NDC, E repeat, and Creative wheel regression |
+| 10 | [Last: find, list, and fix latent bugs](plans/implementation/10_bug_audit.md) | Closed current pass | `2f3370b` | 30 candidates listed; 26 fixed and regression-tested; 4 follow-ups documented; `cargo fmt`; `cargo test` (304 unit + 1 integration); `cargo check --release`; `git diff --check` |
 
 ## Working notes
 
@@ -88,6 +88,21 @@
   transitions are mutually exclusive without intermediate re-grabs, E ignores
   key repeat, and focus/death/respawn use the same synchronization path.
   Windows cursor-mode fallback and event timing remain an interactive check.
+- Task 10's partitioned audit produced 30 evidence-backed candidates across
+  rendering, streaming, networking, inventory, input, combat, physics, world
+  rules, persistence, and weather/audio. This pass fixes 26 with regression
+  coverage: AABB-nearest LOD, vertical far plane, double-sided translucent
+  terrain, async chunk reload/save ordering, diagonal remote chunk invalidation,
+  fluid lighting updates, per-player pose coalescing, reliable roster delivery,
+  slow-client eviction, inventory metadata/remainder/cursor conservation,
+  held-mining cancellation, repeat-key UI transitions, stale Controls rebinding,
+  combat reward/poison/knockback targeting, high-speed collision substeps,
+  respawn timer reset, Creative sprint policy, break raycast fluid filtering,
+  redstone torch mesh, sugar cane/cactus support, authoritative weather
+  phase/lightning sync, non-finite view settings, and invalid WAV fallback.
+  Follow-ups intentionally not hidden: remote block action ACK/reach validation,
+  redstone metadata persistence, and proper door/trapdoor block-state
+  orientation/collision/model work.
 
 ## Commit discipline
 

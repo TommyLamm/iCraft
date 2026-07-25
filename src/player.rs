@@ -48,6 +48,21 @@ impl PlayerState {
         }
     }
 
+    pub fn reset_for_respawn(&mut self) {
+        self.health = self.max_health;
+        self.hunger = 20.0;
+        self.saturation = 5.0;
+        self.exhaustion = 0.0;
+        self.is_dead = false;
+        self.death_reason = None;
+        self.invulnerable_time = 1.0;
+        self.damaged_flash_time = 0.0;
+        self.regen_timer = 0.0;
+        self.starve_timer = 0.0;
+        self.oxygen = 300.0;
+        self.drowning_timer = 0.0;
+    }
+
     pub fn take_damage(&mut self, amount: f32, source: DamageSource) -> bool {
         if self.is_dead || self.invulnerable_time > 0.0 {
             return false;
@@ -271,5 +286,41 @@ mod tests {
         // Next second underwater should trigger drowning damage
         let damage = state.update(1.0, true);
         assert_eq!(damage, Some((2.0, DamageSource::Drowning)));
+    }
+
+    #[test]
+    fn reset_for_respawn_restores_survival_resources_and_timers() {
+        let mut state = PlayerState::new();
+        state.health = 0.0;
+        state.hunger = 0.0;
+        state.saturation = 0.0;
+        state.exhaustion = 3.5;
+        state.is_dead = true;
+        state.death_reason = Some(DamageSource::Drowning);
+        state.invulnerable_time = 0.0;
+        state.damaged_flash_time = 0.4;
+        state.regen_timer = 3.0;
+        state.starve_timer = 3.9;
+        state.oxygen = 0.0;
+        state.drowning_timer = 0.9;
+        state.experience = 17;
+        state.experience_level = 4;
+
+        state.reset_for_respawn();
+
+        assert_eq!(state.health, state.max_health);
+        assert_eq!(state.hunger, 20.0);
+        assert_eq!(state.saturation, 5.0);
+        assert_eq!(state.exhaustion, 0.0);
+        assert!(!state.is_dead);
+        assert_eq!(state.death_reason, None);
+        assert_eq!(state.invulnerable_time, 1.0);
+        assert_eq!(state.damaged_flash_time, 0.0);
+        assert_eq!(state.regen_timer, 0.0);
+        assert_eq!(state.starve_timer, 0.0);
+        assert_eq!(state.oxygen, 300.0);
+        assert_eq!(state.drowning_timer, 0.0);
+        assert_eq!(state.experience, 17);
+        assert_eq!(state.experience_level, 4);
     }
 }

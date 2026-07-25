@@ -1,4 +1,4 @@
-use crate::world::{BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{BlockSupportStatus, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 type BlockPos = (i32, i32, i32);
@@ -157,12 +157,37 @@ impl ChunkManager {
     }
 
     pub fn get_block(&self, wx: i32, wy: i32, wz: i32) -> BlockType {
-        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
-            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                return chunk.blocks[bx][by][bz];
-            }
-        }
-        BlockType::Air
+        self.get_loaded_block(wx, wy, wz).unwrap_or(BlockType::Air)
+    }
+
+    /// Returns `None` when the coordinate is outside world height or its chunk
+    /// is not loaded. Support rules use this instead of treating missing chunk
+    /// data as air.
+    pub fn get_loaded_block(&self, wx: i32, wy: i32, wz: i32) -> Option<BlockType> {
+        let ((cx, cz), (bx, by, bz)) = self.world_to_local(wx, wy, wz)?;
+        let chunk = self.chunks.get(&(cx, cz))?;
+        Some(chunk.blocks[bx][by][bz])
+    }
+
+    pub fn block_support_status(
+        &self,
+        block: BlockType,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+    ) -> BlockSupportStatus {
+        block.support_status_at((wx, wy, wz), |x, y, z| self.get_loaded_block(x, y, z))
+    }
+
+    pub fn can_place_block_with_support(
+        &self,
+        block: BlockType,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+    ) -> bool {
+        self.get_loaded_block(wx, wy, wz).is_some()
+            && self.block_support_status(block, wx, wy, wz) == BlockSupportStatus::Supported
     }
 
     pub fn set_block(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
@@ -280,41 +305,137 @@ impl ChunkManager {
     ) where
         F: FnMut((i32, i32, i32), BlockType),
     {
-        let mut current_y = wy + 1;
-        while current_y < CHUNK_HEIGHT as i32 {
-            let block_above = self.get_block(wx, current_y, wz);
-            if block_above == BlockType::Air {
-                break;
+        self.break_unsupported_from_candidates(
+            support_candidates_affected_by_change((wx, wy, wz)),
+            dirty_chunks,
+            &mut on_break,
+        );
+    }
+
+    /// Revalidates context-dependent plants in a newly loaded chunk and along
+    /// the cardinal borders of already-loaded neighbors. This resolves blocks
+    /// previously preserved as `Unknown` without loading any additional chunks.
+    pub fn check_and_break_unsupported_for_loaded_chunk<F>(
+        &mut self,
+        cx: i32,
+        cz: i32,
+        dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
+        mut on_break: F,
+    ) where
+        F: FnMut((i32, i32, i32), BlockType),
+    {
+        if !self.chunks.contains_key(&(cx, cz)) {
+            return;
+        }
+
+        let min_x = cx * CHUNK_WIDTH as i32;
+        let min_z = cz * CHUNK_DEPTH as i32;
+        let mut candidates = Vec::new();
+
+        for x in min_x..min_x + CHUNK_WIDTH as i32 {
+            for z in min_z..min_z + CHUNK_DEPTH as i32 {
+                for y in 1..CHUNK_HEIGHT as i32 {
+                    if matches!(
+                        self.get_loaded_block(x, y, z),
+                        Some(BlockType::SugarCane | BlockType::Cactus)
+                    ) {
+                        candidates.push((x, y, z));
+                    }
+                }
             }
-            let block_below = self.get_block(wx, current_y - 1, wz);
-            if !block_above.can_stay_on(block_below) {
-                self.set_block(wx, current_y, wz, BlockType::Air);
+        }
 
-                crate::lighting::update_sky_light_after_removed(
-                    self,
-                    wx,
-                    current_y,
-                    wz,
-                    dirty_chunks,
-                );
-                crate::lighting::update_block_light_after_removed(
-                    self,
-                    wx,
-                    current_y,
-                    wz,
-                    block_above.properties().light_emission,
-                    dirty_chunks,
-                );
-                mark_block_mesh_dependencies(dirty_chunks, wx, wz);
+        for z in min_z..min_z + CHUNK_DEPTH as i32 {
+            for x in [min_x - 1, min_x + CHUNK_WIDTH as i32] {
+                for y in 1..CHUNK_HEIGHT as i32 {
+                    if matches!(
+                        self.get_loaded_block(x, y, z),
+                        Some(BlockType::SugarCane | BlockType::Cactus)
+                    ) {
+                        candidates.push((x, y, z));
+                    }
+                }
+            }
+        }
+        for x in min_x..min_x + CHUNK_WIDTH as i32 {
+            for z in [min_z - 1, min_z + CHUNK_DEPTH as i32] {
+                for y in 1..CHUNK_HEIGHT as i32 {
+                    if matches!(
+                        self.get_loaded_block(x, y, z),
+                        Some(BlockType::SugarCane | BlockType::Cactus)
+                    ) {
+                        candidates.push((x, y, z));
+                    }
+                }
+            }
+        }
 
-                on_break((wx, current_y, wz), block_above);
+        self.break_unsupported_from_candidates(candidates, dirty_chunks, &mut on_break);
+    }
 
-                current_y += 1;
-            } else {
-                break;
+    fn break_unsupported_from_candidates<I, F>(
+        &mut self,
+        candidates: I,
+        dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
+        on_break: &mut F,
+    ) where
+        I: IntoIterator<Item = BlockPos>,
+        F: FnMut((i32, i32, i32), BlockType),
+    {
+        let mut queue = VecDeque::new();
+        let mut queued = HashSet::new();
+        for position in candidates {
+            if queued.insert(position) {
+                queue.push_back(position);
+            }
+        }
+
+        while let Some((x, y, z)) = queue.pop_front() {
+            queued.remove(&(x, y, z));
+            let Some(block) = self.get_loaded_block(x, y, z) else {
+                continue;
+            };
+            if block == BlockType::Air
+                || self.block_support_status(block, x, y, z) != BlockSupportStatus::Unsupported
+            {
+                continue;
+            }
+
+            self.set_block(x, y, z, BlockType::Air);
+            crate::lighting::update_sky_light_after_removed(self, x, y, z, dirty_chunks);
+            crate::lighting::update_block_light_after_removed(
+                self,
+                x,
+                y,
+                z,
+                block.properties().light_emission,
+                dirty_chunks,
+            );
+            mark_block_mesh_dependencies(dirty_chunks, x, z);
+            on_break((x, y, z), block);
+
+            for affected in support_candidates_affected_by_change((x, y, z)) {
+                if queued.insert(affected) {
+                    queue.push_back(affected);
+                }
             }
         }
     }
+}
+
+fn support_candidates_affected_by_change((x, y, z): BlockPos) -> [BlockPos; 10] {
+    [
+        (x, y, z),
+        (x, y + 1, z),
+        (x + 1, y, z),
+        (x - 1, y, z),
+        (x, y, z + 1),
+        (x, y, z - 1),
+        (x + 1, y + 1, z),
+        (x - 1, y + 1, z),
+        (x, y + 1, z + 1),
+        (x, y + 1, z - 1),
+    ]
 }
 
 #[cfg(test)]
@@ -400,5 +521,137 @@ mod tests {
 
         assert_eq!(manager.get_block(5, 65, 5), BlockType::Air);
         assert_eq!(broken, vec![((5, 65, 5), BlockType::Dandelion)]);
+    }
+
+    #[test]
+    fn player_placement_support_requires_water_for_cane_and_clear_sides_for_cactus() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.set_block(8, 99, 8, BlockType::Sand);
+
+        assert!(!manager.can_place_block_with_support(BlockType::SugarCane, 8, 100, 8));
+        manager.set_block(9, 99, 8, BlockType::Water);
+        assert!(manager.can_place_block_with_support(BlockType::SugarCane, 8, 100, 8));
+
+        assert!(manager.can_place_block_with_support(BlockType::Cactus, 8, 100, 8));
+        manager.set_block(9, 100, 8, BlockType::Stone);
+        assert!(!manager.can_place_block_with_support(BlockType::Cactus, 8, 100, 8));
+    }
+
+    #[test]
+    fn removing_cane_water_breaks_the_entire_column() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.set_block(8, 99, 8, BlockType::Sand);
+        manager.set_block(9, 99, 8, BlockType::Water);
+        manager.set_block(8, 100, 8, BlockType::SugarCane);
+        manager.set_block(8, 101, 8, BlockType::SugarCane);
+
+        manager.set_block(9, 99, 8, BlockType::Air);
+        let mut dirty = HashSet::new();
+        let mut broken = Vec::new();
+        manager.check_and_break_unsupported_above(9, 99, 8, &mut dirty, |position, block| {
+            broken.push((position, block));
+        });
+
+        assert_eq!(manager.get_block(8, 100, 8), BlockType::Air);
+        assert_eq!(manager.get_block(8, 101, 8), BlockType::Air);
+        assert_eq!(
+            broken,
+            vec![
+                ((8, 100, 8), BlockType::SugarCane),
+                ((8, 101, 8), BlockType::SugarCane),
+            ]
+        );
+    }
+
+    #[test]
+    fn adding_a_lateral_cactus_obstruction_breaks_and_cascades() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.set_block(8, 99, 8, BlockType::Sand);
+        manager.set_block(8, 100, 8, BlockType::Cactus);
+        manager.set_block(8, 101, 8, BlockType::Cactus);
+
+        manager.set_block(9, 100, 8, BlockType::Stone);
+        let mut dirty = HashSet::new();
+        let mut broken = Vec::new();
+        manager.check_and_break_unsupported_above(9, 100, 8, &mut dirty, |position, block| {
+            broken.push((position, block));
+        });
+
+        assert_eq!(manager.get_block(8, 100, 8), BlockType::Air);
+        assert_eq!(manager.get_block(8, 101, 8), BlockType::Air);
+        assert_eq!(
+            broken,
+            vec![
+                ((8, 100, 8), BlockType::Cactus),
+                ((8, 101, 8), BlockType::Cactus),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_boundary_chunk_is_unknown_until_loaded_and_never_forced() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.set_block(15, 99, 8, BlockType::Sand);
+        manager.set_block(15, 100, 8, BlockType::SugarCane);
+
+        assert_eq!(
+            manager.block_support_status(BlockType::SugarCane, 15, 100, 8),
+            BlockSupportStatus::Unknown
+        );
+        let mut dirty = HashSet::new();
+        let mut broken = Vec::new();
+        manager.check_and_break_unsupported_above(16, 99, 8, &mut dirty, |position, block| {
+            broken.push((position, block));
+        });
+        assert_eq!(
+            manager.chunks.len(),
+            1,
+            "support checks must not load chunks"
+        );
+        assert_eq!(manager.get_block(15, 100, 8), BlockType::SugarCane);
+        assert!(broken.is_empty());
+
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.set_block(16, 99, 8, BlockType::Water);
+        manager.check_and_break_unsupported_for_loaded_chunk(
+            1,
+            0,
+            &mut dirty,
+            |position, block| broken.push((position, block)),
+        );
+        assert_eq!(manager.get_block(15, 100, 8), BlockType::SugarCane);
+        assert!(broken.is_empty());
+    }
+
+    #[test]
+    fn loading_a_boundary_obstruction_revalidates_neighboring_cactus() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.set_block(15, 99, 8, BlockType::Sand);
+        manager.set_block(15, 100, 8, BlockType::Cactus);
+        assert_eq!(
+            manager.block_support_status(BlockType::Cactus, 15, 100, 8),
+            BlockSupportStatus::Unknown
+        );
+
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.set_block(16, 100, 8, BlockType::Stone);
+        let mut dirty = HashSet::new();
+        let mut broken = Vec::new();
+        manager.check_and_break_unsupported_for_loaded_chunk(
+            1,
+            0,
+            &mut dirty,
+            |position, block| broken.push((position, block)),
+        );
+
+        assert_eq!(manager.get_block(15, 100, 8), BlockType::Air);
+        assert_eq!(broken, vec![((15, 100, 8), BlockType::Cactus)]);
+        assert!(dirty.contains(&(0, 0)));
+        assert!(dirty.contains(&(1, 0)));
     }
 }

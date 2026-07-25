@@ -429,7 +429,7 @@ pub fn select_lod_for_bounds(
     thresholds: LodThresholds,
 ) -> LodLevel {
     select_lod(
-        bounds.center_distance_squared(camera_position).sqrt(),
+        bounds.distance_squared_to_point(camera_position).sqrt(),
         thresholds,
     )
 }
@@ -675,6 +675,27 @@ mod tests {
         assert_eq!(
             select_lod_for_bounds(Vec3::ZERO, mesh_bounds, thresholds),
             LodLevel::L1
+        );
+    }
+
+    #[test]
+    fn lod_uses_nearest_distance_for_tall_bounds() {
+        let thresholds = LodThresholds::new(64.0, 96.0);
+        let tall_bounds = bounds([0.0, 0.0, 0.0], [16.0, 256.0, 16.0]);
+
+        assert_eq!(
+            select_lod_for_bounds(Vec3::new(8.0, 4.0, 8.0), tall_bounds, thresholds),
+            LodLevel::L0,
+            "a camera inside a tall chunk must retain its full mesh"
+        );
+        assert_eq!(
+            select_lod_for_bounds(Vec3::new(-10.0, 128.0, 8.0), tall_bounds, thresholds),
+            LodLevel::L0,
+            "vertical extent must not make a nearby chunk appear distant"
+        );
+        assert_eq!(
+            select_lod_for_bounds(Vec3::new(-100.0, 128.0, 8.0), tall_bounds, thresholds),
+            LodLevel::L2
         );
     }
 }

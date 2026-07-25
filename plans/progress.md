@@ -103,6 +103,14 @@ P3 [█████████░] 88.9%
 
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
+### 2026-07-25
+- 🔧 完成 Task 10 潛在 Bug 審計的快速收尾 pass (By Codex, sub-agent 交付已審核；最後依使用者要求停止再派 sub-agent)
+  - 新增文件：`plans/implementation/10_bug_audit.md`
+  - 修改文件：`src/app.rs`, `src/audio.rs`, `src/camera.rs`, `src/chunk_manager.rs`, `src/chunk_render.rs`, `src/entity.rs`, `src/interaction.rs`, `src/inventory.rs`, `src/menu.rs`, `src/mob.rs`, `src/network/client.rs`, `src/network/protocol.rs`, `src/network/server.rs`, `src/passive_mob.rs`, `src/physics.rs`, `src/player.rs`, `src/save.rs`, `src/state.rs`, `src/texture.rs`, `src/weather.rs`, `src/world.rs`, `ARCHITECTURE.md`, `track.md`
+  - 關鍵決策：本輪列出 30 個證據充分的潛在 bug，完成 26 個低風險且可回歸測試的修復，涵蓋 render LOD/far plane/translucent culling、chunk streaming 競態與 halo invalidation、fluid lighting、多人 pose mailbox/可靠 roster/慢 client eviction、inventory metadata 與 cursor 守恆、UI repeat/held mining、combat reward/effect/knockback、Creative sprint/高速碰撞/respawn reset、break raycast fluid filtering、redstone torch mesh、植物支撐規則、權威 weather phase/lightning、settings NaN/Inf 與 invalid WAV fallback。最後依使用者要求快速驗證收尾，未再擴大到 protocol ACK、redstone sidecar 或門/活板門 block-state 系統。
+  - 驗證：`cargo fmt`、`cargo fmt --all -- --check`、`cargo test` 通過，共 304 項單元測試與 1 項整合測試；`cargo check --release` 與 `git diff --check` 已通過。
+  - 後續項：joined client survival place/break 的權威 action-result/消耗/drop ACK 與 host reach validation；紅石 facing/delay/comparator/note metadata 持久化；OakDoor/OakTrapdoor 的正式 orientation/collision/model state。
+
 ### 2026-07-24
 - ✅ 修復開啟物品欄仍會旋轉視角 (By inventory-camera sub-agent, reviewed by Codex)
   - 修改文件：`src/app.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/09_inventory_camera_lock.md`, `plans/progress.md`, `track.md`

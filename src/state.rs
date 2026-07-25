@@ -5,7 +5,7 @@ use crate::chunk_render::{
     LodThresholds, MeshBounds, TerrainVertex,
 };
 use crate::crafting::RecipeManager;
-use crate::interaction::raycast;
+use crate::interaction::{raycast, RaycastTargetPolicy};
 use crate::inventory::{
     CreativeTab, GameMode, Inventory, Item, ItemStack, ToolType, CREATIVE_COLUMNS, CREATIVE_ROWS,
     CREATIVE_VISIBLE_SLOTS,
@@ -45,6 +45,10 @@ fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
     x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
 }
 
+fn terrain_translucent_cull_mode() -> Option<wgpu::Face> {
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PrimaryPressDecision {
     keep_held_mining: bool,
@@ -71,9 +75,7 @@ fn primary_press_decision(game_mode: GameMode, melee_consumed: bool) -> PrimaryP
 }
 
 fn is_legal_melee_target(entity: &crate::entity::Entity) -> bool {
-    entity.entity_type != crate::entity::EntityType::RemotePlayer
-        && entity.max_health > 0.0
-        && entity.health > 0.0
+    entity.is_player_melee_target()
 }
 
 fn closest_melee_target(
@@ -126,6 +128,177 @@ fn apply_melee_impact(
         killed: entity.health <= 0.0,
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+struct PlayerKill {
+    entity_type: crate::entity::EntityType,
+    position: Vec3,
+    burning: bool,
+    has_wool: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PlayerKillRewards {
+    items: Vec<Item>,
+    experience: u32,
+}
+
+fn claim_standard_player_kill(entity: &mut crate::entity::Entity) -> Option<PlayerKill> {
+    if entity.health > 0.0
+        || entity.player_kill_rewarded
+        || !entity.entity_type.uses_standard_player_kill_rewards()
+    {
+        return None;
+    }
+
+    entity.player_kill_rewarded = true;
+    Some(PlayerKill {
+        entity_type: entity.entity_type,
+        position: entity.position,
+        burning: entity.burn_timer > 0.0 || entity.fire_aspect_timer > 0.0,
+        has_wool: entity.has_wool,
+    })
+}
+
+fn apply_player_projectile_damage(
+    entity: &mut crate::entity::Entity,
+    damage: f32,
+) -> Option<PlayerKill> {
+    if !entity.is_player_projectile_target() || damage <= 0.0 {
+        return None;
+    }
+
+    entity.health -= damage;
+    claim_standard_player_kill(entity)
+}
+
+fn apply_player_splash_effect(
+    entity: &mut crate::entity::Entity,
+    potion: crate::brewing::PotionData,
+) -> Option<PlayerKill> {
+    if !entity.is_local_living_target() {
+        return None;
+    }
+
+    match potion.kind {
+        crate::brewing::PotionKind::Healing | crate::brewing::PotionKind::Regeneration => {
+            entity.health = (entity.health + 4.0 * potion.level as f32).min(entity.max_health);
+        }
+        crate::brewing::PotionKind::Poison => {
+            entity.health -= 2.0 * potion.level as f32;
+        }
+        crate::brewing::PotionKind::Slowness => entity.velocity *= 0.4,
+        _ => {}
+    }
+
+    claim_standard_player_kill(entity)
+}
+
+fn standard_player_kill_rewards(kill: PlayerKill, looting: u8) -> PlayerKillRewards {
+    let mut items = Vec::new();
+    for _ in 0..=(looting / 2) {
+        match kill.entity_type {
+            crate::entity::EntityType::Zombie => items.push(Item::RottenFlesh),
+            crate::entity::EntityType::Skeleton => {
+                items.push(Item::Bone);
+                items.push(Item::Arrow);
+                let mut rng_seed = (kill.position.x as u32)
+                    .wrapping_mul(31)
+                    .wrapping_add(kill.position.z as u32);
+                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                if ((rng_seed / 65536) % 32768) % 10 == 0 {
+                    items.push(Item::Bow);
+                }
+            }
+            crate::entity::EntityType::Creeper => items.push(Item::Gunpowder),
+            crate::entity::EntityType::Pig => items.push(if kill.burning {
+                Item::CookedPorkchop
+            } else {
+                Item::RawPorkchop
+            }),
+            crate::entity::EntityType::Cow => {
+                items.push(Item::RawBeef);
+                if (kill.position.x as u32).wrapping_mul(31) % 2 == 0 {
+                    items.push(Item::Leather);
+                }
+            }
+            crate::entity::EntityType::Sheep => {
+                items.push(Item::RawMutton);
+                if kill.has_wool {
+                    items.push(Item::Wool);
+                }
+            }
+            crate::entity::EntityType::Chicken => {
+                items.push(Item::RawChicken);
+                items.push(Item::Feather);
+            }
+            _ => {}
+        }
+    }
+
+    let experience = match kill.entity_type {
+        crate::entity::EntityType::Zombie
+        | crate::entity::EntityType::Skeleton
+        | crate::entity::EntityType::Creeper => 5,
+        _ => 2,
+    };
+    PlayerKillRewards { items, experience }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedItemDestination {
+    Inventory,
+    Dropped,
+    IgnoredAir,
+}
+
+fn spawn_dropped_item_entity(
+    entity_manager: &mut crate::entity::EntityManager,
+    item: Item,
+    position: Vec3,
+    random_seed: u32,
+) -> bool {
+    if item == Item::Air {
+        return false;
+    }
+
+    let id = entity_manager.spawn(crate::entity::EntityType::DroppedItem, position);
+    let Some(entity) = entity_manager.entities.last_mut() else {
+        return false;
+    };
+    entity.dropped_item = Some(item);
+
+    let mut rng = random_seed.wrapping_add((id.wrapping_mul(2_654_435_761)) as u32);
+    rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+    let vx = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
+    rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+    let vz = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
+    rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+    let vy = 2.0 + ((rng / 65_536) as f32 / 32_768.0);
+    entity.velocity = Vec3::new(vx, vy, vz);
+    entity.pickup_cooldown = 0.5;
+    true
+}
+
+fn store_or_drop_generated_item(
+    inventory: &mut Inventory,
+    entity_manager: &mut crate::entity::EntityManager,
+    item: Item,
+    position: Vec3,
+    random_seed: u32,
+) -> GeneratedItemDestination {
+    if item == Item::Air {
+        return GeneratedItemDestination::IgnoredAir;
+    }
+    if inventory.add_item(item) {
+        return GeneratedItemDestination::Inventory;
+    }
+
+    let spawned = spawn_dropped_item_entity(entity_manager, item, position, random_seed);
+    debug_assert!(spawned);
+    GeneratedItemDestination::Dropped
+}
+
 // Creating an entire render distance while handling a menu click blocks the
 // window event loop and can allocate hundreds of chunk meshes at once.  Start
 // with a safe area around the player; `update_chunks` streams the rest in over
@@ -917,8 +1090,6 @@ impl State {
         wz: i32,
         dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
     ) {
-        let game_mode = self.game_mode;
-        let mut drops = Vec::new();
         let mut broken_blocks = Vec::new();
         self.chunk_manager.check_and_break_unsupported_above(
             wx,
@@ -926,36 +1097,54 @@ impl State {
             wz,
             dirty_chunks,
             |(x, y, z), block| {
-                broken_blocks.push((x, y, z));
-                if game_mode == GameMode::Survival {
-                    let drop_item = match block {
-                        BlockType::TallGrass => {
-                            let rng = (x as u32)
-                                .wrapping_mul(31)
-                                .wrapping_add(y as u32 * 17)
-                                .wrapping_add(z as u32);
-                            if rng % 8 == 0 {
-                                Some(crate::inventory::Item::Seeds)
-                            } else {
-                                None
-                            }
-                        }
-                        BlockType::SnowLayer => None,
-                        _ => Some(crate::inventory::Item::from_block(block)),
-                    };
-                    if let Some(item) = drop_item {
-                        drops.push((
-                            item,
-                            glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                        ));
-                    }
-                }
+                broken_blocks.push(((x, y, z), block));
             },
         );
-        for (item, pos) in drops {
-            self.spawn_dropped_item(item, pos);
-        }
-        for (x, y, z) in broken_blocks {
+        self.finish_unsupported_breaks(broken_blocks);
+    }
+
+    fn check_and_break_unsupported_for_loaded_chunk(
+        &mut self,
+        cx: i32,
+        cz: i32,
+        dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
+    ) {
+        let mut broken_blocks = Vec::new();
+        self.chunk_manager
+            .check_and_break_unsupported_for_loaded_chunk(
+                cx,
+                cz,
+                dirty_chunks,
+                |position, block| broken_blocks.push((position, block)),
+            );
+        self.finish_unsupported_breaks(broken_blocks);
+    }
+
+    fn finish_unsupported_breaks(&mut self, broken_blocks: Vec<((i32, i32, i32), BlockType)>) {
+        for ((x, y, z), block) in broken_blocks {
+            if self.game_mode == GameMode::Survival {
+                let drop_item = match block {
+                    BlockType::TallGrass => {
+                        let rng = (x as u32)
+                            .wrapping_mul(31)
+                            .wrapping_add(y as u32 * 17)
+                            .wrapping_add(z as u32);
+                        if rng % 8 == 0 {
+                            Some(crate::inventory::Item::Seeds)
+                        } else {
+                            None
+                        }
+                    }
+                    BlockType::SnowLayer => None,
+                    _ => Some(crate::inventory::Item::from_block(block)),
+                };
+                if let Some(item) = drop_item {
+                    self.spawn_dropped_item(
+                        item,
+                        glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                    );
+                }
+            }
             self.broadcast_block_change(x, y, z, BlockType::Air);
         }
     }
@@ -1292,6 +1481,14 @@ pub(crate) fn allows_camera_look(
         && has_focus
 }
 
+fn allows_continuous_mining(
+    left_mouse_pressed: bool,
+    game_mode: GameMode,
+    gameplay_input_allowed: bool,
+) -> bool {
+    left_mouse_pressed && game_mode == GameMode::Survival && gameplay_input_allowed
+}
+
 fn cursor_position_to_ndc(x: f64, y: f64, width: u32, height: u32) -> [f32; 2] {
     [
         (x as f32 / width.max(1) as f32) * 2.0 - 1.0,
@@ -1301,7 +1498,7 @@ fn cursor_position_to_ndc(x: f64, y: f64, width: u32, height: u32) -> [f32; 2] {
 
 #[cfg(test)]
 mod camera_input_tests {
-    use super::{allows_camera_look, cursor_position_to_ndc};
+    use super::{allows_camera_look, allows_continuous_mining, cursor_position_to_ndc, GameMode};
 
     #[test]
     fn every_gameplay_blocker_disables_camera_look() {
@@ -1341,6 +1538,14 @@ mod camera_input_tests {
             [1.0, -1.0]
         );
     }
+
+    #[test]
+    fn continuous_mining_requires_unblocked_survival_input() {
+        assert!(allows_continuous_mining(true, GameMode::Survival, true));
+        assert!(!allows_continuous_mining(false, GameMode::Survival, true));
+        assert!(!allows_continuous_mining(true, GameMode::Creative, true));
+        assert!(!allows_continuous_mining(true, GameMode::Survival, false));
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1377,6 +1582,23 @@ impl DoubleTapTracker {
 
 fn should_exit_creative_flight(was_flying: bool, vertical_input: f32, on_ground: bool) -> bool {
     was_flying && vertical_input < 0.0 && on_ground
+}
+
+fn sprint_allowed(game_mode: GameMode, hunger: f32) -> bool {
+    game_mode == GameMode::Creative || hunger > 6.0
+}
+
+fn sprint_exhaustion_amount(
+    game_mode: GameMode,
+    is_sprinting: bool,
+    is_moving: bool,
+    dt: f32,
+) -> f32 {
+    if game_mode == GameMode::Survival && is_sprinting && is_moving {
+        dt * 0.15
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -1435,6 +1657,38 @@ mod creative_flight_input_tests {
         assert!(!should_exit_creative_flight(true, 1.0, true));
         assert!(!should_exit_creative_flight(true, -1.0, false));
         assert!(!should_exit_creative_flight(false, -1.0, true));
+    }
+}
+
+#[cfg(test)]
+mod sprint_policy_tests {
+    use super::*;
+
+    #[test]
+    fn creative_sprint_ignores_hunger_and_exhaustion() {
+        assert!(sprint_allowed(GameMode::Creative, 0.0));
+        assert_eq!(
+            sprint_exhaustion_amount(GameMode::Creative, true, true, 10.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn survival_sprint_keeps_hunger_and_exhaustion_rules() {
+        assert!(!sprint_allowed(GameMode::Survival, 6.0));
+        assert!(sprint_allowed(GameMode::Survival, 6.01));
+        assert!(
+            (sprint_exhaustion_amount(GameMode::Survival, true, true, 10.0) - 1.5).abs()
+                < f32::EPSILON
+        );
+        assert_eq!(
+            sprint_exhaustion_amount(GameMode::Survival, false, true, 10.0),
+            0.0
+        );
+        assert_eq!(
+            sprint_exhaustion_amount(GameMode::Survival, true, false, 10.0),
+            0.0
+        );
     }
 }
 
@@ -1762,7 +2016,9 @@ enum NetworkInbound {
     TimeSync {
         ticks: u64,
         weather: u8,
+        weather_remaining_ticks: f32,
     },
+    LightningStrike(crate::network::protocol::LightningStrike),
     ChatFromClient {
         id: crate::network::protocol::PlayerId,
         message: String,
@@ -1873,8 +2129,17 @@ impl NetworkHandle {
                     crate::network::client::ClientToGame::ChunkData { cx, cz, blocks } => {
                         NetworkInbound::ChunkData { cx, cz, blocks }
                     }
-                    crate::network::client::ClientToGame::TimeSync { ticks, weather } => {
-                        NetworkInbound::TimeSync { ticks, weather }
+                    crate::network::client::ClientToGame::TimeSync {
+                        ticks,
+                        weather,
+                        weather_remaining_ticks,
+                    } => NetworkInbound::TimeSync {
+                        ticks,
+                        weather,
+                        weather_remaining_ticks,
+                    },
+                    crate::network::client::ClientToGame::LightningStrike(strike) => {
+                        NetworkInbound::LightningStrike(strike)
                     }
                     crate::network::client::ClientToGame::Chat { sender, message } => {
                         NetworkInbound::Chat { sender, message }
@@ -1970,10 +2235,37 @@ impl NetworkHandle {
         }
     }
 
-    fn broadcast_time_sync(&self, ticks: u64, weather: u8) {
+    fn broadcast_time_sync(&self, ticks: u64, weather: u8, weather_remaining_ticks: f32) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.send(crate::network::server::HostToServer::BroadcastTimeSync {
+                ticks,
+                weather,
+                weather_remaining_ticks,
+            });
+        }
+    }
+
+    fn send_time_sync_to(
+        &self,
+        ticks: u64,
+        weather: u8,
+        weather_remaining_ticks: f32,
+        to: crate::network::protocol::PlayerId,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.send(crate::network::server::HostToServer::SendTimeSync {
+                ticks,
+                weather,
+                weather_remaining_ticks,
+                to,
+            });
+        }
+    }
+
+    fn broadcast_lightning_strike(&self, strike: crate::network::protocol::LightningStrike) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server
-                .send(crate::network::server::HostToServer::BroadcastTimeSync { ticks, weather });
+                .send(crate::network::server::HostToServer::BroadcastLightningStrike { strike });
         }
     }
 
@@ -2760,7 +3052,7 @@ impl State {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Cw,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode: terrain_translucent_cull_mode(),
                     polygon_mode: wgpu::PolygonMode::Fill,
                     unclipped_depth: false,
                     conservative: false,
@@ -3474,17 +3766,25 @@ impl State {
         }
     }
 
-    fn weather_wire_value(&self) -> u8 {
-        match self.weather.current {
-            crate::weather::Weather::Clear => 0,
-            crate::weather::Weather::Rain => 1,
-            crate::weather::Weather::Thunder => 2,
-        }
+    fn weather_sync_fields(&self) -> (u8, f32) {
+        let snapshot = self.weather.snapshot();
+        (snapshot.current.wire_value(), snapshot.remaining_ticks)
     }
 
     fn broadcast_time_sync(&self) {
+        let (weather, weather_remaining_ticks) = self.weather_sync_fields();
         self.network
-            .broadcast_time_sync(self.world_time.ticks, self.weather_wire_value());
+            .broadcast_time_sync(self.world_time.ticks, weather, weather_remaining_ticks);
+    }
+
+    fn send_time_sync_to(&self, player_id: crate::network::protocol::PlayerId) {
+        let (weather, weather_remaining_ticks) = self.weather_sync_fields();
+        self.network.send_time_sync_to(
+            self.world_time.ticks,
+            weather,
+            weather_remaining_ticks,
+            player_id,
+        );
     }
 
     fn drain_network_events(&mut self) {
@@ -3580,8 +3880,8 @@ impl State {
                     }
                     if matches!(self.role, MultiplayerRole::Host { .. }) {
                         self.network.notify_player_join(id, username);
+                        self.send_time_sync_to(id);
                         self.send_mutated_chunks_to(id);
-                        self.broadcast_time_sync();
                     }
                 }
                 NetworkInbound::PlayerLeave(id) => {
@@ -3705,15 +4005,28 @@ impl State {
                 NetworkInbound::ChunkData { cx, cz, blocks } => {
                     self.apply_remote_chunk_data(cx, cz, blocks);
                 }
-                NetworkInbound::TimeSync { ticks, weather } => {
+                NetworkInbound::TimeSync {
+                    ticks,
+                    weather,
+                    weather_remaining_ticks,
+                } => {
                     if !self.is_authoritative() {
                         self.world_time.ticks = ticks;
                         self.world_time.tick_accumulator = 0.0;
-                        self.weather.current = match weather {
-                            1 => crate::weather::Weather::Rain,
-                            2 => crate::weather::Weather::Thunder,
-                            _ => crate::weather::Weather::Clear,
-                        };
+                        if let Some(current) = crate::weather::Weather::from_wire(weather) {
+                            self.weather
+                                .apply_snapshot(crate::weather::WeatherSnapshot {
+                                    current,
+                                    remaining_ticks: weather_remaining_ticks,
+                                });
+                        }
+                    }
+                }
+                NetworkInbound::LightningStrike(strike) => {
+                    if !self.is_authoritative()
+                        && self.current_dimension == crate::dimension::Dimension::Overworld
+                    {
+                        self.apply_lightning_strike(strike);
                     }
                 }
                 NetworkInbound::ChatFromClient { id, message } => {
@@ -3777,6 +4090,9 @@ impl State {
     pub fn clear_movement_input(&mut self) {
         self.keys = KeyState::default();
         self.jump_taps.reset();
+        self.left_mouse_pressed = false;
+        self.mining_target = None;
+        self.mining_progress = 0.0;
     }
 
     pub fn camera_look_allowed(&self) -> bool {
@@ -3984,10 +4300,10 @@ impl State {
     }
 
     pub fn open_advancements_ui(&mut self) {
-        self.advancement_gui.open();
-        if self.inventory.is_open {
-            self.close_inventory();
+        if self.inventory.is_open && !self.close_inventory() {
+            return;
         }
+        self.advancement_gui.open();
         self.clear_movement_input();
         self.sync_cursor_mode();
     }
@@ -4142,6 +4458,7 @@ impl State {
                     }
 
                     let mut dirty = std::collections::HashSet::new();
+                    self.check_and_break_unsupported_for_loaded_chunk(cx, cz, &mut dirty);
                     for (lighting_cx, lighting_cz) in [
                         (cx, cz),
                         (cx - 1, cz),
@@ -4539,30 +4856,33 @@ impl State {
         self.water_tick_timer += dt;
         if self.is_authoritative() && self.water_tick_timer >= 0.25 {
             self.water_tick_timer = 0.0;
-            let (dirty, mutations) =
+            let (mut dirty, mutations) =
                 crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
+            // Fan fluid-driven block changes out to connected clients.
+            for ((x, y, z), block) in mutations {
+                self.broadcast_block_change(x, y, z, block);
+                self.check_and_break_unsupported_above(x, y, z, &mut dirty);
+            }
             for (cx, cz) in dirty {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
                     mesh.mark_dirty();
                 }
-            }
-            // Fan fluid-driven block changes out to connected clients.
-            for ((x, y, z), block) in mutations {
-                self.broadcast_block_change(x, y, z, block);
             }
         }
 
         self.lava_tick_timer += dt;
         if self.is_authoritative() && self.lava_tick_timer >= 1.5 {
             self.lava_tick_timer = 0.0;
-            let (dirty, mutations) = crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
+            let (mut dirty, mutations) =
+                crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
+            for ((x, y, z), block) in mutations {
+                self.broadcast_block_change(x, y, z, block);
+                self.check_and_break_unsupported_above(x, y, z, &mut dirty);
+            }
             for (cx, cz) in dirty {
                 if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
                     mesh.mark_dirty();
                 }
-            }
-            for ((x, y, z), block) in mutations {
-                self.broadcast_block_change(x, y, z, block);
             }
         }
         if self.player_state.is_dead {
@@ -4634,9 +4954,11 @@ impl State {
         // Advance lightweight particle simulation every frame.
         self.particles.update(dt);
 
+        let can_sprint = sprint_allowed(self.game_mode, self.player_state.hunger);
+
         // Double click W logic
         if self.keys.w && !self.last_w_pressed {
-            if self.w_click_timer > 0.0 && self.player_state.hunger > 6.0 {
+            if self.w_click_timer > 0.0 && can_sprint {
                 self.is_sprinting = true;
             }
             self.w_click_timer = 0.3; // 0.3 seconds window
@@ -4647,12 +4969,12 @@ impl State {
         }
 
         // Ctrl key sprint check
-        if self.keys.ctrl && self.keys.w && self.player_state.hunger > 6.0 {
+        if self.keys.ctrl && self.keys.w && can_sprint {
             self.is_sprinting = true;
         }
 
         // Cancel sprinting conditions
-        if !self.keys.w || self.keys.shift || self.player_state.hunger <= 6.0 {
+        if !self.keys.w || self.keys.shift || !can_sprint {
             self.is_sprinting = false;
         }
 
@@ -4674,8 +4996,14 @@ impl State {
         self.camera.fov = self.camera.fov + (target_fov - self.camera.fov) * dt * 10.0;
 
         // Consume more hunger when sprinting
-        if self.is_sprinting && (self.keys.w || self.keys.a || self.keys.s || self.keys.d) {
-            self.player_state.add_exhaustion(dt * 0.15);
+        let sprint_exhaustion = sprint_exhaustion_amount(
+            self.game_mode,
+            self.is_sprinting,
+            self.keys.w || self.keys.a || self.keys.s || self.keys.d,
+            dt,
+        );
+        if sprint_exhaustion > 0.0 {
+            self.player_state.add_exhaustion(sprint_exhaustion);
         }
 
         // Update game time
@@ -4685,7 +5013,15 @@ impl State {
         self.world_time.ticks += new_ticks;
         self.world_time.tick_accumulator -= new_ticks as f32;
         if self.current_dimension == crate::dimension::Dimension::Overworld {
-            let weather_update = self.weather.update(elapsed_world_ticks, dt);
+            let weather_update = if self.is_authoritative() {
+                self.weather.update_authoritative(elapsed_world_ticks, dt)
+            } else {
+                self.weather.update_client(elapsed_world_ticks, dt);
+                crate::weather::WeatherUpdate::default()
+            };
+            if weather_update.changed {
+                self.broadcast_time_sync();
+            }
             self.update_weather_effects(dt, weather_update.lightning_due);
         } else {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
@@ -5215,7 +5551,11 @@ impl State {
         );
 
         // Continuous mining logic
-        if self.left_mouse_pressed && self.game_mode == GameMode::Survival {
+        if allows_continuous_mining(
+            self.left_mouse_pressed,
+            self.game_mode,
+            self.camera_look_allowed(),
+        ) {
             let dir = Vec3::new(
                 self.camera.yaw.cos() * self.camera.pitch.cos(),
                 self.camera.pitch.sin(),
@@ -5223,7 +5563,13 @@ impl State {
             )
             .normalize_or_zero();
 
-            if let Some(hit) = raycast(self.camera.position, dir, 5.0, &self.chunk_manager, true) {
+            if let Some(hit) = raycast(
+                self.camera.position,
+                dir,
+                5.0,
+                &self.chunk_manager,
+                RaycastTargetPolicy::Break,
+            ) {
                 let target = hit.block_pos;
                 let block =
                     self.chunk_manager
@@ -5257,7 +5603,7 @@ impl State {
                 self.mining_target = None;
                 self.mining_progress = 0.0;
             }
-        } else if !self.left_mouse_pressed {
+        } else {
             self.mining_target = None;
             self.mining_progress = 0.0;
         }
@@ -5282,8 +5628,8 @@ impl State {
         let rain_uv = weather_tile_uv(10, 0);
         let snow_uv = weather_tile_uv(3, 1);
         for _ in 0..spawn_count {
-            let wx = player_x + self.weather.random_offset(14);
-            let wz = player_z + self.weather.random_offset(14);
+            let wx = player_x + self.weather.presentation_random_offset(14);
+            let wz = player_z + self.weather.presentation_random_offset(14);
             let precipitation = self.weather.precipitation_at(wx, wz);
             if precipitation == Precipitation::None {
                 continue;
@@ -5302,7 +5648,7 @@ impl State {
             let stop_y = surface_y as f32 + 1.05;
             match precipitation {
                 Precipitation::Rain => {
-                    let speed = 26.0 + self.weather.random_unit() * 8.0;
+                    let speed = 26.0 + self.weather.presentation_random_unit() * 8.0;
                     let lifetime = ((spawn_y - stop_y) / speed).clamp(0.08, 2.5);
                     self.particles.spawn_stretched(
                         Vec3::new(wx as f32 + 0.5, spawn_y, wz as f32 + 0.5),
@@ -5315,9 +5661,9 @@ impl State {
                     );
                 }
                 Precipitation::Snow => {
-                    let drift_x = (self.weather.random_unit() - 0.5) * 0.8;
-                    let drift_z = (self.weather.random_unit() - 0.5) * 0.8;
-                    let speed = 2.2 + self.weather.random_unit();
+                    let drift_x = (self.weather.presentation_random_unit() - 0.5) * 0.8;
+                    let drift_z = (self.weather.presentation_random_unit() - 0.5) * 0.8;
+                    let speed = 2.2 + self.weather.presentation_random_unit();
                     let lifetime = ((spawn_y - stop_y) / speed).clamp(0.2, 8.0);
                     self.particles.spawn(
                         Vec3::new(wx as f32 + 0.5, spawn_y, wz as f32 + 0.5),
@@ -5338,8 +5684,8 @@ impl State {
             0
         };
         for _ in 0..accumulation_steps * 6 {
-            let wx = player_x + self.weather.random_offset(24);
-            let wz = player_z + self.weather.random_offset(24);
+            let wx = player_x + self.weather.authority_random_offset(24);
+            let wz = player_z + self.weather.authority_random_offset(24);
             if self.weather.precipitation_at(wx, wz) != Precipitation::Snow {
                 continue;
             }
@@ -5360,7 +5706,7 @@ impl State {
             }
         }
 
-        if lightning_due {
+        if lightning_due && self.is_authoritative() {
             self.strike_lightning();
         }
     }
@@ -5376,6 +5722,9 @@ impl State {
     fn strike_lightning(&mut self) {
         use crate::entity::EntityType;
 
+        if !self.is_authoritative() {
+            return;
+        }
         let player_pos = self.player_physics.position;
         let living_target = self
             .entity_manager
@@ -5406,19 +5755,32 @@ impl State {
             (target.x.floor() as i32, target.z.floor() as i32)
         } else {
             (
-                player_pos.x.floor() as i32 + self.weather.random_offset(30),
-                player_pos.z.floor() as i32 + self.weather.random_offset(30),
+                player_pos.x.floor() as i32 + self.weather.authority_random_offset(30),
+                player_pos.z.floor() as i32 + self.weather.authority_random_offset(30),
             )
         };
         let Some(surface_y) = self.surface_height(strike_x, strike_z) else {
             return;
         };
+        let strike = crate::network::protocol::LightningStrike {
+            x: strike_x,
+            y: surface_y + 1,
+            z: strike_z,
+            visual_seed: self.weather.authority_random_seed(),
+        };
+        self.network.broadcast_lightning_strike(strike);
+        self.apply_lightning_strike(strike);
+    }
+
+    fn apply_lightning_strike(&mut self, strike: crate::network::protocol::LightningStrike) {
+        let player_pos = self.player_physics.position;
         let strike_pos = Vec3::new(
-            strike_x as f32 + 0.5,
-            surface_y as f32 + 1.0,
-            strike_z as f32 + 0.5,
+            strike.x as f32 + 0.5,
+            strike.y as f32,
+            strike.z as f32 + 0.5,
         );
 
+        self.weather.trigger_lightning_flash();
         let listener_right =
             Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
         self.audio_manager.play_sound_3d(
@@ -5453,9 +5815,10 @@ impl State {
         // A short chain of bright, vertically stretched billboards forms the
         // visible bolt and persists just long enough to accompany the flash.
         let bolt_uv = weather_tile_uv(3, 1);
+        let mut visual_seed = strike.visual_seed;
         for segment in 0..12 {
-            let jitter_x = (self.weather.random_unit() - 0.5) * 0.55;
-            let jitter_z = (self.weather.random_unit() - 0.5) * 0.55;
+            let jitter_x = (crate::weather::seeded_visual_unit(&mut visual_seed) - 0.5) * 0.55;
+            let jitter_z = (crate::weather::seeded_visual_unit(&mut visual_seed) - 0.5) * 0.55;
             self.particles.spawn_stretched(
                 strike_pos + Vec3::new(jitter_x, segment as f32 * 3.0 + 1.5, jitter_z),
                 Vec3::ZERO,
@@ -5467,8 +5830,9 @@ impl State {
             );
         }
 
-        let fire_y = surface_y + 1;
-        let support = self.chunk_manager.get_block(strike_x, surface_y, strike_z);
+        let fire_y = strike.y;
+        let support_y = fire_y - 1;
+        let support = self.chunk_manager.get_block(strike.x, support_y, strike.z);
         if self.is_authoritative()
             && fire_y < CHUNK_HEIGHT as i32
             && support.properties().is_solid
@@ -5476,9 +5840,9 @@ impl State {
                 support,
                 BlockType::Water | BlockType::Lava | BlockType::Ice | BlockType::Snow
             )
-            && self.chunk_manager.get_block(strike_x, fire_y, strike_z) == BlockType::Air
+            && self.chunk_manager.get_block(strike.x, fire_y, strike.z) == BlockType::Air
         {
-            self.apply_weather_block_change(strike_x, fire_y, strike_z, BlockType::Fire);
+            self.apply_weather_block_change(strike.x, fire_y, strike.z, BlockType::Fire);
         }
     }
 
@@ -5896,6 +6260,12 @@ impl State {
         if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
             return;
         }
+        if !self
+            .chunk_manager
+            .can_place_block_with_support(block, x, y, z)
+        {
+            return;
+        }
         let prev = self.chunk_manager.get_block(x, y, z);
         if prev == block {
             // Echo the authoritative value to correct a requesting client's
@@ -6231,32 +6601,38 @@ impl State {
     /// The item is launched with a small random upward velocity and given a
     /// brief pickup cooldown so it can't be instantly re-collected.
     pub fn spawn_dropped_item(&mut self, item: crate::inventory::Item, pos: glam::Vec3) {
-        if item == Item::Air {
+        let _ = spawn_dropped_item_entity(
+            &mut self.entity_manager,
+            item,
+            pos,
+            self.total_time.to_bits(),
+        );
+    }
+
+    fn store_or_drop_generated_item(&mut self, item: Item, position: Vec3) {
+        let _ = store_or_drop_generated_item(
+            &mut self.inventory,
+            &mut self.entity_manager,
+            item,
+            position,
+            self.total_time.to_bits(),
+        );
+    }
+
+    fn settle_standard_player_kill(&mut self, kill: PlayerKill, looting: u8) {
+        if self.game_mode != GameMode::Survival {
             return;
         }
-        let id = self
-            .entity_manager
-            .spawn(crate::entity::EntityType::DroppedItem, pos);
-        if let Some(entity) = self.entity_manager.entities.last_mut() {
-            entity.dropped_item = Some(item);
-            // Small random initial upward velocity plus a little horizontal
-            // scatter so stacks don't overlap perfectly.
-            let mut rng = self
-                .total_time
-                .to_bits()
-                .wrapping_add((id.wrapping_mul(2654435761)) as u32);
-            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-            let vx = ((rng / 65536) as f32 / 32768.0 - 0.5) * 1.5;
-            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-            let vz = ((rng / 65536) as f32 / 32768.0 - 0.5) * 1.5;
-            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-            let vy = 2.0 + ((rng / 65536) as f32 / 32768.0) * 1.0;
-            entity.velocity = glam::Vec3::new(vx, vy, vz);
-            entity.pickup_cooldown = 0.5;
+
+        let rewards = standard_player_kill_rewards(kill, looting);
+        for item in rewards.items {
+            self.store_or_drop_generated_item(item, kill.position);
         }
+        self.player_state.add_experience(rewards.experience);
     }
 
     fn update_player_projectiles(&mut self, dt: f32) {
+        let mut player_kills = Vec::new();
         let mut splashes = Vec::new();
         for projectile in &mut self.entity_manager.entities {
             if projectile.entity_type != crate::entity::EntityType::SplashPotion {
@@ -6289,22 +6665,11 @@ impl State {
                     (self.player_state.health + healing).min(self.player_state.max_health);
             }
             for entity in &mut self.entity_manager.entities {
-                if entity.entity_type == crate::entity::EntityType::RemotePlayer
-                    || entity.position.distance(position) > 4.0
-                {
+                if entity.position.distance(position) > 4.0 {
                     continue;
                 }
-                match potion.kind {
-                    crate::brewing::PotionKind::Healing
-                    | crate::brewing::PotionKind::Regeneration => {
-                        entity.health =
-                            (entity.health + 4.0 * potion.level as f32).min(entity.max_health);
-                    }
-                    crate::brewing::PotionKind::Poison => {
-                        entity.health -= 2.0 * potion.level as f32
-                    }
-                    crate::brewing::PotionKind::Slowness => entity.velocity *= 0.4,
-                    _ => {}
+                if let Some(kill) = apply_player_splash_effect(entity, potion) {
+                    player_kills.push(kill);
                 }
             }
         }
@@ -6318,14 +6683,7 @@ impl State {
             }
             for target in &self.entity_manager.entities {
                 if target.id != projectile.id
-                    && !matches!(
-                        target.entity_type,
-                        crate::entity::EntityType::Arrow
-                            | crate::entity::EntityType::SplashPotion
-                            | crate::entity::EntityType::DroppedItem
-                            | crate::entity::EntityType::HeartParticle
-                            | crate::entity::EntityType::RemotePlayer
-                    )
+                    && target.is_player_projectile_target()
                     && projectile.get_aabb().intersects(&target.get_aabb())
                 {
                     hits.push((projectile.id, target.id, projectile.projectile_damage));
@@ -6340,7 +6698,9 @@ impl State {
                 .iter_mut()
                 .find(|entity| entity.id == target_id)
             {
-                target.health -= damage;
+                if let Some(kill) = apply_player_projectile_damage(target, damage) {
+                    player_kills.push(kill);
+                }
             }
             if let Some(projectile) = self
                 .entity_manager
@@ -6350,6 +6710,9 @@ impl State {
             {
                 projectile.health = -1.0;
             }
+        }
+        for kill in player_kills {
+            self.settle_standard_player_kill(kill, 0);
         }
         self.entity_manager.entities.retain(|entity| {
             entity.health >= 0.0
@@ -6410,15 +6773,7 @@ impl State {
         self.player_physics.on_ground = false;
         self.player_physics.highest_y = 80.0;
 
-        // Reset player state
-        self.player_state.health = self.player_state.max_health;
-        self.player_state.hunger = 20.0;
-        self.player_state.saturation = 5.0;
-        self.player_state.exhaustion = 0.0;
-        self.player_state.is_dead = false;
-        self.player_state.death_reason = None;
-        self.player_state.invulnerable_time = 1.0; // Give 1.0s invulnerability on respawn
-        self.player_state.damaged_flash_time = 0.0;
+        self.player_state.reset_for_respawn();
         self.void_damage_timer = 0.0;
 
         self.sync_cursor_mode();
@@ -6482,86 +6837,38 @@ impl State {
             8.0 + enchantments.level_of(crate::enchantment::Enchantment::Knockback(1)) as f32 * 3.0;
         let fire_level = enchantments.level_of(crate::enchantment::Enchantment::FireAspect(1));
 
-        let Some(entity) = self
-            .entity_manager
-            .entities
-            .iter_mut()
-            .find(|entity| entity.id == entity_id)
-        else {
-            return false;
-        };
-        let impact = apply_melee_impact(entity, direction, damage, knockback, fire_level);
-        let MeleeImpact::Damaged { killed } = impact else {
-            return true;
+        let (entity_type, remaining_health, killed, kill) = {
+            let Some(entity) = self
+                .entity_manager
+                .entities
+                .iter_mut()
+                .find(|entity| entity.id == entity_id)
+            else {
+                return false;
+            };
+            let MeleeImpact::Damaged { killed } =
+                apply_melee_impact(entity, direction, damage, knockback, fire_level)
+            else {
+                return true;
+            };
+            let kill = if killed {
+                claim_standard_player_kill(entity)
+            } else {
+                None
+            };
+            (entity.entity_type, entity.health, killed, kill)
         };
 
         println!(
             "[Debug] Hit {:?}, health={:.1}",
-            entity.entity_type, entity.health
+            entity_type, remaining_health
         );
 
         if killed {
-            println!("[Debug] Killed {:?}", entity.entity_type);
-            if self.game_mode == GameMode::Survival {
+            println!("[Debug] Killed {:?}", entity_type);
+            if let Some(kill) = kill {
                 let looting = enchantments.level_of(crate::enchantment::Enchantment::Looting(1));
-                for _ in 0..=(looting / 2) {
-                    match entity.entity_type {
-                        crate::entity::EntityType::Zombie => {
-                            self.inventory.add_item(crate::inventory::Item::RottenFlesh);
-                        }
-                        crate::entity::EntityType::Skeleton => {
-                            self.inventory.add_item(crate::inventory::Item::Bone);
-                            self.inventory.add_item(crate::inventory::Item::Arrow);
-                            let mut rng_seed = (entity.position.x as u32)
-                                .wrapping_mul(31)
-                                .wrapping_add(entity.position.z as u32);
-                            let mut next_rand = || {
-                                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                                (rng_seed / 65536) % 32768
-                            };
-                            if next_rand() % 10 == 0 {
-                                self.inventory.add_item(crate::inventory::Item::Bow);
-                            }
-                        }
-                        crate::entity::EntityType::Creeper => {
-                            self.inventory.add_item(crate::inventory::Item::Gunpowder);
-                        }
-                        crate::entity::EntityType::Pig => {
-                            let is_on_fire =
-                                entity.burn_timer > 0.0 || entity.fire_aspect_timer > 0.0;
-                            let drop = if is_on_fire {
-                                crate::inventory::Item::CookedPorkchop
-                            } else {
-                                crate::inventory::Item::RawPorkchop
-                            };
-                            self.inventory.add_item(drop);
-                        }
-                        crate::entity::EntityType::Cow => {
-                            self.inventory.add_item(crate::inventory::Item::RawBeef);
-                            let rng = (entity.position.x as u32).wrapping_mul(31);
-                            if rng % 2 == 0 {
-                                self.inventory.add_item(crate::inventory::Item::Leather);
-                            }
-                        }
-                        crate::entity::EntityType::Sheep => {
-                            self.inventory.add_item(crate::inventory::Item::RawMutton);
-                            if entity.has_wool {
-                                self.inventory.add_item(crate::inventory::Item::Wool);
-                            }
-                        }
-                        crate::entity::EntityType::Chicken => {
-                            self.inventory.add_item(crate::inventory::Item::RawChicken);
-                            self.inventory.add_item(crate::inventory::Item::Feather);
-                        }
-                        _ => {}
-                    }
-                }
-                self.player_state.add_experience(match entity.entity_type {
-                    crate::entity::EntityType::Zombie
-                    | crate::entity::EntityType::Skeleton
-                    | crate::entity::EntityType::Creeper => 5,
-                    _ => 2,
-                });
+                self.settle_standard_player_kill(kill, looting);
             }
         }
 
@@ -6577,12 +6884,17 @@ impl State {
                 self.camera.yaw.sin() * self.camera.pitch.cos(),
             )
             .normalize_or_zero();
+            let target_policy = if is_left_click {
+                RaycastTargetPolicy::Break
+            } else {
+                RaycastTargetPolicy::Place
+            };
             if let Some(hit) = raycast(
                 self.camera.position,
                 direction,
                 5.0,
                 &self.chunk_manager,
-                is_left_click,
+                target_policy,
             ) {
                 if is_left_click {
                     self.network.request_block_change(
@@ -6796,8 +7108,12 @@ impl State {
                                 return;
                             }
                             if held_item == crate::inventory::Item::Shears && entity.has_wool {
+                                let wool_position = entity.position;
                                 entity.has_wool = false;
-                                self.inventory.add_item(crate::inventory::Item::Wool);
+                                self.store_or_drop_generated_item(
+                                    crate::inventory::Item::Wool,
+                                    wool_position,
+                                );
                                 println!("[Debug] Sheared a Sheep!");
                                 if let Some(stack) =
                                     &mut self.inventory.hotbar[self.inventory.selected]
@@ -6829,12 +7145,17 @@ impl State {
             }
         }
 
+        let target_policy = if is_left_click {
+            RaycastTargetPolicy::Break
+        } else {
+            RaycastTargetPolicy::Place
+        };
         if let Some(hit) = raycast(
             self.camera.position,
             dir,
             5.0,
             &self.chunk_manager,
-            is_left_click,
+            target_policy,
         ) {
             let target = if is_left_click {
                 hit.block_pos
@@ -6907,11 +7228,15 @@ impl State {
                 if clicked_block == BlockType::Water
                     && held.is_some_and(|stack| stack.item == Item::GlassBottle)
                 {
+                    let selected = self.inventory.selected;
+                    let original_selected = self.inventory.hotbar[selected];
                     self.inventory
                         .use_selected_item(self.game_mode == GameMode::Creative);
                     let mut water_bottle = ItemStack::new(Item::Potion, 1);
                     water_bottle.potion = Some(crate::brewing::PotionData::water());
-                    self.inventory.add_stack(water_bottle);
+                    if self.inventory.add_stack(water_bottle).is_some() {
+                        self.inventory.hotbar[selected] = original_selected;
+                    }
                     return;
                 }
                 if clicked_block == BlockType::CraftingTable {
@@ -7000,8 +7325,10 @@ impl State {
                     }
 
                     if self.game_mode == GameMode::Survival {
-                        self.inventory
-                            .add_item(crate::inventory::Item::from_block(old_block));
+                        self.store_or_drop_generated_item(
+                            crate::inventory::Item::from_block(old_block),
+                            sound_pos,
+                        );
 
                         if old_block == BlockType::Grass {
                             let rng = (wx as u32).wrapping_mul(31).wrapping_add(wz as u32);
@@ -7011,7 +7338,7 @@ impl State {
                                     1 => crate::inventory::Item::Wheat,
                                     _ => crate::inventory::Item::Carrot,
                                 };
-                                self.inventory.add_item(drop);
+                                self.store_or_drop_generated_item(drop, sound_pos);
                             }
                         }
                     }
@@ -7037,8 +7364,10 @@ impl State {
                 }
             } else {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
-                    let below_block = self.chunk_manager.get_block(wx, wy - 1, wz);
-                    if !placed_block.can_stay_on(below_block) {
+                    if !self
+                        .chunk_manager
+                        .can_place_block_with_support(placed_block, wx, wy, wz)
+                    {
                         return;
                     }
                     if !self.can_place_block_at(wx, wy, wz, placed_block) {
@@ -7433,7 +7762,7 @@ impl State {
                                 .recipe_manager
                                 .match_recipe(&self.inventory.craft_input, grid_size);
                         } else if let Some(ref mut dragged) = self.inventory.dragged {
-                            if dragged.item == output.item
+                            if dragged.can_merge_with(&output)
                                 && dragged.count + output.count <= max_stack
                             {
                                 dragged.count += output.count;
@@ -7481,7 +7810,7 @@ impl State {
                         // Left Click interaction
                         if let Some(dragged) = self.inventory.dragged {
                             if let Some(slot) = slot_item {
-                                if slot.item == dragged.item {
+                                if slot.can_merge_with(&dragged) {
                                     // Stack them
                                     let space = max_stack.saturating_sub(slot.count);
                                     let transfer = space.min(dragged.count);
@@ -7524,7 +7853,7 @@ impl State {
                         // Right Click interaction
                         if let Some(dragged) = self.inventory.dragged {
                             if let Some(slot) = slot_item {
-                                if slot.item == dragged.item && slot.count < max_stack {
+                                if slot.can_merge_with(&dragged) && slot.count < max_stack {
                                     // Drop 1
                                     self.set_item_at_slot(
                                         slot_type,
@@ -7541,7 +7870,7 @@ impl State {
                                     } else {
                                         self.inventory.dragged = None;
                                     }
-                                } else if slot.item != dragged.item {
+                                } else if !slot.can_merge_with(&dragged) {
                                     // Swap (like left click swap)
                                     self.set_item_at_slot(slot_type, Some(dragged));
                                     self.inventory.dragged = Some(slot);
@@ -7679,54 +8008,57 @@ impl State {
         self.open_inventory();
     }
 
-    pub fn close_inventory(&mut self) {
-        let creative_catalog = self.is_creative_catalog_open();
-        self.inventory.is_open = false;
-        // Return craft input items
-        let inputs: Vec<ItemStack> = self
+    pub fn close_inventory(&mut self) -> bool {
+        let mut returning_items: Vec<ItemStack> = self
             .inventory
             .craft_input
-            .iter_mut()
-            .filter_map(|slot| slot.take())
+            .iter()
+            .flatten()
+            .copied()
             .collect();
-        for stack in inputs {
-            for _ in 0..stack.count {
-                self.inventory.add_item(stack.item);
-            }
-        }
-        let station_items: Vec<ItemStack> = match self.active_station {
-            Some(StationKind::Enchanting) => {
-                [self.enchanting.input.take(), self.enchanting.lapis.take()]
-                    .into_iter()
-                    .flatten()
-                    .collect()
-            }
+        returning_items.extend(match self.active_station {
+            Some(StationKind::Enchanting) => [self.enchanting.input, self.enchanting.lapis]
+                .into_iter()
+                .flatten()
+                .collect(),
             Some(StationKind::Brewing) => self
                 .brewing
                 .bottles
-                .iter_mut()
-                .map(Option::take)
-                .chain(std::iter::once(self.brewing.ingredient.take()))
+                .iter()
+                .copied()
+                .chain(std::iter::once(self.brewing.ingredient))
                 .flatten()
                 .collect(),
-            Some(StationKind::Anvil) => [self.anvil.left.take(), self.anvil.right.take()]
+            Some(StationKind::Anvil) => [self.anvil.left, self.anvil.right]
                 .into_iter()
                 .flatten()
                 .collect(),
             None => Vec::new(),
-        };
-        for stack in station_items {
-            self.inventory.add_stack(stack);
+        });
+
+        if !self.inventory.try_store_for_close(&returning_items) {
+            self.sync_cursor_mode();
+            return false;
         }
 
-        // Catalog-created cursor stacks are disposable, while real stacks taken
-        // from the hotbar must only be returned when the full stack fits.
-        if creative_catalog || self.inventory.creative_drag_origin.is_some() {
-            self.inventory.finish_creative_cursor();
-        } else if let Some(dragged) = self.inventory.dragged.take() {
-            self.inventory.add_stack(dragged);
+        self.inventory.craft_input.fill(None);
+        match self.active_station {
+            Some(StationKind::Enchanting) => {
+                self.enchanting.input = None;
+                self.enchanting.lapis = None;
+            }
+            Some(StationKind::Brewing) => {
+                self.brewing.bottles.fill(None);
+                self.brewing.ingredient = None;
+            }
+            Some(StationKind::Anvil) => {
+                self.anvil.left = None;
+                self.anvil.right = None;
+            }
+            None => {}
         }
 
+        self.inventory.is_open = false;
         self.inventory.is_table_open = false;
         self.inventory.craft_input = vec![None; 4];
         self.inventory.craft_output = None;
@@ -7734,6 +8066,7 @@ impl State {
         self.anvil.rename.clear();
 
         self.sync_cursor_mode();
+        true
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -11073,6 +11406,11 @@ fn debug_chunk_coordinate(position: f32, chunk_size: usize) -> i32 {
 mod debug_tests {
     use super::*;
 
+    #[test]
+    fn terrain_translucent_pipeline_is_double_sided() {
+        assert_eq!(terrain_translucent_cull_mode(), None);
+    }
+
     fn rects_overlap(a: InventoryUiRect, b: InventoryUiRect) -> bool {
         a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
     }
@@ -11168,6 +11506,140 @@ mod debug_tests {
                 instant_break: true,
             }
         );
+    }
+
+    #[test]
+    fn friendly_arrow_damage_settles_lethal_rewards_exactly_once() {
+        let mut zombie =
+            crate::entity::Entity::new(1, crate::entity::EntityType::Zombie, Vec3::ZERO);
+        zombie.health = 5.0;
+
+        assert!(apply_player_projectile_damage(&mut zombie, 4.0).is_none());
+        assert_eq!(zombie.health, 1.0);
+        assert!(!zombie.player_kill_rewarded);
+
+        let kill =
+            apply_player_projectile_damage(&mut zombie, 1.0).expect("lethal arrow should settle");
+        assert_eq!(zombie.health, 0.0);
+        assert!(zombie.player_kill_rewarded);
+        assert_eq!(
+            standard_player_kill_rewards(kill, 0),
+            PlayerKillRewards {
+                items: vec![Item::RottenFlesh],
+                experience: 5,
+            }
+        );
+
+        assert!(apply_player_projectile_damage(&mut zombie, 4.0).is_none());
+        assert!(claim_standard_player_kill(&mut zombie).is_none());
+        assert_eq!(zombie.health, 0.0);
+    }
+
+    #[test]
+    fn full_inventory_generates_exactly_one_world_drop_at_the_source() {
+        let mut inventory = Inventory::new();
+        inventory
+            .hotbar
+            .fill(Some(ItemStack::new(Item::DiamondSword, 1)));
+        inventory
+            .main
+            .fill(Some(ItemStack::new(Item::DiamondPickaxe, 1)));
+        let original_hotbar = inventory.hotbar;
+        let original_main = inventory.main;
+        let mut entities = crate::entity::EntityManager::new();
+        let source = Vec3::new(8.5, 64.5, -2.5);
+
+        assert_eq!(
+            store_or_drop_generated_item(
+                &mut inventory,
+                &mut entities,
+                Item::RottenFlesh,
+                source,
+                123,
+            ),
+            GeneratedItemDestination::Dropped
+        );
+        assert_eq!(inventory.hotbar, original_hotbar);
+        assert_eq!(inventory.main, original_main);
+        assert_eq!(entities.entities.len(), 1);
+        let dropped = &entities.entities[0];
+        assert_eq!(dropped.entity_type, crate::entity::EntityType::DroppedItem);
+        assert_eq!(dropped.dropped_item, Some(Item::RottenFlesh));
+        assert_eq!(dropped.position, source);
+        assert_eq!(dropped.pickup_cooldown, 0.5);
+    }
+
+    #[test]
+    fn generated_item_stored_in_inventory_does_not_duplicate_as_a_drop() {
+        let mut inventory = Inventory::new();
+        let mut entities = crate::entity::EntityManager::new();
+
+        assert_eq!(
+            store_or_drop_generated_item(
+                &mut inventory,
+                &mut entities,
+                Item::Wool,
+                Vec3::ZERO,
+                456,
+            ),
+            GeneratedItemDestination::Inventory
+        );
+        assert_eq!(inventory.count_item(Item::Wool), 1);
+        assert!(entities.entities.is_empty());
+    }
+
+    #[test]
+    fn friendly_arrows_destroy_end_crystals_without_standard_mob_rewards() {
+        let mut crystal =
+            crate::entity::Entity::new(1, crate::entity::EntityType::EndCrystal, Vec3::ZERO);
+        assert!(!crystal.is_local_living_target());
+        assert!(crystal.is_player_projectile_target());
+        assert!(is_legal_melee_target(&crystal));
+
+        assert!(apply_player_projectile_damage(&mut crystal, 5.0).is_none());
+        assert_eq!(crystal.health, 0.0);
+        assert!(!crystal.player_kill_rewarded);
+        assert!(!crystal.is_player_projectile_target());
+    }
+
+    #[test]
+    fn splash_effects_ignore_nonliving_entities_but_affect_living_targets() {
+        let poison = crate::brewing::PotionData {
+            kind: crate::brewing::PotionKind::Poison,
+            level: 1,
+            duration_seconds: 30,
+            splash: true,
+        };
+        let slowness = crate::brewing::PotionData {
+            kind: crate::brewing::PotionKind::Slowness,
+            level: 1,
+            duration_seconds: 30,
+            splash: true,
+        };
+        let mut nonliving = vec![
+            crate::entity::Entity::new(1, crate::entity::EntityType::DroppedItem, Vec3::ZERO),
+            crate::entity::Entity::new(2, crate::entity::EntityType::Arrow, Vec3::ZERO),
+            crate::entity::Entity::new(3, crate::entity::EntityType::HeartParticle, Vec3::ZERO),
+            crate::entity::Entity::new(4, crate::entity::EntityType::EndCrystal, Vec3::ZERO),
+        ];
+        for entity in &mut nonliving {
+            entity.velocity = Vec3::new(2.0, 1.0, -3.0);
+            let health = entity.health;
+            let velocity = entity.velocity;
+            assert!(apply_player_splash_effect(entity, poison).is_none());
+            assert!(apply_player_splash_effect(entity, slowness).is_none());
+            assert_eq!(entity.health, health);
+            assert_eq!(entity.velocity, velocity);
+        }
+
+        let mut zombie =
+            crate::entity::Entity::new(5, crate::entity::EntityType::Zombie, Vec3::ZERO);
+        zombie.health = 10.0;
+        zombie.velocity = Vec3::new(2.0, 1.0, -3.0);
+        assert!(apply_player_splash_effect(&mut zombie, poison).is_none());
+        assert_eq!(zombie.health, 8.0);
+        assert!(apply_player_splash_effect(&mut zombie, slowness).is_none());
+        assert_eq!(zombie.velocity, Vec3::new(0.8, 0.4, -1.2));
     }
 
     #[test]

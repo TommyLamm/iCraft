@@ -5,6 +5,7 @@ use glam::Vec3;
 const CREATIVE_FLY_SPEED: f32 = 10.0;
 const CREATIVE_FLY_SPRINT_MULTIPLIER: f32 = 2.0;
 const CREATIVE_FLY_VERTICAL_SPEED: f32 = 8.0;
+const MAX_COLLISION_STEP: f32 = 0.25;
 pub const PLAYER_WIDTH: f32 = 0.6;
 pub const PLAYER_STANDING_HEIGHT: f32 = 1.8;
 
@@ -218,8 +219,8 @@ impl PlayerPhysics {
 
         // 3. 沿 X 軸位移並處理碰撞
         let old_x = self.position.x;
-        self.position.x += self.velocity.x * dt;
-        self.resolve_collisions(chunk_manager, 0);
+        let x_displacement = self.velocity.x * dt;
+        self.move_axis_with_collisions(chunk_manager, 0, x_displacement);
         if !is_flying && is_sneaking && self.on_ground {
             if !self.is_block_below(chunk_manager) {
                 self.position.x = old_x;
@@ -229,8 +230,8 @@ impl PlayerPhysics {
 
         // 4. 沿 Z 軸位移並處理碰撞
         let old_z = self.position.z;
-        self.position.z += self.velocity.z * dt;
-        self.resolve_collisions(chunk_manager, 2);
+        let z_displacement = self.velocity.z * dt;
+        self.move_axis_with_collisions(chunk_manager, 2, z_displacement);
         if !is_flying && is_sneaking && self.on_ground {
             if !self.is_block_below(chunk_manager) {
                 self.position.z = old_z;
@@ -239,9 +240,9 @@ impl PlayerPhysics {
         }
 
         // 5. 沿 Y 軸位移並處理碰撞
-        self.position.y += self.velocity.y * dt;
+        let y_displacement = self.velocity.y * dt;
         self.on_ground = false;
-        self.resolve_collisions(chunk_manager, 1);
+        self.move_axis_with_collisions(chunk_manager, 1, y_displacement);
 
         if is_flying {
             self.highest_y = self.position.y;
@@ -264,6 +265,36 @@ impl PlayerPhysics {
         }
 
         fall_damage
+    }
+
+    fn move_axis_with_collisions(
+        &mut self,
+        chunk_manager: &ChunkManager,
+        axis: usize,
+        displacement: f32,
+    ) {
+        let step_count = (displacement.abs() / MAX_COLLISION_STEP).ceil().max(1.0) as usize;
+        let step = displacement / step_count as f32;
+
+        for _ in 0..step_count {
+            match axis {
+                0 => self.position.x += step,
+                1 => self.position.y += step,
+                2 => self.position.z += step,
+                _ => unreachable!("invalid movement axis"),
+            }
+            self.resolve_collisions(chunk_manager, axis);
+
+            let blocked = match axis {
+                0 => self.velocity.x == 0.0,
+                1 => self.velocity.y == 0.0,
+                2 => self.velocity.z == 0.0,
+                _ => unreachable!("invalid movement axis"),
+            };
+            if displacement != 0.0 && blocked {
+                break;
+            }
+        }
     }
 
     fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
@@ -587,6 +618,38 @@ mod tests {
             physics.velocity.x,
             CREATIVE_FLY_SPEED * CREATIVE_FLY_SPRINT_MULTIPLIER
         );
+    }
+
+    #[test]
+    fn high_speed_motion_cannot_tunnel_through_one_block_barriers_on_any_axis() {
+        let mut chunk_manager = empty_chunk_manager();
+        let chunk = chunk_manager.chunks.get_mut(&(0, 0)).unwrap();
+        chunk.blocks[9][80][8] = BlockType::Stone;
+        chunk.blocks[9][81][8] = BlockType::Stone;
+        chunk.blocks[8][80][9] = BlockType::Stone;
+        chunk.blocks[8][81][9] = BlockType::Stone;
+        chunk.blocks[8][83][8] = BlockType::Stone;
+
+        let mut x_motion = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
+        x_motion.set_flying(true);
+        x_motion.update(0.1, &chunk_manager, Vec3::X, false, true);
+        assert!((x_motion.position.x - 8.7).abs() < 1.0e-5);
+        assert_eq!(x_motion.velocity.x, 0.0);
+
+        let mut z_motion = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
+        z_motion.set_flying(true);
+        z_motion.update(0.1, &chunk_manager, Vec3::Z, false, true);
+        assert!((z_motion.position.z - 8.7).abs() < 1.0e-5);
+        assert_eq!(z_motion.velocity.z, 0.0);
+
+        let mut falling = PlayerPhysics::new(Vec3::new(8.5, 86.0, 8.5));
+        falling.velocity.y = -50.0;
+        falling.highest_y = falling.position.y;
+        let fall_damage = falling.update(0.1, &chunk_manager, Vec3::ZERO, false, false);
+        assert!((falling.position.y - 84.0).abs() < 1.0e-5);
+        assert_eq!(falling.velocity.y, 0.0);
+        assert!(falling.on_ground);
+        assert_eq!(fall_damage, 0.0);
     }
 
     #[test]

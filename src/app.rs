@@ -58,7 +58,7 @@ fn camera_angles_after_mouse_motion(
     Some((yaw, pitch.clamp(-max_pitch, max_pitch)))
 }
 
-fn inventory_toggle_requested(pressed: bool, repeat: bool) -> bool {
+fn non_repeating_press(pressed: bool, repeat: bool) -> bool {
     pressed && !repeat
 }
 
@@ -407,7 +407,9 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
     let pressed = event.state == ElementState::Pressed;
 
     if state.connection_lost {
-        if pressed && event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
+        if non_repeating_press(pressed, event.repeat)
+            && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
+        {
             state.shutdown_network();
             return true;
         }
@@ -417,7 +419,7 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
     if state.is_chat_open {
         if pressed {
             match &event.logical_key {
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => {
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) if !event.repeat => {
                     state.close_chat();
                 }
                 winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
@@ -469,27 +471,29 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent) -> bool {
     let PhysicalKey::Code(code) = event.physical_key else {
         return false;
     };
-    if code == KeyCode::Escape && pressed {
-        if state.advancement_gui.is_open {
-            state.close_advancements_ui();
-        } else if state.inventory.is_open {
-            state.close_inventory();
-        } else {
-            state.set_paused(!state.is_paused);
+    if code == KeyCode::Escape {
+        if non_repeating_press(pressed, event.repeat) {
+            if state.advancement_gui.is_open {
+                state.close_advancements_ui();
+            } else if state.inventory.is_open {
+                state.close_inventory();
+            } else {
+                state.set_paused(!state.is_paused);
+            }
         }
         return false;
     }
-    if code == KeyCode::KeyL && pressed {
-        if state.advancement_gui.is_open {
-            state.close_advancements_ui();
-        } else if !state.is_paused {
-            state.open_advancements_ui();
+    if code == KeyCode::KeyL {
+        if non_repeating_press(pressed, event.repeat) {
+            if state.advancement_gui.is_open {
+                state.close_advancements_ui();
+            } else if !state.is_paused {
+                state.open_advancements_ui();
+            }
         }
         return false;
     }
-    if code == state.settings.controls.inventory
-        && inventory_toggle_requested(pressed, event.repeat)
-    {
+    if code == state.settings.controls.inventory && non_repeating_press(pressed, event.repeat) {
         if state.inventory.is_open {
             state.close_inventory();
         } else if !state.is_paused {
@@ -609,10 +613,29 @@ mod tests {
     }
 
     #[test]
-    fn inventory_toggle_ignores_repeated_and_release_events() {
-        assert!(inventory_toggle_requested(true, false));
-        assert!(!inventory_toggle_requested(true, true));
-        assert!(!inventory_toggle_requested(false, false));
-        assert!(!inventory_toggle_requested(false, true));
+    fn ui_transitions_ignore_repeated_and_release_events() {
+        assert!(non_repeating_press(true, false));
+        assert!(!non_repeating_press(true, true));
+        assert!(!non_repeating_press(false, false));
+        assert!(!non_repeating_press(false, true));
+    }
+
+    #[test]
+    fn repeated_escape_after_closing_chat_does_not_toggle_pause() {
+        let mut chat_open = true;
+        let mut paused = false;
+
+        for repeat in [false, true, true] {
+            if chat_open {
+                if non_repeating_press(true, repeat) {
+                    chat_open = false;
+                }
+            } else if non_repeating_press(true, repeat) {
+                paused = !paused;
+            }
+        }
+
+        assert!(!chat_open);
+        assert!(!paused);
     }
 }

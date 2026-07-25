@@ -2,13 +2,21 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     Place,
     Break,
     Use,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightningStrike {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub visual_seed: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,6 +77,11 @@ pub enum Packet {
         protocol_version: u32,
         ticks: u64,
         weather: u8,
+        weather_remaining_ticks: f32,
+    },
+    LightningStrike {
+        protocol_version: u32,
+        strike: LightningStrike,
     },
     ChatMessage {
         protocol_version: u32,
@@ -111,6 +124,9 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::TimeSync {
+                protocol_version, ..
+            }
+            | Packet::LightningStrike {
                 protocol_version, ..
             }
             | Packet::ChatMessage {
@@ -249,6 +265,22 @@ mod tests {
             protocol_version: v(),
             ticks: 18_500,
             weather: 2,
+            weather_remaining_ticks: 9_500.25,
+        };
+        let decoded = Packet::decode(&p.encode()).unwrap();
+        assert_eq!(p, decoded);
+    }
+
+    #[test]
+    fn lightning_strike_roundtrip() {
+        let p = Packet::LightningStrike {
+            protocol_version: v(),
+            strike: LightningStrike {
+                x: -12,
+                y: 81,
+                z: 42,
+                visual_seed: 0xCAFE_BABE,
+            },
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_eq!(p, decoded);
@@ -279,6 +311,18 @@ mod tests {
         let p = Packet::Handshake {
             protocol_version: 999,
             username: "old".into(),
+        };
+        let decoded = Packet::decode(&p.encode()).unwrap();
+        assert_ne!(decoded.protocol_version(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn old_weather_packet_version_is_rejected_by_version_check() {
+        let p = Packet::TimeSync {
+            protocol_version: PROTOCOL_VERSION - 1,
+            ticks: 20_000,
+            weather: 1,
+            weather_remaining_ticks: 4_000.0,
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_ne!(decoded.protocol_version(), PROTOCOL_VERSION);

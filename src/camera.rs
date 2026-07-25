@@ -1,4 +1,7 @@
+use crate::world::{CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
 use glam::{Mat4, Vec3};
+
+const FAR_PLANE_MARGIN: f32 = 32.0;
 
 pub struct Camera {
     pub position: Vec3,
@@ -31,7 +34,11 @@ impl Camera {
 }
 
 pub fn render_far_plane(render_distance: u32) -> f32 {
-    render_distance as f32 * 16.0 * std::f32::consts::SQRT_2 + 32.0
+    let chunk_radius = render_distance as f32;
+    let horizontal_x = chunk_radius * CHUNK_WIDTH as f32;
+    let horizontal_z = chunk_radius * CHUNK_DEPTH as f32;
+    let horizontal_corner = horizontal_x.hypot(horizontal_z);
+    horizontal_corner.hypot(CHUNK_HEIGHT as f32) + FAR_PLANE_MARGIN
 }
 
 // 用於 Uniform 上傳的對齊結構體
@@ -192,6 +199,33 @@ mod tests {
         for render_distance in [2, 8, 16, 32] {
             let corner_distance = render_distance as f32 * 16.0 * std::f32::consts::SQRT_2;
             assert!(render_far_plane(render_distance) >= corner_distance + 32.0);
+        }
+    }
+
+    #[test]
+    fn far_plane_covers_the_vertical_render_distance_corner() {
+        for render_distance in [2, 8, 16, 32] {
+            let target = Vec3::new(
+                render_distance as f32 * CHUNK_WIDTH as f32,
+                CHUNK_HEIGHT as f32,
+                render_distance as f32 * CHUNK_DEPTH as f32,
+            );
+            let far_plane = render_far_plane(render_distance);
+            assert!(far_plane >= target.length() + FAR_PLANE_MARGIN);
+
+            let direction = target.normalize();
+            let camera = Camera::new(
+                Vec3::ZERO,
+                direction.z.atan2(direction.x),
+                direction.y.asin(),
+                70.0,
+            );
+            let clip = camera.build_view_projection_matrix(1.0, far_plane) * target.extend(1.0);
+            assert!(clip.z >= 0.0);
+            assert!(
+                clip.z <= clip.w,
+                "vertical render-distance corner must remain before the far plane"
+            );
         }
     }
 }

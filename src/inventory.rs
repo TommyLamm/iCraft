@@ -355,7 +355,7 @@ impl CreativeTab {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CreativeDragOrigin {
     Catalog,
     Inventory,
@@ -418,6 +418,112 @@ impl ItemStack {
             potion,
             custom_name: crate::enchantment::ItemName::default(),
         }
+    }
+
+    pub fn can_merge_with(&self, other: &Self) -> bool {
+        self.item == other.item
+            && self.durability == other.durability
+            && self.enchantments == other.enchantments
+            && self.potion == other.potion
+            && self.custom_name == other.custom_name
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StackClickResult {
+    pub slot: Option<ItemStack>,
+    pub dragged: Option<ItemStack>,
+    pub cursor_from_slot: bool,
+}
+
+pub(crate) fn apply_stack_click(
+    slot_item: Option<ItemStack>,
+    dragged_item: Option<ItemStack>,
+    is_left: bool,
+) -> StackClickResult {
+    let mut slot = slot_item;
+    let mut dragged = dragged_item;
+    let mut cursor_from_slot = false;
+
+    if is_left {
+        match (dragged, slot) {
+            (Some(cursor), Some(existing)) if existing.can_merge_with(&cursor) => {
+                let max_stack = existing.item.properties().max_stack;
+                let transfer = max_stack.saturating_sub(existing.count).min(cursor.count);
+                slot = Some(ItemStack {
+                    count: existing.count + transfer,
+                    ..existing
+                });
+                dragged = (cursor.count > transfer).then_some(ItemStack {
+                    count: cursor.count - transfer,
+                    ..cursor
+                });
+            }
+            (Some(cursor), Some(existing)) => {
+                slot = Some(cursor);
+                dragged = Some(existing);
+                cursor_from_slot = true;
+            }
+            (Some(cursor), None) => {
+                slot = Some(cursor);
+                dragged = None;
+            }
+            (None, Some(existing)) => {
+                slot = None;
+                dragged = Some(existing);
+                cursor_from_slot = true;
+            }
+            (None, None) => {}
+        }
+    } else {
+        match (dragged, slot) {
+            (Some(cursor), Some(existing))
+                if existing.can_merge_with(&cursor)
+                    && existing.count < existing.item.properties().max_stack =>
+            {
+                slot = Some(ItemStack {
+                    count: existing.count + 1,
+                    ..existing
+                });
+                dragged = (cursor.count > 1).then_some(ItemStack {
+                    count: cursor.count - 1,
+                    ..cursor
+                });
+            }
+            (Some(cursor), Some(existing)) if !existing.can_merge_with(&cursor) => {
+                slot = Some(cursor);
+                dragged = Some(existing);
+                cursor_from_slot = true;
+            }
+            (Some(_), Some(_)) => {}
+            (Some(cursor), None) => {
+                slot = Some(ItemStack { count: 1, ..cursor });
+                dragged = (cursor.count > 1).then_some(ItemStack {
+                    count: cursor.count - 1,
+                    ..cursor
+                });
+            }
+            (None, Some(existing)) => {
+                let take = existing.count.div_ceil(2);
+                let keep = existing.count - take;
+                slot = (keep > 0).then_some(ItemStack {
+                    count: keep,
+                    ..existing
+                });
+                dragged = Some(ItemStack {
+                    count: take,
+                    ..existing
+                });
+                cursor_from_slot = true;
+            }
+            (None, None) => {}
+        }
+    }
+
+    StackClickResult {
+        slot,
+        dragged,
+        cursor_from_slot,
     }
 }
 
@@ -1752,95 +1858,17 @@ impl Inventory {
             self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
         }
 
-        let slot_item = self.hotbar[index];
-        let max_stack = slot_item
-            .map(|stack| stack.item.properties().max_stack)
-            .unwrap_or(64);
-
-        if is_left {
-            if let Some(dragged) = self.dragged {
-                if let Some(slot) = slot_item {
-                    if slot.item == dragged.item {
-                        let space = max_stack.saturating_sub(slot.count);
-                        let transfer = space.min(dragged.count);
-                        self.hotbar[index] = Some(ItemStack {
-                            count: slot.count + transfer,
-                            ..slot
-                        });
-                        let remaining = dragged.count - transfer;
-                        if remaining > 0 {
-                            self.dragged = Some(ItemStack {
-                                count: remaining,
-                                ..dragged
-                            });
-                        } else {
-                            self.dragged = None;
-                            self.creative_drag_origin = None;
-                        }
-                    } else {
-                        self.hotbar[index] = Some(dragged);
-                        self.dragged = Some(slot);
-                        self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
-                    }
-                } else {
-                    self.hotbar[index] = Some(dragged);
-                    self.dragged = None;
-                    self.creative_drag_origin = None;
-                }
-            } else if let Some(slot) = slot_item {
-                self.dragged = Some(slot);
-                self.hotbar[index] = None;
-                self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
-            }
-        } else if let Some(dragged) = self.dragged {
-            if let Some(slot) = slot_item {
-                if slot.item == dragged.item && slot.count < max_stack {
-                    self.hotbar[index] = Some(ItemStack {
-                        count: slot.count + 1,
-                        ..slot
-                    });
-                    if dragged.count > 1 {
-                        self.dragged = Some(ItemStack {
-                            count: dragged.count - 1,
-                            ..dragged
-                        });
-                    } else {
-                        self.dragged = None;
-                        self.creative_drag_origin = None;
-                    }
-                } else if slot.item != dragged.item {
-                    self.hotbar[index] = Some(dragged);
-                    self.dragged = Some(slot);
-                    self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
-                }
-            } else {
-                self.hotbar[index] = Some(ItemStack {
-                    count: 1,
-                    ..dragged
-                });
-                if dragged.count > 1 {
-                    self.dragged = Some(ItemStack {
-                        count: dragged.count - 1,
-                        ..dragged
-                    });
-                } else {
-                    self.dragged = None;
-                    self.creative_drag_origin = None;
-                }
-            }
-        } else if let Some(slot) = slot_item {
-            let take = (slot.count + 1) / 2;
-            let keep = slot.count - take;
-            self.dragged = Some(ItemStack {
-                count: take,
-                ..slot
-            });
-            self.hotbar[index] = (keep > 0).then_some(ItemStack {
-                count: keep,
-                ..slot
-            });
-            self.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
-        }
+        let previous_origin = self.creative_drag_origin;
+        let result = apply_stack_click(self.hotbar[index], self.dragged, is_left);
+        self.hotbar[index] = result.slot;
+        self.dragged = result.dragged;
+        self.creative_drag_origin = if self.dragged.is_none() {
+            None
+        } else if result.cursor_from_slot {
+            Some(CreativeDragOrigin::Inventory)
+        } else {
+            previous_origin
+        };
     }
 
     pub fn finish_creative_cursor(&mut self) -> bool {
@@ -1863,11 +1891,19 @@ impl Inventory {
             return false;
         }
 
+        let origin = self.creative_drag_origin;
         self.dragged = None;
-        self.creative_drag_origin = None;
-        let stored = self.add_stack(stack);
-        debug_assert!(stored);
-        stored
+        match self.add_stack(stack) {
+            None => {
+                self.creative_drag_origin = None;
+                true
+            }
+            Some(remainder) => {
+                self.dragged = Some(remainder);
+                self.creative_drag_origin = origin;
+                false
+            }
+        }
     }
 
     fn storage_capacity_for(&self, incoming: ItemStack) -> u32 {
@@ -1876,18 +1912,40 @@ impl Inventory {
             .iter()
             .chain(self.main.iter())
             .map(|slot| match slot {
-                Some(existing)
-                    if existing.item == incoming.item
-                        && existing.enchantments == incoming.enchantments
-                        && existing.potion == incoming.potion
-                        && existing.custom_name == incoming.custom_name =>
-                {
+                Some(existing) if existing.can_merge_with(&incoming) => {
                     max_stack.saturating_sub(existing.count)
                 }
                 None => max_stack,
                 _ => 0,
             })
             .sum()
+    }
+
+    pub(crate) fn try_store_for_close(&mut self, returning_items: &[ItemStack]) -> bool {
+        let original_hotbar = self.hotbar;
+        let original_main = self.main;
+        let original_dragged = self.dragged;
+        let original_origin = self.creative_drag_origin;
+
+        for &stack in returning_items {
+            if self.add_stack(stack).is_some() {
+                self.hotbar = original_hotbar;
+                self.main = original_main;
+                self.dragged = original_dragged;
+                self.creative_drag_origin = original_origin;
+                return false;
+            }
+        }
+
+        if !self.finish_creative_cursor() {
+            self.hotbar = original_hotbar;
+            self.main = original_main;
+            self.dragged = original_dragged;
+            self.creative_drag_origin = original_origin;
+            return false;
+        }
+
+        true
     }
 
     pub fn clear(&mut self) {
@@ -1905,64 +1963,25 @@ impl Inventory {
     }
 
     pub fn add_item(&mut self, item: Item) -> bool {
-        if item == Item::Air {
-            return false;
-        }
-        let max_stack = item.properties().max_stack;
-
-        // 1. Try to add to existing stack in hotbar
-        for slot in self.hotbar.iter_mut() {
-            if let Some(stack) = slot {
-                if stack.item == item && stack.count < max_stack {
-                    stack.count += 1;
-                    return true;
-                }
-            }
-        }
-        // 2. Try to add to existing stack in main backpack
-        for slot in self.main.iter_mut() {
-            if let Some(stack) = slot {
-                if stack.item == item && stack.count < max_stack {
-                    stack.count += 1;
-                    return true;
-                }
-            }
-        }
-        // 3. Try to add to empty slot in hotbar
-        for slot in self.hotbar.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(ItemStack::new(item, 1));
-                return true;
-            }
-        }
-        // 4. Try to add to empty slot in main backpack
-        for slot in self.main.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(ItemStack::new(item, 1));
-                return true;
-            }
-        }
-        false
+        self.add_stack(ItemStack::new(item, 1)).is_none()
     }
 
-    pub fn add_stack(&mut self, mut incoming: ItemStack) -> bool {
-        if incoming.item == Item::Air || incoming.count == 0 {
-            return false;
+    pub fn add_stack(&mut self, mut incoming: ItemStack) -> Option<ItemStack> {
+        if incoming.count == 0 {
+            return None;
+        }
+        if incoming.item == Item::Air {
+            return Some(incoming);
         }
         let max_stack = incoming.item.properties().max_stack;
         for slot in self.hotbar.iter_mut().chain(self.main.iter_mut()) {
             if let Some(existing) = slot {
-                if existing.item == incoming.item
-                    && existing.enchantments == incoming.enchantments
-                    && existing.potion == incoming.potion
-                    && existing.custom_name == incoming.custom_name
-                    && existing.count < max_stack
-                {
+                if existing.can_merge_with(&incoming) && existing.count < max_stack {
                     let moved = (max_stack - existing.count).min(incoming.count);
                     existing.count += moved;
                     incoming.count -= moved;
                     if incoming.count == 0 {
-                        return true;
+                        return None;
                     }
                 }
             }
@@ -1976,11 +1995,11 @@ impl Inventory {
                 });
                 incoming.count -= moved;
                 if incoming.count == 0 {
-                    return true;
+                    return None;
                 }
             }
         }
-        false
+        Some(incoming)
     }
 
     pub fn count_item(&self, item: Item) -> u32 {
@@ -2058,6 +2077,108 @@ mod tests {
 
         assert!(inv.add_item(Item::Stone));
         assert_eq!(inv.hotbar[0].unwrap().count, 2);
+    }
+
+    #[test]
+    fn add_stack_returns_exact_metadata_preserving_remainder() {
+        let mut inv = Inventory::new();
+        inv.hotbar.fill(Some(ItemStack::new(Item::DiamondSword, 1)));
+        inv.main.fill(Some(ItemStack::new(Item::DiamondPickaxe, 1)));
+
+        let mut incoming = ItemStack::new(Item::Stone, 2);
+        incoming.custom_name.set("Keepsake");
+        incoming
+            .enchantments
+            .add_or_upgrade(crate::enchantment::Enchantment::Unbreaking(2));
+        incoming.potion = Some(crate::brewing::PotionData {
+            kind: crate::brewing::PotionKind::Speed,
+            level: 2,
+            duration_seconds: 45,
+            splash: true,
+        });
+        inv.hotbar[0] = Some(ItemStack {
+            count: 63,
+            ..incoming
+        });
+
+        let remainder = inv.add_stack(incoming).expect("one item should remain");
+        assert_eq!(inv.hotbar[0].unwrap().count, 64);
+        assert_eq!(
+            remainder,
+            ItemStack {
+                count: 1,
+                ..incoming
+            }
+        );
+    }
+
+    #[test]
+    fn stack_clicks_merge_only_identical_metadata() {
+        let plain = ItemStack::new(Item::Dirt, 4);
+        let mut named = ItemStack::new(Item::Dirt, 3);
+        named.custom_name.set("Garden Soil");
+
+        for is_left in [true, false] {
+            let rejected = apply_stack_click(Some(plain), Some(named), is_left);
+            assert_eq!(rejected.slot, Some(named));
+            assert_eq!(rejected.dragged, Some(plain));
+            assert!(rejected.cursor_from_slot);
+        }
+
+        let left = apply_stack_click(Some(plain), Some(ItemStack { count: 3, ..plain }), true);
+        assert_eq!(left.slot.unwrap().count, 7);
+        assert!(left.dragged.is_none());
+
+        let right = apply_stack_click(Some(plain), Some(ItemStack { count: 3, ..plain }), false);
+        assert_eq!(right.slot.unwrap().count, 5);
+        assert_eq!(right.dragged.unwrap().count, 2);
+    }
+
+    #[test]
+    fn stack_identity_checks_every_metadata_field() {
+        let original = ItemStack::new(Item::Dirt, 1);
+        assert!(original.can_merge_with(&ItemStack {
+            count: 63,
+            ..original
+        }));
+
+        let mut variants = Vec::new();
+        variants.push(ItemStack::new(Item::Stone, 1));
+        variants.push(ItemStack {
+            durability: 1,
+            ..original
+        });
+
+        let mut enchanted = original;
+        enchanted
+            .enchantments
+            .add_or_upgrade(crate::enchantment::Enchantment::Unbreaking(1));
+        variants.push(enchanted);
+
+        variants.push(ItemStack {
+            potion: Some(crate::brewing::PotionData::water()),
+            ..original
+        });
+
+        let mut named = original;
+        named.custom_name.set("Named");
+        variants.push(named);
+
+        assert!(variants
+            .into_iter()
+            .all(|variant| !original.can_merge_with(&variant)));
+    }
+
+    #[test]
+    fn add_item_does_not_merge_plain_items_into_named_stacks() {
+        let mut inv = Inventory::new();
+        let mut named = ItemStack::new(Item::Dirt, 1);
+        named.custom_name.set("Named");
+        inv.hotbar[0] = Some(named);
+
+        assert!(inv.add_item(Item::Dirt));
+        assert_eq!(inv.hotbar[0], Some(named));
+        assert_eq!(inv.hotbar[1], Some(ItemStack::new(Item::Dirt, 1)));
     }
 
     #[test]
@@ -2216,6 +2337,66 @@ mod tests {
         assert!(!inventory.finish_creative_cursor());
         assert_eq!(inventory.dragged.unwrap().item, Item::Stone);
         assert_eq!(inventory.dragged.unwrap().count, 64);
+        assert_eq!(
+            inventory.creative_drag_origin,
+            Some(CreativeDragOrigin::Inventory)
+        );
+    }
+
+    #[test]
+    fn close_storage_transaction_rolls_back_partial_returns_and_real_cursor() {
+        let mut inventory = Inventory::new();
+        inventory
+            .hotbar
+            .fill(Some(ItemStack::new(Item::DiamondSword, 1)));
+        inventory
+            .main
+            .fill(Some(ItemStack::new(Item::DiamondPickaxe, 1)));
+        inventory.hotbar[0] = Some(ItemStack::new(Item::Stone, 63));
+        inventory.dragged = Some(ItemStack::new(Item::Dirt, 64));
+        inventory.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+        let original_hotbar = inventory.hotbar;
+        let original_main = inventory.main;
+
+        assert!(!inventory.try_store_for_close(&[ItemStack::new(Item::Stone, 2)]));
+        assert_eq!(inventory.hotbar, original_hotbar);
+        assert_eq!(inventory.main, original_main);
+        assert_eq!(inventory.dragged, Some(ItemStack::new(Item::Dirt, 64)));
+        assert_eq!(
+            inventory.creative_drag_origin,
+            Some(CreativeDragOrigin::Inventory)
+        );
+    }
+
+    #[test]
+    fn close_storage_discards_only_catalog_cursor() {
+        let mut inventory = Inventory::new();
+        inventory
+            .hotbar
+            .fill(Some(ItemStack::new(Item::DiamondSword, 1)));
+        inventory
+            .main
+            .fill(Some(ItemStack::new(Item::DiamondPickaxe, 1)));
+        inventory.dragged = Some(ItemStack::new(Item::Stone, 64));
+        inventory.creative_drag_origin = Some(CreativeDragOrigin::Catalog);
+
+        assert!(inventory.try_store_for_close(&[]));
+        assert!(inventory.dragged.is_none());
+        assert!(inventory.creative_drag_origin.is_none());
+    }
+
+    #[test]
+    fn creative_hotbar_rejects_same_item_with_different_metadata() {
+        let mut inventory = Inventory::new();
+        inventory.hotbar[0] = Some(ItemStack::new(Item::Dirt, 4));
+        let mut named = ItemStack::new(Item::Dirt, 3);
+        named.custom_name.set("Garden Soil");
+        inventory.dragged = Some(named);
+        inventory.creative_drag_origin = Some(CreativeDragOrigin::Inventory);
+
+        inventory.click_creative_hotbar(0, true);
+        assert_eq!(inventory.hotbar[0], Some(named));
+        assert_eq!(inventory.dragged, Some(ItemStack::new(Item::Dirt, 4)));
         assert_eq!(
             inventory.creative_drag_origin,
             Some(CreativeDragOrigin::Inventory)

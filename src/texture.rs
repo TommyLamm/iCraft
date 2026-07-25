@@ -253,6 +253,26 @@ fn draw_torch(img: &mut RgbaImage, tx: u32, ty: u32) {
     }
 }
 
+fn draw_redstone_torch(img: &mut RgbaImage, tx: u32, ty: u32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let is_stick = x == 7 && (6..=13).contains(&y);
+            let is_redstone = x == 7 && y == 5;
+            let is_glow = (6..=8).contains(&x) && (2..=4).contains(&y);
+            let color = if is_stick {
+                [125, 78, 42, 255]
+            } else if is_redstone {
+                [120, 15, 20, 255]
+            } else if is_glow {
+                [245, 45, 35, 255]
+            } else {
+                [0, 0, 0, 0]
+            };
+            img.put_pixel(tx * 16 + x, ty * 16 + y, Rgba(color));
+        }
+    }
+}
+
 fn draw_stick_icon(img: &mut RgbaImage, tx: u32, ty: u32) {
     for y in 0..16 {
         for x in 0..16 {
@@ -1954,7 +1974,7 @@ impl TextureAtlas {
         // between each component's powered/unpowered block variants, except
         // for the lamp where emissive state needs an obvious visual cue.
         draw_noise(&mut img, 5, 2, [95, 30, 30], 8, &mut seed); // wire
-        draw_noise(&mut img, 6, 2, [150, 45, 35], 12, &mut seed); // redstone torch
+        draw_redstone_torch(&mut img, 6, 2);
         draw_noise(&mut img, 7, 2, [175, 170, 165], 7, &mut seed); // repeater
         draw_noise(&mut img, 8, 2, [155, 150, 145], 7, &mut seed); // comparator
         draw_noise(&mut img, 9, 2, [110, 110, 110], 5, &mut seed); // button
@@ -2049,5 +2069,32 @@ impl TextureAtlas {
             view,
             sampler,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redstone_torch_sprite_has_transparent_background_and_thin_artwork() {
+        let mut image = RgbaImage::new(16, 16);
+        draw_redstone_torch(&mut image, 0, 0);
+
+        assert_eq!(image.get_pixel(0, 0).0[3], 0);
+        assert_eq!(image.get_pixel(15, 15).0[3], 0);
+
+        let opaque_pixels: Vec<(u32, u32)> = image
+            .enumerate_pixels()
+            .filter_map(|(x, y, pixel)| (pixel.0[3] != 0).then_some((x, y)))
+            .collect();
+        assert!(!opaque_pixels.is_empty());
+        assert!(opaque_pixels
+            .iter()
+            .all(|&(x, y)| (6..=8).contains(&x) && (2..=13).contains(&y)));
+        assert!(
+            opaque_pixels.len() < 16 * 4,
+            "redstone torch tile must remain mostly transparent"
+        );
     }
 }
