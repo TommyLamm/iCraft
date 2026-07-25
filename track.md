@@ -17,7 +17,7 @@
 | 7 | [Add adjustable weather/rain volume](plans/implementation/07_weather_volume.md) | Complete | `7fa3b6b` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (226 unit + 1 integration); legacy/clamp/roundtrip settings, category gain, live-loop refresh, and UI hit regions |
 | 8 | [Add a Creative item catalog on `E`](plans/implementation/08_creative_inventory.md) | Complete | `f5b69f8` | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (238 unit + 1 integration); exact catalog/partition, virtual supply/no-op, hotbar/cursor safety, wheel routing, SplashPotion metadata, and multi-aspect layout regressions |
 | 9 | [Stop camera rotation while inventory is open](plans/implementation/09_inventory_camera_lock.md) | Complete | `1343834` | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (243 unit + 1 integration); seven-blocker predicate, disabled/enabled mouse deltas, sensitivity/pitch clamp, UI NDC, E repeat, and Creative wheel regression |
-| 10 | [Last: find, list, and fix latent bugs](plans/implementation/10_bug_audit.md) | Closed current pass | `2f3370b` | 30 candidates listed; 26 fixed and regression-tested; 4 follow-ups documented; `cargo fmt`; `cargo test` (304 unit + 1 integration); `cargo check --release`; `git diff --check` |
+| 10 | [Last: find, list, and fix latent bugs](plans/implementation/10_bug_audit.md) | Closed current pass | `26102a2` | 30 candidates listed; 26 fixed and regression-tested; 4 follow-ups documented; `cargo fmt`; `cargo test` (304 unit + 1 integration); `cargo check --release`; `git diff --check` |
 
 ## Working notes
 
