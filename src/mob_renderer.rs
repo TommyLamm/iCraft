@@ -796,7 +796,8 @@ pub fn render_mobs<'a>(
                 let scale = if entity.age < 0.0 { 0.5f32 } else { 1.0f32 };
                 let head_scale = if entity.age < 0.0 { 0.75f32 } else { 1.0f32 };
 
-                // Pig Head (Row 10, Col 0 face, Col 1 body/pink skin for other 5 faces) - offset forward
+                // Pig Head (Row 10) - face on the front only, plain body pink
+                // on the other five sides.
                 add_cuboid(
                     cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5) * head_scale,
@@ -804,7 +805,7 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 0.8 * scale, 0.2 * scale)),
                     entity.yaw,
                     entity.pitch,
-                    [0, 1, 1, 1, 1, 1],
+                    [0, 1, 1, 1, 1, 1], // Front Col 0, others Col 1
                     10,
                     light_val,
                 );
@@ -874,7 +875,8 @@ pub fn render_mobs<'a>(
                 let scale = if entity.age < 0.0 { 0.5 } else { 1.0 };
                 let head_scale = if entity.age < 0.0 { 0.75 } else { 1.0 };
 
-                // Cow Head (Row 10, Col 2 face, Col 3 body/skin for other 5 faces) - offset forward
+                // Cow Head (Row 10) - face on the front only, plain body
+                // texture on the other five sides.
                 add_cuboid(
                     cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5) * head_scale,
@@ -882,7 +884,7 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 1.1 * scale, 0.35 * scale)),
                     entity.yaw,
                     entity.pitch,
-                    [2, 3, 3, 3, 3, 3],
+                    [2, 3, 3, 3, 3, 3], // Front Col 2, others Col 3
                     10,
                     light_val,
                 );
@@ -1039,7 +1041,8 @@ pub fn render_mobs<'a>(
                     0.0
                 };
 
-                // Head (Row 10, Col 7 face, Col 8 body/feathers for other 5 faces) - offset forward
+                // Head (Row 10) - face/beak on the front only, plain body
+                // white on the other five sides.
                 add_cuboid(
                     cuboid_instances,
                     Vec3::new(0.25, 0.35, 0.25) * head_scale,
@@ -1047,7 +1050,7 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 0.45 * scale, 0.1 * scale)),
                     entity.yaw,
                     entity.pitch,
-                    [7, 8, 8, 8, 8, 8],
+                    [7, 8, 8, 8, 8, 8], // Front Col 7, others Col 8
                     10,
                     light_val,
                 );

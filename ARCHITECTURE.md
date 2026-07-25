@@ -96,6 +96,19 @@ ChunkManager chunks
   -> wgpu render passes
 ```
 
+The renderer then generates mob mesh data, camera-facing particle quads, and all
+immediate-mode UI vertices (including remote-player name tags, chat, disconnect
+UI, and advancement toasts/screen) on the CPU.
+The render pass order is: sky ->
+opaque/cutout chunks -> mobs (including dropped items) -> translucent chunks ->
+alpha-blended particles -> multiply-blended mining crack overlay -> colored UI ->
+textured UI -> crosshair -> line/text UI -> present. The shader entrypoints
+and packed camera, lighting, fog, time, underwater, and damage behavior are in
+`src/shader.wgsl`. Terrain uses the separate `TerrainVertex` layout and
+`vs_terrain`/`fs_terrain`; AO remains smooth, while atlas tile and packed
+sky/block/face lighting remain flat. Mob, hand, particle, and UI geometry keep
+their existing vertex layouts.
+
 `world.rs` produces terrain mesh data; `chunk_render.rs` defines terrain
 vertices, bounds, LOD data, draw planning, and region allocations.
 `culling.rs` performs bounded section visibility traversal and conservative
