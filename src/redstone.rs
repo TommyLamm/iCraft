@@ -1,5 +1,6 @@
 use crate::chunk_manager::ChunkManager;
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub type BlockPos = (i32, i32, i32);
@@ -124,6 +125,92 @@ impl ComponentState {
             last_powered: false,
         }
     }
+
+    /// Returns `true` when the component carries non-default metadata that must
+    /// survive a chunk unload/reload cycle. The runtime default (`new`) state
+    /// does not need to be persisted because `sync_loaded_chunks` already
+    /// reconstructs it from the block type alone.
+    fn has_persistent_metadata(&self) -> bool {
+        self.facing != Direction::North
+            || self.repeater_delay != 1
+            || self.comparator_mode != ComparatorMode::Compare
+            || self.note != 0
+    }
+}
+
+/// Direction encoding used by the redstone metadata sidecar. Independent of
+/// the runtime `Direction` enum so the on-disk format stays stable even if the
+/// enum is reordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SavedDirection {
+    North,
+    South,
+    West,
+    East,
+}
+
+impl From<Direction> for SavedDirection {
+    fn from(direction: Direction) -> Self {
+        match direction {
+            Direction::North => SavedDirection::North,
+            Direction::South => SavedDirection::South,
+            Direction::West => SavedDirection::West,
+            Direction::East => SavedDirection::East,
+        }
+    }
+}
+
+impl SavedDirection {
+    fn into_direction(self) -> Direction {
+        match self {
+            SavedDirection::North => Direction::North,
+            SavedDirection::South => Direction::South,
+            SavedDirection::West => Direction::West,
+            SavedDirection::East => Direction::East,
+        }
+    }
+}
+
+/// Comparator-mode encoding used by the redstone metadata sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SavedComparatorMode {
+    Compare,
+    Subtract,
+}
+
+impl From<ComparatorMode> for SavedComparatorMode {
+    fn from(mode: ComparatorMode) -> Self {
+        match mode {
+            ComparatorMode::Compare => SavedComparatorMode::Compare,
+            ComparatorMode::Subtract => SavedComparatorMode::Subtract,
+        }
+    }
+}
+
+impl SavedComparatorMode {
+    fn into_comparator_mode(self) -> ComparatorMode {
+        match self {
+            SavedComparatorMode::Compare => ComparatorMode::Compare,
+            SavedComparatorMode::Subtract => ComparatorMode::Subtract,
+        }
+    }
+}
+
+/// Persistent redstone component metadata for a single block inside a chunk.
+///
+/// `local_x`/`local_y`/`local_z` are chunk-local coordinates (0..16, 0..256,
+/// 0..16). Only components whose `ComponentState` differs from the runtime
+/// default are serialized, so freshly-placed or never-interacted components
+/// round-trip as an empty vector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedstoneComponentMetadata {
+    pub local_x: u8,
+    pub local_y: u8,
+    pub local_z: u8,
+    pub facing: SavedDirection,
+    pub repeater_delay: u8,
+    pub comparator_mode: SavedComparatorMode,
+    pub note: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +328,91 @@ impl RedstoneSystem {
     pub fn set_comparator_mode(&mut self, pos: BlockPos, mode: ComparatorMode) {
         if let Some(state) = self.components.get_mut(&pos) {
             state.comparator_mode = mode;
+        }
+    }
+
+    /// Collects persistent metadata for every redstone component whose runtime
+    /// state differs from the default that `sync_loaded_chunks` would rebuild
+    /// after a reload. Callers persist the returned list as a sidecar on the
+    /// chunk save data so that repeater delays, comparator modes, note pitches,
+    /// and component facings survive chunk unload/reload cycles.
+    ///
+    /// Only components whose chunk-local coordinates fall inside `(cx, cz)` are
+    /// emitted. Components that straddle a chunk boundary are still indexed by
+    /// their own block position, so each one belongs to exactly one chunk.
+    pub fn collect_chunk_metadata(
+        &self,
+        _manager: &ChunkManager,
+        cx: i32,
+        cz: i32,
+    ) -> Vec<RedstoneComponentMetadata> {
+        let mut metadata = Vec::new();
+        let origin_x = cx * CHUNK_WIDTH as i32;
+        let origin_z = cz * CHUNK_DEPTH as i32;
+        for (&pos, state) in &self.components {
+            let local_x = pos.0 - origin_x;
+            let local_z = pos.2 - origin_z;
+            if local_x < 0
+                || local_x >= CHUNK_WIDTH as i32
+                || local_z < 0
+                || local_z >= CHUNK_DEPTH as i32
+            {
+                continue;
+            }
+            if pos.1 < 0 || pos.1 >= CHUNK_HEIGHT as i32 {
+                continue;
+            }
+            // `sync_loaded_chunks` evicts components whose block was replaced,
+            // so any entry still present here corresponds to a live component.
+            if !state.has_persistent_metadata() {
+                continue;
+            }
+            metadata.push(RedstoneComponentMetadata {
+                local_x: local_x as u8,
+                local_y: pos.1 as u8,
+                local_z: local_z as u8,
+                facing: state.facing.into(),
+                repeater_delay: state.repeater_delay,
+                comparator_mode: state.comparator_mode.into(),
+                note: state.note,
+            });
+        }
+        metadata
+    }
+
+    /// Reapplies previously persisted component metadata after a chunk has been
+    /// (re)loaded and `sync_loaded_chunks` has rebuilt default `ComponentState`
+    /// entries. Entries whose block no longer matches a redstone component are
+    /// ignored so stale metadata cannot resurrect facings on unrelated blocks.
+    pub fn restore_chunk_metadata(
+        &mut self,
+        manager: &ChunkManager,
+        cx: i32,
+        cz: i32,
+        metadata: &[RedstoneComponentMetadata],
+    ) {
+        if metadata.is_empty() {
+            return;
+        }
+        let origin_x = cx * CHUNK_WIDTH as i32;
+        let origin_z = cz * CHUNK_DEPTH as i32;
+        for entry in metadata {
+            let wx = origin_x + entry.local_x as i32;
+            let wy = entry.local_y as i32;
+            let wz = origin_z + entry.local_z as i32;
+            let pos = (wx, wy, wz);
+            let block = get_block(manager, pos);
+            if !is_component(block) {
+                continue;
+            }
+            let state = self
+                .components
+                .entry(pos)
+                .or_insert_with(|| ComponentState::new(block, Direction::North));
+            state.facing = entry.facing.into_direction();
+            state.repeater_delay = entry.repeater_delay.clamp(1, 4);
+            state.comparator_mode = entry.comparator_mode.into_comparator_mode();
+            state.note = entry.note.min(24);
         }
     }
 
@@ -1157,5 +1329,148 @@ mod tests {
             fired.actions,
             vec![RedstoneAction::Explode { pos: (1, Y, 0) }]
         );
+    }
+
+    #[test]
+    fn collect_and_restore_preserves_repeater_delay_comparator_mode_and_note() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        // Repeater with a non-default delay (4) and a non-North facing.
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::Repeater,
+            Direction::East,
+        );
+        system.set_repeater_delay((1, Y, 0), 4);
+        // Comparator in Subtract mode.
+        place(
+            &mut system,
+            &mut manager,
+            2,
+            BlockType::Comparator,
+            Direction::South,
+        );
+        system.set_comparator_mode((2, Y, 0), ComparatorMode::Subtract);
+        // NoteBlock tuned to pitch 12.
+        place(
+            &mut system,
+            &mut manager,
+            3,
+            BlockType::NoteBlock,
+            Direction::West,
+        );
+        for _ in 0..12 {
+            system.interact(&mut manager, (3, Y, 0));
+        }
+
+        let metadata = system.collect_chunk_metadata(&manager, 0, 0);
+        assert_eq!(metadata.len(), 3);
+
+        // Simulate the unload+reload path: drop the in-memory component state
+        // and let `sync_loaded_chunks` rebuild default entries from the blocks.
+        let mut reloaded = RedstoneSystem::new();
+        reloaded.tick(&mut manager, &[]);
+        // Defaults restored by `sync_loaded_chunks` must differ from the saved
+        // values before we apply the sidecar.
+        assert_eq!(reloaded.repeater_delay((1, Y, 0)), Some(1));
+        assert_eq!(
+            reloaded.comparator_mode((2, Y, 0)),
+            Some(ComparatorMode::Compare)
+        );
+
+        reloaded.restore_chunk_metadata(&manager, 0, 0, &metadata);
+        assert_eq!(reloaded.repeater_delay((1, Y, 0)), Some(4));
+        assert_eq!(
+            reloaded.comparator_mode((2, Y, 0)),
+            Some(ComparatorMode::Subtract)
+        );
+        assert_eq!(
+            reloaded.components.get(&(3, Y, 0)).map(|s| s.note),
+            Some(12)
+        );
+        assert_eq!(
+            reloaded.components.get(&(1, Y, 0)).map(|s| s.facing),
+            Some(Direction::East)
+        );
+        assert_eq!(
+            reloaded.components.get(&(2, Y, 0)).map(|s| s.facing),
+            Some(Direction::South)
+        );
+        assert_eq!(
+            reloaded.components.get(&(3, Y, 0)).map(|s| s.facing),
+            Some(Direction::West)
+        );
+    }
+
+    #[test]
+    fn collect_skips_components_with_default_metadata() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        // A freshly-placed Repeater with default delay 1 and North facing
+        // carries no persistent metadata and must not appear in the sidecar.
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::Repeater,
+            Direction::North,
+        );
+        // A lever is a component but only carries the default state.
+        place(
+            &mut system,
+            &mut manager,
+            2,
+            BlockType::Lever,
+            Direction::North,
+        );
+
+        let metadata = system.collect_chunk_metadata(&manager, 0, 0);
+        assert!(metadata.is_empty());
+    }
+
+    #[test]
+    fn collect_only_emits_components_inside_the_target_chunk() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        let mut system = RedstoneSystem::new();
+        // First component inside chunk (0, 0).
+        manager.set_block(1, Y, 0, BlockType::Repeater);
+        system.on_block_changed(&mut manager, (1, Y, 0), Direction::East);
+        system.set_repeater_delay((1, Y, 0), 3);
+        // Second component inside chunk (1, 0) (x = 16..31).
+        manager.set_block(17, Y, 0, BlockType::Repeater);
+        system.on_block_changed(&mut manager, (17, Y, 0), Direction::East);
+        system.set_repeater_delay((17, Y, 0), 2);
+
+        let metadata_chunk_0 = system.collect_chunk_metadata(&manager, 0, 0);
+        assert_eq!(metadata_chunk_0.len(), 1);
+        assert_eq!(metadata_chunk_0[0].local_x, 1);
+        assert_eq!(metadata_chunk_0[0].repeater_delay, 3);
+
+        let metadata_chunk_1 = system.collect_chunk_metadata(&manager, 1, 0);
+        assert_eq!(metadata_chunk_1.len(), 1);
+        assert_eq!(metadata_chunk_1[0].local_x, 1);
+        assert_eq!(metadata_chunk_1[0].repeater_delay, 2);
+    }
+
+    #[test]
+    fn restore_ignores_entries_whose_block_is_no_longer_a_component() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        manager.set_block(1, Y, 0, BlockType::Repeater);
+        system.on_block_changed(&mut manager, (1, Y, 0), Direction::East);
+        let metadata = system.collect_chunk_metadata(&manager, 0, 0);
+        assert_eq!(metadata.len(), 1);
+
+        // Simulate the block being replaced with Stone before reload. The
+        // stale sidecar entry must not resurrect a facing on a non-component.
+        manager.set_block(1, Y, 0, BlockType::Stone);
+        let mut reloaded = RedstoneSystem::new();
+        reloaded.tick(&mut manager, &[]);
+        reloaded.restore_chunk_metadata(&manager, 0, 0, &metadata);
+        assert!(reloaded.components.get(&(1, Y, 0)).is_none());
     }
 }

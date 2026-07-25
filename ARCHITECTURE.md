@@ -386,8 +386,10 @@ processes device transitions. Repeaters delay 1-4 ticks and restore power to 15;
 buttons release after 20 ticks; primed TNT explodes after 80 ticks. Pistons move
 one block, sticky pistons also pull one block, lamps change light emission,
 powered doors/trapdoors become passable, dispensers fire arrows, droppers emit
-items, and note blocks play one of 25 synthesized pitches. Dynamic metadata is
-rebuilt when chunks load; block variants remain part of normal chunk saves.
+items, and note blocks play one of 25 synthesized pitches. Component metadata
+(facing, repeater delay, comparator mode, note pitch) is persisted across chunk
+save/unload/reload via a `ChunkSaveData` sidecar (`redstone_metadata`); legacy
+saves without sidecar data fall back to empty metadata on load.
 
 ### Dimensions, portals, and bosses
 

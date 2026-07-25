@@ -104,6 +104,10 @@ P3 [█████████░] 88.9%
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
 ### 2026-07-25
+- 🔧 完成 Task 10 後續項 G3：紅石組件元資料 (facing/delay/comparator_mode/note) 持久化
+  - 修改文件：`src/redstone.rs`, `src/save.rs`, `src/state.rs`, `plans/implementation/10_bug_audit.md`, `ARCHITECTURE.md`, `track.md`, `plans/progress.md`
+  - 關鍵決策：實作 `ChunkSaveData` 的 `redstone_metadata` sidecar 結構與序列化／反序列化邏輯。區塊存檔與卸載時寫入紅石組件狀態，區塊載入與生成時於首次紅石 tick 前自動還原；提供 `deserialize_chunk_save_data` 的 legacy fallback，無縫相容舊版 6 欄位存檔。
+  - 驗證：`cargo fmt --all -- --check`、`cargo test --release` 通過，新增 6 項紅石與存檔單元測試（共 310 項單元測試 + 1 項整合測試全部通過）；`cargo check --release` 與 `git diff --check` 通過。
 - 🔧 完成 Task 10 潛在 Bug 審計的快速收尾 pass (By Codex, sub-agent 交付已審核；最後依使用者要求停止再派 sub-agent)
   - 新增文件：`plans/implementation/10_bug_audit.md`
   - 修改文件：`src/app.rs`, `src/audio.rs`, `src/camera.rs`, `src/chunk_manager.rs`, `src/chunk_render.rs`, `src/entity.rs`, `src/interaction.rs`, `src/inventory.rs`, `src/menu.rs`, `src/mob.rs`, `src/network/client.rs`, `src/network/protocol.rs`, `src/network/server.rs`, `src/passive_mob.rs`, `src/physics.rs`, `src/player.rs`, `src/save.rs`, `src/state.rs`, `src/texture.rs`, `src/weather.rs`, `src/world.rs`, `ARCHITECTURE.md`, `track.md`

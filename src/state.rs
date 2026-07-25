@@ -892,6 +892,7 @@ struct ChunkLoadResult {
     lifetime: u64,
     chunk: Chunk,
     mutated: bool,
+    redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
 }
 
 struct ChunkMeshResult {
@@ -1219,7 +1220,13 @@ impl State {
         self.jump_taps.reset();
         let source = self.current_dimension;
         for chunk in self.chunk_manager.chunks.values() {
-            let data = crate::save::ChunkSaveData::from_chunk(chunk);
+            let redstone_metadata = self.redstone.collect_chunk_metadata(
+                &self.chunk_manager,
+                chunk.chunk_x,
+                chunk.chunk_z,
+            );
+            let data =
+                crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata);
             let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
                 dimension: source,
                 data,
@@ -1260,6 +1267,7 @@ impl State {
         let cx = (destination.x / CHUNK_WIDTH as f32).floor() as i32;
         let cz = (destination.z / CHUNK_DEPTH as f32).floor() as i32;
         let mut chunk = crate::dimension::generate_chunk(target, cx, cz, self.world_seed);
+        let mut restored_redstone = Vec::new();
         if let Some(saved) = self
             .save_manager
             .lock()
@@ -1270,9 +1278,14 @@ impl State {
             if saved.blocks != generated_blocks {
                 self.mutated_chunks.insert((target, cx, cz));
             }
+            restored_redstone = saved.redstone_metadata();
             saved.restore_to_chunk(&mut chunk);
         }
         self.chunk_manager.chunks.insert((cx, cz), chunk);
+        if !restored_redstone.is_empty() {
+            self.redstone
+                .restore_chunk_metadata(&self.chunk_manager, cx, cz, &restored_redstone);
+        }
         let lifetime = self.next_chunk_lifetime();
         self.chunk_lifetimes.insert((cx, cz), lifetime);
         self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
@@ -3251,6 +3264,11 @@ impl State {
         // frame is visible.
         let player_chunk_x = (player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32;
         let player_chunk_z = (player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32;
+        let mut pending_redstone_metadata: Vec<(
+            i32,
+            i32,
+            Vec<crate::redstone::RedstoneComponentMetadata>,
+        )> = Vec::new();
         if !is_client {
             let initial_radius = initial_chunk_radius(render_distance);
             for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
@@ -3267,7 +3285,11 @@ impl State {
                         if data.blocks != generated_blocks {
                             mutated_chunks.insert((current_dimension, cx, cz));
                         }
+                        let metadata = data.redstone_metadata();
                         data.restore_to_chunk(&mut chunk);
+                        if !metadata.is_empty() {
+                            pending_redstone_metadata.push((cx, cz, metadata));
+                        }
                     }
                     chunk_manager.chunks.insert((cx, cz), chunk);
                 }
@@ -3570,7 +3592,7 @@ impl State {
             }
         };
 
-        Self {
+        let mut state = Self {
             window,
             surface,
             device,
@@ -3701,7 +3723,24 @@ impl State {
             pending_chunk_payloads: std::collections::HashMap::new(),
             pending_block_changes: std::collections::HashMap::new(),
             mutated_chunks,
+        };
+
+        // Restore persisted redstone component metadata (facing/delay/comparator
+        // mode/note) for spawn-area chunks that were loaded before the redstone
+        // system existed. The first `RedstoneSystem::tick` will call
+        // `sync_loaded_chunks`, which rebuilds default `ComponentState` entries
+        // for every loaded component; applying the sidecar first ensures those
+        // rebuilt entries pick up the saved facing/delay/mode/note rather than
+        // the defaults. The runtime first tick then settles power against the
+        // restored facings. Subsequent streaming loads go through
+        // `schedule_chunk_load`, which restores metadata alongside the chunk.
+        for (cx, cz, metadata) in pending_redstone_metadata {
+            state
+                .redstone
+                .restore_chunk_metadata(&state.chunk_manager, cx, cz, &metadata);
         }
+
+        state
     }
 
     fn sync_audio_settings(&mut self) {
@@ -4232,7 +4271,13 @@ impl State {
             .send(crate::save::SaveCommand::SaveLevelAndPlayer(level, player));
 
         for chunk in self.chunk_manager.chunks.values() {
-            let chunk_data = crate::save::ChunkSaveData::from_chunk(chunk);
+            let redstone_metadata = self.redstone.collect_chunk_metadata(
+                &self.chunk_manager,
+                chunk.chunk_x,
+                chunk.chunk_z,
+            );
+            let chunk_data =
+                crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata);
             let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
                 dimension: self.current_dimension,
                 data: chunk_data,
@@ -4268,7 +4313,13 @@ impl State {
         let _ = mgr.save_player_and_level(&level, &player);
 
         for chunk in self.chunk_manager.chunks.values() {
-            let chunk_data = crate::save::ChunkSaveData::from_chunk(chunk);
+            let redstone_metadata = self.redstone.collect_chunk_metadata(
+                &self.chunk_manager,
+                chunk.chunk_x,
+                chunk.chunk_z,
+            );
+            let chunk_data =
+                crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata);
             let _ = mgr.save_chunk_in(
                 self.current_dimension,
                 chunk.chunk_x,
@@ -4443,6 +4494,20 @@ impl State {
                     self.chunk_lifetimes.insert(result.coord, result.lifetime);
                     self.chunk_meshes.insert(result.coord, ChunkMesh::pending());
 
+                    // Restore persisted redstone component metadata before any
+                    // redstone tick runs, so freshly-rebuilt `ComponentState`
+                    // entries pick up the saved facing/delay/mode/note instead
+                    // of the runtime defaults. The next `RedstoneSystem::tick`
+                    // settles power against the restored facings.
+                    if !result.redstone_metadata.is_empty() {
+                        self.redstone.restore_chunk_metadata(
+                            &self.chunk_manager,
+                            cx,
+                            cz,
+                            &result.redstone_metadata,
+                        );
+                    }
+
                     if let Some(blocks) = self.pending_chunk_payloads.remove(&result.coord) {
                         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&result.coord) {
                             Self::restore_chunk_payload(chunk, &blocks);
@@ -4540,6 +4605,7 @@ impl State {
             let mut chunk =
                 crate::dimension::generate_chunk(dimension, coord.0, coord.1, world_seed);
             let mut mutated = false;
+            let mut redstone_metadata = Vec::new();
             if authoritative {
                 if let Some(saved) = save_manager
                     .lock()
@@ -4548,6 +4614,7 @@ impl State {
                 {
                     let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
                     mutated = saved.blocks != generated_blocks;
+                    redstone_metadata = saved.redstone_metadata();
                     saved.restore_to_chunk(&mut chunk);
                 }
             }
@@ -4558,6 +4625,7 @@ impl State {
                 lifetime,
                 chunk,
                 mutated,
+                redstone_metadata,
             }));
         });
     }
@@ -4618,7 +4686,13 @@ impl State {
         for &(cx, cz) in &to_unload {
             if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
                 if self.is_authoritative() {
-                    let chunk_data = crate::save::ChunkSaveData::from_chunk(&chunk);
+                    let redstone_metadata =
+                        self.redstone
+                            .collect_chunk_metadata(&self.chunk_manager, cx, cz);
+                    let chunk_data = crate::save::ChunkSaveData::from_chunk_with_redstone(
+                        &chunk,
+                        &redstone_metadata,
+                    );
                     let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
                         dimension: self.current_dimension,
                         data: chunk_data,

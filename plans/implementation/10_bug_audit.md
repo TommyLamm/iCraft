@@ -1,6 +1,7 @@
 # 實作計畫 10：潛在 Bug 審計與修復
 
-> 狀態：快速收尾（2026-07-25）。依使用者要求，本任務只在 1–9 全部完成後開始。
+> 狀態：G3 後續項已修復（2026-07-25）。其餘 N3/G1/W1 仍為後續項。
+> 原始審計依使用者要求，只在 1–9 全部完成後開始。
 
 ## 目標
 
@@ -51,7 +52,7 @@
 | P3 | Creative sprint 仍受飢餓限制並消耗 exhaustion | 已修 |
 | G1 | joined client 生存放置/破壞缺權威消耗/drop ACK | 後續項 |
 | G2 | 破壞 raycast 可選中 Water/Lava 等環境 passable | 已修 |
-| G3 | 紅石 facing/delay/comparator/note 卸載後丟失 | 後續項 |
+| G3 | 紅石 facing/delay/comparator/note 卸載後丟失 | 已修 |
 | W1 | 門/活板門仍是通用完整 cube，缺方向/薄碰撞 state | 後續項 |
 | W2 | RedstoneTorch/Off 使用普通完整 cube | 已修 |
 | W3 | Sugar cane/cactus 支撐規則缺水/側邊約束 | 已修 |
@@ -62,9 +63,12 @@
 ## 後續項
 
 本輪最後依使用者要求停止再派 sub-agent 並快速驗證收尾，因此不再擴大改動面。
-`N3/G1` 需要 protocol/State 的權威方塊 action-result 流程；`G3` 需要 redstone
-metadata sidecar；`W1` 需要正式 block-state/orientation 與碰撞資料，不應只用視覺
-假修。
+`N3/G1` 需要 protocol/State 的權威方塊 action-result 流程；`W1` 需要正式
+block-state/orientation 與碰撞資料，不應只用視覺假修。`G3` 已於 2026-07-25
+完成：redstone component metadata（facing/repeater_delay/comparator_mode/note）
+現在以 `ChunkSaveData.redstone_metadata` sidecar（Zlib + bincode）持久化，跨
+chunk 卸載／重載、維度切換、背景存檔與同步存檔皆保留；舊存檔透過
+`deserialize_chunk_save_data` 的 legacy fallback 讀回並回報空 sidecar。
 
 ## 驗證門檻
 

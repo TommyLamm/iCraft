@@ -100,9 +100,10 @@
   respawn timer reset, Creative sprint policy, break raycast fluid filtering,
   redstone torch mesh, sugar cane/cactus support, authoritative weather
   phase/lightning sync, non-finite view settings, and invalid WAV fallback.
-  Follow-ups intentionally not hidden: remote block action ACK/reach validation,
-  redstone metadata persistence, and proper door/trapdoor block-state
-  orientation/collision/model work.
+  Follow-up G3 (redstone component metadata persistence across chunk save/unload/reload
+  via ChunkSaveData sidecar) has been completed and verified. Remaining follow-ups:
+  remote block action ACK/reach validation (N3/G1) and proper door/trapdoor block-state
+  orientation/collision/model work (W1).
 
 ## Commit discipline
 

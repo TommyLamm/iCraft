@@ -225,10 +225,25 @@ pub struct ChunkSaveData {
     pub sky_light: Vec<u8>,    // Zlib compressed u8 array of sky light
     pub block_light: Vec<u8>,  // Zlib compressed u8 array of block light
     pub fluid_levels: Vec<u8>, // Zlib compressed u8 array of fluid levels
+    /// Zlib-compressed bincode of `Vec<RedstoneComponentMetadata>`. Older saves
+    /// written before this sidecar existed deserialize as an empty vector via
+    /// `#[serde(default)]`, preserving full backward compatibility.
+    #[serde(default)]
+    pub redstone_metadata: Vec<u8>,
 }
 
 impl ChunkSaveData {
     pub fn from_chunk(chunk: &Chunk) -> Self {
+        Self::from_chunk_with_redstone(chunk, &[])
+    }
+
+    /// Builds a `ChunkSaveData` and attaches the provided redstone component
+    /// metadata sidecar. Pass an empty slice for chunks with no persisted
+    /// redstone state (the historical behavior of `from_chunk`).
+    pub fn from_chunk_with_redstone(
+        chunk: &Chunk,
+        redstone_metadata: &[crate::redstone::RedstoneComponentMetadata],
+    ) -> Self {
         let mut blocks = Vec::with_capacity(16 * 256 * 16);
         let mut sky_light = Vec::with_capacity(16 * 256 * 16);
         let mut block_light = Vec::with_capacity(16 * 256 * 16);
@@ -245,6 +260,15 @@ impl ChunkSaveData {
             }
         }
 
+        let redstone_metadata = if redstone_metadata.is_empty() {
+            Vec::new()
+        } else {
+            bincode::serialize(redstone_metadata)
+                .ok()
+                .and_then(|bytes| compress_bytes(&bytes).ok())
+                .unwrap_or_default()
+        };
+
         Self {
             chunk_x: chunk.chunk_x,
             chunk_z: chunk.chunk_z,
@@ -252,7 +276,23 @@ impl ChunkSaveData {
             sky_light: compress_bytes(&sky_light).unwrap_or_default(),
             block_light: compress_bytes(&block_light).unwrap_or_default(),
             fluid_levels: compress_bytes(&fluid_levels).unwrap_or_default(),
+            redstone_metadata,
         }
+    }
+
+    /// Decodes the redstone metadata sidecar into typed records. Returns an
+    /// empty vector for older saves (no sidecar) or when decompression fails,
+    /// so callers can always iterate the result without a separate error path.
+    pub fn redstone_metadata(&self) -> Vec<crate::redstone::RedstoneComponentMetadata> {
+        if self.redstone_metadata.is_empty() {
+            return Vec::new();
+        }
+        decompress_bytes(&self.redstone_metadata)
+            .ok()
+            .and_then(|bytes| {
+                bincode::deserialize::<Vec<crate::redstone::RedstoneComponentMetadata>>(&bytes).ok()
+            })
+            .unwrap_or_default()
     }
 
     pub fn restore_to_chunk(&self, chunk: &mut Chunk) {
@@ -349,6 +389,39 @@ pub fn decompress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
     Ok(result)
 }
 
+/// Deserializes a `ChunkSaveData` from persisted chunk bytes with full backward
+/// compatibility. Saves written before the redstone metadata sidecar existed
+/// only contain the historical six fields; bincode 1.x is a strict binary
+/// format and does not synthesize missing fields from `#[serde(default)]`, so
+/// we try the current shape first and fall back to the legacy shape (filling
+/// the sidecar with an empty vector) when the new deserializer rejects the
+/// bytes. This keeps pre-sidecar saves readable without a migration pass.
+fn deserialize_chunk_save_data(bytes: &[u8]) -> Option<ChunkSaveData> {
+    if let Ok(data) = bincode::deserialize::<ChunkSaveData>(bytes) {
+        return Some(data);
+    }
+    #[derive(serde::Deserialize)]
+    struct LegacyChunkSaveData {
+        chunk_x: i32,
+        chunk_z: i32,
+        blocks: Vec<u8>,
+        sky_light: Vec<u8>,
+        block_light: Vec<u8>,
+        fluid_levels: Vec<u8>,
+    }
+    bincode::deserialize::<LegacyChunkSaveData>(bytes)
+        .ok()
+        .map(|legacy| ChunkSaveData {
+            chunk_x: legacy.chunk_x,
+            chunk_z: legacy.chunk_z,
+            blocks: legacy.blocks,
+            sky_light: legacy.sky_light,
+            block_light: legacy.block_light,
+            fluid_levels: legacy.fluid_levels,
+            redstone_metadata: Vec::new(),
+        })
+}
+
 impl SaveManager {
     pub fn new<P: AsRef<Path>>(world_dir: P) -> Self {
         let world_dir = world_dir.as_ref().to_path_buf();
@@ -423,7 +496,7 @@ impl SaveManager {
             });
 
         if let Some(chunk_bytes) = region.chunks.get(&(lx, lz)) {
-            bincode::deserialize::<ChunkSaveData>(chunk_bytes).ok()
+            deserialize_chunk_save_data(chunk_bytes)
         } else {
             None
         }
@@ -1014,6 +1087,100 @@ mod tests {
             manager.load_current_dimension(),
             crate::dimension::Dimension::End
         );
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn redstone_metadata_sidecar_roundtrips_through_save_and_load() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_redstone_sidecar_{}_{}",
+            std::process::id(),
+            unique
+        ));
+
+        let chunk = Chunk::new(-2, 5);
+        let metadata = vec![crate::redstone::RedstoneComponentMetadata {
+            local_x: 3,
+            local_y: 100,
+            local_z: 7,
+            facing: crate::redstone::SavedDirection::East,
+            repeater_delay: 4,
+            comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
+            note: 12,
+        }];
+        let mut manager = SaveManager::new(&world_dir);
+        manager
+            .save_chunk_in(
+                crate::dimension::Dimension::Overworld,
+                -2,
+                5,
+                ChunkSaveData::from_chunk_with_redstone(&chunk, &metadata),
+            )
+            .unwrap();
+
+        let saved = manager
+            .load_chunk_in(crate::dimension::Dimension::Overworld, -2, 5)
+            .expect("redstone sidecar chunk should load");
+        assert_eq!(saved.redstone_metadata(), metadata);
+
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn chunk_saved_without_redstone_sidecar_loads_as_empty_metadata() {
+        // Older saves written before the redstone metadata sidecar existed
+        // must deserialize cleanly and report an empty metadata vector. Build a
+        // `ChunkSaveData` without the sidecar by serializing the historical
+        // shape directly, then confirm `redstone_metadata()` degrades
+        // gracefully.
+        #[derive(serde::Serialize)]
+        struct LegacyChunkSaveData {
+            chunk_x: i32,
+            chunk_z: i32,
+            blocks: Vec<u8>,
+            sky_light: Vec<u8>,
+            block_light: Vec<u8>,
+            fluid_levels: Vec<u8>,
+        }
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_redstone_legacy_{}_{}",
+            std::process::id(),
+            unique
+        ));
+
+        let chunk = Chunk::new(0, 0);
+        let mut manager = SaveManager::new(&world_dir);
+        let legacy = LegacyChunkSaveData {
+            chunk_x: chunk.chunk_x,
+            chunk_z: chunk.chunk_z,
+            blocks: Vec::new(),
+            sky_light: Vec::new(),
+            block_light: Vec::new(),
+            fluid_levels: Vec::new(),
+        };
+        let region = crate::save::RegionData {
+            chunks: [((0u8, 0u8), bincode::serialize(&legacy).unwrap())]
+                .into_iter()
+                .collect(),
+        };
+        let region_bytes = bincode::serialize(&region).unwrap();
+        std::fs::create_dir_all(world_dir.join("regions")).unwrap();
+        std::fs::write(world_dir.join("regions/r.0.0.bin"), region_bytes).unwrap();
+
+        let saved = manager
+            .load_chunk_in(crate::dimension::Dimension::Overworld, 0, 0)
+            .expect("legacy chunk should load");
+        assert!(saved.redstone_metadata().is_empty());
+
         fs::remove_dir_all(world_dir).unwrap();
     }
 }
