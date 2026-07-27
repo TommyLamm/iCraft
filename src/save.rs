@@ -64,6 +64,78 @@ pub struct InventoryData {
     pub creative_drag_origin: Option<CreativeDragOrigin>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EntitySaveData {
+    pub entity_type: crate::entity::EntityType,
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub health: f32,
+    pub max_health: f32,
+    pub is_ignited: bool,
+    pub burn_timer: f32,
+    pub age: f32,
+    pub breeding_timer: f32,
+    pub breed_cooldown: f32,
+    pub has_wool: bool,
+    pub wool_color: [f32; 3],
+    pub dropped_item: Option<crate::inventory::Item>,
+    pub dropped_count: u32,
+}
+
+impl From<&crate::entity::Entity> for EntitySaveData {
+    fn from(entity: &crate::entity::Entity) -> Self {
+        Self {
+            entity_type: entity.entity_type,
+            position: [entity.position.x, entity.position.y, entity.position.z],
+            velocity: [entity.velocity.x, entity.velocity.y, entity.velocity.z],
+            yaw: entity.yaw,
+            pitch: entity.pitch,
+            health: entity.health,
+            max_health: entity.max_health,
+            is_ignited: entity.is_ignited,
+            burn_timer: entity.burn_timer,
+            age: entity.age,
+            breeding_timer: entity.breeding_timer,
+            breed_cooldown: entity.breed_cooldown,
+            has_wool: entity.has_wool,
+            wool_color: entity.wool_color,
+            dropped_item: entity.dropped_item,
+            dropped_count: entity.dropped_count,
+        }
+    }
+}
+
+impl EntitySaveData {
+    pub fn to_entity(&self, id: u64) -> crate::entity::Entity {
+        let pos = glam::Vec3::new(self.position[0], self.position[1], self.position[2]);
+        let mut entity = crate::entity::Entity::new(id, self.entity_type, pos);
+        entity.velocity = glam::Vec3::new(self.velocity[0], self.velocity[1], self.velocity[2]);
+        entity.yaw = self.yaw;
+        entity.pitch = self.pitch;
+        entity.health = self.health;
+        entity.max_health = self.max_health;
+        entity.is_ignited = self.is_ignited;
+        entity.burn_timer = self.burn_timer;
+        entity.age = self.age;
+        entity.breeding_timer = self.breeding_timer;
+        entity.breed_cooldown = self.breed_cooldown;
+        entity.has_wool = self.has_wool;
+        entity.wool_color = self.wool_color;
+        entity.dropped_item = self.dropped_item;
+        entity.dropped_count = self.dropped_count;
+        entity
+    }
+
+    pub fn should_persist(&self) -> bool {
+        self.entity_type.is_living()
+            || self.entity_type.is_persistent()
+            || self.entity_type == crate::entity::EntityType::DroppedItem
+    }
+}
+
+
 impl From<&Inventory> for InventoryData {
     fn from(inv: &Inventory) -> Self {
         let (dragged, creative_drag_origin) = match inv.creative_drag_origin {
@@ -1232,4 +1304,27 @@ mod tests {
         assert_eq!(restored.get_block_state(5, 64, 5), 0b0000_1101);
         assert_eq!(restored.get_block(5, 64, 5), BlockType::OakDoor);
     }
+
+    #[test]
+    fn test_entity_save_data_roundtrip() {
+        use crate::entity::{Entity, EntityType};
+        use glam::Vec3;
+
+        let mut entity = Entity::new(42, EntityType::Pig, Vec3::new(10.5, 64.0, -15.2));
+        entity.health = 7.5;
+        entity.age = -120.0;
+        entity.has_wool = true;
+
+        let save_data = EntitySaveData::from(&entity);
+        assert_eq!(save_data.entity_type, EntityType::Pig);
+        assert_eq!(save_data.position, [10.5, 64.0, -15.2]);
+
+        let restored = save_data.to_entity(100);
+        assert_eq!(restored.id, 100);
+        assert_eq!(restored.entity_type, EntityType::Pig);
+        assert_eq!(restored.position, Vec3::new(10.5, 64.0, -15.2));
+        assert_eq!(restored.health, 7.5);
+        assert_eq!(restored.age, -120.0);
+    }
 }
+
