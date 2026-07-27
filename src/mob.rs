@@ -904,7 +904,12 @@ mod tests {
         let chunk = crate::world::Chunk::new(0, 0);
         chunk_manager.chunks.insert((0, 0), chunk);
 
-        let zombie_pos = Vec3::new(8.0, 64.0, 8.0);
+        let highest_y = (0..crate::world::CHUNK_HEIGHT as i32)
+            .rev()
+            .find(|&y| chunk_manager.get_block(8, y, 8).properties().is_solid)
+            .unwrap_or(64);
+
+        let zombie_pos = Vec3::new(8.0, (highest_y + 1) as f32, 8.0);
         // Exposed to sky (15), sky_light_level = 15, not raining, not in water
         assert!(is_under_sun(&chunk_manager, zombie_pos, 15, false));
         // Raining -> should not be exposed to sun
