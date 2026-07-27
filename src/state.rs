@@ -38,11 +38,23 @@ const REMOTE_TELEPORT_DISTANCE: f32 = 8.0;
 const REMOTE_TELEPORT_GAP: f64 = 0.5;
 const CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 const MELEE_REACH: f32 = 4.0;
+const BLOCK_REACH: f32 = 5.0;
+const BLOCK_REACH_TOLERANCE: f32 = 1.5;
 const PAUSE_WEATHER_VOLUME_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.46, -0.36];
 const PAUSE_QUIT_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.60, -0.50];
 
 fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
     x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
+}
+
+fn block_within_reach(player_pos: Vec3, block_pos: (i32, i32, i32)) -> bool {
+    let block_center = Vec3::new(
+        block_pos.0 as f32 + 0.5,
+        block_pos.1 as f32 + 0.5,
+        block_pos.2 as f32 + 0.5,
+    );
+    let limit = BLOCK_REACH + BLOCK_REACH_TOLERANCE;
+    (player_pos - block_center).length() <= limit
 }
 
 fn terrain_translucent_cull_mode() -> Option<wgpu::Face> {
@@ -12166,5 +12178,71 @@ mod debug_tests {
         // Ground is Air now, flower above must be destroyed
         assert_eq!(manager.get_block(2, 11, 2), BlockType::Air);
         assert_eq!(drops, vec![((2, 11, 2), BlockType::Dandelion)]);
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    #[test]
+    fn block_at_exact_reach_distance_passes() {
+        let block_center = Vec3::new(0.5, 0.5, 0.5);
+        let player_pos = block_center + Vec3::new(BLOCK_REACH, 0.0, 0.0);
+        assert!(block_within_reach(player_pos, (0, 0, 0)));
+    }
+
+    #[test]
+    fn block_within_tolerance_passes() {
+        let block_center = Vec3::new(0.5, 0.5, 0.5);
+        let player_pos = block_center + Vec3::new(6.0, 0.0, 0.0);
+        assert!(block_within_reach(player_pos, (0, 0, 0)));
+    }
+
+    #[test]
+    fn block_at_tolerance_boundary_passes() {
+        let block_center = Vec3::new(0.5, 0.5, 0.5);
+        let limit = BLOCK_REACH + BLOCK_REACH_TOLERANCE;
+        let player_pos = block_center + Vec3::new(limit, 0.0, 0.0);
+        assert!(block_within_reach(player_pos, (0, 0, 0)));
+    }
+
+    #[test]
+    fn block_just_beyond_tolerance_is_rejected() {
+        let block_center = Vec3::new(0.5, 0.5, 0.5);
+        let player_pos = block_center + Vec3::new(6.51, 0.0, 0.0);
+        assert!(!block_within_reach(player_pos, (0, 0, 0)));
+    }
+
+    #[test]
+    fn block_far_away_is_rejected() {
+        let block_center = Vec3::new(0.5, 0.5, 0.5);
+        let player_pos = block_center + Vec3::new(10.0, 0.0, 0.0);
+        assert!(!block_within_reach(player_pos, (0, 0, 0)));
+    }
+
+    #[test]
+    fn diagonal_neighbor_block_passes() {
+        let player_pos = Vec3::new(0.5, 0.5, 0.5);
+        assert!(block_within_reach(player_pos, (1, 1, 1)));
+    }
+
+    #[test]
+    fn block_center_uses_half_offset() {
+        let player_pos = Vec3::new(10.5, 0.5, 0.5);
+        assert!(block_within_reach(player_pos, (5, 0, 0)));
+    }
+
+    #[test]
+    fn same_position_block_passes() {
+        let player_pos = Vec3::new(0.5, 0.5, 0.5);
+        assert!(block_within_reach(player_pos, (0, 0, 0)));
+    }
+
+    #[test]
+    fn negative_coordinates_use_block_center_offset() {
+        let block_center = Vec3::new(-4.5, 0.5, -4.5);
+        let player_pos = block_center + Vec3::new(0.0, 0.0, 6.0);
+        assert!(block_within_reach(player_pos, (-5, 0, -5)));
     }
 }
