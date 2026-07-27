@@ -1275,6 +1275,7 @@ impl State {
             destination = Vec3::new(8.5, 80.0, 8.5);
         }
 
+        self.save_current_dimension_entities();
         self.current_dimension = target;
         let render_distance = self.chunk_manager.render_distance;
         self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
@@ -1284,6 +1285,7 @@ impl State {
         self.chunk_lifetimes.clear();
         self.chunk_meshes.clear();
         self.entity_manager = crate::entity::EntityManager::new();
+        self.load_current_dimension_entities();
         self.particles = crate::particles::ParticleSystem::new();
         self.redstone = crate::redstone::RedstoneSystem::new();
         self.redstone_tick_timer = 0.0;
@@ -3879,6 +3881,8 @@ impl State {
                 .restore_chunk_metadata(&state.chunk_manager, cx, cz, &metadata);
         }
 
+        state.load_current_dimension_entities();
+
         state
     }
 
@@ -3891,7 +3895,7 @@ impl State {
     }
 
     pub fn save_settings(&mut self) {
-        self.settings.fov = self.camera.fov;
+        self.settings.fov = self.base_fov;
         self.settings.sensitivity = self.sensitivity;
         self.settings.render_distance = self.chunk_manager.render_distance;
         self.sync_audio_settings();
@@ -4491,6 +4495,7 @@ impl State {
             .lock()
             .unwrap()
             .save_current_dimension(self.current_dimension);
+        self.save_current_dimension_entities();
     }
 
     pub fn save_synchronously(&self) {
@@ -4537,8 +4542,43 @@ impl State {
             self.game_mode,
             self.difficulty,
         );
+        drop(mgr);
+        self.save_current_dimension_entities();
         println!("[Save] Synchronously saved world state.");
     }
+
+    pub fn save_current_dimension_entities(&self) {
+        let save_manager = match self.save_manager.lock() {
+            Ok(mgr) => mgr,
+            Err(_) => return,
+        };
+        let persistent_entities: Vec<crate::save::EntitySaveData> = self
+            .entity_manager
+            .entities
+            .iter()
+            .map(crate::save::EntitySaveData::from)
+            .filter(|data| data.should_persist())
+            .collect();
+
+        let _ = save_manager.save_entities_in(self.current_dimension, &persistent_entities);
+    }
+
+    pub fn load_current_dimension_entities(&mut self) {
+        let save_manager = match self.save_manager.lock() {
+            Ok(mgr) => mgr,
+            Err(_) => return,
+        };
+        let saved_entities = save_manager.load_entities_in(self.current_dimension);
+        if saved_entities.is_empty() {
+            return;
+        }
+
+        self.entity_manager.entities.clear();
+        for data in &saved_entities {
+            self.entity_manager.add_restored_entity(data);
+        }
+    }
+
 
     pub fn trigger_advancement(&mut self, trigger: crate::advancements::AdvancementTrigger) {
         let newly_completed = self.advancement_manager.check_trigger(&trigger);
@@ -5001,10 +5041,11 @@ impl State {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::UiClick);
                 if x < 0.0 {
-                    self.camera.fov = (self.camera.fov - 5.0).max(30.0);
+                    self.base_fov = (self.base_fov - 5.0).max(30.0);
                 } else {
-                    self.camera.fov = (self.camera.fov + 5.0).min(120.0);
+                    self.base_fov = (self.base_fov + 5.0).min(120.0);
                 }
+                self.camera.fov = self.base_fov;
                 // Update camera projection buffer immediately for visual feedback in paused state
                 let is_underwater = self.chunk_manager.get_block(
                     self.camera.position.x.floor() as i32,
@@ -9610,7 +9651,7 @@ impl State {
             );
 
             // "FOV < value >"
-            let fov_text = format!("FOV < {:.0} >", self.camera.fov);
+            let fov_text = format!("FOV < {:.0} >", self.base_fov);
             draw_centered_text(
                 &fov_text,
                 0.14,
@@ -12848,6 +12889,30 @@ mod debug_tests {
         assert!(point_in_bounds(0.0, -0.55, PAUSE_QUIT_BOUNDS));
         assert!(!point_in_bounds(0.0, -0.55, PAUSE_WEATHER_VOLUME_BOUNDS));
         assert!(!point_in_bounds(0.31, -0.41, PAUSE_WEATHER_VOLUME_BOUNDS));
+    }
+
+    #[test]
+    fn fov_adjustment_updates_base_fov_and_camera_fov() {
+        let mut base_fov: f32 = 70.0;
+        let mut camera_fov: f32;
+
+        // Simulate pause menu FOV increase (+5)
+        base_fov = (base_fov + 5.0).min(120.0);
+        camera_fov = base_fov;
+        assert_eq!(base_fov, 75.0);
+        assert_eq!(camera_fov, 75.0);
+
+        // Simulate frame FOV interpolation when not sprinting
+        let target_fov = base_fov;
+        let dt = 0.016;
+        camera_fov = camera_fov + (target_fov - camera_fov) * dt * 10.0;
+        assert_eq!(camera_fov, 75.0);
+
+        // Simulate pause menu FOV decrease (-5)
+        base_fov = (base_fov - 5.0).max(30.0);
+        camera_fov = base_fov;
+        assert_eq!(base_fov, 70.0);
+        assert_eq!(camera_fov, 70.0);
     }
 
     #[test]

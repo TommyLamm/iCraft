@@ -406,6 +406,13 @@ impl EntityManager {
         id
     }
 
+    pub fn add_restored_entity(&mut self, data: &crate::save::EntitySaveData) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.entities.push(data.to_entity(id));
+        id
+    }
+
     pub fn count_passive(&self) -> usize {
         self.entities
             .iter()
