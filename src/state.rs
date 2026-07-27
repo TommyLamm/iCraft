@@ -13,6 +13,7 @@ use crate::inventory::{
 use crate::menu::{Difficulty, GameSettings, MultiplayerRole, WorldLaunch};
 use crate::physics::{
     block_placement_decision, player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB,
+    PLAYER_STANDING_HEIGHT,
 };
 use crate::player::{DamageSource, PlayerState};
 use crate::world::{Biome, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
@@ -55,6 +56,24 @@ fn block_within_reach(player_pos: Vec3, block_pos: (i32, i32, i32)) -> bool {
     );
     let limit = BLOCK_REACH + BLOCK_REACH_TOLERANCE;
     (player_pos - block_center).length() <= limit
+}
+
+fn validate_remote_block_request(
+    remote_players: &std::collections::HashMap<
+        crate::network::protocol::PlayerId,
+        RemotePlayerState,
+    >,
+    requester: crate::network::protocol::PlayerId,
+    block_pos: (i32, i32, i32),
+) -> bool {
+    let Some(remote) = remote_players.get(&requester) else {
+        return false;
+    };
+    let Some(snapshot) = remote.snapshots.back() else {
+        return false;
+    };
+    let player_center = snapshot.position + Vec3::new(0.0, PLAYER_STANDING_HEIGHT * 0.5, 0.0);
+    block_within_reach(player_center, block_pos)
 }
 
 fn terrain_translucent_cull_mode() -> Option<wgpu::Face> {
@@ -6345,7 +6364,8 @@ impl State {
             Some(b) => b,
             None => return,
         };
-        if !self.remote_players.contains_key(&requester) || !self.can_place_block_at(x, y, z, block)
+        if !validate_remote_block_request(&self.remote_players, requester, (x, y, z))
+            || !self.can_place_block_at(x, y, z, block)
         {
             return;
         }
@@ -12244,5 +12264,96 @@ mod reach_tests {
         let block_center = Vec3::new(-4.5, 0.5, -4.5);
         let player_pos = block_center + Vec3::new(0.0, 0.0, 6.0);
         assert!(block_within_reach(player_pos, (-5, 0, -5)));
+    }
+
+    #[test]
+    fn validate_remote_block_request_close_snapshot_passes() {
+        let mut remote_players = std::collections::HashMap::new();
+        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
+        remote.snapshots.push_back(PlayerSnapshot {
+            position: Vec3::new(0.0, 60.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            time: 0.0,
+            sequence: 1,
+            sender_time_millis: 100,
+        });
+        remote_players.insert(7, remote);
+        // Player center = (0.0, 60.9, 0.0); block center (0.5, 60.5, 2.5) -> distance approx 2.58 <= 6.5
+        assert!(validate_remote_block_request(
+            &remote_players,
+            7,
+            (0, 60, 2)
+        ));
+    }
+
+    #[test]
+    fn validate_remote_block_request_far_snapshot_rejected() {
+        let mut remote_players = std::collections::HashMap::new();
+        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
+        remote.snapshots.push_back(PlayerSnapshot {
+            position: Vec3::new(0.0, 60.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            time: 0.0,
+            sequence: 1,
+            sender_time_millis: 100,
+        });
+        remote_players.insert(7, remote);
+        // Target block at (10, 60, 0) -> distance > 6.5
+        assert!(!validate_remote_block_request(
+            &remote_players,
+            7,
+            (10, 60, 0)
+        ));
+    }
+
+    #[test]
+    fn validate_remote_block_request_empty_snapshots_rejected() {
+        let mut remote_players = std::collections::HashMap::new();
+        let remote = RemotePlayerState::new(1, "Alex".to_string());
+        remote_players.insert(7, remote);
+        assert!(!validate_remote_block_request(
+            &remote_players,
+            7,
+            (0, 60, 0)
+        ));
+    }
+
+    #[test]
+    fn validate_remote_block_request_unknown_requester_rejected() {
+        let remote_players = std::collections::HashMap::new();
+        assert!(!validate_remote_block_request(
+            &remote_players,
+            99,
+            (0, 60, 0)
+        ));
+    }
+
+    #[test]
+    fn validate_remote_block_request_destroy_close_passes_and_far_rejected() {
+        let mut remote_players = std::collections::HashMap::new();
+        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
+        remote.snapshots.push_back(PlayerSnapshot {
+            position: Vec3::new(0.0, 60.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            time: 0.0,
+            sequence: 1,
+            sender_time_millis: 100,
+        });
+        remote_players.insert(7, remote);
+        // Destroying Air block close by -> true
+        assert!(validate_remote_block_request(
+            &remote_players,
+            7,
+            (0, 60, 1)
+        ));
+        // Destroying Air block far away -> false
+        assert!(!validate_remote_block_request(
+            &remote_players,
+            7,
+            (0, 60, 20)
+        ));
     }
 }

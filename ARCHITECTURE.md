@@ -35,10 +35,11 @@ the host resolves authenticated player IDs to roster usernames before reliably
 rebroadcasting chat. Host-authoritative block mutations, client-side
 lighting/remeshing including diagonal halo invalidation, deferred changes for
 unloaded chunks, join-time chunk catch-up, and authoritative world-time/weather
-phase plus lightning event correction are integrated. Solid
-placement is preflighted locally and revalidated by the Host against its local
-player plus every remote player's newest authoritative snapshot; the server
-preserves the authenticated requester ID, and rejected placement has no world,
+phase plus lightning event correction are integrated. Solid placement is preflighted locally and revalidated by the Host against its local
+player plus every remote player's newest authoritative snapshot; remote block requests
+are verified against the requester's latest authoritative snapshot using a 5.0 block reach
+plus 1.5 block tolerance budget (maximum 6.5 blocks center-to-center); the server
+preserves the authenticated requester ID, and rejected placement or destruction has no world,
 inventory, sound, action, or broadcast side effects. Client
 connection loss freezes input, removes remote entities, and presents a safe
 return-to-menu overlay without saving the client's transient copy.

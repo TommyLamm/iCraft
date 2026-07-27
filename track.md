@@ -18,6 +18,7 @@
 | 8 | [Add a Creative item catalog on `E`](plans/implementation/08_creative_inventory.md) | Complete | `f5b69f8` | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (238 unit + 1 integration); exact catalog/partition, virtual supply/no-op, hotbar/cursor safety, wheel routing, SplashPotion metadata, and multi-aspect layout regressions |
 | 9 | [Stop camera rotation while inventory is open](plans/implementation/09_inventory_camera_lock.md) | Complete | `1343834` | `cargo fmt --all -- --check`; `cargo check --release`; `cargo test --release` (243 unit + 1 integration); seven-blocker predicate, disabled/enabled mouse deltas, sensitivity/pitch clamp, UI NDC, E repeat, and Creative wheel regression |
 | 10 | [Last: find, list, and fix latent bugs](plans/implementation/10_bug_audit.md) | Closed current pass | `26102a2` | 30 candidates listed; 26 fixed and regression-tested; 4 follow-ups documented; `cargo fmt`; `cargo test` (304 unit + 1 integration); `cargo check --release`; `git diff --check` |
+| 11 | [Host 遠端方塊請求 Reach 驗證](plans/implementation/track_11_reach_validation.md) | Complete | `fix(network): validate reach for remote block requests` | `cargo fmt -- --check`; `cargo check --release`; `cargo test --release` (315 unit + 1 integration); reach boundary, snapshot existence, air destruction, and authenticated-requester regressions |
 
 ## Working notes
 
@@ -103,7 +104,7 @@
   Follow-up G3 (redstone component metadata persistence across chunk save/unload/reload
   via ChunkSaveData sidecar) has been completed and verified. Remaining follow-ups
   have been broken into standalone implementation plans:
-  - N3 (reach validation) -> plan 11
+  - N3 (reach validation) -> Task 11 (completed: verified reach limit 5.0 + 1.5 tolerance, snapshot existence check, air destruction reach enforcement, unit & integration tests)
   - G1 (authoritative block action-result) -> plan 12
   - W1 (door/trapdoor block-state) -> plan 13
 

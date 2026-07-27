@@ -37,7 +37,7 @@
 | C3 | 流體變更未完整更新 sky/block light | 已修 |
 | N1 | 多 player pose 共用 mailbox，玩家 ID 會互相覆蓋 | 已修 |
 | N2 | join/leave 可靠佇列滿時 roster 可能遺失 | 已修 |
-| N3 | host 對遠端方塊請求缺 reach 驗證 | 後續項 |
+| N3 | host 對遠端方塊請求缺 reach 驗證 | 已修（Task 11） |
 | I1 | `add_stack` 部分寫入後回傳失敗，呼叫端可能丟 remainder | 已修 |
 | I2 | 相同 Item 但 metadata 不同仍可能 merge | 已修 |
 | I3 | 真實拖曳游標在關閉時可能遺失 | 已修 |

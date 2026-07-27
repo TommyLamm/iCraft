@@ -341,6 +341,10 @@ P3 [█████████░] 88.9%
   - 關鍵決策：採用單線程每幀漸進式（限額）加載/卸載，優化了跨 Chunk 邊界時的地形生成卡頓。
 - 📋 建立專案計畫，拆分 P0~P3 共 30 個任務
 - 📋 建立進度追蹤文件
+- ✅ 完成任務 Task 11：Host 遠端方塊請求 Reach 驗證
+  - 修改文件：`src/state.rs`, `ARCHITECTURE.md`, `track.md`, `plans/progress.md`, `plans/implementation/10_bug_audit.md`
+  - 關鍵決策：Host 處理 `set_block_and_broadcast` 之前驗證 requester 最新權威位置與目標方塊距離是否在 `BLOCK_REACH` (5.0) + `BLOCK_REACH_TOLERANCE` (1.5) 即 6.5 格以內，無快照或超標請求直接拒絕。
+
 
 <!--
 ### YYYY-MM-DD

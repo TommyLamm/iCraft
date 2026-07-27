@@ -233,9 +233,7 @@ impl GameSettings {
             let value = value.trim();
             match key.trim() {
                 "fov" => self.fov = value.parse().unwrap_or(self.fov),
-                "sensitivity" => {
-                    self.sensitivity = value.parse().unwrap_or(self.sensitivity)
-                }
+                "sensitivity" => self.sensitivity = value.parse().unwrap_or(self.sensitivity),
                 "render_distance" => {
                     self.render_distance = value.parse().unwrap_or(self.render_distance)
                 }
@@ -244,12 +242,8 @@ impl GameSettings {
                 "volume" | "master_volume" => {
                     self.master_volume = value.parse().unwrap_or(self.master_volume)
                 }
-                "music_volume" => {
-                    self.music_volume = value.parse().unwrap_or(self.music_volume)
-                }
-                "sound_volume" => {
-                    self.sound_volume = value.parse().unwrap_or(self.sound_volume)
-                }
+                "music_volume" => self.music_volume = value.parse().unwrap_or(self.music_volume),
+                "sound_volume" => self.sound_volume = value.parse().unwrap_or(self.sound_volume),
                 "weather_volume" => {
                     self.weather_volume = value.parse().unwrap_or(self.weather_volume)
                 }
