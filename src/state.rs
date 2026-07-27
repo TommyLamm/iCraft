@@ -5737,6 +5737,10 @@ impl State {
         // Update mobs
         self.update_player_projectiles(dt);
         let authoritative = self.is_authoritative();
+        let is_raining = matches!(
+            self.weather.current,
+            crate::weather::Weather::Rain | crate::weather::Weather::Thunder
+        );
         let exploded_blocks = crate::mob::update_mobs(
             &mut self.entity_manager,
             &mut self.chunk_manager,
@@ -5745,6 +5749,7 @@ impl State {
             &mut self.player_state,
             self.game_mode,
             self.world_time.sky_light_level(),
+            is_raining,
             dt,
             &mut self.audio_manager,
             right,
@@ -8644,6 +8649,30 @@ impl State {
                     self.refresh_workstations();
                 }
             }
+        } else if let Some(dragged) = self.inventory.dragged {
+            let aspect = self.size.width as f32 / self.size.height as f32;
+            if creative_catalog
+                && is_left
+                && creative_scroll_track_rect(aspect).contains(mouse_x, mouse_y)
+            {
+                return;
+            }
+            if is_left {
+                self.throw_dropped_item(dragged.item, dragged.count);
+                self.inventory.dragged = None;
+                self.inventory.creative_drag_origin = None;
+            } else {
+                self.throw_dropped_item(dragged.item, 1);
+                if dragged.count > 1 {
+                    self.inventory.dragged = Some(ItemStack {
+                        count: dragged.count - 1,
+                        ..dragged
+                    });
+                } else {
+                    self.inventory.dragged = None;
+                    self.inventory.creative_drag_origin = None;
+                }
+            }
         }
     }
 
@@ -8753,9 +8782,21 @@ impl State {
             None => Vec::new(),
         });
 
-        if !self.inventory.try_store_for_close(&returning_items) {
-            self.sync_cursor_mode();
-            return false;
+        for stack in returning_items {
+            if let Some(remainder) = self.inventory.add_stack(stack) {
+                self.throw_dropped_item(remainder.item, remainder.count);
+            }
+        }
+
+        if self.inventory.creative_drag_origin == Some(crate::inventory::CreativeDragOrigin::Catalog) {
+            self.inventory.dragged = None;
+            self.inventory.creative_drag_origin = None;
+        } else if let Some(dragged) = self.inventory.dragged {
+            if let Some(remainder) = self.inventory.add_stack(dragged) {
+                self.throw_dropped_item(remainder.item, remainder.count);
+            }
+            self.inventory.dragged = None;
+            self.inventory.creative_drag_origin = None;
         }
 
         self.inventory.craft_input.fill(None);
@@ -11372,19 +11413,19 @@ impl State {
             }
 
             if !self.is_paused {
-                // 1. Draw Textured UI (block thumbnails)
+                // 1. Draw Colored UI (hotbar/slot backgrounds)
+                if self.num_ui_vertices > 0 {
+                    render_pass.set_pipeline(&self.ui_pipeline);
+                    render_pass.set_vertex_buffer(0, self.ui_vertex_buffer.slice(..));
+                    render_pass.draw(0..self.num_ui_vertices, 0..1);
+                }
+
+                // 2. Draw Textured UI (block/item thumbnails on top of backgrounds)
                 if self.num_ui_textured_vertices > 0 {
                     render_pass.set_pipeline(&self.ui_textured_pipeline);
                     render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     render_pass.set_vertex_buffer(0, self.ui_textured_vertex_buffer.slice(..));
                     render_pass.draw(0..self.num_ui_textured_vertices, 0..1);
-                }
-
-                // 2. Draw Colored UI (hotbar background)
-                if self.num_ui_vertices > 0 {
-                    render_pass.set_pipeline(&self.ui_pipeline);
-                    render_pass.set_vertex_buffer(0, self.ui_vertex_buffer.slice(..));
-                    render_pass.draw(0..self.num_ui_vertices, 0..1);
                 }
 
                 // 3. Draw Crosshair
@@ -11838,7 +11879,7 @@ fn add_char_lines(
         });
     };
 
-    match c {
+    match c.to_ascii_uppercase() {
         'R' => {
             add_line(x0, y0, x0, y1);
             add_line(x0, y1, x1, y1);
@@ -12616,7 +12657,7 @@ mod debug_tests {
     #[test]
     fn debug_overlay_font_supports_every_required_character() {
         let mut vertices = Vec::new();
-        for character in ['B', 'K', 'W', 'X', 'Z', '/', '_'] {
+        for character in ['B', 'K', 'W', 'X', 'Z', 'b', 'k', 'w', 'x', 'z', '/', '_'] {
             let before = vertices.len();
             add_char_lines(character, 0.0, 0.0, 0.1, 0.2, [1.0; 4], &mut vertices);
             assert!(vertices.len() > before, "missing glyph for {character}");
@@ -13072,5 +13113,24 @@ mod reach_tests {
         let rewards =
             calculate_block_break_rewards(BlockType::Stone, pos, Some(&pick), GameMode::Creative);
         assert!(rewards.drops.is_empty());
+    }
+
+    #[test]
+    fn inventory_click_outside_and_close_overflow_tests() {
+        let mut inv = Inventory::new();
+        inv.dragged = Some(ItemStack::new(Item::Dirt, 64));
+        assert_eq!(inv.dragged.unwrap().count, 64);
+
+        // Fill inventory completely
+        for slot in inv.hotbar.iter_mut() {
+            *slot = Some(ItemStack::new(Item::Stone, 64));
+        }
+        for slot in inv.main.iter_mut() {
+            *slot = Some(ItemStack::new(Item::Stone, 64));
+        }
+
+        // add_stack with full inventory returns remainder
+        let remainder = inv.add_stack(ItemStack::new(Item::Dirt, 64));
+        assert_eq!(remainder, Some(ItemStack::new(Item::Dirt, 64)));
     }
 }

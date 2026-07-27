@@ -169,13 +169,27 @@ pub fn explode(
         .collect()
 }
 
-fn is_under_sun(chunk_manager: &ChunkManager, pos: Vec3, sky_light_level: u8) -> bool {
-    if sky_light_level <= 10 {
+fn is_under_sun(
+    chunk_manager: &ChunkManager,
+    pos: Vec3,
+    sky_light_level: u8,
+    is_raining: bool,
+) -> bool {
+    if is_raining || sky_light_level <= 10 {
         return false;
     }
     let mx = pos.x.floor() as i32;
     let my = pos.y.floor() as i32;
     let mz = pos.z.floor() as i32;
+
+    // Check if foot or eye block is water
+    let feet_block = chunk_manager.get_block(mx, my, mz);
+    let head_block = chunk_manager.get_block(mx, my + 1, mz);
+    if feet_block == crate::world::BlockType::Water
+        || head_block == crate::world::BlockType::Water
+    {
+        return false;
+    }
 
     if chunk_manager.get_sky_light(mx, my, mz) < 12 {
         return false;
@@ -278,6 +292,7 @@ pub fn update_mobs(
     player_state: &mut PlayerState,
     game_mode: GameMode,
     sky_light_level: u8,
+    is_raining: bool,
     dt: f32,
     audio_manager: &mut crate::audio::AudioManager,
     listener_right: Vec3,
@@ -332,6 +347,26 @@ pub fn update_mobs(
         // Apply physical update
         entity.update_physics(dt, chunk_manager);
 
+        let is_in_water = {
+            let mx = entity.position.x.floor() as i32;
+            let my = entity.position.y.floor() as i32;
+            let mz = entity.position.z.floor() as i32;
+            let feet_block = chunk_manager.get_block(mx, my, mz);
+            let head_block = chunk_manager.get_block(mx, my + 1, mz);
+            feet_block == crate::world::BlockType::Water
+                || head_block == crate::world::BlockType::Water
+        };
+
+        if is_in_water || is_raining {
+            entity.fire_aspect_timer = 0.0;
+            entity.burn_timer = 0.0;
+            entity.burn_damage_timer = 0.0;
+        } else if (entity.entity_type == EntityType::Zombie || entity.entity_type == EntityType::Skeleton)
+            && is_under_sun(chunk_manager, entity.position, sky_light_level, is_raining)
+        {
+            entity.fire_aspect_timer = entity.fire_aspect_timer.max(8.0);
+        }
+
         if entity.fire_aspect_timer > 0.0 {
             entity.fire_aspect_timer = (entity.fire_aspect_timer - dt).max(0.0);
             entity.burn_damage_timer += dt;
@@ -361,19 +396,6 @@ pub fn update_mobs(
                 entity.health = -1.0; // Destroy arrow
             }
             continue;
-        }
-
-        // Sunlight burning logic
-        if (entity.entity_type == EntityType::Zombie || entity.entity_type == EntityType::Skeleton)
-            && is_under_sun(chunk_manager, entity.position, sky_light_level)
-        {
-            entity.burn_timer += dt;
-            if entity.burn_timer >= 1.0 {
-                entity.burn_timer = 0.0;
-                entity.health -= 1.0; // Burn damage
-            }
-        } else {
-            entity.burn_timer = 0.0;
         }
 
         // Dropped items only need physics; skip all hostile AI.
@@ -775,6 +797,7 @@ mod tests {
                 &mut player_state,
                 GameMode::Survival,
                 0,
+                false,
                 0.0,
                 &mut audio_manager,
                 Vec3::X,
@@ -814,6 +837,7 @@ mod tests {
             &mut player_state,
             GameMode::Creative,
             15,
+            false,
             0.1,
             &mut audio_manager,
             Vec3::X,
@@ -857,6 +881,7 @@ mod tests {
             &mut player_state,
             GameMode::Creative,
             15,
+            false,
             0.1,
             &mut audio_manager,
             Vec3::X,
@@ -872,4 +897,15 @@ mod tests {
             .unwrap();
         assert_eq!(remote.velocity, expected_velocity);
     }
+
+    #[test]
+    fn test_daylight_exposure_and_water_extinguish() {
+        let chunk_manager = ChunkManager::new(1);
+        let zombie_pos = Vec3::new(8.0, 64.0, 8.0);
+        // Exposed to sky (15), sky_light_level = 15, not raining, not in water
+        assert!(is_under_sun(&chunk_manager, zombie_pos, 15, false));
+        // Raining -> should not be exposed to sun
+        assert!(!is_under_sun(&chunk_manager, zombie_pos, 15, true));
+    }
 }
+
