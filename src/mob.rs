@@ -632,10 +632,57 @@ pub fn update_mobs(
         }
     }
 
+    // Handle entity death drops and sound effects for dying living entities
+    let mut items_to_drop = Vec::new();
+    let mut death_sounds = Vec::new();
+
+    for entity in &entity_manager.entities {
+        if entity.health <= 0.0
+            && entity.entity_type.is_living()
+            && entity.entity_type != EntityType::RemotePlayer
+        {
+            death_sounds.push(entity.position);
+            match entity.entity_type {
+                EntityType::Zombie => {
+                    items_to_drop.push((crate::inventory::Item::RottenFlesh, entity.position));
+                }
+                EntityType::Skeleton => {
+                    items_to_drop.push((crate::inventory::Item::Bone, entity.position));
+                    items_to_drop.push((crate::inventory::Item::Arrow, entity.position));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
+    for death_pos in death_sounds {
+        audio_manager.play_sound_3d(
+            crate::audio::SoundId::PlayerDeath,
+            death_pos,
+            listener_pos,
+            listener_right,
+        );
+    }
+
     // Clean up dead entities (health < 0 or health == 0)
     entity_manager
         .entities
         .retain(should_retain_after_health_cleanup);
+
+    // Spawn dropped items for dead entities
+    for (item, pos) in items_to_drop {
+        let id = entity_manager.spawn(EntityType::DroppedItem, pos);
+        if let Some(drop) = entity_manager
+            .entities
+            .iter_mut()
+            .find(|e| e.id == id)
+        {
+            drop.dropped_item = Some(item);
+            drop.velocity = Vec3::new(0.0, 2.0, 0.0);
+            drop.pickup_cooldown = 0.5;
+        }
+    }
 
     blocks_removed
 }
@@ -914,6 +961,49 @@ mod tests {
         assert!(is_under_sun(&chunk_manager, zombie_pos, 15, false));
         // Raining -> should not be exposed to sun
         assert!(!is_under_sun(&chunk_manager, zombie_pos, 15, true));
+    }
+
+    #[test]
+    fn test_mob_burn_death_drops() {
+        let mut entity_manager = EntityManager::new();
+        let zombie_id = entity_manager.spawn(EntityType::Zombie, Vec3::new(0.0, 64.0, 0.0));
+        if let Some(zombie) = entity_manager.entities.iter_mut().find(|e| e.id == zombie_id) {
+            zombie.health = 0.0;
+            zombie.fire_aspect_timer = 1.0;
+        }
+
+        let mut chunk_manager = ChunkManager::new(1);
+        let mut chunk_meshes = std::collections::HashMap::new();
+        let mut player_physics = PlayerPhysics::new(Vec3::ZERO);
+        let mut player_state = PlayerState::new();
+        let mut audio_manager = crate::audio::AudioManager::new();
+
+        update_mobs(
+            &mut entity_manager,
+            &mut chunk_manager,
+            &mut chunk_meshes,
+            &mut player_physics,
+            &mut player_state,
+            GameMode::Survival,
+            15,
+            false,
+            0.1,
+            &mut audio_manager,
+            Vec3::X,
+            false,
+            1.0,
+            true,
+        );
+
+        // Zombie should be dead and cleaned up
+        assert!(!entity_manager.entities.iter().any(|e| e.id == zombie_id));
+
+        // Dropped item RottenFlesh should exist
+        let dropped_flesh = entity_manager.entities.iter().find(|e| {
+            e.entity_type == EntityType::DroppedItem
+                && e.dropped_item == Some(crate::inventory::Item::RottenFlesh)
+        });
+        assert!(dropped_flesh.is_some());
     }
 }
 
