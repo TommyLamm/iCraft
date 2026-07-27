@@ -49,6 +49,7 @@ pub enum ServerToHost {
         y: i32,
         z: i32,
         block: u32,
+        state: u8,
     },
     ClientBlockAction {
         id: PlayerId,
@@ -72,6 +73,7 @@ pub enum HostToServer {
         y: i32,
         z: i32,
         block: u32,
+        state: u8,
     },
     SendBlockActionResult {
         to: PlayerId,
@@ -86,6 +88,7 @@ pub enum HostToServer {
         cx: i32,
         cz: i32,
         blocks: Vec<u8>,
+        block_states: Vec<u8>,
         to: PlayerId,
     },
     BroadcastTimeSync {
@@ -481,9 +484,9 @@ impl NetworkServer {
                                 break;
                             }
                         }
-                        Ok(Ok(Packet::BlockChange { x, y, z, block, .. })) => {
+                        Ok(Ok(Packet::BlockChange { x, y, z, block, state, .. })) => {
                             if server_to_host.send(ServerToHost::ClientBlockChange {
-                                id, x, y, z, block,
+                                id, x, y, z, block, state,
                             }).is_err() {
                                 disconnect_reason = "host channel closed (ClientBlockChange)".into();
                                 break;
@@ -615,13 +618,20 @@ impl NetworkServer {
                 | HostToServer::BroadcastLightningStrike { .. }
         );
         let (packet, recipient) = match command {
-            HostToServer::BroadcastBlockChange { x, y, z, block } => (
+            HostToServer::BroadcastBlockChange {
+                x,
+                y,
+                z,
+                block,
+                state,
+            } => (
                 Packet::BlockChange {
                     protocol_version: PROTOCOL_VERSION,
                     x,
                     y,
                     z,
                     block,
+                    state,
                 },
                 None,
             ),
@@ -645,12 +655,19 @@ impl NetworkServer {
                 },
                 Some(to),
             ),
-            HostToServer::SendChunk { cx, cz, blocks, to } => (
+            HostToServer::SendChunk {
+                cx,
+                cz,
+                blocks,
+                block_states,
+                to,
+            } => (
                 Packet::ChunkData {
                     protocol_version: PROTOCOL_VERSION,
                     cx,
                     cz,
                     blocks,
+                    block_states,
                 },
                 Some(to),
             ),
@@ -1019,6 +1036,7 @@ mod tests {
                 y: 80,
                 z: -4,
                 block: 3,
+                state: 0,
             })
             .await
             .unwrap();
@@ -1034,6 +1052,7 @@ mod tests {
                 y: 80,
                 z: -4,
                 block: 3,
+                state: 0,
             } if event_id == id
         ));
 
@@ -1410,6 +1429,7 @@ mod tests {
                 y: 80,
                 z: -3,
                 block: 4,
+                state: 0,
             }),
         )
         .await;

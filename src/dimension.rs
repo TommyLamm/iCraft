@@ -543,6 +543,7 @@ fn finish_chunk(
         block_light,
         heightmap,
         fluid_levels,
+        block_states: Box::new([[[0; 16]; 256]; 16]),
     }
 }
 

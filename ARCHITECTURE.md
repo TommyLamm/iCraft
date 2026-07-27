@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-07-25. This is a navigation map, not a replacement for
+> Last verified: 2026-07-27. This is a navigation map, not a replacement for
 > source code. Read it first, then inspect only the symbols named for the task.
 >
 > Git baseline: branch `master`, commit

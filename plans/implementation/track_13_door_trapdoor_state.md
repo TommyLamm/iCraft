@@ -2,7 +2,7 @@
 
 > 對應計畫：`plans/implementation/13_door_trapdoor_state.md`（Task 10 後續項 W1）
 > 相依：與計畫 12 共用 `PROTOCOL_VERSION` 升 v5 與 `BlockChange`/`ChunkData`（見協調說明）。
-> 狀態：⏳ 待實作
+> 狀態：✅ 已完成
 > 目標：門與活板門擁有正式 facing、half（門頂／底）、hinge（左／右）與開啟狀態，
 > 正確薄板碰撞 AABB 與專用立體模型，取代目前通用 1×1×1 完整 cube。
 > Commit：`feat(blocks): door and trapdoor facing, thin collision, and proper models`

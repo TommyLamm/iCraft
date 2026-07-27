@@ -44,6 +44,7 @@ pub enum ClientToGame {
         y: i32,
         z: i32,
         block: u32,
+        state: u8,
     },
     BlockActionResult {
         x: i32,
@@ -57,6 +58,7 @@ pub enum ClientToGame {
         cx: i32,
         cz: i32,
         blocks: Vec<u8>,
+        block_states: Vec<u8>,
     },
     TimeSync {
         ticks: u64,
@@ -267,11 +269,11 @@ async fn run_client(
                         });
                     }
                     Ok(Packet::PlayerAction { id, action, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerAction { id, action }); }
-                    Ok(Packet::BlockChange { x, y, z, block, .. }) => { let _ = client_to_game.send(ClientToGame::BlockChange { x, y, z, block }); }
+                    Ok(Packet::BlockChange { x, y, z, block, state, .. }) => { let _ = client_to_game.send(ClientToGame::BlockChange { x, y, z, block, state }); }
                     Ok(Packet::BlockActionResult { x, y, z, success, consumed_item, drops, .. }) => {
                         let _ = client_to_game.send(ClientToGame::BlockActionResult { x, y, z, success, consumed_item, drops });
                     }
-                    Ok(Packet::ChunkData { cx, cz, blocks, .. }) => { let _ = client_to_game.send(ClientToGame::ChunkData { cx, cz, blocks }); }
+                    Ok(Packet::ChunkData { cx, cz, blocks, block_states, .. }) => { let _ = client_to_game.send(ClientToGame::ChunkData { cx, cz, blocks, block_states }); }
                     Ok(packet @ Packet::TimeSync { .. })
                     | Ok(packet @ Packet::LightningStrike { .. }) => {
                         if let Some(event) = authoritative_weather_event(&packet) {
@@ -328,7 +330,7 @@ async fn run_client(
                             }
                         }
                         Ok(GameToClient::RequestBlockChange { x, y, z, block }) => {
-                            if writer.send(&Packet::BlockChange { protocol_version: PROTOCOL_VERSION, x, y, z, block }).await.is_err() {
+                            if writer.send(&Packet::BlockChange { protocol_version: PROTOCOL_VERSION, x, y, z, block, state: 0 }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send BlockChange");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
@@ -507,6 +509,7 @@ mod tests {
                 y: 80,
                 z: -9,
                 block: 3,
+                state: 0,
             })
             .unwrap();
         host_tx
@@ -514,6 +517,7 @@ mod tests {
                 cx: -2,
                 cz: 5,
                 blocks: vec![1, 2, 3, 4],
+                block_states: vec![0, 0, 0, 0],
                 to: player_id,
             })
             .unwrap();
@@ -540,12 +544,13 @@ mod tests {
                 x: 7,
                 y: 80,
                 z: -9,
-                block: 3
+                block: 3,
+                state: 0,
             }
         ));
         assert!(matches!(
             wait_for_event(&event_rx),
-            ClientToGame::ChunkData { cx: -2, cz: 5, blocks } if blocks == vec![1, 2, 3, 4]
+            ClientToGame::ChunkData { cx: -2, cz: 5, blocks, block_states: _ } if blocks == vec![1, 2, 3, 4]
         ));
         assert!(matches!(
             wait_for_event(&event_rx),

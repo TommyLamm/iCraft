@@ -703,7 +703,21 @@ impl RedstoneSystem {
                     } else {
                         BlockType::OakDoor
                     };
-                    set_block_record(manager, pos, target, &mut update.mutations);
+                    let is_open = state.signal.power > 0;
+                    let cur_raw = manager.get_block_state(pos.0, pos.1, pos.2);
+                    let mut bstate = crate::world::BlockState::decode(cur_raw);
+                    if bstate.is_open != is_open {
+                        bstate.is_open = is_open;
+                        set_block_record_with_state(
+                            manager,
+                            pos,
+                            target,
+                            bstate.encode(),
+                            &mut update.mutations,
+                        );
+                    } else {
+                        set_block_record(manager, pos, target, &mut update.mutations);
+                    }
                 }
                 BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => {
                     let target = if state.signal.power > 0 {
@@ -711,7 +725,21 @@ impl RedstoneSystem {
                     } else {
                         BlockType::OakTrapdoor
                     };
-                    set_block_record(manager, pos, target, &mut update.mutations);
+                    let is_open = state.signal.power > 0;
+                    let cur_raw = manager.get_block_state(pos.0, pos.1, pos.2);
+                    let mut bstate = crate::world::BlockState::decode(cur_raw);
+                    if bstate.is_open != is_open {
+                        bstate.is_open = is_open;
+                        set_block_record_with_state(
+                            manager,
+                            pos,
+                            target,
+                            bstate.encode(),
+                            &mut update.mutations,
+                        );
+                    } else {
+                        set_block_record(manager, pos, target, &mut update.mutations);
+                    }
                 }
                 BlockType::Piston
                 | BlockType::PistonExtended
@@ -1065,6 +1093,27 @@ fn set_block_record(
     }
 }
 
+fn set_block_record_with_state(
+    manager: &mut ChunkManager,
+    pos: BlockPos,
+    block: BlockType,
+    state: u8,
+    mutations: &mut Vec<BlockMutation>,
+) {
+    let old_block = get_block(manager, pos);
+    let old_state = manager.get_block_state(pos.0, pos.1, pos.2);
+    if old_block == block && old_state == state {
+        return;
+    }
+    manager.set_block(pos.0, pos.1, pos.2, block);
+    manager.set_block_state(pos.0, pos.1, pos.2, state);
+    mutations.push(BlockMutation {
+        pos,
+        old_block,
+        new_block: block,
+    });
+}
+
 fn add(a: BlockPos, b: BlockPos) -> BlockPos {
     (a.0 + b.0, a.1 + b.1, a.2 + b.2)
 }
@@ -1209,6 +1258,51 @@ mod tests {
         assert_eq!(manager.get_block(2, Y, 0), BlockType::PistonExtended);
         assert_eq!(manager.get_block(3, Y, 0), BlockType::Air);
         assert_eq!(manager.get_block(4, Y, 0), BlockType::Stone);
+    }
+
+    #[test]
+    fn door_and_trapdoor_redstone_toggle_preserves_facing_and_updates_open_bit() {
+        use crate::world::BlockState;
+
+        let mut system = RedstoneSystem::new();
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+
+        let initial_state = BlockState {
+            facing: Direction::West,
+            is_top: false,
+            is_right_hinge: true,
+            is_open: false,
+        };
+
+        place(
+            &mut system,
+            &mut manager,
+            0,
+            BlockType::Lever,
+            Direction::South,
+        );
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::RedstoneWire,
+            Direction::East,
+        );
+
+        manager.set_block(2, Y, 0, BlockType::OakDoor);
+        manager.set_block_state(2, Y, 0, initial_state.encode());
+        system.on_block_changed(&manager, (2, Y, 0), Direction::West);
+
+        system.interact(&mut manager, (0, Y, 0));
+        system.tick(&mut manager, &[]);
+
+        assert_eq!(manager.get_block(2, Y, 0), BlockType::OakDoorOpen);
+        let toggled_raw = manager.get_block_state(2, Y, 0);
+        let toggled_state = BlockState::decode(toggled_raw);
+        assert_eq!(toggled_state.facing, Direction::West);
+        assert!(toggled_state.is_right_hinge);
+        assert!(toggled_state.is_open);
     }
 
     #[test]

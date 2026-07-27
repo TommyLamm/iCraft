@@ -230,6 +230,8 @@ pub struct ChunkSaveData {
     /// `#[serde(default)]`, preserving full backward compatibility.
     #[serde(default)]
     pub redstone_metadata: Vec<u8>,
+    #[serde(default)]
+    pub block_states: Vec<u8>,
 }
 
 impl ChunkSaveData {
@@ -245,6 +247,7 @@ impl ChunkSaveData {
         redstone_metadata: &[crate::redstone::RedstoneComponentMetadata],
     ) -> Self {
         let mut blocks = Vec::with_capacity(16 * 256 * 16);
+        let mut block_states_raw = Vec::with_capacity(16 * 256 * 16);
         let mut sky_light = Vec::with_capacity(16 * 256 * 16);
         let mut block_light = Vec::with_capacity(16 * 256 * 16);
         let mut fluid_levels = Vec::with_capacity(16 * 256 * 16);
@@ -253,6 +256,7 @@ impl ChunkSaveData {
             for y in 0..256 {
                 for z in 0..16 {
                     blocks.push(chunk.blocks[x][y][z] as u8);
+                    block_states_raw.push(chunk.block_states[x][y][z]);
                     sky_light.push(chunk.sky_light[x][y][z]);
                     block_light.push(chunk.block_light[x][y][z]);
                     fluid_levels.push(chunk.fluid_levels[x][y][z]);
@@ -277,6 +281,7 @@ impl ChunkSaveData {
             block_light: compress_bytes(&block_light).unwrap_or_default(),
             fluid_levels: compress_bytes(&fluid_levels).unwrap_or_default(),
             redstone_metadata,
+            block_states: compress_bytes(&block_states_raw).unwrap_or_default(),
         }
     }
 
@@ -295,8 +300,16 @@ impl ChunkSaveData {
             .unwrap_or_default()
     }
 
+    pub fn block_states(&self) -> Vec<u8> {
+        if self.block_states.is_empty() {
+            return Vec::new();
+        }
+        decompress_bytes(&self.block_states).unwrap_or_default()
+    }
+
     pub fn restore_to_chunk(&self, chunk: &mut Chunk) {
         let blocks = decompress_bytes(&self.blocks).unwrap_or_default();
+        let block_states = decompress_bytes(&self.block_states).unwrap_or_default();
         let sky_light = decompress_bytes(&self.sky_light).unwrap_or_default();
         let block_light = decompress_bytes(&self.block_light).unwrap_or_default();
         let fluid_levels = decompress_bytes(&self.fluid_levels).unwrap_or_default();
@@ -311,6 +324,21 @@ impl ChunkSaveData {
                     }
                 }
             }
+        }
+
+        if block_states.len() == 16 * 256 * 16 {
+            let mut idx = 0;
+            for x in 0..16 {
+                for y in 0..256 {
+                    for z in 0..16 {
+                        chunk.block_states[x][y][z] = block_states[idx];
+                        idx += 1;
+                    }
+                }
+            }
+        } else {
+            // Legacy save without block_states: default all to 0
+            chunk.block_states = vec![[[0u8; 16]; 256]; 16].try_into().unwrap();
         }
 
         if sky_light.len() == 16 * 256 * 16 {
@@ -419,6 +447,7 @@ fn deserialize_chunk_save_data(bytes: &[u8]) -> Option<ChunkSaveData> {
             block_light: legacy.block_light,
             fluid_levels: legacy.fluid_levels,
             redstone_metadata: Vec::new(),
+            block_states: Vec::new(),
         })
 }
 
@@ -1180,7 +1209,27 @@ mod tests {
             .load_chunk_in(crate::dimension::Dimension::Overworld, 0, 0)
             .expect("legacy chunk should load");
         assert!(saved.redstone_metadata().is_empty());
+        assert!(saved.block_states().is_empty());
+
+        let mut restored = Chunk::new(0, 0);
+        saved.restore_to_chunk(&mut restored);
+        assert_eq!(restored.get_block_state(0, 64, 0), 0);
 
         fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn block_states_roundtrip_and_restore() {
+        let mut chunk = Chunk::new(1, 1);
+        chunk.blocks[5][64][5] = BlockType::OakDoor;
+        chunk.set_block_state(5, 64, 5, 0b0000_1101); // facing East, top, right hinge
+
+        let save_data = ChunkSaveData::from_chunk(&chunk);
+        assert!(!save_data.block_states().is_empty());
+
+        let mut restored = Chunk::new(1, 1);
+        save_data.restore_to_chunk(&mut restored);
+        assert_eq!(restored.get_block_state(5, 64, 5), 0b0000_1101);
+        assert_eq!(restored.get_block(5, 64, 5), BlockType::OakDoor);
     }
 }

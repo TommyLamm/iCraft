@@ -349,17 +349,20 @@ fn apply_synced_block_change(
     y: i32,
     z: i32,
     block: BlockType,
+    state: u8,
 ) -> Option<std::collections::HashSet<(i32, i32)>> {
     let ((cx, cz), _) = chunk_manager.world_to_local(x, y, z)?;
     if !chunk_manager.chunks.contains_key(&(cx, cz)) {
         return None;
     }
     let previous = chunk_manager.get_block(x, y, z);
-    if previous == block {
+    let previous_state = chunk_manager.get_block_state(x, y, z);
+    if previous == block && previous_state == state {
         return None;
     }
 
     chunk_manager.set_block(x, y, z, block);
+    chunk_manager.set_block_state(x, y, z, state);
     let old_properties = previous.properties();
     let new_properties = block.properties();
     let mut dirty_chunks = std::collections::HashSet::new();
@@ -632,7 +635,7 @@ mod remote_sync_tests {
         manager.chunks.insert((1, 0), Chunk::new(1, 0));
         manager.set_sky_light(15, 80, 8, 15);
 
-        let dirty = apply_synced_block_change(&mut manager, 15, 80, 8, BlockType::Stone)
+        let dirty = apply_synced_block_change(&mut manager, 15, 80, 8, BlockType::Stone, 0)
             .expect("loaded block should change");
 
         assert_eq!(manager.get_block(15, 80, 8), BlockType::Stone);
@@ -1883,7 +1886,7 @@ fn placement_decision_for_players<'a>(
         player_aabbs.push(player_aabb_at(latest.position));
     }
 
-    block_placement_decision(block, block_pos, player_aabbs)
+    block_placement_decision(block, 0, block_pos, player_aabbs)
 }
 
 fn sequence_is_newer(candidate: u32, previous: u32) -> bool {
@@ -2046,6 +2049,7 @@ enum NetworkInbound {
         y: i32,
         z: i32,
         block: u32,
+        state: u8,
     },
     ClientBlockAction {
         id: crate::network::protocol::PlayerId,
@@ -2069,11 +2073,13 @@ enum NetworkInbound {
         y: i32,
         z: i32,
         block: u32,
+        state: u8,
     },
     ChunkData {
         cx: i32,
         cz: i32,
         blocks: Vec<u8>,
+        block_states: Vec<u8>,
     },
     TimeSync {
         ticks: u64,
@@ -2136,7 +2142,15 @@ impl NetworkHandle {
                         y,
                         z,
                         block,
-                    } => NetworkInbound::ClientBlockChange { id, x, y, z, block },
+                        state,
+                    } => NetworkInbound::ClientBlockChange {
+                        id,
+                        x,
+                        y,
+                        z,
+                        block,
+                        state,
+                    },
                     crate::network::server::ServerToHost::ClientBlockAction {
                         id,
                         action,
@@ -2202,9 +2216,19 @@ impl NetworkHandle {
                     crate::network::client::ClientToGame::PlayerAction { id, action } => {
                         NetworkInbound::PlayerAction { id, action }
                     }
-                    crate::network::client::ClientToGame::BlockChange { x, y, z, block } => {
-                        NetworkInbound::AuthoritativeBlockChange { x, y, z, block }
-                    }
+                    crate::network::client::ClientToGame::BlockChange {
+                        x,
+                        y,
+                        z,
+                        block,
+                        state,
+                    } => NetworkInbound::AuthoritativeBlockChange {
+                        x,
+                        y,
+                        z,
+                        block,
+                        state,
+                    },
                     crate::network::client::ClientToGame::BlockActionResult {
                         x,
                         y,
@@ -2220,9 +2244,17 @@ impl NetworkHandle {
                         consumed_item,
                         drops,
                     },
-                    crate::network::client::ClientToGame::ChunkData { cx, cz, blocks } => {
-                        NetworkInbound::ChunkData { cx, cz, blocks }
-                    }
+                    crate::network::client::ClientToGame::ChunkData {
+                        cx,
+                        cz,
+                        blocks,
+                        block_states,
+                    } => NetworkInbound::ChunkData {
+                        cx,
+                        cz,
+                        blocks,
+                        block_states,
+                    },
                     crate::network::client::ClientToGame::TimeSync {
                         ticks,
                         weather,
@@ -2319,7 +2351,7 @@ impl NetworkHandle {
     /// Host-only: fan a block mutation out to every connected client. The host
     /// applies the mutation locally through the canonical path and then calls
     /// this so peers render the same world state.
-    fn broadcast_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
+    fn broadcast_block_change(&self, x: i32, y: i32, z: i32, block: u32, state: u8) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ =
                 host_to_server.send(crate::network::server::HostToServer::BroadcastBlockChange {
@@ -2327,6 +2359,7 @@ impl NetworkHandle {
                     y,
                     z,
                     block,
+                    state,
                 });
         }
     }
@@ -2338,6 +2371,7 @@ impl NetworkHandle {
         cx: i32,
         cz: i32,
         blocks: Vec<u8>,
+        block_states: Vec<u8>,
         to: crate::network::protocol::PlayerId,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
@@ -2345,6 +2379,7 @@ impl NetworkHandle {
                 cx,
                 cz,
                 blocks,
+                block_states,
                 to,
             });
         }
@@ -2580,11 +2615,13 @@ pub struct State {
     network_time: f64,
     /// Client-only: chunk payloads that arrived from the host before the chunk
     /// was streamed in. Applied when `update_chunks` loads the coordinate.
-    pending_chunk_payloads: std::collections::HashMap<(i32, i32), Vec<u8>>,
+    pending_chunk_payloads: std::collections::HashMap<(i32, i32), (Vec<u8>, Vec<u8>)>,
     /// Client-only coalesced mutations for chunks that are not streamed in yet.
     /// The latest authoritative value wins for each world-space block.
-    pending_block_changes:
-        std::collections::HashMap<(i32, i32), std::collections::HashMap<(i32, i32, i32), u32>>,
+    pending_block_changes: std::collections::HashMap<
+        (i32, i32),
+        std::collections::HashMap<(i32, i32, i32), (u32, u8)>,
+    >,
     /// Host-only set of dimension-namespaced chunks that differ from their
     /// deterministic generated form and therefore need join-time catch-up.
     mutated_chunks: std::collections::HashSet<(crate::dimension::Dimension, i32, i32)>,
@@ -3884,8 +3921,9 @@ impl State {
         let cx = x.div_euclid(CHUNK_WIDTH as i32);
         let cz = z.div_euclid(CHUNK_DEPTH as i32);
         self.mutated_chunks.insert((self.current_dimension, cx, cz));
+        let state = self.chunk_manager.get_block_state(x, y, z);
         self.network
-            .broadcast_block_change(x, y, z, block.to_wire());
+            .broadcast_block_change(x, y, z, block.to_wire(), state);
     }
 
     fn send_mutated_chunks_to(&self, player_id: crate::network::protocol::PlayerId) {
@@ -3897,13 +3935,15 @@ impl State {
                     return None;
                 }
                 self.chunk_manager.chunks.get(&(cx, cz)).map(|chunk| {
-                    let blocks = crate::save::ChunkSaveData::from_chunk(chunk).blocks;
-                    (cx, cz, blocks)
+                    let save_data = crate::save::ChunkSaveData::from_chunk(chunk);
+                    (cx, cz, save_data.blocks, save_data.block_states)
                 })
             })
             .collect();
-        for (cx, cz, blocks) in payloads {
-            self.network.send_chunk_to(cx, cz, blocks, player_id);
+
+        for (cx, cz, blocks, block_states) in payloads {
+            self.network
+                .send_chunk_to(cx, cz, blocks, block_states, player_id);
         }
     }
 
@@ -4132,9 +4172,16 @@ impl State {
                         }
                     }
                 }
-                NetworkInbound::ClientBlockChange { id, x, y, z, block } => {
+                NetworkInbound::ClientBlockChange {
+                    id,
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                } => {
                     // Legacy/fallback block change
-                    self.set_block_and_broadcast(id, x, y, z, block);
+                    self.set_block_and_broadcast(id, x, y, z, block, state);
                 }
                 NetworkInbound::ClientBlockAction {
                     id,
@@ -4181,13 +4228,24 @@ impl State {
                         );
                     }
                 }
-                NetworkInbound::AuthoritativeBlockChange { x, y, z, block } => {
+                NetworkInbound::AuthoritativeBlockChange {
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                } => {
                     // Clients always apply host authority without re-validating
                     // against their delayed render snapshots.
-                    self.apply_remote_block_change(x, y, z, block);
+                    self.apply_remote_block_change(x, y, z, block, state);
                 }
-                NetworkInbound::ChunkData { cx, cz, blocks } => {
-                    self.apply_remote_chunk_data(cx, cz, blocks);
+                NetworkInbound::ChunkData {
+                    cx,
+                    cz,
+                    blocks,
+                    block_states,
+                } => {
+                    self.apply_remote_chunk_data(cx, cz, blocks, block_states);
                 }
                 NetworkInbound::TimeSync {
                     ticks,
@@ -4653,17 +4711,19 @@ impl State {
                         );
                     }
 
-                    if let Some(blocks) = self.pending_chunk_payloads.remove(&result.coord) {
+                    if let Some((blocks, block_states)) =
+                        self.pending_chunk_payloads.remove(&result.coord)
+                    {
                         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&result.coord) {
-                            Self::restore_chunk_payload(chunk, &blocks);
+                            Self::restore_chunk_payload(chunk, &blocks, &block_states);
                         }
                         if let Some(mesh) = self.chunk_meshes.get_mut(&result.coord) {
                             mesh.mark_dirty();
                         }
                     }
                     if let Some(changes) = self.pending_block_changes.remove(&result.coord) {
-                        for ((x, y, z), block) in changes {
-                            self.apply_remote_block_change(x, y, z, block);
+                        for ((x, y, z), (block, state)) in changes {
+                            self.apply_remote_block_change(x, y, z, block, state);
                         }
                     }
 
@@ -6472,6 +6532,7 @@ impl State {
         y: i32,
         z: i32,
         block_wire: u32,
+        state: u8,
     ) {
         let block = match BlockType::from_wire(block_wire) {
             Some(b) => b,
@@ -6495,14 +6556,16 @@ impl State {
             return;
         }
         let prev = self.chunk_manager.get_block(x, y, z);
-        if prev == block {
+        let prev_state = self.chunk_manager.get_block_state(x, y, z);
+        if prev == block && prev_state == state {
             // Echo the authoritative value to correct a requesting client's
             // prediction, but do not mark an unchanged chunk as mutated.
-            self.network.broadcast_block_change(x, y, z, block_wire);
+            self.network
+                .broadcast_block_change(x, y, z, block_wire, state);
             return;
         }
         let Some(mut dirty_chunks) =
-            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block)
+            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state)
         else {
             return;
         };
@@ -6526,7 +6589,7 @@ impl State {
     /// - the host runs the redstone simulation and broadcasts its actuator
     /// effects as further `BlockChange`s, so running it here would double-apply
     /// and could diverge.
-    fn apply_remote_block_change(&mut self, x: i32, y: i32, z: i32, block_wire: u32) {
+    fn apply_remote_block_change(&mut self, x: i32, y: i32, z: i32, block_wire: u32, state: u8) {
         let block = match BlockType::from_wire(block_wire) {
             Some(b) => b,
             None => return,
@@ -6538,10 +6601,11 @@ impl State {
             self.pending_block_changes
                 .entry((cx, cz))
                 .or_default()
-                .insert((x, y, z), block_wire);
+                .insert((x, y, z), (block_wire, state));
             return;
         }
-        let Some(dirty_chunks) = apply_synced_block_change(&mut self.chunk_manager, x, y, z, block)
+        let Some(dirty_chunks) =
+            apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state)
         else {
             return;
         };
@@ -6556,9 +6620,15 @@ impl State {
     /// mid-game join catch-up. The payload uses the same Zlib-compressed layout
     /// as `save.rs::ChunkSaveData`. If the chunk is not loaded yet, the payload
     /// is buffered and applied once `update_chunks` loads that coordinate.
-    fn apply_remote_chunk_data(&mut self, cx: i32, cz: i32, blocks: Vec<u8>) {
+    fn apply_remote_chunk_data(
+        &mut self,
+        cx: i32,
+        cz: i32,
+        blocks: Vec<u8>,
+        block_states: Vec<u8>,
+    ) {
         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-            Self::restore_chunk_payload(chunk, &blocks);
+            Self::restore_chunk_payload(chunk, &blocks, &block_states);
             if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
                 mesh.mark_dirty();
             }
@@ -6595,37 +6665,26 @@ impl State {
             }
         } else {
             // Chunk not streamed in yet; buffer for deferred application.
-            self.pending_chunk_payloads.insert((cx, cz), blocks);
+            self.pending_chunk_payloads
+                .insert((cx, cz), (blocks, block_states));
         }
     }
 
     /// Decode a `ChunkSaveData`-style compressed payload into an existing
     /// chunk. Reused by both the save loader and the network catch-up path so
     /// the wire format stays identical to the on-disk format.
-    fn restore_chunk_payload(chunk: &mut crate::world::Chunk, blocks: &[u8]) {
-        let decoded = match crate::save::decompress_bytes(blocks) {
-            Ok(d) => d,
-            Err(_) => return,
+    fn restore_chunk_payload(chunk: &mut crate::world::Chunk, blocks: &[u8], block_states: &[u8]) {
+        let save_data = crate::save::ChunkSaveData {
+            chunk_x: chunk.chunk_x,
+            chunk_z: chunk.chunk_z,
+            blocks: blocks.to_vec(),
+            sky_light: Vec::new(),
+            block_light: Vec::new(),
+            fluid_levels: Vec::new(),
+            redstone_metadata: Vec::new(),
+            block_states: block_states.to_vec(),
         };
-        if decoded.len() == 16 * 256 * 16 {
-            let mut idx = 0;
-            for x in 0..16 {
-                for y in 0..256 {
-                    for z in 0..16 {
-                        chunk.blocks[x][y][z] = BlockType::from_u8(decoded[idx]);
-                        chunk.sky_light[x][y][z] = 0;
-                        chunk.block_light[x][y][z] = 0;
-                        chunk.fluid_levels[x][y][z] = 0;
-                        idx += 1;
-                    }
-                }
-            }
-        }
-        for x in 0..16 {
-            for z in 0..16 {
-                chunk.update_heightmap(x, z);
-            }
-        }
+        save_data.restore_to_chunk(chunk);
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
@@ -6641,6 +6700,9 @@ impl State {
                 .request_block_change(wx, wy, wz, BlockType::Air as u32);
             return;
         }
+
+        let old_state_raw = self.chunk_manager.get_block_state(wx, wy, wz);
+        let old_state = crate::world::BlockState::decode(old_state_raw);
 
         self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
         self.redstone.on_block_changed(
@@ -6723,6 +6785,24 @@ impl State {
         );
 
         mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
+
+        if old_block == BlockType::OakDoor {
+            let other_y = if old_state.is_top { wy - 1 } else { wy + 1 };
+            if self.chunk_manager.get_block(wx, other_y, wz) == BlockType::OakDoor {
+                self.chunk_manager
+                    .set_block(wx, other_y, wz, BlockType::Air);
+                crate::lighting::update_sky_light_after_removed(
+                    &mut self.chunk_manager,
+                    wx,
+                    other_y,
+                    wz,
+                    &mut dirty_chunks,
+                );
+                mark_block_mesh_dependencies(&mut dirty_chunks, wx, other_y);
+                self.broadcast_block_change(wx, other_y, wz, BlockType::Air);
+            }
+        }
+
         self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
 
         for (dcx, dcz) in dirty_chunks {
@@ -7686,6 +7766,79 @@ impl State {
                 }
                 if matches!(
                     clicked_block,
+                    BlockType::OakDoor
+                        | BlockType::OakDoorOpen
+                        | BlockType::OakTrapdoor
+                        | BlockType::OakTrapdoorOpen
+                ) {
+                    let pos = (
+                        hit.block_pos.x as i32,
+                        hit.block_pos.y as i32,
+                        hit.block_pos.z as i32,
+                    );
+                    let (target_block, sound) = match clicked_block {
+                        BlockType::OakDoor => {
+                            (BlockType::OakDoorOpen, crate::audio::SoundId::UiClick)
+                        }
+                        BlockType::OakDoorOpen => {
+                            (BlockType::OakDoor, crate::audio::SoundId::UiClick)
+                        }
+                        BlockType::OakTrapdoor => {
+                            (BlockType::OakTrapdoorOpen, crate::audio::SoundId::UiClick)
+                        }
+                        BlockType::OakTrapdoorOpen => {
+                            (BlockType::OakTrapdoor, crate::audio::SoundId::UiClick)
+                        }
+                        _ => unreachable!(),
+                    };
+                    let cur_raw = self.chunk_manager.get_block_state(pos.0, pos.1, pos.2);
+                    let mut bstate = crate::world::BlockState::decode(cur_raw);
+                    bstate.is_open = !bstate.is_open;
+                    let new_state_raw = bstate.encode();
+
+                    self.chunk_manager
+                        .set_block(pos.0, pos.1, pos.2, target_block);
+                    self.chunk_manager
+                        .set_block_state(pos.0, pos.1, pos.2, new_state_raw);
+                    self.broadcast_block_change(pos.0, pos.1, pos.2, target_block);
+
+                    if matches!(clicked_block, BlockType::OakDoor | BlockType::OakDoorOpen) {
+                        let other_y = if bstate.is_top { pos.1 - 1 } else { pos.1 + 1 };
+                        let other_block = self.chunk_manager.get_block(pos.0, other_y, pos.2);
+                        if matches!(other_block, BlockType::OakDoor | BlockType::OakDoorOpen) {
+                            let other_raw =
+                                self.chunk_manager.get_block_state(pos.0, other_y, pos.2);
+                            let mut other_bstate = crate::world::BlockState::decode(other_raw);
+                            other_bstate.is_open = bstate.is_open;
+                            let other_target = if bstate.is_open {
+                                BlockType::OakDoorOpen
+                            } else {
+                                BlockType::OakDoor
+                            };
+                            self.chunk_manager
+                                .set_block(pos.0, other_y, pos.2, other_target);
+                            self.chunk_manager.set_block_state(
+                                pos.0,
+                                other_y,
+                                pos.2,
+                                other_bstate.encode(),
+                            );
+                            self.broadcast_block_change(pos.0, other_y, pos.2, other_target);
+                        }
+                    }
+
+                    let mut dirty_chunks = std::collections::HashSet::new();
+                    mark_block_mesh_dependencies(&mut dirty_chunks, pos.0, pos.2);
+                    for (dcx, dcz) in dirty_chunks {
+                        if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                            mesh.mark_dirty();
+                        }
+                    }
+                    self.audio_manager.play_sound(sound);
+                    return;
+                }
+                if matches!(
+                    clicked_block,
                     BlockType::Lever
                         | BlockType::LeverOn
                         | BlockType::StoneButton
@@ -7791,61 +7944,198 @@ impl State {
                 }
             } else {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
-                    if !self
-                        .chunk_manager
-                        .can_place_block_with_support(placed_block, wx, wy, wz)
-                    {
-                        return;
-                    }
-                    if !self.can_place_block_at(wx, wy, wz, placed_block) {
-                        return;
-                    }
+                    if placed_block == BlockType::OakDoor {
+                        if wy + 1 >= crate::world::CHUNK_HEIGHT as i32 {
+                            return;
+                        }
+                        if !self.can_place_block_at(wx, wy, wz, BlockType::OakDoor)
+                            || !self.can_place_block_at(wx, wy + 1, wz, BlockType::OakDoor)
+                        {
+                            return;
+                        }
+                        if !self.chunk_manager.can_place_block_with_support(
+                            BlockType::OakDoor,
+                            wx,
+                            wy,
+                            wz,
+                        ) {
+                            return;
+                        }
+                        let (bottom_state, top_state) =
+                            crate::world::BlockState::for_door_placement(
+                                &self.chunk_manager,
+                                wx,
+                                wy,
+                                wz,
+                                self.camera.yaw,
+                            );
 
-                    self.chunk_manager.set_block(wx, wy, wz, placed_block);
-                    self.network
-                        .send_action(crate::network::protocol::Action::Place);
-                    self.redstone.on_block_changed(
-                        &self.chunk_manager,
-                        (wx, wy, wz),
-                        crate::redstone::Direction::from_yaw(self.camera.yaw),
-                    );
+                        self.chunk_manager.set_block(wx, wy, wz, BlockType::OakDoor);
+                        self.chunk_manager
+                            .set_block_state(wx, wy, wz, bottom_state.encode());
+                        self.chunk_manager
+                            .set_block(wx, wy + 1, wz, BlockType::OakDoor);
+                        self.chunk_manager
+                            .set_block_state(wx, wy + 1, wz, top_state.encode());
 
-                    let sound_pos =
-                        glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
-                    let listener_right =
-                        glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
-                            .normalize_or_zero();
-                    if let Some(mat) = placed_block.sound_material() {
-                        self.audio_manager.play_sound_3d(
-                            crate::audio::SoundId::BlockPlace(mat),
-                            sound_pos,
-                            self.camera.position,
-                            listener_right,
+                        self.network
+                            .send_action(crate::network::protocol::Action::Place);
+                        self.redstone.on_block_changed(
+                            &self.chunk_manager,
+                            (wx, wy, wz),
+                            bottom_state.facing,
                         );
+
+                        let sound_pos =
+                            glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                        let listener_right =
+                            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
+                                .normalize_or_zero();
+                        if let Some(mat) = BlockType::OakDoor.sound_material() {
+                            self.audio_manager.play_sound_3d(
+                                crate::audio::SoundId::BlockPlace(mat),
+                                sound_pos,
+                                self.camera.position,
+                                listener_right,
+                            );
+                        }
+
+                        let is_creative = self.game_mode == GameMode::Creative;
+                        self.inventory.use_selected_item(is_creative);
+
+                        crate::lighting::update_sky_light_after_placed(
+                            &mut self.chunk_manager,
+                            wx,
+                            wy,
+                            wz,
+                            &mut dirty_chunks,
+                        );
+                        crate::lighting::update_sky_light_after_placed(
+                            &mut self.chunk_manager,
+                            wx,
+                            wy + 1,
+                            wz,
+                            &mut dirty_chunks,
+                        );
+                        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
+                        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz + 1);
+
+                        self.broadcast_block_change(wx, wy, wz, BlockType::OakDoor);
+                        self.broadcast_block_change(wx, wy + 1, wz, BlockType::OakDoor);
+                        result_block = Some(BlockType::OakDoor);
+                    } else if placed_block == BlockType::OakTrapdoor {
+                        if !self.chunk_manager.can_place_block_with_support(
+                            placed_block,
+                            wx,
+                            wy,
+                            wz,
+                        ) || !self.can_place_block_at(wx, wy, wz, placed_block)
+                        {
+                            return;
+                        }
+                        let state =
+                            crate::world::BlockState::for_trapdoor_placement(self.camera.yaw);
+
+                        self.chunk_manager
+                            .set_block(wx, wy, wz, BlockType::OakTrapdoor);
+                        self.chunk_manager
+                            .set_block_state(wx, wy, wz, state.encode());
+
+                        self.network
+                            .send_action(crate::network::protocol::Action::Place);
+                        self.redstone.on_block_changed(
+                            &self.chunk_manager,
+                            (wx, wy, wz),
+                            state.facing,
+                        );
+
+                        let sound_pos =
+                            glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                        let listener_right =
+                            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
+                                .normalize_or_zero();
+                        if let Some(mat) = BlockType::OakTrapdoor.sound_material() {
+                            self.audio_manager.play_sound_3d(
+                                crate::audio::SoundId::BlockPlace(mat),
+                                sound_pos,
+                                self.camera.position,
+                                listener_right,
+                            );
+                        }
+
+                        let is_creative = self.game_mode == GameMode::Creative;
+                        self.inventory.use_selected_item(is_creative);
+
+                        crate::lighting::update_sky_light_after_placed(
+                            &mut self.chunk_manager,
+                            wx,
+                            wy,
+                            wz,
+                            &mut dirty_chunks,
+                        );
+                        mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
+
+                        self.broadcast_block_change(wx, wy, wz, BlockType::OakTrapdoor);
+                        result_block = Some(BlockType::OakTrapdoor);
+                    } else {
+                        if !self.chunk_manager.can_place_block_with_support(
+                            placed_block,
+                            wx,
+                            wy,
+                            wz,
+                        ) {
+                            return;
+                        }
+                        if !self.can_place_block_at(wx, wy, wz, placed_block) {
+                            return;
+                        }
+
+                        self.chunk_manager.set_block(wx, wy, wz, placed_block);
+                        self.network
+                            .send_action(crate::network::protocol::Action::Place);
+                        self.redstone.on_block_changed(
+                            &self.chunk_manager,
+                            (wx, wy, wz),
+                            crate::redstone::Direction::from_yaw(self.camera.yaw),
+                        );
+
+                        let sound_pos =
+                            glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                        let listener_right =
+                            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
+                                .normalize_or_zero();
+                        if let Some(mat) = placed_block.sound_material() {
+                            self.audio_manager.play_sound_3d(
+                                crate::audio::SoundId::BlockPlace(mat),
+                                sound_pos,
+                                self.camera.position,
+                                listener_right,
+                            );
+                        }
+
+                        let is_creative = self.game_mode == GameMode::Creative;
+                        self.inventory.use_selected_item(is_creative);
+
+                        // Update lighting for placement
+                        crate::lighting::update_sky_light_after_placed(
+                            &mut self.chunk_manager,
+                            wx,
+                            wy,
+                            wz,
+                            &mut dirty_chunks,
+                        );
+                        crate::lighting::update_block_light_after_placed(
+                            &mut self.chunk_manager,
+                            wx,
+                            wy,
+                            wz,
+                            placed_block.properties().light_emission,
+                            &mut dirty_chunks,
+                        );
+
+                        self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
+                        result_block = Some(placed_block);
                     }
-
-                    let is_creative = self.game_mode == GameMode::Creative;
-                    self.inventory.use_selected_item(is_creative);
-
-                    // Update lighting for placement
-                    crate::lighting::update_sky_light_after_placed(
-                        &mut self.chunk_manager,
-                        wx,
-                        wy,
-                        wz,
-                        &mut dirty_chunks,
-                    );
-                    crate::lighting::update_block_light_after_placed(
-                        &mut self.chunk_manager,
-                        wx,
-                        wy,
-                        wz,
-                        placed_block.properties().light_emission,
-                        &mut dirty_chunks,
-                    );
-
-                    self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
-                    result_block = Some(placed_block);
 
                     if matches!(
                         placed_block,
@@ -12424,6 +12714,7 @@ mod debug_tests {
                 y: 80,
                 z: -4,
                 block: BlockType::Stone.to_wire(),
+                state: 0,
             })
             .unwrap();
 
@@ -12435,7 +12726,8 @@ mod debug_tests {
                 x: 3,
                 y: 80,
                 z: -4,
-                block
+                block,
+                state: 0,
             }] if *block == BlockType::Stone.to_wire()
         ));
     }
@@ -12455,6 +12747,7 @@ mod debug_tests {
                 y: 80,
                 z: -4,
                 block: BlockType::Stone.to_wire(),
+                state: 0,
             })
             .unwrap();
 
@@ -12464,7 +12757,8 @@ mod debug_tests {
                 x: 3,
                 y: 80,
                 z: -4,
-                block
+                block,
+                state: 0,
             }] if *block == BlockType::Stone.to_wire()
         ));
     }
@@ -12534,6 +12828,46 @@ mod debug_tests {
         // Ground is Air now, flower above must be destroyed
         assert_eq!(manager.get_block(2, 11, 2), BlockType::Air);
         assert_eq!(drops, vec![((2, 11, 2), BlockType::Dandelion)]);
+    }
+
+    #[test]
+    fn door_and_trapdoor_placement_states_and_hinges() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+
+        // Test door facing from yaw (yaw=0.0 -> East, yaw=FRAC_PI_2 -> South, -FRAC_PI_2 -> North, PI -> West)
+        let (bottom, top) = crate::world::BlockState::for_door_placement(
+            &manager,
+            5,
+            64,
+            5,
+            std::f32::consts::FRAC_PI_2,
+        );
+        assert_eq!(bottom.facing, crate::redstone::Direction::South);
+        assert!(!bottom.is_top);
+        assert!(!bottom.is_open);
+        assert!(top.is_top);
+        assert_eq!(top.facing, crate::redstone::Direction::South);
+
+        // Hinge logic: left solid, right empty -> right hinge
+        // North facing: left = West (-1, 0) -> (4, 64, 5), right = East (+1, 0) -> (6, 64, 5)
+        manager.set_block(4, 64, 5, BlockType::Stone); // left neighbor
+        manager.set_block(6, 64, 5, BlockType::Air); // right neighbor
+        let (bottom_hinge, _) = crate::world::BlockState::for_door_placement(
+            &manager,
+            5,
+            64,
+            5,
+            -std::f32::consts::FRAC_PI_2,
+        );
+        assert_eq!(bottom_hinge.facing, crate::redstone::Direction::North);
+        assert!(bottom_hinge.is_right_hinge);
+
+        // Trapdoor state
+        let trapdoor =
+            crate::world::BlockState::for_trapdoor_placement(-std::f32::consts::FRAC_PI_2);
+        assert_eq!(trapdoor.facing, crate::redstone::Direction::North);
+        assert!(!trapdoor.is_open);
     }
 }
 

@@ -67,8 +67,71 @@ pub fn unit_block_aabb((x, y, z): (i32, i32, i32)) -> AABB {
 /// overlap on all three axes; merely touching a face, edge, or corner remains
 /// legal through `AABB::intersects`' strict comparisons. Non-solid blocks do
 /// not displace players and are therefore always allowed by this policy.
+/// Build the collision box for a block, taking into account block states (e.g. doors, trapdoors).
+pub fn block_aabb(block: BlockType, state_raw: u8, (x, y, z): (i32, i32, i32)) -> AABB {
+    use crate::redstone::Direction;
+    use crate::world::BlockState;
+
+    let fx = x as f32;
+    let fy = y as f32;
+    let fz = z as f32;
+
+    const THICKNESS: f32 = 3.0 / 16.0;
+
+    if matches!(block, BlockType::OakDoor | BlockType::OakDoorOpen) {
+        let state = BlockState::decode(state_raw);
+        let (min_x, max_x, min_z, max_z) = if !state.is_open {
+            match state.facing {
+                Direction::North => (0.0, 1.0, 0.0, THICKNESS),
+                Direction::South => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
+                Direction::West => (0.0, THICKNESS, 0.0, 1.0),
+                Direction::East => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+            }
+        } else if !state.is_right_hinge {
+            match state.facing {
+                Direction::North => (0.0, THICKNESS, 0.0, 1.0),
+                Direction::South => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+                Direction::West => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
+                Direction::East => (0.0, 1.0, 0.0, THICKNESS),
+            }
+        } else {
+            match state.facing {
+                Direction::North => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+                Direction::South => (0.0, THICKNESS, 0.0, 1.0),
+                Direction::West => (0.0, 1.0, 0.0, THICKNESS),
+                Direction::East => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
+            }
+        };
+        return AABB {
+            min: Vec3::new(fx + min_x, fy, fz + min_z),
+            max: Vec3::new(fx + max_x, fy + 1.0, fz + max_z),
+        };
+    }
+
+    if matches!(block, BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen) {
+        let state = BlockState::decode(state_raw);
+        let (min_x, max_x, min_y, max_y, min_z, max_z) = if !state.is_open {
+            (0.0, 1.0, 0.0, THICKNESS, 0.0, 1.0)
+        } else {
+            match state.facing {
+                Direction::North => (0.0, 1.0, 0.0, 1.0, 0.0, THICKNESS),
+                Direction::South => (0.0, 1.0, 0.0, 1.0, 1.0 - THICKNESS, 1.0),
+                Direction::West => (0.0, THICKNESS, 0.0, 1.0, 0.0, 1.0),
+                Direction::East => (1.0 - THICKNESS, 1.0, 0.0, 1.0, 0.0, 1.0),
+            }
+        };
+        return AABB {
+            min: Vec3::new(fx + min_x, fy + min_y, fz + min_z),
+            max: Vec3::new(fx + max_x, fy + max_y, fz + max_z),
+        };
+    }
+
+    unit_block_aabb((x, y, z))
+}
+
 pub fn block_placement_decision(
     block: BlockType,
+    block_state: u8,
     block_pos: (i32, i32, i32),
     player_aabbs: impl IntoIterator<Item = AABB>,
 ) -> BlockPlacementDecision {
@@ -76,7 +139,7 @@ pub fn block_placement_decision(
         return BlockPlacementDecision::Allowed;
     }
 
-    let block_aabb = unit_block_aabb(block_pos);
+    let block_aabb = block_aabb(block, block_state, block_pos);
     if player_aabbs
         .into_iter()
         .any(|player_aabb| player_aabb.intersects(&block_aabb))
@@ -315,7 +378,8 @@ impl PlayerPhysics {
                 for z in min_z..=max_z {
                     let block = chunk_manager.get_block(x, y, z);
                     if block.properties().is_solid {
-                        let block_aabb = unit_block_aabb((x, y, z));
+                        let state = chunk_manager.get_block_state(x, y, z);
+                        let block_aabb = block_aabb(block, state, (x, y, z));
 
                         if self.get_aabb().intersects(&block_aabb) {
                             if axis == 0 {
@@ -370,7 +434,8 @@ impl PlayerPhysics {
                 for z in min_z..=max_z {
                     let block = chunk_manager.get_block(x, y, z);
                     if block.properties().is_solid {
-                        let block_aabb = unit_block_aabb((x, y, z));
+                        let state = chunk_manager.get_block_state(x, y, z);
+                        let block_aabb = block_aabb(block, state, (x, y, z));
                         if check_aabb.intersects(&block_aabb) {
                             return true;
                         }
@@ -435,6 +500,7 @@ mod tests {
         assert_eq!(
             block_placement_decision(
                 BlockType::Stone,
+                0,
                 (0, 0, 0),
                 [player_aabb_at(Vec3::new(0.5, 0.0, 0.5))]
             ),
@@ -459,7 +525,7 @@ mod tests {
 
         for player in [face_touch, edge_touch, corner_touch] {
             assert_eq!(
-                block_placement_decision(BlockType::Stone, (0, 0, 0), [player]),
+                block_placement_decision(BlockType::Stone, 0, (0, 0, 0), [player]),
                 BlockPlacementDecision::Allowed
             );
         }
@@ -470,11 +536,48 @@ mod tests {
         assert_eq!(
             block_placement_decision(
                 BlockType::Torch,
+                0,
                 (0, 0, 0),
                 [player_aabb_at(Vec3::new(0.5, 0.0, 0.5))]
             ),
             BlockPlacementDecision::Allowed
         );
+    }
+
+    #[test]
+    fn door_and_trapdoor_block_aabbs_use_thin_slab_bounds() {
+        use crate::redstone::Direction;
+        use crate::world::BlockState;
+
+        let closed_door_state = BlockState {
+            facing: Direction::North,
+            is_top: false,
+            is_right_hinge: false,
+            is_open: false,
+        };
+        let aabb = block_aabb(BlockType::OakDoor, closed_door_state.encode(), (2, 10, 2));
+        assert_eq!(aabb.min, Vec3::new(2.0, 10.0, 2.0));
+        assert_eq!(aabb.max, Vec3::new(3.0, 11.0, 2.1875));
+
+        let open_door_state = BlockState {
+            facing: Direction::North,
+            is_top: false,
+            is_right_hinge: false,
+            is_open: true,
+        };
+        let open_aabb = block_aabb(BlockType::OakDoor, open_door_state.encode(), (2, 10, 2));
+        assert_eq!(open_aabb.min, Vec3::new(2.0, 10.0, 2.0));
+        assert_eq!(open_aabb.max, Vec3::new(2.1875, 11.0, 3.0));
+
+        let closed_trapdoor = BlockState {
+            facing: Direction::North,
+            is_top: false,
+            is_right_hinge: false,
+            is_open: false,
+        };
+        let trap_aabb = block_aabb(BlockType::OakTrapdoor, closed_trapdoor.encode(), (0, 64, 0));
+        assert_eq!(trap_aabb.min, Vec3::new(0.0, 64.0, 0.0));
+        assert_eq!(trap_aabb.max, Vec3::new(1.0, 64.1875, 1.0));
     }
 
     #[test]

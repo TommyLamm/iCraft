@@ -253,12 +253,15 @@ pub enum Packet {
         y: i32,
         z: i32,
         block: u32,
+        state: u8,
     },
     ChunkData {
         protocol_version: u32,
         cx: i32,
         cz: i32,
         blocks: Vec<u8>,
+        #[serde(default)]
+        block_states: Vec<u8>,
     },
     TimeSync {
         protocol_version: u32,
@@ -453,6 +456,7 @@ mod tests {
             y: 64,
             z: 200,
             block: 12,
+            state: 0,
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_eq!(p, decoded);
@@ -465,6 +469,7 @@ mod tests {
             cx: -3,
             cz: 4,
             blocks: vec![0u8; 4096],
+            block_states: Vec::new(),
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_eq!(p, decoded);
@@ -625,5 +630,29 @@ mod tests {
     #[test]
     fn invalid_bytes_rejected() {
         assert!(Packet::decode(&[0xFF; 3]).is_err());
+    }
+
+    #[test]
+    fn block_change_and_chunk_data_state_roundtrip() {
+        let bc = Packet::BlockChange {
+            protocol_version: v(),
+            x: 10,
+            y: 64,
+            z: -5,
+            block: 67,
+            state: 0b0000_1101,
+        };
+        let decoded_bc = Packet::decode(&bc.encode()).unwrap();
+        assert_eq!(bc, decoded_bc);
+
+        let cd = Packet::ChunkData {
+            protocol_version: v(),
+            cx: 2,
+            cz: -3,
+            blocks: vec![1, 2, 3],
+            block_states: vec![4, 5, 6],
+        };
+        let decoded_cd = Packet::decode(&cd.encode()).unwrap();
+        assert_eq!(cd, decoded_cd);
     }
 }

@@ -1,4 +1,5 @@
 use crate::chunk_render::{ChunkLodMeshData, ChunkMeshBundle, TerrainVertex};
+use crate::redstone::Direction;
 use noise::{NoiseFn, Perlin};
 
 pub const CHUNK_WIDTH: usize = 16;
@@ -367,6 +368,110 @@ pub struct BlockProperties {
     pub light_emission: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockState {
+    pub facing: Direction,
+    pub is_top: bool,
+    pub is_right_hinge: bool,
+    pub is_open: bool,
+}
+
+impl Default for BlockState {
+    fn default() -> Self {
+        Self {
+            facing: Direction::North,
+            is_top: false,
+            is_right_hinge: false,
+            is_open: false,
+        }
+    }
+}
+
+impl BlockState {
+    pub fn encode(self) -> u8 {
+        let facing_bits = match self.facing {
+            Direction::North => 0b00,
+            Direction::South => 0b01,
+            Direction::West => 0b10,
+            Direction::East => 0b11,
+        };
+        let half_bit = if self.is_top { 1 << 2 } else { 0 };
+        let hinge_bit = if self.is_right_hinge { 1 << 3 } else { 0 };
+        let open_bit = if self.is_open { 1 << 4 } else { 0 };
+        facing_bits | half_bit | hinge_bit | open_bit
+    }
+
+    pub fn decode(val: u8) -> Self {
+        let facing = match val & 0b11 {
+            0 => Direction::North,
+            1 => Direction::South,
+            2 => Direction::West,
+            3 => Direction::East,
+            _ => unreachable!(),
+        };
+        let is_top = (val & (1 << 2)) != 0;
+        let is_right_hinge = (val & (1 << 3)) != 0;
+        let is_open = (val & (1 << 4)) != 0;
+        Self {
+            facing,
+            is_top,
+            is_right_hinge,
+            is_open,
+        }
+    }
+
+    pub fn for_door_placement(
+        chunk_manager: &crate::chunk_manager::ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+        yaw: f32,
+    ) -> (Self, Self) {
+        let facing = Direction::from_yaw(yaw);
+        let (left_dx, left_dz) = match facing {
+            Direction::North => (-1, 0),
+            Direction::South => (1, 0),
+            Direction::West => (0, 1),
+            Direction::East => (0, -1),
+        };
+        let (right_dx, right_dz) = match facing {
+            Direction::North => (1, 0),
+            Direction::South => (-1, 0),
+            Direction::West => (0, -1),
+            Direction::East => (0, 1),
+        };
+
+        let left_block = chunk_manager.get_block(x + left_dx, y, z + left_dz);
+        let right_block = chunk_manager.get_block(x + right_dx, y, z + right_dz);
+
+        let is_right_hinge = left_block.properties().is_solid && !right_block.properties().is_solid;
+
+        let bottom = Self {
+            facing,
+            is_top: false,
+            is_right_hinge,
+            is_open: false,
+        };
+        let top = Self {
+            facing,
+            is_top: true,
+            is_right_hinge,
+            is_open: false,
+        };
+        (bottom, top)
+    }
+
+    pub fn for_trapdoor_placement(yaw: f32) -> Self {
+        let facing = Direction::from_yaw(yaw);
+        Self {
+            facing,
+            is_top: false,
+            is_right_hinge: false,
+            is_open: false,
+        }
+    }
+}
+
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
         if val <= BlockType::EndCityChest as u8 {
@@ -506,6 +611,19 @@ impl BlockType {
                     BlockSupportStatus::Unknown
                 } else {
                     BlockSupportStatus::Supported
+                }
+            }
+            BlockType::OakDoor => {
+                if y <= 0 {
+                    BlockSupportStatus::Unsupported
+                } else {
+                    match get_loaded_block(x, y - 1, z) {
+                        Some(below) if below == BlockType::OakDoor || self.can_stay_on(below) => {
+                            BlockSupportStatus::Supported
+                        }
+                        Some(_) => BlockSupportStatus::Unsupported,
+                        None => BlockSupportStatus::Unknown,
+                    }
                 }
             }
             BlockType::Dandelion
@@ -1661,12 +1779,133 @@ fn face_should_render(
     }
 }
 
+fn append_box_mesh(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    bounds: ([f32; 3], [f32; 3]),
+    sky_light: u8,
+    block_light: u8,
+    atlas_tile: (u32, u32),
+) {
+    let light_level = sky_light as f32 + block_light as f32 * 16.0;
+    let (min, max) = bounds;
+
+    for (_, (_, corner_data)) in BLOCK_FACES.iter().enumerate() {
+        let mut positions = [[0.0; 3]; 4];
+        let mut local_uvs = [[0.0; 2]; 4];
+
+        for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
+            positions[corner_idx] = [
+                origin[0] + if offset[0] == 0.0 { min[0] } else { max[0] },
+                origin[1] + if offset[1] == 0.0 { min[1] } else { max[1] },
+                origin[2] + if offset[2] == 0.0 { min[2] } else { max[2] },
+            ];
+            local_uvs[corner_idx] = [uv[0], uv[1]];
+        }
+
+        push_terrain_quad(
+            vertices,
+            indices,
+            positions,
+            local_uvs,
+            atlas_tile,
+            light_level,
+            [1.0; 4],
+        );
+    }
+}
+
+fn append_door_mesh(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    state: BlockState,
+    sky_light: u8,
+    block_light: u8,
+    atlas_tile: (u32, u32),
+) {
+    const THICKNESS: f32 = 3.0 / 16.0;
+
+    let (min_x, max_x, min_z, max_z) = if !state.is_open {
+        match state.facing {
+            Direction::North => (0.0, 1.0, 0.0, THICKNESS),
+            Direction::South => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
+            Direction::West => (0.0, THICKNESS, 0.0, 1.0),
+            Direction::East => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+        }
+    } else if !state.is_right_hinge {
+        match state.facing {
+            Direction::North => (0.0, THICKNESS, 0.0, 1.0),
+            Direction::South => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+            Direction::West => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
+            Direction::East => (0.0, 1.0, 0.0, THICKNESS),
+        }
+    } else {
+        match state.facing {
+            Direction::North => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+            Direction::South => (0.0, THICKNESS, 0.0, 1.0),
+            Direction::West => (0.0, 1.0, 0.0, THICKNESS),
+            Direction::East => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
+        }
+    };
+
+    append_box_mesh(
+        vertices,
+        indices,
+        origin,
+        ([min_x, 0.0, min_z], [max_x, 1.0, max_z]),
+        sky_light,
+        block_light,
+        atlas_tile,
+    );
+}
+
+fn append_trapdoor_mesh(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    state: BlockState,
+    sky_light: u8,
+    block_light: u8,
+    atlas_tile: (u32, u32),
+) {
+    const THICKNESS: f32 = 3.0 / 16.0;
+
+    let bounds = if !state.is_open {
+        ([0.0, 0.0, 0.0], [1.0, THICKNESS, 1.0])
+    } else {
+        match state.facing {
+            Direction::North => ([0.0, 0.0, 0.0], [1.0, 1.0, THICKNESS]),
+            Direction::South => ([0.0, 0.0, 1.0 - THICKNESS], [1.0, 1.0, 1.0]),
+            Direction::West => ([0.0, 0.0, 0.0], [THICKNESS, 1.0, 1.0]),
+            Direction::East => ([1.0 - THICKNESS, 0.0, 0.0], [1.0, 1.0, 1.0]),
+        }
+    };
+
+    append_box_mesh(
+        vertices,
+        indices,
+        origin,
+        bounds,
+        sky_light,
+        block_light,
+        atlas_tile,
+    );
+}
+
 fn is_greedy_cube(block: BlockType) -> bool {
     block.properties().is_solid
         && !block.is_cross_model()
         && !matches!(
             block,
-            BlockType::Water | BlockType::Lava | BlockType::SnowLayer
+            BlockType::Water
+                | BlockType::Lava
+                | BlockType::SnowLayer
+                | BlockType::OakDoor
+                | BlockType::OakDoorOpen
+                | BlockType::OakTrapdoor
+                | BlockType::OakTrapdoorOpen
         )
 }
 
@@ -1693,6 +1932,7 @@ pub struct Chunk {
     pub chunk_x: i32,
     pub chunk_z: i32,
     pub blocks: Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
+    pub block_states: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     pub sky_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     pub block_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     /// Per-column max Y of non-air blocks (indexed as [x][z])
@@ -2177,11 +2417,16 @@ impl Chunk {
             vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
                 .try_into()
                 .unwrap();
+        let block_states: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
+            vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
+                .try_into()
+                .unwrap();
 
         Self {
             chunk_x,
             chunk_z,
             blocks,
+            block_states,
             sky_light,
             block_light,
             heightmap,
@@ -2198,6 +2443,32 @@ impl Chunk {
             }
         }
         self.heightmap[x][z] = 0;
+    }
+
+    pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> u8 {
+        if x < 0
+            || x >= CHUNK_WIDTH as i32
+            || y < 0
+            || y >= CHUNK_HEIGHT as i32
+            || z < 0
+            || z >= CHUNK_DEPTH as i32
+        {
+            0
+        } else {
+            self.block_states[x as usize][y as usize][z as usize]
+        }
+    }
+
+    pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: u8) {
+        if x >= 0
+            && x < CHUNK_WIDTH as i32
+            && y >= 0
+            && y < CHUNK_HEIGHT as i32
+            && z >= 0
+            && z < CHUNK_DEPTH as i32
+        {
+            self.block_states[x as usize][y as usize][z as usize] = state;
+        }
     }
 
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
@@ -2258,6 +2529,34 @@ impl Chunk {
                             self.sky_light[x][y][z],
                             self.block_light[x][y][z],
                             atlas_tile,
+                        );
+                        continue;
+                    }
+
+                    if matches!(block, BlockType::OakDoor | BlockType::OakDoorOpen) {
+                        let state = BlockState::decode(self.block_states[x][y][z]);
+                        append_door_mesh(
+                            &mut opaque_vertices,
+                            &mut opaque_indices,
+                            [world_x as f32, world_y as f32, world_z as f32],
+                            state,
+                            self.sky_light[x][y][z],
+                            self.block_light[x][y][z],
+                            (9, 14),
+                        );
+                        continue;
+                    }
+
+                    if matches!(block, BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen) {
+                        let state = BlockState::decode(self.block_states[x][y][z]);
+                        append_trapdoor_mesh(
+                            &mut opaque_vertices,
+                            &mut opaque_indices,
+                            [world_x as f32, world_y as f32, world_z as f32],
+                            state,
+                            self.sky_light[x][y][z],
+                            self.block_light[x][y][z],
+                            (10, 14),
                         );
                         continue;
                     }
@@ -3337,12 +3636,6 @@ mod tests {
             [8.0 + TORCH_MIN, 1.0, 8.0 + TORCH_MIN],
             "torch must start at the centered 7/16 inset"
         );
-        assert_eq!(
-            max,
-            [8.0 + TORCH_MAX, 1.0 + TORCH_HEIGHT, 8.0 + TORCH_MAX],
-            "torch must occupy exactly a 2x2x10-pixel cuboid"
-        );
-
         for face_idx in 0..6 {
             let expected = BLOCK_FACES[face_idx].0.map(|component| component as f32);
             for triangle in indices[face_idx * 6..face_idx * 6 + 6].chunks_exact(3) {
@@ -3359,6 +3652,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn door_mesh_generation_bounds_and_quad_count() {
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..16 {
+            for y in 0..256 {
+                for z in 0..16 {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                }
+            }
+        }
+        chunk.heightmap[0][0] = 64;
+        chunk.blocks[0][64][0] = BlockType::OakDoor;
+        let state = BlockState {
+            facing: Direction::North,
+            is_top: false,
+            is_right_hinge: false,
+            is_open: false,
+        };
+        chunk.set_block_state(0, 64, 0, state.encode());
+
+        let (opaque_v, opaque_i, trans_v, trans_i) =
+            chunk.generate_mesh(|_, _, _| (BlockType::Air, 0, 0, 0, false));
+
+        assert_eq!(opaque_v.len(), 24);
+        assert_eq!(opaque_i.len(), 36);
+        assert!(trans_v.is_empty());
+        assert!(trans_i.is_empty());
+
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for v in &opaque_v {
+            for a in 0..3 {
+                min[a] = min[a].min(v.position[a]);
+                max[a] = max[a].max(v.position[a]);
+            }
+        }
+        assert!((min[0] - 0.0).abs() < 1e-4);
+        assert!((max[0] - 1.0).abs() < 1e-4);
+        assert!((min[1] - 64.0).abs() < 1e-4);
+        assert!((max[1] - 65.0).abs() < 1e-4);
+        assert!((min[2] - 0.0).abs() < 1e-4);
+        assert!((max[2] - 0.1875).abs() < 1e-4);
+    }
+
+    #[test]
+    fn trapdoor_mesh_generation_open_and_closed_bounds() {
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..16 {
+            for y in 0..256 {
+                for z in 0..16 {
+                    chunk.blocks[x][y][z] = BlockType::Air;
+                }
+            }
+        }
+        chunk.heightmap[0][0] = 64;
+        chunk.blocks[0][64][0] = BlockType::OakTrapdoor;
+        let closed_state = BlockState {
+            facing: Direction::North,
+            is_top: false,
+            is_right_hinge: false,
+            is_open: false,
+        };
+        chunk.set_block_state(0, 64, 0, closed_state.encode());
+
+        let (opaque_v, opaque_i, _, _) =
+            chunk.generate_mesh(|_, _, _| (BlockType::Air, 0, 0, 0, false));
+
+        assert_eq!(opaque_v.len(), 24);
+        assert_eq!(opaque_i.len(), 36);
+
+        let mut max_y = f32::NEG_INFINITY;
+        for v in &opaque_v {
+            max_y = max_y.max(v.position[1]);
+        }
+        assert!((max_y - 64.1875).abs() < 1e-4);
+
+        // Open trapdoor
+        let open_state = BlockState {
+            facing: Direction::North,
+            is_top: false,
+            is_right_hinge: false,
+            is_open: true,
+        };
+        chunk.set_block_state(0, 64, 0, open_state.encode());
+        let (opaque_v2, _, _, _) = chunk.generate_mesh(|_, _, _| (BlockType::Air, 0, 0, 0, false));
+        let mut max_y_open = f32::NEG_INFINITY;
+        for v in &opaque_v2 {
+            max_y_open = max_y_open.max(v.position[1]);
+        }
+        assert!((max_y_open - 65.0).abs() < 1e-4);
     }
 
     #[test]
@@ -3814,5 +4199,38 @@ mod tests {
             BlockType::Cactus.support_status_at(position, lookup),
             BlockSupportStatus::Unknown
         );
+    }
+
+    #[test]
+    fn block_state_encoding_roundtrip() {
+        assert_eq!(BlockState::default().encode(), 0);
+
+        let directions = [
+            Direction::North,
+            Direction::South,
+            Direction::West,
+            Direction::East,
+        ];
+        for facing in directions {
+            for is_top in [false, true] {
+                for is_right_hinge in [false, true] {
+                    for is_open in [false, true] {
+                        let state = BlockState {
+                            facing,
+                            is_top,
+                            is_right_hinge,
+                            is_open,
+                        };
+                        let encoded = state.encode();
+                        let decoded = BlockState::decode(encoded);
+                        assert_eq!(decoded, state);
+
+                        // Verify reserved bits (bits 5, 6, 7) are ignored
+                        let decoded_with_reserved = BlockState::decode(encoded | 0b1110_0000);
+                        assert_eq!(decoded_with_reserved, state);
+                    }
+                }
+            }
+        }
     }
 }

@@ -190,6 +190,23 @@ impl ChunkManager {
             && self.block_support_status(block, wx, wy, wz) == BlockSupportStatus::Supported
     }
 
+    pub fn get_block_state(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                return chunk.block_states[bx][by][bz];
+            }
+        }
+        0
+    }
+
+    pub fn set_block_state(&mut self, wx: i32, wy: i32, wz: i32, state: u8) {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                chunk.block_states[bx][by][bz] = state;
+            }
+        }
+    }
+
     pub fn set_block(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
@@ -197,6 +214,7 @@ impl ChunkManager {
                     return;
                 }
                 chunk.blocks[bx][by][bz] = block;
+                chunk.block_states[bx][by][bz] = 0;
                 if block != BlockType::Water && block != BlockType::Lava {
                     chunk.fluid_levels[bx][by][bz] = 0;
                 }
