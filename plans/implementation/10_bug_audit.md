@@ -70,6 +70,12 @@ block-state/orientation 與碰撞資料，不應只用視覺假修。`G3` 已於
 chunk 卸載／重載、維度切換、背景存檔與同步存檔皆保留；舊存檔透過
 `deserialize_chunk_save_data` 的 legacy fallback 讀回並回報空 sidecar。
 
+三項後續項已各自立為獨立實作計畫：
+
+- **N3** → [計畫 11：Host 遠端方塊請求 Reach 驗證](./11_reach_validation.md)
+- **G1** → [計畫 12：Joined Client 權威方塊 Action-Result 流程](./12_block_action_result.md)
+- **W1** → [計畫 13：門／活板門方向與薄碰撞 Block-State](./13_door_trapdoor_state.md)
+
 ## 驗證門檻
 
 - 每項已修問題都有失敗前／成功後可表達的純回歸測試。

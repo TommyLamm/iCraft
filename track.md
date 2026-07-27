@@ -101,9 +101,11 @@
   redstone torch mesh, sugar cane/cactus support, authoritative weather
   phase/lightning sync, non-finite view settings, and invalid WAV fallback.
   Follow-up G3 (redstone component metadata persistence across chunk save/unload/reload
-  via ChunkSaveData sidecar) has been completed and verified. Remaining follow-ups:
-  remote block action ACK/reach validation (N3/G1) and proper door/trapdoor block-state
-  orientation/collision/model work (W1).
+  via ChunkSaveData sidecar) has been completed and verified. Remaining follow-ups
+  have been broken into standalone implementation plans:
+  - N3 (reach validation) -> plan 11
+  - G1 (authoritative block action-result) -> plan 12
+  - W1 (door/trapdoor block-state) -> plan 13
 
 ## Commit discipline
 
