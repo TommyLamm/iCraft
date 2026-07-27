@@ -45,6 +45,14 @@ pub enum ClientToGame {
         z: i32,
         block: u32,
     },
+    BlockActionResult {
+        x: i32,
+        y: i32,
+        z: i32,
+        success: bool,
+        consumed_item: bool,
+        drops: Vec<crate::network::protocol::ItemWire>,
+    },
     ChunkData {
         cx: i32,
         cz: i32,
@@ -84,6 +92,14 @@ pub enum GameToClient {
         y: i32,
         z: i32,
         block: u32,
+    },
+    RequestBlockAction {
+        action: Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        held_item: Option<crate::network::protocol::ItemWire>,
     },
     SendChat {
         message: String,
@@ -252,6 +268,9 @@ async fn run_client(
                     }
                     Ok(Packet::PlayerAction { id, action, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerAction { id, action }); }
                     Ok(Packet::BlockChange { x, y, z, block, .. }) => { let _ = client_to_game.send(ClientToGame::BlockChange { x, y, z, block }); }
+                    Ok(Packet::BlockActionResult { x, y, z, success, consumed_item, drops, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::BlockActionResult { x, y, z, success, consumed_item, drops });
+                    }
                     Ok(Packet::ChunkData { cx, cz, blocks, .. }) => { let _ = client_to_game.send(ClientToGame::ChunkData { cx, cz, blocks }); }
                     Ok(packet @ Packet::TimeSync { .. })
                     | Ok(packet @ Packet::LightningStrike { .. }) => {
@@ -311,6 +330,13 @@ async fn run_client(
                         Ok(GameToClient::RequestBlockChange { x, y, z, block }) => {
                             if writer.send(&Packet::BlockChange { protocol_version: PROTOCOL_VERSION, x, y, z, block }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send BlockChange");
+                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                                return;
+                            }
+                        }
+                        Ok(GameToClient::RequestBlockAction { action, x, y, z, block, held_item }) => {
+                            if writer.send(&Packet::BlockActionRequest { protocol_version: PROTOCOL_VERSION, action, x, y, z, block, held_item }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send BlockActionRequest");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }

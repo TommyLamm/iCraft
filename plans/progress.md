@@ -103,6 +103,12 @@ P3 [█████████░] 88.9%
 
 <!-- 每次完成任務時，在這裡新增一條記錄，格式如下： -->
 
+### 2026-07-27
+- 🔧 完成 Task 12：Host Authoritative Block Action-Result 驗證與 Network Protocol v5 升級
+  - 修改文件：`src/inventory.rs`, `src/network/protocol.rs`, `src/network/server.rs`, `src/network/client.rs`, `src/state.rs`, `ARCHITECTURE.md`, `track.md`, `plans/progress.md`, `plans/implementation/track_12_block_action_result.md`
+  - 關鍵決策：升級通訊協定版本至 Protocol v5，新增 `ItemWire` / `PotionWire` 序列化結構以支援物品耐久、附魔 (4-bit kind/level)、藥水與自訂名稱傳輸。加入 `BlockActionRequest` 與 targeted `BlockActionResult` 封包。Host 為方塊動作唯一權威：檢查點 reach (5.0 + 1.5 預算)、區塊載入與放置條件；執行破壞/放置後向廣播 `BlockChange`，並單獨發送 targeted ACK 回請求用戶端。用戶端於收到成功 ACK 後才觸發物品欄消耗、計算掉落物收集、工具耐久扣減與 MineBlock 成就觸發。重構提取 `calculate_block_break_rewards` 共用掉落/XP/ exhaustion 算式。
+  - 驗證：`cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過，新增 10+ 項 protocol、server relay、block action result 與 rewards 測試（共 337 項單元與整合測試全部通過）。
+
 ### 2026-07-25
 - 🔧 完成 Task 10 後續項 G3：紅石組件元資料 (facing/delay/comparator_mode/note) 持久化
   - 修改文件：`src/redstone.rs`, `src/save.rs`, `src/state.rs`, `plans/implementation/10_bug_audit.md`, `ARCHITECTURE.md`, `track.md`, `plans/progress.md`

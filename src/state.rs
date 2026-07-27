@@ -2047,6 +2047,23 @@ enum NetworkInbound {
         z: i32,
         block: u32,
     },
+    ClientBlockAction {
+        id: crate::network::protocol::PlayerId,
+        action: crate::network::protocol::Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        held_item: Option<crate::network::protocol::ItemWire>,
+    },
+    BlockActionResult {
+        x: i32,
+        y: i32,
+        z: i32,
+        success: bool,
+        consumed_item: bool,
+        drops: Vec<crate::network::protocol::ItemWire>,
+    },
     AuthoritativeBlockChange {
         x: i32,
         y: i32,
@@ -2120,6 +2137,23 @@ impl NetworkHandle {
                         z,
                         block,
                     } => NetworkInbound::ClientBlockChange { id, x, y, z, block },
+                    crate::network::server::ServerToHost::ClientBlockAction {
+                        id,
+                        action,
+                        x,
+                        y,
+                        z,
+                        block,
+                        held_item,
+                    } => NetworkInbound::ClientBlockAction {
+                        id,
+                        action,
+                        x,
+                        y,
+                        z,
+                        block,
+                        held_item,
+                    },
                     crate::network::server::ServerToHost::ChatFromClient { id, message } => {
                         NetworkInbound::ChatFromClient { id, message }
                     }
@@ -2171,6 +2205,21 @@ impl NetworkHandle {
                     crate::network::client::ClientToGame::BlockChange { x, y, z, block } => {
                         NetworkInbound::AuthoritativeBlockChange { x, y, z, block }
                     }
+                    crate::network::client::ClientToGame::BlockActionResult {
+                        x,
+                        y,
+                        z,
+                        success,
+                        consumed_item,
+                        drops,
+                    } => NetworkInbound::BlockActionResult {
+                        x,
+                        y,
+                        z,
+                        success,
+                        consumed_item,
+                        drops,
+                    },
                     crate::network::client::ClientToGame::ChunkData { cx, cz, blocks } => {
                         NetworkInbound::ChunkData { cx, cz, blocks }
                     }
@@ -2242,6 +2291,27 @@ impl NetworkHandle {
                 y,
                 z,
                 block,
+            });
+        }
+    }
+
+    fn request_block_action(
+        &self,
+        action: crate::network::protocol::Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        held_item: Option<crate::network::protocol::ItemWire>,
+    ) {
+        if let NetworkHandle::Client { game_to_client, .. } = self {
+            let _ = game_to_client.send(crate::network::client::GameToClient::RequestBlockAction {
+                action,
+                x,
+                y,
+                z,
+                block,
+                held_item,
             });
         }
     }
@@ -4063,10 +4133,53 @@ impl State {
                     }
                 }
                 NetworkInbound::ClientBlockChange { id, x, y, z, block } => {
-                    // The server supplied the authenticated session id. The
-                    // host is the final authority for both player occupancy and
-                    // the resulting world mutation.
+                    // Legacy/fallback block change
                     self.set_block_and_broadcast(id, x, y, z, block);
+                }
+                NetworkInbound::ClientBlockAction {
+                    id,
+                    action,
+                    x,
+                    y,
+                    z,
+                    block,
+                    held_item,
+                } => {
+                    self.handle_client_block_action(id, action, x, y, z, block, held_item);
+                }
+                NetworkInbound::BlockActionResult {
+                    x,
+                    y,
+                    z,
+                    success,
+                    consumed_item,
+                    drops,
+                } => {
+                    if success {
+                        if consumed_item {
+                            self.inventory
+                                .use_selected_item(self.game_mode == GameMode::Creative);
+                        }
+                        for drop_wire in drops {
+                            if let Some(stack) = drop_wire.to_stack() {
+                                if let Some(leftover) = self.inventory.add_stack(stack) {
+                                    let sound_pos = glam::Vec3::new(
+                                        x as f32 + 0.5,
+                                        y as f32 + 0.5,
+                                        z as f32 + 0.5,
+                                    );
+                                    self.spawn_dropped_item(leftover.item, sound_pos);
+                                }
+                            }
+                        }
+                        let mined_block = self.chunk_manager.get_block(x, y, z);
+                        self.trigger_advancement(
+                            crate::advancements::AdvancementTrigger::MineBlock(mined_block),
+                        );
+                        self.damage_selected_tool(
+                            (x as u32) ^ (y as u32).rotate_left(11) ^ (z as u32).rotate_left(22),
+                        );
+                    }
                 }
                 NetworkInbound::AuthoritativeBlockChange { x, y, z, block } => {
                     // Clients always apply host authority without re-validating
@@ -6568,114 +6681,24 @@ impl State {
             );
         }
 
-        // Survival drops check
-        if self.game_mode == GameMode::Survival {
-            let mut eligible_to_harvest = true;
-            if let Some(min_material) = old_block.min_harvest_material() {
-                let held_item = self.inventory.hotbar[self.inventory.selected]
-                    .map(|s| s.item)
-                    .unwrap_or(Item::Air);
-                if let Some(tool_prop) = held_item.tool_properties() {
-                    eligible_to_harvest = tool_prop.tool_type == old_block.preferred_tool()
-                        && tool_prop.material >= min_material;
-                } else {
-                    eligible_to_harvest = false;
-                }
-            }
+        let held_stack = self.inventory.hotbar[self.inventory.selected];
+        let rewards = calculate_block_break_rewards(
+            old_block,
+            (wx, wy, wz),
+            held_stack.as_ref(),
+            self.game_mode,
+        );
 
-            if eligible_to_harvest {
-                let held_enchantments = self.inventory.hotbar[self.inventory.selected]
-                    .map(|stack| stack.enchantments)
-                    .unwrap_or_default();
-                let silk_touch =
-                    held_enchantments.level_of(crate::enchantment::Enchantment::SilkTouch) > 0;
-                let fortune =
-                    held_enchantments.level_of(crate::enchantment::Enchantment::Fortune(1)) as u32;
-                let is_any_leaves = old_block == BlockType::OakLeaves
-                    || old_block == BlockType::BirchLeaves
-                    || old_block == BlockType::SpruceLeaves;
-                if silk_touch {
-                    self.spawn_dropped_item(Item::from_block(old_block), sound_pos);
-                } else if is_any_leaves {
-                    let mut rng_seed = (wx as u32)
-                        .wrapping_mul(31)
-                        .wrapping_add(wy as u32)
-                        .wrapping_mul(17)
-                        .wrapping_add(wz as u32);
-                    let mut next_rand = || {
-                        rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                        (rng_seed / 65536) % 32768
-                    };
-                    if next_rand() % 10 == 0 {
-                        self.spawn_dropped_item(crate::inventory::Item::Apple, sound_pos);
-                    } else {
-                        self.spawn_dropped_item(
-                            crate::inventory::Item::from_block(old_block),
-                            sound_pos,
-                        );
-                    }
-                } else if old_block == BlockType::TallGrass {
-                    let mut rng_seed = (wx as u32)
-                        .wrapping_mul(31)
-                        .wrapping_add(wy as u32)
-                        .wrapping_mul(17)
-                        .wrapping_add(wz as u32);
-                    let mut next_rand = || {
-                        rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                        (rng_seed / 65536) % 32768
-                    };
-                    if next_rand() % 8 == 0 {
-                        // 12.5% chance to drop seed
-                        self.spawn_dropped_item(crate::inventory::Item::Seeds, sound_pos);
-                    }
-                } else {
-                    let base_drop = match old_block {
-                        BlockType::CoalOre => Item::Coal,
-                        BlockType::DiamondOre => Item::Diamond,
-                        BlockType::RedstoneOre => Item::Redstone,
-                        _ => Item::from_block(old_block),
-                    };
-                    let fortune_eligible = matches!(
-                        old_block,
-                        BlockType::CoalOre | BlockType::DiamondOre | BlockType::RedstoneOre
-                    );
-                    let bonus = if fortune_eligible && fortune > 0 {
-                        ((wx as u32)
-                            .wrapping_mul(31)
-                            .wrapping_add(wy as u32 * 17)
-                            .wrapping_add(wz as u32 * 13)
-                            % (fortune + 1))
-                            + fortune / 2
-                    } else {
-                        0
-                    };
-                    for _ in 0..(1 + bonus) {
-                        self.spawn_dropped_item(base_drop, sound_pos);
-                    }
-                }
-            }
-
-            if matches!(
-                old_block,
-                BlockType::CoalOre
-                    | BlockType::IronOre
-                    | BlockType::GoldOre
-                    | BlockType::DiamondOre
-                    | BlockType::RedstoneOre
-            ) {
-                let xp = if old_block == BlockType::DiamondOre {
-                    5
-                } else {
-                    2
-                };
-                self.player_state.add_experience(xp);
-                if old_block == BlockType::RedstoneOre && ((wx ^ wy ^ wz) & 1) == 0 {
-                    self.spawn_dropped_item(Item::LapisLazuli, sound_pos);
-                }
-            }
-
-            self.player_state.add_exhaustion(0.005);
-
+        for drop in rewards.drops {
+            self.spawn_dropped_item(drop.item, sound_pos);
+        }
+        if rewards.xp > 0 {
+            self.player_state.add_experience(rewards.xp);
+        }
+        if rewards.exhaustion > 0.0 {
+            self.player_state.add_exhaustion(rewards.exhaustion);
+        }
+        if rewards.tool_damaged {
             self.damage_selected_tool(
                 (wx as u32) ^ (wy as u32).rotate_left(11) ^ (wz as u32).rotate_left(22),
             );
@@ -6710,6 +6733,176 @@ impl State {
 
         // Fan the authoritative break out to connected clients.
         self.broadcast_block_change(wx, wy, wz, BlockType::Air);
+    }
+
+    pub fn handle_client_block_action(
+        &mut self,
+        requester_id: crate::network::protocol::PlayerId,
+        action: crate::network::protocol::Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block_wire: u32,
+        held_item_wire: Option<crate::network::protocol::ItemWire>,
+    ) {
+        if !validate_remote_block_request(&self.remote_players, requester_id, (x, y, z)) {
+            self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
+            return;
+        }
+
+        let Some(((cx, cz), _)) = self.chunk_manager.world_to_local(x, y, z) else {
+            self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
+            return;
+        };
+        if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
+            self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
+            return;
+        }
+
+        match action {
+            crate::network::protocol::Action::Break => {
+                let old_block = self.chunk_manager.get_block(x, y, z);
+                if old_block == BlockType::Air || old_block == BlockType::Bedrock {
+                    self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
+                    return;
+                }
+
+                let mut dirty_chunks = std::collections::HashSet::new();
+                self.chunk_manager.set_block(x, y, z, BlockType::Air);
+                self.redstone.on_block_changed(
+                    &self.chunk_manager,
+                    (x, y, z),
+                    crate::redstone::Direction::North,
+                );
+                crate::lighting::update_sky_light_after_removed(
+                    &mut self.chunk_manager,
+                    x,
+                    y,
+                    z,
+                    &mut dirty_chunks,
+                );
+                crate::lighting::update_block_light_after_removed(
+                    &mut self.chunk_manager,
+                    x,
+                    y,
+                    z,
+                    old_block.properties().light_emission,
+                    &mut dirty_chunks,
+                );
+                mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
+                self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
+                for (dcx, dcz) in dirty_chunks {
+                    if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                        mesh.mark_dirty();
+                    }
+                }
+
+                self.broadcast_block_change(x, y, z, BlockType::Air);
+
+                let held_stack = held_item_wire.and_then(|w| w.to_stack());
+                let rewards = calculate_block_break_rewards(
+                    old_block,
+                    (x, y, z),
+                    held_stack.as_ref(),
+                    self.game_mode,
+                );
+
+                let sound_pos = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                for drop in &rewards.drops {
+                    self.spawn_dropped_item(drop.item, sound_pos);
+                }
+
+                let drops_wire = rewards
+                    .drops
+                    .iter()
+                    .map(crate::network::protocol::ItemWire::from_stack)
+                    .collect();
+                self.send_block_action_result(requester_id, x, y, z, true, false, drops_wire);
+            }
+            crate::network::protocol::Action::Place => {
+                let block = BlockType::from_u8(block_wire as u8);
+                if block == BlockType::Air {
+                    self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
+                    return;
+                }
+
+                if !self.can_place_block_at(x, y, z, block)
+                    || !self
+                        .chunk_manager
+                        .can_place_block_with_support(block, x, y, z)
+                {
+                    self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
+                    return;
+                }
+
+                let mut dirty_chunks = std::collections::HashSet::new();
+                self.chunk_manager.set_block(x, y, z, block);
+                self.redstone.on_block_changed(
+                    &self.chunk_manager,
+                    (x, y, z),
+                    crate::redstone::Direction::North,
+                );
+                let properties = block.properties();
+                if properties.is_solid {
+                    crate::lighting::update_sky_light_after_placed(
+                        &mut self.chunk_manager,
+                        x,
+                        y,
+                        z,
+                        &mut dirty_chunks,
+                    );
+                }
+                if properties.light_emission > 0 {
+                    crate::lighting::update_block_light_after_placed(
+                        &mut self.chunk_manager,
+                        x,
+                        y,
+                        z,
+                        properties.light_emission,
+                        &mut dirty_chunks,
+                    );
+                }
+                mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
+                for (dcx, dcz) in dirty_chunks {
+                    if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
+                        mesh.mark_dirty();
+                    }
+                }
+
+                self.broadcast_block_change(x, y, z, block);
+
+                let consumed = self.game_mode == GameMode::Survival;
+                self.send_block_action_result(requester_id, x, y, z, true, consumed, vec![]);
+            }
+            _ => {
+                self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
+            }
+        }
+    }
+
+    fn send_block_action_result(
+        &self,
+        to: crate::network::protocol::PlayerId,
+        x: i32,
+        y: i32,
+        z: i32,
+        success: bool,
+        consumed_item: bool,
+        drops: Vec<crate::network::protocol::ItemWire>,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = &self.network {
+            let _ = host_to_server.send(
+                crate::network::server::HostToServer::SendBlockActionResult {
+                    to,
+                    x,
+                    y,
+                    z,
+                    success,
+                    consumed_item,
+                    drops,
+                },
+            );
+        }
     }
 
     /// Spawn a `DroppedItem` entity in the world carrying the given `Item`.
@@ -7118,12 +7311,17 @@ impl State {
                 &self.chunk_manager,
                 target_policy,
             ) {
+                let held_wire = self.inventory.hotbar[self.inventory.selected]
+                    .as_ref()
+                    .map(crate::network::protocol::ItemWire::from_stack);
                 if is_left_click {
-                    self.network.request_block_change(
+                    self.network.request_block_action(
+                        crate::network::protocol::Action::Break,
                         hit.block_pos.x as i32,
                         hit.block_pos.y as i32,
                         hit.block_pos.z as i32,
                         BlockType::Air as u32,
+                        held_wire,
                     );
                     self.network
                         .send_action(crate::network::protocol::Action::Break);
@@ -7133,7 +7331,14 @@ impl State {
                     if !self.can_place_block_at(x, y, z, block) {
                         return;
                     }
-                    self.network.request_block_change(x, y, z, block as u32);
+                    self.network.request_block_action(
+                        crate::network::protocol::Action::Place,
+                        x,
+                        y,
+                        z,
+                        block as u32,
+                        held_wire,
+                    );
                     self.network
                         .send_action(crate::network::protocol::Action::Place);
                 }
@@ -11605,6 +11810,137 @@ fn weather_tile_uv(column: u32, row: u32) -> [f32; 4] {
     ]
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockBreakRewards {
+    pub drops: Vec<ItemStack>,
+    pub xp: u32,
+    pub exhaustion: f32,
+    pub tool_damaged: bool,
+}
+
+pub fn calculate_block_break_rewards(
+    old_block: BlockType,
+    pos: (i32, i32, i32),
+    held_stack: Option<&ItemStack>,
+    game_mode: GameMode,
+) -> BlockBreakRewards {
+    if game_mode != GameMode::Survival {
+        return BlockBreakRewards {
+            drops: Vec::new(),
+            xp: 0,
+            exhaustion: 0.0,
+            tool_damaged: false,
+        };
+    }
+
+    let (wx, wy, wz) = pos;
+    let mut drops = Vec::new();
+
+    let mut eligible_to_harvest = true;
+    if let Some(min_material) = old_block.min_harvest_material() {
+        let held_item = held_stack.map(|s| s.item).unwrap_or(Item::Air);
+        if let Some(tool_prop) = held_item.tool_properties() {
+            eligible_to_harvest = tool_prop.tool_type == old_block.preferred_tool()
+                && tool_prop.material >= min_material;
+        } else {
+            eligible_to_harvest = false;
+        }
+    }
+
+    if eligible_to_harvest {
+        let held_enchantments = held_stack
+            .map(|stack| stack.enchantments)
+            .unwrap_or_default();
+        let silk_touch = held_enchantments.level_of(crate::enchantment::Enchantment::SilkTouch) > 0;
+        let fortune =
+            held_enchantments.level_of(crate::enchantment::Enchantment::Fortune(1)) as u32;
+        let is_any_leaves = old_block == BlockType::OakLeaves
+            || old_block == BlockType::BirchLeaves
+            || old_block == BlockType::SpruceLeaves;
+        if silk_touch {
+            drops.push(ItemStack::new(Item::from_block(old_block), 1));
+        } else if is_any_leaves {
+            let mut rng_seed = (wx as u32)
+                .wrapping_mul(31)
+                .wrapping_add(wy as u32)
+                .wrapping_mul(17)
+                .wrapping_add(wz as u32);
+            let mut next_rand = || {
+                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                (rng_seed / 65536) % 32768
+            };
+            if next_rand() % 10 == 0 {
+                drops.push(ItemStack::new(Item::Apple, 1));
+            } else {
+                drops.push(ItemStack::new(Item::from_block(old_block), 1));
+            }
+        } else if old_block == BlockType::TallGrass {
+            let mut rng_seed = (wx as u32)
+                .wrapping_mul(31)
+                .wrapping_add(wy as u32)
+                .wrapping_mul(17)
+                .wrapping_add(wz as u32);
+            let mut next_rand = || {
+                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                (rng_seed / 65536) % 32768
+            };
+            if next_rand() % 8 == 0 {
+                drops.push(ItemStack::new(Item::Seeds, 1));
+            }
+        } else {
+            let base_drop = match old_block {
+                BlockType::CoalOre => Item::Coal,
+                BlockType::DiamondOre => Item::Diamond,
+                BlockType::RedstoneOre => Item::Redstone,
+                _ => Item::from_block(old_block),
+            };
+            let fortune_eligible = matches!(
+                old_block,
+                BlockType::CoalOre | BlockType::DiamondOre | BlockType::RedstoneOre
+            );
+            let bonus = if fortune_eligible && fortune > 0 {
+                ((wx as u32)
+                    .wrapping_mul(31)
+                    .wrapping_add(wy as u32 * 17)
+                    .wrapping_add(wz as u32 * 13)
+                    % (fortune + 1))
+                    + fortune / 2
+            } else {
+                0
+            };
+            for _ in 0..(1 + bonus) {
+                drops.push(ItemStack::new(base_drop, 1));
+            }
+        }
+    }
+
+    let mut xp = 0;
+    if matches!(
+        old_block,
+        BlockType::CoalOre
+            | BlockType::IronOre
+            | BlockType::GoldOre
+            | BlockType::DiamondOre
+            | BlockType::RedstoneOre
+    ) {
+        xp = if old_block == BlockType::DiamondOre {
+            5
+        } else {
+            2
+        };
+        if old_block == BlockType::RedstoneOre && ((wx ^ wy ^ wz) & 1) == 0 {
+            drops.push(ItemStack::new(Item::LapisLazuli, 1));
+        }
+    }
+
+    BlockBreakRewards {
+        drops,
+        xp,
+        exhaustion: 0.005,
+        tool_damaged: true,
+    }
+}
+
 impl Drop for State {
     fn drop(&mut self) {
         self.shutdown_network();
@@ -12355,5 +12691,52 @@ mod reach_tests {
             7,
             (0, 60, 20)
         ));
+    }
+
+    #[test]
+    fn calculate_block_break_rewards_harvest_and_drops() {
+        let pos = (10, 60, 10);
+
+        // Stone with bare hand in Survival -> not eligible to harvest (no drops)
+        let rewards =
+            calculate_block_break_rewards(BlockType::Stone, pos, None, GameMode::Survival);
+        assert!(rewards.drops.is_empty());
+        assert_eq!(rewards.xp, 0);
+
+        // Stone with Pickaxe -> eligible, drops Stone
+        let pick = ItemStack::new(Item::StonePickaxe, 1);
+        let rewards =
+            calculate_block_break_rewards(BlockType::Stone, pos, Some(&pick), GameMode::Survival);
+        assert_eq!(rewards.drops.len(), 1);
+        assert_eq!(rewards.drops[0].item, Item::Stone);
+
+        // DiamondOre with IronPickaxe -> drops Diamond + 5 XP
+        let iron_pick = ItemStack::new(Item::IronPickaxe, 1);
+        let rewards = calculate_block_break_rewards(
+            BlockType::DiamondOre,
+            pos,
+            Some(&iron_pick),
+            GameMode::Survival,
+        );
+        assert_eq!(rewards.drops[0].item, Item::Diamond);
+        assert_eq!(rewards.xp, 5);
+
+        // DiamondOre with SilkTouch -> drops DiamondOre block
+        let mut silk_pick = ItemStack::new(Item::IronPickaxe, 1);
+        silk_pick
+            .enchantments
+            .add_or_upgrade(crate::enchantment::Enchantment::SilkTouch);
+        let rewards = calculate_block_break_rewards(
+            BlockType::DiamondOre,
+            pos,
+            Some(&silk_pick),
+            GameMode::Survival,
+        );
+        assert_eq!(rewards.drops[0].item, Item::DiamondOre);
+
+        // Creative mode -> zero drops
+        let rewards =
+            calculate_block_break_rewards(BlockType::Stone, pos, Some(&pick), GameMode::Creative);
+        assert!(rewards.drops.is_empty());
     }
 }

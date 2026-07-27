@@ -50,6 +50,15 @@ pub enum ServerToHost {
         z: i32,
         block: u32,
     },
+    ClientBlockAction {
+        id: PlayerId,
+        action: Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        held_item: Option<crate::network::protocol::ItemWire>,
+    },
     ChatFromClient {
         id: PlayerId,
         message: String,
@@ -63,6 +72,15 @@ pub enum HostToServer {
         y: i32,
         z: i32,
         block: u32,
+    },
+    SendBlockActionResult {
+        to: PlayerId,
+        x: i32,
+        y: i32,
+        z: i32,
+        success: bool,
+        consumed_item: bool,
+        drops: Vec<crate::network::protocol::ItemWire>,
     },
     SendChunk {
         cx: i32,
@@ -471,6 +489,14 @@ impl NetworkServer {
                                 break;
                             }
                         }
+                        Ok(Ok(Packet::BlockActionRequest { action, x, y, z, block, held_item, .. })) => {
+                            if server_to_host.send(ServerToHost::ClientBlockAction {
+                                id, action, x, y, z, block, held_item,
+                            }).is_err() {
+                                disconnect_reason = "host channel closed (ClientBlockAction)".into();
+                                break;
+                            }
+                        }
                         Ok(Ok(Packet::ChatMessage { message, .. })) => {
                             if server_to_host.send(ServerToHost::ChatFromClient { id, message }).is_err() {
                                 disconnect_reason = "host channel closed (ChatFromClient)".into();
@@ -598,6 +624,26 @@ impl NetworkServer {
                     block,
                 },
                 None,
+            ),
+            HostToServer::SendBlockActionResult {
+                to,
+                x,
+                y,
+                z,
+                success,
+                consumed_item,
+                drops,
+            } => (
+                Packet::BlockActionResult {
+                    protocol_version: PROTOCOL_VERSION,
+                    x,
+                    y,
+                    z,
+                    success,
+                    consumed_item,
+                    drops,
+                },
+                Some(to),
             ),
             HostToServer::SendChunk { cx, cz, blocks, to } => (
                 Packet::ChunkData {
@@ -1654,6 +1700,121 @@ mod tests {
         )
         .await;
         assert!(matches!(packet, Packet::PlayerLeave { id, .. } if id == id_a));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn rejects_v4_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let next_player_id = Arc::new(AtomicU64::new(1));
+        let (event_tx, _event_rx) = std_mpsc::channel();
+
+        let client_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            NetworkServer::run_client(
+                Connection::new(stream),
+                0xCAFE_BABE,
+                1,
+                next_player_id,
+                sessions,
+                event_tx,
+            )
+            .await;
+        });
+
+        let mut client = Connection::new(tokio::net::TcpStream::connect(addr).await.unwrap());
+        client
+            .send(&Packet::Handshake {
+                protocol_version: PROTOCOL_VERSION - 1,
+                username: "old_client".into(),
+            })
+            .await
+            .unwrap();
+
+        let reply = client.recv().await.unwrap();
+        assert!(matches!(
+            reply,
+            Packet::Disconnect { reason, .. } if reason.contains("protocol version mismatch")
+        ));
+
+        let _ = client_task.await;
+    }
+
+    #[tokio::test]
+    async fn relays_block_action_request_and_targeted_result() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client_a, id_a) = server.connect("steve").await;
+        let (mut client_b, _id_b) = server.connect("alex").await;
+
+        let held = crate::network::protocol::ItemWire::from_stack(
+            &crate::inventory::ItemStack::new(crate::inventory::Item::StonePickaxe, 1),
+        );
+        client_a
+            .send(&Packet::BlockActionRequest {
+                protocol_version: PROTOCOL_VERSION,
+                action: Action::Break,
+                x: 10,
+                y: 64,
+                z: 20,
+                block: crate::inventory::Item::Air as u32,
+                held_item: Some(held),
+            })
+            .await
+            .unwrap();
+
+        let event = server
+            .next_event_matching(|e| matches!(e, ServerToHost::ClientBlockAction { .. }))
+            .await;
+        assert!(matches!(
+            event,
+            ServerToHost::ClientBlockAction { id, action: Action::Break, x: 10, y: 64, z: 20, .. } if id == id_a
+        ));
+
+        // Host sends targeted result to client_a
+        let drop = crate::network::protocol::ItemWire::from_stack(
+            &crate::inventory::ItemStack::new(crate::inventory::Item::Cobblestone, 1),
+        );
+        server
+            .host_tx
+            .send(HostToServer::SendBlockActionResult {
+                to: id_a,
+                x: 10,
+                y: 64,
+                z: 20,
+                success: true,
+                consumed_item: false,
+                drops: vec![drop],
+            })
+            .unwrap();
+
+        // client_a receives result
+        let res_a = recv_matching(&mut client_a, |p| {
+            matches!(p, Packet::BlockActionResult { .. })
+        })
+        .await;
+        assert!(matches!(
+            res_a,
+            Packet::BlockActionResult {
+                x: 10,
+                y: 64,
+                z: 20,
+                success: true,
+                ..
+            }
+        ));
+
+        // client_b should NOT receive targeted result (wait short time with recv timeout)
+        let res_b = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            recv_matching(&mut client_b, |p| {
+                matches!(p, Packet::BlockActionResult { .. })
+            }),
+        )
+        .await;
+        assert!(res_b.is_err());
 
         server.stop().await;
     }

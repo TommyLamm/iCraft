@@ -105,7 +105,7 @@
   via ChunkSaveData sidecar) has been completed and verified. Remaining follow-ups
   have been broken into standalone implementation plans:
   - N3 (reach validation) -> Task 11 (completed: verified reach limit 5.0 + 1.5 tolerance, snapshot existence check, air destruction reach enforcement, unit & integration tests)
-  - G1 (authoritative block action-result) -> plan 12
+  - G1 (authoritative block action-result) -> Task 12 (completed: Protocol v5 upgrade, ItemWire serialization, targeted BlockActionResult ACK, host break/place validation, reward extraction, client ACK consumption & drops, unit & integration tests)
   - W1 (door/trapdoor block-state) -> plan 13
 
 ## Commit discipline

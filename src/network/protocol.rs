@@ -1,8 +1,195 @@
+use crate::brewing::{PotionData, PotionKind};
+use crate::enchantment::{Enchantment, EnchantmentSet};
+use crate::inventory::{Item, ItemStack};
 use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PotionWire {
+    pub kind: u8,
+    pub level: u8,
+    pub duration_seconds: u16,
+    pub splash: bool,
+}
+
+impl PotionWire {
+    pub fn from_potion(data: PotionData) -> Self {
+        let kind = match data.kind {
+            PotionKind::Water => 0,
+            PotionKind::Awkward => 1,
+            PotionKind::Speed => 2,
+            PotionKind::Strength => 3,
+            PotionKind::Healing => 4,
+            PotionKind::Regeneration => 5,
+            PotionKind::NightVision => 6,
+            PotionKind::Invisibility => 7,
+            PotionKind::FireResistance => 8,
+            PotionKind::WaterBreathing => 9,
+            PotionKind::Poison => 10,
+            PotionKind::Slowness => 11,
+        };
+        Self {
+            kind,
+            level: data.level,
+            duration_seconds: data.duration_seconds,
+            splash: data.splash,
+        }
+    }
+
+    pub fn to_potion(&self) -> Option<PotionData> {
+        let kind = match self.kind {
+            0 => PotionKind::Water,
+            1 => PotionKind::Awkward,
+            2 => PotionKind::Speed,
+            3 => PotionKind::Strength,
+            4 => PotionKind::Healing,
+            5 => PotionKind::Regeneration,
+            6 => PotionKind::NightVision,
+            7 => PotionKind::Invisibility,
+            8 => PotionKind::FireResistance,
+            9 => PotionKind::WaterBreathing,
+            10 => PotionKind::Poison,
+            11 => PotionKind::Slowness,
+            _ => return None,
+        };
+        Some(PotionData {
+            kind,
+            level: self.level,
+            duration_seconds: self.duration_seconds,
+            splash: self.splash,
+        })
+    }
+}
+
+fn enc_to_u8(enc: &Enchantment) -> u8 {
+    let kind = match enc {
+        Enchantment::Efficiency(_) => 0,
+        Enchantment::Unbreaking(_) => 1,
+        Enchantment::SilkTouch => 2,
+        Enchantment::Fortune(_) => 3,
+        Enchantment::Sharpness(_) => 4,
+        Enchantment::Knockback(_) => 5,
+        Enchantment::FireAspect(_) => 6,
+        Enchantment::Looting(_) => 7,
+        Enchantment::Protection(_) => 8,
+        Enchantment::FeatherFalling(_) => 9,
+        Enchantment::Respiration(_) => 10,
+        Enchantment::Power(_) => 11,
+        Enchantment::Infinity => 12,
+    };
+    let lvl = enc.level().max(1);
+    ((kind + 1) << 4) | (lvl & 0x0F)
+}
+
+fn enc_from_u8(b: u8) -> Option<Enchantment> {
+    if b == 0 {
+        return None;
+    }
+    let kind_code = (b >> 4).checked_sub(1)?;
+    let lvl = b & 0x0F;
+    if lvl == 0 {
+        return None;
+    }
+    match kind_code {
+        0 => Some(Enchantment::Efficiency(lvl)),
+        1 => Some(Enchantment::Unbreaking(lvl)),
+        2 => Some(Enchantment::SilkTouch),
+        3 => Some(Enchantment::Fortune(lvl)),
+        4 => Some(Enchantment::Sharpness(lvl)),
+        5 => Some(Enchantment::Knockback(lvl)),
+        6 => Some(Enchantment::FireAspect(lvl)),
+        7 => Some(Enchantment::Looting(lvl)),
+        8 => Some(Enchantment::Protection(lvl)),
+        9 => Some(Enchantment::FeatherFalling(lvl)),
+        10 => Some(Enchantment::Respiration(lvl)),
+        11 => Some(Enchantment::Power(lvl)),
+        12 => Some(Enchantment::Infinity),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemWire {
+    pub item: u32,
+    pub count: u16,
+    pub durability: u16,
+    pub enchantments: [u8; 6],
+    pub potion: Option<PotionWire>,
+    pub custom_name: [u8; 24],
+}
+
+impl ItemWire {
+    pub fn empty() -> Self {
+        Self {
+            item: Item::Air as u32,
+            count: 0,
+            durability: 0,
+            enchantments: [0; 6],
+            potion: None,
+            custom_name: [0; 24],
+        }
+    }
+
+    pub fn from_stack(stack: &ItemStack) -> Self {
+        if stack.count == 0 || stack.item == Item::Air {
+            return Self::empty();
+        }
+        let mut enchantments = [0u8; 6];
+        for (i, entry) in stack.enchantments.entries.iter().enumerate() {
+            if i < 6 {
+                if let Some(enc) = entry {
+                    enchantments[i] = enc_to_u8(enc);
+                }
+            }
+        }
+        let potion = stack.potion.map(PotionWire::from_potion);
+        let mut custom_name = [0u8; 24];
+        let name_bytes = stack.custom_name.as_str().as_bytes();
+        let len = name_bytes.len().min(24);
+        custom_name[..len].copy_from_slice(&name_bytes[..len]);
+
+        Self {
+            item: stack.item.to_u32(),
+            count: stack.count as u16,
+            durability: stack.durability as u16,
+            enchantments,
+            potion,
+            custom_name,
+        }
+    }
+
+    pub fn to_stack(&self) -> Option<ItemStack> {
+        if self.count == 0 {
+            return None;
+        }
+        let item = Item::from_u32(self.item)?;
+        if item == Item::Air {
+            return None;
+        }
+        let mut stack = ItemStack::new(item, self.count as u32);
+        stack.durability = self.durability as u32;
+        let mut enc_set = EnchantmentSet::default();
+        for &b in &self.enchantments {
+            if let Some(enc) = enc_from_u8(b) {
+                enc_set.add_or_upgrade(enc);
+            }
+        }
+        stack.enchantments = enc_set;
+        if let Some(pw) = self.potion {
+            stack.potion = pw.to_potion();
+        }
+        let name_str = std::str::from_utf8(&self.custom_name)
+            .unwrap_or("")
+            .trim_matches('\0');
+        if !name_str.is_empty() {
+            stack.custom_name.set(name_str);
+        }
+        Some(stack)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
@@ -91,6 +278,24 @@ pub enum Packet {
     Keepalive {
         protocol_version: u32,
     },
+    BlockActionRequest {
+        protocol_version: u32,
+        action: Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        held_item: Option<ItemWire>,
+    },
+    BlockActionResult {
+        protocol_version: u32,
+        x: i32,
+        y: i32,
+        z: i32,
+        success: bool,
+        consumed_item: bool,
+        drops: Vec<ItemWire>,
+    },
 }
 
 impl Packet {
@@ -132,7 +337,13 @@ impl Packet {
             | Packet::ChatMessage {
                 protocol_version, ..
             }
-            | Packet::Keepalive { protocol_version } => *protocol_version,
+            | Packet::Keepalive { protocol_version }
+            | Packet::BlockActionRequest {
+                protocol_version, ..
+            }
+            | Packet::BlockActionResult {
+                protocol_version, ..
+            } => *protocol_version,
         }
     }
 
@@ -301,6 +512,89 @@ mod tests {
     fn keepalive_roundtrip() {
         let p = Packet::Keepalive {
             protocol_version: v(),
+        };
+        let decoded = Packet::decode(&p.encode()).unwrap();
+        assert_eq!(p, decoded);
+    }
+
+    #[test]
+    fn item_wire_roundtrip() {
+        // Plain block
+        let s1 = ItemStack::new(Item::Stone, 64);
+        let w1 = ItemWire::from_stack(&s1);
+        let back1 = w1.to_stack().unwrap();
+        assert_eq!(back1.item, Item::Stone);
+        assert_eq!(back1.count, 64);
+
+        // Tool with durability, enchantments, and custom name
+        let mut s2 = ItemStack::new(Item::DiamondPickaxe, 1);
+        s2.durability = 120;
+        s2.enchantments.add_or_upgrade(Enchantment::Sharpness(5));
+        s2.enchantments.add_or_upgrade(Enchantment::Efficiency(4));
+        s2.enchantments.add_or_upgrade(Enchantment::Unbreaking(3));
+        s2.enchantments.add_or_upgrade(Enchantment::Fortune(3));
+        s2.custom_name.set("SuperPick");
+
+        let w2 = ItemWire::from_stack(&s2);
+        let back2 = w2.to_stack().unwrap();
+        assert_eq!(back2.item, Item::DiamondPickaxe);
+        assert_eq!(back2.durability, 120);
+        assert_eq!(back2.enchantments.level_of(Enchantment::Sharpness(1)), 5);
+        assert_eq!(back2.enchantments.level_of(Enchantment::Efficiency(1)), 4);
+        assert_eq!(back2.enchantments.level_of(Enchantment::Unbreaking(1)), 3);
+        assert_eq!(back2.enchantments.level_of(Enchantment::Fortune(1)), 3);
+        assert_eq!(back2.custom_name.as_str(), "SuperPick");
+
+        // Potion item
+        let mut s3 = ItemStack::new(Item::SplashPotion, 1);
+        s3.potion = Some(PotionData {
+            kind: PotionKind::Speed,
+            level: 2,
+            duration_seconds: 180,
+            splash: true,
+        });
+        let w3 = ItemWire::from_stack(&s3);
+        let back3 = w3.to_stack().unwrap();
+        assert_eq!(back3.item, Item::SplashPotion);
+        let pot = back3.potion.unwrap();
+        assert_eq!(pot.kind, PotionKind::Speed);
+        assert_eq!(pot.level, 2);
+        assert_eq!(pot.duration_seconds, 180);
+        assert!(pot.splash);
+
+        // Air / count 0
+        let s4 = ItemStack::new(Item::Air, 0);
+        let w4 = ItemWire::from_stack(&s4);
+        assert_eq!(w4.to_stack(), None);
+    }
+
+    #[test]
+    fn block_action_request_roundtrip() {
+        let held = ItemWire::from_stack(&ItemStack::new(Item::StonePickaxe, 1));
+        let p = Packet::BlockActionRequest {
+            protocol_version: v(),
+            action: Action::Break,
+            x: 10,
+            y: 64,
+            z: -5,
+            block: Item::Air as u32,
+            held_item: Some(held),
+        };
+        let decoded = Packet::decode(&p.encode()).unwrap();
+        assert_eq!(p, decoded);
+    }
+
+    #[test]
+    fn block_action_result_roundtrip() {
+        let drop = ItemWire::from_stack(&ItemStack::new(Item::Cobblestone, 1));
+        let p = Packet::BlockActionResult {
+            protocol_version: v(),
+            x: 10,
+            y: 64,
+            z: -5,
+            success: true,
+            consumed_item: false,
+            drops: vec![drop],
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_eq!(p, decoded);

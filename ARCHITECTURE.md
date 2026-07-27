@@ -167,14 +167,23 @@ nearby dirty chunk meshes per frame.
 
 ### Networking
 
-Host and joining-client networking use a listen-server model. `NetworkServer`
+Host and joining-client networking use a listen-server model operating under Protocol v5. `NetworkServer`
 and `NetworkClient` each own a Tokio runtime on a dedicated background thread;
 the main-thread `State` exchanges typed commands/events with them over
 `std::sync::mpsc` channels and drains inbound events at the start of every
 update. A client waits for `LoginSuccess`, then replaces its provisional seed
 and generates the same deterministic terrain as the host. The host remains the
-authority for block/world mutations and sends catch-up chunk payloads only for
-loaded chunks that differ from deterministic generation.
+sole authority for block actions and world mutations: non-authoritative clients
+send targeted `BlockActionRequest` packets containing action type (`Break`/`Place`),
+coordinates, target block wire value, and held item details encoded via `ItemWire`.
+The host validates requester block reach against the latest authoritative player
+snapshot (max 6.5 blocks budget), chunk loading, placement support, and collision,
+applies the mutation, broadcasts an authoritative `BlockChange` to all peers, and
+sends a targeted `BlockActionResult` ACK to the requester. Rejections cause no world,
+inventory, or drop side-effects. Clients consume hotbar items, collect calculated
+drops, apply tool damage, and trigger advancements only upon receiving a successful ACK.
+The host sends catch-up chunk payloads only for loaded chunks that differ from
+deterministic generation.
 
 Local poses are sent at 20 Hz with a wrapping sequence and sender timestamp.
 Each remote player retains a bounded 32-snapshot history and samples a 100 ms

@@ -72,8 +72,8 @@ chunk 卸載／重載、維度切換、背景存檔與同步存檔皆保留；�
 
 三項後續項已各自立為獨立實作計畫：
 
-- **N3** → [計畫 11：Host 遠端方塊請求 Reach 驗證](./11_reach_validation.md)
-- **G1** → [計畫 12：Joined Client 權威方塊 Action-Result 流程](./12_block_action_result.md)
+- **N3** → [計畫 11：Host 遠端方塊請求 Reach 驗證](./11_reach_validation.md) (已完成)
+- **G1** → [計畫 12：Joined Client 權威方塊 Action-Result 流程](./track_12_block_action_result.md) (已完成)
 - **W1** → [計畫 13：門／活板門方向與薄碰撞 Block-State](./13_door_trapdoor_state.md)
 
 ## 驗證門檻
