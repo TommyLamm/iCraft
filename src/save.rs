@@ -558,7 +558,53 @@ impl SaveManager {
         }
     }
 
+    pub fn entities_file_path(&self, dimension: crate::dimension::Dimension) -> PathBuf {
+        match dimension {
+            crate::dimension::Dimension::Overworld => self.world_dir.join("entities.dat"),
+            crate::dimension::Dimension::Nether => self
+                .world_dir
+                .join("dimensions")
+                .join("nether")
+                .join("entities.dat"),
+            crate::dimension::Dimension::End => self
+                .world_dir
+                .join("dimensions")
+                .join("end")
+                .join("entities.dat"),
+        }
+    }
+
+    pub fn save_entities_in(
+        &self,
+        dimension: crate::dimension::Dimension,
+        entities: &[EntitySaveData],
+    ) -> io::Result<()> {
+        let path = self.entities_file_path(dimension);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = bincode::serialize(entities)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        fs::write(path, bytes)
+    }
+
+    pub fn load_entities_in(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> Vec<EntitySaveData> {
+        let path = self.entities_file_path(dimension);
+        if !path.exists() {
+            return Vec::new();
+        }
+        let bytes = match fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return Vec::new(),
+        };
+        bincode::deserialize(&bytes).unwrap_or_default()
+    }
+
     pub fn load_chunk(&mut self, cx: i32, cz: i32) -> Option<ChunkSaveData> {
+
         self.load_chunk_in(crate::dimension::Dimension::Overworld, cx, cz)
     }
 
@@ -1326,5 +1372,41 @@ mod tests {
         assert_eq!(restored.health, 7.5);
         assert_eq!(restored.age, -120.0);
     }
+
+    #[test]
+    fn test_save_manager_entities_persistence() {
+        let temp_dir = std::env::temp_dir().join(format!("icraft_test_entities_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let manager = SaveManager::new(&temp_dir);
+
+        let test_data = vec![EntitySaveData {
+            entity_type: crate::entity::EntityType::Zombie,
+            position: [1.0, 65.0, 2.0],
+            velocity: [0.0, 0.0, 0.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            health: 20.0,
+            max_health: 20.0,
+            is_ignited: false,
+            burn_timer: 0.0,
+            age: 0.0,
+            breeding_timer: 0.0,
+            breed_cooldown: 0.0,
+            has_wool: false,
+            wool_color: [1.0, 1.0, 1.0],
+            dropped_item: None,
+            dropped_count: 0,
+        }];
+
+        manager.save_entities_in(crate::dimension::Dimension::Overworld, &test_data).unwrap();
+
+        let loaded = manager.load_entities_in(crate::dimension::Dimension::Overworld);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].entity_type, crate::entity::EntityType::Zombie);
+        assert_eq!(loaded[0].position, [1.0, 65.0, 2.0]);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
+
 
