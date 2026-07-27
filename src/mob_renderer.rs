@@ -599,7 +599,7 @@ pub fn render_mobs(
                 let scale = if entity.age < 0.0 { 0.5f32 } else { 1.0f32 };
                 let head_scale = if entity.age < 0.0 { 0.75f32 } else { 1.0f32 };
 
-                // Pig Head (Row 10, Col 0) - offset forward
+                // Pig Head (Row 10, Col 0 face, Col 1 body/pink skin for other 5 faces) - offset forward
                 add_cuboid(
                     vertices,
                     indices,
@@ -608,7 +608,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(0.0, 0.8 * scale, 0.2 * scale)),
                     entity.yaw,
                     entity.pitch,
-                    [0, 0, 0, 0, 0, 0], // Col 0
+                    [0, 1, 1, 1, 1, 1],
                     10,
                     light_val,
                 );
@@ -683,7 +683,7 @@ pub fn render_mobs(
                 let scale = if entity.age < 0.0 { 0.5 } else { 1.0 };
                 let head_scale = if entity.age < 0.0 { 0.75 } else { 1.0 };
 
-                // Cow Head (Row 10, Col 2) - offset forward
+                // Cow Head (Row 10, Col 2 face, Col 3 body/skin for other 5 faces) - offset forward
                 add_cuboid(
                     vertices,
                     indices,
@@ -692,7 +692,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(0.0, 1.1 * scale, 0.35 * scale)),
                     entity.yaw,
                     entity.pitch,
-                    [2, 2, 2, 2, 2, 2],
+                    [2, 3, 3, 3, 3, 3],
                     10,
                     light_val,
                 );
@@ -771,7 +771,7 @@ pub fn render_mobs(
                     entity.pitch
                 };
 
-                // Head (Row 10, Col 4) - offset forward
+                // Head (Row 10, Col 4 face, Col 6 sheared skin for other 5 faces) - offset forward
                 add_cuboid(
                     vertices,
                     indices,
@@ -780,7 +780,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(0.0, 0.9 * scale, 0.3 * scale)),
                     entity.yaw,
                     final_pitch,
-                    [4, 4, 4, 4, 4, 4],
+                    [4, 6, 6, 6, 6, 6],
                     10,
                     light_val,
                 );
@@ -800,7 +800,7 @@ pub fn render_mobs(
                     light_val,
                 );
 
-                // 4 Legs (Col 4)
+                // 4 Legs (Col 6 sheared skin)
                 add_cuboid(
                     vertices,
                     indices,
@@ -809,7 +809,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(-0.25 * scale, 0.5 * scale, 0.3 * scale)),
                     entity.yaw,
                     swing,
-                    [4; 6],
+                    [6; 6],
                     10,
                     light_val,
                 );
@@ -821,7 +821,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(0.25 * scale, 0.5 * scale, 0.3 * scale)),
                     entity.yaw,
                     -swing,
-                    [4; 6],
+                    [6; 6],
                     10,
                     light_val,
                 );
@@ -833,7 +833,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(-0.25 * scale, 0.5 * scale, -0.3 * scale)),
                     entity.yaw,
                     -swing,
-                    [4; 6],
+                    [6; 6],
                     10,
                     light_val,
                 );
@@ -845,7 +845,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(0.25 * scale, 0.5 * scale, -0.3 * scale)),
                     entity.yaw,
                     swing,
-                    [4; 6],
+                    [6; 6],
                     10,
                     light_val,
                 );
@@ -859,7 +859,7 @@ pub fn render_mobs(
                     0.0
                 };
 
-                // Head (Row 10, Col 7) - offset forward
+                // Head (Row 10, Col 7 face, Col 8 body/feathers for other 5 faces) - offset forward
                 add_cuboid(
                     vertices,
                     indices,
@@ -868,7 +868,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(0.0, 0.45 * scale, 0.1 * scale)),
                     entity.yaw,
                     entity.pitch,
-                    [7, 7, 7, 7, 7, 7],
+                    [7, 8, 8, 8, 8, 8],
                     10,
                     light_val,
                 );
@@ -1483,7 +1483,7 @@ pub fn render_mobs(
                     to_world(Vec3::new(0.0, 1.4, 0.0)),
                     entity.yaw,
                     entity.pitch,
-                    [4; 6],
+                    [4, 9, 9, 9, 9, 9],
                     10,
                     light_val,
                 );
@@ -1553,6 +1553,25 @@ pub fn render_mobs(
                 );
             }
         }
+
+        if (entity.fire_aspect_timer > 0.0 || entity.burn_timer > 0.0)
+            && entity.entity_type != EntityType::RemotePlayer
+        {
+            let fire_size = entity.size + Vec3::splat(0.1);
+            let fire_offset = Vec3::new(0.0, entity.size.y * 0.5, 0.0);
+            add_cuboid(
+                vertices,
+                indices,
+                fire_size,
+                fire_offset,
+                entity.position,
+                entity.yaw,
+                0.0,
+                [15; 6],
+                12,
+                255.0,
+            );
+        }
     }
 }
 
@@ -1594,7 +1613,7 @@ pub fn render_local_player(
             )
     };
 
-    // Head (sheep skin face)
+    // Head (sheep skin face on front, plain skin on other 5 faces)
     add_cuboid(
         vertices,
         indices,
@@ -1603,7 +1622,7 @@ pub fn render_local_player(
         to_world(Vec3::new(0.0, 1.4, 0.0)),
         yaw,
         pitch,
-        [4; 6],
+        [4, 9, 9, 9, 9, 9],
         10,
         light_val,
     );
@@ -1791,4 +1810,74 @@ mod tests {
         assert_eq!(vertices.len(), 24);
         assert_eq!(indices.len(), 36);
     }
+
+    #[test]
+    fn passive_mob_heads_have_single_face_texture_and_body_sides() {
+        let test_cases = [
+            (EntityType::Pig, 0.0, 1.0),
+            (EntityType::Cow, 2.0, 3.0),
+            (EntityType::Sheep, 4.0, 6.0),
+            (EntityType::Chicken, 7.0, 8.0),
+        ];
+
+        let chunks = ChunkManager::new(1);
+
+        for (mob_type, face_col, body_col) in test_cases {
+            let mut entities = EntityManager::new();
+            entities.spawn(mob_type, Vec3::new(0.0, 64.0, 0.0));
+
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            render_mobs(&entities, &chunks, &mut vertices, &mut indices, 0.0);
+
+            // Head is the first cuboid (24 vertices, 6 faces of 4 vertices each).
+            // Face 0 (Front face) starts at vertex index 0; vertex 0 has uv[0] = 0.0.
+            let front_col = (vertices[0].tex_coords[0] * 16.0).round();
+            assert_eq!(
+                front_col, face_col,
+                "{mob_type:?} head front face should use face_col {face_col}"
+            );
+
+            // Faces 1..5 (Back, Left, Right, Top, Bottom) start at vertex indices 4, 8, 12, 16, 20.
+            for face in 1..6 {
+                let v_idx = face * 4;
+                let col = (vertices[v_idx].tex_coords[0] * 16.0).round();
+                assert_eq!(
+                    col, body_col,
+                    "{mob_type:?} head face {face} should use body_col {body_col}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_burning_entity_fire_flag() {
+        let mut entity_manager = EntityManager::new();
+        let zombie_id = entity_manager.spawn(EntityType::Zombie, Vec3::new(0.0, 64.0, 0.0));
+        
+        let chunk_manager = ChunkManager::new(1);
+        let mut vertices_normal = Vec::new();
+        let mut indices_normal = Vec::new();
+        render_mobs(&entity_manager, &chunk_manager, &mut vertices_normal, &mut indices_normal, 0.0);
+
+        // Turn on fire
+        if let Some(zombie) = entity_manager.entities.iter_mut().find(|e| e.id == zombie_id) {
+            zombie.fire_aspect_timer = 5.0;
+        }
+
+        let mut vertices_burning = Vec::new();
+        let mut indices_burning = Vec::new();
+        render_mobs(&entity_manager, &chunk_manager, &mut vertices_burning, &mut indices_burning, 0.0);
+
+        // Burning entity should generate 24 extra vertices (1 extra cuboid)
+        assert_eq!(vertices_burning.len(), vertices_normal.len() + 24);
+        assert_eq!(indices_burning.len(), indices_normal.len() + 36);
+
+        // Verify the extra fire vertices use row 12 (v = (uv[1] + 12) * 0.0625)
+        let last_v = vertices_burning.last().unwrap().tex_coords[1];
+        let row = (last_v * 16.0).floor();
+        assert_eq!(row, 12.0);
+    }
 }
+
+
