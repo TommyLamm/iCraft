@@ -900,7 +900,10 @@ mod tests {
 
     #[test]
     fn test_daylight_exposure_and_water_extinguish() {
-        let chunk_manager = ChunkManager::new(1);
+        let mut chunk_manager = ChunkManager::new(1);
+        let chunk = crate::world::Chunk::new(0, 0);
+        chunk_manager.chunks.insert((0, 0), chunk);
+
         let zombie_pos = Vec3::new(8.0, 64.0, 8.0);
         // Exposed to sky (15), sky_light_level = 15, not raining, not in water
         assert!(is_under_sun(&chunk_manager, zombie_pos, 15, false));
