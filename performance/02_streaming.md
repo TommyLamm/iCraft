@@ -1,7 +1,10 @@
+Created At: 2026-07-28T05:34:08Z
+Completed At: 2026-07-28T13:49:00Z
+
 # 任務 2：增量 prioritized Chunk queues
 
 > 對應計畫：`14_performance_optimization.md` Phase 1.2
-> 狀態：⏳ 待實作
+> 狀態：✅ 已完成
 > 前置：任務 1（基線）
 > 目標：消除 `State::update_chunks` 每幀重建及排序完整載入範圍的 O(render_distance²) 工作，改為增量優先級佇列與多重整合預算。
 > Commit 訊息：`perf(streaming): add incremental prioritized chunk queues and budgets`
@@ -14,6 +17,7 @@
 - `src/state.rs:952` - `ChunkMeshResult`：worker 回傳結果與 generation/lifetime/revision 驗證。
 - `src/chunk_manager.rs:210` - `ChunkManager::set_block`：mutation 來源。
 - `src/chunk_render.rs:303` - `DrawPlan`：draw 排序。
+- `src/chunk_schedule.rs` - `ChunkStreamingScheduler` 與螺旋 offset 預計算。
 
 ## 已確認的基線風險
 
@@ -23,7 +27,7 @@
 ## 子任務清單
 
 ### 2.1 預計算近到遠螺旋 offset
-- [ ] 檔案：`src/state.rs`（或新模組 `src/chunk_schedule.rs`）
+- [x] 檔案：`src/chunk_schedule.rs`
 - 步驟：
   1. 依 render distance 預計算穩定的近到遠螺旋 offset 列表（相對玩家 Chunk）。
   2. 快取結果，只在 render distance 或維度變更時重算。
@@ -31,7 +35,7 @@
 - 驗收：玩家不改變位置時，不重算 offset。
 
 ### 2.2 只在跨越 Chunk／切換維度／視距變更時更新 target
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. 記錄玩家上次所在的 Chunk 座標。
   2. 只有玩家跨越 Chunk 邊界、切換維度或更改視距時，才更新 load/unload target 集合。
@@ -39,7 +43,7 @@
 - 驗收：靜止時 `chunk_schedule` scope 接近零。
 
 ### 2.3 Load/dirty mesh queue 去重與優先級排序
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. load queue 使用可去重 priority queue（`BTreeSet<(distance, cx, cz)>` 或 `BinaryHeap`）。
   2. dirty mesh queue 同樣去重並按距離排序。
@@ -47,15 +51,15 @@
 - 驗收：dirty queue 不含重複項；近距離 Chunk 優先處理。
 
 ### 2.4 Unload hysteresis
-- [ ] 檔案：`src/state.rs`、`src/chunk_manager.rs`
+- [x] 檔案：`src/state.rs`、`src/chunk_manager.rs`
 - 步驟：
   1. 加入一圈保留 hysteresis（例如 render distance + 1 或 + 2），降低邊界往返造成的 unload/reload thrash。
   2. 實際圈數由記憶體基線決定（任務 1 基線）。
-  3. hysteresis 圈內的 Chunk 不立即 unload。
+  3. hysteresis 圈內的 Chunk 不領域 unload。
 - 驗收：快速飛行時邊界 Chunk 不反覆 unload/reload。
 
 ### 2.5 每幀多重整合預算
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. 每幀按三重預算整合 worker result：CPU 時間（目標 2-4 ms）、結果數（如最多 4 個 mesh）、upload bytes。
   2. 任一預算用完即停止本幀整合，剩餘結果留到下一幀。
@@ -63,7 +67,7 @@
 - 驗收：快速飛行時無單幀集中 upload；`terrain_result_integrate` p95 在預算內。
 
 ### 2.6 保留 stale-result 驗證
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. result 保持 generation/lifetime/revision 驗證。
   2. 取消或丟棄過期工作（玩家已飛離、維度已切換）。
@@ -72,12 +76,12 @@
 
 ## 驗收條件
 
-- [ ] 玩家停在同一 Chunk 時，streaming scheduler 不建立 O(render_distance²) 的臨時 Vec 或排序。
-- [ ] 快速飛行時近距離 Chunk 優先完成，無單幀集中 upload。
-- [ ] dirty mutation 只 push 受影響的 Chunk，不掃描全部 mesh。
-- [ ] unload hysteresis 降低邊界 thrash。
-- [ ] `chunk_schedule` 與 `terrain_result_integrate` p95 改善（與任務 1 基線比較）。
-- [ ] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
+- [x] 玩家停在同一 Chunk 時，streaming scheduler 不建立 O(render_distance²) 的臨時 Vec 或排序。
+- [x] 快速飛行時近距離 Chunk 優先完成，無單幀集中 upload。
+- [x] dirty mutation 只 push 受影響的 Chunk，不掃描全部 mesh。
+- [x] unload hysteresis 降低邊界 thrash。
+- [x] `chunk_schedule` 與 `terrain_result_integrate` p95 改善（與任務 1 基線比較）。
+- [x] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
 
 ## 風險與回退
 

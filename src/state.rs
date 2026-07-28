@@ -1304,6 +1304,8 @@ impl State {
         self.chunk_mesh_in_flight.clear();
         self.chunk_lifetimes.clear();
         self.chunk_meshes.clear();
+        self.scheduler.clear();
+        self.pending_worker_results.clear();
         self.entity_manager = crate::entity::EntityManager::new();
         self.load_current_dimension_entities();
         self.particles = crate::particles::ParticleSystem::new();
@@ -2525,6 +2527,8 @@ pub struct State {
     pub chunk_meshes: std::collections::HashMap<(i32, i32), ChunkMesh>,
     terrain_worker_tx: std::sync::mpsc::Sender<TerrainWorkerResult>,
     terrain_worker_rx: std::sync::mpsc::Receiver<TerrainWorkerResult>,
+    pending_worker_results: std::collections::VecDeque<TerrainWorkerResult>,
+    scheduler: crate::chunk_schedule::ChunkStreamingScheduler,
     chunk_load_in_flight: std::collections::HashMap<(i32, i32), u64>,
     chunk_mesh_in_flight: std::collections::HashMap<(i32, i32), (u64, u64)>,
     chunk_lifetimes: std::collections::HashMap<(i32, i32), u64>,
@@ -3827,6 +3831,8 @@ impl State {
             chunk_meshes,
             terrain_worker_tx,
             terrain_worker_rx,
+            pending_worker_results: std::collections::VecDeque::new(),
+            scheduler: crate::chunk_schedule::ChunkStreamingScheduler::new(),
             chunk_load_in_flight: std::collections::HashMap::new(),
             chunk_mesh_in_flight: std::collections::HashMap::new(),
             chunk_lifetimes,
@@ -4091,6 +4097,8 @@ impl State {
                     self.chunk_mesh_in_flight.clear();
                     self.chunk_lifetimes.clear();
                     self.chunk_meshes.clear();
+                    self.scheduler.clear();
+                    self.pending_worker_results.clear();
                     self.pending_chunk_payloads.clear();
                     self.pending_block_changes.clear();
                     self.network_ready = true;
@@ -4796,11 +4804,42 @@ impl State {
         lifetime
     }
 
+    pub fn mark_chunk_dirty(&mut self, coord: (i32, i32)) {
+        if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
+            mesh.mark_dirty();
+            self.scheduler.mark_dirty(coord);
+        }
+    }
+
     fn process_terrain_worker_results(&mut self, player_chunk: (i32, i32)) {
         let integrate_started = Instant::now();
         let mut lighting_elapsed = Duration::ZERO;
         let mut gpu_upload_elapsed = Duration::ZERO;
-        while let Ok(result) = self.terrain_worker_rx.try_recv() {
+
+        let mut integrated_meshes = 0;
+        let mut integrated_bytes = 0u64;
+
+        loop {
+            let result = if let Some(res) = self.pending_worker_results.pop_front() {
+                res
+            } else if let Ok(res) = self.terrain_worker_rx.try_recv() {
+                res
+            } else {
+                break;
+            };
+
+            if let TerrainWorkerResult::Meshed(_) = &result {
+                let elapsed = integrate_started.elapsed();
+                if integrated_meshes >= crate::chunk_schedule::MAX_INTEGRATE_MESHES
+                    || integrated_bytes >= crate::chunk_schedule::MAX_INTEGRATE_UPLOAD_BYTES
+                    || elapsed
+                        >= Duration::from_millis(crate::chunk_schedule::MAX_INTEGRATE_TIME_MS)
+                {
+                    self.pending_worker_results.push_front(result);
+                    break;
+                }
+            }
+
             match result {
                 TerrainWorkerResult::Loaded(result) => {
                     let expected = self.chunk_load_in_flight.get(&result.coord).copied();
@@ -4831,6 +4870,7 @@ impl State {
                     self.chunk_manager.chunks.insert(result.coord, result.chunk);
                     self.chunk_lifetimes.insert(result.coord, result.lifetime);
                     self.chunk_meshes.insert(result.coord, ChunkMesh::pending());
+                    self.scheduler.mark_dirty(result.coord);
 
                     // Restore persisted redstone component metadata before any
                     // redstone tick runs, so freshly-rebuilt `ComponentState`
@@ -4852,9 +4892,7 @@ impl State {
                         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&result.coord) {
                             Self::restore_chunk_payload(chunk, &blocks, &block_states);
                         }
-                        if let Some(mesh) = self.chunk_meshes.get_mut(&result.coord) {
-                            mesh.mark_dirty();
-                        }
+                        self.mark_chunk_dirty(result.coord);
                     }
                     if let Some(changes) = self.pending_block_changes.remove(&result.coord) {
                         for ((x, y, z), (block, state)) in changes {
@@ -4887,14 +4925,10 @@ impl State {
                     }
                     lighting_elapsed += lighting_started.elapsed();
                     for neighbor in surrounding_chunk_coords(cx, cz) {
-                        if let Some(mesh) = self.chunk_meshes.get_mut(&neighbor) {
-                            mesh.mark_dirty();
-                        }
+                        self.mark_chunk_dirty(neighbor);
                     }
                     for coord in dirty {
-                        if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
-                            mesh.mark_dirty();
-                        }
+                        self.mark_chunk_dirty(coord);
                     }
                 }
                 TerrainWorkerResult::Meshed(result) => {
@@ -4925,12 +4959,19 @@ impl State {
                     };
                     let upload_started = Instant::now();
                     mesh.levels = Some(Self::upload_mesh_bundle(&self.device, &result.bundle));
-                    gpu_upload_elapsed += upload_started.elapsed();
+                    let upload_elapsed = upload_started.elapsed();
+                    gpu_upload_elapsed += upload_elapsed;
+                    let gpu_bytes = mesh.gpu_bytes() as u64;
                     self.perf_counters.upload_bytes_frame = self
                         .perf_counters
                         .upload_bytes_frame
-                        .saturating_add(mesh.gpu_bytes() as u64);
+                        .saturating_add(gpu_bytes);
                     mesh.meshed_revision = result.revision;
+                    if !mesh.needs_rebuild() {
+                        self.scheduler.remove_dirty(&result.coord);
+                    }
+                    integrated_meshes += 1;
+                    integrated_bytes += gpu_bytes;
                 }
             }
         }
@@ -5004,6 +5045,7 @@ impl State {
         else {
             return;
         };
+        self.scheduler.remove_dirty(&coord);
         self.chunk_mesh_in_flight
             .insert(coord, (lifetime, revision));
         let sender = self.terrain_worker_tx.clone();
@@ -5032,95 +5074,119 @@ impl State {
         let r = self.chunk_manager.render_distance;
         self.process_terrain_worker_results((px, pz));
 
-        // 1. Unload out-of-bounds chunks
-        let mut to_unload = Vec::new();
-        for &(cx, cz) in self.chunk_manager.chunks.keys() {
-            if (cx - px).abs() > r || (cz - pz).abs() > r {
-                to_unload.push((cx, cz));
+        let target_changed = self.scheduler.last_player_chunk != Some((px, pz))
+            || self.scheduler.last_render_distance != r
+            || self.scheduler.last_dimension != Some(self.current_dimension);
+
+        if target_changed {
+            if self.scheduler.last_render_distance != r || self.scheduler.spiral_offsets.is_empty()
+            {
+                self.scheduler.spiral_offsets = crate::chunk_schedule::precompute_spiral_offsets(r);
             }
-        }
-        for &(cx, cz) in &to_unload {
-            if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                if self.is_authoritative() {
-                    let redstone_metadata =
-                        self.redstone
-                            .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                    let chunk_data = crate::save::ChunkSaveData::from_chunk_with_redstone(
-                        &chunk,
-                        &redstone_metadata,
-                    );
-                    let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
-                        dimension: self.current_dimension,
-                        data: chunk_data,
-                    });
+
+            let hysteresis_r = (r as i32) + crate::chunk_schedule::UNLOAD_HYSTERESIS;
+            let mut to_unload = Vec::new();
+            for &(cx, cz) in self.chunk_manager.chunks.keys() {
+                if (cx - px).abs() > hysteresis_r || (cz - pz).abs() > hysteresis_r {
+                    to_unload.push((cx, cz));
                 }
             }
-        }
-        for &(cx, cz) in &to_unload {
-            for neighbor in surrounding_chunk_coords(cx, cz) {
-                if self.chunk_manager.chunks.contains_key(&neighbor) {
-                    if let Some(mesh) = self.chunk_meshes.get_mut(&neighbor) {
-                        mesh.mark_dirty();
+            for &(cx, cz) in &to_unload {
+                if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
+                    if self.is_authoritative() {
+                        let redstone_metadata =
+                            self.redstone
+                                .collect_chunk_metadata(&self.chunk_manager, cx, cz);
+                        let chunk_data = crate::save::ChunkSaveData::from_chunk_with_redstone(
+                            &chunk,
+                            &redstone_metadata,
+                        );
+                        let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
+                            dimension: self.current_dimension,
+                            data: chunk_data,
+                        });
                     }
                 }
             }
-            self.chunk_lifetimes.remove(&(cx, cz));
-            self.chunk_mesh_in_flight.remove(&(cx, cz));
-        }
-        self.chunk_meshes
-            .retain(|&(cx, cz), _| (cx - px).abs() <= r && (cz - pz).abs() <= r);
-        self.chunk_load_in_flight
-            .retain(|&(cx, cz), _| (cx - px).abs() <= r && (cz - pz).abs() <= r);
+            for &(cx, cz) in &to_unload {
+                for neighbor in surrounding_chunk_coords(cx, cz) {
+                    if self.chunk_manager.chunks.contains_key(&neighbor) {
+                        self.mark_chunk_dirty(neighbor);
+                    }
+                }
+                self.chunk_lifetimes.remove(&(cx, cz));
+                self.chunk_mesh_in_flight.remove(&(cx, cz));
+                self.scheduler.remove_dirty(&(cx, cz));
+            }
+            self.chunk_meshes.retain(|&(cx, cz), _| {
+                (cx - px).abs() <= hysteresis_r && (cz - pz).abs() <= hysteresis_r
+            });
+            self.chunk_load_in_flight.retain(|&(cx, cz), _| {
+                (cx - px).abs() <= hysteresis_r && (cz - pz).abs() <= hysteresis_r
+            });
 
-        // 2. Queue missing chunks
-        let mut load_queue = Vec::new();
-        for dx in -r..=r {
-            for dz in -r..=r {
+            // Rebuild pending_load_queue in spiral order
+            self.scheduler.pending_load_queue.clear();
+            for &(dx, dz) in &self.scheduler.spiral_offsets {
                 let cx = px + dx;
                 let cz = pz + dz;
                 if !self.chunk_manager.chunks.contains_key(&(cx, cz))
                     && !self.chunk_load_in_flight.contains_key(&(cx, cz))
                 {
-                    load_queue.push((cx, cz));
+                    self.scheduler.pending_load_queue.push_back((cx, cz));
                 }
             }
+
+            self.scheduler.last_player_chunk = Some((px, pz));
+            self.scheduler.last_render_distance = r;
+            self.scheduler.last_dimension = Some(self.current_dimension);
         }
 
-        load_queue.sort_by_key(|&(cx, cz)| {
-            let dx = cx - px;
-            let dz = cz - pz;
-            dx * dx + dz * dz
-        });
-
-        // 3. Deterministic terrain generation and save restore run on Rayon.
+        // 2. Dispatch chunk loads from precomputed spiral load queue
         let available_load_slots =
             MAX_CHUNK_LOAD_JOBS.saturating_sub(self.chunk_load_in_flight.len());
-        for coord in load_queue.into_iter().take(available_load_slots) {
-            self.schedule_chunk_load(coord);
-        }
-
-        // 4. Snapshot and dispatch dirty meshes without waiting for workers.
-        let mut to_rebuild = Vec::new();
-        for (&(cx, cz), mesh) in &self.chunk_meshes {
-            if mesh.needs_rebuild() && !self.chunk_mesh_in_flight.contains_key(&(cx, cz)) {
-                let dx = cx - px;
-                let dz = cz - pz;
-                to_rebuild.push((cx, cz, dx * dx + dz * dz));
+        let mut dispatched_loads = 0;
+        while dispatched_loads < available_load_slots {
+            if let Some(coord) = self.scheduler.pending_load_queue.pop_front() {
+                if !self.chunk_manager.chunks.contains_key(&coord)
+                    && !self.chunk_load_in_flight.contains_key(&coord)
+                {
+                    self.schedule_chunk_load(coord);
+                    dispatched_loads += 1;
+                }
+            } else {
+                break;
             }
         }
 
-        // Sort by distance — rebuild closest chunks first
-        to_rebuild.sort_by_key(|&(_, _, dist)| dist);
-
-        let default_sky_light = if self.current_dimension.has_sky_light() {
-            15
-        } else {
-            0
-        };
+        // 3. Dispatch dirty meshes prioritized by distance to player
         let available_mesh_slots =
             MAX_CHUNK_MESH_JOBS.saturating_sub(self.chunk_mesh_in_flight.len());
-        for (cx, cz, _) in to_rebuild.into_iter().take(available_mesh_slots) {
-            self.schedule_chunk_mesh((cx, cz), default_sky_light);
+        if available_mesh_slots > 0 && !self.scheduler.dirty_chunk_meshes.is_empty() {
+            let default_sky_light = if self.current_dimension.has_sky_light() {
+                15
+            } else {
+                0
+            };
+            let r_i32 = r as i32;
+            let mut candidates: Vec<(i32, i32, i32)> = Vec::new();
+            for &(cx, cz) in &self.scheduler.dirty_chunk_meshes {
+                let dx = cx - px;
+                let dz = cz - pz;
+                if dx.abs() <= r_i32 && dz.abs() <= r_i32 {
+                    if let Some(mesh) = self.chunk_meshes.get(&(cx, cz)) {
+                        if mesh.needs_rebuild()
+                            && !self.chunk_mesh_in_flight.contains_key(&(cx, cz))
+                        {
+                            candidates.push((cx, cz, dx * dx + dz * dz));
+                        }
+                    }
+                }
+            }
+            candidates.sort_by_key(|&(_, _, dist)| dist);
+            for (cx, cz, _) in candidates.into_iter().take(available_mesh_slots) {
+                self.schedule_chunk_mesh((cx, cz), default_sky_light);
+            }
         }
     }
 
