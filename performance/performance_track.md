@@ -1,8 +1,58 @@
 # Performance Optimization Track
 
 > 更新日期：2026-07-28  
-> 來源計畫：`plans/implementation/14_performance_optimization.md`  
-> 原則：每個階段獨立量測、驗證及回退；沒有改善 p95/p99 或記憶體的高複雜度改動不繼續擴大。
+> 來源計畫：`14_performance_optimization.md`（同目錄）  
+> 原則：每個任務獨立量測、驗證及回退；沒有改善 p95/p99 或記憶體的高複雜度改動不繼續擴大。  
+> 詳細計畫：本目錄下 `01_*.md` ~ `14_*.md`，每個任務一份獨立 plan（含子任務、驗收條件、風險）。
+
+## 任務總覽
+
+| # | 任務 | 詳細計畫 | 狀態 | Commit | 驗證 |
+|---|---|---|---|---|---|
+| 0 | 火把索引與週期掃描移除 | （已完成，見下方「已完成進度」） | Complete | - | `cargo test --release`（358 unit + 1 integration）；torch index focused tests 2 passed |
+| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Pending | - | - |
+| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Pending | - | - |
+| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Pending | - | - |
+| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Pending | - | - |
+| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Pending | - | - |
+| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Pending | - | - |
+| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Pending | - | - |
+| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Pending | - | - |
+| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Pending | - | - |
+| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Pending | - | - |
+| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Pending | - | - |
+| 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Pending | - | - |
+| 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Pending | - | - |
+| 14 | Release、PGO 與 frame pacing | [14_build_release.md](14_build_release.md) | Pending | - | - |
+
+## 實作順序與依賴
+
+```
+[已完成] 火把索引
+   │
+   ▼
+1. 可觀測性與基線 ◄── 所有後續任務的量測前提
+   │
+   ├──► 2. streaming ──► 4. network
+   │       │
+   ├──► 3. save
+   │
+   ├──► 5. simulation tick ──► 6. redstone
+   │                          └─► 7. entity
+   │
+   ├──► 8. render scratch ──► 9. instancing ──► 10. GPU arena
+   │                                              └─► 11. packed vertex + section meshing
+   │                                                    └─► 12. paletted storage
+   │                                                          └─► 13. culling
+   │
+   └──► 14. build/release（最後，需穩定 workload 後才做 PGO）
+```
+
+依賴說明：
+- **任務 1（基線）是所有後續任務的前提**：沒有可重現的 before/after 量測，任何改動都無法證明有效。
+- **任務 5（固定 tick）是任務 6、7 的前提**：redstone/entity 優化建立在 tick 語義明確化之後。
+- **任務 8->9->10->11->12->13 為渲染/記憶體路線的漸進鏈**：先消除穩態配置，再做 instancing，然後才動 GPU arena、packed vertex、paletted storage 與 occlusion。
+- **任務 14（build）最後執行**：PGO 需要穩定 workload 才有意義。
 
 ## 目前進度
 
@@ -57,7 +107,11 @@
 
 ## 剩餘實作順序
 
+> 每個任務的詳細子任務清單、驗收條件與風險評估見同目錄對應檔案。
+
 ### 1. 補完 Phase 0 可觀測性與固定基線
+
+> 詳細計畫：[`01_observability_baseline.md`](01_observability_baseline.md)
 
 - 完成 GPU timestamps 與缺少的 counters。
 - 建立開放地形、遮擋室內、快速飛行、紅石、流體、1,000 entities、
@@ -66,6 +120,8 @@
   與 upload bytes。
 
 ### 2. `perf(streaming)`：增量 prioritized Chunk queues
+
+> 詳細計畫：[`02_streaming.md`](02_streaming.md)
 
 - 預計算近到遠 spiral offsets。
 - 只在跨 Chunk、切換維度或視距變更時更新 target。
@@ -76,6 +132,8 @@
 
 ### 3. `perf(save)`：真正的背景存檔
 
+> 詳細計畫：[`03_save.md`](03_save.md)
+
 - 建立 `DirtyChunkSet`，autosave 只 snapshot dirty chunks。
 - Flatten、Bincode、Zlib 及 region I/O 全部移至 save worker。
 - Bounded、latest-revision-wins queue。
@@ -85,6 +143,8 @@
 
 ### 4. `perf(network)`：多人 catch-up streaming
 
+> 詳細計畫：[`04_network.md`](04_network.md)
+
 - PlayerJoin 不同步壓縮全部 mutated chunks。
 - 背景建立 payload，依玩家距離與 revision 排序並分幀傳送。
 - 大型 payload bounded backpressure。
@@ -92,6 +152,8 @@
 - Pose/time 可 coalesce；可靠 block/chat/control 封包保持語義。
 
 ### 5. `perf(sim)`：固定 simulation tick
+
+> 詳細計畫：[`05_simulation_tick.md`](05_simulation_tick.md)
 
 - Frame update 與 20 Hz authoritative world simulation 分離。
 - 最多四個 catch-up ticks，保留有界 debt。
@@ -101,6 +163,8 @@
 
 ### 6. `perf(redstone)`：dirty worklist 與 sleeping
 
+> 詳細計畫：[`06_redstone.md`](06_redstone.md)
+
 - Mutation、scheduled tick、pressure plate change 推入去重 worklist。
 - 只重新計算 changed node 與鄰接元件。
 - 無 dirty/scheduled/active device 時 sleep。
@@ -109,12 +173,16 @@
 
 ### 7. `perf(entity)`：ID/type/spatial indexes
 
+> 詳細計畫：[`07_entity.md`](07_entity.md)
+
 - `EntityId -> dense index`，`swap_remove` 後修正 index。
 - EntityType 及 Chunk/section buckets。
 - Nearby collision、pickup、melee、projectile、spawn、render 先查 bucket。
 - 使用 distance-squared 並重用 scratch vectors。
 
 ### 8. `perf(render)`：重用 frame scratch 與靜態快取
+
+> 詳細計畫：[`08_render_scratch.md`](08_render_scratch.md)
 
 - 重用 terrain candidates、draw plan、LOD、mob、particle、UI storage。
 - `DrawCandidate` 攜帶 LOD 與 distance key。
@@ -124,6 +192,8 @@
 
 ### 9. `perf(render)`：Entity、item 與 particle instancing
 
+> 詳細計畫：[`09_render_instancing.md`](09_render_instancing.md)
+
 - 預建 entity/item prototype meshes。
 - 每個可見 entity 只上傳 instance data。
 - 依 model/material 分組批次繪製。
@@ -132,6 +202,8 @@
 
 ### 10. `perf(render)`：Region GPU arena
 
+> 詳細計畫：[`10_render_gpu_arena.md`](10_render_gpu_arena.md)
+
 - 以 8×8 Chunk 或 benchmark 選定大小建立 `RenderRegion`。
 - Region 共用少量 vertex/index arenas。
 - Free-list/buddy suballocation、stale handle 防護與低優先 compact。
@@ -139,6 +211,8 @@
 - 目標：視距 16 的 GPU buffer object 數降低至少 90%。
 
 ### 11. `perf(render)`：Packed TerrainVertex 與 section meshing
+
+> 詳細計畫：[`11_render_packed_vertex.md`](11_render_packed_vertex.md)
 
 - TerrainVertex 壓縮至約 16–20 bytes。
 - Shader 從 region origin 重建 world position。
@@ -149,6 +223,8 @@
 
 ### 12. `perf(memory)`：Paletted ChunkSection
 
+> 詳細計畫：[`12_memory_paletted.md`](12_memory_paletted.md)
+
 - 先建立 storage access abstraction。
 - Block storage 支援 Empty、Uniform、Paletted、Global。
 - Sky/block light 合併為 nibble-packed byte。
@@ -158,6 +234,8 @@
 
 ### 13. `perf(culling)`：Section visibility 與 Entity occlusion
 
+> 詳細計畫：[`13_culling.md`](13_culling.md)
+
 - 剔除順序：distance、frustum、section visibility、optional async LOS。
 - Meshing worker 建立 section face connectivity。
 - Camera section 執行 bounded visibility graph traversal。
@@ -166,6 +244,8 @@
 - 所有 stale、timeout、overflow 狀態 fail-open。
 
 ### 14. `perf(build)`：Release、PGO 與 frame pacing
+
+> 詳細計畫：[`14_build_release.md`](14_build_release.md)
 
 - 加入經測試的 release profile：`opt-level = 3`、thin LTO、
   `codegen-units = 1`。
@@ -198,9 +278,19 @@
 
 - `Chunk::blocks` 仍是 public；目前 runtime direct writes 均在生成／restore 後
   rebuild index，但未來新增 direct writer 可能令火把索引失效。長期應收斂至
-  統一 mutation/storage access API。
+  統一 mutation/storage access API（任務 12）。
 - `world_tick` 是總時間，包含 redstone、mob、chunk schedule 等子 scopes；
   這些數字是巢狀關係，不可相加。
 - F3 snapshot 每 0.5 秒更新，顯示的是最近窗口摘要，不是即時單幀值。
-- 高複雜度的 GPU arena、packed vertex、paletted storage 與 occlusion 必須先有
-  基線證明是瓶頸，才進入實作。
+- 高複雜度的 GPU arena（任務 10）、packed vertex（任務 11）、paletted storage
+  （任務 12）與 occlusion（任務 13）必須先有基線證明是瓶頸，才進入實作。
+
+## 提交規範
+
+每個任務完成後：
+
+1. 更新本檔案的任務總覽表狀態欄、commit hash 與驗證摘要。
+2. 在對應的詳細計畫檔案中勾選所有子任務與驗收條件。
+3. 執行 `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release`。
+4. 保存 before/after 性能報告（任務 1 基線建立後）。
+5. 單一功能 commit，訊息格式：`perf(<area>): <description>`。
