@@ -1941,6 +1941,8 @@ pub struct Chunk {
     /// Compact local coordinates of ordinary torch blocks. Each entry packs
     /// x (4 bits), z (4 bits), and y (8 bits) into a u16.
     pub(crate) torch_positions: Vec<u16>,
+    /// Compact local coordinates of redstone component blocks.
+    pub(crate) redstone_positions: Vec<u16>,
 }
 
 impl Chunk {
@@ -2425,6 +2427,7 @@ impl Chunk {
                 .try_into()
                 .unwrap();
         let torch_positions = Self::build_torch_index(&blocks);
+        let redstone_positions = Self::build_redstone_index(&blocks);
 
         Self {
             chunk_x,
@@ -2436,6 +2439,7 @@ impl Chunk {
             heightmap,
             fluid_levels,
             torch_positions,
+            redstone_positions,
         }
     }
 
@@ -2443,7 +2447,7 @@ impl Chunk {
         (x as u16) | ((z as u16) << 4) | ((y as u16) << 8)
     }
 
-    /// Decodes a compact local torch index into `(x, y, z)` coordinates.
+    /// Decodes a compact local torch/component index into `(x, y, z)` coordinates.
     pub fn decode_torch_position(index: u16) -> (usize, usize, usize) {
         (
             (index & 0x0f) as usize,
@@ -2468,9 +2472,30 @@ impl Chunk {
         positions
     }
 
+    fn build_redstone_index(
+        blocks: &[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
+    ) -> Vec<u16> {
+        let mut positions = Vec::new();
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                for y in 0..CHUNK_HEIGHT {
+                    if crate::redstone::is_component(blocks[x][y][z]) {
+                        positions.push(Self::encode_torch_position(x, y, z));
+                    }
+                }
+            }
+        }
+        positions
+    }
+
     /// Returns the indexed local positions of ordinary torches.
     pub fn torch_positions(&self) -> &[u16] {
         &self.torch_positions
+    }
+
+    /// Returns the indexed local positions of redstone components.
+    pub fn redstone_positions(&self) -> &[u16] {
+        &self.redstone_positions
     }
 
     /// Rebuilds the torch index after bulk block mutations (generation/load).
@@ -2478,7 +2503,12 @@ impl Chunk {
         self.torch_positions = Self::build_torch_index(&self.blocks);
     }
 
-    /// Sets a local block and keeps the torch index synchronized.
+    /// Rebuilds the redstone index after bulk block mutations (generation/load).
+    pub fn rebuild_redstone_index(&mut self) {
+        self.redstone_positions = Self::build_redstone_index(&self.blocks);
+    }
+
+    /// Sets a local block and keeps the torch and redstone indices synchronized.
     pub fn set_block_local(&mut self, x: usize, y: usize, z: usize, block: BlockType) {
         let old = self.blocks[x][y][z];
         if old == block {
@@ -2493,6 +2523,17 @@ impl Chunk {
         }
         if block == BlockType::Torch && old != BlockType::Torch {
             self.torch_positions.push(encoded);
+        }
+
+        let old_is_redstone = crate::redstone::is_component(old);
+        let new_is_redstone = crate::redstone::is_component(block);
+        if old_is_redstone {
+            if let Some(index) = self.redstone_positions.iter().position(|&p| p == encoded) {
+                self.redstone_positions.swap_remove(index);
+            }
+        }
+        if new_is_redstone && !old_is_redstone {
+            self.redstone_positions.push(encoded);
         }
     }
 

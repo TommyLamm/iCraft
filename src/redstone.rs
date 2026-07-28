@@ -263,12 +263,18 @@ pub struct RedstoneSystem {
     known_chunks: HashSet<(i32, i32)>,
     scheduled: Vec<ScheduledTick>,
     tick: u64,
+    dirty: HashSet<BlockPos>,
+    sleeping: bool,
 }
 
 #[allow(dead_code)]
 impl RedstoneSystem {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn is_sleeping(&self) -> bool {
+        self.sleeping
     }
 
     pub fn current_tick(&self) -> u64 {
@@ -413,6 +419,37 @@ impl RedstoneSystem {
             state.repeater_delay = entry.repeater_delay.clamp(1, 4);
             state.comparator_mode = entry.comparator_mode.into_comparator_mode();
             state.note = entry.note.min(24);
+            self.mark_dirty(pos);
+        }
+    }
+
+    fn mark_dirty(&mut self, pos: BlockPos) {
+        if self.components.contains_key(&pos) {
+            self.dirty.insert(pos);
+            self.sleeping = false;
+        }
+    }
+
+    fn mark_neighbors_dirty(&mut self, manager: &ChunkManager, pos: BlockPos) {
+        if self.components.contains_key(&pos) {
+            self.dirty.insert(pos);
+            self.sleeping = false;
+        }
+        for offset in NEIGHBORS {
+            let n1 = add(pos, offset);
+            if self.components.contains_key(&n1) {
+                self.dirty.insert(n1);
+                self.sleeping = false;
+            }
+            if get_block(manager, n1).properties().is_solid {
+                for off2 in NEIGHBORS {
+                    let n2 = add(n1, off2);
+                    if self.components.contains_key(&n2) {
+                        self.dirty.insert(n2);
+                        self.sleeping = false;
+                    }
+                }
+            }
         }
     }
 
@@ -429,6 +466,7 @@ impl RedstoneSystem {
                 scheduled.pos != pos || scheduled.kind == ScheduledKind::Explode
             });
         }
+        self.mark_neighbors_dirty(manager, pos);
     }
 
     pub fn interact(&mut self, manager: &mut ChunkManager, pos: BlockPos) -> RedstoneUpdate {
@@ -437,10 +475,10 @@ impl RedstoneSystem {
         let mut update = RedstoneUpdate::default();
         match block {
             BlockType::Lever => {
-                set_block_record(manager, pos, BlockType::LeverOn, &mut update.mutations)
+                set_block_record(manager, pos, BlockType::LeverOn, &mut update.mutations);
             }
             BlockType::LeverOn => {
-                set_block_record(manager, pos, BlockType::Lever, &mut update.mutations)
+                set_block_record(manager, pos, BlockType::Lever, &mut update.mutations);
             }
             BlockType::StoneButton | BlockType::StoneButtonPressed => {
                 set_block_record(
@@ -457,6 +495,7 @@ impl RedstoneSystem {
                     pos,
                     kind: ScheduledKind::ReleaseButton,
                 });
+                self.sleeping = false;
             }
             BlockType::Repeater | BlockType::RepeaterPowered => {
                 if let Some(state) = self.components.get_mut(&pos) {
@@ -482,6 +521,7 @@ impl RedstoneSystem {
             }
             _ => return update,
         }
+        self.mark_neighbors_dirty(manager, pos);
         self.reconcile_mutations(manager, &update.mutations);
         update
     }
@@ -489,6 +529,15 @@ impl RedstoneSystem {
     pub fn tick(&mut self, manager: &mut ChunkManager, occupants: &[BlockPos]) -> RedstoneUpdate {
         self.tick = self.tick.wrapping_add(1);
         self.sync_loaded_chunks(manager);
+
+        if self.sleeping
+            && self.dirty.is_empty()
+            && self.scheduled.is_empty()
+            && occupants.is_empty()
+        {
+            return RedstoneUpdate::default();
+        }
+
         let mut update = RedstoneUpdate::default();
         self.process_scheduled(manager, &mut update);
         self.update_pressure_plates(manager, occupants, &mut update.mutations);
@@ -497,6 +546,11 @@ impl RedstoneSystem {
         update.propagation_overflowed = !converged;
         self.apply_component_transitions(manager, &mut update);
         self.reconcile_mutations(manager, &update.mutations);
+
+        if self.dirty.is_empty() && self.scheduled.is_empty() {
+            self.sleeping = true;
+        }
+
         update
     }
 
@@ -508,26 +562,22 @@ impl RedstoneSystem {
             let cz = pos.2.div_euclid(CHUNK_DEPTH as i32);
             manager.chunks.contains_key(&(cx, cz)) && is_component(get_block(manager, *pos))
         });
+        self.dirty.retain(|pos| self.components.contains_key(pos));
 
         for (&(cx, cz), chunk) in &manager.chunks {
             if !self.known_chunks.insert((cx, cz)) {
                 continue;
             }
-            for x in 0..CHUNK_WIDTH {
-                for y in 0..CHUNK_HEIGHT {
-                    for z in 0..CHUNK_DEPTH {
-                        let block = chunk.blocks[x][y][z];
-                        if is_component(block) {
-                            let pos = (
-                                cx * CHUNK_WIDTH as i32 + x as i32,
-                                y as i32,
-                                cz * CHUNK_DEPTH as i32 + z as i32,
-                            );
-                            self.components
-                                .entry(pos)
-                                .or_insert_with(|| ComponentState::new(block, Direction::North));
-                        }
-                    }
+            let origin_x = cx * CHUNK_WIDTH as i32;
+            let origin_z = cz * CHUNK_DEPTH as i32;
+            for &encoded in chunk.redstone_positions() {
+                let (x, y, z) = crate::world::Chunk::decode_torch_position(encoded);
+                let pos = (origin_x + x as i32, y as i32, origin_z + z as i32);
+                let block = chunk.blocks[x][y][z];
+                use std::collections::hash_map::Entry;
+                if let Entry::Vacant(e) = self.components.entry(pos) {
+                    e.insert(ComponentState::new(block, Direction::North));
+                    self.mark_dirty(pos);
                 }
             }
         }
@@ -545,18 +595,19 @@ impl RedstoneSystem {
                     scheduled.pos != mutation.pos || scheduled.kind == ScheduledKind::Explode
                 });
             }
+            self.mark_neighbors_dirty(manager, mutation.pos);
         }
         self.components
             .retain(|pos, _| is_component(get_block(manager, *pos)));
     }
 
     fn process_scheduled(&mut self, manager: &mut ChunkManager, update: &mut RedstoneUpdate) {
-        let mut future = Vec::with_capacity(self.scheduled.len());
-        for scheduled in self.scheduled.drain(..) {
-            if scheduled.due > self.tick {
-                future.push(scheduled);
-                continue;
-            }
+        let (due, future): (Vec<_>, Vec<_>) = std::mem::take(&mut self.scheduled)
+            .into_iter()
+            .partition(|s| s.due <= self.tick);
+        self.scheduled = future;
+
+        for scheduled in due {
             match scheduled.kind {
                 ScheduledKind::ReleaseButton => {
                     if get_block(manager, scheduled.pos) == BlockType::StoneButtonPressed {
@@ -566,6 +617,7 @@ impl RedstoneSystem {
                             BlockType::StoneButton,
                             &mut update.mutations,
                         );
+                        self.mark_neighbors_dirty(manager, scheduled.pos);
                     }
                 }
                 ScheduledKind::Repeater(powered) => {
@@ -577,6 +629,7 @@ impl RedstoneSystem {
                             BlockType::Repeater
                         };
                         set_block_record(manager, scheduled.pos, target, &mut update.mutations);
+                        self.mark_neighbors_dirty(manager, scheduled.pos);
                     }
                 }
                 ScheduledKind::Explode => update
@@ -584,11 +637,10 @@ impl RedstoneSystem {
                     .push(RedstoneAction::Explode { pos: scheduled.pos }),
             }
         }
-        self.scheduled = future;
     }
 
     fn update_pressure_plates(
-        &self,
+        &mut self,
         manager: &mut ChunkManager,
         occupants: &[BlockPos],
         mutations: &mut Vec<BlockMutation>,
@@ -608,22 +660,46 @@ impl RedstoneSystem {
             let occupied = occupants.iter().any(|occupant| {
                 occupant.0 == pos.0 && occupant.2 == pos.2 && occupant.1 == pos.1 + 1
             });
+            let current_block = get_block(manager, pos);
             let target = if occupied {
                 BlockType::PressurePlatePowered
             } else {
                 BlockType::PressurePlate
             };
-            set_block_record(manager, pos, target, mutations);
+            if current_block != target {
+                set_block_record(manager, pos, target, mutations);
+                self.mark_neighbors_dirty(manager, pos);
+            }
         }
     }
 
     fn settle_power(&mut self, manager: &ChunkManager) -> bool {
-        for _ in 0..MAX_PROPAGATION_PASSES {
-            let snapshot = self.components.clone();
-            let mut changed = false;
-            for (&pos, state) in &mut self.components {
+        if self.dirty.is_empty() {
+            return true;
+        }
+
+        let mut current_dirty = std::mem::take(&mut self.dirty);
+        let mut next_dirty = HashSet::new();
+        let max_evaluations = (self.components.len() * MAX_PROPAGATION_PASSES).max(1024);
+        let mut evaluations = 0;
+
+        for _pass in 0..MAX_PROPAGATION_PASSES {
+            if current_dirty.is_empty() {
+                return true;
+            }
+
+            for pos in current_dirty.drain() {
+                evaluations += 1;
+                if evaluations > max_evaluations {
+                    self.dirty.extend(next_dirty);
+                    return false;
+                }
+
+                let Some(state) = self.components.get(&pos).copied() else {
+                    continue;
+                };
                 let block = get_block(manager, pos);
-                let new_power = desired_power(manager, &snapshot, pos, block, *state);
+                let new_power = desired_power(manager, &self.components, pos, block, state);
                 let new_charge = if new_power == 0 {
                     ChargeKind::Unpowered
                 } else if is_strong_source(block) {
@@ -631,17 +707,39 @@ impl RedstoneSystem {
                 } else {
                     ChargeKind::Weak
                 };
+
                 if state.signal.power != new_power || state.signal.charge != new_charge {
-                    state.signal.power = new_power;
-                    state.signal.charge = new_charge;
-                    changed = true;
+                    if let Some(mut_state) = self.components.get_mut(&pos) {
+                        mut_state.signal.power = new_power;
+                        mut_state.signal.charge = new_charge;
+                    }
+                    next_dirty.insert(pos);
+                    for offset in NEIGHBORS {
+                        let n1 = add(pos, offset);
+                        if self.components.contains_key(&n1) {
+                            next_dirty.insert(n1);
+                        }
+                        if get_block(manager, n1).properties().is_solid {
+                            for off2 in NEIGHBORS {
+                                let n2 = add(n1, off2);
+                                if self.components.contains_key(&n2) {
+                                    next_dirty.insert(n2);
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            if !changed {
-                return true;
-            }
+
+            std::mem::swap(&mut current_dirty, &mut next_dirty);
         }
-        false
+
+        if !current_dirty.is_empty() {
+            self.dirty.extend(current_dirty);
+            return false;
+        }
+
+        true
     }
 
     fn apply_component_transitions(
@@ -1024,7 +1122,7 @@ fn is_strong_source(block: BlockType) -> bool {
     )
 }
 
-fn is_component(block: BlockType) -> bool {
+pub(crate) fn is_component(block: BlockType) -> bool {
     matches!(
         block,
         BlockType::RedstoneWire
@@ -1566,5 +1664,184 @@ mod tests {
         reloaded.tick(&mut manager, &[]);
         reloaded.restore_chunk_metadata(&manager, 0, 0, &metadata);
         assert!(reloaded.components.get(&(1, Y, 0)).is_none());
+    }
+
+    #[test]
+    fn cross_chunk_redstone_line_propagation() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        let mut system = RedstoneSystem::new();
+
+        // Place Lever at x=14 (chunk 0) and RedstoneWires across x=15 (chunk 0) to x=20 (chunk 1)
+        manager.set_block(14, Y, 0, BlockType::Lever);
+        system.on_block_changed(&manager, (14, Y, 0), Direction::North);
+
+        for x in 15..=20 {
+            manager.set_block(x, Y, 0, BlockType::RedstoneWire);
+            system.on_block_changed(&manager, (x, Y, 0), Direction::North);
+        }
+
+        // Toggle Lever ON
+        system.interact(&mut manager, (14, Y, 0));
+        system.tick(&mut manager, &[]);
+
+        assert_eq!(system.power_at((14, Y, 0)), 15);
+        assert_eq!(system.power_at((15, Y, 0)), 15); // Wire adjacent to Lever gets full 15 power
+        assert_eq!(system.power_at((16, Y, 0)), 14); // In chunk 1 (attenuated by 1)
+        assert_eq!(system.power_at((17, Y, 0)), 13);
+        assert_eq!(system.power_at((20, Y, 0)), 10);
+    }
+
+    #[test]
+    fn sleeping_mechanism_behavior() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+
+        place(
+            &mut system,
+            &mut manager,
+            0,
+            BlockType::Lever,
+            Direction::North,
+        );
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::RedstoneWire,
+            Direction::North,
+        );
+
+        // Initial tick settles power and enters sleeping state
+        system.tick(&mut manager, &[]);
+        assert!(system.is_sleeping());
+
+        // Subsequent tick when idle stays sleeping
+        let idle_update = system.tick(&mut manager, &[]);
+        assert!(idle_update.mutations.is_empty());
+        assert!(system.is_sleeping());
+
+        // Interaction wakes system up
+        system.interact(&mut manager, (0, Y, 0));
+        assert!(!system.is_sleeping());
+
+        // Tick settles again and returns to sleeping
+        system.tick(&mut manager, &[]);
+        assert!(system.is_sleeping());
+        assert_eq!(system.power_at((0, Y, 0)), 15);
+        assert_eq!(system.power_at((1, Y, 0)), 15);
+    }
+
+    fn reference_full_settle(
+        components: &mut HashMap<BlockPos, ComponentState>,
+        manager: &ChunkManager,
+    ) -> bool {
+        for _ in 0..MAX_PROPAGATION_PASSES {
+            let snapshot = components.clone();
+            let mut changed = false;
+            for (&pos, state) in components.iter_mut() {
+                let block = get_block(manager, pos);
+                let new_power = desired_power(manager, &snapshot, pos, block, *state);
+                let new_charge = if new_power == 0 {
+                    ChargeKind::Unpowered
+                } else if is_strong_source(block) {
+                    ChargeKind::Strong
+                } else {
+                    ChargeKind::Weak
+                };
+                if state.signal.power != new_power || state.signal.charge != new_charge {
+                    state.signal.power = new_power;
+                    state.signal.charge = new_charge;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn differential_dirty_worklist_vs_full_settle_parity() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        let mut system = RedstoneSystem::new();
+
+        // Build circuit spanning multiple chunks:
+        // Lever at 0, wires 1..10, repeater at 11, wires 12..20
+        manager.set_block(0, Y, 0, BlockType::Lever);
+        system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+
+        for x in 1..=10 {
+            manager.set_block(x, Y, 0, BlockType::RedstoneWire);
+            system.on_block_changed(&manager, (x, Y, 0), Direction::North);
+        }
+        manager.set_block(11, Y, 0, BlockType::Repeater);
+        system.on_block_changed(&manager, (11, Y, 0), Direction::East);
+
+        for x in 12..=20 {
+            manager.set_block(x, Y, 0, BlockType::RedstoneWire);
+            system.on_block_changed(&manager, (x, Y, 0), Direction::North);
+        }
+
+        // Action 1: Toggle lever ON and tick
+        system.interact(&mut manager, (0, Y, 0));
+        system.tick(&mut manager, &[]);
+
+        // Check parity against full settle reference
+        let mut ref_components = system.components.clone();
+        reference_full_settle(&mut ref_components, &manager);
+        for (pos, state) in &system.components {
+            let ref_state = ref_components.get(pos).unwrap();
+            assert_eq!(
+                state.signal.power, ref_state.signal.power,
+                "Mismatch at pos {:?}",
+                pos
+            );
+            assert_eq!(
+                state.signal.charge, ref_state.signal.charge,
+                "Mismatch at pos {:?}",
+                pos
+            );
+        }
+
+        // Action 2: Advance ticks for repeater propagation
+        for _ in 0..5 {
+            system.tick(&mut manager, &[]);
+            let mut ref_comp = system.components.clone();
+            reference_full_settle(&mut ref_comp, &manager);
+            for (pos, state) in &system.components {
+                let ref_state = ref_comp.get(pos).unwrap();
+                assert_eq!(
+                    state.signal.power, ref_state.signal.power,
+                    "Mismatch post-repeater at pos {:?}",
+                    pos
+                );
+                assert_eq!(
+                    state.signal.charge, ref_state.signal.charge,
+                    "Mismatch post-repeater at pos {:?}",
+                    pos
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn loop_budget_parity_test() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+
+        // Create a feedback loop of wires
+        let positions = [(0, Y, 0), (1, Y, 0), (1, Y, 1), (0, Y, 1)];
+        for &pos in &positions {
+            manager.set_block(pos.0, pos.1, pos.2, BlockType::RedstoneWire);
+            system.on_block_changed(&manager, pos, Direction::North);
+        }
+
+        system.tick(&mut manager, &[]);
+        assert!(!system.tick(&mut manager, &[]).propagation_overflowed);
     }
 }

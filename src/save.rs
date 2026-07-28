@@ -396,6 +396,7 @@ impl ChunkSaveData {
                 }
             }
             chunk.rebuild_torch_index();
+            chunk.rebuild_redstone_index();
         }
 
         if block_states.len() == 16 * 256 * 16 {

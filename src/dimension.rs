@@ -113,6 +113,7 @@ fn generate_overworld_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     // Structure placement above mutates blocks directly; keep derived indexes
     // valid for all dimension-generated chunks.
     chunk.rebuild_torch_index();
+    chunk.rebuild_redstone_index();
     chunk
 }
 
@@ -548,8 +549,10 @@ fn finish_chunk(
         fluid_levels,
         block_states: Box::new([[[0; 16]; 256]; 16]),
         torch_positions: Vec::new(),
+        redstone_positions: Vec::new(),
     };
     chunk.rebuild_torch_index();
+    chunk.rebuild_redstone_index();
     chunk
 }
 
