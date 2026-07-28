@@ -96,13 +96,18 @@ impl ParticleSystem {
     /// indices to draw, or `None` if there are no particles.
     pub fn compile_mesh(
         &self,
-        device: &Device,
+        _device: &Device,
         queue: &Queue,
         cam_right: Vec3,
         cam_up: Vec3,
         vertex_buffer: &Buffer,
         index_buffer: &Buffer,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
     ) -> Option<u32> {
+        vertices.clear();
+        indices.clear();
+
         if self.particles.is_empty() {
             return None;
         }
@@ -110,8 +115,8 @@ impl ParticleSystem {
         let cam_right = cam_right.normalize_or_zero();
         let cam_up = cam_up.normalize_or_zero();
 
-        let mut vertices: Vec<Vertex> = Vec::with_capacity(self.particles.len() * 4);
-        let mut indices: Vec<u32> = Vec::with_capacity(self.particles.len() * 6);
+        vertices.reserve(self.particles.len() * 4);
+        indices.reserve(self.particles.len() * 6);
 
         for (i, p) in self.particles.iter().enumerate() {
             let start_idx = (i * 4) as u32;
@@ -180,10 +185,10 @@ impl ParticleSystem {
             return None;
         }
 
-        queue.write_buffer(vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-        queue.write_buffer(index_buffer, 0, bytemuck::cast_slice(&indices));
+        queue.write_buffer(vertex_buffer, 0, bytemuck::cast_slice(vertices));
+        queue.write_buffer(index_buffer, 0, bytemuck::cast_slice(indices));
 
-        let _ = device; // device reserved for future allocations
+        let _ = _device; // device reserved for future allocations
 
         Some(indices.len() as u32)
     }

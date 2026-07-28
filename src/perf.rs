@@ -4,7 +4,41 @@
 //! state and use [`PerfRecorder::record`] on hot paths. Samples are nanoseconds
 //! and overwrite the oldest sample when the fixed-capacity history is full.
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+pub struct AllocTracker;
+
+pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for AllocTracker {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        System.alloc(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        System.alloc_zeroed(layout)
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: AllocTracker = AllocTracker;
+
+pub fn alloc_count() -> u64 {
+    ALLOC_COUNT.load(Ordering::Relaxed)
+}
 
 pub const SCOPE_COUNT: usize = 17;
 pub const DEFAULT_HISTORY_CAPACITY: usize = 256;
@@ -220,6 +254,7 @@ pub struct PerfCounters {
     pub save_queue_depth: u64,
     pub network_queue_depth: u64,
     pub loaded_region_cache_bytes: u64,
+    pub frame_allocations: u64,
     pub gpu_sky_ns: u64,
     pub gpu_opaque_ns: u64,
     pub gpu_mobs_ns: u64,

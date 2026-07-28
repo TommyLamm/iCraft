@@ -1,8 +1,8 @@
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk_manager::{mark_block_mesh_dependencies, surrounding_chunk_coords, ChunkManager};
 use crate::chunk_render::{
-    build_draw_plan, select_lod_for_bounds, DrawCandidate, DrawLayer, Frustum, LodLevel,
-    LodThresholds, MeshBounds, TerrainVertex,
+    select_lod_for_bounds, DrawCandidate, DrawLayer, Frustum, LodLevel, LodThresholds, MeshBounds,
+    TerrainVertex,
 };
 use crate::crafting::RecipeManager;
 use crate::interaction::{raycast, RaycastTargetPolicy};
@@ -2633,6 +2633,20 @@ pub struct State {
     gpu_pass_timings_ns: [u64; 7],
     gpu_timestamps_supported: bool,
     gpu_timestamps_inside_passes: bool,
+    terrain_candidates_scratch: Vec<crate::chunk_render::DrawCandidate>,
+    terrain_draw_plan_scratch: crate::chunk_render::DrawPlan,
+    mob_vertices_scratch: Vec<Vertex>,
+    mob_indices_scratch: Vec<u32>,
+    particle_vertices_scratch: Vec<Vertex>,
+    particle_indices_scratch: Vec<u32>,
+    hand_vertices_scratch: Vec<Vertex>,
+    hand_indices_scratch: Vec<u32>,
+    last_held_item: Option<Item>,
+    last_hand_walk_swing: f32,
+    last_hand_attack_swing: f32,
+    ui_vertices_scratch: Vec<UiVertex>,
+    ui_line_vertices_scratch: Vec<UiVertex>,
+    debug_str_scratch: String,
     pub active_station: Option<StationKind>,
     pub enchanting: crate::enchantment::EnchantingState,
     pub brewing: crate::brewing::BrewingStandState,
@@ -4027,6 +4041,20 @@ impl State {
             gpu_pass_timings_ns: [0; 7],
             gpu_timestamps_supported,
             gpu_timestamps_inside_passes,
+            terrain_candidates_scratch: Vec::with_capacity(256),
+            terrain_draw_plan_scratch: crate::chunk_render::DrawPlan::default(),
+            mob_vertices_scratch: Vec::with_capacity(1024),
+            mob_indices_scratch: Vec::with_capacity(1536),
+            particle_vertices_scratch: Vec::with_capacity(1024),
+            particle_indices_scratch: Vec::with_capacity(1536),
+            hand_vertices_scratch: Vec::with_capacity(256),
+            hand_indices_scratch: Vec::with_capacity(384),
+            last_held_item: None,
+            last_hand_walk_swing: -1.0,
+            last_hand_attack_swing: -1.0,
+            ui_vertices_scratch: Vec::with_capacity(2048),
+            ui_line_vertices_scratch: Vec::with_capacity(4096),
+            debug_str_scratch: String::with_capacity(128),
             active_station: None,
             enchanting: crate::enchantment::EnchantingState::default(),
             brewing: crate::brewing::BrewingStandState::default(),
@@ -9283,6 +9311,7 @@ impl State {
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let allocs_before = crate::perf::alloc_count();
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -9317,8 +9346,7 @@ impl State {
 
         let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
         let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
-        let mut selected_lods = std::collections::HashMap::new();
-        let mut candidates = Vec::new();
+        self.terrain_candidates_scratch.clear();
         for (&coord, mesh) in &self.chunk_meshes {
             let Some(bounds) = mesh.finest_bounds() else {
                 continue;
@@ -9327,26 +9355,32 @@ impl State {
             let Some(level) = mesh.level(lod) else {
                 continue;
             };
-            selected_lods.insert(coord, lod);
+            let distance_sq = bounds.center_distance_squared(self.camera.position);
             if let Some(bounds) = level.opaque.bounds {
-                candidates.push(DrawCandidate::new(
+                self.terrain_candidates_scratch.push(DrawCandidate::new(
                     coord,
                     bounds,
                     level.opaque.num_indices,
                     DrawLayer::Opaque,
+                    lod,
+                    distance_sq,
                 ));
             }
             if let Some(bounds) = level.transparent.bounds {
-                candidates.push(DrawCandidate::new(
+                self.terrain_candidates_scratch.push(DrawCandidate::new(
                     coord,
                     bounds,
                     level.transparent.num_indices,
                     DrawLayer::Transparent,
+                    lod,
+                    distance_sq,
                 ));
             }
         }
-        let terrain_candidate_count = candidates.len();
-        let draw_plan = build_draw_plan(candidates, &frustum, self.camera.position);
+        let terrain_candidate_count = self.terrain_candidates_scratch.len();
+        self.terrain_draw_plan_scratch
+            .build_into(self.terrain_candidates_scratch.iter().copied(), &frustum);
+        let draw_plan = &self.terrain_draw_plan_scratch;
         self.submitted_terrain_triangles = draw_plan.submitted_triangle_count();
         self.submitted_terrain_draw_calls = draw_plan.draw_call_count();
         self.visible_chunk_count = draw_plan.visible_chunk_count();
@@ -9373,54 +9407,47 @@ impl State {
 
         // Compile mob meshes
         let entity_prepare_started = Instant::now();
-        let mut mob_vertices = Vec::new();
-        let mut mob_indices = Vec::new();
+        self.mob_vertices_scratch.clear();
+        self.mob_indices_scratch.clear();
         crate::mob_renderer::render_mobs(
             &self.entity_manager,
             &self.chunk_manager,
-            &mut mob_vertices,
-            &mut mob_indices,
+            &mut self.mob_vertices_scratch,
+            &mut self.mob_indices_scratch,
             self.total_time,
         );
 
         // In third-person mode also render the local player avatar.
         if self.third_person {
-            // The avatar's local +Z "front" maps to (sin(yaw), 0, cos(yaw)),
-            // while the camera's horizontal forward is (cos(yaw), 0, sin(yaw)).
-            // Passing the camera yaw directly leaves the model rotated 90
-            // degrees (side-on to the camera); shift by 90 degrees so the
-            // avatar faces the camera direction and its back always faces the
-            // camera. Positive camera pitch looks up, but a positive head
-            // rotation tilts the face downward, so flip the sign.
             crate::mob_renderer::render_local_player(
                 self.player_physics.position,
                 std::f32::consts::FRAC_PI_2 - self.camera.yaw,
                 -self.camera.pitch,
                 &self.chunk_manager,
-                &mut mob_vertices,
-                &mut mob_indices,
+                &mut self.mob_vertices_scratch,
+                &mut self.mob_indices_scratch,
                 self.total_time,
                 self.player_physics.velocity,
             );
         }
 
-        let mob_indices_len = mob_indices.len();
+        let mob_indices_len = self.mob_indices_scratch.len();
         self.mob_num_indices = mob_indices_len as u32;
 
         if mob_indices_len > 0 {
-            let vert_limit = mob_vertices.len().min(8192);
+            let vert_limit = self.mob_vertices_scratch.len().min(8192);
             let ind_limit = mob_indices_len.min(12288);
             self.mob_num_indices = ind_limit as u32;
             let upload_started = Instant::now();
             self.queue.write_buffer(
                 &self.mob_vertex_buffer,
                 0,
-                bytemuck::cast_slice(&mob_vertices[..vert_limit]),
+                bytemuck::cast_slice(&self.mob_vertices_scratch[..vert_limit]),
             );
             self.queue.write_buffer(
                 &self.mob_index_buffer,
                 0,
-                bytemuck::cast_slice(&mob_indices[..ind_limit]),
+                bytemuck::cast_slice(&self.mob_indices_scratch[..ind_limit]),
             );
             gpu_upload_elapsed += upload_started.elapsed();
             self.perf_counters.upload_bytes_frame =
@@ -9452,6 +9479,8 @@ impl State {
                 cam_up,
                 &self.particle_vertex_buffer,
                 &self.particle_index_buffer,
+                &mut self.particle_vertices_scratch,
+                &mut self.particle_indices_scratch,
             )
             .unwrap_or(0);
         let particle_prepare_elapsed = particle_prepare_started.elapsed();
@@ -9485,35 +9514,50 @@ impl State {
                 0.0
             };
             let attack_swing = if self.left_mouse_pressed { 1.0 } else { 0.0 };
-            let (hand_vertices, hand_indices) = crate::hand_renderer::build_first_person_hand_mesh(
-                &self.inventory,
-                walk_swing,
-                attack_swing,
-            );
-            let hand_indices_len = hand_indices.len();
-            self.hand_num_indices = hand_indices_len as u32;
-            if hand_indices_len > 0 {
-                let vert_limit = hand_vertices.len().min(1024);
-                let ind_limit = hand_indices_len.min(1536);
-                self.hand_num_indices = ind_limit as u32;
-                let upload_started = Instant::now();
-                self.queue.write_buffer(
-                    &self.hand_vertex_buffer,
-                    0,
-                    bytemuck::cast_slice(&hand_vertices[..vert_limit]),
+            let current_held = self.inventory.hotbar[self.inventory.selected]
+                .map(|stack| stack.item)
+                .unwrap_or(Item::Air);
+            let item_changed = self.last_held_item != Some(current_held);
+            let swing_changed = (self.last_hand_walk_swing - walk_swing).abs() > 0.001
+                || (self.last_hand_attack_swing - attack_swing).abs() > 0.001;
+
+            if item_changed || swing_changed {
+                self.last_held_item = Some(current_held);
+                self.last_hand_walk_swing = walk_swing;
+                self.last_hand_attack_swing = attack_swing;
+
+                crate::hand_renderer::build_first_person_hand_mesh_into(
+                    &self.inventory,
+                    walk_swing,
+                    attack_swing,
+                    &mut self.hand_vertices_scratch,
+                    &mut self.hand_indices_scratch,
                 );
-                self.queue.write_buffer(
-                    &self.hand_index_buffer,
-                    0,
-                    bytemuck::cast_slice(&hand_indices[..ind_limit]),
-                );
-                gpu_upload_elapsed += upload_started.elapsed();
-                self.perf_counters.upload_bytes_frame =
-                    self.perf_counters.upload_bytes_frame.saturating_add(
-                        (vert_limit * std::mem::size_of::<Vertex>()
-                            + ind_limit * std::mem::size_of::<u32>())
-                            as u64,
+                let hand_indices_len = self.hand_indices_scratch.len();
+                self.hand_num_indices = hand_indices_len as u32;
+                if hand_indices_len > 0 {
+                    let vert_limit = self.hand_vertices_scratch.len().min(1024);
+                    let ind_limit = hand_indices_len.min(1536);
+                    self.hand_num_indices = ind_limit as u32;
+                    let upload_started = Instant::now();
+                    self.queue.write_buffer(
+                        &self.hand_vertex_buffer,
+                        0,
+                        bytemuck::cast_slice(&self.hand_vertices_scratch[..vert_limit]),
                     );
+                    self.queue.write_buffer(
+                        &self.hand_index_buffer,
+                        0,
+                        bytemuck::cast_slice(&self.hand_indices_scratch[..ind_limit]),
+                    );
+                    gpu_upload_elapsed += upload_started.elapsed();
+                    self.perf_counters.upload_bytes_frame =
+                        self.perf_counters.upload_bytes_frame.saturating_add(
+                            (vert_limit * std::mem::size_of::<Vertex>()
+                                + ind_limit * std::mem::size_of::<u32>())
+                                as u64,
+                        );
+                }
             }
         } else {
             self.hand_num_indices = 0;
@@ -9525,10 +9569,11 @@ impl State {
         );
 
         let ui_prepare_started = Instant::now();
+        let mut ui_vertices = std::mem::take(&mut self.ui_vertices_scratch);
+        let mut ui_line_vertices = std::mem::take(&mut self.ui_line_vertices_scratch);
+        ui_vertices.clear();
+        ui_line_vertices.clear();
         if self.is_saving {
-            let mut ui_vertices = Vec::new();
-            let mut ui_line_vertices = Vec::new();
-
             let bg_color = [0.1, 0.1, 0.1, 0.75];
             ui_vertices.push(UiVertex {
                 position: [-1.0, 1.0, 0.0],
@@ -9598,8 +9643,6 @@ impl State {
             self.num_ui_line_vertices = ui_line_vert_len as u32;
             self.num_ui_textured_vertices = 0;
         } else if self.connection_lost {
-            let mut ui_vertices = Vec::new();
-            let mut ui_line_vertices = Vec::new();
             let [mouse_x, mouse_y] = self.mouse_ndc;
             let button_hover = (-0.3..=0.3).contains(&mouse_x) && (-0.10..=0.00).contains(&mouse_y);
 
@@ -9693,9 +9736,6 @@ impl State {
             self.num_ui_line_vertices = ui_line_vert_len as u32;
             self.num_ui_textured_vertices = 0;
         } else if self.player_state.is_dead {
-            let mut ui_vertices = Vec::new();
-            let mut ui_line_vertices = Vec::new();
-
             let mouse_x = self.mouse_ndc[0];
             let mouse_y = self.mouse_ndc[1];
 
@@ -9875,9 +9915,6 @@ impl State {
             self.num_ui_line_vertices = ui_line_vert_len as u32;
             self.num_ui_textured_vertices = 0;
         } else if self.is_paused {
-            let mut ui_vertices = Vec::new();
-            let mut ui_line_vertices = Vec::new();
-
             let mouse_x = self.mouse_ndc[0];
             let mouse_y = self.mouse_ndc[1];
 
@@ -10196,8 +10233,6 @@ impl State {
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
         } else {
-            let mut ui_vertices = Vec::new();
-            let mut ui_line_vertices = Vec::new();
             let mut ui_textured_vertices = Vec::new();
 
             let aspect = self.size.width as f32 / self.size.height as f32;
@@ -11464,48 +11499,118 @@ impl State {
 
                 // F3 Debug Screen
                 if self.show_debug {
-                    let frame_str = format!(
+                    use std::fmt::Write;
+
+                    let char_w = 0.007;
+                    let char_h = 0.014;
+                    let spacing = 0.002;
+                    let start_x = -0.98;
+                    let mut line_y = 0.95;
+                    let line_gap = 0.025;
+
+                    let mut render_line = |s: &str, color: [f32; 4], verts: &mut Vec<UiVertex>| {
+                        add_string_lines(s, start_x, line_y, char_w, char_h, spacing, color, verts);
+                        line_y -= line_gap;
+                    };
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "FPS: {:.1} / FRAME: {:.2} MS",
                         self.debug_fps, self.debug_frame_ms
                     );
-
-                    let time_of_day = self.world_time.time_of_day_smooth();
-                    let hour = ((time_of_day * 24.0 + 6.0) % 24.0).floor() as u32;
-                    let minute = (((time_of_day * 24.0 + 6.0) % 1.0) * 60.0).floor() as u32;
-                    let day = self.world_time.ticks / self.world_time.day_length;
-                    let time_str = format!(
-                        "TIME: {:02}:{:02} / DAY: {} / TICKS: {}",
-                        hour, minute, day, self.world_time.ticks
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
                     );
 
                     let pos = self.player_physics.position;
-                    let pos_str = format!("XYZ: {:.3} / {:.3} / {:.3}", pos.x, pos.y, pos.z);
-                    let facing_str = format!(
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
+                        "XYZ: {:.3} / {:.3} / {:.3}",
+                        pos.x, pos.y, pos.z
+                    );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "FACING: YAW {:.2} / PITCH {:.2}",
                         self.camera.yaw.to_degrees().rem_euclid(360.0),
                         self.camera.pitch.to_degrees()
                     );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
                     let chunk_x = debug_chunk_coordinate(pos.x, CHUNK_WIDTH);
                     let chunk_z = debug_chunk_coordinate(pos.z, CHUNK_DEPTH);
-                    let chunk_str = format!("CHUNK: {} / {}", chunk_x, chunk_z);
+                    self.debug_str_scratch.clear();
+                    let _ = write!(self.debug_str_scratch, "CHUNK: {} / {}", chunk_x, chunk_z);
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
 
                     let biome = self
                         .weather
                         .biome_at(pos.x.floor() as i32, pos.z.floor() as i32);
-                    let biome_str = format!("BIOME: {}", biome_debug_name(biome));
-                    let weather_str = format!("WEATHER: {:?}", self.weather.current).to_uppercase();
-                    let chunks_str = format!(
+                    self.debug_str_scratch.clear();
+                    let _ = write!(self.debug_str_scratch, "BIOME: {}", biome_debug_name(biome));
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
+                        "WEATHER: {:?}",
+                        self.weather.current
+                    );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "CHUNKS: {} VISIBLE / {} LOADED / {} DRAWS",
                         self.visible_chunk_count,
                         self.chunk_manager.chunks.len(),
                         self.submitted_terrain_draw_calls
                     );
-                    let entities_str = format!(
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "ENTITIES: {} ({} RENDERED, {} CULLED) / PARTICLES: {}",
                         self.entity_manager.entities.len(),
                         self.perf_counters.rendered_entities,
                         self.perf_counters.frustum_culled_entities,
                         self.particles.particles.len()
+                    );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
                     );
 
                     let terrain_indices = self.submitted_terrain_triangles.saturating_mul(3);
@@ -11514,59 +11619,88 @@ impl State {
                         + u64::from(self.particle_num_indices);
                     let rendered_triangles = rendered_indices / 3;
                     let rendered_vertices = rendered_indices * 2 / 3;
-                    let render_str = format!(
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "RENDER: {} VERTICES / {} TRIANGLES / {} DRAWS",
                         rendered_vertices, rendered_triangles, self.perf_counters.draw_calls
                     );
-                    let memory_str = format!(
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
+                        "FRAME ALLOCS: {}",
+                        self.perf_counters.frame_allocations
+                    );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "MEMORY EST: {:.1} MB",
                         self.estimated_debug_memory_bytes() as f64 / (1024.0 * 1024.0)
                     );
-                    let gpu_str = format!(
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "GPU MESH: {:.1} MB / {} BUFFERS / UPLOAD: {:.1} KB",
                         self.perf_counters.gpu_mesh_bytes as f64 / (1024.0 * 1024.0),
                         self.perf_counters.gpu_buffer_objects,
                         self.perf_counters.upload_bytes_frame as f64 / 1024.0
                     );
-                    let worker_str = format!(
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "WORKERS: {} IN FLIGHT / {} STALE / {} CANCELLED",
                         self.perf_counters.in_flight,
                         self.perf_counters.stale_results,
                         self.perf_counters.cancelled
                     );
-                    let save_net_str = format!(
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
                         "SAVE Q: {} | REGION CACHE: {:.2} MB | NET Q: {}",
                         self.perf_counters.save_queue_depth,
                         self.perf_counters.loaded_region_cache_bytes as f64 / (1024.0 * 1024.0),
                         self.perf_counters.network_queue_depth
                     );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
 
-                    let net_str = match &self.role {
-                        MultiplayerRole::Host { port } => {
-                            format!(
-                                "NET: HOST ON PORT {} | CLIENTS: {}",
-                                port,
-                                self.remote_players.len()
-                            )
-                        }
-                        MultiplayerRole::Client {
-                            server_addr, port, ..
-                        } => {
-                            format!(
-                                "NET: CLIENT @ {}:{} | LOCAL ID: {} | PLAYERS: {}",
-                                server_addr,
-                                port,
-                                self.local_player_id
-                                    .map(|id| id.to_string())
-                                    .unwrap_or_else(|| "?".to_string()),
-                                self.remote_players.len() + 1
-                            )
-                        }
-                        MultiplayerRole::Singleplayer => "NET: SINGLEPLAYER".to_string(),
-                    };
-
-                    let gpu_passes_str = if self.perf_counters.gpu_timestamps_supported {
-                        format!(
+                    self.debug_str_scratch.clear();
+                    if self.perf_counters.gpu_timestamps_supported {
+                        let _ = write!(
+                            self.debug_str_scratch,
                             "GPU PASSES: SKY {:.2}MS | OPAQUE {:.2}MS | MOBS {:.2}MS | TRANS {:.2}MS | PART {:.2}MS | CRACK {:.2}MS | UI {:.2}MS",
                             self.perf_counters.gpu_sky_ns as f64 / 1_000_000.0,
                             self.perf_counters.gpu_opaque_ns as f64 / 1_000_000.0,
@@ -11575,56 +11709,78 @@ impl State {
                             self.perf_counters.gpu_particles_ns as f64 / 1_000_000.0,
                             self.perf_counters.gpu_crack_ns as f64 / 1_000_000.0,
                             self.perf_counters.gpu_ui_ns as f64 / 1_000_000.0,
-                        )
+                        );
                     } else {
-                        "GPU PASSES: TIMESTAMP QUERY NOT SUPPORTED".to_string()
-                    };
-
-                    let char_w = 0.007;
-                    let char_h = 0.014;
-                    let spacing = 0.002;
-
-                    let start_x = -0.98;
-                    let start_y = 0.95;
-                    let line_gap = 0.025;
-
-                    let debug_lines = [
-                        frame_str,
-                        pos_str,
-                        facing_str,
-                        chunk_str,
-                        biome_str,
-                        weather_str,
-                        chunks_str,
-                        entities_str,
-                        render_str,
-                        memory_str,
-                        gpu_str,
-                        worker_str,
-                        save_net_str,
-                        gpu_passes_str,
-                        time_str,
-                        net_str,
-                    ];
-                    for (line_index, line) in debug_lines.iter().enumerate() {
-                        add_string_lines(
-                            line,
-                            start_x,
-                            start_y - line_gap * line_index as f32,
-                            char_w,
-                            char_h,
-                            spacing,
-                            [1.0, 1.0, 1.0, 1.0],
-                            &mut ui_line_vertices,
+                        let _ = write!(
+                            self.debug_str_scratch,
+                            "GPU PASSES: TIMESTAMP QUERY NOT SUPPORTED"
                         );
                     }
-                    for (scope_index, summary) in self.perf_summaries.iter().enumerate() {
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    let time_of_day = self.world_time.time_of_day_smooth();
+                    let hour = ((time_of_day * 24.0 + 6.0) % 24.0).floor() as u32;
+                    let minute = (((time_of_day * 24.0 + 6.0) % 1.0) * 60.0).floor() as u32;
+                    let day = self.world_time.ticks / self.world_time.day_length;
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
+                        "TIME: {:02}:{:02} / DAY: {} / TICKS: {}",
+                        hour, minute, day, self.world_time.ticks
+                    );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    match &self.role {
+                        MultiplayerRole::Host { port } => {
+                            let _ = write!(
+                                self.debug_str_scratch,
+                                "NET: HOST ON PORT {} | CLIENTS: {}",
+                                port,
+                                self.remote_players.len()
+                            );
+                        }
+                        MultiplayerRole::Client {
+                            server_addr, port, ..
+                        } => {
+                            let _ = write!(
+                                self.debug_str_scratch,
+                                "NET: CLIENT @ {}:{} | LOCAL ID: {} | PLAYERS: {}",
+                                server_addr,
+                                port,
+                                self.local_player_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "?".to_string()),
+                                self.remote_players.len() + 1
+                            );
+                        }
+                        MultiplayerRole::Singleplayer => {
+                            let _ = write!(self.debug_str_scratch, "NET: SINGLEPLAYER");
+                        }
+                    }
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    for summary in self.perf_summaries.iter() {
                         let name_label = if summary.name == "lighting" {
-                            "LIGHTING (LOAD+MUTATION)".to_string()
+                            "LIGHTING (LOAD+MUTATION)"
                         } else {
-                            summary.name.to_uppercase()
+                            summary.name
                         };
-                        let perf_line = format!(
+                        self.debug_str_scratch.clear();
+                        let _ = write!(
+                            self.debug_str_scratch,
                             "CPU {}: AVG {:.3} / P95 {:.3} / P99 {:.3} MS / N {}",
                             name_label,
                             summary.average() as f64 / 1_000_000.0,
@@ -11632,13 +11788,8 @@ impl State {
                             summary.p99() as f64 / 1_000_000.0,
                             summary.sample_count(),
                         );
-                        add_string_lines(
-                            &perf_line,
-                            start_x,
-                            start_y - line_gap * (debug_lines.len() + scope_index) as f32,
-                            char_w,
-                            char_h,
-                            spacing,
+                        render_line(
+                            &self.debug_str_scratch,
                             [0.82, 0.94, 1.0, 1.0],
                             &mut ui_line_vertices,
                         );
@@ -11832,6 +11983,9 @@ impl State {
             self.num_ui_textured_vertices = ui_textured_vert_len as u32;
         }
 
+        self.ui_vertices_scratch = ui_vertices;
+        self.ui_line_vertices_scratch = ui_line_vertices;
+
         self.perf_recorder.record(
             crate::perf::ScopeId::RenderPrepareUi,
             ui_prepare_started.elapsed(),
@@ -11914,9 +12068,7 @@ impl State {
             render_pass.set_pipeline(&self.terrain_render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             for candidate in &draw_plan.opaque {
-                let Some(lod) = selected_lods.get(&candidate.chunk_coord).copied() else {
-                    continue;
-                };
+                let lod = candidate.lod;
                 let Some(layer) = self
                     .chunk_meshes
                     .get(&candidate.chunk_coord)
@@ -11963,9 +12115,7 @@ impl State {
             }
             render_pass.set_pipeline(&self.terrain_trans_pipeline);
             for candidate in &draw_plan.transparent {
-                let Some(lod) = selected_lods.get(&candidate.chunk_coord).copied() else {
-                    continue;
-                };
+                let lod = candidate.lod;
                 let Some(layer) = self
                     .chunk_meshes
                     .get(&candidate.chunk_coord)
@@ -12156,6 +12306,8 @@ impl State {
         output.present();
         self.perf_recorder
             .record(crate::perf::ScopeId::Present, present_started.elapsed());
+        let allocs_after = crate::perf::alloc_count();
+        self.perf_counters.frame_allocations = allocs_after.saturating_sub(allocs_before);
         Ok(())
     }
 
@@ -12827,7 +12979,15 @@ fn add_string_lines(
 ) {
     let mut current_x = start_x;
     for c in s.chars() {
-        add_char_lines(c, current_x, y, char_w, char_h, color, vertices);
+        add_char_lines(
+            c.to_ascii_uppercase(),
+            current_x,
+            y,
+            char_w,
+            char_h,
+            color,
+            vertices,
+        );
         current_x += char_w + spacing;
     }
 }

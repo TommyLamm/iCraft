@@ -276,6 +276,8 @@ pub struct DrawCandidate {
     pub bounds: MeshBounds,
     pub index_count: u32,
     pub layer: DrawLayer,
+    pub lod: LodLevel,
+    pub distance_sq: f32,
 }
 
 impl DrawCandidate {
@@ -284,12 +286,16 @@ impl DrawCandidate {
         bounds: MeshBounds,
         index_count: u32,
         layer: DrawLayer,
+        lod: LodLevel,
+        distance_sq: f32,
     ) -> Self {
         Self {
             chunk_coord,
             bounds,
             index_count,
             layer,
+            lod,
+            distance_sq,
         }
     }
 
@@ -306,35 +312,48 @@ pub struct DrawPlan {
 }
 
 impl DrawPlan {
-    pub fn build(
+    pub fn clear(&mut self) {
+        self.opaque.clear();
+        self.transparent.clear();
+    }
+
+    pub fn build_into(
+        &mut self,
         candidates: impl IntoIterator<Item = DrawCandidate>,
         frustum: &Frustum,
-        camera_position: Vec3,
-    ) -> Self {
-        let mut plan = Self::default();
+    ) {
+        self.clear();
 
         for candidate in candidates {
             if candidate.index_count == 0 || !frustum.intersects_aabb(&candidate.bounds) {
                 continue;
             }
             match candidate.layer {
-                DrawLayer::Opaque => plan.opaque.push(candidate),
-                DrawLayer::Transparent => plan.transparent.push(candidate),
+                DrawLayer::Opaque => self.opaque.push(candidate),
+                DrawLayer::Transparent => self.transparent.push(candidate),
             }
         }
 
-        plan.opaque.sort_by(|left, right| {
-            left.distance_squared_from(camera_position)
-                .total_cmp(&right.distance_squared_from(camera_position))
+        self.opaque.sort_by(|left, right| {
+            left.distance_sq
+                .total_cmp(&right.distance_sq)
                 .then_with(|| left.chunk_coord.cmp(&right.chunk_coord))
         });
-        plan.transparent.sort_by(|left, right| {
+        self.transparent.sort_by(|left, right| {
             right
-                .distance_squared_from(camera_position)
-                .total_cmp(&left.distance_squared_from(camera_position))
+                .distance_sq
+                .total_cmp(&left.distance_sq)
                 .then_with(|| left.chunk_coord.cmp(&right.chunk_coord))
         });
+    }
 
+    pub fn build(
+        candidates: impl IntoIterator<Item = DrawCandidate>,
+        frustum: &Frustum,
+        _camera_position: Vec3,
+    ) -> Self {
+        let mut plan = Self::default();
+        plan.build_into(candidates, frustum);
         plan
     }
 
@@ -461,12 +480,9 @@ mod tests {
         index_count: u32,
         layer: DrawLayer,
     ) -> DrawCandidate {
-        DrawCandidate::new(
-            chunk_coord,
-            bounds([-0.25, -0.25, z - 0.25], [0.25, 0.25, z + 0.25]),
-            index_count,
-            layer,
-        )
+        let b = bounds([-0.25, -0.25, z - 0.25], [0.25, 0.25, z + 0.25]);
+        let dist_sq = b.center_distance_squared(Vec3::ZERO);
+        DrawCandidate::new(chunk_coord, b, index_count, layer, LodLevel::L0, dist_sq)
     }
 
     #[test]

@@ -10,14 +10,14 @@
 | # | 任務 | 詳細計畫 | 狀態 | Commit | 驗證 |
 |---|---|---|---|---|---|
 | 0 | 火把索引與週期掃描移除 | （已完成，見下方「已完成進度」） | Complete | - | `cargo test --release`（358 unit + 1 integration）；torch index focused tests 2 passed |
-| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Pending | - | - |
-| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Pending | - | - |
-| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Pending | - | - |
-| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Pending | - | - |
-| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Pending | - | - |
-| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Pending | - | - |
-| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Pending | - | - |
-| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Pending | - | - |
+| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Complete | - | - |
+| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Complete | - | - |
+| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Complete | - | - |
+| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Complete | - | - |
+| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Complete | - | - |
+| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Complete | - | - |
+| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Complete | - | - |
+| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過 |
 | 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Pending | - | - |
 | 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Pending | - | - |
 | 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Pending | - | - |

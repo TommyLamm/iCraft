@@ -23,13 +23,15 @@ fn held_item_texture(item: Item) -> Option<([u32; 6], u32)> {
 /// The hand is positioned on the right side of the screen, angled slightly
 /// inward and upward like Minecraft. The view space convention is the same
 /// as the main renderer: +X right, +Y up, +Z forward (left-handed).
-pub fn build_first_person_hand_mesh(
+pub fn build_first_person_hand_mesh_into(
     inventory: &Inventory,
     walk_swing: f32,
     attack_swing: f32,
-) -> (Vec<Vertex>, Vec<u32>) {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    vertices.clear();
+    indices.clear();
 
     // The arm is an elongated rectangular box angled from off-screen
     // bottom-right toward the fist, like Minecraft's first-person arm
@@ -42,8 +44,8 @@ pub fn build_first_person_hand_mesh(
 
     // Right arm: plain player skin tile (col 9, row 10) with no face/eye features.
     add_cuboid_view(
-        &mut vertices,
-        &mut indices,
+        vertices,
+        indices,
         Vec3::new(0.24, 0.24, 1.2),
         Vec3::new(0.0, 0.0, -0.55),
         fist_pos,
@@ -68,20 +70,12 @@ pub fn build_first_person_hand_mesh(
         if held_item.renders_flat() {
             let (tex_col, tex_row) = held_item.properties().tex_coords;
             add_sprite_view(
-                &mut vertices,
-                &mut indices,
-                0.3,
-                item_pos,
-                item_yaw,
-                item_pitch,
-                tex_col,
-                tex_row,
-                1.0,
+                vertices, indices, 0.3, item_pos, item_yaw, item_pitch, tex_col, tex_row, 1.0,
             );
         } else if let Some((tex_cols, tex_row)) = held_item_texture(held_item) {
             add_cuboid_view(
-                &mut vertices,
-                &mut indices,
+                vertices,
+                indices,
                 Vec3::new(0.18, 0.18, 0.18),
                 Vec3::new(0.0, 0.0, 0.0),
                 item_pos,
@@ -93,7 +87,22 @@ pub fn build_first_person_hand_mesh(
             );
         }
     }
+}
 
+pub fn build_first_person_hand_mesh(
+    inventory: &Inventory,
+    walk_swing: f32,
+    attack_swing: f32,
+) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    build_first_person_hand_mesh_into(
+        inventory,
+        walk_swing,
+        attack_swing,
+        &mut vertices,
+        &mut indices,
+    );
     (vertices, indices)
 }
 
