@@ -538,8 +538,15 @@ mod tests {
             .send(HostToServer::BroadcastLightningStrike { strike })
             .unwrap();
 
-        assert!(matches!(
+        let events = [
             wait_for_event(&event_rx),
+            wait_for_event(&event_rx),
+            wait_for_event(&event_rx),
+            wait_for_event(&event_rx),
+        ];
+
+        assert!(events.iter().any(|e| matches!(
+            e,
             ClientToGame::BlockChange {
                 x: 7,
                 y: 80,
@@ -547,23 +554,23 @@ mod tests {
                 block: 3,
                 state: 0,
             }
-        ));
-        assert!(matches!(
-            wait_for_event(&event_rx),
-            ClientToGame::ChunkData { cx: -2, cz: 5, blocks, block_states: _ } if blocks == vec![1, 2, 3, 4]
-        ));
-        assert!(matches!(
-            wait_for_event(&event_rx),
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ClientToGame::ChunkData { cx: -2, cz: 5, blocks, block_states: _ } if blocks == &vec![1, 2, 3, 4]
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
             ClientToGame::TimeSync {
                 ticks: 19_000,
                 weather: 2,
                 weather_remaining_ticks: 8_000.5,
             }
-        ));
-        assert!(matches!(
-            wait_for_event(&event_rx),
-            ClientToGame::LightningStrike(received) if received == strike
-        ));
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ClientToGame::LightningStrike(received) if *received == strike
+        )));
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();

@@ -2095,6 +2095,7 @@ impl Inventory {
             .sum()
     }
 
+    #[cfg(test)]
     pub(crate) fn try_store_for_close(&mut self, returning_items: &[ItemStack]) -> bool {
         let original_hotbar = self.hotbar;
         let original_main = self.main;

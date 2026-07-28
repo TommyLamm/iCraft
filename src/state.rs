@@ -2593,6 +2593,7 @@ pub struct State {
     hand_vertex_buffer: wgpu::Buffer,
     hand_index_buffer: wgpu::Buffer,
     hand_num_indices: u32,
+    #[allow(dead_code)] // Owned for bind group lifetime; not read directly.
     hand_camera_buffer: wgpu::Buffer,
     hand_camera_bind_group: wgpu::BindGroup,
     pub particles: crate::particles::ParticleSystem,
@@ -2693,8 +2694,10 @@ pub struct State {
     /// deterministic generated form and therefore need join-time catch-up.
     mutated_chunks: std::collections::HashSet<(crate::dimension::Dimension, i32, i32)>,
     /// Host-only queue of pending join catch-up chunk coordinates per joining client.
-    pending_player_catchups:
-        std::collections::HashMap<crate::network::protocol::PlayerId, Vec<(i32, i32)>>,
+    pending_player_catchups: std::collections::HashMap<
+        crate::network::protocol::PlayerId,
+        std::collections::VecDeque<(i32, i32)>,
+    >,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4189,7 +4192,8 @@ impl State {
             .collect();
 
         chunks.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let pending_coords: Vec<_> = chunks.into_iter().map(|(coord, _)| coord).collect();
+        let pending_coords: std::collections::VecDeque<_> =
+            chunks.into_iter().map(|(coord, _)| coord).collect();
         self.pending_player_catchups
             .insert(player_id, pending_coords);
     }
@@ -4211,7 +4215,7 @@ impl State {
             if let Some(pending) = self.pending_player_catchups.get_mut(&id) {
                 let mut sent = 0;
                 while sent < MAX_CATCHUP_PER_FRAME && !pending.is_empty() {
-                    let (cx, cz) = pending.remove(0);
+                    let (cx, cz) = pending.pop_front().unwrap();
                     if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
                         let save_data = crate::save::ChunkSaveData::from_chunk(chunk);
                         self.network.send_chunk_to(

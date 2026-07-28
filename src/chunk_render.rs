@@ -298,10 +298,6 @@ impl DrawCandidate {
             distance_sq,
         }
     }
-
-    pub fn distance_squared_from(self, camera_position: Vec3) -> f32 {
-        self.bounds.center_distance_squared(camera_position)
-    }
 }
 
 /// Visible terrain draws split into the two required submission orders.
@@ -347,6 +343,7 @@ impl DrawPlan {
         });
     }
 
+    #[allow(dead_code)] // Convenience constructor used by tests; production uses build_into.
     pub fn build(
         candidates: impl IntoIterator<Item = DrawCandidate>,
         frustum: &Frustum,
@@ -377,14 +374,6 @@ impl DrawPlan {
             .collect::<HashSet<_>>()
             .len()
     }
-}
-
-pub fn build_draw_plan(
-    candidates: impl IntoIterator<Item = DrawCandidate>,
-    frustum: &Frustum,
-    camera_position: Vec3,
-) -> DrawPlan {
-    DrawPlan::build(candidates, frustum, camera_position)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -600,7 +589,7 @@ mod tests {
             candidate((2, 0), 200.0, 6, DrawLayer::Transparent),
         ];
 
-        let plan = build_draw_plan(candidates, &frustum, Vec3::ZERO);
+        let plan = DrawPlan::build(candidates, &frustum, Vec3::ZERO);
         assert_eq!(plan.opaque.len(), 1);
         assert!(plan.transparent.is_empty());
         assert_eq!(plan.draw_call_count(), 1);

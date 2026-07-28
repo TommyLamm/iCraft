@@ -2,6 +2,7 @@ use image::{Rgba, RgbaImage};
 use wgpu::{Device, Queue, Sampler, Texture, TextureView};
 
 pub struct TextureAtlas {
+    #[allow(dead_code)] // Owned for GPU lifetime; accessed via `view` and `sampler`.
     pub texture: Texture,
     pub view: TextureView,
     pub sampler: Sampler,

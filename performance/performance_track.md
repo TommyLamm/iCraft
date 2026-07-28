@@ -9,7 +9,7 @@
 
 | # | 任務 | 詳細計畫 | 狀態 | Commit | 驗證 |
 |---|---|---|---|---|---|
-| 0 | 火把索引與週期掃描移除 | （已完成，見下方「已完成進度」） | Complete | - | `cargo test --release`（358 unit + 1 integration）；torch index focused tests 2 passed |
+| 0 | 火把索引與週期掃描移除 | （已完成，見下方「已完成進度」） | Complete | - | `cargo test --release`（366 unit + 1 integration）；torch index focused tests 2 passed |
 | 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Complete | - | - |
 | 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Complete | - | - |
 | 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Complete | - | - |

@@ -203,6 +203,7 @@ impl CatchupMailbox {
         packets
     }
 
+    #[allow(dead_code)]
     async fn len(&self) -> usize {
         self.pending.lock().await.len()
     }

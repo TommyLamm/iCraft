@@ -89,6 +89,7 @@ pub fn build_first_person_hand_mesh_into(
     }
 }
 
+#[cfg(test)]
 pub fn build_first_person_hand_mesh(
     inventory: &Inventory,
     walk_swing: f32,

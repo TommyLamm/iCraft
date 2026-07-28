@@ -466,7 +466,19 @@ impl EntityManager {
     }
 
     pub fn update_spatial_indexes(&mut self) {
-        self.rebuild_indexes();
+        for vec in self.spatial_buckets.values_mut() {
+            vec.clear();
+        }
+        for entity in &self.entities {
+            let chunk_pos = (
+                (entity.position.x / 16.0).floor() as i32,
+                (entity.position.z / 16.0).floor() as i32,
+            );
+            self.spatial_buckets
+                .entry(chunk_pos)
+                .or_default()
+                .push(entity.id);
+        }
     }
 
     pub fn get_by_id(&self, id: u64) -> Option<&Entity> {
@@ -523,7 +535,17 @@ impl EntityManager {
             let swapped_id = self.entities[idx].id;
             self.id_to_index.insert(swapped_id, idx);
         }
-        self.rebuild_indexes();
+        // Incremental bucket update: remove the entity from type and spatial buckets.
+        if let Some(bucket) = self.type_buckets.get_mut(&removed.entity_type) {
+            bucket.retain(|&id| id != removed.id);
+        }
+        let removed_chunk_pos = (
+            (removed.position.x / 16.0).floor() as i32,
+            (removed.position.z / 16.0).floor() as i32,
+        );
+        if let Some(bucket) = self.spatial_buckets.get_mut(&removed_chunk_pos) {
+            bucket.retain(|&id| id != removed.id);
+        }
         removed
     }
 
