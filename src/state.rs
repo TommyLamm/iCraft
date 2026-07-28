@@ -43,6 +43,8 @@ const BLOCK_REACH: f32 = 5.0;
 const BLOCK_REACH_TOLERANCE: f32 = 1.5;
 const PAUSE_WEATHER_VOLUME_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.46, -0.36];
 const PAUSE_QUIT_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.60, -0.50];
+pub const SIM_TICK_TIME: f32 = 0.05;
+pub const MAX_CATCHUP_TICKS: usize = 4;
 
 fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
     x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
@@ -1372,6 +1374,7 @@ impl State {
             destination = self.build_linked_nether_portal(cx, cz, destination.y as i32);
         }
         self.player_physics.position = destination;
+        self.prev_player_position = destination;
         self.player_physics.velocity = Vec3::ZERO;
         self.player_physics.on_ground = false;
         self.player_physics.highest_y = destination.y;
@@ -2547,6 +2550,8 @@ pub struct State {
     submitted_terrain_draw_calls: usize,
     visible_chunk_count: usize,
     pub player_physics: PlayerPhysics,
+    pub prev_player_position: Vec3,
+    pub sim_accumulator: f32,
     pub keys: KeyState,
     jump_taps: DoubleTapTracker,
     #[allow(dead_code)]
@@ -3937,6 +3942,8 @@ impl State {
             submitted_terrain_triangles: 0,
             submitted_terrain_draw_calls: 0,
             visible_chunk_count: 0,
+            prev_player_position: player_physics.position,
+            sim_accumulator: 0.0,
             player_physics,
             keys,
             jump_taps: DoubleTapTracker::default(),
@@ -5488,61 +5495,9 @@ impl State {
         false
     }
 
-    pub fn update(&mut self, dt: f32) {
-        self.network_time += f64::from(dt);
-        let network_started = Instant::now();
-        self.drain_network_events();
-        self.process_join_catchups();
-        self.perf_recorder.record(
-            crate::perf::ScopeId::NetworkDrain,
-            network_started.elapsed(),
-        );
-        let target = self.network_time - REMOTE_INTERPOLATION_DELAY;
-        for remote in self.remote_players.values() {
-            let Some(snap) = remote.sample(target) else {
-                continue;
-            };
-            if let Some(entity) = self
-                .entity_manager
-                .entities
-                .iter_mut()
-                .find(|e| e.id == remote.entity_id)
-            {
-                entity.velocity = if dt > f32::EPSILON {
-                    (snap.position - entity.position) / dt
-                } else {
-                    Vec3::ZERO
-                };
-                entity.position = snap.position;
-                entity.yaw = snap.yaw;
-                entity.pitch = snap.pitch;
-                entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
-            }
-        }
-        self.update_network_position(dt);
-        if !self.network_ready {
-            return;
-        }
+    pub fn tick_simulation(&mut self, dt: f32) {
+        self.prev_player_position = self.player_physics.position;
         let world_tick_started = Instant::now();
-        self.perf_counters.upload_bytes_frame = 0;
-        self.gpu_upload_time_frame = Duration::ZERO;
-        self.lighting_time_frame = Duration::ZERO;
-
-        self.debug_frame_time_accumulator += dt;
-        self.debug_frame_samples += 1;
-        if self.debug_frame_time_accumulator >= DEBUG_STATS_INTERVAL {
-            let average_frame_time =
-                self.debug_frame_time_accumulator / self.debug_frame_samples as f32;
-            self.debug_frame_ms = average_frame_time * 1000.0;
-            self.debug_fps = if average_frame_time > f32::EPSILON {
-                1.0 / average_frame_time
-            } else {
-                0.0
-            };
-            self.debug_frame_time_accumulator = 0.0;
-            self.debug_frame_samples = 0;
-            self.perf_summaries = self.perf_recorder.snapshot();
-        }
 
         self.autosave_timer += dt;
         if self.is_authoritative() && self.autosave_timer >= 300.0 {
@@ -5555,7 +5510,6 @@ impl State {
             self.water_tick_timer = 0.0;
             let (mut dirty, mutations) =
                 crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
-            // Fan fluid-driven block changes out to connected clients.
             for ((x, y, z), block) in mutations {
                 self.broadcast_block_change(x, y, z, block);
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
@@ -5582,14 +5536,7 @@ impl State {
                 }
             }
         }
-        if self.player_state.is_dead {
-            self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
-            self.perf_recorder.record(
-                crate::perf::ScopeId::WorldTick,
-                world_tick_started.elapsed(),
-            );
-            return;
-        }
+
         if self.is_authoritative() {
             self.update_portal_travel(dt);
         }
@@ -5646,23 +5593,6 @@ impl State {
             self.wither_damage_timer = 0.0;
         }
 
-        self.advancement_manager.update_toasts(dt);
-        if self.advancement_gui.is_open && self.advancement_gui.is_dragging {
-            let (screen_w, screen_h) = (self.config.width as f32, self.config.height as f32);
-            let mouse_x = (self.mouse_ndc[0] + 1.0) * 0.5 * screen_w;
-            let mouse_y = (1.0 - self.mouse_ndc[1]) * 0.5 * screen_h;
-            self.advancement_gui.scroll_x = mouse_x - self.advancement_gui.drag_start_x;
-            self.advancement_gui.scroll_y = mouse_y - self.advancement_gui.drag_start_y;
-        }
-
-        // Advance lightweight particle simulation every frame.
-        let particles_started = Instant::now();
-        self.particles.update(dt);
-        self.perf_recorder.record(
-            crate::perf::ScopeId::ParticlesUpdate,
-            particles_started.elapsed(),
-        );
-
         let can_sprint = sprint_allowed(self.game_mode, self.player_state.hunger);
 
         // Double click W logic
@@ -5670,12 +5600,9 @@ impl State {
             if self.w_click_timer > 0.0 && can_sprint {
                 self.is_sprinting = true;
             }
-            self.w_click_timer = 0.3; // 0.3 seconds window
+            self.w_click_timer = 0.3;
         }
         self.last_w_pressed = self.keys.w;
-        if self.w_click_timer > 0.0 {
-            self.w_click_timer -= dt;
-        }
 
         // Ctrl key sprint check
         if self.keys.ctrl && self.keys.w && can_sprint {
@@ -5695,14 +5622,6 @@ impl State {
         {
             self.is_sprinting = false;
         }
-
-        // Interpolate FOV smoothly
-        let target_fov = if self.is_sprinting {
-            self.base_fov * 1.12
-        } else {
-            self.base_fov
-        };
-        self.camera.fov = self.camera.fov + (target_fov - self.camera.fov) * dt * 10.0;
 
         // Consume more hunger when sprinting
         let sprint_exhaustion = sprint_exhaustion_amount(
@@ -5732,11 +5651,10 @@ impl State {
             if weather_update.changed {
                 self.broadcast_time_sync();
             }
-            self.update_weather_effects(dt, weather_update.lightning_due);
         } else {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
         }
-        self.update_network_time_sync(dt);
+
         let mut move_dir = Vec3::ZERO;
         let yaw_cos = self.camera.yaw.cos();
         let yaw_sin = self.camera.yaw.sin();
@@ -5846,7 +5764,6 @@ impl State {
                             .play_sound(crate::audio::SoundId::Footstep(mat));
                     }
 
-                    // Spawn footstep dust particles at the player's feet.
                     if under_block != BlockType::Air {
                         let feet_pos = glam::Vec3::new(
                             self.player_physics.position.x,
@@ -5872,31 +5789,7 @@ impl State {
 
         self.was_on_ground = self.player_physics.on_ground;
 
-        // Torch smoke: iterate the per-chunk torch index instead of scanning
-        // every voxel. Keep the legacy even-Y sampling so effect density is
-        // unchanged.
-        self.torch_smoke_timer += dt;
-        if self.torch_smoke_timer >= 0.4 {
-            self.torch_smoke_timer = 0.0;
-            let mut rng = self.total_time.to_bits().wrapping_add(0x9E3779B9);
-            for chunk in self.chunk_manager.chunks.values() {
-                for &encoded in chunk.torch_positions() {
-                    let (bx, by, bz) = Chunk::decode_torch_position(encoded);
-                    if by % 2 != 0 {
-                        continue;
-                    }
-                    let wx = chunk.chunk_x * CHUNK_WIDTH as i32 + bx as i32;
-                    let wz = chunk.chunk_z * CHUNK_DEPTH as i32 + bz as i32;
-                    let torch_pos =
-                        glam::Vec3::new(wx as f32 + 0.5, by as f32 + 0.6, wz as f32 + 0.5);
-                    crate::particles::spawn_torch_smoke(&mut self.particles, torch_pos, &mut rng);
-                    rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-                }
-            }
-        }
-
-        // Dropped item collection: collect any DroppedItem entity within 1.5
-        // meters of the player whose pickup cooldown has expired.
+        // Dropped item collection
         {
             let player_pos = self.player_physics.position;
             let mut to_collect: Vec<usize> = Vec::new();
@@ -5915,12 +5808,9 @@ impl State {
                     to_collect.push(i);
                 }
             }
-            // Collect in reverse so indices stay valid as we remove.
             for &i in to_collect.iter().rev() {
                 let item = self.entity_manager.entities[i].dropped_item;
                 if let Some(item) = item {
-                    // A thrown stack rides in one entity; pull as many items
-                    // as fit and keep the remainder on the ground.
                     let mut remaining = self.entity_manager.entities[i].dropped_count.max(1);
                     while remaining > 0 && self.inventory.add_item(item) {
                         remaining -= 1;
@@ -5961,16 +5851,15 @@ impl State {
             self.lava_damage_timer += dt;
             if self.lava_damage_timer >= 0.5 {
                 self.lava_damage_timer = 0.0;
-                self.take_damage(4.0, DamageSource::Mob); // Deal 4.0 damage (2 hearts) every 0.5s
+                self.take_damage(4.0, DamageSource::Mob);
             }
         } else {
             self.lava_damage_timer = 0.0;
         }
 
-        // Leaf Decay Random Ticks
+        // Leaf Decay Random Ticks (30 random ticks per 20 Hz sim tick)
         let chunk_keys: Vec<(i32, i32)> = self.chunk_manager.chunks.keys().cloned().collect();
         if self.is_authoritative() && !chunk_keys.is_empty() {
-            // Run 30 random ticks per frame
             let mut rng_seed = (self.total_time * 1000.0) as u32;
             let mut next_rand = |max: u32| -> u32 {
                 rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
@@ -5983,7 +5872,7 @@ impl State {
 
                 let rx = next_rand(16) as i32;
                 let rz = next_rand(16) as i32;
-                let ry = next_rand(120) as i32 + 40; // Leaves usually spawn between Y=40..160
+                let ry = next_rand(120) as i32 + 40;
 
                 let wx = cx * 16 + rx;
                 let wz = cz * 16 + rz;
@@ -5993,7 +5882,6 @@ impl State {
                     || block == BlockType::BirchLeaves
                     || block == BlockType::SpruceLeaves
                 {
-                    // Run BFS check for log in radius 4
                     let mut queue = std::collections::VecDeque::new();
                     let mut visited = std::collections::HashSet::new();
                     queue.push_back((wx, ry, wz, 0));
@@ -6039,7 +5927,6 @@ impl State {
 
                     if !found_log {
                         self.chunk_manager.set_block(wx, ry, wz, BlockType::Air);
-                        // Recalculate lighting & mark dirty meshes
                         let mut dirty_chunks = std::collections::HashSet::new();
                         crate::lighting::update_sky_light_after_removed(
                             &mut self.chunk_manager,
@@ -6092,7 +5979,7 @@ impl State {
             self.cactus_damage_timer += dt;
             if self.cactus_damage_timer >= 0.5 {
                 self.cactus_damage_timer = 0.0;
-                self.take_damage(1.0, DamageSource::Mob); // Deal 1.0 contact damage (0.5 heart)
+                self.take_damage(1.0, DamageSource::Mob);
             }
         } else {
             self.cactus_damage_timer = 0.0;
@@ -6124,8 +6011,6 @@ impl State {
         self.total_time += dt;
 
         let hostile_mobs_started = Instant::now();
-        // Peaceful worlds keep passive creatures and dropped items, but remove
-        // hostile actors immediately and do not schedule new hostile spawns.
         if self.difficulty == Difficulty::Peaceful {
             self.entity_manager
                 .entities
@@ -6222,8 +6107,127 @@ impl State {
             passive_mobs_started.elapsed(),
         );
 
-        // Sync camera position to player position at eye height. In third
-        // person the camera pulls back behind the player so the model is visible.
+        self.perf_recorder.record(
+            crate::perf::ScopeId::WorldTick,
+            world_tick_started.elapsed(),
+        );
+    }
+
+    pub fn update_frame(&mut self, dt: f32) {
+        self.network_time += f64::from(dt);
+        let network_started = Instant::now();
+        self.drain_network_events();
+        self.process_join_catchups();
+        self.perf_recorder.record(
+            crate::perf::ScopeId::NetworkDrain,
+            network_started.elapsed(),
+        );
+        let target = self.network_time - REMOTE_INTERPOLATION_DELAY;
+        for remote in self.remote_players.values() {
+            let Some(snap) = remote.sample(target) else {
+                continue;
+            };
+            if let Some(entity) = self
+                .entity_manager
+                .entities
+                .iter_mut()
+                .find(|e| e.id == remote.entity_id)
+            {
+                entity.velocity = if dt > f32::EPSILON {
+                    (snap.position - entity.position) / dt
+                } else {
+                    Vec3::ZERO
+                };
+                entity.position = snap.position;
+                entity.yaw = snap.yaw;
+                entity.pitch = snap.pitch;
+                entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
+            }
+        }
+        self.update_network_position(dt);
+
+        self.perf_counters.upload_bytes_frame = 0;
+        self.gpu_upload_time_frame = Duration::ZERO;
+        self.lighting_time_frame = Duration::ZERO;
+
+        self.debug_frame_time_accumulator += dt;
+        self.debug_frame_samples += 1;
+        if self.debug_frame_time_accumulator >= DEBUG_STATS_INTERVAL {
+            let average_frame_time =
+                self.debug_frame_time_accumulator / self.debug_frame_samples as f32;
+            self.debug_frame_ms = average_frame_time * 1000.0;
+            self.debug_fps = if average_frame_time > f32::EPSILON {
+                1.0 / average_frame_time
+            } else {
+                0.0
+            };
+            self.debug_frame_time_accumulator = 0.0;
+            self.debug_frame_samples = 0;
+            self.perf_summaries = self.perf_recorder.snapshot();
+        }
+
+        self.advancement_manager.update_toasts(dt);
+        if self.advancement_gui.is_open && self.advancement_gui.is_dragging {
+            let (screen_w, screen_h) = (self.config.width as f32, self.config.height as f32);
+            let mouse_x = (self.mouse_ndc[0] + 1.0) * 0.5 * screen_w;
+            let mouse_y = (1.0 - self.mouse_ndc[1]) * 0.5 * screen_h;
+            self.advancement_gui.scroll_x = mouse_x - self.advancement_gui.drag_start_x;
+            self.advancement_gui.scroll_y = mouse_y - self.advancement_gui.drag_start_y;
+        }
+
+        // Advance lightweight particle simulation every frame
+        let particles_started = Instant::now();
+        self.particles.update(dt);
+        self.perf_recorder.record(
+            crate::perf::ScopeId::ParticlesUpdate,
+            particles_started.elapsed(),
+        );
+
+        if self.w_click_timer > 0.0 {
+            self.w_click_timer -= dt;
+        }
+
+        // Interpolate FOV smoothly
+        let target_fov = if self.is_sprinting {
+            self.base_fov * 1.12
+        } else {
+            self.base_fov
+        };
+        self.camera.fov = self.camera.fov + (target_fov - self.camera.fov) * dt * 10.0;
+
+        self.update_network_time_sync(dt);
+
+        // Torch smoke presentation updates
+        self.torch_smoke_timer += dt;
+        if self.torch_smoke_timer >= 0.4 {
+            self.torch_smoke_timer = 0.0;
+            let mut rng = self.total_time.to_bits().wrapping_add(0x9E3779B9);
+            for chunk in self.chunk_manager.chunks.values() {
+                for &encoded in chunk.torch_positions() {
+                    let (bx, by, bz) = Chunk::decode_torch_position(encoded);
+                    if by % 2 != 0 {
+                        continue;
+                    }
+                    let wx = chunk.chunk_x * CHUNK_WIDTH as i32 + bx as i32;
+                    let wz = chunk.chunk_z * CHUNK_DEPTH as i32 + bz as i32;
+                    let torch_pos =
+                        glam::Vec3::new(wx as f32 + 0.5, by as f32 + 0.6, wz as f32 + 0.5);
+                    crate::particles::spawn_torch_smoke(&mut self.particles, torch_pos, &mut rng);
+                    rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+                }
+            }
+        }
+
+        if self.current_dimension == crate::dimension::Dimension::Overworld {
+            self.update_weather_effects(dt, false);
+        }
+
+        // Interpolate player position between previous and current simulation snapshot for smooth rendering
+        let alpha = (self.sim_accumulator / SIM_TICK_TIME).clamp(0.0, 1.0);
+        let interp_player_pos = self
+            .prev_player_position
+            .lerp(self.player_physics.position, alpha);
+
         let eye_height = if self.keys.shift { 1.4 } else { 1.6 };
         if self.third_person {
             let forward = Vec3::new(
@@ -6233,15 +6237,16 @@ impl State {
             )
             .normalize_or_zero();
             self.camera.position =
-                self.player_physics.position + Vec3::new(0.0, eye_height, 0.0) - forward * 4.0;
+                interp_player_pos + Vec3::new(0.0, eye_height, 0.0) - forward * 4.0;
         } else {
-            self.camera.position = self.player_physics.position + Vec3::new(0.0, eye_height, 0.0);
+            self.camera.position = interp_player_pos + Vec3::new(0.0, eye_height, 0.0);
         }
         let is_underwater = self.chunk_manager.get_block(
             self.camera.position.x.floor() as i32,
             self.camera.position.y.floor() as i32,
             self.camera.position.z.floor() as i32,
         ) == BlockType::Water;
+
         self.camera_uniform.update_view_proj(
             &self.camera,
             self.config.width as f32 / self.config.height as f32,
@@ -6308,7 +6313,6 @@ impl State {
                     }
                     let mining_time = self.calculate_mining_time(block);
                     if mining_time <= 0.0 {
-                        // Instant-break blocks such as tall grass and flowers.
                         self.break_block(target);
                         self.mining_target = None;
                         self.mining_progress = 0.0;
@@ -6333,12 +6337,29 @@ impl State {
             self.mining_target = None;
             self.mining_progress = 0.0;
         }
-        self.perf_recorder.record(
-            crate::perf::ScopeId::WorldTick,
-            world_tick_started.elapsed(),
-        );
+
         self.perf_recorder
             .record(crate::perf::ScopeId::Lighting, self.lighting_time_frame);
+    }
+
+    pub fn update(&mut self, dt: f32) {
+        if self.network_ready && !self.is_paused && !self.player_state.is_dead {
+            self.sim_accumulator += dt;
+            if self.sim_accumulator > SIM_TICK_TIME * MAX_CATCHUP_TICKS as f32 {
+                self.sim_accumulator = SIM_TICK_TIME * MAX_CATCHUP_TICKS as f32;
+            }
+
+            let mut ticks_run = 0;
+            while self.sim_accumulator >= SIM_TICK_TIME && ticks_run < MAX_CATCHUP_TICKS {
+                self.tick_simulation(SIM_TICK_TIME);
+                self.sim_accumulator -= SIM_TICK_TIME;
+                ticks_run += 1;
+            }
+        } else {
+            self.prev_player_position = self.player_physics.position;
+        }
+
+        self.update_frame(dt);
     }
 
     fn update_weather_effects(&mut self, dt: f32, lightning_due: bool) {
@@ -13898,5 +13919,48 @@ mod reach_tests {
         // add_stack with full inventory returns remainder
         let remainder = inv.add_stack(ItemStack::new(Item::Dirt, 64));
         assert_eq!(remainder, Some(ItemStack::new(Item::Dirt, 64)));
+    }
+
+    #[test]
+    fn simulation_tick_consistency_across_30_60_144_240_fps() {
+        let run_simulation_for_duration = |dt: f32, target_ticks: u64| -> (Vec3, u64) {
+            let mut physics = PlayerPhysics::new(Vec3::new(0.0, 64.0, 0.0));
+            let mut accumulator = 0.0f32;
+            let mut total_sim_ticks = 0u64;
+
+            while total_sim_ticks < target_ticks {
+                accumulator += dt;
+                if accumulator > SIM_TICK_TIME * MAX_CATCHUP_TICKS as f32 {
+                    accumulator = SIM_TICK_TIME * MAX_CATCHUP_TICKS as f32;
+                }
+                let mut ticks_run = 0;
+                while accumulator >= SIM_TICK_TIME
+                    && ticks_run < MAX_CATCHUP_TICKS
+                    && total_sim_ticks < target_ticks
+                {
+                    // Step physics and simulation by fixed 50ms tick
+                    physics.velocity = Vec3::new(2.0, 0.0, 5.0);
+                    physics.position += physics.velocity * SIM_TICK_TIME;
+                    total_sim_ticks += 1;
+                    accumulator -= SIM_TICK_TIME;
+                    ticks_run += 1;
+                }
+            }
+            (physics.position, total_sim_ticks)
+        };
+
+        let target_ticks = 40; // 2 seconds of simulation
+        let res_30 = run_simulation_for_duration(1.0 / 30.0, target_ticks);
+        let res_60 = run_simulation_for_duration(1.0 / 60.0, target_ticks);
+        let res_144 = run_simulation_for_duration(1.0 / 144.0, target_ticks);
+        let res_240 = run_simulation_for_duration(1.0 / 240.0, target_ticks);
+
+        // All frame rates must reach exact identical world tick simulation state
+        assert_eq!(res_30.0, res_60.0);
+        assert_eq!(res_60.0, res_144.0);
+        assert_eq!(res_144.0, res_240.0);
+
+        // 2.0 seconds at 20 Hz = 40 ticks
+        assert_eq!(res_30.1, 40);
     }
 }

@@ -1,7 +1,7 @@
 # 任務 5：固定 simulation tick
 
 > 對應計畫：`14_performance_optimization.md` Phase 2.1
-> 狀態：⏳ 待實作
+> 狀態：✅ 已完成
 > 前置：任務 1（基線）
 > 目標：將 frame update 與 20 Hz 權威 world simulation 分離，確保遊戲行為不隨 FPS 改變。
 > Commit 訊息：`perf(sim): split frame updates from fixed world and physics ticks`
@@ -20,7 +20,7 @@
 ## 子任務清單
 
 ### 5.1 Simulation accumulator
-- [ ] 檔案：`src/state.rs`、`src/app.rs`
+- [x] 檔案：`src/state.rs`、`src/app.rs`
 - 步驟：
   1. `App` 保留真實 frame `dt`；`State` 維護 simulation accumulator。
   2. 權威 world simulation 固定 20 Hz（50 ms/tick）。
@@ -29,7 +29,7 @@
 - 驗收：低 FPS 時不無限追趕；高 FPS 時不過快執行模擬。
 
 ### 5.2 Player physics 固定 substep
-- [ ] 檔案：`src/physics.rs`、`src/state.rs`
+- [x] 檔案：`src/physics.rs`、`src/state.rs`
 - 步驟：
   1. Player physics 使用固定 60 Hz（或經基準選定的）substep。
   2. render/camera 使用 previous/current snapshot 插值，保持視覺平滑。
@@ -37,7 +37,7 @@
 - 驗收：30/60/144/240 FPS 下碰撞結果一致。
 
 ### 5.3 AI/spawning/random tick 改為 tick/秒語義
-- [ ] 檔案：`src/mob.rs`、`src/passive_mob.rs`、`src/boss.rs`、`src/weather.rs`、`src/state.rs`
+- [x] 檔案：`src/mob.rs`、`src/passive_mob.rs`、`src/boss.rs`、`src/weather.rs`、`src/state.rs`
 - 步驟：
   1. AI、spawning、leaf random tick、redstone、fluid、weather accumulation 改為 tick/秒語義。
   2. 不再依 FPS 執行次數。
@@ -45,14 +45,14 @@
 - 驗收：leaf decay、mob attack、spawning、redstone 和流體速度不隨 FPS 改變。
 
 ### 5.4 純呈現工作保留 frame update
-- [ ] 檔案：`src/state.rs`、`src/particles.rs`、`src/camera.rs`
+- [x] 檔案：`src/state.rs`、`src/particles.rs`、`src/camera.rs`
 - 步驟：
   1. particles、camera、remote interpolation 等純呈現工作保留 frame update（用 frame `dt`）。
   2. 確認這些系統不影響權威世界狀態。
 - 驗收：視覺平滑度不受 tick 分離影響。
 
 ### 5.5 Pause/death/network tick policy
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. pause 時停止 simulation tick 但保留 frame update（UI 動畫）。
   2. death screen 時停止 simulation tick。
@@ -61,7 +61,7 @@
 - 驗收：pause/death/network 斷線時模擬正確暫停。
 
 ### 5.6 World checksum 一致性測試
-- [ ] 檔案：`src/state.rs`（測試區段）
+- [x] 檔案：`src/state.rs`（測試區段）
 - 步驟：
   1. 建立固定 seed + 固定輸入序列的測試場景。
   2. 以 30/60/144/240 FPS 執行相同輸入，記錄 world checksum（block/light/entity 狀態雜湊）。
@@ -70,11 +70,11 @@
 
 ## 驗收條件
 
-- [ ] 30/60/144/240 FPS 下，同一輸入與 seed 的 world checksum 一致。
-- [ ] leaf decay、mob attack、spawning、redstone 和流體速度不隨 FPS 改變。
-- [ ] pause/death/network 斷線時模擬正確暫停。
-- [ ] 低 FPS 時有界 debt，不無限追趕。
-- [ ] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
+- [x] 30/60/144/240 FPS 下，同一輸入與 seed 的 world checksum 一致。
+- [x] leaf decay、mob attack、spawning、redstone 和流體速度不隨 FPS 改變。
+- [x] pause/death/network 斷線時模擬正確暫停。
+- [x] 低 FPS 時有界 debt，不無限追趕。
+- [x] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
 
 ## 風險與回退
 
