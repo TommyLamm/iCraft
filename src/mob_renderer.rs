@@ -1854,20 +1854,36 @@ mod tests {
     fn test_burning_entity_fire_flag() {
         let mut entity_manager = EntityManager::new();
         let zombie_id = entity_manager.spawn(EntityType::Zombie, Vec3::new(0.0, 64.0, 0.0));
-        
+
         let chunk_manager = ChunkManager::new(1);
         let mut vertices_normal = Vec::new();
         let mut indices_normal = Vec::new();
-        render_mobs(&entity_manager, &chunk_manager, &mut vertices_normal, &mut indices_normal, 0.0);
+        render_mobs(
+            &entity_manager,
+            &chunk_manager,
+            &mut vertices_normal,
+            &mut indices_normal,
+            0.0,
+        );
 
         // Turn on fire
-        if let Some(zombie) = entity_manager.entities.iter_mut().find(|e| e.id == zombie_id) {
+        if let Some(zombie) = entity_manager
+            .entities
+            .iter_mut()
+            .find(|e| e.id == zombie_id)
+        {
             zombie.fire_aspect_timer = 5.0;
         }
 
         let mut vertices_burning = Vec::new();
         let mut indices_burning = Vec::new();
-        render_mobs(&entity_manager, &chunk_manager, &mut vertices_burning, &mut indices_burning, 0.0);
+        render_mobs(
+            &entity_manager,
+            &chunk_manager,
+            &mut vertices_burning,
+            &mut indices_burning,
+            0.0,
+        );
 
         // Burning entity should generate 24 extra vertices (1 extra cuboid)
         assert_eq!(vertices_burning.len(), vertices_normal.len() + 24);

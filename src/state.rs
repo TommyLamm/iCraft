@@ -2592,6 +2592,7 @@ pub struct State {
     pub cactus_damage_timer: f32,
     pub save_manager: std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>,
     pub save_tx: std::sync::mpsc::Sender<crate::save::SaveCommand>,
+    save_queue_depth: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub autosave_timer: f32,
     pub is_saving: bool,
     pub is_sprinting: bool,
@@ -2606,6 +2607,14 @@ pub struct State {
     perf_summaries: [crate::perf::ScopeSummary; crate::perf::SCOPE_COUNT],
     perf_counters: crate::perf::PerfCounters,
     gpu_upload_time_frame: Duration,
+    lighting_time_frame: Duration,
+    gpu_timestamp_query_set: Option<wgpu::QuerySet>,
+    gpu_timestamp_resolve_buffer: Option<wgpu::Buffer>,
+    gpu_timestamp_readback_buffer: Option<wgpu::Buffer>,
+    gpu_timestamp_read_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gpu_pass_timings_ns: [u64; 7],
+    gpu_timestamps_supported: bool,
+    gpu_timestamps_inside_passes: bool,
     pub active_station: Option<StationKind>,
     pub enchanting: crate::enchantment::EnchantingState,
     pub brewing: crate::brewing::BrewingStandState,
@@ -2821,10 +2830,22 @@ impl State {
             .await
             .unwrap();
 
+        let adapter_features = adapter.features();
+        let gpu_timestamps_supported = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let gpu_timestamps_inside_passes =
+            adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
+        let mut required_features = wgpu::Features::empty();
+        if gpu_timestamps_supported {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY;
+            if gpu_timestamps_inside_passes {
+                required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+            }
+        }
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: wgpu::Limits::default(),
                     label: None,
                 },
@@ -2832,6 +2853,30 @@ impl State {
             )
             .await
             .unwrap();
+
+        let (gpu_timestamp_query_set, gpu_timestamp_resolve_buffer, gpu_timestamp_readback_buffer) =
+            if gpu_timestamps_supported {
+                let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("Timestamp Query Set"),
+                    count: 14,
+                    ty: wgpu::QueryType::Timestamp,
+                });
+                let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Timestamp Resolve Buffer"),
+                    size: 14 * 8,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Timestamp Readback Buffer"),
+                    size: 14 * 8,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                (Some(query_set), Some(resolve_buffer), Some(readback_buffer))
+            } else {
+                (None, None, None)
+            };
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -2875,8 +2920,10 @@ impl State {
         };
 
         // Spawn background worker thread
+        let save_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let (save_tx, save_rx) = std::sync::mpsc::channel::<crate::save::SaveCommand>();
         let save_manager_clone = std::sync::Arc::clone(&save_manager);
+        let save_depth_clone = std::sync::Arc::clone(&save_queue_depth);
         std::thread::spawn(move || {
             while let Ok(cmd) = save_rx.recv() {
                 match cmd {
@@ -2889,6 +2936,7 @@ impl State {
                         let _ = mgr.save_player_and_level(&level, &player);
                     }
                 }
+                save_depth_clone.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
         });
 
@@ -3843,6 +3891,7 @@ impl State {
             cactus_damage_timer: 0.0,
             save_manager,
             save_tx,
+            save_queue_depth,
             autosave_timer: 0.0,
             is_saving: false,
             is_sprinting: false,
@@ -3859,6 +3908,16 @@ impl State {
                     .snapshot(),
             perf_counters: crate::perf::PerfCounters::default(),
             gpu_upload_time_frame: Duration::ZERO,
+            lighting_time_frame: Duration::ZERO,
+            gpu_timestamp_query_set,
+            gpu_timestamp_resolve_buffer,
+            gpu_timestamp_readback_buffer,
+            gpu_timestamp_read_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            gpu_pass_timings_ns: [0; 7],
+            gpu_timestamps_supported,
+            gpu_timestamps_inside_passes,
             active_station: None,
             enchanting: crate::enchantment::EnchantingState::default(),
             brewing: crate::brewing::BrewingStandState::default(),
@@ -4609,7 +4668,6 @@ impl State {
         }
     }
 
-
     pub fn trigger_advancement(&mut self, trigger: crate::advancements::AdvancementTrigger) {
         let newly_completed = self.advancement_manager.check_trigger(&trigger);
         for id in newly_completed {
@@ -4880,8 +4938,7 @@ impl State {
             crate::perf::ScopeId::TerrainResultIntegrate,
             integrate_started.elapsed(),
         );
-        self.perf_recorder
-            .record(crate::perf::ScopeId::Lighting, lighting_elapsed);
+        self.lighting_time_frame += lighting_elapsed;
         self.gpu_upload_time_frame += gpu_upload_elapsed;
     }
 
@@ -5213,6 +5270,7 @@ impl State {
         let world_tick_started = Instant::now();
         self.perf_counters.upload_bytes_frame = 0;
         self.gpu_upload_time_frame = Duration::ZERO;
+        self.lighting_time_frame = Duration::ZERO;
 
         self.debug_frame_time_accumulator += dt;
         self.debug_frame_samples += 1;
@@ -6023,6 +6081,8 @@ impl State {
             crate::perf::ScopeId::WorldTick,
             world_tick_started.elapsed(),
         );
+        self.perf_recorder
+            .record(crate::perf::ScopeId::Lighting, self.lighting_time_frame);
     }
 
     fn update_weather_effects(&mut self, dt: f32, lightning_due: bool) {
@@ -8912,7 +8972,9 @@ impl State {
             }
         }
 
-        if self.inventory.creative_drag_origin == Some(crate::inventory::CreativeDragOrigin::Catalog) {
+        if self.inventory.creative_drag_origin
+            == Some(crate::inventory::CreativeDragOrigin::Catalog)
+        {
             self.inventory.dragged = None;
             self.inventory.creative_drag_origin = None;
         } else if let Some(dragged) = self.inventory.dragged {
@@ -9010,6 +9072,29 @@ impl State {
         let terrain_prepare_started = Instant::now();
         let view_projection = Mat4::from_cols_array_2d(&self.camera_uniform.view_proj);
         let frustum = Frustum::from_view_projection(view_projection);
+
+        let mut entities_rendered = 0u64;
+        let mut entities_frustum_culled = 0u64;
+        for entity in &self.entity_manager.entities {
+            let aabb = entity.get_aabb();
+            let bounds = crate::chunk_render::MeshBounds::new(aabb.min, aabb.max);
+            if frustum.intersects_aabb(&bounds) {
+                entities_rendered += 1;
+            } else {
+                entities_frustum_culled += 1;
+            }
+        }
+        self.perf_counters.rendered_entities = entities_rendered;
+        self.perf_counters.frustum_culled_entities = entities_frustum_culled;
+        self.perf_counters.occlusion_culled_entities = 0;
+
+        self.perf_counters.save_queue_depth =
+            self.save_queue_depth
+                .load(std::sync::atomic::Ordering::Relaxed) as u64;
+        if let Ok(mgr) = self.save_manager.try_lock() {
+            self.perf_counters.loaded_region_cache_bytes = mgr.region_cache_bytes();
+        }
+
         let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
         let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
         let mut selected_lods = std::collections::HashMap::new();
@@ -11196,8 +11281,10 @@ impl State {
                         self.submitted_terrain_draw_calls
                     );
                     let entities_str = format!(
-                        "ENTITIES: {} / PARTICLES: {}",
+                        "ENTITIES: {} ({} RENDERED, {} CULLED) / PARTICLES: {}",
                         self.entity_manager.entities.len(),
+                        self.perf_counters.rendered_entities,
+                        self.perf_counters.frustum_culled_entities,
                         self.particles.particles.len()
                     );
 
@@ -11222,8 +11309,16 @@ impl State {
                         self.perf_counters.upload_bytes_frame as f64 / 1024.0
                     );
                     let worker_str = format!(
-                        "WORKERS: {} IN FLIGHT / {} STALE",
-                        self.perf_counters.in_flight, self.perf_counters.stale_results
+                        "WORKERS: {} IN FLIGHT / {} STALE / {} CANCELLED",
+                        self.perf_counters.in_flight,
+                        self.perf_counters.stale_results,
+                        self.perf_counters.cancelled
+                    );
+                    let save_net_str = format!(
+                        "SAVE Q: {} | REGION CACHE: {:.2} MB | NET Q: {}",
+                        self.perf_counters.save_queue_depth,
+                        self.perf_counters.loaded_region_cache_bytes as f64 / (1024.0 * 1024.0),
+                        self.perf_counters.network_queue_depth
                     );
 
                     let net_str = match &self.role {
@@ -11250,6 +11345,21 @@ impl State {
                         MultiplayerRole::Singleplayer => "NET: SINGLEPLAYER".to_string(),
                     };
 
+                    let gpu_passes_str = if self.perf_counters.gpu_timestamps_supported {
+                        format!(
+                            "GPU PASSES: SKY {:.2}MS | OPAQUE {:.2}MS | MOBS {:.2}MS | TRANS {:.2}MS | PART {:.2}MS | CRACK {:.2}MS | UI {:.2}MS",
+                            self.perf_counters.gpu_sky_ns as f64 / 1_000_000.0,
+                            self.perf_counters.gpu_opaque_ns as f64 / 1_000_000.0,
+                            self.perf_counters.gpu_mobs_ns as f64 / 1_000_000.0,
+                            self.perf_counters.gpu_translucent_ns as f64 / 1_000_000.0,
+                            self.perf_counters.gpu_particles_ns as f64 / 1_000_000.0,
+                            self.perf_counters.gpu_crack_ns as f64 / 1_000_000.0,
+                            self.perf_counters.gpu_ui_ns as f64 / 1_000_000.0,
+                        )
+                    } else {
+                        "GPU PASSES: TIMESTAMP QUERY NOT SUPPORTED".to_string()
+                    };
+
                     let char_w = 0.007;
                     let char_h = 0.014;
                     let spacing = 0.002;
@@ -11271,6 +11381,8 @@ impl State {
                         memory_str,
                         gpu_str,
                         worker_str,
+                        save_net_str,
+                        gpu_passes_str,
                         time_str,
                         net_str,
                     ];
@@ -11287,9 +11399,14 @@ impl State {
                         );
                     }
                     for (scope_index, summary) in self.perf_summaries.iter().enumerate() {
+                        let name_label = if summary.name == "lighting" {
+                            "LIGHTING (LOAD+MUTATION)".to_string()
+                        } else {
+                            summary.name.to_uppercase()
+                        };
                         let perf_line = format!(
                             "CPU {}: AVG {:.3} / P95 {:.3} / P99 {:.3} MS / N {}",
-                            summary.name.to_uppercase(),
+                            name_label,
                             summary.average() as f64 / 1_000_000.0,
                             summary.p95() as f64 / 1_000_000.0,
                             summary.p99() as f64 / 1_000_000.0,
@@ -11505,19 +11622,14 @@ impl State {
             ui_prepare_started.elapsed(),
         );
         self.gpu_upload_time_frame += gpu_upload_elapsed;
-        self.perf_recorder.record(
-            crate::perf::ScopeId::GpuUpload,
-            self.gpu_upload_time_frame,
-        );
+        self.perf_recorder
+            .record(crate::perf::ScopeId::GpuUpload, self.gpu_upload_time_frame);
         let mut total_draw_calls = 1 + self.submitted_terrain_draw_calls as u64;
         total_draw_calls += u64::from(self.mob_num_indices > 0);
         total_draw_calls += u64::from(self.particle_num_indices > 0);
-        total_draw_calls += u64::from(
-            self.mining_target.is_some() && self.mining_progress > 0.0,
-        );
-        total_draw_calls += u64::from(
-            self.hand_num_indices > 0 && !self.third_person && !self.is_paused,
-        );
+        total_draw_calls += u64::from(self.mining_target.is_some() && self.mining_progress > 0.0);
+        total_draw_calls +=
+            u64::from(self.hand_num_indices > 0 && !self.third_person && !self.is_paused);
         if self.is_paused {
             total_draw_calls += 2;
         } else {
@@ -11564,11 +11676,26 @@ impl State {
             });
 
             // Draw Skybox first
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 0);
+                }
+            }
             render_pass.set_pipeline(&self.sky_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.draw(0..6, 0..1);
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 1);
+                }
+            }
 
             // Pass 1: Opaque & Cutout
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 2);
+                }
+            }
             render_pass.set_pipeline(&self.terrain_render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             for candidate in &draw_plan.opaque {
@@ -11588,8 +11715,18 @@ impl State {
                     .set_index_buffer(layer.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..layer.num_indices, 0, 0..1);
             }
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 3);
+                }
+            }
 
             // Draw Mobs
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 4);
+                }
+            }
             if self.mob_num_indices > 0 {
                 render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_vertex_buffer(0, self.mob_vertex_buffer.slice(..));
@@ -11597,8 +11734,18 @@ impl State {
                     .set_index_buffer(self.mob_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.mob_num_indices, 0, 0..1);
             }
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 5);
+                }
+            }
 
             // Pass 2: Translucent (Water/Ice)
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 6);
+                }
+            }
             render_pass.set_pipeline(&self.terrain_trans_pipeline);
             for candidate in &draw_plan.transparent {
                 let Some(lod) = selected_lods.get(&candidate.chunk_coord).copied() else {
@@ -11617,8 +11764,18 @@ impl State {
                     .set_index_buffer(layer.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..layer.num_indices, 0, 0..1);
             }
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 7);
+                }
+            }
 
             // Draw billboard particles using the translucent (alpha-blend) pipeline.
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 8);
+                }
+            }
             if self.particle_num_indices > 0 {
                 render_pass.set_pipeline(&self.trans_pipeline);
                 render_pass.set_vertex_buffer(0, self.particle_vertex_buffer.slice(..));
@@ -11628,8 +11785,18 @@ impl State {
                 );
                 render_pass.draw_indexed(0..self.particle_num_indices, 0, 0..1);
             }
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 9);
+                }
+            }
 
             // Draw Block cracking animation overlay (multiply blend)
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 10);
+                }
+            }
             if let Some(target) = self.mining_target {
                 if self.mining_progress > 0.0 {
                     if let Some((_num_vertices, num_indices)) =
@@ -11643,6 +11810,11 @@ impl State {
                         );
                         render_pass.draw_indexed(0..num_indices, 0, 0..1);
                     }
+                }
+            }
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 11);
                 }
             }
 
@@ -11659,6 +11831,11 @@ impl State {
                 render_pass.draw_indexed(0..self.hand_num_indices, 0, 0..1);
             }
 
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 12);
+                }
+            }
             if !self.is_paused {
                 // 1. Draw Colored UI (hotbar/slot backgrounds)
                 if self.num_ui_vertices > 0 {
@@ -11698,7 +11875,61 @@ impl State {
                 render_pass.set_vertex_buffer(0, self.ui_line_vertex_buffer.slice(..));
                 render_pass.draw(0..self.num_ui_line_vertices, 0..1);
             }
+            if self.gpu_timestamps_inside_passes {
+                if let Some(qs) = &self.gpu_timestamp_query_set {
+                    render_pass.write_timestamp(qs, 13);
+                }
+            }
         }
+
+        if let (Some(qs), Some(res_buf), Some(read_buf)) = (
+            &self.gpu_timestamp_query_set,
+            &self.gpu_timestamp_resolve_buffer,
+            &self.gpu_timestamp_readback_buffer,
+        ) {
+            if self.gpu_timestamps_inside_passes {
+                encoder.resolve_query_set(qs, 0..14, res_buf, 0);
+                encoder.copy_buffer_to_buffer(res_buf, 0, read_buf, 0, 14 * 8);
+
+                if !self
+                    .gpu_timestamp_read_pending
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let slice = read_buf.slice(..);
+                    {
+                        let range = slice.get_mapped_range();
+                        if range.len() == 112 {
+                            let data: [u64; 14] = *bytemuck::from_bytes(&range);
+                            let period = self.queue.get_timestamp_period();
+                            for i in 0..7 {
+                                let t0 = data[i * 2];
+                                let t1 = data[i * 2 + 1];
+                                let diff = if t1 >= t0 { t1 - t0 } else { 0 };
+                                self.gpu_pass_timings_ns[i] =
+                                    (diff as f64 * f64::from(period)) as u64;
+                            }
+                        }
+                    }
+                    read_buf.unmap();
+                    self.gpu_timestamp_read_pending
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    let pending = std::sync::Arc::clone(&self.gpu_timestamp_read_pending);
+                    slice.map_async(wgpu::MapMode::Read, move |res| {
+                        if res.is_ok() {
+                            pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    });
+                }
+            }
+        }
+        self.perf_counters.gpu_sky_ns = self.gpu_pass_timings_ns[0];
+        self.perf_counters.gpu_opaque_ns = self.gpu_pass_timings_ns[1];
+        self.perf_counters.gpu_mobs_ns = self.gpu_pass_timings_ns[2];
+        self.perf_counters.gpu_translucent_ns = self.gpu_pass_timings_ns[3];
+        self.perf_counters.gpu_particles_ns = self.gpu_pass_timings_ns[4];
+        self.perf_counters.gpu_crack_ns = self.gpu_pass_timings_ns[5];
+        self.perf_counters.gpu_ui_ns = self.gpu_pass_timings_ns[6];
+        self.perf_counters.gpu_timestamps_supported = self.gpu_timestamps_supported;
 
         let command_buffer = encoder.finish();
         self.queue.submit(std::iter::once(command_buffer));

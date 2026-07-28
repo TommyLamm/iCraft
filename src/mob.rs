@@ -185,8 +185,7 @@ fn is_under_sun(
     // Check if foot or eye block is water
     let feet_block = chunk_manager.get_block(mx, my, mz);
     let head_block = chunk_manager.get_block(mx, my + 1, mz);
-    if feet_block == crate::world::BlockType::Water
-        || head_block == crate::world::BlockType::Water
+    if feet_block == crate::world::BlockType::Water || head_block == crate::world::BlockType::Water
     {
         return false;
     }
@@ -361,7 +360,8 @@ pub fn update_mobs(
             entity.fire_aspect_timer = 0.0;
             entity.burn_timer = 0.0;
             entity.burn_damage_timer = 0.0;
-        } else if (entity.entity_type == EntityType::Zombie || entity.entity_type == EntityType::Skeleton)
+        } else if (entity.entity_type == EntityType::Zombie
+            || entity.entity_type == EntityType::Skeleton)
             && is_under_sun(chunk_manager, entity.position, sky_light_level, is_raining)
         {
             entity.fire_aspect_timer = entity.fire_aspect_timer.max(8.0);
@@ -673,11 +673,7 @@ pub fn update_mobs(
     // Spawn dropped items for dead entities
     for (item, pos) in items_to_drop {
         let id = entity_manager.spawn(EntityType::DroppedItem, pos);
-        if let Some(drop) = entity_manager
-            .entities
-            .iter_mut()
-            .find(|e| e.id == id)
-        {
+        if let Some(drop) = entity_manager.entities.iter_mut().find(|e| e.id == id) {
             drop.dropped_item = Some(item);
             drop.velocity = Vec3::new(0.0, 2.0, 0.0);
             drop.pickup_cooldown = 0.5;
@@ -967,7 +963,11 @@ mod tests {
     fn test_mob_burn_death_drops() {
         let mut entity_manager = EntityManager::new();
         let zombie_id = entity_manager.spawn(EntityType::Zombie, Vec3::new(0.0, 64.0, 0.0));
-        if let Some(zombie) = entity_manager.entities.iter_mut().find(|e| e.id == zombie_id) {
+        if let Some(zombie) = entity_manager
+            .entities
+            .iter_mut()
+            .find(|e| e.id == zombie_id)
+        {
             zombie.health = 0.0;
             zombie.fire_aspect_timer = 1.0;
         }

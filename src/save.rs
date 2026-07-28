@@ -135,7 +135,6 @@ impl EntitySaveData {
     }
 }
 
-
 impl From<&Inventory> for InventoryData {
     fn from(inv: &Inventory) -> Self {
         let (dragged, creative_drag_origin) = match inv.creative_drag_origin {
@@ -543,6 +542,13 @@ impl SaveManager {
         }
     }
 
+    pub fn region_cache_bytes(&self) -> u64 {
+        self.region_cache
+            .values()
+            .map(|region| region.chunks.values().map(|v| v.len() as u64).sum::<u64>())
+            .sum()
+    }
+
     fn region_dir(&self, dimension: crate::dimension::Dimension) -> PathBuf {
         match dimension {
             crate::dimension::Dimension::Overworld => self.world_dir.join("regions"),
@@ -584,15 +590,12 @@ impl SaveManager {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let bytes = bincode::serialize(entities)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let bytes =
+            bincode::serialize(entities).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         fs::write(path, bytes)
     }
 
-    pub fn load_entities_in(
-        &self,
-        dimension: crate::dimension::Dimension,
-    ) -> Vec<EntitySaveData> {
+    pub fn load_entities_in(&self, dimension: crate::dimension::Dimension) -> Vec<EntitySaveData> {
         let path = self.entities_file_path(dimension);
         if !path.exists() {
             return Vec::new();
@@ -605,7 +608,6 @@ impl SaveManager {
     }
 
     pub fn load_chunk(&mut self, cx: i32, cz: i32) -> Option<ChunkSaveData> {
-
         self.load_chunk_in(crate::dimension::Dimension::Overworld, cx, cz)
     }
 
@@ -1381,7 +1383,8 @@ mod tests {
 
     #[test]
     fn test_save_manager_entities_persistence() {
-        let temp_dir = std::env::temp_dir().join(format!("icraft_test_entities_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("icraft_test_entities_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         let manager = SaveManager::new(&temp_dir);
 
@@ -1404,7 +1407,9 @@ mod tests {
             dropped_count: 0,
         }];
 
-        manager.save_entities_in(crate::dimension::Dimension::Overworld, &test_data).unwrap();
+        manager
+            .save_entities_in(crate::dimension::Dimension::Overworld, &test_data)
+            .unwrap();
 
         let loaded = manager.load_entities_in(crate::dimension::Dimension::Overworld);
         assert_eq!(loaded.len(), 1);
