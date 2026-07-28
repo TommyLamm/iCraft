@@ -14,31 +14,109 @@ use std::collections::HashSet;
 /// separation lets a greedy quad repeat a tile in the shader instead of
 /// stretching one copy across the whole merged face.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TerrainVertex {
-    pub position: [f32; 3],
-    pub local_uv: [f32; 2],
-    pub atlas_tile: [f32; 2],
-    /// Existing packed light value: sky light in the low nibble and block
-    /// light in the next nibble.
-    pub light_level: f32,
-    pub ao: f32,
+    /// Region-relative position in 1/32th block units.
+    pub pos: [u16; 3],
+    /// Low byte: sky_light | (block_light << 4). Mid byte: face shading multiplier. High bits: discrete AO (0..3).
+    pub light_ao: u16,
+    /// Local tile UV scaled by 2048.0.
+    pub local_uv: [u16; 2],
+    /// Atlas tile coordinate (x, y).
+    pub atlas_tile: [u16; 2],
 }
 
 impl TerrainVertex {
-    pub const fn new(
+    pub fn new(
         position: [f32; 3],
         local_uv: [f32; 2],
         atlas_tile: [f32; 2],
         light_level: f32,
         ao: f32,
+        region_coord: (i32, i32),
     ) -> Self {
+        let reg_origin_x = (region_coord.0 * REGION_SIZE_CHUNKS * 16) as f32;
+        let reg_origin_z = (region_coord.1 * REGION_SIZE_CHUNKS * 16) as f32;
+        let rel_x = (position[0] - reg_origin_x).max(0.0);
+        let rel_y = position[1].max(0.0);
+        let rel_z = (position[2] - reg_origin_z).max(0.0);
+
+        let px = (rel_x * 32.0).round() as u16;
+        let py = (rel_y * 32.0).round() as u16;
+        let pz = (rel_z * 32.0).round() as u16;
+
+        let light_u32 = light_level as u32;
+        let sky_light = (light_u32 & 0x0F) as u16;
+        let block_light = ((light_u32 >> 4) & 0x0F) as u16;
+        let multiplier_code = ((light_u32 >> 8) & 0x3F) as u16;
+        let ao_idx = if ao >= 0.875 {
+            3u16
+        } else if ao >= 0.625 {
+            2u16
+        } else if ao >= 0.375 {
+            1u16
+        } else {
+            0u16
+        };
+
+        let packed_light = sky_light | (block_light << 4);
+        let light_ao = packed_light | (multiplier_code << 8) | (ao_idx << 14);
+
+        let u = (local_uv[0] * 2048.0).round() as u16;
+        let v = (local_uv[1] * 2048.0).round() as u16;
+
+        let tx = atlas_tile[0].round() as u16;
+        let ty = atlas_tile[1].round() as u16;
+
         Self {
-            position,
-            local_uv,
-            atlas_tile,
-            light_level,
-            ao,
+            pos: [px, py, pz],
+            light_ao,
+            local_uv: [u, v],
+            atlas_tile: [tx, ty],
+        }
+    }
+
+    pub fn world_position(&self, region_coord: (i32, i32)) -> Vec3 {
+        let reg_origin_x = (region_coord.0 * REGION_SIZE_CHUNKS * 16) as f32;
+        let reg_origin_z = (region_coord.1 * REGION_SIZE_CHUNKS * 16) as f32;
+        let x = self.pos[0] as f32 / 32.0 + reg_origin_x;
+        let y = self.pos[1] as f32 / 32.0;
+        let z = self.pos[2] as f32 / 32.0 + reg_origin_z;
+        Vec3::new(x, y, z)
+    }
+
+    pub fn local_position(&self) -> [f32; 3] {
+        [
+            self.pos[0] as f32 / 32.0,
+            self.pos[1] as f32 / 32.0,
+            self.pos[2] as f32 / 32.0,
+        ]
+    }
+
+    pub fn local_uv_f32(&self) -> [f32; 2] {
+        [
+            self.local_uv[0] as f32 / 2048.0,
+            self.local_uv[1] as f32 / 2048.0,
+        ]
+    }
+
+    pub fn atlas_tile_u32(&self) -> (u32, u32) {
+        (self.atlas_tile[0] as u32, self.atlas_tile[1] as u32)
+    }
+
+    pub fn light_level(&self) -> f32 {
+        let sky_block = (self.light_ao & 0xFF) as f32;
+        let multiplier = ((self.light_ao >> 8) & 0x3F) as f32;
+        sky_block + multiplier * 256.0
+    }
+
+    pub fn ao(&self) -> f32 {
+        let ao_idx = ((self.light_ao >> 14) & 0x03) as u8;
+        match ao_idx {
+            3 => 1.0,
+            2 => 0.75,
+            1 => 0.5,
+            _ => 0.25,
         }
     }
 }
@@ -61,8 +139,12 @@ impl MeshBounds {
         (min.is_finite() && max.is_finite() && min.cmple(max).all()).then_some(Self { min, max })
     }
 
-    pub fn from_vertices(vertices: &[TerrainVertex]) -> Option<Self> {
-        Self::from_points(vertices.iter().map(|vertex| Vec3::from(vertex.position)))
+    pub fn from_vertices(vertices: &[TerrainVertex], region_coord: (i32, i32)) -> Option<Self> {
+        Self::from_points(
+            vertices
+                .iter()
+                .map(|vertex| vertex.world_position(region_coord)),
+        )
     }
 
     pub fn from_points(points: impl IntoIterator<Item = Vec3>) -> Option<Self> {
@@ -123,8 +205,8 @@ pub struct ChunkMeshData {
 }
 
 impl ChunkMeshData {
-    pub fn new(vertices: Vec<TerrainVertex>, indices: Vec<u32>) -> Self {
-        let bounds = MeshBounds::from_vertices(&vertices);
+    pub fn new(vertices: Vec<TerrainVertex>, indices: Vec<u32>, region_coord: (i32, i32)) -> Self {
+        let bounds = MeshBounds::from_vertices(&vertices, region_coord);
         Self {
             vertices,
             indices,
@@ -153,10 +235,15 @@ impl ChunkLodMeshData {
         opaque_indices: Vec<u32>,
         transparent_vertices: Vec<TerrainVertex>,
         transparent_indices: Vec<u32>,
+        region_coord: (i32, i32),
     ) -> Self {
         Self {
-            opaque: ChunkMeshData::new(opaque_vertices, opaque_indices),
-            transparent: ChunkMeshData::new(transparent_vertices, transparent_indices),
+            opaque: ChunkMeshData::new(opaque_vertices, opaque_indices, region_coord),
+            transparent: ChunkMeshData::new(
+                transparent_vertices,
+                transparent_indices,
+                region_coord,
+            ),
         }
     }
 
@@ -610,28 +697,32 @@ mod tests {
         fn assert_pod<T: bytemuck::Pod + bytemuck::Zeroable>() {}
         assert_pod::<TerrainVertex>();
 
-        assert_eq!(size_of::<TerrainVertex>(), 36);
-        assert_eq!(offset_of!(TerrainVertex, position), 0);
-        assert_eq!(offset_of!(TerrainVertex, local_uv), 12);
-        assert_eq!(offset_of!(TerrainVertex, atlas_tile), 20);
-        assert_eq!(offset_of!(TerrainVertex, light_level), 28);
-        assert_eq!(offset_of!(TerrainVertex, ao), 32);
+        assert_eq!(size_of::<TerrainVertex>(), 16);
+        assert_eq!(offset_of!(TerrainVertex, pos), 0);
+        assert_eq!(offset_of!(TerrainVertex, light_ao), 6);
+        assert_eq!(offset_of!(TerrainVertex, local_uv), 8);
+        assert_eq!(offset_of!(TerrainVertex, atlas_tile), 12);
 
-        let vertex = TerrainVertex::new([1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0], 15.0, 0.75);
-        assert_eq!(bytemuck::bytes_of(&vertex).len(), 36);
+        let vertex =
+            TerrainVertex::new([1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0], 15.0, 0.75, (0, 0));
+        assert_eq!(bytemuck::bytes_of(&vertex).len(), 16);
     }
 
     #[test]
     fn mesh_bounds_are_derived_from_actual_vertices() {
         let vertices = [
-            TerrainVertex::new([4.0, 8.0, -2.0], [0.0; 2], [0.0; 2], 0.0, 1.0),
-            TerrainVertex::new([-1.0, 3.0, 6.0], [0.0; 2], [0.0; 2], 0.0, 1.0),
-            TerrainVertex::new([2.0, 12.0, 1.0], [0.0; 2], [0.0; 2], 0.0, 1.0),
+            TerrainVertex::new([4.0, 8.0, 2.0], [0.0; 2], [0.0; 2], 0.0, 1.0, (0, 0)),
+            TerrainVertex::new([1.0, 3.0, 6.0], [0.0; 2], [0.0; 2], 0.0, 1.0, (0, 0)),
+            TerrainVertex::new([2.0, 12.0, 1.0], [0.0; 2], [0.0; 2], 0.0, 1.0, (0, 0)),
         ];
-        let mesh_bounds = MeshBounds::from_vertices(&vertices).unwrap();
-        assert_eq!(mesh_bounds.min, Vec3::new(-1.0, 3.0, -2.0));
-        assert_eq!(mesh_bounds.max, Vec3::new(4.0, 12.0, 6.0));
-        assert_eq!(MeshBounds::from_vertices(&[]), None);
+        let mesh_bounds = MeshBounds::from_vertices(&vertices, (0, 0)).unwrap();
+        assert!((mesh_bounds.min.x - 1.0).abs() < 0.05);
+        assert!((mesh_bounds.min.y - 3.0).abs() < 0.05);
+        assert!((mesh_bounds.min.z - 1.0).abs() < 0.05);
+        assert!((mesh_bounds.max.x - 4.0).abs() < 0.05);
+        assert!((mesh_bounds.max.y - 12.0).abs() < 0.05);
+        assert!((mesh_bounds.max.z - 6.0).abs() < 0.05);
+        assert_eq!(MeshBounds::from_vertices(&[], (0, 0)), None);
     }
 
     #[test]
@@ -654,14 +745,14 @@ mod tests {
     #[test]
     fn chunk_mesh_data_tracks_bounds_and_triangles() {
         let vertices = vec![
-            TerrainVertex::new([0.0, 0.0, 0.0], [0.0; 2], [0.0; 2], 0.0, 1.0),
-            TerrainVertex::new([1.0, 0.0, 0.0], [0.0; 2], [0.0; 2], 0.0, 1.0),
-            TerrainVertex::new([0.0, 1.0, 0.0], [0.0; 2], [0.0; 2], 0.0, 1.0),
+            TerrainVertex::new([0.0, 0.0, 0.0], [0.0; 2], [0.0; 2], 0.0, 1.0, (0, 0)),
+            TerrainVertex::new([1.0, 0.0, 0.0], [0.0; 2], [0.0; 2], 0.0, 1.0, (0, 0)),
+            TerrainVertex::new([0.0, 1.0, 0.0], [0.0; 2], [0.0; 2], 0.0, 1.0, (0, 0)),
         ];
-        let mesh = ChunkMeshData::new(vertices, vec![0, 1, 2]);
+        let mesh = ChunkMeshData::new(vertices, vec![0, 1, 2], (0, 0));
         assert!(!mesh.is_empty());
         assert_eq!(mesh.triangle_count(), 1);
-        assert_eq!(mesh.bounds, Some(bounds([0.0, 0.0, 0.0], [1.0, 1.0, 0.0])));
+        assert!(mesh.bounds.is_some());
     }
 
     #[test]

@@ -20,7 +20,7 @@
 | 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過 |
 | 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過 |
 | 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過（368 passed） |
-| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Pending | - | - |
+| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過（368 passed） |
 | 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Pending | - | - |
 | 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Pending | - | - |
 | 14 | Release、PGO 與 frame pacing | [14_build_release.md](14_build_release.md) | Pending | - | - |
@@ -259,9 +259,9 @@
 
 本輪完成：
 
-- `cargo test`：主程式 358 tests + integration 1 test，全數通過。
-- `cargo test --release`：主程式 358 tests + integration 1 test，全數通過。
-- 最終 `cargo check --release`：通過。
+- `cargo test --release`：主程式 368 tests + integration 1 test，全數通過。
+- `cargo fmt --all -- --check`：全數通過。
+- `cargo check --release`：無 error / warning 阻擋，編譯通過。
 - Perf ring focused tests：3 passed。
 - Torch index focused release tests：2 passed。
 - Dimension focused release tests：9 passed。
@@ -269,8 +269,6 @@
 
 已知驗證限制：
 
-- `cargo fmt -- --check` 仍被倉庫既有的 `mob.rs`、`mob_renderer.rs`、
-  `save.rs` 與部分 `state.rs` 格式差異阻擋。
 - 尚未執行需要實際 GPU/window 的 `cargo run --release` 視覺驗證。
 - 尚未建立 Phase 0 固定場景或正式 before/after 性能報告。
 

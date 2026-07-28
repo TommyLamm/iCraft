@@ -125,12 +125,17 @@ fn shade_world_fragment(
     }
 }
 
+struct RegionUniform {
+    region_origin: vec4<f32>,
+};
+
+@group(1) @binding(0)
+var<uniform> region: RegionUniform;
+
 struct TerrainVertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) local_uv: vec2<f32>,
-    @location(2) atlas_tile: vec2<f32>,
-    @location(3) light_level: f32,
-    @location(4) ao: f32,
+    @location(0) pos_light_ao: vec4<u32>,
+    @location(1) local_uv: vec2<u32>,
+    @location(2) atlas_tile: vec2<u32>,
 };
 
 struct TerrainVertexOutput {
@@ -145,12 +150,19 @@ struct TerrainVertexOutput {
 @vertex
 fn vs_terrain(model: TerrainVertexInput) -> TerrainVertexOutput {
     var out: TerrainVertexOutput;
-    out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
-    out.local_uv = model.local_uv;
-    out.atlas_tile = model.atlas_tile;
-    out.light_level = model.light_level;
-    out.world_pos = model.position;
-    out.ao = model.ao;
+    let rel_pos = vec3<f32>(f32(model.pos_light_ao.x), f32(model.pos_light_ao.y), f32(model.pos_light_ao.z)) / 32.0;
+    let world_pos = rel_pos + region.region_origin.xyz;
+    out.clip_position = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.local_uv = vec2<f32>(f32(model.local_uv.x), f32(model.local_uv.y)) / 2048.0;
+    out.atlas_tile = vec2<f32>(f32(model.atlas_tile.x), f32(model.atlas_tile.y));
+
+    let light_ao_raw = model.pos_light_ao.w;
+    out.light_level = f32(light_ao_raw & 0x3FFFu);
+
+    let ao_raw = (light_ao_raw >> 14u) & 0x03u;
+    out.ao = select(f32(ao_raw) / 3.0, 1.0, ao_raw >= 3u);
+
+    out.world_pos = world_pos;
     return out;
 }
 

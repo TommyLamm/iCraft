@@ -809,13 +809,19 @@ pub struct RenderRegion {
     pub vertex_freelist: crate::chunk_render::FreeList,
     pub index_freelist: crate::chunk_render::FreeList,
     pub active_chunks: usize,
+    pub region_uniform_buffer: wgpu::Buffer,
+    pub bind_group: wgpu::BindGroup,
 }
 
 impl RenderRegion {
     pub const INITIAL_VERTEX_CAPACITY: u32 = 65_536;
     pub const INITIAL_INDEX_CAPACITY: u32 = 98_304;
 
-    pub fn new(device: &wgpu::Device, region_coord: (i32, i32)) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        region_bind_group_layout: &wgpu::BindGroupLayout,
+        region_coord: (i32, i32),
+    ) -> Self {
         let vertex_bytes = (Self::INITIAL_VERTEX_CAPACITY as usize)
             * std::mem::size_of::<crate::chunk_render::TerrainVertex>();
         let index_bytes = (Self::INITIAL_INDEX_CAPACITY as usize) * std::mem::size_of::<u32>();
@@ -838,6 +844,32 @@ impl RenderRegion {
             mapped_at_creation: false,
         });
 
+        let reg_origin = [
+            (region_coord.0
+                * crate::chunk_render::REGION_SIZE_CHUNKS
+                * crate::world::CHUNK_WIDTH as i32) as f32,
+            0.0,
+            (region_coord.1
+                * crate::chunk_render::REGION_SIZE_CHUNKS
+                * crate::world::CHUNK_DEPTH as i32) as f32,
+            0.0,
+        ];
+        use wgpu::util::DeviceExt;
+        let region_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Region Uniform Buffer"),
+            contents: bytemuck::cast_slice(&reg_origin),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: region_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: region_uniform_buffer.as_entire_binding(),
+            }],
+            label: Some("Region Bind Group"),
+        });
+
         Self {
             region_coord,
             vertex_buffer,
@@ -847,6 +879,8 @@ impl RenderRegion {
             vertex_freelist: crate::chunk_render::FreeList::new(Self::INITIAL_VERTEX_CAPACITY),
             index_freelist: crate::chunk_render::FreeList::new(Self::INITIAL_INDEX_CAPACITY),
             active_chunks: 0,
+            region_uniform_buffer,
+            bind_group,
         }
     }
 
@@ -1080,7 +1114,6 @@ struct MeshVoxel {
 }
 
 struct MeshSnapshot {
-    chunk: Chunk,
     min_world_x: i32,
     min_world_z: i32,
     voxels: Vec<MeshVoxel>,
@@ -1096,7 +1129,9 @@ impl MeshSnapshot {
         chunks: &std::collections::HashMap<(i32, i32), Chunk>,
         default_sky_light: u8,
     ) -> Option<Self> {
-        let chunk = chunks.get(&coord)?.clone();
+        if !chunks.contains_key(&coord) {
+            return None;
+        }
         let min_world_x = coord.0 * CHUNK_WIDTH as i32 - 1;
         let min_world_z = coord.1 * CHUNK_DEPTH as i32 - 1;
         let mut voxels = Vec::with_capacity(Self::WIDTH * CHUNK_HEIGHT * Self::DEPTH);
@@ -1128,7 +1163,6 @@ impl MeshSnapshot {
             }
         }
         Some(Self {
-            chunk,
             min_world_x,
             min_world_z,
             voxels,
@@ -1264,32 +1298,17 @@ impl TerrainVertex {
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Uint16x4,
                 },
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    offset: 8,
                     shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
+                    format: wgpu::VertexFormat::Uint16x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>())
-                        as wgpu::BufferAddress,
+                    offset: 12,
                     shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>() + 2 * std::mem::size_of::<[f32; 2]>())
-                        as wgpu::BufferAddress,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32,
-                },
-                wgpu::VertexAttribute {
-                    offset: (std::mem::size_of::<[f32; 3]>()
-                        + 2 * std::mem::size_of::<[f32; 2]>()
-                        + std::mem::size_of::<f32>())
-                        as wgpu::BufferAddress,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Float32,
+                    format: wgpu::VertexFormat::Uint16x2,
                 },
             ],
         }
@@ -2745,6 +2764,7 @@ pub struct State {
     pub size: winit::dpi::PhysicalSize<u32>,
     terrain_render_pipeline: wgpu::RenderPipeline,
     terrain_trans_pipeline: wgpu::RenderPipeline,
+    region_bind_group_layout: wgpu::BindGroupLayout,
     render_pipeline: wgpu::RenderPipeline,
     trans_pipeline: wgpu::RenderPipeline,
     crack_pipeline: wgpu::RenderPipeline,
@@ -3442,10 +3462,32 @@ impl State {
             ))),
         });
 
+        let region_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("region_bind_group_layout"),
+            });
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
                 bind_group_layouts: &[&camera_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let terrain_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Terrain Pipeline Layout"),
+                bind_group_layouts: &[&camera_bind_group_layout, &region_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -3489,7 +3531,7 @@ impl State {
         let terrain_render_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Terrain Render Pipeline"),
-                layout: Some(&render_pipeline_layout),
+                layout: Some(&terrain_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: "vs_terrain",
@@ -3615,7 +3657,7 @@ impl State {
         let terrain_trans_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Terrain Translucent Render Pipeline"),
-                layout: Some(&render_pipeline_layout),
+                layout: Some(&terrain_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: "vs_terrain",
@@ -4336,6 +4378,7 @@ impl State {
             size,
             terrain_render_pipeline,
             terrain_trans_pipeline,
+            region_bind_group_layout,
             render_pipeline,
             trans_pipeline,
             crack_pipeline,
@@ -5386,6 +5429,7 @@ impl State {
     fn upload_mesh_bundle(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        region_bind_group_layout: &wgpu::BindGroupLayout,
         render_regions: &mut std::collections::HashMap<(i32, i32), RenderRegion>,
         coord: (i32, i32),
         existing_mesh: &mut ChunkMesh,
@@ -5395,7 +5439,7 @@ impl State {
         let is_new = existing_mesh.levels.is_none();
         let region = render_regions
             .entry(r_coord)
-            .or_insert_with(|| RenderRegion::new(device, r_coord));
+            .or_insert_with(|| RenderRegion::new(device, region_bind_group_layout, r_coord));
         if is_new {
             region.active_chunks += 1;
         }
@@ -5584,6 +5628,7 @@ impl State {
                     let levels = Self::upload_mesh_bundle(
                         &self.device,
                         &self.queue,
+                        &self.region_bind_group_layout,
                         &mut self.render_regions,
                         result.coord,
                         mesh,
@@ -5664,6 +5709,9 @@ impl State {
         {
             return;
         }
+        let Some(chunk) = self.chunk_manager.chunks.get(&coord).cloned() else {
+            return;
+        };
         let Some(mesh) = self.chunk_meshes.get(&coord) else {
             return;
         };
@@ -5682,9 +5730,7 @@ impl State {
         let sender = self.terrain_worker_tx.clone();
         let generation = self.terrain_generation;
         rayon::spawn(move || {
-            let bundle = snapshot
-                .chunk
-                .generate_mesh_bundle(|x, y, z| snapshot.get(x, y, z));
+            let bundle = chunk.generate_mesh_bundle(|x, y, z| snapshot.get(x, y, z));
             let _ = sender.send(TerrainWorkerResult::Meshed(ChunkMeshResult {
                 coord,
                 generation,
@@ -12534,6 +12580,7 @@ impl State {
                             region.index_buffer.slice(..),
                             wgpu::IndexFormat::Uint32,
                         );
+                        render_pass.set_bind_group(1, &region.bind_group, &[]);
                         bound_region = Some(region_coord);
                     } else {
                         continue;
@@ -12623,6 +12670,7 @@ impl State {
                             region.index_buffer.slice(..),
                             wgpu::IndexFormat::Uint32,
                         );
+                        render_pass.set_bind_group(1, &region.bind_group, &[]);
                         bound_region = Some(region_coord);
                     } else {
                         continue;

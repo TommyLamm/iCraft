@@ -1668,6 +1668,7 @@ fn push_terrain_quad(
     atlas_tile: (u32, u32),
     light_level: f32,
     ao: [f32; 4],
+    region_coord: (i32, i32),
 ) {
     let start = vertices.len() as u32;
     for corner in 0..4 {
@@ -1677,6 +1678,7 @@ fn push_terrain_quad(
             [atlas_tile.0 as f32, atlas_tile.1 as f32],
             light_level,
             ao[corner],
+            region_coord,
         ));
     }
     indices.extend(quad_indices_for_ao(ao).iter().map(|index| start + index));
@@ -1702,6 +1704,7 @@ fn append_torch_mesh(
     sky_light: u8,
     block_light: u8,
     atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
 ) {
     let light_level = sky_light as f32 + block_light as f32 * 16.0;
 
@@ -1745,6 +1748,7 @@ fn append_torch_mesh(
             atlas_tile,
             light_level,
             [1.0; 4],
+            region_coord,
         );
     }
 }
@@ -1787,6 +1791,7 @@ fn append_box_mesh(
     sky_light: u8,
     block_light: u8,
     atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
 ) {
     let light_level = sky_light as f32 + block_light as f32 * 16.0;
     let (min, max) = bounds;
@@ -1812,6 +1817,7 @@ fn append_box_mesh(
             atlas_tile,
             light_level,
             [1.0; 4],
+            region_coord,
         );
     }
 }
@@ -1824,6 +1830,7 @@ fn append_door_mesh(
     sky_light: u8,
     block_light: u8,
     atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
 ) {
     const THICKNESS: f32 = 3.0 / 16.0;
 
@@ -1858,6 +1865,7 @@ fn append_door_mesh(
         sky_light,
         block_light,
         atlas_tile,
+        region_coord,
     );
 }
 
@@ -1869,6 +1877,7 @@ fn append_trapdoor_mesh(
     sky_light: u8,
     block_light: u8,
     atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
 ) {
     const THICKNESS: f32 = 3.0 / 16.0;
 
@@ -1891,6 +1900,7 @@ fn append_trapdoor_mesh(
         sky_light,
         block_light,
         atlas_tile,
+        region_coord,
     );
 }
 
@@ -2602,6 +2612,8 @@ impl Chunk {
         let mut trans_vertices = Vec::new();
         let mut trans_indices = Vec::new();
 
+        let region_coord = crate::chunk_render::chunk_to_region_coord(self.chunk_x, self.chunk_z);
+
         // Non-cubic geometry and non-solid decorative blocks retain the exact
         // per-block path. They cannot be combined into rectangular cube faces.
         for x in 0..CHUNK_WIDTH {
@@ -2632,6 +2644,7 @@ impl Chunk {
                             self.sky_light[x][y][z],
                             self.block_light[x][y][z],
                             atlas_tile,
+                            region_coord,
                         );
                         continue;
                     }
@@ -2646,6 +2659,7 @@ impl Chunk {
                             self.sky_light[x][y][z],
                             self.block_light[x][y][z],
                             (9, 14),
+                            region_coord,
                         );
                         continue;
                     }
@@ -2660,6 +2674,7 @@ impl Chunk {
                             self.sky_light[x][y][z],
                             self.block_light[x][y][z],
                             (10, 14),
+                            region_coord,
                         );
                         continue;
                     }
@@ -2702,6 +2717,7 @@ impl Chunk {
                                 atlas_tile,
                                 light_val,
                                 [1.0; 4],
+                                region_coord,
                             );
                             push_terrain_quad(
                                 &mut opaque_vertices,
@@ -2711,6 +2727,7 @@ impl Chunk {
                                 atlas_tile,
                                 light_val,
                                 [1.0; 4],
+                                region_coord,
                             );
                         }
 
@@ -2801,7 +2818,14 @@ impl Chunk {
                                 local_uvs[corner_idx] = *uv;
                             }
                             push_terrain_quad(
-                                v_list, i_list, positions, local_uvs, atlas_tile, light_val, ao,
+                                v_list,
+                                i_list,
+                                positions,
+                                local_uvs,
+                                atlas_tile,
+                                light_val,
+                                ao,
+                                region_coord,
                             );
                         }
                     }
@@ -2979,6 +3003,7 @@ impl Chunk {
                             face.atlas_tile,
                             face.light_level as f32,
                             face.ao(),
+                            region_coord,
                         );
                         u += width;
                     }
@@ -2998,11 +3023,16 @@ impl Chunk {
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
     {
+        let region_coord = crate::chunk_render::chunk_to_region_coord(self.chunk_x, self.chunk_z);
         let (o0, oi0, t0, ti0) = self.generate_mesh(get_block_at);
         let l1 = self.generate_surface_mesh(get_block_at, 1);
         let l2 = self.generate_surface_mesh(get_block_at, 4);
         ChunkMeshBundle {
-            levels: [ChunkLodMeshData::from_parts(o0, oi0, t0, ti0), l1, l2],
+            levels: [
+                ChunkLodMeshData::from_parts(o0, oi0, t0, ti0, region_coord),
+                l1,
+                l2,
+            ],
         }
     }
 
@@ -3010,6 +3040,7 @@ impl Chunk {
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
     {
+        let region_coord = crate::chunk_render::chunk_to_region_coord(self.chunk_x, self.chunk_z);
         debug_assert!(step > 0 && CHUNK_WIDTH % step == 0 && CHUNK_DEPTH % step == 0);
         let grid_width = CHUNK_WIDTH / step;
         let grid_depth = CHUNK_DEPTH / step;
@@ -3116,6 +3147,7 @@ impl Chunk {
                     cell.top_tile,
                     cell.light_level as f32,
                     [1.0; 4],
+                    region_coord,
                 );
                 gx += width;
             }
@@ -3243,6 +3275,7 @@ impl Chunk {
                         side_tile,
                         cell.light_level as f32 + 256.0,
                         [1.0; 4],
+                        region_coord,
                     );
                     cursor += run;
                 }
@@ -3254,6 +3287,7 @@ impl Chunk {
             opaque_indices,
             trans_vertices,
             trans_indices,
+            region_coord,
         )
     }
 }
@@ -3558,7 +3592,7 @@ mod tests {
         let (vertices, indices, _, _) = chunk.generate_mesh(empty_lookup);
         assert_eq!(vertices.len(), 24);
         assert_eq!(indices.len(), 36);
-        assert!(vertices.iter().all(|vertex| vertex.ao == 1.0));
+        assert!(vertices.iter().all(|vertex| vertex.ao() == 1.0));
 
         let occluders = HashSet::from([(7, 2, 8), (8, 2, 9)]);
         let lookup = |x: i32, y: i32, z: i32| {
@@ -3570,8 +3604,8 @@ mod tests {
             (block, 15, 0, 0, false)
         };
         let (vertices, _, _, _) = chunk.generate_mesh(lookup);
-        assert_eq!(vertices[16].position, [8.0, 2.0, 9.0]);
-        assert_eq!(vertices[16].ao, 0.5);
+        assert_eq!(vertices[16].local_position(), [8.0, 2.0, 9.0]);
+        assert_eq!(vertices[16].ao(), 0.5);
     }
 
     #[test]
@@ -3596,8 +3630,8 @@ mod tests {
         assert_eq!(
             vertices
                 .iter()
-                .flat_map(|vertex| vertex.local_uv)
-                .fold(0.0, f32::max),
+                .flat_map(|vertex| vertex.local_uv_f32())
+                .fold(0.0f32, f32::max),
             2.0
         );
     }
@@ -3614,7 +3648,7 @@ mod tests {
             light_chunk.generate_mesh(|x, y, z| test_chunk_lookup(&light_chunk, x, y, z));
         let light_top_quads = light_vertices
             .chunks_exact(4)
-            .filter(|quad| quad.iter().all(|vertex| vertex.position[1] == 2.0))
+            .filter(|quad| quad.iter().all(|vertex| vertex.local_position()[1] == 2.0))
             .count();
         assert_eq!(light_top_quads, 2);
 
@@ -3627,7 +3661,7 @@ mod tests {
             material_chunk.generate_mesh(|x, y, z| test_chunk_lookup(&material_chunk, x, y, z));
         let material_top_quads = material_vertices
             .chunks_exact(4)
-            .filter(|quad| quad.iter().all(|vertex| vertex.position[1] == 2.0))
+            .filter(|quad| quad.iter().all(|vertex| vertex.local_position()[1] == 2.0))
             .count();
         assert_eq!(material_top_quads, 2);
     }
@@ -3689,7 +3723,7 @@ mod tests {
         let (vertices, _, _, _) = chunk.generate_mesh(lookup);
         let max_y = vertices
             .iter()
-            .map(|vertex| vertex.position[1])
+            .map(|vertex| vertex.local_position()[1])
             .fold(f32::NEG_INFINITY, f32::max);
         assert!((max_y - 1.125).abs() < f32::EPSILON);
     }
@@ -3729,9 +3763,10 @@ mod tests {
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
         for vertex in &vertices {
+            let pos = vertex.local_position();
             for axis in 0..3 {
-                min[axis] = min[axis].min(vertex.position[axis]);
-                max[axis] = max[axis].max(vertex.position[axis]);
+                min[axis] = min[axis].min(pos[axis]);
+                max[axis] = max[axis].max(pos[axis]);
             }
         }
         assert_eq!(
@@ -3743,9 +3778,9 @@ mod tests {
             let expected = BLOCK_FACES[face_idx].0.map(|component| component as f32);
             for triangle in indices[face_idx * 6..face_idx * 6 + 6].chunks_exact(3) {
                 let normal = triangle_normal(
-                    vertices[triangle[0] as usize].position,
-                    vertices[triangle[1] as usize].position,
-                    vertices[triangle[2] as usize].position,
+                    vertices[triangle[0] as usize].local_position(),
+                    vertices[triangle[1] as usize].local_position(),
+                    vertices[triangle[2] as usize].local_position(),
                 );
                 let dot =
                     normal[0] * expected[0] + normal[1] * expected[1] + normal[2] * expected[2];
@@ -3788,9 +3823,10 @@ mod tests {
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
         for v in &opaque_v {
+            let pos = v.local_position();
             for a in 0..3 {
-                min[a] = min[a].min(v.position[a]);
-                max[a] = max[a].max(v.position[a]);
+                min[a] = min[a].min(pos[a]);
+                max[a] = max[a].max(pos[a]);
             }
         }
         assert!((min[0] - 0.0).abs() < 1e-4);
@@ -3829,7 +3865,7 @@ mod tests {
 
         let mut max_y = f32::NEG_INFINITY;
         for v in &opaque_v {
-            max_y = max_y.max(v.position[1]);
+            max_y = max_y.max(v.local_position()[1]);
         }
         assert!((max_y - 64.1875).abs() < 1e-4);
 
@@ -3844,7 +3880,7 @@ mod tests {
         let (opaque_v2, _, _, _) = chunk.generate_mesh(|_, _, _| (BlockType::Air, 0, 0, 0, false));
         let mut max_y_open = f32::NEG_INFINITY;
         for v in &opaque_v2 {
-            max_y_open = max_y_open.max(v.position[1]);
+            max_y_open = max_y_open.max(v.local_position()[1]);
         }
         assert!((max_y_open - 65.0).abs() < 1e-4);
     }
@@ -3879,16 +3915,16 @@ mod tests {
             let mut observed_min = [f32::INFINITY; 2];
             let mut observed_max = [f32::NEG_INFINITY; 2];
             for vertex in quad {
-                assert_eq!(vertex.atlas_tile, [4.0, 2.0]);
+                assert_eq!(vertex.atlas_tile_u32(), (4, 2));
+                let uv = vertex.local_uv_f32();
                 assert!(
-                    (0.0..1.0).contains(&vertex.local_uv[0])
-                        && (0.0..1.0).contains(&vertex.local_uv[1]),
+                    (0.0..1.0).contains(&uv[0]) && (0.0..1.0).contains(&uv[1]),
                     "torch UV must remain inside atlas tile (4, 2)"
                 );
-                observed_min[0] = observed_min[0].min(vertex.local_uv[0]);
-                observed_min[1] = observed_min[1].min(vertex.local_uv[1]);
-                observed_max[0] = observed_max[0].max(vertex.local_uv[0]);
-                observed_max[1] = observed_max[1].max(vertex.local_uv[1]);
+                observed_min[0] = observed_min[0].min(uv[0]);
+                observed_min[1] = observed_min[1].min(uv[1]);
+                observed_max[0] = observed_max[0].max(uv[0]);
+                observed_max[1] = observed_max[1].max(uv[1]);
             }
             assert_eq!(observed_min, [rect[0], rect[1]]);
             assert_eq!(observed_max, [rect[2], rect[3]]);
@@ -3902,11 +3938,11 @@ mod tests {
         let expected_packed_light = sky_light as f32 + block_light as f32 * 16.0;
         let (vertices, _, _, _) = single_torch_mesh(BlockType::Torch, sky_light, block_light);
 
-        assert!(vertices.iter().all(|vertex| vertex.ao == 1.0));
+        assert!(vertices.iter().all(|vertex| vertex.ao() == 1.0));
         assert!(
             vertices
                 .iter()
-                .all(|vertex| vertex.light_level == expected_packed_light),
+                .all(|vertex| vertex.light_level() == expected_packed_light),
             "every torch face must use the source cell light without a face multiplier"
         );
     }
@@ -3934,9 +3970,10 @@ mod tests {
             let mut min = [f32::INFINITY; 3];
             let mut max = [f32::NEG_INFINITY; 3];
             for vertex in &vertices {
+                let pos = vertex.local_position();
                 for axis in 0..3 {
-                    min[axis] = min[axis].min(vertex.position[axis]);
-                    max[axis] = max[axis].max(vertex.position[axis]);
+                    min[axis] = min[axis].min(pos[axis]);
+                    max[axis] = max[axis].max(pos[axis]);
                 }
             }
             assert_eq!(min, [8.0 + TORCH_MIN, 1.0, 8.0 + TORCH_MIN]);
@@ -3953,16 +3990,17 @@ mod tests {
                 let mut observed_max = [f32::NEG_INFINITY; 2];
                 for vertex in quad {
                     assert_eq!(
-                        vertex.atlas_tile,
-                        [
-                            REDSTONE_TORCH_ATLAS_TILE.0 as f32,
-                            REDSTONE_TORCH_ATLAS_TILE.1 as f32,
-                        ]
+                        vertex.atlas_tile_u32(),
+                        (
+                            REDSTONE_TORCH_ATLAS_TILE.0 as u32,
+                            REDSTONE_TORCH_ATLAS_TILE.1 as u32,
+                        )
                     );
-                    observed_min[0] = observed_min[0].min(vertex.local_uv[0]);
-                    observed_min[1] = observed_min[1].min(vertex.local_uv[1]);
-                    observed_max[0] = observed_max[0].max(vertex.local_uv[0]);
-                    observed_max[1] = observed_max[1].max(vertex.local_uv[1]);
+                    let uv = vertex.local_uv_f32();
+                    observed_min[0] = observed_min[0].min(uv[0]);
+                    observed_min[1] = observed_min[1].min(uv[1]);
+                    observed_max[0] = observed_max[0].max(uv[0]);
+                    observed_max[1] = observed_max[1].max(uv[1]);
                 }
                 assert_eq!(observed_min, [rect[0], rect[1]]);
                 assert_eq!(observed_max, [rect[2], rect[3]]);
