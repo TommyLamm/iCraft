@@ -110,6 +110,9 @@ fn generate_overworld_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
         let blocks = std::mem::replace(&mut chunk.blocks, empty_blocks());
         chunk = finish_chunk(chunk_x, chunk_z, blocks, true);
     }
+    // Structure placement above mutates blocks directly; keep derived indexes
+    // valid for all dimension-generated chunks.
+    chunk.rebuild_torch_index();
     chunk
 }
 
@@ -535,7 +538,7 @@ fn finish_chunk(
         }
     }
 
-    Chunk {
+    let mut chunk = Chunk {
         chunk_x,
         chunk_z,
         blocks,
@@ -544,7 +547,10 @@ fn finish_chunk(
         heightmap,
         fluid_levels,
         block_states: Box::new([[[0; 16]; 256]; 16]),
-    }
+        torch_positions: Vec::new(),
+    };
+    chunk.rebuild_torch_index();
+    chunk
 }
 
 /// Finds a complete 4x5 obsidian frame in either vertical axis and returns its

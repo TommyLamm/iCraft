@@ -213,7 +213,7 @@ impl ChunkManager {
                 if chunk.blocks[bx][by][bz] == block {
                     return;
                 }
-                chunk.blocks[bx][by][bz] = block;
+                chunk.set_block_local(bx, by, bz, block);
                 chunk.block_states[bx][by][bz] = 0;
                 if block != BlockType::Water && block != BlockType::Lava {
                     chunk.fluid_levels[bx][by][bz] = 0;
@@ -518,6 +518,28 @@ mod tests {
                 (4, -1),
             ])
         );
+    }
+
+    #[test]
+    fn set_block_updates_torch_index_at_negative_world_coordinates() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((-1, -1), Chunk::new(-1, -1));
+
+        manager.set_block(-1, 64, -1, BlockType::Torch);
+        let chunk = manager.chunks.get(&(-1, -1)).unwrap();
+        assert_eq!(chunk.torch_positions().len(), 1);
+        assert_eq!(
+            Chunk::decode_torch_position(chunk.torch_positions()[0]),
+            (15, 64, 15)
+        );
+
+        manager.set_block(-1, 64, -1, BlockType::Air);
+        assert!(manager
+            .chunks
+            .get(&(-1, -1))
+            .unwrap()
+            .torch_positions()
+            .is_empty());
     }
 
     #[test]

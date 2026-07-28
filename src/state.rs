@@ -781,6 +781,8 @@ pub struct GpuMeshLayer {
     index_buffer: wgpu::Buffer,
     num_indices: u32,
     bounds: Option<MeshBounds>,
+    vertex_bytes: usize,
+    index_bytes: usize,
 }
 
 pub struct GpuMeshLevel {
@@ -827,6 +829,24 @@ impl ChunkMesh {
             .flatten()
             .map(|level| level.opaque.num_indices as usize + level.transparent.num_indices as usize)
             .sum()
+    }
+
+    fn gpu_bytes(&self) -> usize {
+        self.levels
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .map(|level| {
+                level.opaque.vertex_bytes
+                    + level.opaque.index_bytes
+                    + level.transparent.vertex_bytes
+                    + level.transparent.index_bytes
+            })
+            .sum()
+    }
+
+    fn gpu_buffer_objects(&self) -> usize {
+        self.levels.as_ref().map_or(0, |_| 12)
     }
 }
 
@@ -2582,6 +2602,10 @@ pub struct State {
     debug_frame_samples: u32,
     debug_fps: f32,
     debug_frame_ms: f32,
+    perf_recorder: crate::perf::PerfRecorder,
+    perf_summaries: [crate::perf::ScopeSummary; crate::perf::SCOPE_COUNT],
+    perf_counters: crate::perf::PerfCounters,
+    gpu_upload_time_frame: Duration,
     pub active_station: Option<StationKind>,
     pub enchanting: crate::enchantment::EnchantingState,
     pub brewing: crate::brewing::BrewingStandState,
@@ -3829,6 +3853,12 @@ impl State {
             debug_frame_samples: 0,
             debug_fps: 0.0,
             debug_frame_ms: 0.0,
+            perf_recorder: crate::perf::PerfRecorder::new(),
+            perf_summaries:
+                crate::perf::PerfRecorder::<{ crate::perf::DEFAULT_HISTORY_CAPACITY }>::new()
+                    .snapshot(),
+            perf_counters: crate::perf::PerfCounters::default(),
+            gpu_upload_time_frame: Duration::ZERO,
             active_station: None,
             enchanting: crate::enchantment::EnchantingState::default(),
             brewing: crate::brewing::BrewingStandState::default(),
@@ -4675,6 +4705,8 @@ impl State {
             index_buffer,
             num_indices: data.indices.len() as u32,
             bounds: data.bounds,
+            vertex_bytes: vertex_bytes.len(),
+            index_bytes: index_bytes.len(),
         }
     }
 
@@ -4707,6 +4739,9 @@ impl State {
     }
 
     fn process_terrain_worker_results(&mut self, player_chunk: (i32, i32)) {
+        let integrate_started = Instant::now();
+        let mut lighting_elapsed = Duration::ZERO;
+        let mut gpu_upload_elapsed = Duration::ZERO;
         while let Ok(result) = self.terrain_worker_rx.try_recv() {
             match result {
                 TerrainWorkerResult::Loaded(result) => {
@@ -4726,6 +4761,8 @@ impl State {
                         || (result.coord.1 - player_chunk.1).abs() > r
                         || self.chunk_manager.chunks.contains_key(&result.coord)
                     {
+                        self.perf_counters.stale_results =
+                            self.perf_counters.stale_results.saturating_add(1);
                         continue;
                     }
 
@@ -4769,6 +4806,7 @@ impl State {
 
                     let mut dirty = std::collections::HashSet::new();
                     self.check_and_break_unsupported_for_loaded_chunk(cx, cz, &mut dirty);
+                    let lighting_started = Instant::now();
                     for (lighting_cx, lighting_cz) in [
                         (cx, cz),
                         (cx - 1, cz),
@@ -4789,6 +4827,7 @@ impl State {
                             );
                         }
                     }
+                    lighting_elapsed += lighting_started.elapsed();
                     for neighbor in surrounding_chunk_coords(cx, cz) {
                         if let Some(mesh) = self.chunk_meshes.get_mut(&neighbor) {
                             mesh.mark_dirty();
@@ -4819,16 +4858,31 @@ impl State {
                         current_lifetime,
                         current_revision,
                     ) {
+                        self.perf_counters.stale_results =
+                            self.perf_counters.stale_results.saturating_add(1);
                         continue;
                     }
                     let Some(mesh) = self.chunk_meshes.get_mut(&result.coord) else {
                         continue;
                     };
+                    let upload_started = Instant::now();
                     mesh.levels = Some(Self::upload_mesh_bundle(&self.device, &result.bundle));
+                    gpu_upload_elapsed += upload_started.elapsed();
+                    self.perf_counters.upload_bytes_frame = self
+                        .perf_counters
+                        .upload_bytes_frame
+                        .saturating_add(mesh.gpu_bytes() as u64);
                     mesh.meshed_revision = result.revision;
                 }
             }
         }
+        self.perf_recorder.record(
+            crate::perf::ScopeId::TerrainResultIntegrate,
+            integrate_started.elapsed(),
+        );
+        self.perf_recorder
+            .record(crate::perf::ScopeId::Lighting, lighting_elapsed);
+        self.gpu_upload_time_frame += gpu_upload_elapsed;
     }
 
     fn schedule_chunk_load(&mut self, coord: (i32, i32)) {
@@ -5124,7 +5178,12 @@ impl State {
 
     pub fn update(&mut self, dt: f32) {
         self.network_time += f64::from(dt);
+        let network_started = Instant::now();
         self.drain_network_events();
+        self.perf_recorder.record(
+            crate::perf::ScopeId::NetworkDrain,
+            network_started.elapsed(),
+        );
         let target = self.network_time - REMOTE_INTERPOLATION_DELAY;
         for remote in self.remote_players.values() {
             let Some(snap) = remote.sample(target) else {
@@ -5151,6 +5210,9 @@ impl State {
         if !self.network_ready {
             return;
         }
+        let world_tick_started = Instant::now();
+        self.perf_counters.upload_bytes_frame = 0;
+        self.gpu_upload_time_frame = Duration::ZERO;
 
         self.debug_frame_time_accumulator += dt;
         self.debug_frame_samples += 1;
@@ -5165,6 +5227,7 @@ impl State {
             };
             self.debug_frame_time_accumulator = 0.0;
             self.debug_frame_samples = 0;
+            self.perf_summaries = self.perf_recorder.snapshot();
         }
 
         self.autosave_timer += dt;
@@ -5207,6 +5270,10 @@ impl State {
         }
         if self.player_state.is_dead {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
+            self.perf_recorder.record(
+                crate::perf::ScopeId::WorldTick,
+                world_tick_started.elapsed(),
+            );
             return;
         }
         if self.is_authoritative() {
@@ -5216,6 +5283,7 @@ impl State {
         if self.is_authoritative() {
             self.redstone_tick_timer += dt;
         }
+        let redstone_started = Instant::now();
         let mut redstone_steps = 0;
         while self.is_authoritative() && self.redstone_tick_timer >= 0.05 && redstone_steps < 4 {
             self.redstone_tick_timer -= 0.05;
@@ -5239,6 +5307,8 @@ impl State {
         if redstone_steps == 4 {
             self.redstone_tick_timer = self.redstone_tick_timer.min(0.05);
         }
+        self.perf_recorder
+            .record(crate::perf::ScopeId::Redstone, redstone_started.elapsed());
 
         self.brewing.update(dt);
         let effect_health = self.potion_effects.update(dt);
@@ -5272,7 +5342,12 @@ impl State {
         }
 
         // Advance lightweight particle simulation every frame.
+        let particles_started = Instant::now();
         self.particles.update(dt);
+        self.perf_recorder.record(
+            crate::perf::ScopeId::ParticlesUpdate,
+            particles_started.elapsed(),
+        );
 
         let can_sprint = sprint_allowed(self.game_mode, self.player_state.hunger);
 
@@ -5389,6 +5464,7 @@ impl State {
 
         let old_pos = self.player_physics.position;
 
+        let physics_started = Instant::now();
         let fall_damage = self.player_physics.update(
             dt,
             &self.chunk_manager,
@@ -5396,11 +5472,20 @@ impl State {
             self.keys.shift && !was_flying,
             self.is_sprinting,
         );
+        self.perf_recorder.record(
+            crate::perf::ScopeId::PlayerPhysics,
+            physics_started.elapsed(),
+        );
         if should_exit_creative_flight(was_flying, movement.y, self.player_physics.on_ground) {
             self.player_physics.set_flying(false);
             self.jump_taps.reset();
         }
+        let chunk_schedule_started = Instant::now();
         self.update_chunks();
+        self.perf_recorder.record(
+            crate::perf::ScopeId::ChunkSchedule,
+            chunk_schedule_started.elapsed(),
+        );
 
         // Landing sound
         let px = self.player_physics.position.x.floor() as i32;
@@ -5473,41 +5558,25 @@ impl State {
 
         self.was_on_ground = self.player_physics.on_ground;
 
-        // Torch smoke: periodically scan loaded chunks for torch blocks and
-        // spawn a slowly rising smoke particle above each one.
+        // Torch smoke: iterate the per-chunk torch index instead of scanning
+        // every voxel. Keep the legacy even-Y sampling so effect density is
+        // unchanged.
         self.torch_smoke_timer += dt;
         if self.torch_smoke_timer >= 0.4 {
             self.torch_smoke_timer = 0.0;
             let mut rng = self.total_time.to_bits().wrapping_add(0x9E3779B9);
-            let chunks: Vec<(i32, i32)> = self.chunk_manager.chunks.keys().copied().collect();
-            for (cx, cz) in chunks {
-                let chunk = match self.chunk_manager.chunks.get(&(cx, cz)) {
-                    Some(c) => c,
-                    None => continue,
-                };
-                // Scan a downsampled subset of columns for torches to keep the
-                // cost bounded per frame.
-                for bx in 0..16 {
-                    for bz in 0..16 {
-                        for by in (0..crate::world::CHUNK_HEIGHT).step_by(2) {
-                            if chunk.blocks[bx][by][bz] == BlockType::Torch {
-                                let wx = cx * crate::world::CHUNK_WIDTH as i32 + bx as i32;
-                                let wy = by as i32;
-                                let wz = cz * crate::world::CHUNK_DEPTH as i32 + bz as i32;
-                                let torch_pos = glam::Vec3::new(
-                                    wx as f32 + 0.5,
-                                    wy as f32 + 0.6,
-                                    wz as f32 + 0.5,
-                                );
-                                crate::particles::spawn_torch_smoke(
-                                    &mut self.particles,
-                                    torch_pos,
-                                    &mut rng,
-                                );
-                                rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-                            }
-                        }
+            for chunk in self.chunk_manager.chunks.values() {
+                for &encoded in chunk.torch_positions() {
+                    let (bx, by, bz) = Chunk::decode_torch_position(encoded);
+                    if by % 2 != 0 {
+                        continue;
                     }
+                    let wx = chunk.chunk_x * CHUNK_WIDTH as i32 + bx as i32;
+                    let wz = chunk.chunk_z * CHUNK_DEPTH as i32 + bz as i32;
+                    let torch_pos =
+                        glam::Vec3::new(wx as f32 + 0.5, by as f32 + 0.6, wz as f32 + 0.5);
+                    crate::particles::spawn_torch_smoke(&mut self.particles, torch_pos, &mut rng);
+                    rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
                 }
             }
         }
@@ -5740,6 +5809,7 @@ impl State {
 
         self.total_time += dt;
 
+        let hostile_mobs_started = Instant::now();
         // Peaceful worlds keep passive creatures and dropped items, but remove
         // hostile actors immediately and do not schedule new hostile spawns.
         if self.difficulty == Difficulty::Peaceful {
@@ -5801,8 +5871,13 @@ impl State {
         for (x, y, z) in exploded_blocks {
             self.broadcast_block_change(x, y, z, BlockType::Air);
         }
+        self.perf_recorder.record(
+            crate::perf::ScopeId::HostileMobs,
+            hostile_mobs_started.elapsed(),
+        );
 
         // Update passive mobs
+        let passive_mobs_started = Instant::now();
         let grazed_blocks = crate::passive_mob::update_passive_mobs(
             &mut self.entity_manager,
             &mut self.chunk_manager,
@@ -5828,6 +5903,10 @@ impl State {
                 self.total_time,
             );
         }
+        self.perf_recorder.record(
+            crate::perf::ScopeId::PassiveMobs,
+            passive_mobs_started.elapsed(),
+        );
 
         // Sync camera position to player position at eye height. In third
         // person the camera pulls back behind the player so the model is visible.
@@ -5940,6 +6019,10 @@ impl State {
             self.mining_target = None;
             self.mining_progress = 0.0;
         }
+        self.perf_recorder.record(
+            crate::perf::ScopeId::WorldTick,
+            world_tick_started.elapsed(),
+        );
     }
 
     fn update_weather_effects(&mut self, dt: f32, lightning_due: bool) {
@@ -8922,7 +9005,9 @@ impl State {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut gpu_upload_elapsed = Duration::ZERO;
 
+        let terrain_prepare_started = Instant::now();
         let view_projection = Mat4::from_cols_array_2d(&self.camera_uniform.view_proj);
         let frustum = Frustum::from_view_projection(view_projection);
         let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
@@ -8955,12 +9040,34 @@ impl State {
                 ));
             }
         }
+        let terrain_candidate_count = candidates.len();
         let draw_plan = build_draw_plan(candidates, &frustum, self.camera.position);
         self.submitted_terrain_triangles = draw_plan.submitted_triangle_count();
         self.submitted_terrain_draw_calls = draw_plan.draw_call_count();
         self.visible_chunk_count = draw_plan.visible_chunk_count();
+        self.perf_counters.loaded_chunks = self.chunk_manager.chunks.len() as u64;
+        self.perf_counters.visible_chunks = self.visible_chunk_count as u64;
+        self.perf_counters.terrain_candidates = terrain_candidate_count as u64;
+        self.perf_counters.terrain_triangles = self.submitted_terrain_triangles;
+        self.perf_counters.in_flight =
+            (self.chunk_load_in_flight.len() + self.chunk_mesh_in_flight.len()) as u64;
+        self.perf_counters.gpu_mesh_bytes = self
+            .chunk_meshes
+            .values()
+            .map(ChunkMesh::gpu_bytes)
+            .sum::<usize>() as u64;
+        self.perf_counters.gpu_buffer_objects = self
+            .chunk_meshes
+            .values()
+            .map(ChunkMesh::gpu_buffer_objects)
+            .sum::<usize>() as u64;
+        self.perf_recorder.record(
+            crate::perf::ScopeId::RenderPrepareTerrain,
+            terrain_prepare_started.elapsed(),
+        );
 
         // Compile mob meshes
+        let entity_prepare_started = Instant::now();
         let mut mob_vertices = Vec::new();
         let mut mob_indices = Vec::new();
         crate::mob_renderer::render_mobs(
@@ -8999,6 +9106,7 @@ impl State {
             let vert_limit = mob_vertices.len().min(8192);
             let ind_limit = mob_indices_len.min(12288);
             self.mob_num_indices = ind_limit as u32;
+            let upload_started = Instant::now();
             self.queue.write_buffer(
                 &self.mob_vertex_buffer,
                 0,
@@ -9009,7 +9117,14 @@ impl State {
                 0,
                 bytemuck::cast_slice(&mob_indices[..ind_limit]),
             );
+            gpu_upload_elapsed += upload_started.elapsed();
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    (vert_limit * std::mem::size_of::<Vertex>()
+                        + ind_limit * std::mem::size_of::<u32>()) as u64,
+                );
         }
+        let mut entity_prepare_elapsed = entity_prepare_started.elapsed();
 
         // Compile billboard particle quads into the dynamic particle buffers.
         // Camera right/up vectors are derived from yaw/pitch so billboards face
@@ -9022,6 +9137,7 @@ impl State {
             -self.camera.yaw.sin() * self.camera.pitch.sin(),
         )
         .normalize_or_zero();
+        let particle_prepare_started = Instant::now();
         self.particle_num_indices = self
             .particles
             .compile_mesh(
@@ -9033,8 +9149,23 @@ impl State {
                 &self.particle_index_buffer,
             )
             .unwrap_or(0);
+        let particle_prepare_elapsed = particle_prepare_started.elapsed();
+        self.perf_recorder.record(
+            crate::perf::ScopeId::RenderPrepareParticles,
+            particle_prepare_elapsed,
+        );
+        if self.particle_num_indices > 0 {
+            let particle_indices = self.particle_num_indices as usize;
+            let particle_vertices = particle_indices.saturating_mul(2) / 3;
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    (particle_vertices * std::mem::size_of::<Vertex>()
+                        + particle_indices * std::mem::size_of::<u32>()) as u64,
+                );
+        }
 
         // Compile first-person hand mesh in view space. Hidden in third-person.
+        let hand_prepare_started = Instant::now();
         if !self.third_person {
             let speed_2d = Vec3::new(
                 self.player_physics.velocity.x,
@@ -9060,6 +9191,7 @@ impl State {
                 let vert_limit = hand_vertices.len().min(1024);
                 let ind_limit = hand_indices_len.min(1536);
                 self.hand_num_indices = ind_limit as u32;
+                let upload_started = Instant::now();
                 self.queue.write_buffer(
                     &self.hand_vertex_buffer,
                     0,
@@ -9070,11 +9202,24 @@ impl State {
                     0,
                     bytemuck::cast_slice(&hand_indices[..ind_limit]),
                 );
+                gpu_upload_elapsed += upload_started.elapsed();
+                self.perf_counters.upload_bytes_frame =
+                    self.perf_counters.upload_bytes_frame.saturating_add(
+                        (vert_limit * std::mem::size_of::<Vertex>()
+                            + ind_limit * std::mem::size_of::<u32>())
+                            as u64,
+                    );
             }
         } else {
             self.hand_num_indices = 0;
         }
+        entity_prepare_elapsed += hand_prepare_started.elapsed();
+        self.perf_recorder.record(
+            crate::perf::ScopeId::RenderPrepareEntities,
+            entity_prepare_elapsed,
+        );
 
+        let ui_prepare_started = Instant::now();
         if self.is_saving {
             let mut ui_vertices = Vec::new();
             let mut ui_line_vertices = Vec::new();
@@ -11063,12 +11208,22 @@ impl State {
                     let rendered_triangles = rendered_indices / 3;
                     let rendered_vertices = rendered_indices * 2 / 3;
                     let render_str = format!(
-                        "RENDER: {} VERTICES / {} TRIANGLES",
-                        rendered_vertices, rendered_triangles
+                        "RENDER: {} VERTICES / {} TRIANGLES / {} DRAWS",
+                        rendered_vertices, rendered_triangles, self.perf_counters.draw_calls
                     );
                     let memory_str = format!(
                         "MEMORY EST: {:.1} MB",
                         self.estimated_debug_memory_bytes() as f64 / (1024.0 * 1024.0)
+                    );
+                    let gpu_str = format!(
+                        "GPU MESH: {:.1} MB / {} BUFFERS / UPLOAD: {:.1} KB",
+                        self.perf_counters.gpu_mesh_bytes as f64 / (1024.0 * 1024.0),
+                        self.perf_counters.gpu_buffer_objects,
+                        self.perf_counters.upload_bytes_frame as f64 / 1024.0
+                    );
+                    let worker_str = format!(
+                        "WORKERS: {} IN FLIGHT / {} STALE",
+                        self.perf_counters.in_flight, self.perf_counters.stale_results
                     );
 
                     let net_str = match &self.role {
@@ -11114,6 +11269,8 @@ impl State {
                         entities_str,
                         render_str,
                         memory_str,
+                        gpu_str,
+                        worker_str,
                         time_str,
                         net_str,
                     ];
@@ -11126,6 +11283,26 @@ impl State {
                             char_h,
                             spacing,
                             [1.0, 1.0, 1.0, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                    }
+                    for (scope_index, summary) in self.perf_summaries.iter().enumerate() {
+                        let perf_line = format!(
+                            "CPU {}: AVG {:.3} / P95 {:.3} / P99 {:.3} MS / N {}",
+                            summary.name.to_uppercase(),
+                            summary.average() as f64 / 1_000_000.0,
+                            summary.p95() as f64 / 1_000_000.0,
+                            summary.p99() as f64 / 1_000_000.0,
+                            summary.sample_count(),
+                        );
+                        add_string_lines(
+                            &perf_line,
+                            start_x,
+                            start_y - line_gap * (debug_lines.len() + scope_index) as f32,
+                            char_w,
+                            char_h,
+                            spacing,
+                            [0.82, 0.94, 1.0, 1.0],
                             &mut ui_line_vertices,
                         );
                     }
@@ -11323,6 +11500,35 @@ impl State {
             self.num_ui_textured_vertices = ui_textured_vert_len as u32;
         }
 
+        self.perf_recorder.record(
+            crate::perf::ScopeId::RenderPrepareUi,
+            ui_prepare_started.elapsed(),
+        );
+        self.gpu_upload_time_frame += gpu_upload_elapsed;
+        self.perf_recorder.record(
+            crate::perf::ScopeId::GpuUpload,
+            self.gpu_upload_time_frame,
+        );
+        let mut total_draw_calls = 1 + self.submitted_terrain_draw_calls as u64;
+        total_draw_calls += u64::from(self.mob_num_indices > 0);
+        total_draw_calls += u64::from(self.particle_num_indices > 0);
+        total_draw_calls += u64::from(
+            self.mining_target.is_some() && self.mining_progress > 0.0,
+        );
+        total_draw_calls += u64::from(
+            self.hand_num_indices > 0 && !self.third_person && !self.is_paused,
+        );
+        if self.is_paused {
+            total_draw_calls += 2;
+        } else {
+            total_draw_calls += u64::from(self.num_ui_vertices > 0);
+            total_draw_calls += u64::from(self.num_ui_textured_vertices > 0);
+            total_draw_calls += 1; // Crosshair.
+            total_draw_calls += u64::from(self.num_ui_line_vertices > 0);
+        }
+        self.perf_counters.draw_calls = total_draw_calls;
+
+        let render_encode_started = Instant::now();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -11494,8 +11700,16 @@ impl State {
             }
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        let command_buffer = encoder.finish();
+        self.queue.submit(std::iter::once(command_buffer));
+        self.perf_recorder.record(
+            crate::perf::ScopeId::RenderEncode,
+            render_encode_started.elapsed(),
+        );
+        let present_started = Instant::now();
         output.present();
+        self.perf_recorder
+            .record(crate::perf::ScopeId::Present, present_started.elapsed());
         Ok(())
     }
 

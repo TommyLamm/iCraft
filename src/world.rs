@@ -1938,6 +1938,9 @@ pub struct Chunk {
     /// Per-column max Y of non-air blocks (indexed as [x][z])
     pub heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]>,
     pub fluid_levels: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
+    /// Compact local coordinates of ordinary torch blocks. Each entry packs
+    /// x (4 bits), z (4 bits), and y (8 bits) into a u16.
+    pub(crate) torch_positions: Vec<u16>,
 }
 
 impl Chunk {
@@ -2421,6 +2424,7 @@ impl Chunk {
             vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
                 .try_into()
                 .unwrap();
+        let torch_positions = Self::build_torch_index(&blocks);
 
         Self {
             chunk_x,
@@ -2431,6 +2435,64 @@ impl Chunk {
             block_light,
             heightmap,
             fluid_levels,
+            torch_positions,
+        }
+    }
+
+    fn encode_torch_position(x: usize, y: usize, z: usize) -> u16 {
+        (x as u16) | ((z as u16) << 4) | ((y as u16) << 8)
+    }
+
+    /// Decodes a compact local torch index into `(x, y, z)` coordinates.
+    pub fn decode_torch_position(index: u16) -> (usize, usize, usize) {
+        (
+            (index & 0x0f) as usize,
+            (index >> 8) as usize,
+            ((index >> 4) & 0x0f) as usize,
+        )
+    }
+
+    fn build_torch_index(
+        blocks: &[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
+    ) -> Vec<u16> {
+        let mut positions = Vec::new();
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                for y in 0..CHUNK_HEIGHT {
+                    if blocks[x][y][z] == BlockType::Torch {
+                        positions.push(Self::encode_torch_position(x, y, z));
+                    }
+                }
+            }
+        }
+        positions
+    }
+
+    /// Returns the indexed local positions of ordinary torches.
+    pub fn torch_positions(&self) -> &[u16] {
+        &self.torch_positions
+    }
+
+    /// Rebuilds the torch index after bulk block mutations (generation/load).
+    pub fn rebuild_torch_index(&mut self) {
+        self.torch_positions = Self::build_torch_index(&self.blocks);
+    }
+
+    /// Sets a local block and keeps the torch index synchronized.
+    pub fn set_block_local(&mut self, x: usize, y: usize, z: usize, block: BlockType) {
+        let old = self.blocks[x][y][z];
+        if old == block {
+            return;
+        }
+        self.blocks[x][y][z] = block;
+        let encoded = Self::encode_torch_position(x, y, z);
+        if old == BlockType::Torch {
+            if let Some(index) = self.torch_positions.iter().position(|&p| p == encoded) {
+                self.torch_positions.swap_remove(index);
+            }
+        }
+        if block == BlockType::Torch && old != BlockType::Torch {
+            self.torch_positions.push(encoded);
         }
     }
 
@@ -4232,5 +4294,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn torch_index_tracks_local_mutations_without_duplicates() {
+        let mut chunk = Chunk::new(0, 0);
+        assert!(chunk.torch_positions().is_empty());
+        chunk.set_block_local(3, 40, 5, BlockType::Torch);
+        assert_eq!(chunk.torch_positions().len(), 1);
+        let encoded = chunk.torch_positions()[0];
+        assert_eq!(Chunk::decode_torch_position(encoded), (3, 40, 5));
+        chunk.set_block_local(3, 40, 5, BlockType::Torch);
+        assert_eq!(chunk.torch_positions().len(), 1);
+        chunk.set_block_local(3, 40, 5, BlockType::Stone);
+        assert!(chunk.torch_positions().is_empty());
     }
 }

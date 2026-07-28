@@ -396,6 +396,7 @@ impl ChunkSaveData {
                     }
                 }
             }
+            chunk.rebuild_torch_index();
         }
 
         if block_states.len() == 16 * 256 * 16 {
@@ -1340,6 +1341,7 @@ mod tests {
     fn block_states_roundtrip_and_restore() {
         let mut chunk = Chunk::new(1, 1);
         chunk.blocks[5][64][5] = BlockType::OakDoor;
+        chunk.blocks[7][65][7] = BlockType::Torch;
         chunk.set_block_state(5, 64, 5, 0b0000_1101); // facing East, top, right hinge
 
         let save_data = ChunkSaveData::from_chunk(&chunk);
@@ -1349,6 +1351,10 @@ mod tests {
         save_data.restore_to_chunk(&mut restored);
         assert_eq!(restored.get_block_state(5, 64, 5), 0b0000_1101);
         assert_eq!(restored.get_block(5, 64, 5), BlockType::OakDoor);
+        assert!(restored
+            .torch_positions()
+            .iter()
+            .any(|&position| Chunk::decode_torch_position(position) == (7, 65, 7)));
     }
 
     #[test]
@@ -1408,5 +1414,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
-
-

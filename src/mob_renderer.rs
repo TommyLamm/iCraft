@@ -1879,5 +1879,3 @@ mod tests {
         assert_eq!(row, 12.0);
     }
 }
-
-

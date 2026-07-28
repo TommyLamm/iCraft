@@ -21,6 +21,7 @@ mod mob_renderer;
 mod network;
 mod particles;
 mod passive_mob;
+mod perf;
 mod physics;
 mod player;
 mod redstone;

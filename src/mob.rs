@@ -1006,4 +1006,3 @@ mod tests {
         assert!(dropped_flesh.is_some());
     }
 }
-
