@@ -340,17 +340,16 @@ pub fn update_dimension_entities(
         }
     }
 
-    entities
-        .entities
-        .retain(|entity| !removed_projectiles.contains(&entity.id));
+    entities.retain(|entity| !removed_projectiles.contains(&entity.id));
     for (kind, position, velocity, damage) in pending_spawns {
         let id = entities.spawn(kind, position);
-        if let Some(projectile) = entities.entities.iter_mut().find(|entity| entity.id == id) {
+        if let Some(projectile) = entities.get_by_id_mut(id) {
             projectile.velocity = velocity;
             projectile.projectile_damage = damage;
             projectile.ai_timer = 0.0;
         }
     }
+    entities.update_spatial_indexes();
     events
 }
 
@@ -576,9 +575,7 @@ fn collect_deaths(entities: &mut EntityManager, events: &mut BossEvents) {
             _ => {}
         }
     }
-    entities
-        .entities
-        .retain(|entity| !dead_ids.contains(&entity.id));
+    entities.retain(|entity| !dead_ids.contains(&entity.id));
 }
 
 fn complete_dragon(dragon_id: u64, death_position: Vec3, events: &mut BossEvents) {
@@ -770,9 +767,8 @@ mod tests {
         );
 
         let dragon = entities
-            .entities
-            .iter()
-            .find(|entity| entity.entity_type == EntityType::EnderDragon)
+            .get_entities_by_type(EntityType::EnderDragon)
+            .next()
             .unwrap();
         assert_eq!(dragon.ai_phase, 1);
         assert!(dragon.health > 100.0);
@@ -819,9 +815,8 @@ mod tests {
             "Bosses emitted player damage events in Creative mode!"
         );
         let dragon = entities
-            .entities
-            .iter()
-            .find(|e| e.entity_type == EntityType::EnderDragon)
+            .get_entities_by_type(EntityType::EnderDragon)
+            .next()
             .unwrap();
         assert_eq!(dragon.ai_phase, 0, "Dragon left phase 0 in Creative mode!");
     }

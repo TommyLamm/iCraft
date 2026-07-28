@@ -4360,12 +4360,7 @@ impl State {
                 if self.local_player_id != Some(id) {
                     if let Some(remote) = self.remote_players.get_mut(&id) {
                         remote.username = username.clone();
-                        if let Some(entity) = self
-                            .entity_manager
-                            .entities
-                            .iter_mut()
-                            .find(|e| e.id == remote.entity_id)
-                        {
+                        if let Some(entity) = self.entity_manager.get_by_id_mut(remote.entity_id) {
                             entity.username = username.clone();
                         }
                     } else {
@@ -4373,12 +4368,7 @@ impl State {
                             crate::entity::EntityType::RemotePlayer,
                             self.player_physics.position,
                         );
-                        if let Some(entity) = self
-                            .entity_manager
-                            .entities
-                            .iter_mut()
-                            .find(|e| e.id == entity_id)
-                        {
+                        if let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) {
                             entity.player_id = id;
                             entity.username = username.clone();
                         }
@@ -4405,9 +4395,7 @@ impl State {
                         "[Network]".into(),
                         format!("{} left the game", remote.username),
                     );
-                    self.entity_manager
-                        .entities
-                        .retain(|e| e.id != remote.entity_id);
+                    self.entity_manager.remove_by_id(remote.entity_id);
                 } else {
                     push_chat_history(
                         &mut self.chat_messages,
@@ -4434,12 +4422,7 @@ impl State {
                     let entity_id = self
                         .entity_manager
                         .spawn(crate::entity::EntityType::RemotePlayer, Vec3::new(x, y, z));
-                    if let Some(entity) = self
-                        .entity_manager
-                        .entities
-                        .iter_mut()
-                        .find(|e| e.id == entity_id)
-                    {
+                    if let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) {
                         entity.player_id = id;
                     }
                     self.remote_players
@@ -4457,12 +4440,7 @@ impl State {
                         arrival,
                     );
 
-                    if let Some(entity) = self
-                        .entity_manager
-                        .entities
-                        .iter_mut()
-                        .find(|e| e.id == remote.entity_id)
-                    {
+                    if let Some(entity) = self.entity_manager.get_by_id_mut(remote.entity_id) {
                         let (snap_pos, snap_yaw, snap_pitch) =
                             if result == SnapshotPushResult::Snapped {
                                 (Vec3::new(x, y, z), yaw, pitch)
@@ -4481,12 +4459,7 @@ impl State {
             }
             NetworkInbound::PlayerAction { id, action } => {
                 if let Some(remote) = self.remote_players.get(&id) {
-                    if let Some(entity) = self
-                        .entity_manager
-                        .entities
-                        .iter_mut()
-                        .find(|e| e.id == remote.entity_id)
-                    {
+                    if let Some(entity) = self.entity_manager.get_by_id_mut(remote.entity_id) {
                         entity.action_cooldown = match action {
                             crate::network::protocol::Action::Place
                             | crate::network::protocol::Action::Break
@@ -5803,8 +5776,7 @@ impl State {
                 if entity.dropped_item.is_none() {
                     continue;
                 }
-                let d = entity.position.distance(player_pos);
-                if d < 1.5 {
+                if entity.position.distance_squared(player_pos) < 2.25 {
                     to_collect.push(i);
                 }
             }
@@ -5816,12 +5788,13 @@ impl State {
                         remaining -= 1;
                     }
                     if remaining == 0 {
-                        self.entity_manager.entities.remove(i);
+                        self.entity_manager.swap_remove(i);
                     } else {
                         self.entity_manager.entities[i].dropped_count = remaining;
                     }
                 }
             }
+            self.entity_manager.update_spatial_indexes();
         }
 
         // Void damage check
@@ -7653,29 +7626,19 @@ impl State {
             }
         }
         for (projectile_id, target_id, damage) in hits {
-            if let Some(target) = self
-                .entity_manager
-                .entities
-                .iter_mut()
-                .find(|entity| entity.id == target_id)
-            {
+            if let Some(target) = self.entity_manager.get_by_id_mut(target_id) {
                 if let Some(kill) = apply_player_projectile_damage(target, damage) {
                     player_kills.push(kill);
                 }
             }
-            if let Some(projectile) = self
-                .entity_manager
-                .entities
-                .iter_mut()
-                .find(|entity| entity.id == projectile_id)
-            {
+            if let Some(projectile) = self.entity_manager.get_by_id_mut(projectile_id) {
                 projectile.health = -1.0;
             }
         }
         for kill in player_kills {
             self.settle_standard_player_kill(kill, 0);
         }
-        self.entity_manager.entities.retain(|entity| {
+        self.entity_manager.retain(|entity| {
             entity.health >= 0.0
                 || matches!(
                     entity.entity_type,
@@ -7799,12 +7762,7 @@ impl State {
         let fire_level = enchantments.level_of(crate::enchantment::Enchantment::FireAspect(1));
 
         let (entity_type, remaining_health, killed, kill) = {
-            let Some(entity) = self
-                .entity_manager
-                .entities
-                .iter_mut()
-                .find(|entity| entity.id == entity_id)
-            else {
+            let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) else {
                 return false;
             };
             let MeleeImpact::Damaged { killed } =
@@ -7909,12 +7867,7 @@ impl State {
                         crate::entity::EntityType::SplashPotion,
                         self.camera.position + dir * 0.5,
                     );
-                    if let Some(projectile) = self
-                        .entity_manager
-                        .entities
-                        .iter_mut()
-                        .find(|entity| entity.id == id)
-                    {
+                    if let Some(projectile) = self.entity_manager.get_by_id_mut(id) {
                         projectile.velocity = dir * 12.0;
                         projectile.potion = Some(potion);
                         projectile.life_time = 3.0;
@@ -7954,12 +7907,7 @@ impl State {
                         crate::entity::EntityType::Arrow,
                         self.camera.position + dir * 0.6,
                     );
-                    if let Some(arrow) = self
-                        .entity_manager
-                        .entities
-                        .iter_mut()
-                        .find(|entity| entity.id == id)
-                    {
+                    if let Some(arrow) = self.entity_manager.get_by_id_mut(id) {
                         arrow.velocity = dir * 22.0;
                         arrow.friendly_projectile = true;
                         arrow.projectile_damage = 4.0
@@ -8027,12 +7975,7 @@ impl State {
             }
 
             if let Some((entity_id, _)) = closest_entity {
-                if let Some(entity) = self
-                    .entity_manager
-                    .entities
-                    .iter_mut()
-                    .find(|e| e.id == entity_id)
-                {
+                if let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) {
                     let held_stack = self.inventory.hotbar[self.inventory.selected].clone();
                     let held_item = held_stack
                         .map(|s| s.item)
@@ -11714,12 +11657,7 @@ impl State {
                 if remote.username.trim().is_empty() {
                     continue;
                 }
-                let Some(entity) = self
-                    .entity_manager
-                    .entities
-                    .iter()
-                    .find(|entity| entity.id == remote.entity_id)
-                else {
+                let Some(entity) = self.entity_manager.get_by_id(remote.entity_id) else {
                     continue;
                 };
                 if entity.position.distance_squared(self.camera.position) > 96.0 * 96.0 {

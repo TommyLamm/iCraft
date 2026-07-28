@@ -302,14 +302,14 @@ pub fn update_mobs(
     let player_pos = player_physics.position;
 
     // Despawn out-of-bounds mobs
-    entity_manager.entities.retain(|entity| {
+    entity_manager.retain(|entity| {
         if entity.entity_type == EntityType::RemotePlayer
             || entity.entity_type.is_projectile()
             || entity.entity_type.is_persistent()
         {
             true
         } else {
-            entity.position.distance(player_pos) <= 128.0
+            entity.position.distance_squared(player_pos) <= 128.0 * 128.0
         }
     });
 
@@ -408,8 +408,8 @@ pub fn update_mobs(
             || entity.entity_type == EntityType::Skeleton
             || entity.entity_type == EntityType::Creeper;
 
-        let dist = entity.position.distance(player_pos);
-        if is_hostile && dist <= 16.0 && !player_invisible && game_mode != GameMode::Creative {
+        let dist_sq = entity.position.distance_squared(player_pos);
+        if is_hostile && dist_sq <= 256.0 && !player_invisible && game_mode != GameMode::Creative {
             entity.target_player = true;
 
             // Turn towards player
@@ -442,7 +442,7 @@ pub fn update_mobs(
                     }
 
                     // Melee attack
-                    if dist <= 1.2 && entity.action_cooldown <= 0.0 {
+                    if dist_sq <= 1.44 && entity.action_cooldown <= 0.0 {
                         player_hit = Some(PlayerHitEvent::from_attacker(3.0, entity.position));
                         entity.action_cooldown = 1.0; // Cooldown
                     }
@@ -450,11 +450,11 @@ pub fn update_mobs(
                 EntityType::Skeleton => {
                     // Keep distance AI
                     let speed = 2.5;
-                    if dist < 8.0 {
+                    if dist_sq < 64.0 {
                         // Back away
                         entity.velocity.x = -walk_dir.x * speed;
                         entity.velocity.z = -walk_dir.z * speed;
-                    } else if dist > 12.0 {
+                    } else if dist_sq > 144.0 {
                         // Move closer
                         entity.velocity.x = walk_dir.x * speed;
                         entity.velocity.z = walk_dir.z * speed;
@@ -531,7 +531,7 @@ pub fn update_mobs(
                     }
 
                     // Ignite countdown
-                    if dist <= 2.0 {
+                    if dist_sq <= 4.0 {
                         if !entity.is_ignited {
                             println!("[Debug] Creeper: ssssssssss...");
                             entity.is_ignited = true;
@@ -545,7 +545,7 @@ pub fn update_mobs(
                                 listener_right,
                             );
                         }
-                    } else if dist > 3.5 {
+                    } else if dist_sq > 12.25 {
                         if entity.is_ignited {
                             println!("[Debug] Creeper: fuse defused.");
                             entity.is_ignited = false;
@@ -666,20 +666,19 @@ pub fn update_mobs(
     }
 
     // Clean up dead entities (health < 0 or health == 0)
-    entity_manager
-        .entities
-        .retain(should_retain_after_health_cleanup);
+    entity_manager.retain(should_retain_after_health_cleanup);
 
     // Spawn dropped items for dead entities
     for (item, pos) in items_to_drop {
         let id = entity_manager.spawn(EntityType::DroppedItem, pos);
-        if let Some(drop) = entity_manager.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(drop) = entity_manager.get_by_id_mut(id) {
             drop.dropped_item = Some(item);
             drop.velocity = Vec3::new(0.0, 2.0, 0.0);
             drop.pickup_cooldown = 0.5;
         }
     }
 
+    entity_manager.update_spatial_indexes();
     blocks_removed
 }
 
@@ -696,28 +695,14 @@ mod tests {
         let expired_arrow_id = entity_manager.spawn(EntityType::Arrow, Vec3::ZERO);
         let boss_owned_id = entity_manager.spawn(EntityType::Blaze, Vec3::ZERO);
 
+        entity_manager.get_by_id_mut(zombie_id).unwrap().health = 0.0;
         entity_manager
-            .entities
-            .iter_mut()
-            .find(|entity| entity.id == zombie_id)
-            .unwrap()
-            .health = 0.0;
-        entity_manager
-            .entities
-            .iter_mut()
-            .find(|entity| entity.id == expired_arrow_id)
+            .get_by_id_mut(expired_arrow_id)
             .unwrap()
             .health = -1.0;
-        entity_manager
-            .entities
-            .iter_mut()
-            .find(|entity| entity.id == boss_owned_id)
-            .unwrap()
-            .health = 0.0;
+        entity_manager.get_by_id_mut(boss_owned_id).unwrap().health = 0.0;
 
-        entity_manager
-            .entities
-            .retain(should_retain_after_health_cleanup);
+        entity_manager.retain(should_retain_after_health_cleanup);
 
         assert!(!entity_manager
             .entities
@@ -904,12 +889,7 @@ mod tests {
         let mut entity_manager = EntityManager::new();
         let remote_id = entity_manager.spawn(EntityType::RemotePlayer, Vec3::new(2.0, 1.0, 0.0));
         let expected_velocity = Vec3::new(4.0, 1.0, -2.0);
-        entity_manager
-            .entities
-            .iter_mut()
-            .find(|entity| entity.id == remote_id)
-            .unwrap()
-            .velocity = expected_velocity;
+        entity_manager.get_by_id_mut(remote_id).unwrap().velocity = expected_velocity;
 
         let mut chunk_manager = ChunkManager::new(1);
         let mut chunk_meshes = std::collections::HashMap::new();
@@ -933,11 +913,7 @@ mod tests {
             true,
         );
 
-        let remote = entity_manager
-            .entities
-            .iter()
-            .find(|entity| entity.id == remote_id)
-            .unwrap();
+        let remote = entity_manager.get_by_id(remote_id).unwrap();
         assert_eq!(remote.velocity, expected_velocity);
     }
 
@@ -963,11 +939,7 @@ mod tests {
     fn test_mob_burn_death_drops() {
         let mut entity_manager = EntityManager::new();
         let zombie_id = entity_manager.spawn(EntityType::Zombie, Vec3::new(0.0, 64.0, 0.0));
-        if let Some(zombie) = entity_manager
-            .entities
-            .iter_mut()
-            .find(|e| e.id == zombie_id)
-        {
+        if let Some(zombie) = entity_manager.get_by_id_mut(zombie_id) {
             zombie.health = 0.0;
             zombie.fire_aspect_timer = 1.0;
         }

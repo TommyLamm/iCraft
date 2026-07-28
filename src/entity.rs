@@ -2,7 +2,7 @@ use crate::chunk_manager::ChunkManager;
 use crate::physics::AABB;
 use glam::Vec3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EntityType {
     Zombie,
     Skeleton,
@@ -386,8 +386,44 @@ impl Entity {
     }
 }
 
+use std::collections::HashMap;
+
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct EntityScratch {
+    pub arrows_to_spawn: Vec<(Vec3, Vec3)>,
+    pub explosions: Vec<Vec3>,
+    pub blocks_removed: Vec<(i32, i32, i32)>,
+    pub items_to_drop: Vec<(crate::inventory::Item, Vec3)>,
+    pub death_sounds: Vec<Vec3>,
+    pub hearts_to_spawn: Vec<Vec3>,
+    pub baby_mobs_to_spawn: Vec<(EntityType, Vec3)>,
+    pub id_list: Vec<u64>,
+    pub usize_list: Vec<usize>,
+}
+
+impl EntityScratch {
+    #[allow(dead_code)]
+    pub fn clear(&mut self) {
+        self.arrows_to_spawn.clear();
+        self.explosions.clear();
+        self.blocks_removed.clear();
+        self.items_to_drop.clear();
+        self.death_sounds.clear();
+        self.hearts_to_spawn.clear();
+        self.baby_mobs_to_spawn.clear();
+        self.id_list.clear();
+        self.usize_list.clear();
+    }
+}
+
 pub struct EntityManager {
     pub entities: Vec<Entity>,
+    pub id_to_index: HashMap<u64, usize>,
+    pub type_buckets: HashMap<EntityType, Vec<u64>>,
+    pub spatial_buckets: HashMap<(i32, i32), Vec<u64>>,
+    #[allow(dead_code)]
+    pub scratch: EntityScratch,
     next_id: u64,
 }
 
@@ -395,36 +431,162 @@ impl EntityManager {
     pub fn new() -> Self {
         Self {
             entities: Vec::new(),
+            id_to_index: HashMap::new(),
+            type_buckets: HashMap::new(),
+            spatial_buckets: HashMap::new(),
+            scratch: EntityScratch::default(),
             next_id: 1,
         }
+    }
+
+    pub fn rebuild_indexes(&mut self) {
+        self.id_to_index.clear();
+        for vec in self.type_buckets.values_mut() {
+            vec.clear();
+        }
+        for vec in self.spatial_buckets.values_mut() {
+            vec.clear();
+        }
+
+        for (idx, entity) in self.entities.iter().enumerate() {
+            self.id_to_index.insert(entity.id, idx);
+            self.type_buckets
+                .entry(entity.entity_type)
+                .or_default()
+                .push(entity.id);
+            let chunk_pos = (
+                (entity.position.x / 16.0).floor() as i32,
+                (entity.position.z / 16.0).floor() as i32,
+            );
+            self.spatial_buckets
+                .entry(chunk_pos)
+                .or_default()
+                .push(entity.id);
+        }
+    }
+
+    pub fn update_spatial_indexes(&mut self) {
+        self.rebuild_indexes();
+    }
+
+    pub fn get_by_id(&self, id: u64) -> Option<&Entity> {
+        self.id_to_index
+            .get(&id)
+            .and_then(|&idx| self.entities.get(idx))
+    }
+
+    pub fn get_by_id_mut(&mut self, id: u64) -> Option<&mut Entity> {
+        if let Some(&idx) = self.id_to_index.get(&id) {
+            self.entities.get_mut(idx)
+        } else {
+            None
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn get_index_by_id(&self, id: u64) -> Option<usize> {
+        self.id_to_index.get(&id).copied()
     }
 
     pub fn spawn(&mut self, entity_type: EntityType, pos: Vec3) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.entities.push(Entity::new(id, entity_type, pos));
+        let idx = self.entities.len();
+        let entity = Entity::new(id, entity_type, pos);
+        self.entities.push(entity);
+        self.id_to_index.insert(id, idx);
+        self.type_buckets.entry(entity_type).or_default().push(id);
+        let chunk_pos = ((pos.x / 16.0).floor() as i32, (pos.z / 16.0).floor() as i32);
+        self.spatial_buckets.entry(chunk_pos).or_default().push(id);
         id
     }
 
     pub fn add_restored_entity(&mut self, data: &crate::save::EntitySaveData) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.entities.push(data.to_entity(id));
+        let idx = self.entities.len();
+        let entity = data.to_entity(id);
+        let entity_type = entity.entity_type;
+        let pos = entity.position;
+        self.entities.push(entity);
+        self.id_to_index.insert(id, idx);
+        self.type_buckets.entry(entity_type).or_default().push(id);
+        let chunk_pos = ((pos.x / 16.0).floor() as i32, (pos.z / 16.0).floor() as i32);
+        self.spatial_buckets.entry(chunk_pos).or_default().push(id);
         id
     }
 
+    pub fn swap_remove(&mut self, idx: usize) -> Entity {
+        let removed = self.entities.swap_remove(idx);
+        self.id_to_index.remove(&removed.id);
+        if idx < self.entities.len() {
+            let swapped_id = self.entities[idx].id;
+            self.id_to_index.insert(swapped_id, idx);
+        }
+        self.rebuild_indexes();
+        removed
+    }
+
+    pub fn remove_by_id(&mut self, id: u64) -> Option<Entity> {
+        if let Some(&idx) = self.id_to_index.get(&id) {
+            Some(self.swap_remove(idx))
+        } else {
+            None
+        }
+    }
+
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&Entity) -> bool,
+    {
+        self.entities.retain(&mut f);
+        self.rebuild_indexes();
+    }
+
+    #[allow(dead_code)]
+    pub fn clear(&mut self) {
+        self.entities.clear();
+        self.id_to_index.clear();
+        self.type_buckets.clear();
+        self.spatial_buckets.clear();
+    }
+
     pub fn count_passive(&self) -> usize {
-        self.entities
+        self.type_buckets
             .iter()
-            .filter(|e| e.entity_type.is_passive())
-            .count()
+            .filter(|(t, _)| t.is_passive())
+            .map(|(_, v)| v.len())
+            .sum()
     }
 
     pub fn count_hostile(&self) -> usize {
-        self.entities
+        self.type_buckets
             .iter()
-            .filter(|e| e.entity_type.is_hostile())
-            .count()
+            .filter(|(t, _)| t.is_hostile())
+            .map(|(_, v)| v.len())
+            .sum()
+    }
+
+    #[allow(dead_code)]
+    pub fn get_entities_by_type(&self, entity_type: EntityType) -> impl Iterator<Item = &Entity> {
+        self.type_buckets
+            .get(&entity_type)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.get_by_id(*id))
+    }
+
+    #[allow(dead_code)]
+    pub fn get_entities_in_chunk(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> impl Iterator<Item = &Entity> {
+        self.spatial_buckets
+            .get(&(chunk_x, chunk_z))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.get_by_id(*id))
     }
 }
 

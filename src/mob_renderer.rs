@@ -1867,11 +1867,7 @@ mod tests {
         );
 
         // Turn on fire
-        if let Some(zombie) = entity_manager
-            .entities
-            .iter_mut()
-            .find(|e| e.id == zombie_id)
-        {
+        if let Some(zombie) = entity_manager.get_by_id_mut(zombie_id) {
             zombie.fire_aspect_timer = 5.0;
         }
 

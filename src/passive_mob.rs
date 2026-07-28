@@ -14,11 +14,7 @@ fn store_or_drop_chicken_egg(
     }
 
     let id = entity_manager.spawn(EntityType::DroppedItem, position);
-    if let Some(egg) = entity_manager
-        .entities
-        .iter_mut()
-        .find(|entity| entity.id == id)
-    {
+    if let Some(egg) = entity_manager.get_by_id_mut(id) {
         egg.dropped_item = Some(Item::Egg);
         egg.velocity = Vec3::new(0.0, 1.0, 0.0);
         egg.pickup_cooldown = 0.5;
@@ -102,7 +98,7 @@ pub fn update_passive_mobs(
             if lay_timer <= 0.0 {
                 // Lay egg
                 entity_manager.entities[i].egg_lay_timer = 300.0 + (pos.x + pos.z) % 300.0;
-                if pos.distance(player_pos) <= 16.0 && game_mode == GameMode::Survival {
+                if pos.distance_squared(player_pos) <= 256.0 && game_mode == GameMode::Survival {
                     println!("[Debug] Chicken laid an egg in your pocket!");
                     store_or_drop_chicken_egg(inventory, entity_manager, pos);
                 }
@@ -160,16 +156,16 @@ pub fn update_passive_mobs(
         } else if breed_timer > 0.0 {
             // Seeking mating partner
             let mut nearest_partner = None;
-            let mut nearest_dist = 999.0;
+            let mut nearest_dist_sq = 999999.0;
             for j in 0..entity_len {
                 if i == j {
                     continue;
                 }
                 let partner = &entity_manager.entities[j];
                 if partner.entity_type == entity_type && partner.breeding_timer > 0.0 {
-                    let dist = pos.distance(partner.position);
-                    if dist < nearest_dist {
-                        nearest_dist = dist;
+                    let dist_sq = pos.distance_squared(partner.position);
+                    if dist_sq < nearest_dist_sq {
+                        nearest_dist_sq = dist_sq;
                         nearest_partner = Some(partner.position);
                     }
                 }
@@ -181,7 +177,7 @@ pub fn update_passive_mobs(
                 speed = 1.5;
 
                 // If touching, spawn offspring
-                if nearest_dist <= 1.2 && breed_cd <= 0.0 {
+                if nearest_dist_sq <= 1.44 && breed_cd <= 0.0 {
                     // Trigger mating
                     entity_manager.entities[i].breeding_timer = 0.0;
                     entity_manager.entities[i].breed_cooldown = 300.0;
@@ -191,7 +187,7 @@ pub fn update_passive_mobs(
                         if entity_manager.entities[j].entity_type == entity_type
                             && entity_manager.entities[j].breeding_timer > 0.0
                         {
-                            if entity_manager.entities[j].position.distance(pos) <= 1.5 {
+                            if entity_manager.entities[j].position.distance_squared(pos) <= 2.25 {
                                 entity_manager.entities[j].breeding_timer = 0.0;
                                 entity_manager.entities[j].breed_cooldown = 300.0;
                                 break;
@@ -209,20 +205,20 @@ pub fn update_passive_mobs(
         } else if age < 0.0 {
             // Follow nearest adult parent
             let mut nearest_adult = None;
-            let mut nearest_dist = 999.0;
+            let mut nearest_dist_sq = 999999.0;
             for j in 0..entity_len {
                 let adult = &entity_manager.entities[j];
                 if adult.entity_type == entity_type && adult.age >= 0.0 {
-                    let dist = pos.distance(adult.position);
-                    if dist < nearest_dist {
-                        nearest_dist = dist;
+                    let dist_sq = pos.distance_squared(adult.position);
+                    if dist_sq < nearest_dist_sq {
+                        nearest_dist_sq = dist_sq;
                         nearest_adult = Some(adult.position);
                     }
                 }
             }
 
             if let Some(adult_pos) = nearest_adult {
-                if nearest_dist > 2.0 {
+                if nearest_dist_sq > 4.0 {
                     let follow_dir = (adult_pos - pos).normalize_or_zero();
                     entity_manager.entities[i].yaw = f32::atan2(follow_dir.x, follow_dir.z);
                     speed = 1.5;
@@ -237,8 +233,8 @@ pub fn update_passive_mobs(
                 0.0,
                 entity_manager.entities[i].velocity.z,
             )
-            .length()
-                > 0.1;
+            .length_squared()
+                > 0.01;
             let seed = (pos.x.to_bits() ^ pos.z.to_bits()) as u32;
             if !is_moving && (time * 100.0) as u32 % 500 == 0 {
                 // Turn to a random angle
@@ -284,7 +280,7 @@ pub fn update_passive_mobs(
     // Spawn new offspring baby mobs
     for (et, baby_pos) in baby_mobs_to_spawn {
         let baby_id = entity_manager.spawn(et, baby_pos);
-        if let Some(baby) = entity_manager.entities.iter_mut().find(|e| e.id == baby_id) {
+        if let Some(baby) = entity_manager.get_by_id_mut(baby_id) {
             baby.age = -120.0; // Start as baby
         }
     }
@@ -292,7 +288,7 @@ pub fn update_passive_mobs(
     // Spawn heart particles
     for h_pos in hearts_to_spawn {
         let id = entity_manager.spawn(EntityType::HeartParticle, h_pos);
-        if let Some(p) = entity_manager.entities.iter_mut().find(|e| e.id == id) {
+        if let Some(p) = entity_manager.get_by_id_mut(id) {
             let time_seed = (h_pos.x.to_bits() ^ h_pos.z.to_bits()) as u32;
             let rand_x = ((time_seed % 100) as f32 - 50.0) / 100.0;
             let rand_z = (((time_seed / 100) % 100) as f32 - 50.0) / 100.0;
@@ -307,7 +303,7 @@ pub fn update_passive_mobs(
     }
 
     // Clean up dead/expired particles
-    entity_manager.entities.retain(|entity| {
+    entity_manager.retain(|entity| {
         if entity.entity_type == EntityType::HeartParticle {
             entity.life_time > 0.0
         } else {
@@ -322,6 +318,7 @@ pub fn update_passive_mobs(
         }
     }
 
+    entity_manager.update_spatial_indexes();
     block_changes
 }
 
