@@ -1274,18 +1274,27 @@ impl State {
         self.jump_taps.reset();
         let source = self.current_dimension;
         for chunk in self.chunk_manager.chunks.values() {
-            let redstone_metadata = self.redstone.collect_chunk_metadata(
-                &self.chunk_manager,
-                chunk.chunk_x,
-                chunk.chunk_z,
-            );
-            let data =
-                crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata);
-            let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
-                dimension: source,
-                data,
-            });
+            if self
+                .chunk_manager
+                .dirty_chunks
+                .is_dirty(chunk.chunk_x, chunk.chunk_z)
+            {
+                let redstone_metadata = self.redstone.collect_chunk_metadata(
+                    &self.chunk_manager,
+                    chunk.chunk_x,
+                    chunk.chunk_z,
+                );
+                let snapshot = crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
+                    source,
+                    chunk,
+                    redstone_metadata,
+                );
+                let _ = self
+                    .save_tx
+                    .send(crate::save::SaveCommand::SaveChunk { snapshot });
+            }
         }
+        self.chunk_manager.dirty_chunks.clear();
 
         let mut destination =
             crate::dimension::transform_position(source, target, self.player_physics.position);
@@ -2929,18 +2938,102 @@ impl State {
         let save_manager_clone = std::sync::Arc::clone(&save_manager);
         let save_depth_clone = std::sync::Arc::clone(&save_queue_depth);
         std::thread::spawn(move || {
-            while let Ok(cmd) = save_rx.recv() {
+            let mut pending_chunks: std::collections::HashMap<
+                (crate::dimension::Dimension, i32, i32),
+                crate::save::UncompressedChunkSnapshot,
+            > = std::collections::HashMap::new();
+            let mut pending_level_player: Option<(
+                crate::save::LevelData,
+                crate::save::PlayerData,
+            )> = None;
+
+            let flush_pending =
+                |chunks: &mut std::collections::HashMap<
+                    (crate::dimension::Dimension, i32, i32),
+                    crate::save::UncompressedChunkSnapshot,
+                >,
+                 level_player: &mut Option<(crate::save::LevelData, crate::save::PlayerData)>,
+                 mgr_arc: &std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>,
+                 depth_arc: &std::sync::Arc<std::sync::atomic::AtomicU32>| {
+                    if chunks.is_empty() && level_player.is_none() {
+                        return;
+                    }
+                    let mut count = 0usize;
+                    let mut mgr = mgr_arc.lock().unwrap();
+                    if let Some((level, player)) = level_player.take() {
+                        let _ = mgr.save_player_and_level(&level, &player);
+                        count += 1;
+                    }
+                    if !chunks.is_empty() {
+                        count += chunks.len();
+                        let snapshots: Vec<_> = chunks.drain().map(|(_, v)| v).collect();
+                        let mut by_dim: std::collections::HashMap<
+                            crate::dimension::Dimension,
+                            Vec<crate::save::UncompressedChunkSnapshot>,
+                        > = std::collections::HashMap::new();
+                        for snap in snapshots {
+                            by_dim.entry(snap.dimension).or_default().push(snap);
+                        }
+                        for (dim, dim_snaps) in by_dim {
+                            let _ = mgr.save_chunks_batch_in(dim, &dim_snaps);
+                        }
+                    }
+                    depth_arc.fetch_sub(count as u32, std::sync::atomic::Ordering::Relaxed);
+                };
+
+            loop {
+                let cmd = if pending_chunks.is_empty() && pending_level_player.is_none() {
+                    match save_rx.recv() {
+                        Ok(c) => c,
+                        Err(_) => break,
+                    }
+                } else {
+                    match save_rx.try_recv() {
+                        Ok(c) => c,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            flush_pending(
+                                &mut pending_chunks,
+                                &mut pending_level_player,
+                                &save_manager_clone,
+                                &save_depth_clone,
+                            );
+                            continue;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            flush_pending(
+                                &mut pending_chunks,
+                                &mut pending_level_player,
+                                &save_manager_clone,
+                                &save_depth_clone,
+                            );
+                            break;
+                        }
+                    }
+                };
+
                 match cmd {
-                    crate::save::SaveCommand::SaveChunk { dimension, data } => {
-                        let mut mgr = save_manager_clone.lock().unwrap();
-                        let _ = mgr.save_chunk_in(dimension, data.chunk_x, data.chunk_z, data);
+                    crate::save::SaveCommand::SaveChunk { snapshot } => {
+                        let key = (snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z);
+                        if pending_chunks.insert(key, snapshot).is_none() {
+                            save_depth_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     crate::save::SaveCommand::SaveLevelAndPlayer(level, player) => {
-                        let mgr = save_manager_clone.lock().unwrap();
-                        let _ = mgr.save_player_and_level(&level, &player);
+                        if pending_level_player.is_none() {
+                            save_depth_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        pending_level_player = Some((level, player));
+                    }
+                    crate::save::SaveCommand::Flush(ack_tx) => {
+                        flush_pending(
+                            &mut pending_chunks,
+                            &mut pending_level_player,
+                            &save_manager_clone,
+                            &save_depth_clone,
+                        );
+                        let _ = ack_tx.send(());
                     }
                 }
-                save_depth_clone.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
         });
 
@@ -4574,18 +4667,21 @@ impl State {
             .save_tx
             .send(crate::save::SaveCommand::SaveLevelAndPlayer(level, player));
 
-        for chunk in self.chunk_manager.chunks.values() {
-            let redstone_metadata = self.redstone.collect_chunk_metadata(
-                &self.chunk_manager,
-                chunk.chunk_x,
-                chunk.chunk_z,
-            );
-            let chunk_data =
-                crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata);
-            let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
-                dimension: self.current_dimension,
-                data: chunk_data,
-            });
+        let dirty_coords = self.chunk_manager.dirty_chunks.drain();
+        for (cx, cz) in dirty_coords {
+            if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
+                let redstone_metadata =
+                    self.redstone
+                        .collect_chunk_metadata(&self.chunk_manager, cx, cz);
+                let snapshot = crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
+                    self.current_dimension,
+                    chunk,
+                    redstone_metadata,
+                );
+                let _ = self
+                    .save_tx
+                    .send(crate::save::SaveCommand::SaveChunk { snapshot });
+            }
         }
         let _ = self
             .save_manager
@@ -4599,48 +4695,15 @@ impl State {
         if !self.is_authoritative() {
             return;
         }
-        let level = crate::save::LevelData {
-            seed: self.world_seed,
-            time: self.world_time.ticks,
-        };
-        let player = crate::save::PlayerData::from_state(
-            self.player_physics.position,
-            self.player_physics.persistent_velocity(),
-            self.camera.yaw,
-            self.camera.pitch,
-            &self.player_state,
-            self.game_mode,
-            &self.inventory,
-            self.advancement_manager.progress.clone(),
-        );
-
-        let mut mgr = self.save_manager.lock().unwrap();
-        let _ = mgr.save_player_and_level(&level, &player);
-
-        for chunk in self.chunk_manager.chunks.values() {
-            let redstone_metadata = self.redstone.collect_chunk_metadata(
-                &self.chunk_manager,
-                chunk.chunk_x,
-                chunk.chunk_z,
-            );
-            let chunk_data =
-                crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata);
-            let _ = mgr.save_chunk_in(
-                self.current_dimension,
-                chunk.chunk_x,
-                chunk.chunk_z,
-                chunk_data,
-            );
+        // Mark all currently loaded chunks dirty for complete save and quit flush
+        for &coord in self.chunk_manager.chunks.keys() {
+            self.chunk_manager.dirty_chunks.mark_dirty(coord.0, coord.1);
         }
-        let _ = mgr.save_current_dimension(self.current_dimension);
-        crate::menu::update_world_metadata(
-            &mgr.world_dir,
-            self.world_seed,
-            self.game_mode,
-            self.difficulty,
-        );
-        drop(mgr);
-        self.save_current_dimension_entities();
+        self.trigger_background_save();
+
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let _ = self.save_tx.send(crate::save::SaveCommand::Flush(ack_tx));
+        let _ = ack_rx.recv();
         println!("[Save] Synchronously saved world state.");
     }
 
@@ -5093,18 +5156,19 @@ impl State {
             }
             for &(cx, cz) in &to_unload {
                 if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                    if self.is_authoritative() {
+                    if self.is_authoritative() && self.chunk_manager.dirty_chunks.remove(cx, cz) {
                         let redstone_metadata =
                             self.redstone
                                 .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                        let chunk_data = crate::save::ChunkSaveData::from_chunk_with_redstone(
-                            &chunk,
-                            &redstone_metadata,
-                        );
-                        let _ = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
-                            dimension: self.current_dimension,
-                            data: chunk_data,
-                        });
+                        let snapshot =
+                            crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
+                                self.current_dimension,
+                                &chunk,
+                                redstone_metadata,
+                            );
+                        let _ = self
+                            .save_tx
+                            .send(crate::save::SaveCommand::SaveChunk { snapshot });
                     }
                 }
             }

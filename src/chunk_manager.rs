@@ -82,6 +82,7 @@ pub struct ChunkManager {
     pub chunks: HashMap<(i32, i32), Chunk>,
     pub render_distance: i32,
     pub dimension: crate::dimension::Dimension,
+    pub dirty_chunks: crate::save::DirtyChunkSet,
     water_updates: FluidUpdateQueue,
     lava_updates: FluidUpdateQueue,
 }
@@ -97,9 +98,14 @@ impl ChunkManager {
             chunks: HashMap::new(),
             render_distance,
             dimension,
+            dirty_chunks: crate::save::DirtyChunkSet::new(),
             water_updates: FluidUpdateQueue::new(),
             lava_updates: FluidUpdateQueue::new(),
         }
+    }
+
+    pub fn mark_dirty(&mut self, cx: i32, cz: i32) {
+        self.dirty_chunks.mark_dirty(cx, cz);
     }
 
     fn schedule_fluid_neighbors(&mut self, wx: i32, wy: i32, wz: i32) {
@@ -202,7 +208,10 @@ impl ChunkManager {
     pub fn set_block_state(&mut self, wx: i32, wy: i32, wz: i32, state: u8) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                chunk.block_states[bx][by][bz] = state;
+                if chunk.block_states[bx][by][bz] != state {
+                    chunk.block_states[bx][by][bz] = state;
+                    self.dirty_chunks.mark_dirty(cx, cz);
+                }
             }
         }
     }
@@ -220,6 +229,7 @@ impl ChunkManager {
                 }
                 chunk.update_heightmap(bx, bz);
                 self.schedule_fluid_neighbors(wx, wy, wz);
+                self.dirty_chunks.mark_dirty(cx, cz);
             }
         }
     }
@@ -243,7 +253,10 @@ impl ChunkManager {
     pub fn set_sky_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                chunk.sky_light[bx][by][bz] = val;
+                if chunk.sky_light[bx][by][bz] != val {
+                    chunk.sky_light[bx][by][bz] = val;
+                    self.dirty_chunks.mark_dirty(cx, cz);
+                }
             }
         }
     }
@@ -260,7 +273,10 @@ impl ChunkManager {
     pub fn set_block_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                chunk.block_light[bx][by][bz] = val;
+                if chunk.block_light[bx][by][bz] != val {
+                    chunk.block_light[bx][by][bz] = val;
+                    self.dirty_chunks.mark_dirty(cx, cz);
+                }
             }
         }
     }
@@ -282,6 +298,7 @@ impl ChunkManager {
                 if current != updated {
                     chunk.fluid_levels[bx][by][bz] = updated;
                     self.schedule_fluid_neighbors(wx, wy, wz);
+                    self.dirty_chunks.mark_dirty(cx, cz);
                 }
             }
         }
@@ -308,6 +325,7 @@ impl ChunkManager {
                 if current != updated {
                     chunk.fluid_levels[bx][by][bz] = updated;
                     self.schedule_fluid_neighbors(wx, wy, wz);
+                    self.dirty_chunks.mark_dirty(cx, cz);
                 }
             }
         }

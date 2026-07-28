@@ -4,7 +4,7 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -457,12 +457,151 @@ impl ChunkSaveData {
     }
 }
 
-pub enum SaveCommand {
-    SaveChunk {
+#[derive(Debug, Default)]
+pub struct DirtyChunkSet {
+    dirty: std::sync::Mutex<HashSet<(i32, i32)>>,
+}
+
+impl DirtyChunkSet {
+    pub fn new() -> Self {
+        Self {
+            dirty: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub fn mark_dirty(&self, cx: i32, cz: i32) {
+        if let Ok(mut set) = self.dirty.lock() {
+            set.insert((cx, cz));
+        }
+    }
+
+    pub fn is_dirty(&self, cx: i32, cz: i32) -> bool {
+        if let Ok(set) = self.dirty.lock() {
+            set.contains(&(cx, cz))
+        } else {
+            false
+        }
+    }
+
+    pub fn remove(&self, cx: i32, cz: i32) -> bool {
+        if let Ok(mut set) = self.dirty.lock() {
+            set.remove(&(cx, cz))
+        } else {
+            false
+        }
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut set) = self.dirty.lock() {
+            set.clear();
+        }
+    }
+
+    pub fn drain(&self) -> HashSet<(i32, i32)> {
+        if let Ok(mut set) = self.dirty.lock() {
+            std::mem::take(&mut *set)
+        } else {
+            HashSet::new()
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.dirty.lock().map(|set| set.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dirty.lock().map(|set| set.is_empty()).unwrap_or(true)
+    }
+}
+
+#[derive(Clone)]
+pub struct UncompressedChunkSnapshot {
+    pub dimension: crate::dimension::Dimension,
+    pub chunk_x: i32,
+    pub chunk_z: i32,
+    pub blocks: Box<
+        [[[BlockType; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+            crate::world::CHUNK_WIDTH],
+    >,
+    pub block_states: Box<
+        [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT]; crate::world::CHUNK_WIDTH],
+    >,
+    pub sky_light: Box<
+        [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT]; crate::world::CHUNK_WIDTH],
+    >,
+    pub block_light: Box<
+        [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT]; crate::world::CHUNK_WIDTH],
+    >,
+    pub fluid_levels: Box<
+        [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT]; crate::world::CHUNK_WIDTH],
+    >,
+    pub redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
+}
+
+impl UncompressedChunkSnapshot {
+    pub fn from_chunk_with_redstone(
         dimension: crate::dimension::Dimension,
-        data: ChunkSaveData,
-    },
+        chunk: &Chunk,
+        redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
+    ) -> Self {
+        Self {
+            dimension,
+            chunk_x: chunk.chunk_x,
+            chunk_z: chunk.chunk_z,
+            blocks: chunk.blocks.clone(),
+            block_states: chunk.block_states.clone(),
+            sky_light: chunk.sky_light.clone(),
+            block_light: chunk.block_light.clone(),
+            fluid_levels: chunk.fluid_levels.clone(),
+            redstone_metadata,
+        }
+    }
+
+    pub fn to_chunk_save_data(&self) -> ChunkSaveData {
+        let mut blocks = Vec::with_capacity(16 * 256 * 16);
+        let mut block_states_raw = Vec::with_capacity(16 * 256 * 16);
+        let mut sky_light = Vec::with_capacity(16 * 256 * 16);
+        let mut block_light = Vec::with_capacity(16 * 256 * 16);
+        let mut fluid_levels = Vec::with_capacity(16 * 256 * 16);
+
+        for x in 0..16 {
+            for y in 0..256 {
+                for z in 0..16 {
+                    blocks.push(self.blocks[x][y][z] as u8);
+                    block_states_raw.push(self.block_states[x][y][z]);
+                    sky_light.push(self.sky_light[x][y][z]);
+                    block_light.push(self.block_light[x][y][z]);
+                    fluid_levels.push(self.fluid_levels[x][y][z]);
+                }
+            }
+        }
+
+        let redstone_metadata_bytes = if self.redstone_metadata.is_empty() {
+            Vec::new()
+        } else {
+            bincode::serialize(&self.redstone_metadata)
+                .ok()
+                .and_then(|bytes| compress_bytes(&bytes).ok())
+                .unwrap_or_default()
+        };
+
+        ChunkSaveData {
+            chunk_x: self.chunk_x,
+            chunk_z: self.chunk_z,
+            blocks: compress_bytes(&blocks).unwrap_or_default(),
+            sky_light: compress_bytes(&sky_light).unwrap_or_default(),
+            block_light: compress_bytes(&block_light).unwrap_or_default(),
+            fluid_levels: compress_bytes(&fluid_levels).unwrap_or_default(),
+            redstone_metadata: redstone_metadata_bytes,
+            block_states: compress_bytes(&block_states_raw).unwrap_or_default(),
+        }
+    }
+}
+
+pub enum SaveCommand {
+    SaveChunk { snapshot: UncompressedChunkSnapshot },
     SaveLevelAndPlayer(LevelData, PlayerData),
+    Flush(std::sync::mpsc::Sender<()>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -474,6 +613,33 @@ pub struct RegionData {
 pub struct SaveManager {
     pub world_dir: PathBuf,
     region_cache: HashMap<(crate::dimension::Dimension, i32, i32), RegionData>,
+    lru_order: VecDeque<(crate::dimension::Dimension, i32, i32)>,
+}
+
+pub fn atomic_write<P: AsRef<Path>>(path: P, bytes: &[u8]) -> io::Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("tmp");
+    {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        if path.exists() {
+            let _ = fs::remove_file(path);
+            if let Err(e2) = fs::rename(&tmp_path, path) {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e2);
+            }
+        } else {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 pub fn compress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
@@ -539,6 +705,27 @@ impl SaveManager {
         Self {
             world_dir,
             region_cache: HashMap::new(),
+            lru_order: VecDeque::new(),
+        }
+    }
+
+    fn touch_region(&mut self, key: (crate::dimension::Dimension, i32, i32)) {
+        if let Some(pos) = self.lru_order.iter().position(|k| k == &key) {
+            self.lru_order.remove(pos);
+        }
+        self.lru_order.push_back(key);
+    }
+
+    fn evict_lru_regions(&mut self) {
+        const MAX_ENTRIES: usize = 16;
+        const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+        while self.region_cache.len() > MAX_ENTRIES || self.region_cache_bytes() > MAX_BYTES {
+            if let Some(lru_key) = self.lru_order.pop_front() {
+                self.region_cache.remove(&lru_key);
+            } else {
+                break;
+            }
         }
     }
 
@@ -587,12 +774,9 @@ impl SaveManager {
         entities: &[EntitySaveData],
     ) -> io::Result<()> {
         let path = self.entities_file_path(dimension);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let bytes =
             bincode::serialize(entities).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        fs::write(path, bytes)
+        atomic_write(path, &bytes)
     }
 
     pub fn load_entities_in(&self, dimension: crate::dimension::Dimension) -> Vec<EntitySaveData> {
@@ -638,12 +822,10 @@ impl SaveManager {
             }
         }
 
-        let region = self
-            .region_cache
-            .entry((dimension, rx, rz))
-            .or_insert_with(|| RegionData {
-                chunks: HashMap::new(),
-            });
+        self.touch_region((dimension, rx, rz));
+        self.evict_lru_regions();
+
+        let region = self.region_cache.get(&(dimension, rx, rz))?;
 
         if let Some(chunk_bytes) = region.chunks.get(&(lx, lz)) {
             deserialize_chunk_save_data(chunk_bytes)
@@ -654,6 +836,65 @@ impl SaveManager {
 
     pub fn save_chunk(&mut self, cx: i32, cz: i32, data: ChunkSaveData) -> io::Result<()> {
         self.save_chunk_in(crate::dimension::Dimension::Overworld, cx, cz, data)
+    }
+
+    pub fn save_chunks_batch_in(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        snapshots: &[UncompressedChunkSnapshot],
+    ) -> io::Result<()> {
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+        let mut by_region: HashMap<(i32, i32), Vec<&UncompressedChunkSnapshot>> = HashMap::new();
+        for snap in snapshots {
+            let rx = snap.chunk_x.div_euclid(32);
+            let rz = snap.chunk_z.div_euclid(32);
+            by_region.entry((rx, rz)).or_default().push(snap);
+        }
+
+        for ((rx, rz), snaps) in by_region {
+            let region_file = self
+                .region_dir(dimension)
+                .join(format!("r.{}.{}.bin", rx, rz));
+
+            if !self.region_cache.contains_key(&(dimension, rx, rz)) {
+                if region_file.exists() {
+                    if let Ok(mut file) = File::open(&region_file) {
+                        let mut bytes = Vec::new();
+                        if file.read_to_end(&mut bytes).is_ok() {
+                            if let Ok(region_data) = bincode::deserialize::<RegionData>(&bytes) {
+                                self.region_cache.insert((dimension, rx, rz), region_data);
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.touch_region((dimension, rx, rz));
+            let region = self
+                .region_cache
+                .entry((dimension, rx, rz))
+                .or_insert_with(|| RegionData {
+                    chunks: HashMap::new(),
+                });
+
+            for snap in snaps {
+                let lx = snap.chunk_x.rem_euclid(32) as u8;
+                let lz = snap.chunk_z.rem_euclid(32) as u8;
+                let data = snap.to_chunk_save_data();
+                let serialized_chunk = bincode::serialize(&data)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                region.chunks.insert((lx, lz), serialized_chunk);
+            }
+
+            let serialized_region =
+                bincode::serialize(region).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+            atomic_write(&region_file, &serialized_region)?;
+            self.evict_lru_regions();
+        }
+        Ok(())
     }
 
     pub fn save_chunk_in(
@@ -684,6 +925,7 @@ impl SaveManager {
             }
         }
 
+        self.touch_region((dimension, rx, rz));
         let region = self
             .region_cache
             .entry((dimension, rx, rz))
@@ -699,13 +941,13 @@ impl SaveManager {
         let serialized_region =
             bincode::serialize(region).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        let mut file = File::create(&region_file)?;
-        file.write_all(&serialized_region)?;
+        atomic_write(&region_file, &serialized_region)?;
+        self.evict_lru_regions();
         Ok(())
     }
 
     pub fn save_current_dimension(&self, dimension: crate::dimension::Dimension) -> io::Result<()> {
-        fs::write(self.world_dir.join("dimension.dat"), [dimension as u8])
+        atomic_write(self.world_dir.join("dimension.dat"), &[dimension as u8])
     }
 
     pub fn load_current_dimension(&self) -> crate::dimension::Dimension {
@@ -728,11 +970,8 @@ impl SaveManager {
         let serialized_player =
             serialize_player_data(player).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        let mut lf = File::create(&level_file)?;
-        lf.write_all(&serialized_level)?;
-
-        let mut pf = File::create(&player_file)?;
-        pf.write_all(&serialized_player)?;
+        atomic_write(&level_file, &serialized_level)?;
+        atomic_write(&player_file, &serialized_player)?;
 
         Ok(())
     }
