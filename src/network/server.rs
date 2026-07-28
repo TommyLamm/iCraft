@@ -130,11 +130,14 @@ pub enum HostToServer {
     Stop,
 }
 
+const MAX_CATCHUP_QUEUE_DEPTH: usize = 32;
+
 struct ClientSession {
     id: PlayerId,
     username: String,
     out_tx: mpsc::Sender<Packet>,
     pose_mailbox: Arc<PoseMailbox>,
+    catchup_mailbox: Arc<CatchupMailbox>,
     cancel_tx: watch::Sender<bool>,
 }
 
@@ -165,6 +168,43 @@ impl PoseMailbox {
             _ => PlayerId::MAX,
         });
         packets
+    }
+}
+
+#[derive(Default)]
+struct CatchupMailbox {
+    pending: Mutex<HashMap<(i32, i32), Packet>>,
+    notify: Notify,
+}
+
+impl CatchupMailbox {
+    async fn replace(&self, cx: i32, cz: i32, packet: Packet) -> bool {
+        let mut guard = self.pending.lock().await;
+        if guard.len() >= MAX_CATCHUP_QUEUE_DEPTH && !guard.contains_key(&(cx, cz)) {
+            return false;
+        }
+        guard.insert((cx, cz), packet);
+        self.notify.notify_one();
+        true
+    }
+
+    async fn drain(&self) -> Vec<Packet> {
+        let mut packets: Vec<_> = self
+            .pending
+            .lock()
+            .await
+            .drain()
+            .map(|(_, packet)| packet)
+            .collect();
+        packets.sort_by_key(|packet| match packet {
+            Packet::ChunkData { cx, cz, .. } => (*cx, *cz),
+            _ => (0, 0),
+        });
+        packets
+    }
+
+    async fn len(&self) -> usize {
+        self.pending.lock().await.len()
     }
 }
 
@@ -362,9 +402,11 @@ impl NetworkServer {
         let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
         let roster_tx = out_tx.clone();
         let pose_mailbox = Arc::new(PoseMailbox::default());
+        let catchup_mailbox = Arc::new(CatchupMailbox::default());
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let (mut reader, mut writer) = connection.into_split();
         let writer_pose_mailbox = Arc::clone(&pose_mailbox);
+        let writer_catchup_mailbox = Arc::clone(&catchup_mailbox);
         let mut send_task = tokio::spawn(async move {
             let mut keepalive =
                 time::interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
@@ -393,6 +435,14 @@ impl NetworkServer {
                             }
                         }
                     }
+                    _ = writer_catchup_mailbox.notify.notified() => {
+                        for packet in writer_catchup_mailbox.drain().await {
+                            if writer.send(&packet).await.is_err() {
+                                eprintln!("[NetworkServer] Send task: writer send failed for catchup chunk");
+                                return;
+                            }
+                        }
+                    }
                     _ = keepalive.tick() => {
                         if writer.send(&Packet::Keepalive {
                             protocol_version: PROTOCOL_VERSION,
@@ -412,6 +462,7 @@ impl NetworkServer {
                 username: handshake.clone(),
                 out_tx,
                 pose_mailbox: Arc::clone(&pose_mailbox),
+                catchup_mailbox: Arc::clone(&catchup_mailbox),
                 cancel_tx,
             },
         );
@@ -580,6 +631,27 @@ impl NetworkServer {
     }
 
     async fn handle_host_command(&self, command: HostToServer) {
+        if let HostToServer::SendChunk {
+            cx,
+            cz,
+            blocks,
+            block_states,
+            to,
+        } = command
+        {
+            let packet = Packet::ChunkData {
+                protocol_version: PROTOCOL_VERSION,
+                cx,
+                cz,
+                blocks,
+                block_states,
+            };
+            if let Some(session) = self.sessions.lock().await.get(&to) {
+                session.catchup_mailbox.replace(cx, cz, packet).await;
+            }
+            return;
+        }
+
         if let HostToServer::BroadcastPlayerPosition {
             id,
             sequence,
@@ -655,22 +727,6 @@ impl NetworkServer {
                 },
                 Some(to),
             ),
-            HostToServer::SendChunk {
-                cx,
-                cz,
-                blocks,
-                block_states,
-                to,
-            } => (
-                Packet::ChunkData {
-                    protocol_version: PROTOCOL_VERSION,
-                    cx,
-                    cz,
-                    blocks,
-                    block_states,
-                },
-                Some(to),
-            ),
             HostToServer::BroadcastTimeSync {
                 ticks,
                 weather,
@@ -732,6 +788,9 @@ impl NetworkServer {
                 },
                 None,
             ),
+            HostToServer::SendChunk { .. } => {
+                unreachable!("chunk data payloads use catchup_mailbox")
+            }
             HostToServer::Stop => return,
         };
 
@@ -1187,6 +1246,7 @@ mod tests {
                 username: "alex".into(),
                 out_tx,
                 pose_mailbox: Arc::clone(&pose_mailbox),
+                catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
             },
         );
@@ -1249,6 +1309,7 @@ mod tests {
                 username: "observer".into(),
                 out_tx: observer_out_tx,
                 pose_mailbox: Arc::new(PoseMailbox::default()),
+                catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
             },
         );
@@ -1261,6 +1322,7 @@ mod tests {
                 username: "departing".into(),
                 out_tx: departing_out_tx,
                 pose_mailbox: Arc::new(PoseMailbox::default()),
+                catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
             },
         );
@@ -1329,6 +1391,7 @@ mod tests {
                 username: "slow-client".into(),
                 out_tx,
                 pose_mailbox: Arc::new(PoseMailbox::default()),
+                catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx,
             },
         );
@@ -1837,5 +1900,32 @@ mod tests {
         assert!(res_b.is_err());
 
         server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn catchup_mailbox_is_latest_wins_and_bounded() {
+        let mailbox = CatchupMailbox::default();
+        let p1 = Packet::ChunkData {
+            protocol_version: PROTOCOL_VERSION,
+            cx: 1,
+            cz: 2,
+            blocks: vec![1],
+            block_states: vec![],
+        };
+        let p2 = Packet::ChunkData {
+            protocol_version: PROTOCOL_VERSION,
+            cx: 1,
+            cz: 2,
+            blocks: vec![2],
+            block_states: vec![],
+        };
+        assert!(mailbox.replace(1, 2, p1).await);
+        assert_eq!(mailbox.len().await, 1);
+        assert!(mailbox.replace(1, 2, p2.clone()).await);
+        assert_eq!(mailbox.len().await, 1);
+
+        let drained = mailbox.drain().await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0], p2);
     }
 }

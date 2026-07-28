@@ -1,31 +1,27 @@
 # 任務 4：多人 catch-up streaming
 
 > 對應計畫：`14_performance_optimization.md` Phase 1.4
-> 狀態：⏳ 待實作
+> 狀態：✅ 已完成
 > 前置：任務 1（基線）、建議任務 2（streaming queue 基礎）
 > 目標：PlayerJoin 不同步壓縮全部 mutated chunks，改為背景建立 payload 並分幀傳送，消除加入期間的主線程長幀。
 > Commit 訊息：`perf(network): stream join catch-up with bounded backpressure`
 
 ## 相關程式碼位置（已核對）
 
-- `src/state.rs:3963` - `send_mutated_chunks_to`：目前 PlayerJoin 時同步壓縮全部 Chunk。
-- `src/state.rs:4005` - `drain_network_events`：network event drain。
-- `src/state.rs:6657` - `set_block_and_broadcast`：host 權威變更與廣播。
-- `src/network/server.rs` - `NetworkServer`、`ServerToHost`、`HostToServer`。
-- `src/network/client.rs` - `NetworkClient`、`ClientToGame`、`GameToClient`。
-- `src/network/protocol.rs` - `Packet`、`PlayerId`、`PROTOCOL_VERSION`。
+- `src/state.rs` - `schedule_player_catchup`, `process_join_catchups`, `drain_network_events`
+- `src/network/server.rs` - `CatchupMailbox`, `ClientSession`, `handle_host_command`
 
 ## 子任務清單
 
 ### 4.1 PlayerJoin 不同步壓縮
-- [ ] 檔案：`src/state.rs`、`src/network/server.rs`
+- [x] 檔案：`src/state.rs`、`src/network/server.rs`
 - 步驟：
-  1. `send_mutated_chunks_to` 不在 PlayerJoin callback 同步壓縮全部 Chunk。
+  1. `schedule_player_catchup` 不在 PlayerJoin callback 同步壓縮全部 Chunk。
   2. 改為標記需要傳送的 Chunk 清單，交給背景建立 payload。
 - 驗收：PlayerJoin 不造成主線程長幀。
 
 ### 4.2 背景建立 payload 並分幀傳送
-- [ ] 檔案：`src/network/server.rs`、`src/state.rs`
+- [x] 檔案：`src/network/server.rs`、`src/state.rs`
 - 步驟：
   1. 背景建立 payload，依玩家距離與 Chunk revision 排序。
   2. 分幀發送，每幀只傳送有限數量的 payload。
@@ -33,22 +29,22 @@
 - 驗收：加入期間主線程 `network_drain` p95 在預算內。
 
 ### 4.3 可靠佇列保留順序
-- [ ] 檔案：`src/network/server.rs`
+- [x] 檔案：`src/network/server.rs`
 - 步驟：
   1. 可靠 block/chat/control queue 保留順序，不被 catch-up payload 干擾。
-  2. catch-up payload 使用獨立 bounded queue，與可靠佇列分離。
+  2. catch-up payload 使用獨立 bounded queue (`CatchupMailbox`)，與可靠佇列分離。
 - 驗收：block change 與 chat 順序正確；catch-up 不阻塞可靠封包。
 
 ### 4.4 drain_network_events 預算
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
-  1. `drain_network_events`（`state.rs:4005`）加入時間預算與事件數預算。
+  1. `drain_network_events` 加入時間預算與事件數預算。
   2. pose/time 可 coalesce（latest-wins），達到預算時保留未處理的 coalescable 事件。
   3. authoritative block result 不可丟失，必須在預算內處理完畢或提高預算。
 - 驗收：大量網路事件不造成單幀 `network_drain` 超過預算。
 
 ### 4.5 大型 payload bounded backpressure
-- [ ] 檔案：`src/network/server.rs`、`src/network/client.rs`
+- [x] 檔案：`src/network/server.rs`、`src/network/client.rs`
 - 步驟：
   1. 大型 payload 使用 bounded backpressure，避免主線程和 Tokio thread 同時累積無上限 Vec。
   2. queue 滿時暫停 payload 建立，等待 consumer 消化。
@@ -56,13 +52,13 @@
 
 ## 驗收條件
 
-- [ ] PlayerJoin 不在主線程同步壓縮全部 Chunk。
-- [ ] catch-up payload 依距離排序且分幀傳送。
-- [ ] 可靠 block/chat/control 封包順序不受影響。
-- [ ] `drain_network_events` 有時間/事件數預算。
-- [ ] queue 深度有上限。
-- [ ] 加入期間主線程 p95 改善（與任務 1 基線比較）。
-- [ ] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
+- [x] PlayerJoin 不在主線程同步壓縮全部 Chunk。
+- [x] catch-up payload 依距離排序且分幀傳送。
+- [x] 可靠 block/chat/control 封包順序不受影響。
+- [x] `drain_network_events` 有時間/事件數預算。
+- [x] queue 深度有上限。
+- [x] 加入期間主線程 p95 改善（與任務 1 基線比較）。
+- [x] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
 
 ## 風險與回退
 
