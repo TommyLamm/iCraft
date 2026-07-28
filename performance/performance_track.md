@@ -18,8 +18,8 @@
 | 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Complete | - | - |
 | 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Complete | - | - |
 | 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過 |
-| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Pending | - | - |
-| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Pending | - | - |
+| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過 |
+| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過（368 passed） |
 | 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Pending | - | - |
 | 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Pending | - | - |
 | 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Pending | - | - |

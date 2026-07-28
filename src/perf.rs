@@ -236,6 +236,9 @@ fn percentile(values: &[u64], percent: usize) -> u64 {
 pub struct PerfCounters {
     pub cpu_mesh_bytes: u64,
     pub gpu_mesh_bytes: u64,
+    pub gpu_arena_used_bytes: u64,
+    pub gpu_arena_wasted_bytes: u64,
+    pub gpu_arena_regions: u64,
     pub gpu_buffer_objects: u64,
     pub loaded_chunks: u64,
     pub visible_chunks: u64,

@@ -442,6 +442,137 @@ pub fn select_lod_for_bounds(
     )
 }
 
+/// Number of chunks along one axis in a single render region (8x8 chunks).
+pub const REGION_SIZE_CHUNKS: i32 = 8;
+
+/// Maps a chunk coordinate (cx, cz) to its 8x8 render region coordinate.
+pub fn chunk_to_region_coord(cx: i32, cz: i32) -> (i32, i32) {
+    (
+        cx.div_euclid(REGION_SIZE_CHUNKS),
+        cz.div_euclid(REGION_SIZE_CHUNKS),
+    )
+}
+
+/// Handle representing a suballocation range inside a render region's GPU buffers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RegionAllocationHandle {
+    pub vertex_offset: u32,
+    pub index_offset: u32,
+    pub num_vertices: u32,
+    pub num_indices: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreeListBlock {
+    pub offset: u32,
+    pub count: u32,
+}
+
+/// A free-list allocator managing suballocation ranges inside a contiguous buffer capacity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreeList {
+    capacity: u32,
+    free_blocks: Vec<FreeListBlock>,
+}
+
+impl FreeList {
+    pub fn new(capacity: u32) -> Self {
+        Self {
+            capacity,
+            free_blocks: if capacity > 0 {
+                vec![FreeListBlock {
+                    offset: 0,
+                    count: capacity,
+                }]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    pub fn used_units(&self) -> u32 {
+        self.capacity - self.free_units()
+    }
+
+    pub fn free_units(&self) -> u32 {
+        self.free_blocks.iter().map(|b| b.count).sum()
+    }
+
+    pub fn largest_free_block(&self) -> u32 {
+        self.free_blocks.iter().map(|b| b.count).max().unwrap_or(0)
+    }
+
+    pub fn free_blocks(&self) -> &[FreeListBlock] {
+        &self.free_blocks
+    }
+
+    pub fn allocate(&mut self, count: u32) -> Option<u32> {
+        if count == 0 {
+            return Some(0);
+        }
+        for i in 0..self.free_blocks.len() {
+            if self.free_blocks[i].count >= count {
+                let offset = self.free_blocks[i].offset;
+                self.free_blocks[i].offset += count;
+                self.free_blocks[i].count -= count;
+                if self.free_blocks[i].count == 0 {
+                    self.free_blocks.remove(i);
+                }
+                return Some(offset);
+            }
+        }
+        None
+    }
+
+    pub fn deallocate(&mut self, offset: u32, count: u32) {
+        if count == 0 {
+            return;
+        }
+        let insert_idx = self
+            .free_blocks
+            .binary_search_by_key(&offset, |b| b.offset)
+            .unwrap_or_else(|idx| idx);
+
+        self.free_blocks
+            .insert(insert_idx, FreeListBlock { offset, count });
+
+        let mut i = 0;
+        while i + 1 < self.free_blocks.len() {
+            if self.free_blocks[i].offset + self.free_blocks[i].count
+                == self.free_blocks[i + 1].offset
+            {
+                self.free_blocks[i].count += self.free_blocks[i + 1].count;
+                self.free_blocks.remove(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub fn resize(&mut self, new_capacity: u32) {
+        if new_capacity <= self.capacity {
+            return;
+        }
+        let added = new_capacity - self.capacity;
+        let old_capacity = self.capacity;
+        self.capacity = new_capacity;
+        self.deallocate(old_capacity, added);
+    }
+
+    pub fn fragmentation(&self) -> f32 {
+        let total_free = self.free_units();
+        if total_free == 0 {
+            return 0.0;
+        }
+        let largest = self.largest_free_block();
+        (total_free - largest) as f32 / total_free as f32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,5 +833,43 @@ mod tests {
             select_lod_for_bounds(Vec3::new(-100.0, 128.0, 8.0), tall_bounds, thresholds),
             LodLevel::L2
         );
+    }
+
+    #[test]
+    fn chunk_to_region_coord_maps_8x8_blocks() {
+        assert_eq!(chunk_to_region_coord(0, 0), (0, 0));
+        assert_eq!(chunk_to_region_coord(7, 7), (0, 0));
+        assert_eq!(chunk_to_region_coord(8, 7), (1, 0));
+        assert_eq!(chunk_to_region_coord(-1, -1), (-1, -1));
+        assert_eq!(chunk_to_region_coord(-8, -8), (-1, -1));
+        assert_eq!(chunk_to_region_coord(-9, -9), (-2, -2));
+    }
+
+    #[test]
+    fn freelist_allocates_deallocates_and_coalesces() {
+        let mut list = FreeList::new(100);
+        assert_eq!(list.capacity(), 100);
+        assert_eq!(list.free_units(), 100);
+
+        let a1 = list.allocate(30).unwrap();
+        assert_eq!(a1, 0);
+        assert_eq!(list.free_units(), 70);
+
+        let a2 = list.allocate(40).unwrap();
+        assert_eq!(a2, 30);
+        assert_eq!(list.free_units(), 30);
+
+        list.deallocate(a1, 30);
+        assert_eq!(list.free_units(), 60);
+
+        let a3 = list.allocate(20).unwrap();
+        assert_eq!(a3, 0);
+        assert_eq!(list.free_units(), 40);
+
+        list.deallocate(a2, 40);
+        list.deallocate(a3, 20);
+        assert_eq!(list.free_units(), 100);
+        assert_eq!(list.largest_free_block(), 100);
+        assert_eq!(list.fragmentation(), 0.0);
     }
 }

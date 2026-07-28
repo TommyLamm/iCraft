@@ -388,7 +388,7 @@ fn vs_instanced_mob(
     
     let world_pos = v3 + instance.pivot;
     
-    let col = (instance.tex_cols_packed >> (instance.face_idx * 4u)) & 0xFu;
+    let col = (instance.tex_cols_packed >> (model.face_idx * 4u)) & 0xFu;
     let u = (model.uv.x + f32(col)) * 0.0625;
     let v = (model.uv.y + f32(instance.tex_row)) * 0.0625;
     

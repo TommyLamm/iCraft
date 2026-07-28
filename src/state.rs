@@ -755,7 +755,7 @@ mod remote_sync_tests {
             &wgpu::DeviceDescriptor {
                 label: Some("Terrain shader validation device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: wgpu::Limits::default(),
             },
             None,
         )) else {
@@ -779,12 +779,229 @@ const MAX_CHUNK_LOAD_JOBS: usize = 2;
 const MAX_CHUNK_MESH_JOBS: usize = 4;
 
 pub struct GpuMeshLayer {
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    num_indices: u32,
-    bounds: Option<MeshBounds>,
-    vertex_bytes: usize,
-    index_bytes: usize,
+    pub handle: Option<crate::chunk_render::RegionAllocationHandle>,
+    pub bounds: Option<MeshBounds>,
+    pub vertex_bytes: usize,
+    pub index_bytes: usize,
+}
+
+impl GpuMeshLayer {
+    pub fn empty() -> Self {
+        Self {
+            handle: None,
+            bounds: None,
+            vertex_bytes: 0,
+            index_bytes: 0,
+        }
+    }
+
+    pub fn num_indices(&self) -> u32 {
+        self.handle.map_or(0, |h| h.num_indices)
+    }
+}
+
+pub struct RenderRegion {
+    pub region_coord: (i32, i32),
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub vertex_capacity: u32,
+    pub index_capacity: u32,
+    pub vertex_freelist: crate::chunk_render::FreeList,
+    pub index_freelist: crate::chunk_render::FreeList,
+    pub active_chunks: usize,
+}
+
+impl RenderRegion {
+    pub const INITIAL_VERTEX_CAPACITY: u32 = 65_536;
+    pub const INITIAL_INDEX_CAPACITY: u32 = 98_304;
+
+    pub fn new(device: &wgpu::Device, region_coord: (i32, i32)) -> Self {
+        let vertex_bytes = (Self::INITIAL_VERTEX_CAPACITY as usize)
+            * std::mem::size_of::<crate::chunk_render::TerrainVertex>();
+        let index_bytes = (Self::INITIAL_INDEX_CAPACITY as usize) * std::mem::size_of::<u32>();
+
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Render Region Vertex Buffer"),
+            size: vertex_bytes as u64,
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Render Region Index Buffer"),
+            size: index_bytes as u64,
+            usage: wgpu::BufferUsages::INDEX
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            region_coord,
+            vertex_buffer,
+            index_buffer,
+            vertex_capacity: Self::INITIAL_VERTEX_CAPACITY,
+            index_capacity: Self::INITIAL_INDEX_CAPACITY,
+            vertex_freelist: crate::chunk_render::FreeList::new(Self::INITIAL_VERTEX_CAPACITY),
+            index_freelist: crate::chunk_render::FreeList::new(Self::INITIAL_INDEX_CAPACITY),
+            active_chunks: 0,
+        }
+    }
+
+    pub fn deallocate_handle(&mut self, handle: &crate::chunk_render::RegionAllocationHandle) {
+        self.vertex_freelist
+            .deallocate(handle.vertex_offset, handle.num_vertices);
+        self.index_freelist
+            .deallocate(handle.index_offset, handle.num_indices);
+    }
+
+    pub fn committed_bytes(&self) -> usize {
+        (self.vertex_capacity as usize) * std::mem::size_of::<crate::chunk_render::TerrainVertex>()
+            + (self.index_capacity as usize) * std::mem::size_of::<u32>()
+    }
+
+    pub fn used_bytes(&self) -> usize {
+        (self.vertex_freelist.used_units() as usize)
+            * std::mem::size_of::<crate::chunk_render::TerrainVertex>()
+            + (self.index_freelist.used_units() as usize) * std::mem::size_of::<u32>()
+    }
+
+    pub fn ensure_capacity(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        needed_vertices: u32,
+        needed_indices: u32,
+    ) {
+        let mut grow_v = false;
+        let mut new_v_cap = self.vertex_capacity;
+        if self.vertex_freelist.largest_free_block() < needed_vertices {
+            grow_v = true;
+            new_v_cap = (self.vertex_capacity + needed_vertices).max(self.vertex_capacity * 2);
+        }
+
+        let mut grow_i = false;
+        let mut new_i_cap = self.index_capacity;
+        if self.index_freelist.largest_free_block() < needed_indices {
+            grow_i = true;
+            new_i_cap = (self.index_capacity + needed_indices).max(self.index_capacity * 2);
+        }
+
+        if grow_v {
+            let vertex_bytes =
+                (new_v_cap as usize) * std::mem::size_of::<crate::chunk_render::TerrainVertex>();
+            let new_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Render Region Vertex Buffer (Resized)"),
+                size: vertex_bytes as u64,
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+
+            if self.vertex_freelist.used_units() > 0 {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Resize Region Vertex Buffer Encoder"),
+                });
+                let copy_size = (self.vertex_capacity as usize
+                    * std::mem::size_of::<crate::chunk_render::TerrainVertex>())
+                    as u64;
+                encoder.copy_buffer_to_buffer(
+                    &self.vertex_buffer,
+                    0,
+                    &new_vertex_buffer,
+                    0,
+                    copy_size,
+                );
+                queue.submit(Some(encoder.finish()));
+            }
+
+            self.vertex_buffer = new_vertex_buffer;
+            self.vertex_freelist.resize(new_v_cap);
+            self.vertex_capacity = new_v_cap;
+        }
+
+        if grow_i {
+            let index_bytes = (new_i_cap as usize) * std::mem::size_of::<u32>();
+            let new_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Render Region Index Buffer (Resized)"),
+                size: index_bytes as u64,
+                usage: wgpu::BufferUsages::INDEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+
+            if self.index_freelist.used_units() > 0 {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Resize Region Index Buffer Encoder"),
+                });
+                let copy_size = (self.index_capacity as usize * std::mem::size_of::<u32>()) as u64;
+                encoder.copy_buffer_to_buffer(
+                    &self.index_buffer,
+                    0,
+                    &new_index_buffer,
+                    0,
+                    copy_size,
+                );
+                queue.submit(Some(encoder.finish()));
+            }
+
+            self.index_buffer = new_index_buffer;
+            self.index_freelist.resize(new_i_cap);
+            self.index_capacity = new_i_cap;
+        }
+    }
+
+    pub fn upload_mesh_layer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &crate::chunk_render::ChunkMeshData,
+    ) -> GpuMeshLayer {
+        if data.is_empty() {
+            return GpuMeshLayer::empty();
+        }
+
+        let num_vertices = data.vertices.len() as u32;
+        let num_indices = data.indices.len() as u32;
+
+        self.ensure_capacity(device, queue, num_vertices, num_indices);
+
+        let vertex_offset = self
+            .vertex_freelist
+            .allocate(num_vertices)
+            .expect("vertex freelist allocation failed");
+        let index_offset = self
+            .index_freelist
+            .allocate(num_indices)
+            .expect("index freelist allocation failed");
+
+        let vertex_bytes = bytemuck::cast_slice(&data.vertices);
+        let index_bytes = bytemuck::cast_slice(&data.indices);
+
+        let v_byte_offset = (vertex_offset as usize
+            * std::mem::size_of::<crate::chunk_render::TerrainVertex>())
+            as u64;
+        let i_byte_offset = (index_offset as usize * std::mem::size_of::<u32>()) as u64;
+
+        queue.write_buffer(&self.vertex_buffer, v_byte_offset, vertex_bytes);
+        queue.write_buffer(&self.index_buffer, i_byte_offset, index_bytes);
+
+        GpuMeshLayer {
+            handle: Some(crate::chunk_render::RegionAllocationHandle {
+                vertex_offset,
+                index_offset,
+                num_vertices,
+                num_indices,
+            }),
+            bounds: data.bounds,
+            vertex_bytes: vertex_bytes.len(),
+            index_bytes: index_bytes.len(),
+        }
+    }
 }
 
 pub struct GpuMeshLevel {
@@ -829,7 +1046,9 @@ impl ChunkMesh {
             .as_ref()
             .into_iter()
             .flatten()
-            .map(|level| level.opaque.num_indices as usize + level.transparent.num_indices as usize)
+            .map(|level| {
+                level.opaque.num_indices() as usize + level.transparent.num_indices() as usize
+            })
             .sum()
     }
 
@@ -848,7 +1067,7 @@ impl ChunkMesh {
     }
 
     fn gpu_buffer_objects(&self) -> usize {
-        self.levels.as_ref().map_or(0, |_| 12)
+        0
     }
 }
 
@@ -2537,6 +2756,7 @@ pub struct State {
     depth_view: wgpu::TextureView,
     pub chunk_manager: ChunkManager,
     pub chunk_meshes: std::collections::HashMap<(i32, i32), ChunkMesh>,
+    pub render_regions: std::collections::HashMap<(i32, i32), RenderRegion>,
     terrain_worker_tx: std::sync::mpsc::Sender<TerrainWorkerResult>,
     terrain_worker_rx: std::sync::mpsc::Receiver<TerrainWorkerResult>,
     pending_worker_results: std::collections::VecDeque<TerrainWorkerResult>,
@@ -4127,6 +4347,7 @@ impl State {
             depth_view,
             chunk_manager,
             chunk_meshes,
+            render_regions: std::collections::HashMap::new(),
             terrain_worker_tx,
             terrain_worker_rx,
             pending_worker_results: std::collections::VecDeque::new(),
@@ -4557,6 +4778,7 @@ impl State {
                 self.chunk_mesh_in_flight.clear();
                 self.chunk_lifetimes.clear();
                 self.chunk_meshes.clear();
+                self.render_regions.clear();
                 self.scheduler.clear();
                 self.pending_worker_results.clear();
                 self.pending_chunk_payloads.clear();
@@ -5137,59 +5359,63 @@ impl State {
         }
     }
 
-    fn create_gpu_mesh_layer(
-        device: &wgpu::Device,
-        data: &crate::chunk_render::ChunkMeshData,
-        label: &'static str,
-    ) -> GpuMeshLayer {
-        const EMPTY_BYTES: [u8; 4] = [0; 4];
-        let vertex_bytes = bytemuck::cast_slice(&data.vertices);
-        let index_bytes = bytemuck::cast_slice(&data.indices);
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: if vertex_bytes.is_empty() {
-                &EMPTY_BYTES
-            } else {
-                vertex_bytes
-            },
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: if index_bytes.is_empty() {
-                &EMPTY_BYTES
-            } else {
-                index_bytes
-            },
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        GpuMeshLayer {
-            vertex_buffer,
-            index_buffer,
-            num_indices: data.indices.len() as u32,
-            bounds: data.bounds,
-            vertex_bytes: vertex_bytes.len(),
-            index_bytes: index_bytes.len(),
+    fn free_chunk_mesh_allocations(
+        render_regions: &mut std::collections::HashMap<(i32, i32), RenderRegion>,
+        coord: (i32, i32),
+        mesh: &ChunkMesh,
+    ) {
+        let r_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
+        if let Some(region) = render_regions.get_mut(&r_coord) {
+            if let Some(levels) = &mesh.levels {
+                for level in levels {
+                    if let Some(h) = &level.opaque.handle {
+                        region.deallocate_handle(h);
+                    }
+                    if let Some(h) = &level.transparent.handle {
+                        region.deallocate_handle(h);
+                    }
+                }
+            }
+            region.active_chunks = region.active_chunks.saturating_sub(1);
+            if region.active_chunks == 0 {
+                render_regions.remove(&r_coord);
+            }
         }
     }
 
     fn upload_mesh_bundle(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        render_regions: &mut std::collections::HashMap<(i32, i32), RenderRegion>,
+        coord: (i32, i32),
+        existing_mesh: &mut ChunkMesh,
         bundle: &crate::chunk_render::ChunkMeshBundle,
     ) -> [GpuMeshLevel; 3] {
+        let r_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
+        let is_new = existing_mesh.levels.is_none();
+        let region = render_regions
+            .entry(r_coord)
+            .or_insert_with(|| RenderRegion::new(device, r_coord));
+        if is_new {
+            region.active_chunks += 1;
+        }
+
+        if let Some(levels) = &existing_mesh.levels {
+            for level in levels {
+                if let Some(h) = &level.opaque.handle {
+                    region.deallocate_handle(h);
+                }
+                if let Some(h) = &level.transparent.handle {
+                    region.deallocate_handle(h);
+                }
+            }
+        }
+
         std::array::from_fn(|index| {
             let data = &bundle.levels[index];
             GpuMeshLevel {
-                opaque: Self::create_gpu_mesh_layer(
-                    device,
-                    &data.opaque,
-                    "Chunk Opaque Mesh Buffer",
-                ),
-                transparent: Self::create_gpu_mesh_layer(
-                    device,
-                    &data.transparent,
-                    "Chunk Translucent Mesh Buffer",
-                ),
+                opaque: region.upload_mesh_layer(device, queue, &data.opaque),
+                transparent: region.upload_mesh_layer(device, queue, &data.transparent),
                 bounds: data.bounds(),
             }
         })
@@ -5355,7 +5581,15 @@ impl State {
                         continue;
                     };
                     let upload_started = Instant::now();
-                    mesh.levels = Some(Self::upload_mesh_bundle(&self.device, &result.bundle));
+                    let levels = Self::upload_mesh_bundle(
+                        &self.device,
+                        &self.queue,
+                        &mut self.render_regions,
+                        result.coord,
+                        mesh,
+                        &result.bundle,
+                    );
+                    mesh.levels = Some(levels);
                     let upload_elapsed = upload_started.elapsed();
                     gpu_upload_elapsed += upload_elapsed;
                     let gpu_bytes = mesh.gpu_bytes() as u64;
@@ -5516,9 +5750,17 @@ impl State {
                 self.chunk_mesh_in_flight.remove(&(cx, cz));
                 self.scheduler.remove_dirty(&(cx, cz));
             }
-            self.chunk_meshes.retain(|&(cx, cz), _| {
-                (cx - px).abs() <= hysteresis_r && (cz - pz).abs() <= hysteresis_r
-            });
+            let mut removed_mesh_keys = Vec::new();
+            for &(cx, cz) in self.chunk_meshes.keys() {
+                if (cx - px).abs() > hysteresis_r || (cz - pz).abs() > hysteresis_r {
+                    removed_mesh_keys.push((cx, cz));
+                }
+            }
+            for coord in removed_mesh_keys {
+                if let Some(mesh) = self.chunk_meshes.remove(&coord) {
+                    Self::free_chunk_mesh_allocations(&mut self.render_regions, coord, &mesh);
+                }
+            }
             self.chunk_load_in_flight.retain(|&(cx, cz), _| {
                 (cx - px).abs() <= hysteresis_r && (cz - pz).abs() <= hysteresis_r
             });
@@ -9561,7 +9803,7 @@ impl State {
                 self.terrain_candidates_scratch.push(DrawCandidate::new(
                     coord,
                     bounds,
-                    level.opaque.num_indices,
+                    level.opaque.num_indices(),
                     DrawLayer::Opaque,
                     lod,
                     distance_sq,
@@ -9571,7 +9813,7 @@ impl State {
                 self.terrain_candidates_scratch.push(DrawCandidate::new(
                     coord,
                     bounds,
-                    level.transparent.num_indices,
+                    level.transparent.num_indices(),
                     DrawLayer::Transparent,
                     lod,
                     distance_sq,
@@ -9591,16 +9833,18 @@ impl State {
         self.perf_counters.terrain_triangles = self.submitted_terrain_triangles;
         self.perf_counters.in_flight =
             (self.chunk_load_in_flight.len() + self.chunk_mesh_in_flight.len()) as u64;
-        self.perf_counters.gpu_mesh_bytes = self
-            .chunk_meshes
+        let total_committed: usize = self
+            .render_regions
             .values()
-            .map(ChunkMesh::gpu_bytes)
-            .sum::<usize>() as u64;
-        self.perf_counters.gpu_buffer_objects = self
-            .chunk_meshes
-            .values()
-            .map(ChunkMesh::gpu_buffer_objects)
-            .sum::<usize>() as u64;
+            .map(|r| r.committed_bytes())
+            .sum();
+        let total_used: usize = self.render_regions.values().map(|r| r.used_bytes()).sum();
+        self.perf_counters.gpu_mesh_bytes = total_committed as u64;
+        self.perf_counters.gpu_arena_used_bytes = total_used as u64;
+        self.perf_counters.gpu_arena_wasted_bytes =
+            total_committed.saturating_sub(total_used) as u64;
+        self.perf_counters.gpu_arena_regions = self.render_regions.len() as u64;
+        self.perf_counters.gpu_buffer_objects = (self.render_regions.len() * 2) as u64;
         self.perf_recorder.record(
             crate::perf::ScopeId::RenderPrepareTerrain,
             terrain_prepare_started.elapsed(),
@@ -12265,6 +12509,7 @@ impl State {
             }
             render_pass.set_pipeline(&self.terrain_render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            let mut bound_region: Option<(i32, i32)> = None;
             for candidate in &draw_plan.opaque {
                 let lod = candidate.lod;
                 let Some(layer) = self
@@ -12275,10 +12520,30 @@ impl State {
                 else {
                     continue;
                 };
-                render_pass.set_vertex_buffer(0, layer.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(layer.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..layer.num_indices, 0, 0..1);
+                let Some(handle) = layer.handle else {
+                    continue;
+                };
+                let region_coord = crate::chunk_render::chunk_to_region_coord(
+                    candidate.chunk_coord.0,
+                    candidate.chunk_coord.1,
+                );
+                if bound_region != Some(region_coord) {
+                    if let Some(region) = self.render_regions.get(&region_coord) {
+                        render_pass.set_vertex_buffer(0, region.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(
+                            region.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        bound_region = Some(region_coord);
+                    } else {
+                        continue;
+                    }
+                }
+                render_pass.draw_indexed(
+                    handle.index_offset..(handle.index_offset + handle.num_indices),
+                    handle.vertex_offset as i32,
+                    0..1,
+                );
             }
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
@@ -12333,6 +12598,7 @@ impl State {
                 }
             }
             render_pass.set_pipeline(&self.terrain_trans_pipeline);
+            let mut bound_region: Option<(i32, i32)> = None;
             for candidate in &draw_plan.transparent {
                 let lod = candidate.lod;
                 let Some(layer) = self
@@ -12343,10 +12609,30 @@ impl State {
                 else {
                     continue;
                 };
-                render_pass.set_vertex_buffer(0, layer.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(layer.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..layer.num_indices, 0, 0..1);
+                let Some(handle) = layer.handle else {
+                    continue;
+                };
+                let region_coord = crate::chunk_render::chunk_to_region_coord(
+                    candidate.chunk_coord.0,
+                    candidate.chunk_coord.1,
+                );
+                if bound_region != Some(region_coord) {
+                    if let Some(region) = self.render_regions.get(&region_coord) {
+                        render_pass.set_vertex_buffer(0, region.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(
+                            region.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        bound_region = Some(region_coord);
+                    } else {
+                        continue;
+                    }
+                }
+                render_pass.draw_indexed(
+                    handle.index_offset..(handle.index_offset + handle.num_indices),
+                    handle.vertex_offset as i32,
+                    0..1,
+                );
             }
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
