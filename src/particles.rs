@@ -4,9 +4,116 @@ use wgpu::{Buffer, Device, Queue};
 use crate::state::Vertex;
 use crate::world::BlockType;
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ParticlePrototypeVertex {
+    pub position: [f32; 2],
+    pub uv_corner: [f32; 2],
+}
+
+impl ParticlePrototypeVertex {
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+            ],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ParticleInstance {
+    pub position: [f32; 3],
+    pub size: f32,
+    pub stretch_y: f32,
+    pub age: f32,
+    pub lifetime: f32,
+    pub fade_scale: u32,
+    pub tex_coords: [f32; 4],
+}
+
+impl ParticleInstance {
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 20,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 24,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 28,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
+pub fn build_particle_prototype() -> (Vec<ParticlePrototypeVertex>, Vec<u32>) {
+    let vertices = vec![
+        ParticlePrototypeVertex {
+            position: [-0.5, -0.5],
+            uv_corner: [0.0, 1.0],
+        },
+        ParticlePrototypeVertex {
+            position: [0.5, -0.5],
+            uv_corner: [1.0, 1.0],
+        },
+        ParticlePrototypeVertex {
+            position: [0.5, 0.5],
+            uv_corner: [1.0, 0.0],
+        },
+        ParticlePrototypeVertex {
+            position: [-0.5, 0.5],
+            uv_corner: [0.0, 0.0],
+        },
+    ];
+    let indices = vec![0, 1, 2, 0, 2, 3];
+    (vertices, indices)
+}
+
 /// Maximum number of particles the system can render in a single frame.
-/// 4096 vertices would only cover 1024 quads; we instead size buffers to hold
-/// up to `MAX_PARTICLES` quads (4 verts + 6 indices each).
 pub const MAX_PARTICLES: usize = 4096;
 
 /// A single billboard particle. UVs map into the 256x256 texture atlas.
@@ -89,6 +196,27 @@ impl ParticleSystem {
             p.age += dt;
             p.age < p.lifetime
         });
+    }
+
+    pub fn compile_instances(&self, instances: &mut Vec<ParticleInstance>) -> u32 {
+        instances.clear();
+        if self.particles.is_empty() {
+            return 0;
+        }
+        let count = self.particles.len().min(MAX_PARTICLES);
+        instances.reserve(count);
+        for p in &self.particles[..count] {
+            instances.push(ParticleInstance {
+                position: p.position.into(),
+                size: p.size,
+                stretch_y: p.stretch_y,
+                age: p.age,
+                lifetime: p.lifetime,
+                fade_scale: if p.fade_scale { 1 } else { 0 },
+                tex_coords: p.tex_coords,
+            });
+        }
+        count as u32
     }
 
     /// Build billboard quads facing the camera and write them into the

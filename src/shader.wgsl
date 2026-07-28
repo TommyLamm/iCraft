@@ -345,4 +345,109 @@ fn fs_textured_ui(in: TexturedUiVertexOutput) -> @location(0) vec4<f32> {
     return tex_color * in.color;
 }
 
+struct MobPrototypeVertex {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) face_idx: u32,
+};
+
+struct MobInstanceInput {
+    @location(3) pivot: vec3<f32>,
+    @location(4) size: vec3<f32>,
+    @location(5) offset: vec3<f32>,
+    @location(6) rot_yaw: f32,
+    @location(7) rot_pitch: f32,
+    @location(8) tex_cols_packed: u32,
+    @location(9) tex_row: u32,
+    @location(10) light_level: f32,
+};
+
+@vertex
+fn vs_instanced_mob(
+    model: MobPrototypeVertex,
+    instance: MobInstanceInput,
+) -> VertexOutput {
+    let local_pos = model.position * instance.size + instance.offset;
+    
+    let cos_pitch = cos(instance.rot_pitch);
+    let sin_pitch = sin(instance.rot_pitch);
+    let cos_yaw = cos(instance.rot_yaw);
+    let sin_yaw = sin(instance.rot_yaw);
+    
+    let v2 = vec3<f32>(
+        local_pos.x,
+        local_pos.y * cos_pitch - local_pos.z * sin_pitch,
+        local_pos.y * sin_pitch + local_pos.z * cos_pitch,
+    );
+    
+    let v3 = vec3<f32>(
+        v2.x * cos_yaw + v2.z * sin_yaw,
+        v2.y,
+        -v2.x * sin_yaw + v2.z * cos_yaw,
+    );
+    
+    let world_pos = v3 + instance.pivot;
+    
+    let col = (instance.tex_cols_packed >> (instance.face_idx * 4u)) & 0xFu;
+    let u = (model.uv.x + f32(col)) * 0.0625;
+    let v = (model.uv.y + f32(instance.tex_row)) * 0.0625;
+    
+    var out: VertexOutput;
+    out.clip_position = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.tex_coords = vec2<f32>(u, v);
+    out.light_level = instance.light_level;
+    out.world_pos = world_pos;
+    out.ao = 1.0;
+    return out;
+}
+
+struct ParticlePrototypeVertex {
+    @location(0) position: vec2<f32>,
+    @location(1) uv_corner: vec2<f32>,
+};
+
+struct ParticleInstanceInput {
+    @location(2) position: vec3<f32>,
+    @location(3) size: f32,
+    @location(4) stretch_y: f32,
+    @location(5) age: f32,
+    @location(6) lifetime: f32,
+    @location(7) fade_scale: u32,
+    @location(8) tex_coords: vec4<f32>,
+};
+
+@vertex
+fn vs_instanced_particle(
+    model: ParticlePrototypeVertex,
+    instance: ParticleInstanceInput,
+) -> VertexOutput {
+    let cam_right = normalize(vec3<f32>(camera.inv_view_proj[0].x, camera.inv_view_proj[0].y, camera.inv_view_proj[0].z));
+    let cam_up = normalize(vec3<f32>(camera.inv_view_proj[1].x, camera.inv_view_proj[1].y, camera.inv_view_proj[1].z));
+    
+    let scale = select(1.0, max(0.05, 1.0 - instance.age / instance.lifetime), instance.fade_scale > 0u);
+    let half_size = instance.size * 0.5 * scale;
+    let half_height = half_size * instance.stretch_y;
+    
+    let world_pos = instance.position
+        + cam_right * (model.position.x * 2.0 * half_size)
+        + cam_up * (model.position.y * 2.0 * half_height);
+    
+    let u0 = instance.tex_coords.x;
+    let v0 = instance.tex_coords.y;
+    let u1 = instance.tex_coords.z;
+    let v1 = instance.tex_coords.w;
+    
+    let u = mix(u0, u1, model.uv_corner.x);
+    let v = mix(v0, v1, model.uv_corner.y);
+    
+    var out: VertexOutput;
+    out.clip_position = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.tex_coords = vec2<f32>(u, v);
+    out.light_level = 240.0;
+    out.world_pos = world_pos;
+    out.ao = 1.0;
+    return out;
+}
+
+
 

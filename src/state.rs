@@ -2586,6 +2586,27 @@ pub struct State {
     /// rendered and the camera sits behind the player.
     pub third_person: bool,
     pub entity_manager: crate::entity::EntityManager,
+    mob_instanced_pipeline: wgpu::RenderPipeline,
+    particle_instanced_pipeline: wgpu::RenderPipeline,
+
+    mob_cuboid_proto_vbuf: wgpu::Buffer,
+    mob_cuboid_proto_ibuf: wgpu::Buffer,
+    mob_quad_proto_vbuf: wgpu::Buffer,
+    mob_quad_proto_ibuf: wgpu::Buffer,
+
+    particle_proto_vbuf: wgpu::Buffer,
+    particle_proto_ibuf: wgpu::Buffer,
+
+    frame_ring_index: usize,
+    mob_cuboid_instance_buffers: [wgpu::Buffer; 3],
+    mob_quad_instance_buffers: [wgpu::Buffer; 3],
+    particle_instance_buffers: [wgpu::Buffer; 3],
+
+    mob_cuboid_instances_scratch: Vec<crate::mob_renderer::MobInstance>,
+    mob_quad_instances_scratch: Vec<crate::mob_renderer::MobInstance>,
+    particle_instances_scratch: Vec<crate::particles::ParticleInstance>,
+    mob_cuboid_num_instances: u32,
+    mob_quad_num_instances: u32,
     mob_vertex_buffer: wgpu::Buffer,
     mob_index_buffer: wgpu::Buffer,
     mob_num_indices: u32,
@@ -3882,6 +3903,165 @@ impl State {
             mapped_at_creation: false,
         });
 
+        let (cuboid_proto_verts, cuboid_proto_inds) =
+            crate::mob_renderer::build_unit_cuboid_prototype();
+        let (quad_proto_verts, quad_proto_inds) = crate::mob_renderer::build_unit_quad_prototype();
+        let (particle_proto_verts, particle_proto_inds) =
+            crate::particles::build_particle_prototype();
+
+        let mob_cuboid_proto_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Mob Cuboid Prototype VBuf"),
+            contents: bytemuck::cast_slice(&cuboid_proto_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let mob_cuboid_proto_ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Mob Cuboid Prototype IBuf"),
+            contents: bytemuck::cast_slice(&cuboid_proto_inds),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mob_quad_proto_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Mob Quad Prototype VBuf"),
+            contents: bytemuck::cast_slice(&quad_proto_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let mob_quad_proto_ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Mob Quad Prototype IBuf"),
+            contents: bytemuck::cast_slice(&quad_proto_inds),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let particle_proto_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Particle Prototype VBuf"),
+            contents: bytemuck::cast_slice(&particle_proto_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let particle_proto_ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Particle Prototype IBuf"),
+            contents: bytemuck::cast_slice(&particle_proto_inds),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mob_cuboid_instance_buffers = std::array::from_fn(|i| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Mob Cuboid Instance Buffer {i}")),
+                size: (std::mem::size_of::<crate::mob_renderer::MobInstance>() * 16384)
+                    as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+
+        let mob_quad_instance_buffers = std::array::from_fn(|i| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Mob Quad Instance Buffer {i}")),
+                size: (std::mem::size_of::<crate::mob_renderer::MobInstance>() * 4096)
+                    as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+
+        let particle_instance_buffers = std::array::from_fn(|i| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Particle Instance Buffer {i}")),
+                size: (std::mem::size_of::<crate::particles::ParticleInstance>()
+                    * crate::particles::MAX_PARTICLES) as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+
+        let mob_instanced_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Mob Instanced Render Pipeline"),
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_instanced_mob",
+                    buffers: &[
+                        crate::mob_renderer::MobPrototypeVertex::layout(),
+                        crate::mob_renderer::MobInstance::layout(),
+                    ],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+            });
+
+        let particle_instanced_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Particle Instanced Render Pipeline"),
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_instanced_particle",
+                    buffers: &[
+                        crate::particles::ParticlePrototypeVertex::layout(),
+                        crate::particles::ParticleInstance::layout(),
+                    ],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+            });
+
         let particles = crate::particles::ParticleSystem::new();
         let weather = crate::weather::WeatherSystem::new(world_seed);
         let network = match &role {
@@ -3993,6 +4173,23 @@ impl State {
             show_debug,
             third_person: false,
             entity_manager: crate::entity::EntityManager::new(),
+            mob_instanced_pipeline,
+            particle_instanced_pipeline,
+            mob_cuboid_proto_vbuf,
+            mob_cuboid_proto_ibuf,
+            mob_quad_proto_vbuf,
+            mob_quad_proto_ibuf,
+            particle_proto_vbuf,
+            particle_proto_ibuf,
+            frame_ring_index: 0,
+            mob_cuboid_instance_buffers,
+            mob_quad_instance_buffers,
+            particle_instance_buffers,
+            mob_cuboid_instances_scratch: Vec::with_capacity(1024),
+            mob_quad_instances_scratch: Vec::with_capacity(512),
+            particle_instances_scratch: Vec::with_capacity(4096),
+            mob_cuboid_num_instances: 0,
+            mob_quad_num_instances: 0,
             mob_vertex_buffer,
             mob_index_buffer,
             mob_num_indices: 0,
@@ -9409,98 +9606,94 @@ impl State {
             terrain_prepare_started.elapsed(),
         );
 
-        // Compile mob meshes
+        self.frame_ring_index = (self.frame_ring_index + 1) % 3;
+
+        // Compile mob instance data
         let entity_prepare_started = Instant::now();
-        self.mob_vertices_scratch.clear();
-        self.mob_indices_scratch.clear();
+        self.mob_cuboid_instances_scratch.clear();
+        self.mob_quad_instances_scratch.clear();
         crate::mob_renderer::render_mobs(
             &self.entity_manager,
             &self.chunk_manager,
-            &mut self.mob_vertices_scratch,
-            &mut self.mob_indices_scratch,
+            &mut self.mob_cuboid_instances_scratch,
+            &mut self.mob_quad_instances_scratch,
             self.total_time,
         );
 
-        // In third-person mode also render the local player avatar.
         if self.third_person {
             crate::mob_renderer::render_local_player(
                 self.player_physics.position,
                 std::f32::consts::FRAC_PI_2 - self.camera.yaw,
                 -self.camera.pitch,
                 &self.chunk_manager,
-                &mut self.mob_vertices_scratch,
-                &mut self.mob_indices_scratch,
+                &mut self.mob_cuboid_instances_scratch,
                 self.total_time,
                 self.player_physics.velocity,
             );
         }
 
-        let mob_indices_len = self.mob_indices_scratch.len();
-        self.mob_num_indices = mob_indices_len as u32;
+        self.mob_cuboid_num_instances = self.mob_cuboid_instances_scratch.len() as u32;
+        self.mob_quad_num_instances = self.mob_quad_instances_scratch.len() as u32;
 
-        if mob_indices_len > 0 {
-            let vert_limit = self.mob_vertices_scratch.len().min(8192);
-            let ind_limit = mob_indices_len.min(12288);
-            self.mob_num_indices = ind_limit as u32;
+        if self.mob_cuboid_num_instances > 0 {
+            let limit = (self.mob_cuboid_num_instances as usize).min(16384);
+            self.mob_cuboid_num_instances = limit as u32;
             let upload_started = Instant::now();
             self.queue.write_buffer(
-                &self.mob_vertex_buffer,
+                &self.mob_cuboid_instance_buffers[self.frame_ring_index],
                 0,
-                bytemuck::cast_slice(&self.mob_vertices_scratch[..vert_limit]),
+                bytemuck::cast_slice(&self.mob_cuboid_instances_scratch[..limit]),
             );
-            self.queue.write_buffer(
-                &self.mob_index_buffer,
-                0,
-                bytemuck::cast_slice(&self.mob_indices_scratch[..ind_limit]),
-            );
-            gpu_upload_elapsed += upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_started.elapsed();
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
-                    (vert_limit * std::mem::size_of::<Vertex>()
-                        + ind_limit * std::mem::size_of::<u32>()) as u64,
+                    (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
+                );
+        }
+
+        if self.mob_quad_num_instances > 0 {
+            let limit = (self.mob_quad_num_instances as usize).min(4096);
+            self.mob_quad_num_instances = limit as u32;
+            let upload_started = Instant::now();
+            self.queue.write_buffer(
+                &self.mob_quad_instance_buffers[self.frame_ring_index],
+                0,
+                bytemuck::cast_slice(&self.mob_quad_instances_scratch[..limit]),
+            );
+            self.gpu_upload_time_frame += upload_started.elapsed();
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
                 );
         }
         let mut entity_prepare_elapsed = entity_prepare_started.elapsed();
 
-        // Compile billboard particle quads into the dynamic particle buffers.
-        // Camera right/up vectors are derived from yaw/pitch so billboards face
-        // the viewer.
-        let cam_right =
-            glam::Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos()).normalize_or_zero();
-        let cam_up = glam::Vec3::new(
-            -self.camera.yaw.cos() * self.camera.pitch.sin(),
-            self.camera.pitch.cos(),
-            -self.camera.yaw.sin() * self.camera.pitch.sin(),
-        )
-        .normalize_or_zero();
+        // Compile particle instance data
         let particle_prepare_started = Instant::now();
+        self.particle_instances_scratch.clear();
         self.particle_num_indices = self
             .particles
-            .compile_mesh(
-                &self.device,
-                &self.queue,
-                cam_right,
-                cam_up,
-                &self.particle_vertex_buffer,
-                &self.particle_index_buffer,
-                &mut self.particle_vertices_scratch,
-                &mut self.particle_indices_scratch,
-            )
-            .unwrap_or(0);
+            .compile_instances(&mut self.particle_instances_scratch);
+        let particle_count = self.particle_instances_scratch.len();
+        if particle_count > 0 {
+            let upload_started = Instant::now();
+            self.queue.write_buffer(
+                &self.particle_instance_buffers[self.frame_ring_index],
+                0,
+                bytemuck::cast_slice(&self.particle_instances_scratch),
+            );
+            self.gpu_upload_time_frame += upload_started.elapsed();
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    (particle_count * std::mem::size_of::<crate::particles::ParticleInstance>())
+                        as u64,
+                );
+        }
         let particle_prepare_elapsed = particle_prepare_started.elapsed();
         self.perf_recorder.record(
             crate::perf::ScopeId::RenderPrepareParticles,
             particle_prepare_elapsed,
         );
-        if self.particle_num_indices > 0 {
-            let particle_indices = self.particle_num_indices as usize;
-            let particle_vertices = particle_indices.saturating_mul(2) / 3;
-            self.perf_counters.upload_bytes_frame =
-                self.perf_counters.upload_bytes_frame.saturating_add(
-                    (particle_vertices * std::mem::size_of::<Vertex>()
-                        + particle_indices * std::mem::size_of::<u32>()) as u64,
-                );
-        }
 
         // Compile first-person hand mesh in view space. Hidden in third-person.
         let hand_prepare_started = Instant::now();
@@ -11998,8 +12191,9 @@ impl State {
         self.perf_recorder
             .record(crate::perf::ScopeId::GpuUpload, self.gpu_upload_time_frame);
         let mut total_draw_calls = 1 + self.submitted_terrain_draw_calls as u64;
-        total_draw_calls += u64::from(self.mob_num_indices > 0);
-        total_draw_calls += u64::from(self.particle_num_indices > 0);
+        total_draw_calls += u64::from(self.mob_cuboid_num_instances > 0)
+            + u64::from(self.mob_quad_num_instances > 0);
+        total_draw_calls += u64::from(!self.particle_instances_scratch.is_empty());
         total_draw_calls += u64::from(self.mining_target.is_some() && self.mining_progress > 0.0);
         total_draw_calls +=
             u64::from(self.hand_num_indices > 0 && !self.third_person && !self.is_paused);
@@ -12098,12 +12292,33 @@ impl State {
                     render_pass.write_timestamp(qs, 4);
                 }
             }
-            if self.mob_num_indices > 0 {
-                render_pass.set_pipeline(&self.render_pipeline);
-                render_pass.set_vertex_buffer(0, self.mob_vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(self.mob_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.mob_num_indices, 0, 0..1);
+            if self.mob_cuboid_num_instances > 0 {
+                render_pass.set_pipeline(&self.mob_instanced_pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.mob_cuboid_proto_vbuf.slice(..));
+                render_pass.set_vertex_buffer(
+                    1,
+                    self.mob_cuboid_instance_buffers[self.frame_ring_index].slice(..),
+                );
+                render_pass.set_index_buffer(
+                    self.mob_cuboid_proto_ibuf.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                render_pass.draw_indexed(0..36, 0, 0..self.mob_cuboid_num_instances);
+            }
+            if self.mob_quad_num_instances > 0 {
+                render_pass.set_pipeline(&self.mob_instanced_pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.mob_quad_proto_vbuf.slice(..));
+                render_pass.set_vertex_buffer(
+                    1,
+                    self.mob_quad_instance_buffers[self.frame_ring_index].slice(..),
+                );
+                render_pass.set_index_buffer(
+                    self.mob_quad_proto_ibuf.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                render_pass.draw_indexed(0..12, 0, 0..self.mob_quad_num_instances);
             }
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
@@ -12139,20 +12354,26 @@ impl State {
                 }
             }
 
-            // Draw billboard particles using the translucent (alpha-blend) pipeline.
+            // Draw billboard particles using instanced particle pipeline.
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
                     render_pass.write_timestamp(qs, 8);
                 }
             }
-            if self.particle_num_indices > 0 {
-                render_pass.set_pipeline(&self.trans_pipeline);
-                render_pass.set_vertex_buffer(0, self.particle_vertex_buffer.slice(..));
+            if !self.particle_instances_scratch.is_empty() {
+                let num_particles = self.particle_instances_scratch.len() as u32;
+                render_pass.set_pipeline(&self.particle_instanced_pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.particle_proto_vbuf.slice(..));
+                render_pass.set_vertex_buffer(
+                    1,
+                    self.particle_instance_buffers[self.frame_ring_index].slice(..),
+                );
                 render_pass.set_index_buffer(
-                    self.particle_index_buffer.slice(..),
+                    self.particle_proto_ibuf.slice(..),
                     wgpu::IndexFormat::Uint32,
                 );
-                render_pass.draw_indexed(0..self.particle_num_indices, 0, 0..1);
+                render_pass.draw_indexed(0..6, 0, 0..num_particles);
             }
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {

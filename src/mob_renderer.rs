@@ -3,116 +3,317 @@ use crate::entity::{EntityManager, EntityType};
 use crate::state::Vertex;
 use glam::Vec3;
 
-// South (+Z), North (-Z), West (-X), East (+X), Up (+Y), Down (-Y)
-pub fn add_cuboid(
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MobPrototypeVertex {
+    pub position: [f32; 3],
+    pub uv: [f32; 2],
+    pub face_idx: u32,
+}
+
+impl MobPrototypeVertex {
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 20,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+            ],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MobInstance {
+    pub pivot: [f32; 3],
+    pub size: [f32; 3],
+    pub offset: [f32; 3],
+    pub rot_yaw: f32,
+    pub rot_pitch: f32,
+    pub tex_cols_packed: u32,
+    pub tex_row: u32,
+    pub light_level: f32,
+}
+
+impl MobInstance {
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 24,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 36,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 44,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 48,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 52,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Float32,
+                },
+            ],
+        }
+    }
+}
+
+pub fn pack_tex_cols(cols: [u32; 6]) -> u32 {
+    (cols[0] & 0xF)
+        | ((cols[1] & 0xF) << 4)
+        | ((cols[2] & 0xF) << 8)
+        | ((cols[3] & 0xF) << 12)
+        | ((cols[4] & 0xF) << 16)
+        | ((cols[5] & 0xF) << 20)
+}
+
+pub fn build_unit_cuboid_prototype() -> (Vec<MobPrototypeVertex>, Vec<u32>) {
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+
+    let local_corners = [
+        (Vec3::new(-0.5, -0.5, 0.5), [0.0, 1.0], 0),
+        (Vec3::new(0.5, -0.5, 0.5), [1.0, 1.0], 0),
+        (Vec3::new(0.5, 0.5, 0.5), [1.0, 0.0], 0),
+        (Vec3::new(-0.5, 0.5, 0.5), [0.0, 0.0], 0),
+        (Vec3::new(0.5, -0.5, -0.5), [0.0, 1.0], 1),
+        (Vec3::new(-0.5, -0.5, -0.5), [1.0, 1.0], 1),
+        (Vec3::new(-0.5, 0.5, -0.5), [1.0, 0.0], 1),
+        (Vec3::new(0.5, 0.5, -0.5), [0.0, 0.0], 1),
+        (Vec3::new(-0.5, -0.5, -0.5), [0.0, 1.0], 2),
+        (Vec3::new(-0.5, -0.5, 0.5), [1.0, 1.0], 2),
+        (Vec3::new(-0.5, 0.5, 0.5), [1.0, 0.0], 2),
+        (Vec3::new(-0.5, 0.5, -0.5), [0.0, 0.0], 2),
+        (Vec3::new(0.5, -0.5, 0.5), [0.0, 1.0], 3),
+        (Vec3::new(0.5, -0.5, -0.5), [1.0, 1.0], 3),
+        (Vec3::new(0.5, 0.5, -0.5), [1.0, 0.0], 3),
+        (Vec3::new(0.5, 0.5, 0.5), [0.0, 0.0], 3),
+        (Vec3::new(-0.5, 0.5, 0.5), [0.0, 1.0], 4),
+        (Vec3::new(0.5, 0.5, 0.5), [1.0, 1.0], 4),
+        (Vec3::new(0.5, 0.5, -0.5), [1.0, 0.0], 4),
+        (Vec3::new(-0.5, 0.5, -0.5), [0.0, 0.0], 4),
+        (Vec3::new(-0.5, -0.5, -0.5), [0.0, 1.0], 5),
+        (Vec3::new(0.5, -0.5, -0.5), [1.0, 1.0], 5),
+        (Vec3::new(0.5, -0.5, 0.5), [1.0, 0.0], 5),
+        (Vec3::new(-0.5, -0.5, 0.5), [0.0, 0.0], 5),
+    ];
+
+    for (pos, uv, face_idx) in local_corners {
+        vertices.push(MobPrototypeVertex {
+            position: pos.into(),
+            uv,
+            face_idx,
+        });
+    }
+
+    for f in 0..6 {
+        let f_start = (f * 4) as u32;
+        indices.push(f_start + 0);
+        indices.push(f_start + 1);
+        indices.push(f_start + 2);
+        indices.push(f_start + 0);
+        indices.push(f_start + 2);
+        indices.push(f_start + 3);
+    }
+
+    (vertices, indices)
+}
+
+pub fn build_unit_quad_prototype() -> (Vec<MobPrototypeVertex>, Vec<u32>) {
+    let vertices = vec![
+        MobPrototypeVertex {
+            position: [-0.5, -0.5, 0.0],
+            uv: [0.0, 1.0],
+            face_idx: 0,
+        },
+        MobPrototypeVertex {
+            position: [0.5, -0.5, 0.0],
+            uv: [1.0, 1.0],
+            face_idx: 0,
+        },
+        MobPrototypeVertex {
+            position: [0.5, 0.5, 0.0],
+            uv: [1.0, 0.0],
+            face_idx: 0,
+        },
+        MobPrototypeVertex {
+            position: [-0.5, 0.5, 0.0],
+            uv: [0.0, 0.0],
+            face_idx: 0,
+        },
+    ];
+    let indices = vec![0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0];
+    (vertices, indices)
+}
+
+pub fn expand_mob_instances(
+    cuboid_instances: &[MobInstance],
+    quad_instances: &[MobInstance],
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
+) {
+    let (cuboid_verts, _) = build_unit_cuboid_prototype();
+    let (quad_verts, _) = build_unit_quad_prototype();
+
+    for inst in cuboid_instances {
+        let start_idx = vertices.len() as u32;
+        let size = Vec3::from(inst.size);
+        let offset = Vec3::from(inst.offset);
+        let pivot = Vec3::from(inst.pivot);
+        let cos_pitch = inst.rot_pitch.cos();
+        let sin_pitch = inst.rot_pitch.sin();
+        let cos_yaw = inst.rot_yaw.cos();
+        let sin_yaw = inst.rot_yaw.sin();
+
+        for proto in &cuboid_verts {
+            let local_pos = Vec3::from(proto.position) * size + offset;
+            let v2 = Vec3::new(
+                local_pos.x,
+                local_pos.y * cos_pitch - local_pos.z * sin_pitch,
+                local_pos.y * sin_pitch + local_pos.z * cos_pitch,
+            );
+            let v3 = Vec3::new(
+                v2.x * cos_yaw + v2.z * sin_yaw,
+                v2.y,
+                -v2.x * sin_yaw + v2.z * cos_yaw,
+            );
+            let final_pos = v3 + pivot;
+
+            let col = (inst.tex_cols_packed >> (proto.face_idx * 4)) & 0xF;
+            let u = (proto.uv[0] + col as f32) * 0.0625;
+            let v = (proto.uv[1] + inst.tex_row as f32) * 0.0625;
+
+            vertices.push(Vertex {
+                position: final_pos.into(),
+                tex_coords: [u, v],
+                light_level: inst.light_level,
+                ao: 1.0,
+            });
+        }
+
+        for f in 0..6 {
+            let f_start = start_idx + (f * 4);
+            indices.push(f_start + 0);
+            indices.push(f_start + 1);
+            indices.push(f_start + 2);
+            indices.push(f_start + 0);
+            indices.push(f_start + 2);
+            indices.push(f_start + 3);
+        }
+    }
+
+    for inst in quad_instances {
+        let start_idx = vertices.len() as u32;
+        let size = Vec3::from(inst.size);
+        let offset = Vec3::from(inst.offset);
+        let pivot = Vec3::from(inst.pivot);
+        let cos_yaw = inst.rot_yaw.cos();
+        let sin_yaw = inst.rot_yaw.sin();
+
+        for proto in &quad_verts {
+            let local_pos = Vec3::from(proto.position) * size + offset;
+            let rotated = Vec3::new(
+                local_pos.x * cos_yaw + local_pos.z * sin_yaw,
+                local_pos.y,
+                -local_pos.x * sin_yaw + local_pos.z * cos_yaw,
+            );
+            let final_pos = pivot + rotated;
+
+            let col = inst.tex_cols_packed & 0xF;
+            let u = (proto.uv[0] + col as f32) * 0.0625;
+            let v = (proto.uv[1] + inst.tex_row as f32) * 0.0625;
+
+            vertices.push(Vertex {
+                position: final_pos.into(),
+                tex_coords: [u, v],
+                light_level: inst.light_level,
+                ao: 1.0,
+            });
+        }
+
+        indices.push(start_idx + 0);
+        indices.push(start_idx + 1);
+        indices.push(start_idx + 2);
+        indices.push(start_idx + 0);
+        indices.push(start_idx + 2);
+        indices.push(start_idx + 3);
+        indices.push(start_idx + 2);
+        indices.push(start_idx + 1);
+        indices.push(start_idx + 0);
+        indices.push(start_idx + 3);
+        indices.push(start_idx + 2);
+        indices.push(start_idx + 0);
+    }
+}
+
+pub fn add_cuboid(
+    instances: &mut Vec<MobInstance>,
     size: Vec3,
     offset: Vec3,
     pivot: Vec3,
     rot_yaw: f32,
     rot_pitch: f32,
-    tex_cols: [u32; 6], // Columns: [Front, Back, Left, Right, Top, Bottom]
-    tex_row: u32,       // Row 9 for mob skins
+    tex_cols: [u32; 6],
+    tex_row: u32,
     light_val: f32,
 ) {
-    let half = size * 0.5;
-
-    // Corner coordinates for box faces: South (+Z), North (-Z), West (-X), East (+X), Up (+Y), Down (-Y)
-    let local_corners = [
-        // Face 0: South (+Z)
-        (Vec3::new(-half.x, -half.y, half.z), [0.0, 1.0]),
-        (Vec3::new(half.x, -half.y, half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, half.y, half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, half.y, half.z), [0.0, 0.0]),
-        // Face 1: North (-Z)
-        (Vec3::new(half.x, -half.y, -half.z), [0.0, 1.0]),
-        (Vec3::new(-half.x, -half.y, -half.z), [1.0, 1.0]),
-        (Vec3::new(-half.x, half.y, -half.z), [1.0, 0.0]),
-        (Vec3::new(half.x, half.y, -half.z), [0.0, 0.0]),
-        // Face 2: West (-X)
-        (Vec3::new(-half.x, -half.y, -half.z), [0.0, 1.0]),
-        (Vec3::new(-half.x, -half.y, half.z), [1.0, 1.0]),
-        (Vec3::new(-half.x, half.y, half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, half.y, -half.z), [0.0, 0.0]),
-        // Face 3: East (+X)
-        (Vec3::new(half.x, -half.y, half.z), [0.0, 1.0]),
-        (Vec3::new(half.x, -half.y, -half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, half.y, -half.z), [1.0, 0.0]),
-        (Vec3::new(half.x, half.y, half.z), [0.0, 0.0]),
-        // Face 4: Up (+Y)
-        (Vec3::new(-half.x, half.y, half.z), [0.0, 1.0]),
-        (Vec3::new(half.x, half.y, half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, half.y, -half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, half.y, -half.z), [0.0, 0.0]),
-        // Face 5: Down (-Y)
-        (Vec3::new(-half.x, -half.y, -half.z), [0.0, 1.0]),
-        (Vec3::new(half.x, -half.y, -half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, -half.y, half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, -half.y, half.z), [0.0, 0.0]),
-    ];
-
-    let cos_pitch = rot_pitch.cos();
-    let sin_pitch = rot_pitch.sin();
-    let cos_yaw = rot_yaw.cos();
-    let sin_yaw = rot_yaw.sin();
-
-    let start_idx = vertices.len() as u32;
-
-    for (face_idx, (local_pos, uv)) in local_corners.iter().enumerate() {
-        // Shift by offset relative to joint pivot
-        let v1 = *local_pos + offset;
-
-        // Pitch rotation (around local X axis)
-        let v2 = Vec3::new(
-            v1.x,
-            v1.y * cos_pitch - v1.z * sin_pitch,
-            v1.y * sin_pitch + v1.z * cos_pitch,
-        );
-
-        // Yaw rotation (around local Y axis)
-        let v3 = Vec3::new(
-            v2.x * cos_yaw + v2.z * sin_yaw,
-            v2.y,
-            -v2.x * sin_yaw + v2.z * cos_yaw,
-        );
-
-        // Translate to global pivot in world space
-        let final_pos = v3 + pivot;
-
-        // Compute UV coordinate relative to 16x16 tile mapping
-        let col = tex_cols[face_idx / 4];
-        let u = (uv[0] + col as f32) * 0.0625;
-        let v = (uv[1] + tex_row as f32) * 0.0625;
-
-        vertices.push(Vertex {
-            position: [final_pos.x, final_pos.y, final_pos.z],
-            tex_coords: [u, v],
-            light_level: light_val,
-            ao: 1.0,
-        });
-    }
-
-    // Connect indices for the 6 faces (each face has 4 vertices, 2 triangles)
-    for f in 0..6 {
-        let f_start = start_idx + (f * 4);
-        indices.push(f_start + 0);
-        indices.push(f_start + 1);
-        indices.push(f_start + 2);
-
-        indices.push(f_start + 0);
-        indices.push(f_start + 2);
-        indices.push(f_start + 3);
-    }
+    instances.push(MobInstance {
+        pivot: pivot.into(),
+        size: size.into(),
+        offset: offset.into(),
+        rot_yaw,
+        rot_pitch,
+        tex_cols_packed: pack_tex_cols(tex_cols),
+        tex_row,
+        light_level: light_val,
+    });
 }
 
-/// Adds a flat, double-sided sprite quad centered at `center` and rotated
-/// around the Y axis by `yaw`. Used for dropped items that render as item
-/// sprites (flowers, seeds, tools, ...) instead of cubes. The transparent
-/// parts of the tile are discarded by the fragment shader's alpha test.
 fn add_flat_sprite(
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
+    instances: &mut Vec<MobInstance>,
     size: f32,
     center: Vec3,
     yaw: f32,
@@ -120,58 +321,65 @@ fn add_flat_sprite(
     tex_row: u32,
     light_val: f32,
 ) {
-    let half = size * 0.5;
-    let local_corners = [
-        (Vec3::new(-half, -half, 0.0), [0.0, 1.0]),
-        (Vec3::new(half, -half, 0.0), [1.0, 1.0]),
-        (Vec3::new(half, half, 0.0), [1.0, 0.0]),
-        (Vec3::new(-half, half, 0.0), [0.0, 0.0]),
-    ];
-
-    let sin_yaw = yaw.sin();
-    let cos_yaw = yaw.cos();
-
-    let start_idx = vertices.len() as u32;
-
-    for (local_pos, uv) in local_corners.iter() {
-        let rotated = Vec3::new(
-            local_pos.x * cos_yaw + local_pos.z * sin_yaw,
-            local_pos.y,
-            -local_pos.x * sin_yaw + local_pos.z * cos_yaw,
-        );
-        let final_pos = center + rotated;
-
-        let u = (uv[0] + tex_col as f32) * 0.0625;
-        let v = (uv[1] + tex_row as f32) * 0.0625;
-
-        vertices.push(Vertex {
-            position: [final_pos.x, final_pos.y, final_pos.z],
-            tex_coords: [u, v],
-            light_level: light_val,
-            ao: 1.0,
-        });
-    }
-
-    // Double-sided quad: the pipeline culls back faces, so emit both windings.
-    indices.push(start_idx + 0);
-    indices.push(start_idx + 1);
-    indices.push(start_idx + 2);
-    indices.push(start_idx + 0);
-    indices.push(start_idx + 2);
-    indices.push(start_idx + 3);
-    indices.push(start_idx + 2);
-    indices.push(start_idx + 1);
-    indices.push(start_idx + 0);
-    indices.push(start_idx + 3);
-    indices.push(start_idx + 2);
-    indices.push(start_idx + 0);
+    instances.push(MobInstance {
+        pivot: center.into(),
+        size: [size, size, 1.0],
+        offset: [0.0, 0.0, 0.0],
+        rot_yaw: yaw,
+        rot_pitch: 0.0,
+        tex_cols_packed: pack_tex_cols([tex_col; 6]),
+        tex_row,
+        light_level: light_val,
+    });
 }
 
-pub fn render_mobs(
+pub fn render_mobs_legacy(
     entity_manager: &EntityManager,
     chunk_manager: &ChunkManager,
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
+    time: f32,
+) {
+    let mut cuboids = Vec::new();
+    let mut quads = Vec::new();
+    render_mobs(
+        entity_manager,
+        chunk_manager,
+        &mut cuboids,
+        &mut quads,
+        time,
+    );
+    expand_mob_instances(&cuboids, &quads, vertices, indices);
+}
+
+pub fn render_local_player_legacy(
+    position: Vec3,
+    yaw: f32,
+    pitch: f32,
+    chunk_manager: &ChunkManager,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    time: f32,
+    velocity: Vec3,
+) {
+    let mut cuboids = Vec::new();
+    let quads = Vec::new();
+    render_local_player(
+        position,
+        yaw,
+        pitch,
+        chunk_manager,
+        &mut cuboids,
+        time,
+        velocity,
+    );
+    expand_mob_instances(&cuboids, &quads, vertices, indices);
+}
+pub fn render_mobs(
+    entity_manager: &EntityManager,
+    chunk_manager: &ChunkManager,
+    cuboid_instances: &mut Vec<MobInstance>,
+    quad_instances: &mut Vec<MobInstance>,
     time: f32,
 ) {
     for entity in &entity_manager.entities {
@@ -214,8 +422,7 @@ pub fn render_mobs(
             EntityType::Zombie => {
                 // Head (Col 0 front face, Col 1 others)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5),
                     Vec3::new(0.0, 0.25, 0.0),
                     to_world(Vec3::new(0.0, 1.4, 0.0)),
@@ -228,8 +435,7 @@ pub fn render_mobs(
 
                 // Torso (Col 2)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.75, 0.25),
                     Vec3::new(0.0, 0.375, 0.0),
                     to_world(Vec3::new(0.0, 0.65, 0.0)),
@@ -244,8 +450,7 @@ pub fn render_mobs(
                 let arm_pitch = -std::f32::consts::FRAC_PI_2;
                 // Left Arm (Col 3)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.75, 0.2),
                     Vec3::new(0.0, -0.325, 0.0),
                     to_world(Vec3::new(-0.35, 1.3, 0.0)),
@@ -257,8 +462,7 @@ pub fn render_mobs(
                 );
                 // Right Arm (Col 3)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.75, 0.2),
                     Vec3::new(0.0, -0.325, 0.0),
                     to_world(Vec3::new(0.35, 1.3, 0.0)),
@@ -272,8 +476,7 @@ pub fn render_mobs(
                 // Legs (Col 3)
                 // Left Leg
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.75, 0.2),
                     Vec3::new(0.0, -0.375, 0.0),
                     to_world(Vec3::new(-0.125, 0.75, 0.0)),
@@ -285,8 +488,7 @@ pub fn render_mobs(
                 );
                 // Right Leg
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.75, 0.2),
                     Vec3::new(0.0, -0.375, 0.0),
                     to_world(Vec3::new(0.125, 0.75, 0.0)),
@@ -300,8 +502,7 @@ pub fn render_mobs(
             EntityType::Skeleton => {
                 // Head (Col 4 front face, Col 5 others)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5),
                     Vec3::new(0.0, 0.25, 0.0),
                     to_world(Vec3::new(0.0, 1.4, 0.0)),
@@ -314,8 +515,7 @@ pub fn render_mobs(
 
                 // Torso (Col 5)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.4, 0.75, 0.2),
                     Vec3::new(0.0, 0.375, 0.0),
                     to_world(Vec3::new(0.0, 0.65, 0.0)),
@@ -352,8 +552,7 @@ pub fn render_mobs(
                 // Left Arm (holding bow)
                 let left_shoulder = Vec3::new(-0.275, 1.3, 0.0);
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.15, 0.75, 0.15),
                     Vec3::new(0.0, -0.325, 0.0),
                     to_world(left_shoulder),
@@ -367,8 +566,7 @@ pub fn render_mobs(
                 // Right Arm (drawing string)
                 let right_shoulder = Vec3::new(0.275, 1.3, 0.0);
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.15, 0.75, 0.15),
                     Vec3::new(0.0, -0.325, 0.0),
                     to_world(right_shoulder),
@@ -389,8 +587,7 @@ pub fn render_mobs(
 
                 // Bow Grip (Center)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.08, 0.25, 0.08),
                     Vec3::ZERO,
                     bow_pivot,
@@ -403,8 +600,7 @@ pub fn render_mobs(
 
                 // Bow Upper Limb
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.06, 0.35, 0.06),
                     Vec3::new(0.0, 0.25, 0.04),
                     bow_pivot,
@@ -417,8 +613,7 @@ pub fn render_mobs(
 
                 // Bow Lower Limb
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.06, 0.35, 0.06),
                     Vec3::new(0.0, -0.25, 0.04),
                     bow_pivot,
@@ -432,8 +627,7 @@ pub fn render_mobs(
                 // Bow String (Center pull-back driven by draw_progress)
                 let string_offset_z = -0.04 - 0.25 * draw_progress;
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.02, 0.85, 0.02),
                     Vec3::new(0.0, 0.0, string_offset_z),
                     bow_pivot,
@@ -448,8 +642,7 @@ pub fn render_mobs(
                 if target {
                     let arrow_offset_z = 0.15 - 0.25 * draw_progress;
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.03, 0.03, 0.75),
                         Vec3::new(0.0, 0.0, arrow_offset_z),
                         bow_pivot,
@@ -464,8 +657,7 @@ pub fn render_mobs(
                 // Legs (Col 5)
                 // Left Leg
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.15, 0.75, 0.15),
                     Vec3::new(0.0, -0.375, 0.0),
                     to_world(Vec3::new(-0.1, 0.75, 0.0)),
@@ -477,8 +669,7 @@ pub fn render_mobs(
                 );
                 // Right Leg
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.15, 0.75, 0.15),
                     Vec3::new(0.0, -0.375, 0.0),
                     to_world(Vec3::new(0.1, 0.75, 0.0)),
@@ -500,8 +691,7 @@ pub fn render_mobs(
 
                 // Head (Col 6 front, Col 7 others)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5) * scale,
                     Vec3::new(0.0, 0.25, 0.0) * scale,
                     to_world(Vec3::new(0.0, 1.2, 0.0)),
@@ -514,8 +704,7 @@ pub fn render_mobs(
 
                 // Torso (Col 7)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.75, 0.3) * scale,
                     Vec3::new(0.0, 0.375, 0.0) * scale,
                     to_world(Vec3::new(0.0, 0.45, 0.0)),
@@ -529,8 +718,7 @@ pub fn render_mobs(
                 // Creeper has 4 legs (Col 7)
                 // Front Left Leg
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.35, 0.2) * scale,
                     Vec3::new(0.0, -0.175, 0.0) * scale,
                     to_world(Vec3::new(-0.15, 0.35, 0.15)),
@@ -542,8 +730,7 @@ pub fn render_mobs(
                 );
                 // Front Right Leg
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.35, 0.2) * scale,
                     Vec3::new(0.0, -0.175, 0.0) * scale,
                     to_world(Vec3::new(0.15, 0.35, 0.15)),
@@ -555,8 +742,7 @@ pub fn render_mobs(
                 );
                 // Back Left Leg
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.35, 0.2) * scale,
                     Vec3::new(0.0, -0.175, 0.0) * scale,
                     to_world(Vec3::new(-0.15, 0.35, -0.15)),
@@ -568,8 +754,7 @@ pub fn render_mobs(
                 );
                 // Back Right Leg
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.35, 0.2) * scale,
                     Vec3::new(0.0, -0.175, 0.0) * scale,
                     to_world(Vec3::new(0.15, 0.35, -0.15)),
@@ -583,8 +768,7 @@ pub fn render_mobs(
             EntityType::Arrow | EntityType::SplashPotion => {
                 // Render arrow as a thin box (skin Col 8)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.06, 0.06, 0.6),
                     Vec3::new(0.0, 0.0, 0.0),
                     entity.position,
@@ -601,8 +785,7 @@ pub fn render_mobs(
 
                 // Pig Head (Row 10, Col 0 face, Col 1 body/pink skin for other 5 faces) - offset forward
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5) * head_scale,
                     Vec3::new(0.0, 0.15, 0.2) * head_scale,
                     to_world(Vec3::new(0.0, 0.8 * scale, 0.2 * scale)),
@@ -614,8 +797,7 @@ pub fn render_mobs(
                 );
                 // Torso (Row 10, Col 1) - horizontal: length = 0.8, height = 0.6, width = 0.6
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.6, 0.6, 0.8) * scale,
                     Vec3::new(0.0, 0.0, 0.0),
                     to_world(Vec3::new(0.0, 0.7 * scale, 0.0)),
@@ -628,8 +810,7 @@ pub fn render_mobs(
                 // 4 Legs (Row 10, Col 1)
                 // Left Front
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.4, 0.2) * scale,
                     Vec3::new(0.0, -0.2, 0.0) * scale,
                     to_world(Vec3::new(-0.25 * scale, 0.4 * scale, 0.25 * scale)),
@@ -641,8 +822,7 @@ pub fn render_mobs(
                 );
                 // Right Front
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.4, 0.2) * scale,
                     Vec3::new(0.0, -0.2, 0.0) * scale,
                     to_world(Vec3::new(0.25 * scale, 0.4 * scale, 0.25 * scale)),
@@ -654,8 +834,7 @@ pub fn render_mobs(
                 );
                 // Left Back
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.4, 0.2) * scale,
                     Vec3::new(0.0, -0.2, 0.0) * scale,
                     to_world(Vec3::new(-0.25 * scale, 0.4 * scale, -0.25 * scale)),
@@ -667,8 +846,7 @@ pub fn render_mobs(
                 );
                 // Right Back
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.4, 0.2) * scale,
                     Vec3::new(0.0, -0.2, 0.0) * scale,
                     to_world(Vec3::new(0.25 * scale, 0.4 * scale, -0.25 * scale)),
@@ -685,8 +863,7 @@ pub fn render_mobs(
 
                 // Cow Head (Row 10, Col 2 face, Col 3 body/skin for other 5 faces) - offset forward
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5) * head_scale,
                     Vec3::new(0.0, 0.15, 0.2) * head_scale,
                     to_world(Vec3::new(0.0, 1.1 * scale, 0.35 * scale)),
@@ -698,8 +875,7 @@ pub fn render_mobs(
                 );
                 // Torso (Row 10, Col 3) - horizontal: length = 1.0, height = 0.8, width = 0.7
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.7, 0.8, 1.0) * scale,
                     Vec3::new(0.0, 0.0, 0.0),
                     to_world(Vec3::new(0.0, 1.0 * scale, 0.0)),
@@ -711,8 +887,7 @@ pub fn render_mobs(
                 );
                 // 4 Legs (Row 10, Col 3)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.22, 0.6, 0.22) * scale,
                     Vec3::new(0.0, -0.3, 0.0) * scale,
                     to_world(Vec3::new(-0.25 * scale, 0.6 * scale, 0.35 * scale)),
@@ -723,8 +898,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.22, 0.6, 0.22) * scale,
                     Vec3::new(0.0, -0.3, 0.0) * scale,
                     to_world(Vec3::new(0.25 * scale, 0.6 * scale, 0.35 * scale)),
@@ -735,8 +909,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.22, 0.6, 0.22) * scale,
                     Vec3::new(0.0, -0.3, 0.0) * scale,
                     to_world(Vec3::new(-0.25 * scale, 0.6 * scale, -0.35 * scale)),
@@ -747,8 +920,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.22, 0.6, 0.22) * scale,
                     Vec3::new(0.0, -0.3, 0.0) * scale,
                     to_world(Vec3::new(0.25 * scale, 0.6 * scale, -0.35 * scale)),
@@ -773,8 +945,7 @@ pub fn render_mobs(
 
                 // Head (Row 10, Col 4 face, Col 6 sheared skin for other 5 faces) - offset forward
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.45, 0.45, 0.45) * head_scale,
                     Vec3::new(0.0, 0.15, 0.2) * head_scale,
                     to_world(Vec3::new(0.0, 0.9 * scale, 0.3 * scale)),
@@ -788,8 +959,7 @@ pub fn render_mobs(
                 // Body (sheared skin Col 6 or wool layer Col 5) - horizontal: length = 0.9, height = 0.6, width = 0.6
                 let body_col = if entity.has_wool { 5 } else { 6 };
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.6, 0.6, 0.9) * scale,
                     Vec3::new(0.0, 0.0, 0.0),
                     to_world(Vec3::new(0.0, 0.8 * scale, 0.0)),
@@ -802,8 +972,7 @@ pub fn render_mobs(
 
                 // 4 Legs (Col 6 sheared skin)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
                     Vec3::new(0.0, -0.25, 0.0) * scale,
                     to_world(Vec3::new(-0.25 * scale, 0.5 * scale, 0.3 * scale)),
@@ -814,8 +983,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
                     Vec3::new(0.0, -0.25, 0.0) * scale,
                     to_world(Vec3::new(0.25 * scale, 0.5 * scale, 0.3 * scale)),
@@ -826,8 +994,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
                     Vec3::new(0.0, -0.25, 0.0) * scale,
                     to_world(Vec3::new(-0.25 * scale, 0.5 * scale, -0.3 * scale)),
@@ -838,8 +1005,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
                     Vec3::new(0.0, -0.25, 0.0) * scale,
                     to_world(Vec3::new(0.25 * scale, 0.5 * scale, -0.3 * scale)),
@@ -861,8 +1027,7 @@ pub fn render_mobs(
 
                 // Head (Row 10, Col 7 face, Col 8 body/feathers for other 5 faces) - offset forward
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.25, 0.35, 0.25) * head_scale,
                     Vec3::new(0.0, 0.1, 0.15) * head_scale,
                     to_world(Vec3::new(0.0, 0.45 * scale, 0.1 * scale)),
@@ -874,8 +1039,7 @@ pub fn render_mobs(
                 );
                 // Body (Row 10, Col 8) - horizontal: length = 0.4, height = 0.3, width = 0.3
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.3, 0.3, 0.4) * scale,
                     Vec3::new(0.0, 0.0, 0.0),
                     to_world(Vec3::new(0.0, 0.35 * scale, 0.0)),
@@ -887,8 +1051,7 @@ pub fn render_mobs(
                 );
                 // Wings: rotate along Z axis for flapping animation
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.05, 0.25, 0.25) * scale,
                     Vec3::new(0.0, -0.1, 0.0) * scale,
                     to_world(Vec3::new(-0.175 * scale, 0.35 * scale, 0.0)),
@@ -899,8 +1062,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.05, 0.25, 0.25) * scale,
                     Vec3::new(0.0, -0.1, 0.0) * scale,
                     to_world(Vec3::new(0.175 * scale, 0.35 * scale, 0.0)),
@@ -912,8 +1074,7 @@ pub fn render_mobs(
                 );
                 // Legs (thin boxes, Col 8)
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.06, 0.2, 0.06) * scale,
                     Vec3::new(0.0, -0.1, 0.0) * scale,
                     to_world(Vec3::new(-0.06 * scale, 0.2 * scale, 0.0)),
@@ -924,8 +1085,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.06, 0.2, 0.06) * scale,
                     Vec3::new(0.0, -0.1, 0.0) * scale,
                     to_world(Vec3::new(0.06 * scale, 0.2 * scale, 0.0)),
@@ -947,8 +1107,7 @@ pub fn render_mobs(
                 // Both mobs use the familiar humanoid silhouette. Husks hold
                 // their arms forward, while piglins walk with alternating arms.
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5),
                     Vec3::new(0.0, 0.25, 0.0),
                     to_world(Vec3::new(0.0, 1.45, 0.0)),
@@ -959,8 +1118,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.7, 0.28),
                     Vec3::new(0.0, 0.35, 0.0),
                     to_world(Vec3::new(0.0, 0.75, 0.0)),
@@ -979,8 +1137,7 @@ pub fn render_mobs(
                 };
                 for (x, pitch) in [(-0.35, left_arm_pitch), (0.35, right_arm_pitch)] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.2, 0.75, 0.2),
                         Vec3::new(0.0, -0.325, 0.0),
                         to_world(Vec3::new(x, 1.4, 0.0)),
@@ -993,8 +1150,7 @@ pub fn render_mobs(
                 }
                 for (x, pitch) in [(-0.13, swing), (0.13, -swing)] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.22, 0.75, 0.22),
                         Vec3::new(0.0, -0.375, 0.0),
                         to_world(Vec3::new(x, 0.75, 0.0)),
@@ -1011,8 +1167,7 @@ pub fn render_mobs(
                     // even with the deliberately compact atlas treatment.
                     for x in [-0.34, 0.34] {
                         add_cuboid(
-                            vertices,
-                            indices,
+                            cuboid_instances,
                             Vec3::new(0.18, 0.24, 0.08),
                             Vec3::ZERO,
                             to_world(Vec3::new(x, 1.72, 0.0)),
@@ -1024,8 +1179,7 @@ pub fn render_mobs(
                         );
                     }
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.2, 0.16, 0.12),
                         Vec3::new(0.0, 0.0, 0.29),
                         to_world(Vec3::new(0.0, 1.68, 0.0)),
@@ -1042,8 +1196,7 @@ pub fn render_mobs(
                 let blaze_light = light_val.max(255.0);
 
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 1.5 + hover, 0.0)),
@@ -1054,8 +1207,7 @@ pub fn render_mobs(
                     blaze_light,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.34, 0.7, 0.34),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 0.92 + hover, 0.0)),
@@ -1080,8 +1232,7 @@ pub fn render_mobs(
                             0.55 + (angle * 2.0).cos() * 0.1
                         };
                         add_cuboid(
-                            vertices,
-                            indices,
+                            cuboid_instances,
                             Vec3::new(0.12, 0.62, 0.12),
                             Vec3::ZERO,
                             to_world(Vec3::new(
@@ -1102,8 +1253,7 @@ pub fn render_mobs(
                 let lid_gap = 0.08 + (time * 1.3).sin().abs() * 0.1;
 
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.95, 0.18, 0.95),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 0.09, 0.0)),
@@ -1114,8 +1264,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.88, 0.36, 0.88),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 0.35, 0.0)),
@@ -1126,8 +1275,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::splat(0.34),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 0.63, 0.0)),
@@ -1138,8 +1286,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.9, 0.36, 0.9),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 0.82 + lid_gap, 0.0)),
@@ -1155,8 +1302,7 @@ pub fn render_mobs(
 
                 // Body, neck, head and jaw.
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(2.0, 1.65, 3.2),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 2.05, -0.35)),
@@ -1171,8 +1317,7 @@ pub fn render_mobs(
                     (Vec3::new(0.0, 2.48, 2.3), Vec3::new(1.05, 0.95, 1.0)),
                 ] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         size,
                         Vec3::ZERO,
                         to_world(center),
@@ -1184,8 +1329,7 @@ pub fn render_mobs(
                     );
                 }
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(1.45, 0.9, 1.35),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 2.62, 3.05)),
@@ -1196,8 +1340,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.95, 0.25, 0.85),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 2.22, 3.42)),
@@ -1209,8 +1352,7 @@ pub fn render_mobs(
                 );
                 for x in [-0.48, 0.48] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.2, 0.38, 0.62),
                         Vec3::ZERO,
                         to_world(Vec3::new(x, 3.12, 2.75)),
@@ -1226,8 +1368,7 @@ pub fn render_mobs(
                 // pushing a dragon beyond 800 generated vertices.
                 for side in [-1.0_f32, 1.0] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(2.8, 0.14, 1.35),
                         Vec3::ZERO,
                         to_world(Vec3::new(side * 2.05, 2.55 + flap, -0.2)),
@@ -1238,8 +1379,7 @@ pub fn render_mobs(
                         light_val,
                     );
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(2.2, 0.1, 0.95),
                         Vec3::ZERO,
                         to_world(Vec3::new(side * 4.25, 2.72 + flap * 1.6, -0.55)),
@@ -1256,8 +1396,7 @@ pub fn render_mobs(
                     let i = segment as f32;
                     let curve = (time * 2.0 + i * 0.7).sin() * 0.13;
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.75 - i * 0.1, 0.65 - i * 0.07, 1.25 - i * 0.1),
                         Vec3::ZERO,
                         to_world(Vec3::new(
@@ -1275,8 +1414,7 @@ pub fn render_mobs(
 
                 for (x, z) in [(-0.68, 0.65), (0.68, 0.65), (-0.68, -0.8), (0.68, -0.8)] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.42, 1.0, 0.42),
                         Vec3::ZERO,
                         to_world(Vec3::new(x, 0.85, z)),
@@ -1294,8 +1432,7 @@ pub fn render_mobs(
 
                 // Central spine and the signature three-headed shoulder bar.
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(2.25, 0.36, 0.4),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 2.25 + hover, 0.0)),
@@ -1306,8 +1443,7 @@ pub fn render_mobs(
                     wither_light,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.38, 1.5, 0.4),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 1.4 + hover, 0.0)),
@@ -1319,8 +1455,7 @@ pub fn render_mobs(
                 );
                 for (x, y, scale) in [(-0.92, 2.52, 0.82), (0.0, 2.7, 1.0), (0.92, 2.52, 0.82)] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.72, 0.62, 0.62) * scale,
                         Vec3::ZERO,
                         to_world(Vec3::new(x, y + hover, 0.12)),
@@ -1333,8 +1468,7 @@ pub fn render_mobs(
                 }
                 for (y, width) in [(1.72, 1.45), (1.28, 1.05)] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(width, 0.2, 0.28),
                         Vec3::ZERO,
                         to_world(Vec3::new(0.0, y + hover, 0.0)),
@@ -1352,8 +1486,7 @@ pub fn render_mobs(
 
                 for (size, y) in [(1.25, 0.12), (0.95, 0.25), (0.65, 0.38)] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(size, 0.16, size),
                         Vec3::ZERO,
                         to_world(Vec3::new(0.0, y, 0.0)),
@@ -1365,8 +1498,7 @@ pub fn render_mobs(
                     );
                 }
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.12, 0.85, 0.12),
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 0.85, 0.0)),
@@ -1378,8 +1510,7 @@ pub fn render_mobs(
                 );
                 for (size, yaw, pitch) in [(0.72, spin, 0.65), (0.46, -spin * 1.4, -0.45)] {
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::splat(size),
                         Vec3::ZERO,
                         to_world(Vec3::new(0.0, 1.35, 0.0)),
@@ -1401,8 +1532,7 @@ pub fn render_mobs(
                 let col = if is_skull { 5 } else { 6 };
                 let size = if is_skull { 0.3 } else { 0.22 };
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::splat(size * pulse),
                     Vec3::ZERO,
                     entity.position,
@@ -1417,8 +1547,7 @@ pub fn render_mobs(
                 // Heart Particle billboard rendering
                 // Reuses Row 8, Col 0 Heart icon
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.25, 0.25, 0.01),
                     Vec3::new(0.0, 0.0, 0.0),
                     entity.position,
@@ -1442,8 +1571,7 @@ pub fn render_mobs(
                 if item.renders_flat() {
                     let (col, row) = item.properties().tex_coords;
                     add_flat_sprite(
-                        vertices,
-                        indices,
+                        quad_instances,
                         0.35,
                         entity.position + Vec3::new(0.0, 0.3 + y_offset, 0.0),
                         yaw,
@@ -1458,8 +1586,7 @@ pub fn render_mobs(
                         .unwrap_or((0, 0));
 
                     add_cuboid(
-                        vertices,
-                        indices,
+                        cuboid_instances,
                         Vec3::new(0.25, 0.25, 0.25),
                         Vec3::new(0.0, 0.0, 0.0),
                         to_world(Vec3::new(0.0, 0.25 + y_offset, 0.0)),
@@ -1476,8 +1603,7 @@ pub fn render_mobs(
                 // sheep skin supplies a warm face/skin tone, while the zombie
                 // shirt and trousers provide the familiar teal-and-blue outfit.
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5),
                     Vec3::new(0.0, 0.25, 0.0),
                     to_world(Vec3::new(0.0, 1.4, 0.0)),
@@ -1489,8 +1615,7 @@ pub fn render_mobs(
                 );
 
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.5, 0.75, 0.25),
                     Vec3::new(0.0, 0.375, 0.0),
                     to_world(Vec3::new(0.0, 0.65, 0.0)),
@@ -1503,8 +1628,7 @@ pub fn render_mobs(
 
                 // Arms counter-swing against the legs while walking.
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.25, 0.75, 0.25),
                     Vec3::new(0.0, -0.325, 0.0),
                     to_world(Vec3::new(-0.375, 1.3, 0.0)),
@@ -1515,8 +1639,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.25, 0.75, 0.25),
                     Vec3::new(0.0, -0.325, 0.0),
                     to_world(Vec3::new(0.375, 1.3, 0.0)),
@@ -1528,8 +1651,7 @@ pub fn render_mobs(
                 );
 
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.25, 0.75, 0.25),
                     Vec3::new(0.0, -0.375, 0.0),
                     to_world(Vec3::new(-0.125, 0.75, 0.0)),
@@ -1540,8 +1662,7 @@ pub fn render_mobs(
                     light_val,
                 );
                 add_cuboid(
-                    vertices,
-                    indices,
+                    cuboid_instances,
                     Vec3::new(0.25, 0.75, 0.25),
                     Vec3::new(0.0, -0.375, 0.0),
                     to_world(Vec3::new(0.125, 0.75, 0.0)),
@@ -1560,8 +1681,7 @@ pub fn render_mobs(
             let fire_size = entity.size + Vec3::splat(0.1);
             let fire_offset = Vec3::new(0.0, entity.size.y * 0.5, 0.0);
             add_cuboid(
-                vertices,
-                indices,
+                cuboid_instances,
                 fire_size,
                 fire_offset,
                 entity.position,
@@ -1582,8 +1702,7 @@ pub fn render_local_player(
     yaw: f32,
     pitch: f32,
     chunk_manager: &ChunkManager,
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
+    cuboid_instances: &mut Vec<MobInstance>,
     time: f32,
     velocity: Vec3,
 ) {
@@ -1615,8 +1734,7 @@ pub fn render_local_player(
 
     // Head (sheep skin face on front, plain skin on other 5 faces)
     add_cuboid(
-        vertices,
-        indices,
+        cuboid_instances,
         Vec3::new(0.5, 0.5, 0.5),
         Vec3::new(0.0, 0.25, 0.0),
         to_world(Vec3::new(0.0, 1.4, 0.0)),
@@ -1629,8 +1747,7 @@ pub fn render_local_player(
 
     // Torso (zombie teal shirt)
     add_cuboid(
-        vertices,
-        indices,
+        cuboid_instances,
         Vec3::new(0.5, 0.75, 0.25),
         Vec3::new(0.0, 0.375, 0.0),
         to_world(Vec3::new(0.0, 0.65, 0.0)),
@@ -1643,8 +1760,7 @@ pub fn render_local_player(
 
     // Arms counter-swing against the legs while walking.
     add_cuboid(
-        vertices,
-        indices,
+        cuboid_instances,
         Vec3::new(0.25, 0.75, 0.25),
         Vec3::new(0.0, -0.325, 0.0),
         to_world(Vec3::new(-0.375, 1.3, 0.0)),
@@ -1655,8 +1771,7 @@ pub fn render_local_player(
         light_val,
     );
     add_cuboid(
-        vertices,
-        indices,
+        cuboid_instances,
         Vec3::new(0.25, 0.75, 0.25),
         Vec3::new(0.0, -0.325, 0.0),
         to_world(Vec3::new(0.375, 1.3, 0.0)),
@@ -1669,8 +1784,7 @@ pub fn render_local_player(
 
     // Legs (zombie dark blue pants)
     add_cuboid(
-        vertices,
-        indices,
+        cuboid_instances,
         Vec3::new(0.25, 0.75, 0.25),
         Vec3::new(0.0, -0.375, 0.0),
         to_world(Vec3::new(-0.125, 0.75, 0.0)),
@@ -1681,8 +1795,7 @@ pub fn render_local_player(
         light_val,
     );
     add_cuboid(
-        vertices,
-        indices,
+        cuboid_instances,
         Vec3::new(0.25, 0.75, 0.25),
         Vec3::new(0.0, -0.375, 0.0),
         to_world(Vec3::new(0.125, 0.75, 0.0)),
@@ -1706,7 +1819,7 @@ mod tests {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        render_mobs(&entities, &chunks, &mut vertices, &mut indices, 0.0);
+        render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 0.0);
 
         assert_eq!(vertices.len(), 6 * 24);
         assert_eq!(indices.len(), 6 * 36);
@@ -1721,7 +1834,7 @@ mod tests {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        render_local_player(
+        render_local_player_legacy(
             Vec3::new(0.0, 64.0, 0.0),
             0.0,
             0.0,
@@ -1751,7 +1864,7 @@ mod tests {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        render_local_player(
+        render_local_player_legacy(
             position,
             model_yaw,
             0.0,
@@ -1786,7 +1899,7 @@ mod tests {
         let chunks = ChunkManager::new(1);
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
-        render_mobs(&entities, &chunks, &mut vertices, &mut indices, 1.0);
+        render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 1.0);
 
         // Flat items render as one double-sided quad, not a cube.
         assert_eq!(vertices.len(), 4);
@@ -1805,7 +1918,7 @@ mod tests {
         let chunks = ChunkManager::new(1);
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
-        render_mobs(&entities, &chunks, &mut vertices, &mut indices, 1.0);
+        render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 1.0);
 
         assert_eq!(vertices.len(), 24);
         assert_eq!(indices.len(), 36);
@@ -1828,7 +1941,7 @@ mod tests {
 
             let mut vertices = Vec::new();
             let mut indices = Vec::new();
-            render_mobs(&entities, &chunks, &mut vertices, &mut indices, 0.0);
+            render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 0.0);
 
             // Head is the first cuboid (24 vertices, 6 faces of 4 vertices each).
             // Face 0 (Front face) starts at vertex index 0; vertex 0 has uv[0] = 0.0.
@@ -1858,7 +1971,7 @@ mod tests {
         let chunk_manager = ChunkManager::new(1);
         let mut vertices_normal = Vec::new();
         let mut indices_normal = Vec::new();
-        render_mobs(
+        render_mobs_legacy(
             &entity_manager,
             &chunk_manager,
             &mut vertices_normal,
@@ -1873,7 +1986,7 @@ mod tests {
 
         let mut vertices_burning = Vec::new();
         let mut indices_burning = Vec::new();
-        render_mobs(
+        render_mobs_legacy(
             &entity_manager,
             &chunk_manager,
             &mut vertices_burning,
