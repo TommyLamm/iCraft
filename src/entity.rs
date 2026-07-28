@@ -738,14 +738,14 @@ mod tests {
             for x in 0..crate::world::CHUNK_WIDTH {
                 for y in 0..crate::world::CHUNK_HEIGHT {
                     for z in 0..crate::world::CHUNK_DEPTH {
-                        c.blocks[x][y][z] = crate::world::BlockType::Air;
+                        c.set_block_local(x, y, z, crate::world::BlockType::Air);
                     }
                 }
             }
             // Place a 2x2 stone floor at y=10 covering the item's footprint.
             for fx in 0..2 {
                 for fz in 0..2 {
-                    c.blocks[fx][10][fz] = crate::world::BlockType::Stone;
+                    c.set_block_local(fx, 10, fz, crate::world::BlockType::Stone);
                 }
             }
             c

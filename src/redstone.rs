@@ -573,7 +573,7 @@ impl RedstoneSystem {
             for &encoded in chunk.redstone_positions() {
                 let (x, y, z) = crate::world::Chunk::decode_torch_position(encoded);
                 let pos = (origin_x + x as i32, y as i32, origin_z + z as i32);
-                let block = chunk.blocks[x][y][z];
+                let block = chunk.get_block_local(x, y, z);
                 use std::collections::hash_map::Entry;
                 if let Entry::Vacant(e) = self.components.entry(pos) {
                     e.insert(ComponentState::new(block, Direction::North));

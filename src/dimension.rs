@@ -91,27 +91,31 @@ fn generate_overworld_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
                 for y in 26..=31 {
                     let wall =
                         x == room_min || x == room_max || z == room_min || z == room_max || y == 26;
-                    chunk.blocks[x][y][z] = if wall {
-                        BlockType::StoneBrick
-                    } else {
-                        BlockType::Air
-                    };
+                    chunk.set_block_local(
+                        x,
+                        y,
+                        z,
+                        if wall {
+                            BlockType::StoneBrick
+                        } else {
+                            BlockType::Air
+                        },
+                    );
                 }
             }
         }
-        // World-space portal base is (37, 28, 37); corners are intentionally
-        // empty and the twelve side frames await Eyes of Ender.
         for offset in 1..=3 {
-            chunk.blocks[5 + offset][28][5] = BlockType::EndPortalFrame;
-            chunk.blocks[5 + offset][28][9] = BlockType::EndPortalFrame;
-            chunk.blocks[5][28][5 + offset] = BlockType::EndPortalFrame;
-            chunk.blocks[9][28][5 + offset] = BlockType::EndPortalFrame;
+            chunk.set_block_local(5 + offset, 28, 5, BlockType::EndPortalFrame);
+            chunk.set_block_local(5 + offset, 28, 9, BlockType::EndPortalFrame);
+            chunk.set_block_local(5, 28, 5 + offset, BlockType::EndPortalFrame);
+            chunk.set_block_local(9, 28, 5 + offset, BlockType::EndPortalFrame);
         }
-        let blocks = std::mem::replace(&mut chunk.blocks, empty_blocks());
-        chunk = finish_chunk(chunk_x, chunk_z, blocks, true);
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                chunk.update_heightmap(x, z);
+            }
+        }
     }
-    // Structure placement above mutates blocks directly; keep derived indexes
-    // valid for all dimension-generated chunks.
     chunk.rebuild_torch_index();
     chunk.rebuild_redstone_index();
     chunk
@@ -539,15 +543,38 @@ fn finish_chunk(
         }
     }
 
+    let mut sections = Vec::with_capacity(crate::world::SECTION_COUNT);
+    for sec_y in 0..crate::world::SECTION_COUNT {
+        let mut sec_b = [BlockType::Air; 4096];
+        let mut sec_sk = [0u8; 4096];
+        let mut sec_bl = [0u8; 4096];
+        let mut sec_fl = [0u8; 4096];
+        for ly in 0..crate::world::SECTION_SIZE {
+            let y = sec_y * crate::world::SECTION_SIZE + ly;
+            for z in 0..CHUNK_DEPTH {
+                for x in 0..CHUNK_WIDTH {
+                    let idx = (ly << 8) | (z << 4) | x;
+                    sec_b[idx] = blocks[x][y][z];
+                    sec_sk[idx] = sky_light[x][y][z];
+                    sec_bl[idx] = block_light[x][y][z];
+                    sec_fl[idx] = fluid_levels[x][y][z];
+                }
+            }
+        }
+        sections.push(crate::world::ChunkSection::from_dense(
+            &sec_b,
+            &sec_sk,
+            &sec_bl,
+            None,
+            Some(&sec_fl),
+        ));
+    }
+
     let mut chunk = Chunk {
         chunk_x,
         chunk_z,
-        blocks,
-        sky_light,
-        block_light,
+        sections,
         heightmap,
-        fluid_levels,
-        block_states: Box::new([[[0; 16]; 256]; 16]),
         torch_positions: Vec::new(),
         redstone_positions: Vec::new(),
     };
@@ -707,39 +734,69 @@ mod tests {
         );
     }
 
+    fn chunk_contains_block(chunk: &Chunk, target: BlockType) -> bool {
+        for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    if chunk.get_block_local(x, y, z) == target {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     #[test]
     fn nether_has_roof_lava_features_and_no_sky_light() {
         let chunk = generate_chunk(Dimension::Nether, 0, 0, 42);
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                assert_eq!(chunk.blocks[x][0][z], BlockType::Bedrock);
-                assert_eq!(chunk.blocks[x][NETHER_HEIGHT - 1][z], BlockType::Bedrock);
+                assert_eq!(chunk.get_block_local(x, 0, z), BlockType::Bedrock);
+                assert_eq!(
+                    chunk.get_block_local(x, NETHER_HEIGHT - 1, z),
+                    BlockType::Bedrock
+                );
             }
         }
-        assert!(contains_block(&chunk.blocks, BlockType::Lava));
-        assert!(contains_block(&chunk.blocks, BlockType::SoulSand));
-        assert!(contains_block(&chunk.blocks, BlockType::Glowstone));
-        assert!(chunk
-            .sky_light
-            .iter()
-            .flat_map(|column| column.iter())
-            .flat_map(|row| row.iter())
-            .all(|light| *light == 0));
-        assert!(chunk
-            .block_light
-            .iter()
-            .flat_map(|column| column.iter())
-            .flat_map(|row| row.iter())
-            .any(|light| *light == 15));
+        assert!(chunk_contains_block(&chunk, BlockType::Lava));
+        assert!(chunk_contains_block(&chunk, BlockType::SoulSand));
+        assert!(chunk_contains_block(&chunk, BlockType::Glowstone));
+        // Verify no sky light anywhere in the nether chunk
+        let mut all_sky_zero = true;
+        'outer_sky: for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    if chunk.get_sky_light(x, y, z) != 0 {
+                        all_sky_zero = false;
+                        break 'outer_sky;
+                    }
+                }
+            }
+        }
+        assert!(all_sky_zero);
+        // Verify some block light == 15 exists (from lava/glowstone)
+        let mut has_max_block_light = false;
+        'outer_bl: for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    if chunk.get_block_light(x, y, z) == 15 {
+                        has_max_block_light = true;
+                        break 'outer_bl;
+                    }
+                }
+            }
+        }
+        assert!(has_max_block_light);
     }
 
     #[test]
     fn end_has_dormant_origin_fountain_and_reachable_city_island() {
         let origin = generate_chunk(Dimension::End, 0, 0, 7);
-        assert!(contains_block(&origin.blocks, BlockType::EndStone));
-        assert!(contains_block(&origin.blocks, BlockType::Bedrock));
-        assert!(!contains_block(&origin.blocks, BlockType::EndPortal));
-        assert!(!contains_block(&origin.blocks, BlockType::DragonEgg));
+        assert!(chunk_contains_block(&origin, BlockType::EndStone));
+        assert!(chunk_contains_block(&origin, BlockType::Bedrock));
+        assert!(!chunk_contains_block(&origin, BlockType::EndPortal));
+        assert!(!chunk_contains_block(&origin, BlockType::DragonEgg));
 
         let city = generate_chunk(
             Dimension::End,
@@ -747,37 +804,56 @@ mod tests {
             END_CITY_Z.div_euclid(CHUNK_DEPTH as i32),
             7,
         );
-        assert!(contains_block(&city.blocks, BlockType::EndStone));
-        assert!(contains_block(&city.blocks, BlockType::Purpur));
-        assert!(contains_block(&city.blocks, BlockType::EndCityChest));
+        assert!(chunk_contains_block(&city, BlockType::EndStone));
+        assert!(chunk_contains_block(&city, BlockType::Purpur));
+        assert!(chunk_contains_block(&city, BlockType::EndCityChest));
     }
 
     #[test]
     fn overworld_stronghold_contains_twelve_empty_frames() {
         let chunk = generate_chunk(Dimension::Overworld, 2, 2, 12345);
-        let frames = chunk
-            .blocks
-            .iter()
-            .flat_map(|column| column.iter())
-            .flat_map(|row| row.iter())
-            .filter(|block| **block == BlockType::EndPortalFrame)
-            .count();
+        let mut frames = 0;
+        for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    if chunk.get_block_local(x, y, z) == BlockType::EndPortalFrame {
+                        frames += 1;
+                    }
+                }
+            }
+        }
         assert_eq!(frames, 12);
-        assert!(!contains_block(&chunk.blocks, BlockType::EndPortal));
+        assert!(!chunk_contains_block(&chunk, BlockType::EndPortal));
     }
 
     #[test]
     fn custom_dimension_generation_is_deterministic() {
         let a = generate_chunk(Dimension::Nether, -3, 5, 99);
         let b = generate_chunk(Dimension::Nether, -3, 5, 99);
-        assert_eq!(&*a.blocks, &*b.blocks);
-        assert_eq!(&*a.sky_light, &*b.sky_light);
-        assert_eq!(&*a.block_light, &*b.block_light);
+        assert_eq!(a.sections.len(), b.sections.len());
+        for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    assert_eq!(a.get_block_local(x, y, z), b.get_block_local(x, y, z));
+                    assert_eq!(a.get_sky_light(x, y, z), b.get_sky_light(x, y, z));
+                    assert_eq!(a.get_block_light(x, y, z), b.get_block_light(x, y, z));
+                }
+            }
+        }
         assert_eq!(&*a.heightmap, &*b.heightmap);
 
         let end_a = generate_chunk(Dimension::End, 15, -8, 123);
         let end_b = generate_chunk(Dimension::End, 15, -8, 123);
-        assert_eq!(&*end_a.blocks, &*end_b.blocks);
+        for x in 0..CHUNK_WIDTH {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_DEPTH {
+                    assert_eq!(
+                        end_a.get_block_local(x, y, z),
+                        end_b.get_block_local(x, y, z)
+                    );
+                }
+            }
+        }
     }
 
     fn put_x_frame(blocks: &mut HashMap<BlockPos, BlockType>, base: BlockPos) {

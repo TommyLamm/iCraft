@@ -180,11 +180,9 @@ mod tests {
     fn test_raycast_hit() {
         let mut chunk_manager = ChunkManager::new(8);
         let mut chunk = Chunk::new(0, 0);
-        // Place a block in the air
-        chunk.blocks[8][72][8] = BlockType::Stone;
+        chunk.set_block_local(8, 72, 8, BlockType::Stone);
         chunk_manager.chunks.insert((0, 0), chunk);
 
-        // Look straight up from 8.5, 70.5, 8.5 (distance 2.0 to the block min y=72)
         let hit = raycast(
             Vec3::new(8.5, 70.5, 8.5),
             Vec3::new(0.0, 1.0, 0.0),
@@ -195,14 +193,14 @@ mod tests {
         assert!(hit.is_some());
         let res = hit.unwrap();
         assert_eq!(res.block_pos, Vec3::new(8.0, 72.0, 8.0));
-        assert_eq!(res.normal, Vec3::new(0.0, -1.0, 0.0)); // Ray hits bottom face, normal points down
+        assert_eq!(res.normal, Vec3::new(0.0, -1.0, 0.0));
     }
 
     #[test]
     fn test_raycast_hits_passable_plants_when_breaking() {
         let mut chunk_manager = ChunkManager::new(8);
         let mut chunk = Chunk::new(0, 0);
-        chunk.blocks[8][72][8] = BlockType::TallGrass;
+        chunk.set_block_local(8, 72, 8, BlockType::TallGrass);
         chunk_manager.chunks.insert((0, 0), chunk);
 
         let hit = raycast(
@@ -284,9 +282,9 @@ mod tests {
     fn break_raycast_skips_water_and_lava_for_solid_behind_them() {
         let mut chunk_manager = ChunkManager::new(8);
         let mut chunk = Chunk::new(0, 0);
-        chunk.blocks[8][71][8] = BlockType::Water;
-        chunk.blocks[8][72][8] = BlockType::Lava;
-        chunk.blocks[8][73][8] = BlockType::Stone;
+        chunk.set_block_local(8, 71, 8, BlockType::Water);
+        chunk.set_block_local(8, 72, 8, BlockType::Lava);
+        chunk.set_block_local(8, 73, 8, BlockType::Stone);
         chunk_manager.chunks.insert((0, 0), chunk);
 
         let hit = raycast(
@@ -306,9 +304,9 @@ mod tests {
     fn break_raycast_returns_none_for_only_environmental_passables() {
         let mut chunk_manager = ChunkManager::new(8);
         let mut chunk = Chunk::new(0, 0);
-        chunk.blocks[8][71][8] = BlockType::Water;
-        chunk.blocks[8][72][8] = BlockType::Lava;
-        chunk.blocks[8][73][8] = BlockType::Fire;
+        chunk.set_block_local(8, 71, 8, BlockType::Water);
+        chunk.set_block_local(8, 72, 8, BlockType::Lava);
+        chunk.set_block_local(8, 73, 8, BlockType::Fire);
         chunk_manager.chunks.insert((0, 0), chunk);
 
         assert!(raycast(
@@ -325,10 +323,10 @@ mod tests {
     fn place_raycast_ignores_passable_vegetation_and_fluids() {
         let mut chunk_manager = ChunkManager::new(8);
         let mut chunk = Chunk::new(0, 0);
-        chunk.blocks[8][71][8] = BlockType::TallGrass;
-        chunk.blocks[8][72][8] = BlockType::Water;
-        chunk.blocks[8][73][8] = BlockType::Lava;
-        chunk.blocks[8][74][8] = BlockType::Stone;
+        chunk.set_block_local(8, 71, 8, BlockType::TallGrass);
+        chunk.set_block_local(8, 72, 8, BlockType::Water);
+        chunk.set_block_local(8, 73, 8, BlockType::Lava);
+        chunk.set_block_local(8, 74, 8, BlockType::Stone);
         chunk_manager.chunks.insert((0, 0), chunk);
 
         let hit = raycast(
@@ -349,7 +347,7 @@ mod tests {
         for x in 0..crate::world::CHUNK_WIDTH {
             for y in 0..crate::world::CHUNK_HEIGHT {
                 for z in 0..crate::world::CHUNK_DEPTH {
-                    chunk.blocks[x][y][z] = BlockType::Air;
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
         }

@@ -172,7 +172,7 @@ impl ChunkManager {
     pub fn get_loaded_block(&self, wx: i32, wy: i32, wz: i32) -> Option<BlockType> {
         let ((cx, cz), (bx, by, bz)) = self.world_to_local(wx, wy, wz)?;
         let chunk = self.chunks.get(&(cx, cz))?;
-        Some(chunk.blocks[bx][by][bz])
+        Some(chunk.get_block_local(bx, by, bz))
     }
 
     pub fn block_support_status(
@@ -199,7 +199,7 @@ impl ChunkManager {
     pub fn get_block_state(&self, wx: i32, wy: i32, wz: i32) -> u8 {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                return chunk.block_states[bx][by][bz];
+                return chunk.get_block_state(bx as i32, by as i32, bz as i32);
             }
         }
         0
@@ -208,8 +208,8 @@ impl ChunkManager {
     pub fn set_block_state(&mut self, wx: i32, wy: i32, wz: i32, state: u8) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                if chunk.block_states[bx][by][bz] != state {
-                    chunk.block_states[bx][by][bz] = state;
+                if chunk.get_block_state(bx as i32, by as i32, bz as i32) != state {
+                    chunk.set_block_state(bx as i32, by as i32, bz as i32, state);
                     self.dirty_chunks.mark_dirty(cx, cz);
                 }
             }
@@ -219,13 +219,13 @@ impl ChunkManager {
     pub fn set_block(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                if chunk.blocks[bx][by][bz] == block {
+                if chunk.get_block_local(bx, by, bz) == block {
                     return;
                 }
                 chunk.set_block_local(bx, by, bz, block);
-                chunk.block_states[bx][by][bz] = 0;
+                chunk.set_block_state(bx as i32, by as i32, bz as i32, 0);
                 if block != BlockType::Water && block != BlockType::Lava {
-                    chunk.fluid_levels[bx][by][bz] = 0;
+                    chunk.set_fluid_level(bx, by, bz, 0);
                 }
                 chunk.update_heightmap(bx, bz);
                 self.schedule_fluid_neighbors(wx, wy, wz);
@@ -237,7 +237,7 @@ impl ChunkManager {
     pub fn get_sky_light(&self, wx: i32, wy: i32, wz: i32) -> u8 {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                return chunk.sky_light[bx][by][bz];
+                return chunk.get_sky_light(bx, by, bz);
             }
         }
         if wy >= CHUNK_HEIGHT as i32 {
@@ -253,8 +253,8 @@ impl ChunkManager {
     pub fn set_sky_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                if chunk.sky_light[bx][by][bz] != val {
-                    chunk.sky_light[bx][by][bz] = val;
+                if chunk.get_sky_light(bx, by, bz) != val {
+                    chunk.set_sky_light(bx, by, bz, val);
                     self.dirty_chunks.mark_dirty(cx, cz);
                 }
             }
@@ -264,7 +264,7 @@ impl ChunkManager {
     pub fn get_block_light(&self, wx: i32, wy: i32, wz: i32) -> u8 {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                return chunk.block_light[bx][by][bz];
+                return chunk.get_block_light(bx, by, bz);
             }
         }
         0
@@ -273,8 +273,8 @@ impl ChunkManager {
     pub fn set_block_light(&mut self, wx: i32, wy: i32, wz: i32, val: u8) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                if chunk.block_light[bx][by][bz] != val {
-                    chunk.block_light[bx][by][bz] = val;
+                if chunk.get_block_light(bx, by, bz) != val {
+                    chunk.set_block_light(bx, by, bz, val);
                     self.dirty_chunks.mark_dirty(cx, cz);
                 }
             }
@@ -284,7 +284,7 @@ impl ChunkManager {
     pub fn get_fluid_level(&self, wx: i32, wy: i32, wz: i32) -> u8 {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                return chunk.fluid_levels[bx][by][bz] & 0x07;
+                return chunk.get_fluid_level(bx, by, bz) & 0x07;
             }
         }
         0
@@ -293,10 +293,10 @@ impl ChunkManager {
     pub fn set_fluid_level(&mut self, wx: i32, wy: i32, wz: i32, level: u8) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                let current = chunk.fluid_levels[bx][by][bz];
+                let current = chunk.get_fluid_level(bx, by, bz);
                 let updated = (current & 0xF8) | (level & 0x07);
                 if current != updated {
-                    chunk.fluid_levels[bx][by][bz] = updated;
+                    chunk.set_fluid_level(bx, by, bz, updated);
                     self.schedule_fluid_neighbors(wx, wy, wz);
                     self.dirty_chunks.mark_dirty(cx, cz);
                 }
@@ -307,7 +307,7 @@ impl ChunkManager {
     pub fn get_fluid_falling(&self, wx: i32, wy: i32, wz: i32) -> bool {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                return (chunk.fluid_levels[bx][by][bz] & 0x08) != 0;
+                return (chunk.get_fluid_level(bx, by, bz) & 0x08) != 0;
             }
         }
         false
@@ -316,14 +316,14 @@ impl ChunkManager {
     pub fn set_fluid_falling(&mut self, wx: i32, wy: i32, wz: i32, falling: bool) {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                let current = chunk.fluid_levels[bx][by][bz];
+                let current = chunk.get_fluid_level(bx, by, bz);
                 let updated = if falling {
                     current | 0x08
                 } else {
                     current & !0x08
                 };
                 if current != updated {
-                    chunk.fluid_levels[bx][by][bz] = updated;
+                    chunk.set_fluid_level(bx, by, bz, updated);
                     self.schedule_fluid_neighbors(wx, wy, wz);
                     self.dirty_chunks.mark_dirty(cx, cz);
                 }

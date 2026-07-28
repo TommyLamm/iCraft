@@ -454,14 +454,7 @@ mod tests {
 
     fn empty_chunk_manager() -> ChunkManager {
         let mut chunk_manager = ChunkManager::new(2);
-        let mut chunk = Chunk::new(0, 0);
-        for x in 0..16 {
-            for y in 0..256 {
-                for z in 0..16 {
-                    chunk.blocks[x][y][z] = BlockType::Air;
-                }
-            }
-        }
+        let chunk = Chunk::new(0, 0);
         chunk_manager.chunks.insert((0, 0), chunk);
         chunk_manager
     }
@@ -608,7 +601,11 @@ mod tests {
     fn test_player_edge_guard() {
         let mut chunk_manager = empty_chunk_manager();
         // Set one stone block at (8, 70, 8)
-        chunk_manager.chunks.get_mut(&(0, 0)).unwrap().blocks[8][70][8] = BlockType::Stone;
+        chunk_manager
+            .chunks
+            .get_mut(&(0, 0))
+            .unwrap()
+            .set_block_local(8, 70, 8, BlockType::Stone);
 
         let mut physics = PlayerPhysics::new(Vec3::new(8.5, 71.0, 8.5));
         physics.on_ground = true;
@@ -647,7 +644,11 @@ mod tests {
     #[test]
     fn creative_flight_hovers_and_moves_vertically_without_fall_damage() {
         let mut chunk_manager = empty_chunk_manager();
-        chunk_manager.chunks.get_mut(&(0, 0)).unwrap().blocks[8][80][8] = BlockType::Water;
+        chunk_manager
+            .chunks
+            .get_mut(&(0, 0))
+            .unwrap()
+            .set_block_local(8, 80, 8, BlockType::Water);
         let mut physics = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
         physics.set_flying(true);
 
@@ -679,10 +680,10 @@ mod tests {
     fn creative_flight_keeps_solid_collision_on_every_axis() {
         let mut chunk_manager = empty_chunk_manager();
         let chunk = chunk_manager.chunks.get_mut(&(0, 0)).unwrap();
-        chunk.blocks[9][80][8] = BlockType::Stone;
-        chunk.blocks[9][81][8] = BlockType::Stone;
-        chunk.blocks[8][82][8] = BlockType::Stone;
-        chunk.blocks[8][79][8] = BlockType::Stone;
+        chunk.set_block_local(9, 80, 8, BlockType::Stone);
+        chunk.set_block_local(9, 81, 8, BlockType::Stone);
+        chunk.set_block_local(8, 82, 8, BlockType::Stone);
+        chunk.set_block_local(8, 79, 8, BlockType::Stone);
 
         let mut wall = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
         wall.set_flying(true);
@@ -709,7 +710,11 @@ mod tests {
     #[test]
     fn creative_flight_sprint_changes_horizontal_speed_without_fluid_drag() {
         let mut chunk_manager = empty_chunk_manager();
-        chunk_manager.chunks.get_mut(&(0, 0)).unwrap().blocks[8][80][8] = BlockType::Lava;
+        chunk_manager
+            .chunks
+            .get_mut(&(0, 0))
+            .unwrap()
+            .set_block_local(8, 80, 8, BlockType::Lava);
         let mut physics = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
         physics.set_flying(true);
 
@@ -727,11 +732,11 @@ mod tests {
     fn high_speed_motion_cannot_tunnel_through_one_block_barriers_on_any_axis() {
         let mut chunk_manager = empty_chunk_manager();
         let chunk = chunk_manager.chunks.get_mut(&(0, 0)).unwrap();
-        chunk.blocks[9][80][8] = BlockType::Stone;
-        chunk.blocks[9][81][8] = BlockType::Stone;
-        chunk.blocks[8][80][9] = BlockType::Stone;
-        chunk.blocks[8][81][9] = BlockType::Stone;
-        chunk.blocks[8][83][8] = BlockType::Stone;
+        chunk.set_block_local(9, 80, 8, BlockType::Stone);
+        chunk.set_block_local(9, 81, 8, BlockType::Stone);
+        chunk.set_block_local(8, 80, 9, BlockType::Stone);
+        chunk.set_block_local(8, 81, 9, BlockType::Stone);
+        chunk.set_block_local(8, 83, 8, BlockType::Stone);
 
         let mut x_motion = PlayerPhysics::new(Vec3::new(8.5, 80.0, 8.5));
         x_motion.set_flying(true);
@@ -758,7 +763,11 @@ mod tests {
     #[test]
     fn non_flying_gravity_and_fall_damage_are_unchanged() {
         let mut chunk_manager = empty_chunk_manager();
-        chunk_manager.chunks.get_mut(&(0, 0)).unwrap().blocks[8][79][8] = BlockType::Stone;
+        chunk_manager
+            .chunks
+            .get_mut(&(0, 0))
+            .unwrap()
+            .set_block_local(8, 79, 8, BlockType::Stone);
         let mut physics = PlayerPhysics::new(Vec3::new(8.5, 85.0, 8.5));
         physics.highest_y = physics.position.y;
 

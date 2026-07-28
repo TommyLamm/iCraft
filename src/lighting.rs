@@ -534,7 +534,7 @@ pub fn propagate_chunk_lighting(
                     // 1. Seed sky light only where a loaded, transparent
                     // neighbor actually needs light. Treating every chunk
                     // boundary as dirty creates thousands of useless nodes.
-                    let sky_val = chunk.sky_light[x][y][z];
+                    let sky_val = chunk.get_sky_light(x, y, z);
                     if sky_val > 1 {
                         let mut has_darker_neighbor = false;
 
@@ -552,10 +552,16 @@ pub fn propagate_chunk_lighting(
                                 && local_nz < CHUNK_DEPTH as i32
                             {
                                 (
-                                    chunk.blocks[local_nx as usize][local_ny as usize]
-                                        [local_nz as usize],
-                                    chunk.sky_light[local_nx as usize][local_ny as usize]
-                                        [local_nz as usize],
+                                    chunk.get_block_local(
+                                        local_nx as usize,
+                                        local_ny as usize,
+                                        local_nz as usize,
+                                    ),
+                                    chunk.get_sky_light(
+                                        local_nx as usize,
+                                        local_ny as usize,
+                                        local_nz as usize,
+                                    ),
                                 )
                             } else {
                                 let nx = wx + dx;
@@ -592,7 +598,7 @@ pub fn propagate_chunk_lighting(
                     }
 
                     // 2. Apply the same loaded-neighbor check to block light.
-                    let block_val = chunk.block_light[x][y][z];
+                    let block_val = chunk.get_block_light(x, y, z);
                     if block_val > 1 {
                         let mut has_darker_neighbor = false;
 
@@ -610,10 +616,16 @@ pub fn propagate_chunk_lighting(
                                 && local_nz < CHUNK_DEPTH as i32
                             {
                                 (
-                                    chunk.blocks[local_nx as usize][local_ny as usize]
-                                        [local_nz as usize],
-                                    chunk.block_light[local_nx as usize][local_ny as usize]
-                                        [local_nz as usize],
+                                    chunk.get_block_local(
+                                        local_nx as usize,
+                                        local_ny as usize,
+                                        local_nz as usize,
+                                    ),
+                                    chunk.get_block_light(
+                                        local_nx as usize,
+                                        local_ny as usize,
+                                        local_nz as usize,
+                                    ),
                                 )
                             } else {
                                 let nx = wx + dx;
@@ -673,22 +685,22 @@ mod tests {
             for z in 0..CHUNK_DEPTH {
                 for y in 0..CHUNK_HEIGHT {
                     if y >= 64 {
-                        chunk.blocks[x][y][z] = BlockType::Air;
-                        chunk.sky_light[x][y][z] = 15;
+                        chunk.set_block_local(x, y, z, BlockType::Air);
+                        chunk.set_sky_light(x, y, z, 15);
                     } else {
-                        chunk.blocks[x][y][z] = BlockType::Stone;
-                        chunk.sky_light[x][y][z] = 0;
+                        chunk.set_block_local(x, y, z, BlockType::Stone);
+                        chunk.set_sky_light(x, y, z, 0);
                     }
-                    chunk.block_light[x][y][z] = 0;
+                    chunk.set_block_light(x, y, z, 0);
                 }
             }
         }
 
         // A cave entrance whose light source is queued after those boundary
         // cells, followed by a short horizontal tunnel.
-        chunk.blocks[8][63][8] = BlockType::Air;
+        chunk.set_block_local(8, 63, 8, BlockType::Air);
         for x in 8..=12 {
-            chunk.blocks[x][62][8] = BlockType::Air;
+            chunk.set_block_local(x, 62, 8, BlockType::Air);
         }
 
         chunk_manager.chunks.insert((0, 0), chunk);
@@ -707,17 +719,17 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 for y in 0..CHUNK_HEIGHT {
-                    chunk.blocks[x][y][z] = BlockType::Stone;
-                    chunk.sky_light[x][y][z] = 0;
-                    chunk.block_light[x][y][z] = 0;
+                    chunk.set_block_local(x, y, z, BlockType::Stone);
+                    chunk.set_sky_light(x, y, z, 0);
+                    chunk.set_block_light(x, y, z, 0);
                 }
             }
         }
 
-        chunk.blocks[8][64][8] = BlockType::Air;
-        chunk.blocks[8][63][8] = BlockType::Air;
-        chunk.sky_light[8][64][8] = 15;
-        chunk.block_light[8][64][8] = 14;
+        chunk.set_block_local(8, 64, 8, BlockType::Air);
+        chunk.set_block_local(8, 63, 8, BlockType::Air);
+        chunk.set_sky_light(8, 64, 8, 15);
+        chunk.set_block_light(8, 64, 8, 14);
         chunk_manager.chunks.insert((0, 0), chunk);
 
         let mut dirty_chunks = HashSet::new();

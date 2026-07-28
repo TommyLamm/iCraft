@@ -326,11 +326,11 @@ impl ChunkSaveData {
         for x in 0..16 {
             for y in 0..256 {
                 for z in 0..16 {
-                    blocks.push(chunk.blocks[x][y][z] as u8);
-                    block_states_raw.push(chunk.block_states[x][y][z]);
-                    sky_light.push(chunk.sky_light[x][y][z]);
-                    block_light.push(chunk.block_light[x][y][z]);
-                    fluid_levels.push(chunk.fluid_levels[x][y][z]);
+                    blocks.push(chunk.get_block_local(x, y, z) as u8);
+                    block_states_raw.push(chunk.get_block_state(x as i32, y as i32, z as i32));
+                    sky_light.push(chunk.get_sky_light(x, y, z));
+                    block_light.push(chunk.get_block_light(x, y, z));
+                    fluid_levels.push(chunk.get_fluid_level(x, y, z));
                 }
             }
         }
@@ -386,73 +386,63 @@ impl ChunkSaveData {
         let fluid_levels = decompress_bytes(&self.fluid_levels).unwrap_or_default();
 
         if blocks.len() == 16 * 256 * 16 {
-            let mut idx = 0;
-            for x in 0..16 {
-                for y in 0..256 {
+            let mut sections = Vec::with_capacity(crate::world::SECTION_COUNT);
+            for sec_y in 0..crate::world::SECTION_COUNT {
+                let mut sec_b = [BlockType::Air; 4096];
+                let mut sec_st = [0u8; 4096];
+                let mut sec_sk = [0u8; 4096];
+                let mut sec_bl = [0u8; 4096];
+                let mut sec_fl = [0u8; 4096];
+
+                for ly in 0..crate::world::SECTION_SIZE {
+                    let y = sec_y * crate::world::SECTION_SIZE + ly;
                     for z in 0..16 {
-                        chunk.blocks[x][y][z] = BlockType::from_u8(blocks[idx]);
-                        idx += 1;
+                        for x in 0..16 {
+                            let flat_idx = (x * 256 + y) * 16 + z;
+                            let sec_idx = (ly << 8) | (z << 4) | x;
+
+                            sec_b[sec_idx] = BlockType::from_u8(blocks[flat_idx]);
+                            if !block_states.is_empty() {
+                                sec_st[sec_idx] = block_states[flat_idx];
+                            }
+                            if !sky_light.is_empty() {
+                                sec_sk[sec_idx] = sky_light[flat_idx];
+                            }
+                            if !block_light.is_empty() {
+                                sec_bl[sec_idx] = block_light[flat_idx];
+                            }
+                            if !fluid_levels.is_empty() {
+                                sec_fl[sec_idx] = fluid_levels[flat_idx];
+                            }
+                        }
                     }
                 }
+
+                let sec = crate::world::ChunkSection::from_dense(
+                    &sec_b,
+                    &sec_sk,
+                    &sec_bl,
+                    if block_states.is_empty() {
+                        None
+                    } else {
+                        Some(&sec_st)
+                    },
+                    if fluid_levels.is_empty() {
+                        None
+                    } else {
+                        Some(&sec_fl)
+                    },
+                );
+                sections.push(sec);
             }
+            chunk.sections = sections;
             chunk.rebuild_torch_index();
             chunk.rebuild_redstone_index();
-        }
 
-        if block_states.len() == 16 * 256 * 16 {
-            let mut idx = 0;
             for x in 0..16 {
-                for y in 0..256 {
-                    for z in 0..16 {
-                        chunk.block_states[x][y][z] = block_states[idx];
-                        idx += 1;
-                    }
+                for z in 0..16 {
+                    chunk.update_heightmap(x, z);
                 }
-            }
-        } else {
-            // Legacy save without block_states: default all to 0
-            chunk.block_states = vec![[[0u8; 16]; 256]; 16].try_into().unwrap();
-        }
-
-        if sky_light.len() == 16 * 256 * 16 {
-            let mut idx = 0;
-            for x in 0..16 {
-                for y in 0..256 {
-                    for z in 0..16 {
-                        chunk.sky_light[x][y][z] = sky_light[idx];
-                        idx += 1;
-                    }
-                }
-            }
-        }
-
-        if block_light.len() == 16 * 256 * 16 {
-            let mut idx = 0;
-            for x in 0..16 {
-                for y in 0..256 {
-                    for z in 0..16 {
-                        chunk.block_light[x][y][z] = block_light[idx];
-                        idx += 1;
-                    }
-                }
-            }
-        }
-
-        if fluid_levels.len() == 16 * 256 * 16 {
-            let mut idx = 0;
-            for x in 0..16 {
-                for y in 0..256 {
-                    for z in 0..16 {
-                        chunk.fluid_levels[x][y][z] = fluid_levels[idx];
-                        idx += 1;
-                    }
-                }
-            }
-        }
-
-        for x in 0..16 {
-            for z in 0..16 {
-                chunk.update_heightmap(x, z);
             }
         }
     }
@@ -545,15 +535,73 @@ impl UncompressedChunkSnapshot {
         chunk: &Chunk,
         redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
     ) -> Self {
+        let mut blocks: Box<
+            [[[BlockType; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+                crate::world::CHUNK_WIDTH],
+        > = vec![
+            [[BlockType::Air; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+            crate::world::CHUNK_WIDTH
+        ]
+        .try_into()
+        .unwrap();
+        let mut block_states: Box<
+            [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+                crate::world::CHUNK_WIDTH],
+        > = vec![
+            [[0u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+            crate::world::CHUNK_WIDTH
+        ]
+        .try_into()
+        .unwrap();
+        let mut sky_light: Box<
+            [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+                crate::world::CHUNK_WIDTH],
+        > = vec![
+            [[0u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+            crate::world::CHUNK_WIDTH
+        ]
+        .try_into()
+        .unwrap();
+        let mut block_light: Box<
+            [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+                crate::world::CHUNK_WIDTH],
+        > = vec![
+            [[0u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+            crate::world::CHUNK_WIDTH
+        ]
+        .try_into()
+        .unwrap();
+        let mut fluid_levels: Box<
+            [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+                crate::world::CHUNK_WIDTH],
+        > = vec![
+            [[0u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT];
+            crate::world::CHUNK_WIDTH
+        ]
+        .try_into()
+        .unwrap();
+
+        for x in 0..16 {
+            for y in 0..256 {
+                for z in 0..16 {
+                    blocks[x][y][z] = chunk.get_block_local(x, y, z);
+                    block_states[x][y][z] = chunk.get_block_state(x as i32, y as i32, z as i32);
+                    sky_light[x][y][z] = chunk.get_sky_light(x, y, z);
+                    block_light[x][y][z] = chunk.get_block_light(x, y, z);
+                    fluid_levels[x][y][z] = chunk.get_fluid_level(x, y, z);
+                }
+            }
+        }
+
         Self {
             dimension,
             chunk_x: chunk.chunk_x,
             chunk_z: chunk.chunk_z,
-            blocks: chunk.blocks.clone(),
-            block_states: chunk.block_states.clone(),
-            sky_light: chunk.sky_light.clone(),
-            block_light: chunk.block_light.clone(),
-            fluid_levels: chunk.fluid_levels.clone(),
+            blocks,
+            block_states,
+            sky_light,
+            block_light,
+            fluid_levels,
             redstone_metadata,
         }
     }
@@ -1393,7 +1441,7 @@ mod tests {
         ));
 
         let mut original = Chunk::new(0, 0);
-        original.blocks[8][100][8] = BlockType::Brick;
+        original.set_block_local(8, 100, 8, BlockType::Brick);
 
         let mut manager = SaveManager::new(&world_dir);
         manager
@@ -1404,7 +1452,7 @@ mod tests {
         let mut restored = Chunk::new(0, 0);
         saved.restore_to_chunk(&mut restored);
 
-        assert_eq!(restored.blocks[8][100][8], BlockType::Brick);
+        assert_eq!(restored.get_block_local(8, 100, 8), BlockType::Brick);
 
         fs::remove_dir_all(world_dir).unwrap();
     }
@@ -1429,7 +1477,7 @@ mod tests {
 
         for (dimension, marker) in cases {
             let mut chunk = Chunk::new(4, -3);
-            chunk.blocks[7][90][11] = marker;
+            chunk.set_block_local(7, 90, 11, marker);
             manager
                 .save_chunk_in(dimension, 4, -3, ChunkSaveData::from_chunk(&chunk))
                 .unwrap();
@@ -1443,7 +1491,7 @@ mod tests {
                 .expect("dimension chunk should load");
             let mut restored = Chunk::new(4, -3);
             saved.restore_to_chunk(&mut restored);
-            assert_eq!(restored.blocks[7][90][11], marker);
+            assert_eq!(restored.get_block_local(7, 90, 11), marker);
         }
 
         assert!(world_dir.join("regions/r.0.-1.bin").exists());
@@ -1582,8 +1630,8 @@ mod tests {
     #[test]
     fn block_states_roundtrip_and_restore() {
         let mut chunk = Chunk::new(1, 1);
-        chunk.blocks[5][64][5] = BlockType::OakDoor;
-        chunk.blocks[7][65][7] = BlockType::Torch;
+        chunk.set_block_local(5, 64, 5, BlockType::OakDoor);
+        chunk.set_block_local(7, 65, 7, BlockType::Torch);
         chunk.set_block_state(5, 64, 5, 0b0000_1101); // facing East, top, right hinge
 
         let save_data = ChunkSaveData::from_chunk(&chunk);

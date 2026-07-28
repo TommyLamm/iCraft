@@ -1937,17 +1937,595 @@ fn is_lod_surface(block: BlockType) -> bool {
             ))
 }
 
+pub const SECTION_SIZE: usize = 16;
+pub const SECTION_COUNT: usize = CHUNK_HEIGHT / SECTION_SIZE;
+pub const SECTION_VOLUME: usize = SECTION_SIZE * SECTION_SIZE * SECTION_SIZE;
+
+fn is_random_tick(block: BlockType) -> bool {
+    matches!(
+        block,
+        BlockType::OakLeaves
+            | BlockType::BirchLeaves
+            | BlockType::SpruceLeaves
+            | BlockType::Cactus
+            | BlockType::SugarCane
+            | BlockType::Grass
+            | BlockType::Dirt
+            | BlockType::Ice
+            | BlockType::Snow
+            | BlockType::SnowLayer
+            | BlockType::Fire
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockStorage {
+    Empty,
+    Uniform(BlockType),
+    Paletted1 {
+        palette: Vec<BlockType>,
+        data: Box<[u64; 64]>,
+    },
+    Paletted2 {
+        palette: Vec<BlockType>,
+        data: Box<[u64; 128]>,
+    },
+    Paletted4 {
+        palette: Vec<BlockType>,
+        data: Box<[u64; 256]>,
+    },
+    Paletted8 {
+        palette: Vec<BlockType>,
+        data: Box<[u8; 4096]>,
+    },
+    Global(Box<[BlockType; 4096]>),
+}
+
+impl BlockStorage {
+    pub fn get(&self, idx: usize) -> BlockType {
+        match self {
+            BlockStorage::Empty => BlockType::Air,
+            BlockStorage::Uniform(b) => *b,
+            BlockStorage::Paletted1 { palette, data } => {
+                let word = idx >> 6;
+                let bit = idx & 63;
+                let p_idx = ((data[word] >> bit) & 1) as usize;
+                palette.get(p_idx).copied().unwrap_or(BlockType::Air)
+            }
+            BlockStorage::Paletted2 { palette, data } => {
+                let bit_idx = idx << 1;
+                let word = bit_idx >> 6;
+                let bit = bit_idx & 63;
+                let p_idx = ((data[word] >> bit) & 3) as usize;
+                palette.get(p_idx).copied().unwrap_or(BlockType::Air)
+            }
+            BlockStorage::Paletted4 { palette, data } => {
+                let bit_idx = idx << 2;
+                let word = bit_idx >> 6;
+                let bit = bit_idx & 63;
+                let p_idx = ((data[word] >> bit) & 15) as usize;
+                palette.get(p_idx).copied().unwrap_or(BlockType::Air)
+            }
+            BlockStorage::Paletted8 { palette, data } => {
+                let p_idx = data[idx] as usize;
+                palette.get(p_idx).copied().unwrap_or(BlockType::Air)
+            }
+            BlockStorage::Global(data) => data[idx],
+        }
+    }
+
+    pub fn set(&mut self, idx: usize, block: BlockType) -> BlockType {
+        let old_block = self.get(idx);
+        if old_block == block {
+            return old_block;
+        }
+
+        match self {
+            BlockStorage::Empty => {
+                let palette = vec![BlockType::Air, block];
+                let mut data = Box::new([0u64; 64]);
+                data[idx >> 6] |= 1u64 << (idx & 63);
+                *self = BlockStorage::Paletted1 { palette, data };
+            }
+            BlockStorage::Uniform(old_b) => {
+                let old_b = *old_b;
+                let palette = vec![old_b, block];
+                let mut data = Box::new([0u64; 64]);
+                data[idx >> 6] |= 1u64 << (idx & 63);
+                *self = BlockStorage::Paletted1 { palette, data };
+            }
+            BlockStorage::Paletted1 { palette, data } => {
+                if let Some(pos) = palette.iter().position(|&b| b == block) {
+                    let word = idx >> 6;
+                    let bit = idx & 63;
+                    data[word] = (data[word] & !(1u64 << bit)) | ((pos as u64 & 1) << bit);
+                } else if palette.len() < 2 {
+                    let pos = palette.len();
+                    palette.push(block);
+                    let word = idx >> 6;
+                    let bit = idx & 63;
+                    data[word] = (data[word] & !(1u64 << bit)) | ((pos as u64 & 1) << bit);
+                } else {
+                    let mut new_palette = palette.clone();
+                    new_palette.push(block);
+                    let mut new_data = Box::new([0u64; 128]);
+                    for i in 0..4096 {
+                        let w1 = i >> 6;
+                        let b1 = i & 63;
+                        let old_idx = (data[w1] >> b1) & 1;
+                        let bit2 = (i << 1) & 63;
+                        let word2 = (i << 1) >> 6;
+                        new_data[word2] |= old_idx << bit2;
+                    }
+                    let bit_idx = idx << 1;
+                    let word2 = bit_idx >> 6;
+                    let bit2 = bit_idx & 63;
+                    new_data[word2] = (new_data[word2] & !(3u64 << bit2)) | (2u64 << bit2);
+                    *self = BlockStorage::Paletted2 {
+                        palette: new_palette,
+                        data: new_data,
+                    };
+                }
+            }
+            BlockStorage::Paletted2 { palette, data } => {
+                if let Some(pos) = palette.iter().position(|&b| b == block) {
+                    let bit_idx = idx << 1;
+                    let word = bit_idx >> 6;
+                    let bit = bit_idx & 63;
+                    data[word] = (data[word] & !(3u64 << bit)) | ((pos as u64 & 3) << bit);
+                } else if palette.len() < 4 {
+                    let pos = palette.len();
+                    palette.push(block);
+                    let bit_idx = idx << 1;
+                    let word = bit_idx >> 6;
+                    let bit = bit_idx & 63;
+                    data[word] = (data[word] & !(3u64 << bit)) | ((pos as u64 & 3) << bit);
+                } else {
+                    let mut new_palette = palette.clone();
+                    new_palette.push(block);
+                    let mut new_data = Box::new([0u64; 256]);
+                    for i in 0..4096 {
+                        let bit2 = (i << 1) & 63;
+                        let word2 = (i << 1) >> 6;
+                        let old_idx = (data[word2] >> bit2) & 3;
+                        let bit4 = (i << 2) & 63;
+                        let word4 = (i << 2) >> 6;
+                        new_data[word4] |= old_idx << bit4;
+                    }
+                    let bit_idx = idx << 2;
+                    let word4 = bit_idx >> 6;
+                    let bit4 = bit_idx & 63;
+                    new_data[word4] = (new_data[word4] & !(15u64 << bit4)) | (4u64 << bit4);
+                    *self = BlockStorage::Paletted4 {
+                        palette: new_palette,
+                        data: new_data,
+                    };
+                }
+            }
+            BlockStorage::Paletted4 { palette, data } => {
+                if let Some(pos) = palette.iter().position(|&b| b == block) {
+                    let bit_idx = idx << 2;
+                    let word = bit_idx >> 6;
+                    let bit = bit_idx & 63;
+                    data[word] = (data[word] & !(15u64 << bit)) | ((pos as u64 & 15) << bit);
+                } else if palette.len() < 16 {
+                    let pos = palette.len();
+                    palette.push(block);
+                    let bit_idx = idx << 2;
+                    let word = bit_idx >> 6;
+                    let bit = bit_idx & 63;
+                    data[word] = (data[word] & !(15u64 << bit)) | ((pos as u64 & 15) << bit);
+                } else {
+                    let mut new_palette = palette.clone();
+                    new_palette.push(block);
+                    let mut new_data = Box::new([0u8; 4096]);
+                    for i in 0..4096 {
+                        let bit4 = (i << 2) & 63;
+                        let word4 = (i << 2) >> 6;
+                        let old_idx = (data[word4] >> bit4) & 15;
+                        new_data[i] = old_idx as u8;
+                    }
+                    new_data[idx] = 16;
+                    *self = BlockStorage::Paletted8 {
+                        palette: new_palette,
+                        data: new_data,
+                    };
+                }
+            }
+            BlockStorage::Paletted8 { palette, data } => {
+                if let Some(pos) = palette.iter().position(|&b| b == block) {
+                    data[idx] = pos as u8;
+                } else if palette.len() < 256 {
+                    let pos = palette.len();
+                    palette.push(block);
+                    data[idx] = pos as u8;
+                } else {
+                    let mut new_data = Box::new([BlockType::Air; 4096]);
+                    for i in 0..4096 {
+                        new_data[i] = palette[data[i] as usize];
+                    }
+                    new_data[idx] = block;
+                    *self = BlockStorage::Global(new_data);
+                }
+            }
+            BlockStorage::Global(data) => {
+                data[idx] = block;
+            }
+        }
+        old_block
+    }
+
+    pub fn from_dense(dense: &[BlockType; 4096]) -> Self {
+        let first = dense[0];
+        let mut all_same = true;
+        let mut unique = Vec::new();
+
+        for &b in dense.iter() {
+            if b != first {
+                all_same = false;
+            }
+            if !unique.contains(&b) {
+                unique.push(b);
+            }
+        }
+
+        if all_same {
+            if first == BlockType::Air {
+                return BlockStorage::Empty;
+            } else {
+                return BlockStorage::Uniform(first);
+            }
+        }
+
+        if unique.len() <= 2 {
+            let mut data = Box::new([0u64; 64]);
+            for i in 0..4096 {
+                let pos = unique.iter().position(|&b| b == dense[i]).unwrap();
+                let word = i >> 6;
+                let bit = i & 63;
+                data[word] |= (pos as u64 & 1) << bit;
+            }
+            return BlockStorage::Paletted1 {
+                palette: unique,
+                data,
+            };
+        }
+
+        if unique.len() <= 4 {
+            let mut data = Box::new([0u64; 128]);
+            for i in 0..4096 {
+                let pos = unique.iter().position(|&b| b == dense[i]).unwrap();
+                let bit_idx = i << 1;
+                let word = bit_idx >> 6;
+                let bit = bit_idx & 63;
+                data[word] |= (pos as u64 & 3) << bit;
+            }
+            return BlockStorage::Paletted2 {
+                palette: unique,
+                data,
+            };
+        }
+
+        if unique.len() <= 16 {
+            let mut data = Box::new([0u64; 256]);
+            for i in 0..4096 {
+                let pos = unique.iter().position(|&b| b == dense[i]).unwrap();
+                let bit_idx = i << 2;
+                let word = bit_idx >> 6;
+                let bit = bit_idx & 63;
+                data[word] |= (pos as u64 & 15) << bit;
+            }
+            return BlockStorage::Paletted4 {
+                palette: unique,
+                data,
+            };
+        }
+
+        if unique.len() <= 256 {
+            let mut data = Box::new([0u8; 4096]);
+            for i in 0..4096 {
+                let pos = unique.iter().position(|&b| b == dense[i]).unwrap();
+                data[i] = pos as u8;
+            }
+            return BlockStorage::Paletted8 {
+                palette: unique,
+                data,
+            };
+        }
+
+        BlockStorage::Global(Box::new(*dense))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LightStorage {
+    Uniform { sky: u8, block: u8 },
+    Packed(Box<[u8; 4096]>),
+}
+
+impl LightStorage {
+    pub fn get_sky(&self, idx: usize) -> u8 {
+        match self {
+            LightStorage::Uniform { sky, .. } => *sky,
+            LightStorage::Packed(data) => data[idx] >> 4,
+        }
+    }
+
+    pub fn get_block(&self, idx: usize) -> u8 {
+        match self {
+            LightStorage::Uniform { block, .. } => *block,
+            LightStorage::Packed(data) => data[idx] & 0x0F,
+        }
+    }
+
+    pub fn set_sky(&mut self, idx: usize, val: u8) {
+        let val = val & 0x0F;
+        match self {
+            LightStorage::Uniform { sky, block } => {
+                if *sky == val {
+                    return;
+                }
+                let mut data = Box::new([(*sky << 4) | (*block & 0x0F); 4096]);
+                data[idx] = (val << 4) | (*block & 0x0F);
+                *self = LightStorage::Packed(data);
+            }
+            LightStorage::Packed(data) => {
+                data[idx] = (val << 4) | (data[idx] & 0x0F);
+            }
+        }
+    }
+
+    pub fn set_block(&mut self, idx: usize, val: u8) {
+        let val = val & 0x0F;
+        match self {
+            LightStorage::Uniform { sky, block } => {
+                if *block == val {
+                    return;
+                }
+                let mut data = Box::new([(*sky << 4) | (*block & 0x0F); 4096]);
+                data[idx] = (data[idx] & 0xF0) | val;
+                *self = LightStorage::Packed(data);
+            }
+            LightStorage::Packed(data) => {
+                data[idx] = (data[idx] & 0xF0) | val;
+            }
+        }
+    }
+
+    pub fn from_dense(sky_dense: &[u8; 4096], block_dense: &[u8; 4096]) -> Self {
+        let first_sky = sky_dense[0] & 0x0F;
+        let first_block = block_dense[0] & 0x0F;
+        let mut uniform = true;
+
+        for i in 0..4096 {
+            if (sky_dense[i] & 0x0F) != first_sky || (block_dense[i] & 0x0F) != first_block {
+                uniform = false;
+                break;
+            }
+        }
+
+        if uniform {
+            LightStorage::Uniform {
+                sky: first_sky,
+                block: first_block,
+            }
+        } else {
+            let mut data = Box::new([0u8; 4096]);
+            for i in 0..4096 {
+                data[i] = ((sky_dense[i] & 0x0F) << 4) | (block_dense[i] & 0x0F);
+            }
+            LightStorage::Packed(data)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ChunkSection {
+    pub blocks: BlockStorage,
+    pub light: LightStorage,
+    pub block_states: Option<Box<[u8; 4096]>>,
+    pub fluid_levels: Option<Box<[u8; 4096]>>,
+    pub non_air_count: u16,
+    pub opaque_count: u16,
+    pub random_tick_count: u16,
+    pub fluid_count: u16,
+    pub emitter_count: u16,
+    pub redstone_count: u16,
+}
+
+impl ChunkSection {
+    pub fn empty_sky() -> Self {
+        Self {
+            blocks: BlockStorage::Empty,
+            light: LightStorage::Uniform { sky: 15, block: 0 },
+            block_states: None,
+            fluid_levels: None,
+            non_air_count: 0,
+            opaque_count: 0,
+            random_tick_count: 0,
+            fluid_count: 0,
+            emitter_count: 0,
+            redstone_count: 0,
+        }
+    }
+
+    pub fn empty_dark() -> Self {
+        Self {
+            blocks: BlockStorage::Empty,
+            light: LightStorage::Uniform { sky: 0, block: 0 },
+            block_states: None,
+            fluid_levels: None,
+            non_air_count: 0,
+            opaque_count: 0,
+            random_tick_count: 0,
+            fluid_count: 0,
+            emitter_count: 0,
+            redstone_count: 0,
+        }
+    }
+
+    pub fn from_dense(
+        blocks: &[BlockType; 4096],
+        sky_light: &[u8; 4096],
+        block_light: &[u8; 4096],
+        states: Option<&[u8; 4096]>,
+        fluids: Option<&[u8; 4096]>,
+    ) -> Self {
+        let mut non_air_count = 0u16;
+        let mut opaque_count = 0u16;
+        let mut random_tick_count = 0u16;
+        let mut fluid_count = 0u16;
+        let mut emitter_count = 0u16;
+        let mut redstone_count = 0u16;
+
+        for &b in blocks.iter() {
+            if b != BlockType::Air {
+                non_air_count += 1;
+            }
+            let props = b.properties();
+            if props.render_type == RenderType::Opaque {
+                opaque_count += 1;
+            }
+            if is_random_tick(b) {
+                random_tick_count += 1;
+            }
+            if b == BlockType::Water || b == BlockType::Lava {
+                fluid_count += 1;
+            }
+            if props.light_emission > 0 {
+                emitter_count += 1;
+            }
+            if crate::redstone::is_component(b) {
+                redstone_count += 1;
+            }
+        }
+
+        let block_storage = BlockStorage::from_dense(blocks);
+        let light_storage = LightStorage::from_dense(sky_light, block_light);
+
+        let block_states = states.and_then(|st| {
+            if st.iter().all(|&s| s == 0) {
+                None
+            } else {
+                Some(Box::new(*st))
+            }
+        });
+
+        let fluid_levels = fluids.and_then(|fl| {
+            if fl.iter().all(|&f| f == 0) {
+                None
+            } else {
+                Some(Box::new(*fl))
+            }
+        });
+
+        ChunkSection {
+            blocks: block_storage,
+            light: light_storage,
+            block_states,
+            fluid_levels,
+            non_air_count,
+            opaque_count,
+            random_tick_count,
+            fluid_count,
+            emitter_count,
+            redstone_count,
+        }
+    }
+
+    pub fn set_block(&mut self, idx: usize, block: BlockType) -> BlockType {
+        let old_block = self.blocks.set(idx, block);
+        if old_block != block {
+            if old_block != BlockType::Air {
+                self.non_air_count = self.non_air_count.saturating_sub(1);
+            }
+            if block != BlockType::Air {
+                self.non_air_count += 1;
+            }
+
+            let old_props = old_block.properties();
+            let new_props = block.properties();
+
+            if old_props.render_type == RenderType::Opaque {
+                self.opaque_count = self.opaque_count.saturating_sub(1);
+            }
+            if new_props.render_type == RenderType::Opaque {
+                self.opaque_count += 1;
+            }
+
+            if is_random_tick(old_block) {
+                self.random_tick_count = self.random_tick_count.saturating_sub(1);
+            }
+            if is_random_tick(block) {
+                self.random_tick_count += 1;
+            }
+
+            if old_block == BlockType::Water || old_block == BlockType::Lava {
+                self.fluid_count = self.fluid_count.saturating_sub(1);
+            }
+            if block == BlockType::Water || block == BlockType::Lava {
+                self.fluid_count += 1;
+            }
+
+            if old_props.light_emission > 0 {
+                self.emitter_count = self.emitter_count.saturating_sub(1);
+            }
+            if new_props.light_emission > 0 {
+                self.emitter_count += 1;
+            }
+
+            if crate::redstone::is_component(old_block) {
+                self.redstone_count = self.redstone_count.saturating_sub(1);
+            }
+            if crate::redstone::is_component(block) {
+                self.redstone_count += 1;
+            }
+        }
+        old_block
+    }
+
+    pub fn get_block_state(&self, idx: usize) -> u8 {
+        self.block_states.as_ref().map_or(0, |st| st[idx])
+    }
+
+    pub fn set_block_state(&mut self, idx: usize, state: u8) {
+        if state == 0 {
+            if let Some(ref mut st) = self.block_states {
+                st[idx] = 0;
+            }
+        } else {
+            let st = self
+                .block_states
+                .get_or_insert_with(|| Box::new([0u8; 4096]));
+            st[idx] = state;
+        }
+    }
+
+    pub fn get_fluid_level(&self, idx: usize) -> u8 {
+        self.fluid_levels.as_ref().map_or(0, |fl| fl[idx])
+    }
+
+    pub fn set_fluid_level(&mut self, idx: usize, level: u8) {
+        if level == 0 {
+            if let Some(ref mut fl) = self.fluid_levels {
+                fl[idx] = 0;
+            }
+        } else {
+            let fl = self
+                .fluid_levels
+                .get_or_insert_with(|| Box::new([0u8; 4096]));
+            fl[idx] = level;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Chunk {
     pub chunk_x: i32,
     pub chunk_z: i32,
-    pub blocks: Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    pub block_states: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    pub sky_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    pub block_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
+    pub sections: Vec<ChunkSection>,
     /// Per-column max Y of non-air blocks (indexed as [x][z])
     pub heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]>,
-    pub fluid_levels: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     /// Compact local coordinates of ordinary torch blocks. Each entry packs
     /// x (4 bits), z (4 bits), and y (8 bits) into a u16.
     pub(crate) torch_positions: Vec<u16>,
@@ -2398,56 +2976,61 @@ impl Chunk {
             vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
                 .try_into()
                 .unwrap();
+        let mut heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
+            vec![[0u16; CHUNK_DEPTH]; CHUNK_WIDTH].try_into().unwrap();
 
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 let mut direct_sky = 15;
+                let mut found_h = false;
                 for y in (0..CHUNK_HEIGHT).rev() {
                     let block = blocks[x][y][z];
+                    if !found_h && block != BlockType::Air {
+                        heightmap[x][z] = y as u16;
+                        found_h = true;
+                    }
                     if block.properties().render_type == RenderType::Opaque {
                         direct_sky = 0;
                     }
                     sky_light[x][y][z] = direct_sky;
-
                     block_light[x][y][z] = block.properties().light_emission;
                 }
             }
         }
 
-        // Build heightmap: per-column max Y of non-air blocks
-        let mut heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
-            vec![[0u16; CHUNK_DEPTH]; CHUNK_WIDTH].try_into().unwrap();
-        for x in 0..CHUNK_WIDTH {
-            for z in 0..CHUNK_DEPTH {
-                for y in (0..CHUNK_HEIGHT).rev() {
-                    if blocks[x][y][z] != BlockType::Air {
-                        heightmap[x][z] = y as u16;
-                        break;
+        let mut sections = Vec::with_capacity(SECTION_COUNT);
+        for sec_y in 0..SECTION_COUNT {
+            let mut sec_blocks = [BlockType::Air; 4096];
+            let mut sec_sky = [0u8; 4096];
+            let mut sec_block_light = [0u8; 4096];
+            for ly in 0..SECTION_SIZE {
+                let y = sec_y * SECTION_SIZE + ly;
+                for z in 0..CHUNK_DEPTH {
+                    for x in 0..CHUNK_WIDTH {
+                        let idx = (ly << 8) | (z << 4) | x;
+                        sec_blocks[idx] = blocks[x][y][z];
+                        sec_sky[idx] = sky_light[x][y][z];
+                        sec_block_light[idx] = block_light[x][y][z];
                     }
                 }
             }
+            sections.push(ChunkSection::from_dense(
+                &sec_blocks,
+                &sec_sky,
+                &sec_block_light,
+                None,
+                None,
+            ));
         }
 
-        let fluid_levels: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
-            vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
-                .try_into()
-                .unwrap();
-        let block_states: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
-            vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
-                .try_into()
-                .unwrap();
-        let torch_positions = Self::build_torch_index(&blocks);
-        let redstone_positions = Self::build_redstone_index(&blocks);
+        let torch_positions = Self::build_torch_index_from_sections(&sections);
+        let redstone_positions = Self::build_redstone_index_from_sections(&sections);
 
         Self {
             chunk_x,
             chunk_z,
-            blocks,
-            block_states,
-            sky_light,
-            block_light,
+            sections,
             heightmap,
-            fluid_levels,
             torch_positions,
             redstone_positions,
         }
@@ -2466,15 +3049,21 @@ impl Chunk {
         )
     }
 
-    fn build_torch_index(
-        blocks: &[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
-    ) -> Vec<u16> {
+    fn build_torch_index_from_sections(sections: &[ChunkSection]) -> Vec<u16> {
         let mut positions = Vec::new();
-        for x in 0..CHUNK_WIDTH {
-            for z in 0..CHUNK_DEPTH {
-                for y in 0..CHUNK_HEIGHT {
-                    if blocks[x][y][z] == BlockType::Torch {
-                        positions.push(Self::encode_torch_position(x, y, z));
+        for sec_y in 0..SECTION_COUNT {
+            let sec = &sections[sec_y];
+            if sec.non_air_count == 0 {
+                continue;
+            }
+            for ly in 0..SECTION_SIZE {
+                let y = sec_y * SECTION_SIZE + ly;
+                for z in 0..CHUNK_DEPTH {
+                    for x in 0..CHUNK_WIDTH {
+                        let idx = (ly << 8) | (z << 4) | x;
+                        if sec.blocks.get(idx) == BlockType::Torch {
+                            positions.push(Self::encode_torch_position(x, y, z));
+                        }
                     }
                 }
             }
@@ -2482,15 +3071,21 @@ impl Chunk {
         positions
     }
 
-    fn build_redstone_index(
-        blocks: &[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
-    ) -> Vec<u16> {
+    fn build_redstone_index_from_sections(sections: &[ChunkSection]) -> Vec<u16> {
         let mut positions = Vec::new();
-        for x in 0..CHUNK_WIDTH {
-            for z in 0..CHUNK_DEPTH {
-                for y in 0..CHUNK_HEIGHT {
-                    if crate::redstone::is_component(blocks[x][y][z]) {
-                        positions.push(Self::encode_torch_position(x, y, z));
+        for sec_y in 0..SECTION_COUNT {
+            let sec = &sections[sec_y];
+            if sec.redstone_count == 0 {
+                continue;
+            }
+            for ly in 0..SECTION_SIZE {
+                let y = sec_y * SECTION_SIZE + ly;
+                for z in 0..CHUNK_DEPTH {
+                    for x in 0..CHUNK_WIDTH {
+                        let idx = (ly << 8) | (z << 4) | x;
+                        if crate::redstone::is_component(sec.blocks.get(idx)) {
+                            positions.push(Self::encode_torch_position(x, y, z));
+                        }
                     }
                 }
             }
@@ -2510,21 +3105,24 @@ impl Chunk {
 
     /// Rebuilds the torch index after bulk block mutations (generation/load).
     pub fn rebuild_torch_index(&mut self) {
-        self.torch_positions = Self::build_torch_index(&self.blocks);
+        self.torch_positions = Self::build_torch_index_from_sections(&self.sections);
     }
 
     /// Rebuilds the redstone index after bulk block mutations (generation/load).
     pub fn rebuild_redstone_index(&mut self) {
-        self.redstone_positions = Self::build_redstone_index(&self.blocks);
+        self.redstone_positions = Self::build_redstone_index_from_sections(&self.sections);
     }
 
     /// Sets a local block and keeps the torch and redstone indices synchronized.
     pub fn set_block_local(&mut self, x: usize, y: usize, z: usize, block: BlockType) {
-        let old = self.blocks[x][y][z];
+        let sec_y = y / SECTION_SIZE;
+        let ly = y % SECTION_SIZE;
+        let idx = (ly << 8) | (z << 4) | x;
+        let old = self.sections[sec_y].set_block(idx, block);
         if old == block {
             return;
         }
-        self.blocks[x][y][z] = block;
+
         let encoded = Self::encode_torch_position(x, y, z);
         if old == BlockType::Torch {
             if let Some(index) = self.torch_positions.iter().position(|&p| p == encoded) {
@@ -2549,13 +3147,68 @@ impl Chunk {
 
     /// Update heightmap for a single column after block placement/removal
     pub fn update_heightmap(&mut self, x: usize, z: usize) {
-        for y in (0..CHUNK_HEIGHT).rev() {
-            if self.blocks[x][y][z] != BlockType::Air {
-                self.heightmap[x][z] = y as u16;
-                return;
+        for sec_y in (0..SECTION_COUNT).rev() {
+            if self.sections[sec_y].non_air_count == 0 {
+                continue;
+            }
+            for ly in (0..SECTION_SIZE).rev() {
+                let y = sec_y * SECTION_SIZE + ly;
+                let idx = (ly << 8) | (z << 4) | x;
+                if self.sections[sec_y].blocks.get(idx) != BlockType::Air {
+                    self.heightmap[x][z] = y as u16;
+                    return;
+                }
             }
         }
         self.heightmap[x][z] = 0;
+    }
+
+    pub fn get_block_local(&self, x: usize, y: usize, z: usize) -> BlockType {
+        let sec_y = y / SECTION_SIZE;
+        let ly = y % SECTION_SIZE;
+        let idx = (ly << 8) | (z << 4) | x;
+        self.sections[sec_y].blocks.get(idx)
+    }
+
+    pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
+        if x < 0
+            || x >= CHUNK_WIDTH as i32
+            || y < 0
+            || y >= CHUNK_HEIGHT as i32
+            || z < 0
+            || z >= CHUNK_DEPTH as i32
+        {
+            return BlockType::Air;
+        }
+        self.get_block_local(x as usize, y as usize, z as usize)
+    }
+
+    pub fn get_sky_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        let sec_y = y / SECTION_SIZE;
+        let ly = y % SECTION_SIZE;
+        let idx = (ly << 8) | (z << 4) | x;
+        self.sections[sec_y].light.get_sky(idx)
+    }
+
+    pub fn set_sky_light(&mut self, x: usize, y: usize, z: usize, val: u8) {
+        let sec_y = y / SECTION_SIZE;
+        let ly = y % SECTION_SIZE;
+        let idx = (ly << 8) | (z << 4) | x;
+        self.sections[sec_y].light.set_sky(idx, val);
+    }
+
+    pub fn get_block_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        let sec_y = y / SECTION_SIZE;
+        let ly = y % SECTION_SIZE;
+        let idx = (ly << 8) | (z << 4) | x;
+        self.sections[sec_y].light.get_block(idx)
+    }
+
+    pub fn set_block_light(&mut self, x: usize, y: usize, z: usize, val: u8) {
+        let sec_y = y / SECTION_SIZE;
+        let ly = y % SECTION_SIZE;
+        let idx = (ly << 8) | (z << 4) | x;
+        self.sections[sec_y].light.set_block(idx, val);
     }
 
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -2568,7 +3221,13 @@ impl Chunk {
         {
             0
         } else {
-            self.block_states[x as usize][y as usize][z as usize]
+            let ux = x as usize;
+            let uy = y as usize;
+            let uz = z as usize;
+            let sec_y = uy / SECTION_SIZE;
+            let ly = uy % SECTION_SIZE;
+            let idx = (ly << 8) | (uz << 4) | ux;
+            self.sections[sec_y].get_block_state(idx)
         }
     }
 
@@ -2580,21 +3239,28 @@ impl Chunk {
             && z >= 0
             && z < CHUNK_DEPTH as i32
         {
-            self.block_states[x as usize][y as usize][z as usize] = state;
+            let ux = x as usize;
+            let uy = y as usize;
+            let uz = z as usize;
+            let sec_y = uy / SECTION_SIZE;
+            let ly = uy % SECTION_SIZE;
+            let idx = (ly << 8) | (uz << 4) | ux;
+            self.sections[sec_y].set_block_state(idx, state);
         }
     }
 
-    pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
-        if x < 0
-            || x >= CHUNK_WIDTH as i32
-            || y < 0
-            || y >= CHUNK_HEIGHT as i32
-            || z < 0
-            || z >= CHUNK_DEPTH as i32
-        {
-            return BlockType::Air; // 超出範圍視為空氣
-        }
-        self.blocks[x as usize][y as usize][z as usize]
+    pub fn get_fluid_level(&self, x: usize, y: usize, z: usize) -> u8 {
+        let sec_y = y / SECTION_SIZE;
+        let ly = y % SECTION_SIZE;
+        let idx = (ly << 8) | (z << 4) | x;
+        self.sections[sec_y].get_fluid_level(idx)
+    }
+
+    pub fn set_fluid_level(&mut self, x: usize, y: usize, z: usize, level: u8) {
+        let sec_y = y / SECTION_SIZE;
+        let ly = y % SECTION_SIZE;
+        let idx = (ly << 8) | (z << 4) | x;
+        self.sections[sec_y].set_fluid_level(idx, level);
     }
 
     // Generate opaque/cutout and translucent terrain meshes. Full cube faces
@@ -2620,7 +3286,7 @@ impl Chunk {
             for z in 0..CHUNK_DEPTH {
                 let max_y = self.heightmap[x][z] as usize;
                 for y in 0..=max_y {
-                    let block = self.blocks[x][y][z];
+                    let block = self.get_block_local(x, y, z);
                     if block == BlockType::Air || is_greedy_cube(block) {
                         continue;
                     }
@@ -2641,8 +3307,8 @@ impl Chunk {
                             &mut opaque_vertices,
                             &mut opaque_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
-                            self.sky_light[x][y][z],
-                            self.block_light[x][y][z],
+                            self.get_sky_light(x, y, z),
+                            self.get_block_light(x, y, z),
                             atlas_tile,
                             region_coord,
                         );
@@ -2650,14 +3316,15 @@ impl Chunk {
                     }
 
                     if matches!(block, BlockType::OakDoor | BlockType::OakDoorOpen) {
-                        let state = BlockState::decode(self.block_states[x][y][z]);
+                        let state =
+                            BlockState::decode(self.get_block_state(x as i32, y as i32, z as i32));
                         append_door_mesh(
                             &mut opaque_vertices,
                             &mut opaque_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
                             state,
-                            self.sky_light[x][y][z],
-                            self.block_light[x][y][z],
+                            self.get_sky_light(x, y, z),
+                            self.get_block_light(x, y, z),
                             (9, 14),
                             region_coord,
                         );
@@ -2665,14 +3332,15 @@ impl Chunk {
                     }
 
                     if matches!(block, BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen) {
-                        let state = BlockState::decode(self.block_states[x][y][z]);
+                        let state =
+                            BlockState::decode(self.get_block_state(x as i32, y as i32, z as i32));
                         append_trapdoor_mesh(
                             &mut opaque_vertices,
                             &mut opaque_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
                             state,
-                            self.sky_light[x][y][z],
-                            self.block_light[x][y][z],
+                            self.get_sky_light(x, y, z),
+                            self.get_block_light(x, y, z),
                             (10, 14),
                             region_coord,
                         );
@@ -2680,8 +3348,8 @@ impl Chunk {
                     }
 
                     if block.is_cross_model() {
-                        let sky_val = self.sky_light[x][y][z];
-                        let block_val = self.block_light[x][y][z];
+                        let sky_val = self.get_sky_light(x, y, z);
+                        let block_val = self.get_block_light(x, y, z);
                         let light_val = sky_val as f32 + block_val as f32 * 16.0 + 1.0 * 256.0;
 
                         let atlas_tile = block.get_face_tex_index(0);
@@ -2747,8 +3415,9 @@ impl Chunk {
                             neighbor_falling,
                         ) = get_block_at(nx, ny, nz);
                         let is_fluid = block == BlockType::Water || block == BlockType::Lava;
-                        let level = self.fluid_levels[x][y][z] & 0x07;
-                        let falling = (self.fluid_levels[x][y][z] & 0x08) != 0;
+                        let fl_raw = self.get_fluid_level(x, y, z);
+                        let level = fl_raw & 0x07;
+                        let falling = (fl_raw & 0x08) != 0;
 
                         if face_should_render(
                             block,
@@ -2860,7 +3529,7 @@ impl Chunk {
                         if y > self.heightmap[x][z] as usize {
                             continue;
                         }
-                        let block = self.blocks[x][y][z];
+                        let block = self.get_block_local(x, y, z);
                         if !is_greedy_cube(block) {
                             continue;
                         }
@@ -3055,7 +3724,7 @@ impl Chunk {
                         let z = gz * step + dz;
                         let mut y = self.heightmap[x][z] as usize;
                         loop {
-                            let block = self.blocks[x][y][z];
+                            let block = self.get_block_local(x, y, z);
                             if is_lod_surface(block) {
                                 if best.map_or(true, |(_, best_y, _, _)| y > best_y) {
                                     best = Some((x, y, z, block));
@@ -3379,10 +4048,10 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
                 for z in 0..CHUNK_DEPTH {
-                    chunk.blocks[x][y][z] = BlockType::Air;
-                    chunk.sky_light[x][y][z] = 15;
-                    chunk.block_light[x][y][z] = 0;
-                    chunk.fluid_levels[x][y][z] = 0;
+                    chunk.set_block_local(x, y, z, BlockType::Air);
+                    chunk.set_sky_light(x, y, z, 15);
+                    chunk.set_block_light(x, y, z, 0);
+                    chunk.set_fluid_level(x, y, z, 0);
                 }
             }
             for z in 0..CHUNK_DEPTH {
@@ -3410,11 +4079,11 @@ mod tests {
         let x = world_x as usize;
         let y = world_y as usize;
         let z = world_z as usize;
-        let fluid = chunk.fluid_levels[x][y][z];
+        let fluid = chunk.get_fluid_level(x, y, z);
         (
-            chunk.blocks[x][y][z],
-            chunk.sky_light[x][y][z],
-            chunk.block_light[x][y][z],
+            chunk.get_block_local(x, y, z),
+            chunk.get_sky_light(x, y, z),
+            chunk.get_block_light(x, y, z),
             fluid & 0x07,
             fluid & 0x08 != 0,
         )
@@ -3426,9 +4095,9 @@ mod tests {
         block_light: u8,
     ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>) {
         let mut chunk = empty_test_chunk();
-        chunk.blocks[8][1][8] = block;
-        chunk.sky_light[8][1][8] = sky_light;
-        chunk.block_light[8][1][8] = block_light;
+        chunk.set_block_local(8, 1, 8, block);
+        chunk.set_sky_light(8, 1, 8, sky_light);
+        chunk.set_block_light(8, 1, 8, block_light);
         chunk.heightmap[8][8] = 1;
         chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z))
     }
@@ -3578,14 +4247,14 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
                 for z in 0..CHUNK_DEPTH {
-                    chunk.blocks[x][y][z] = BlockType::Air;
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
             for z in 0..CHUNK_DEPTH {
                 chunk.heightmap[x][z] = 0;
             }
         }
-        chunk.blocks[8][1][8] = BlockType::Stone;
+        chunk.set_block_local(8, 1, 8, BlockType::Stone);
         chunk.heightmap[8][8] = 1;
 
         let empty_lookup = |_: i32, _: i32, _: i32| (BlockType::Air, 15, 0, 0, false);
@@ -3613,7 +4282,7 @@ mod tests {
         let mut chunk = empty_test_chunk();
         for x in 8..10 {
             for z in 8..10 {
-                chunk.blocks[x][1][z] = BlockType::Stone;
+                chunk.set_block_local(x, 1, z, BlockType::Stone);
                 chunk.heightmap[x][z] = 1;
             }
         }
@@ -3640,10 +4309,10 @@ mod tests {
     fn greedy_meshing_does_not_merge_different_light_or_material() {
         let mut light_chunk = empty_test_chunk();
         for x in 8..10 {
-            light_chunk.blocks[x][1][8] = BlockType::Stone;
+            light_chunk.set_block_local(x, 1, 8, BlockType::Stone);
             light_chunk.heightmap[x][8] = 1;
         }
-        light_chunk.sky_light[9][2][8] = 14;
+        light_chunk.set_sky_light(9, 2, 8, 14);
         let (light_vertices, _, _, _) =
             light_chunk.generate_mesh(|x, y, z| test_chunk_lookup(&light_chunk, x, y, z));
         let light_top_quads = light_vertices
@@ -3653,8 +4322,8 @@ mod tests {
         assert_eq!(light_top_quads, 2);
 
         let mut material_chunk = empty_test_chunk();
-        material_chunk.blocks[8][1][8] = BlockType::Stone;
-        material_chunk.blocks[9][1][8] = BlockType::Dirt;
+        material_chunk.set_block_local(8, 1, 8, BlockType::Stone);
+        material_chunk.set_block_local(9, 1, 8, BlockType::Dirt);
         material_chunk.heightmap[8][8] = 1;
         material_chunk.heightmap[9][8] = 1;
         let (material_vertices, _, _, _) =
@@ -3671,7 +4340,7 @@ mod tests {
         let mut flat = empty_test_chunk();
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                flat.blocks[x][1][z] = BlockType::Stone;
+                flat.set_block_local(x, 1, z, BlockType::Stone);
                 flat.heightmap[x][z] = 1;
             }
         }
@@ -3689,7 +4358,7 @@ mod tests {
             for z in 0..CHUNK_DEPTH {
                 let height = 1 + (x + z) % 2;
                 for y in 1..=height {
-                    varied.blocks[x][y][z] = BlockType::Stone;
+                    varied.set_block_local(x, y, z, BlockType::Stone);
                 }
                 varied.heightmap[x][z] = height as u16;
             }
@@ -3710,14 +4379,14 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
                 for z in 0..CHUNK_DEPTH {
-                    chunk.blocks[x][y][z] = BlockType::Air;
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
             for z in 0..CHUNK_DEPTH {
                 chunk.heightmap[x][z] = 0;
             }
         }
-        chunk.blocks[8][1][8] = BlockType::SnowLayer;
+        chunk.set_block_local(8, 1, 8, BlockType::SnowLayer);
         chunk.heightmap[8][8] = 1;
         let lookup = |_: i32, _: i32, _: i32| (BlockType::Air, 15, 0, 0, false);
         let (vertices, _, _, _) = chunk.generate_mesh(lookup);
@@ -3734,14 +4403,14 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
                 for z in 0..CHUNK_DEPTH {
-                    chunk.blocks[x][y][z] = BlockType::Air;
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
             for z in 0..CHUNK_DEPTH {
                 chunk.heightmap[x][z] = 0;
             }
         }
-        chunk.blocks[8][1][8] = BlockType::Poppy;
+        chunk.set_block_local(8, 1, 8, BlockType::Poppy);
         chunk.heightmap[8][8] = 1;
         let lookup = |_: i32, _: i32, _: i32| (BlockType::Air, 15, 0, 0, false);
         let (vertices, indices, _, _) = chunk.generate_mesh(lookup);
@@ -3798,12 +4467,12 @@ mod tests {
         for x in 0..16 {
             for y in 0..256 {
                 for z in 0..16 {
-                    chunk.blocks[x][y][z] = BlockType::Air;
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
         }
         chunk.heightmap[0][0] = 64;
-        chunk.blocks[0][64][0] = BlockType::OakDoor;
+        chunk.set_block_local(0, 64, 0, BlockType::OakDoor);
         let state = BlockState {
             facing: Direction::North,
             is_top: false,
@@ -3843,12 +4512,12 @@ mod tests {
         for x in 0..16 {
             for y in 0..256 {
                 for z in 0..16 {
-                    chunk.blocks[x][y][z] = BlockType::Air;
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
         }
         chunk.heightmap[0][0] = 64;
-        chunk.blocks[0][64][0] = BlockType::OakTrapdoor;
+        chunk.set_block_local(0, 64, 0, BlockType::OakTrapdoor);
         let closed_state = BlockState {
             facing: Direction::North,
             is_top: false,
@@ -4080,7 +4749,7 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 for y in 5..50 {
-                    let block = chunk.blocks[x][y][z];
+                    let block = chunk.get_block_local(x, y, z);
                     if block == BlockType::Air {
                         air_underground += 1;
                     } else if block == BlockType::Stone {
@@ -4107,7 +4776,7 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 for y in 0..CHUNK_HEIGHT {
-                    if chunk.blocks[x][y][z] == BlockType::CoalOre {
+                    if chunk.get_block_local(x, y, z) == BlockType::CoalOre {
                         coal_count += 1;
                         let neighbors = [
                             (x as i32 + 1, y as i32, z as i32),
@@ -4125,7 +4794,7 @@ mod tests {
                                 && ny >= 0
                                 && ny < CHUNK_HEIGHT as i32
                             {
-                                if chunk.blocks[nx as usize][ny as usize][nz as usize]
+                                if chunk.get_block_local(nx as usize, ny as usize, nz as usize)
                                     == BlockType::CoalOre
                                 {
                                     clustered = true;
@@ -4191,7 +4860,7 @@ mod tests {
                 let base_height = (64.0 + noise_val * 12.0) as usize;
                 let entrance_noise = perlin.get([world_x as f64 * 0.015, world_z as f64 * 0.015]);
                 if entrance_noise > 0.55 && base_height > 63 {
-                    if chunk.blocks[x][base_height][z] == BlockType::Air {
+                    if chunk.get_block_local(x, base_height, z) == BlockType::Air {
                         found_surface_air = true;
                         break;
                     }
@@ -4210,9 +4879,9 @@ mod tests {
     #[test]
     fn test_fluid_level_encoding() {
         let mut chunk = Chunk::new(0, 0);
-        chunk.fluid_levels[0][10][0] = 5 | 0x08; // level 5, falling = true
-        assert_eq!(chunk.fluid_levels[0][10][0] & 0x07, 5);
-        assert_eq!((chunk.fluid_levels[0][10][0] & 0x08) != 0, true);
+        chunk.set_fluid_level(0, 10, 0, 5 | 0x08);
+        assert_eq!(chunk.get_fluid_level(0, 10, 0) & 0x07, 5);
+        assert_eq!((chunk.get_fluid_level(0, 10, 0) & 0x08) != 0, true);
     }
 
     #[test]
@@ -4387,5 +5056,96 @@ mod tests {
         assert_eq!(chunk.torch_positions().len(), 1);
         chunk.set_block_local(3, 40, 5, BlockType::Stone);
         assert!(chunk.torch_positions().is_empty());
+    }
+
+    #[test]
+    fn paletted_block_storage_transitions() {
+        let mut dense = [BlockType::Air; 4096];
+        let storage = BlockStorage::from_dense(&dense);
+        assert!(matches!(storage, BlockStorage::Empty));
+
+        dense.fill(BlockType::Stone);
+        let storage = BlockStorage::from_dense(&dense);
+        assert!(matches!(storage, BlockStorage::Uniform(BlockType::Stone)));
+
+        // 2 types -> Paletted1
+        dense[0] = BlockType::Dirt;
+        let storage = BlockStorage::from_dense(&dense);
+        assert!(matches!(storage, BlockStorage::Paletted1 { .. }));
+
+        // 4 types -> Paletted2
+        dense[1] = BlockType::Grass;
+        dense[2] = BlockType::Sand;
+        let storage = BlockStorage::from_dense(&dense);
+        assert!(matches!(storage, BlockStorage::Paletted2 { .. }));
+
+        // 16 types -> Paletted4
+        let types = [
+            BlockType::Air,
+            BlockType::Stone,
+            BlockType::Dirt,
+            BlockType::Grass,
+            BlockType::Sand,
+            BlockType::Gravel,
+            BlockType::Bedrock,
+            BlockType::OakLog,
+            BlockType::OakLeaves,
+            BlockType::Glass,
+            BlockType::Water,
+            BlockType::Lava,
+            BlockType::Brick,
+            BlockType::TNT,
+            BlockType::Bookshelf,
+            BlockType::Obsidian,
+        ];
+        for (i, &t) in types.iter().enumerate() {
+            dense[i] = t;
+        }
+        let storage = BlockStorage::from_dense(&dense);
+        assert!(matches!(storage, BlockStorage::Paletted4 { .. }));
+        for (i, &t) in types.iter().enumerate() {
+            assert_eq!(storage.get(i), t);
+        }
+    }
+
+    #[test]
+    fn light_storage_packing_and_nibbles() {
+        let sky = [15u8; 4096];
+        let block = [0u8; 4096];
+        let storage = LightStorage::from_dense(&sky, &block);
+        assert!(matches!(
+            storage,
+            LightStorage::Uniform { sky: 15, block: 0 }
+        ));
+        assert_eq!(storage.get_sky(100), 15);
+        assert_eq!(storage.get_block(100), 0);
+
+        let mut sky2 = [15u8; 4096];
+        sky2[50] = 7;
+        let storage2 = LightStorage::from_dense(&sky2, &block);
+        assert!(matches!(storage2, LightStorage::Packed(_)));
+        assert_eq!(storage2.get_sky(50), 7);
+        assert_eq!(storage2.get_sky(51), 15);
+    }
+
+    #[test]
+    fn chunk_section_metadata_counts() {
+        let mut section = ChunkSection::empty_sky();
+        assert_eq!(section.non_air_count, 0);
+        assert_eq!(section.opaque_count, 0);
+        assert_eq!(section.random_tick_count, 0);
+
+        section.set_block(0, BlockType::Stone);
+        assert_eq!(section.non_air_count, 1);
+        assert_eq!(section.opaque_count, 1);
+
+        section.set_block(1, BlockType::OakLeaves);
+        assert_eq!(section.non_air_count, 2);
+        assert_eq!(section.opaque_count, 1); // leaves non-opaque
+        assert_eq!(section.random_tick_count, 1);
+
+        section.set_block(0, BlockType::Air);
+        assert_eq!(section.non_air_count, 1);
+        assert_eq!(section.opaque_count, 0);
     }
 }

@@ -726,9 +726,9 @@ mod remote_sync_tests {
         let mut chunks = std::collections::HashMap::new();
         let mut center = Chunk::new(0, 0);
         let mut east = Chunk::new(1, 0);
-        center.blocks[15][10][8] = BlockType::Stone;
-        east.blocks[0][10][8] = BlockType::Dirt;
-        east.sky_light[0][10][8] = 9;
+        center.set_block_local(15, 10, 8, BlockType::Stone);
+        east.set_block_local(0, 10, 8, BlockType::Dirt);
+        east.set_sky_light(0, 10, 8, 9);
         chunks.insert((0, 0), center);
         chunks.insert((1, 0), east);
 
@@ -1147,10 +1147,10 @@ impl MeshSnapshot {
                     let voxel = chunks
                         .get(&(chunk_x, chunk_z))
                         .map(|neighbor| MeshVoxel {
-                            block: neighbor.blocks[local_x][y][local_z],
-                            sky_light: neighbor.sky_light[local_x][y][local_z],
-                            block_light: neighbor.block_light[local_x][y][local_z],
-                            fluid: neighbor.fluid_levels[local_x][y][local_z],
+                            block: neighbor.get_block_local(local_x, y, local_z),
+                            sky_light: neighbor.get_sky_light(local_x, y, local_z),
+                            block_light: neighbor.get_block_light(local_x, y, local_z),
+                            fluid: neighbor.get_fluid_level(local_x, y, local_z),
                         })
                         .unwrap_or(MeshVoxel {
                             block: BlockType::Air,

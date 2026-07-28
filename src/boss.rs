@@ -158,10 +158,17 @@ fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, ti
         .iter()
         .any(|entity| entity.entity_type == EntityType::EnderDragon);
     let dragon_completed = chunks.chunks.values().any(|chunk| {
-        chunk
-            .blocks
-            .iter()
-            .any(|column| column.iter().any(|row| row.contains(&BlockType::DragonEgg)))
+        chunk.sections.iter().any(|sec| match &sec.blocks {
+            crate::world::BlockStorage::Empty => false,
+            crate::world::BlockStorage::Uniform(b) => *b == BlockType::DragonEgg,
+            crate::world::BlockStorage::Paletted1 { palette, .. }
+            | crate::world::BlockStorage::Paletted2 { palette, .. }
+            | crate::world::BlockStorage::Paletted4 { palette, .. }
+            | crate::world::BlockStorage::Paletted8 { palette, .. } => {
+                palette.contains(&BlockType::DragonEgg)
+            }
+            crate::world::BlockStorage::Global(arr) => arr.contains(&BlockType::DragonEgg),
+        })
     });
 
     // The dragon egg is the persistent world marker that prevents a defeated
@@ -199,8 +206,8 @@ fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, ti
         for lx in 0..CHUNK_WIDTH {
             for lz in 0..CHUNK_DEPTH {
                 for y in (1..CHUNK_HEIGHT - 1).rev() {
-                    if chunk.blocks[lx][y][lz] == BlockType::Purpur
-                        && chunk.blocks[lx][y + 1][lz] == BlockType::Air
+                    if chunk.get_block_local(lx, y, lz) == BlockType::Purpur
+                        && chunk.get_block_local(lx, y + 1, lz) == BlockType::Air
                     {
                         candidates.push((
                             cx * CHUNK_WIDTH as i32 + lx as i32,
@@ -828,9 +835,9 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 for y in 1..CHUNK_HEIGHT {
-                    chunk.blocks[x][y][z] = BlockType::Air;
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
-                chunk.blocks[x][40][z] = BlockType::Netherrack;
+                chunk.set_block_local(x, 40, z, BlockType::Netherrack);
             }
         }
         chunks.chunks.insert((0, 0), chunk);
