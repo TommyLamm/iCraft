@@ -1046,6 +1046,7 @@ pub struct GpuMeshLevel {
 
 pub struct ChunkMesh {
     levels: Option<[GpuMeshLevel; 3]>,
+    pub section_connectivity: [crate::culling::SectionConnectivity; crate::world::SECTION_COUNT],
     revision: u64,
     meshed_revision: u64,
 }
@@ -1054,6 +1055,7 @@ impl ChunkMesh {
     fn pending() -> Self {
         Self {
             levels: None,
+            section_connectivity: [crate::culling::SectionConnectivity::FULL; crate::world::SECTION_COUNT],
             revision: 0,
             meshed_revision: u64::MAX,
         }
@@ -2897,6 +2899,8 @@ pub struct State {
     gpu_timestamps_inside_passes: bool,
     terrain_candidates_scratch: Vec<crate::chunk_render::DrawCandidate>,
     terrain_draw_plan_scratch: crate::chunk_render::DrawPlan,
+    pub entity_los_manager: crate::culling::EntityLosManager,
+    visible_sections_scratch: std::collections::HashSet<(i32, usize, i32)>,
     mob_vertices_scratch: Vec<Vertex>,
     mob_indices_scratch: Vec<u32>,
     particle_vertices_scratch: Vec<Vertex>,
@@ -4507,6 +4511,8 @@ impl State {
             gpu_timestamps_inside_passes,
             terrain_candidates_scratch: Vec::with_capacity(256),
             terrain_draw_plan_scratch: crate::chunk_render::DrawPlan::default(),
+            entity_los_manager: crate::culling::EntityLosManager::new(),
+            visible_sections_scratch: std::collections::HashSet::new(),
             mob_vertices_scratch: Vec::with_capacity(1024),
             mob_indices_scratch: Vec::with_capacity(1536),
             particle_vertices_scratch: Vec::with_capacity(1024),
@@ -5635,6 +5641,7 @@ impl State {
                         &result.bundle,
                     );
                     mesh.levels = Some(levels);
+                    mesh.section_connectivity = result.bundle.section_connectivity;
                     let upload_elapsed = upload_started.elapsed();
                     gpu_upload_elapsed += upload_elapsed;
                     let gpu_bytes = mesh.gpu_bytes() as u64;
@@ -9811,20 +9818,34 @@ impl State {
         let view_projection = Mat4::from_cols_array_2d(&self.camera_uniform.view_proj);
         let frustum = Frustum::from_view_projection(view_projection);
 
-        let mut entities_rendered = 0u64;
-        let mut entities_frustum_culled = 0u64;
-        for entity in &self.entity_manager.entities {
-            let aabb = entity.get_aabb();
-            let bounds = crate::chunk_render::MeshBounds::new(aabb.min, aabb.max);
-            if frustum.intersects_aabb(&bounds) {
-                entities_rendered += 1;
-            } else {
-                entities_frustum_culled += 1;
-            }
+        let cam_pos = self.camera.position;
+        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
+        let render_distance_sq = render_blocks * render_blocks;
+        let r_i32 = self.chunk_manager.render_distance as i32;
+
+        let cam_sec_x = (cam_pos.x / 16.0).floor() as i32;
+        let cam_sec_y_raw = (cam_pos.y / 16.0).floor() as i32;
+        let cam_sec_z = (cam_pos.z / 16.0).floor() as i32;
+
+        let fail_open_section_vis = cam_sec_y_raw < 0
+            || cam_sec_y_raw >= 16
+            || !self.chunk_meshes.contains_key(&(cam_sec_x, cam_sec_z));
+
+        if !fail_open_section_vis {
+            crate::culling::traverse_section_visibility(
+                cam_sec_x,
+                cam_sec_y_raw as usize,
+                cam_sec_z,
+                r_i32,
+                &frustum,
+                |x, sy, z| {
+                    self.chunk_meshes
+                        .get(&(x, z))
+                        .map(|m| m.section_connectivity[sy])
+                },
+                &mut self.visible_sections_scratch,
+            );
         }
-        self.perf_counters.rendered_entities = entities_rendered;
-        self.perf_counters.frustum_culled_entities = entities_frustum_culled;
-        self.perf_counters.occlusion_culled_entities = 0;
 
         self.perf_counters.save_queue_depth =
             self.save_queue_depth
@@ -9833,18 +9854,46 @@ impl State {
             self.perf_counters.loaded_region_cache_bytes = mgr.region_cache_bytes();
         }
 
-        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
         let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
         self.terrain_candidates_scratch.clear();
+        let mut occluded_chunks = 0u64;
+
         for (&coord, mesh) in &self.chunk_meshes {
             let Some(bounds) = mesh.finest_bounds() else {
                 continue;
             };
-            let lod = select_lod_for_bounds(self.camera.position, bounds, lod_thresholds);
+
+            // 1. Distance check
+            let distance_sq = bounds.center_distance_squared(cam_pos);
+            if distance_sq > render_distance_sq {
+                continue;
+            }
+
+            // 2. Frustum check
+            if !frustum.intersects_aabb(&bounds) {
+                continue;
+            }
+
+            // 3. Section visibility graph check
+            if !fail_open_section_vis {
+                let mut chunk_visible = false;
+                for sec_y in 0..16usize {
+                    if self.visible_sections_scratch.contains(&(coord.0, sec_y, coord.1)) {
+                        chunk_visible = true;
+                        break;
+                    }
+                }
+                if !chunk_visible {
+                    occluded_chunks += 1;
+                    continue;
+                }
+            }
+
+            let lod = select_lod_for_bounds(cam_pos, bounds, lod_thresholds);
             let Some(level) = mesh.level(lod) else {
                 continue;
             };
-            let distance_sq = bounds.center_distance_squared(self.camera.position);
+
             if let Some(bounds) = level.opaque.bounds {
                 self.terrain_candidates_scratch.push(DrawCandidate::new(
                     coord,
@@ -9866,6 +9915,7 @@ impl State {
                 ));
             }
         }
+
         let terrain_candidate_count = self.terrain_candidates_scratch.len();
         self.terrain_draw_plan_scratch
             .build_into(self.terrain_candidates_scratch.iter().copied(), &frustum);
@@ -9875,6 +9925,7 @@ impl State {
         self.visible_chunk_count = draw_plan.visible_chunk_count();
         self.perf_counters.loaded_chunks = self.chunk_manager.chunks.len() as u64;
         self.perf_counters.visible_chunks = self.visible_chunk_count as u64;
+        self.perf_counters.occluded_chunks = occluded_chunks;
         self.perf_counters.terrain_candidates = terrain_candidate_count as u64;
         self.perf_counters.terrain_triangles = self.submitted_terrain_triangles;
         self.perf_counters.in_flight =
@@ -9898,12 +9949,74 @@ impl State {
 
         self.frame_ring_index = (self.frame_ring_index + 1) % 3;
 
-        // Compile mob instance data
+        // Poll entity LOS async results
+        self.entity_los_manager.poll_results();
+
+        // Compile mob instance data with culling hierarchy
         let entity_prepare_started = Instant::now();
         self.mob_cuboid_instances_scratch.clear();
         self.mob_quad_instances_scratch.clear();
+
+        let mut entities_rendered = 0u64;
+        let mut entities_frustum_culled = 0u64;
+        let mut entities_occlusion_culled = 0u64;
+        let mut visible_entities = Vec::with_capacity(self.entity_manager.entities.len());
+
+        let cam_cell = (
+            cam_pos.x.floor() as i32,
+            cam_pos.y.floor() as i32,
+            cam_pos.z.floor() as i32,
+        );
+
+        for entity in &self.entity_manager.entities {
+            // 1. Distance check
+            let dist_sq = entity.position.distance_squared(cam_pos);
+            if dist_sq > render_distance_sq {
+                continue;
+            }
+
+            // 2. Frustum check
+            let aabb = entity.get_aabb();
+            let bounds = crate::chunk_render::MeshBounds::new(aabb.min, aabb.max);
+            if !frustum.intersects_aabb(&bounds) {
+                entities_frustum_culled += 1;
+                continue;
+            }
+
+            // 3. Section visibility check
+            let sec_x = (entity.position.x / 16.0).floor() as i32;
+            let sec_y = (entity.position.y / 16.0).floor() as i32;
+            let sec_z = (entity.position.z / 16.0).floor() as i32;
+
+            if !fail_open_section_vis {
+                let valid_y = sec_y.clamp(0, 15) as usize;
+                if !self.visible_sections_scratch.contains(&(sec_x, valid_y, sec_z)) {
+                    entities_occlusion_culled += 1;
+                    continue;
+                }
+            }
+
+            // 4. Asynchronous Entity LOS check
+            if !self.entity_los_manager.is_entity_visible(
+                entity,
+                cam_pos,
+                cam_cell,
+                &self.chunk_manager,
+            ) {
+                entities_occlusion_culled += 1;
+                continue;
+            }
+
+            entities_rendered += 1;
+            visible_entities.push(entity);
+        }
+
+        self.perf_counters.rendered_entities = entities_rendered;
+        self.perf_counters.frustum_culled_entities = entities_frustum_culled;
+        self.perf_counters.occlusion_culled_entities = entities_occlusion_culled;
+
         crate::mob_renderer::render_mobs(
-            &self.entity_manager,
+            visible_entities,
             &self.chunk_manager,
             &mut self.mob_cuboid_instances_scratch,
             &mut self.mob_quad_instances_scratch,
@@ -12074,8 +12187,9 @@ impl State {
                     self.debug_str_scratch.clear();
                     let _ = write!(
                         self.debug_str_scratch,
-                        "CHUNKS: {} VISIBLE / {} LOADED / {} DRAWS",
+                        "CHUNKS: {} VISIBLE / {} OCCLUDED / {} LOADED / {} DRAWS",
                         self.visible_chunk_count,
+                        self.perf_counters.occluded_chunks,
                         self.chunk_manager.chunks.len(),
                         self.submitted_terrain_draw_calls
                     );
@@ -12088,10 +12202,11 @@ impl State {
                     self.debug_str_scratch.clear();
                     let _ = write!(
                         self.debug_str_scratch,
-                        "ENTITIES: {} ({} RENDERED, {} CULLED) / PARTICLES: {}",
+                        "ENTITIES: {} ({} RENDERED, {} FRUSTUM, {} OCCLUSION) / PARTICLES: {}",
                         self.entity_manager.entities.len(),
                         self.perf_counters.rendered_entities,
                         self.perf_counters.frustum_culled_entities,
+                        self.perf_counters.occlusion_culled_entities,
                         self.particles.particles.len()
                     );
                     render_line(

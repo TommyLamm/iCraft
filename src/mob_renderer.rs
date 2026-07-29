@@ -1,5 +1,5 @@
 use crate::chunk_manager::ChunkManager;
-use crate::entity::{EntityManager, EntityType};
+use crate::entity::{Entity, EntityManager, EntityType};
 use crate::state::Vertex;
 use glam::Vec3;
 
@@ -343,7 +343,7 @@ pub fn render_mobs_legacy(
     let mut cuboids = Vec::new();
     let mut quads = Vec::new();
     render_mobs(
-        entity_manager,
+        &entity_manager.entities,
         chunk_manager,
         &mut cuboids,
         &mut quads,
@@ -375,14 +375,14 @@ pub fn render_local_player_legacy(
     );
     expand_mob_instances(&cuboids, &quads, vertices, indices);
 }
-pub fn render_mobs(
-    entity_manager: &EntityManager,
+pub fn render_mobs<'a>(
+    entities: impl IntoIterator<Item = &'a Entity>,
     chunk_manager: &ChunkManager,
     cuboid_instances: &mut Vec<MobInstance>,
     quad_instances: &mut Vec<MobInstance>,
     time: f32,
 ) {
-    for entity in &entity_manager.entities {
+    for entity in entities {
         // Retrieve light level at entity position
         let mx = entity.position.x.floor() as i32;
         let my = entity.position.y.floor() as i32;
@@ -538,7 +538,7 @@ pub fn render_mobs(
 
                 // Draw animation progress: action_cooldown from 2.0 to 0.0
                 let draw_progress = if target {
-                    ((2.0 - entity.action_cooldown) / 2.0).clamp(0.0, 1.0)
+                    ((2.0f32 - entity.action_cooldown) / 2.0f32).clamp(0.0f32, 1.0f32)
                 } else {
                     0.0
                 };
@@ -683,7 +683,7 @@ pub fn render_mobs(
             EntityType::Creeper => {
                 // Creeper swelling expansion scale during fuse count down
                 let scale = if entity.is_ignited {
-                    let progress = ((1.5 - entity.action_cooldown) / 1.5).clamp(0.0, 1.0);
+                    let progress = ((1.5f32 - entity.action_cooldown) / 1.5f32).clamp(0.0f32, 1.0f32);
                     1.0 + 0.15 * progress * (time * 35.0).sin().abs()
                 } else {
                     1.0

@@ -259,6 +259,7 @@ impl ChunkLodMeshData {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChunkMeshBundle {
     pub levels: [ChunkLodMeshData; 3],
+    pub section_connectivity: [crate::culling::SectionConnectivity; crate::world::SECTION_COUNT],
 }
 
 impl ChunkMeshBundle {

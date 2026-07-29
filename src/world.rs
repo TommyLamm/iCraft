@@ -3696,12 +3696,17 @@ impl Chunk {
         let (o0, oi0, t0, ti0) = self.generate_mesh(get_block_at);
         let l1 = self.generate_surface_mesh(get_block_at, 1);
         let l2 = self.generate_surface_mesh(get_block_at, 4);
+        let mut section_connectivity = [crate::culling::SectionConnectivity::FULL; SECTION_COUNT];
+        for sec_y in 0..SECTION_COUNT {
+            section_connectivity[sec_y] = crate::culling::compute_section_connectivity(self, sec_y);
+        }
         ChunkMeshBundle {
             levels: [
                 ChunkLodMeshData::from_parts(o0, oi0, t0, ti0, region_coord),
                 l1,
                 l2,
             ],
+            section_connectivity,
         }
     }
 

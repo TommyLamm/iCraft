@@ -7,6 +7,7 @@ mod camera;
 mod chunk_manager;
 mod chunk_render;
 mod chunk_schedule;
+mod culling;
 mod crafting;
 mod dimension;
 mod enchantment;
