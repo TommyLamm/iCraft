@@ -1,7 +1,8 @@
 # 任務 7：Entity ID/type/spatial indexes
 
 > 對應計畫：`14_performance_optimization.md` Phase 2.3
-> 狀態：✅ 已完成
+> 狀態：Partial
+> 審核回退：見 [`15_performance_audit_repair_plan.md`](15_performance_audit_repair_plan.md)；spatial index 仍全量重建，主要 AI/pickup/projectile/render 路徑仍有全表掃描，待 R5 修復。
 > 前置：任務 1（基線）、任務 5（固定 tick）
 > 目標：為 `EntityManager` 加入 ID/type/spatial index，消除全表遍歷與線性 `.find()`。
 > Commit 訊息：`perf(entity): add id, type and spatial indexes`
@@ -26,7 +27,7 @@
 ## 子任務清單
 
 ### 7.1 EntityId -> dense index
-- [x] 檔案：`src/entity.rs`
+- [ ] 檔案：`src/entity.rs`
 - 步驟：
   1. 增加 `EntityId -> dense index` 映射（`HashMap<u64, usize>`）。
   2. `swap_remove` 後更新 index（被 swap 的 entity 的 index 更新）。
@@ -34,7 +35,7 @@
 - 驗收：Entity spawn/remove/restore/remote leave 後 ID index 永遠有效。
 
 ### 7.2 EntityType 與 Chunk/section bucket
-- [x] 檔案：`src/entity.rs`
+- [ ] 檔案：`src/entity.rs`
 - 步驟：
   1. 增加按 `EntityType` 的 bucket（hostile/passive/projectile/drop/remote_player）。
   2. 增加按 Chunk/section 的 spatial bucket。
@@ -42,7 +43,7 @@
 - 驗收：按類型/區域查找不遍歷全部 Entity。
 
 ### 7.3 Nearby 查詢先查 bucket
-- [x] 檔案：`src/mob.rs`、`src/passive_mob.rs`、`src/boss.rs`、`src/state.rs`、`src/mob_renderer.rs`
+- [ ] 檔案：`src/mob.rs`、`src/passive_mob.rs`、`src/boss.rs`、`src/state.rs`、`src/mob_renderer.rs`
 - 步驟：
   1. nearby collision、pickup、melee、projectile、spawning 和 rendering 先查相關 bucket。
   2. 不遍歷全部 Entity。
@@ -50,21 +51,21 @@
 - 驗收：壓力場景查找複雜度隨附近實體數，而不是全世界實體數增長。
 
 ### 7.4 Distance-squared 取代 sqrt
-- [x] 檔案：`src/entity.rs`、`src/mob.rs`、`src/passive_mob.rs`、`src/state.rs`
+- [ ] 檔案：`src/entity.rs`、`src/mob.rs`、`src/passive_mob.rs`、`src/state.rs`
 - 步驟：
   1. 使用 `distance_squared` 取代不需要真實距離的 `sqrt`。
   2. 比較時用 `d_sq <= range * range`。
 - 驗收：無不必要的 `sqrt` 呼叫。
 
 ### 7.5 重用事件 scratch Vec
-- [x] 檔案：`src/entity.rs`、`src/state.rs`、`src/mob.rs`
+- [ ] 檔案：`src/entity.rs`、`src/state.rs`、`src/mob.rs`
 - 步驟：
   1. 重複使用事件 scratch Vec（`State` 持有持久欄位，逐幀 `clear()` 重用 capacity）。
   2. 移除每 frame 的短命 allocations。
 - 驗收：穩態 entity 更新接近零 heap allocation。
 
 ### 7.6 AoS 拆分（條件性）
-- [x] 檔案：`src/entity.rs`
+- [ ] 檔案：`src/entity.rs`
 - 步驟：
   1. 只有性能基線顯示 `Entity` AoS 大小是問題時，才將 dropped item、projectile、passive/hostile payload 拆成 enum/component side storage。
   2. 若無明顯退化，保持現有 AoS。
@@ -72,11 +73,11 @@
 
 ## 驗收條件
 
-- [x] Entity spawn/remove/restore/remote leave 後 ID index 永遠有效。
-- [x] 壓力場景查找複雜度隨附近實體數，而不是全世界實體數增長。
-- [x] 無不必要的 `sqrt` 呼叫。
-- [x] 穩態 entity 更新接近零 heap allocation。
-- [x] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
+- [ ] Entity spawn/remove/restore/remote leave 後 ID index 永遠有效。
+- [ ] 壓力場景查找複雜度隨附近實體數，而不是全世界實體數增長。
+- [ ] 無不必要的 `sqrt` 呼叫。
+- [ ] 穩態 entity 更新接近零 heap allocation。
+- [ ] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
 
 ## 風險與回退
 

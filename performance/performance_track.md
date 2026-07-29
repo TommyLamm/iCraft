@@ -1,29 +1,36 @@
 # Performance Optimization Track
 
-> 更新日期：2026-07-28  
+> 更新日期：2026-07-29
 > 來源計畫：`14_performance_optimization.md`（同目錄）  
 > 原則：每個任務獨立量測、驗證及回退；沒有改善 p95/p99 或記憶體的高複雜度改動不繼續擴大。  
 > 詳細計畫：本目錄下 `01_*.md` ~ `14_*.md`，每個任務一份獨立 plan（含子任務、驗收條件、風險）。
+> 審核基線：[`15_performance_audit_repair_plan.md`](15_performance_audit_repair_plan.md)；已知失敗見 [`repro/README.md`](repro/README.md)。
 
 ## 任務總覽
 
-| # | 任務 | 詳細計畫 | 狀態 | Commit | 驗證 |
-|---|---|---|---|---|---|
-| 0 | 火把索引與週期掃描移除 | （已完成，見下方「已完成進度」） | Complete | - | `cargo test --release`（366 unit + 1 integration）；torch index focused tests 2 passed |
-| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Complete | - | - |
-| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Complete | - | - |
-| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Complete | - | - |
-| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Complete | - | - |
-| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Complete | - | - |
-| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Complete | - | - |
-| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Complete | - | - |
-| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過 |
-| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過 |
-| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過（368 passed） |
-| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Complete | - | `cargo fmt --all -- --check` / `cargo check --release` / `cargo test --release` 通過（368 passed） |
-| 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Pending | - | - |
-| 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Pending | - | - |
-| 14 | Release、PGO 與 frame pacing | [14_build_release.md](14_build_release.md) | Pending | - | - |
+| # | 任務 | 詳細計畫 | 狀態 | 審核修復輪次 | Commit | 驗證 |
+|---|---|---|---|---|---|---|
+| 0 | 火把索引與週期掃描移除 | （不在 01–14 審核回退範圍） | Complete | — | - | `cargo test --release`（366 unit + 1 integration）；torch index focused tests 2 passed |
+| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Partial | R5、R9 | - | GPU/window 與固定場景 artifact 缺失 |
+| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Partial | R1 | - | mesh dirty enqueue correctness 未驗收 |
+| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Partial | R2 | - | ACK、fault-injection、atomic replace 未驗收 |
+| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Partial | R3、R5 | - | backpressure/order/bounded drain 未驗收 |
+| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Partial | R4、R5、R9 | - | 只有合成測試；缺 world checksum |
+| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Partial | R5 | - | sleep fast-path 與獨立 reference 未驗收 |
+| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Partial | R5 | - | index 增量維護與主要消費路徑未驗收 |
+| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Partial | R7 | - | 穩態 allocation 與 hand cache 未驗收 |
+| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Partial | R7、R9 | - | ring completion 與視覺/性能 parity 缺失 |
+| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Partial | R6 | - | lifecycle、handle safety、runtime compact 未驗收 |
+| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Partial | R6 | - | AO decode 錯誤；section ownership 未完成 |
+| 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Partial | R7、R9 | - | storage 不 demote；memory accounting/microbench 缺失 |
+| 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Partial | R6 | - | async LOS 永遠 visible；section culling 未完成 |
+| 14 | Release、PGO 與 frame pacing | [14_build_release.md](14_build_release.md) | Partial | R8、R9 | - | FPS cap、真正 dynamic resolution、PGO A/B 缺失 |
+
+狀態用語：
+
+- `Pending`：尚未開始，或尚無足以確認有效實作的證據。
+- `Partial`：已有部分實作，但仍有 correctness、durability、parity 或驗收 artifact 缺口。
+- `Complete`：必須同時滿足 [`15_performance_audit_repair_plan.md`](15_performance_audit_repair_plan.md) 第 6 節全部完成定義；僅有編譯或單元測試通過不足以宣告完成。
 
 ## 實作順序與依賴
 
@@ -56,7 +63,7 @@
 
 ## 目前進度
 
-### 已完成：火把索引與週期掃描移除
+### 已完成：火把索引與週期掃描移除（不在 01–14 審核範圍）
 
 - `Chunk` 使用緊湊 `u16` 保存普通火把的本地座標。
 - Chunk 生成、維度生成、存檔／網路 payload restore 後會建立或重建索引。
@@ -257,7 +264,7 @@
 
 ## 驗證紀錄
 
-本輪完成：
+審核前曾執行：
 
 - `cargo test --release`：主程式 368 tests + integration 1 test，全數通過。
 - `cargo fmt --all -- --check`：全數通過。
@@ -269,8 +276,19 @@
 
 已知驗證限制：
 
-- 尚未執行需要實際 GPU/window 的 `cargo run --release` 視覺驗證。
-- 尚未建立 Phase 0 固定場景或正式 before/after 性能報告。
+| 缺口 | 影響 | 補完輪次 |
+|---|---|---|
+| 未執行實際 GPU/window 視覺驗證 | GPU timestamp、AO、instancing、arena、culling 與 dynamic resolution 的畫面正確性未知 | R5、R6、R7、R8、R9 |
+| 未建立 8 個固定 seed 場景及可重播 raw artifact | 不能審計 p50/p95/p99、1% low、working set 或 before/after 百分比 | R9 |
+| 現有基線只使用 render distance 8 | 不得作為 render distance 16 的 buffer/memory/performance claims 證據 | R9 |
+| 缺少 host/client world、entity、health checksum | multiplayer authority 與 catch-up 最終收斂未驗證 | R3、R4、R9 |
+| 缺少 slow-client、capacity=1 與多 client backpressure 場景 | catch-up Chunk 可能永久缺漏，可靠封包順序亦未驗證 | R3、R9 |
+| 缺少 save enqueue/I/O/replace crash fault-injection | 無法證明失敗後 dirty ownership、舊/新檔完整性與 revision ACK 正確 | R2、R9 |
+| 缺少 CPU packing ↔ WGSL decode parity/golden | packed AO 與其他 shader decode 不能宣告視覺等價 | R6、R9 |
+| 缺少 30/60/144/240 FPS headless full-world checksum | fixed tick 目前只由合成位移測試支撐 | R5、R9 |
+| 缺少 non-PGO/PGO 相同 workload A/B | PGO 與 release 性能改善不可宣告 | R9 |
+
+目前可重播的已知失敗控制流與缺口，集中記錄於 [`repro/README.md`](repro/README.md)。
 
 ## 持續風險
 

@@ -1,7 +1,7 @@
 # 任務 15-R0：回退 01–14 文件狀態並保存失敗 reproduction
 
 > 對應計畫：`15_performance_audit_repair_plan.md` 第 5 節 R0 與第 4.3 節第 1 點
-> 狀態：待修復
+> 狀態：Complete（2026-07-29；既有 fmt/clippy gate 缺口見下方執行紀錄）
 > 前置：無（審核修復第一輪）
 > 目標：依審核結論把任務 01–14 的文件狀態由虛假的 Complete 改回 Partial/Pending，保存目前已知失敗的 reproduction 與 artifact，並記錄驗證缺口，作為後續 R1–R9 修復的誠實基線。
 > Commit 訊息：`docs(perf): revert 01-14 status to partial and save reproductions`
@@ -25,7 +25,7 @@
 ## 子任務清單
 
 ### 0.1 依審核結論回退 01–14 文件狀態
-- [ ] 檔案：`performance/performance_track.md`、`performance/01_*.md`–`performance/14_*.md`
+- [x] 檔案：`performance/performance_track.md`、`performance/01_*.md`–`performance/14_*.md`
 - 步驟：
   1. 逐項對照 `15_performance_audit_repair_plan.md:13-28` 審核結論表，把 Fail 的任務（01/02/03/04/06/07/08/10/11/13/14）狀態改為 `Partial`，並在對應詳細計畫把驗收條件 `[x]` 改回 `[ ]`。
   2. Partial 的任務（05/09/12）保持 `Partial`，但補註審核指出的剩餘缺口（如 05 的合成測試、09 的 ring 無 completion 保護、12 的 storage 不 demote）。
@@ -34,7 +34,7 @@
 - 驗收：01–14 文件狀態與審核結論表完全一致，無殘留虛假 `Complete`。
 
 ### 0.2 保存現有失敗 reproduction 與 artifact
-- [ ] 檔案：`performance/baselines/`、`performance/repro/`（新建）
+- [x] 檔案：`performance/baselines/`、`performance/repro/`（新建）
 - 步驟：
   1. 建立 `performance/repro/` 目錄，收納目前可重現失敗的測試名稱、輸入 seed 與重現步驟。
   2. 把審核發現的失敗路徑（mesh mark_dirty 漏排程、save 非 atomic、mailbox drop、async LOS 永遠 visible、AO decode 不一致）逐項寫成 repro 條目，記錄對應 `file:line` 與觸發條件。
@@ -43,7 +43,7 @@
 - 驗收：`performance/repro/` 下每個審核發現都有對應條目，可由他人獨立重現。
 
 ### 0.3 記錄已知驗證缺口
-- [ ] 檔案：`performance/performance_track.md`、`performance/15_performance_audit_repair_plan.md`
+- [x] 檔案：`performance/performance_track.md`、`performance/15_performance_audit_repair_plan.md`
 - 步驟：
   1. 在 `performance_track.md`「已知驗證限制」小節擴充：列出缺少 GPU/window 視覺驗證、缺少固定場景、缺少 host/client checksum、缺少 fault-injection 等缺口。
   2. 對應每個缺口標註將由哪一輪（R5/R9 等）補完。
@@ -52,7 +52,7 @@
 - 驗收：驗證缺口清單與審核結論一一對應，且每項有負責輪次。
 
 ### 0.4 統一狀態用語與交叉引用
-- [ ] 檔案：`performance/performance_track.md`、`ARCHITECTURE.md`
+- [x] 檔案：`performance/performance_track.md`、`ARCHITECTURE.md`
 - 步驟：
   1. 統一狀態用語為 `Pending`/`Partial`/`Complete`，並定義：Complete 須同時滿足總計畫第 6 節全部條件。
   2. 在 `performance_track.md` 任務總覽表新增「審核修復輪次」欄，標註每個任務對應的 R1–R9。
@@ -62,12 +62,12 @@
 
 ## 驗收條件
 
-- [ ] 01–14 文件狀態全數回退為 Partial/Pending，與審核結論表一致。
-- [ ] 各詳細計畫內虛假 `[x]` 全改回 `[ ]`。
-- [ ] `performance/repro/` 收納所有審核發現的重現條目。
-- [ ] 已知驗證缺口清單建立且對應到修復輪次。
-- [ ] `performance_track.md`、01–14 詳細計畫、總計畫與 `ARCHITECTURE.md` 狀態一致。
-- [ ] 未修改任何 `src/` 程式碼。
+- [x] 01–14 文件狀態全數回退為 Partial/Pending，與審核結論表一致。
+- [x] 各詳細計畫內虛假 `[x]` 全改回 `[ ]`。
+- [x] `performance/repro/` 收納所有審核發現的重現條目。
+- [x] 已知驗證缺口清單建立且對應到修復輪次。
+- [x] `performance_track.md`、01–14 詳細計畫、總計畫與 `ARCHITECTURE.md` 狀態一致。
+- [x] 未修改任何 `src/` 程式碼。
 
 ## 風險與回退
 
@@ -87,3 +87,20 @@ cargo clippy --all-targets --all-features
 git diff --stat -- src
 git diff --stat -- performance ARCHITECTURE.md
 ```
+
+## R0 執行紀錄（2026-07-29）
+
+| 驗證 | 結果 | 備註 |
+|---|---|---|
+| 01–14 metadata/checkbox 結構檢查 | Pass | 14 份狀態均為 `Partial`、無殘留 `[x]`、都有審核回退連結 |
+| 本地 Markdown links | Pass | `ARCHITECTURE.md` 與 `performance/**/*.md` 相對連結均可解析 |
+| `git diff --check` | Pass | 僅有 Git 的 LF→CRLF working-copy 提示，無 whitespace error |
+| `git diff --stat -- src` | Pass | 無輸出；本輪未修改 `src/` |
+| `cargo test --all-targets` | Pass | 371 unit + 1 integration |
+| `cargo test --all-targets --release -j 1` | Pass | 371 unit + 1 integration；平行首次編譯曾在 `flume` 無診斷退出，單 job 重跑通過 |
+| `cargo build --release -j 1` | Pass | 完成，只有既有 dead-code warnings |
+| `cargo fmt --all -- --check` | Fail（既有） | 未修改的 `src/culling.rs`、`main.rs`、`menu.rs`、`mob_renderer.rs`、`state.rs` 不符合 rustfmt；R0 不得改 `src/` |
+| `cargo clippy --all-targets --all-features -j 1` | Fail（既有） | 5 errors：`src/network/transport.rs:58` 的 `never_loop`；`src/texture.rs:1235,1237,1513,1739` 的永遠為零運算，另有 268 warnings |
+
+fmt/clippy 失敗不由 R0 文件變更引入，也不在本輪純文件授權範圍內；
+它們保留為後續修復前的已知 gate 缺口，不得據此宣告 01–14 `Complete`。

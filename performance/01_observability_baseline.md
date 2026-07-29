@@ -1,7 +1,8 @@
 # 任務 1：補完 Phase 0 可觀測性與固定基線
 
 > 對應計畫：`14_performance_optimization.md` Phase 0
-> 狀態：✅ 已完成
+> 狀態：Partial
+> 審核回退：見 [`15_performance_audit_repair_plan.md`](15_performance_audit_repair_plan.md)；GPU timestamp readback、scope/counter 覆蓋與固定場景 artifact 尚未完成（R5、R9）。
 > 目標：完成 GPU timestamp、缺少的 counters 與固定場景基線，為所有後續性能任務提供可重現的 before/after 量測。
 > Commit 訊息：`perf(instrument): complete gpu timestamps, counters and fixed benchmarks`
 
@@ -18,16 +19,16 @@
 
 ## 已完成部分
 
-- [x] 固定容量 256-sample ring buffer。
-- [x] 熱路徑記錄不建立 `String`、`Vec` 或集合。
-- [x] F3 顯示最近窗口的 average、p95、p99 與樣本數。
-- [x] 已接入 17 個 CPU scopes（network_drain、world_tick、player_physics、chunk_schedule、terrain_result_integrate、lighting、redstone、hostile_mobs、passive_mobs、particles_update、render_prepare_terrain、render_prepare_entities、render_prepare_particles、render_prepare_ui、gpu_upload、render_encode、present）。
-- [x] 已加入 loaded/visible chunks、terrain candidates/triangles/draw calls、GPU mesh bytes、GPU buffer objects、worker in-flight、stale results 與 tracked upload bytes 等 counters。
+- [ ] 固定容量 256-sample ring buffer。
+- [ ] 熱路徑記錄不建立 `String`、`Vec` 或集合。
+- [ ] F3 顯示最近窗口的 average、p95、p99 與樣本數。
+- [ ] 已接入 17 個 CPU scopes（network_drain、world_tick、player_physics、chunk_schedule、terrain_result_integrate、lighting、redstone、hostile_mobs、passive_mobs、particles_update、render_prepare_terrain、render_prepare_entities、render_prepare_particles、render_prepare_ui、gpu_upload、render_encode、present）。
+- [ ] 已加入 loaded/visible chunks、terrain candidates/triangles/draw calls、GPU mesh bytes、GPU buffer objects、worker in-flight、stale results 與 tracked upload bytes 等 counters。
 
 ## 子任務清單
 
 ### 1.1 Adapter timestamp query 支援
-- [x] 檔案：`src/perf.rs`、`src/state.rs`
+- [ ] 檔案：`src/perf.rs`、`src/state.rs`
 - 步驟：
   1. 在 `State::new` 的 wgpu device 初始化後，檢查 `wgpu::Features::TIMESTAMP_QUERY`（及 `TIMESTAMP_QUERY_INSIDE_PASSES`）。
   2. 若支援，啟用 feature 並建立 `wgpu::QuerySet`（足夠數量的 timestamp query slots）。
@@ -38,7 +39,7 @@
 - 驗收：支援的 adapter 下 F3 顯示各 GPU pass 時間；不支援時靜默停用。
 
 ### 1.2 補完 lighting scope 涵蓋範圍
-- [x] 檔案：`src/lighting.rs`、`src/state.rs`、`src/fluid.rs`
+- [ ] 檔案：`src/lighting.rs`、`src/state.rs`、`src/fluid.rs`
 - 步驟：
   1. 目前 `lighting` scope 主要量測 Chunk load propagation；確認 block mutation 後的 `update_sky_light_after_removed` / `update_block_light_after_placed` 等也包在同一 scope。
   2. 流體固化／流動造成的 lighting 更新加入 scope。
@@ -46,21 +47,21 @@
 - 驗收：`lighting` p95 反映真實 lighting 工作量。
 
 ### 1.3 補完 gpu_upload scope 涵蓋範圍
-- [x] 檔案：`src/state.rs`、`src/particles.rs`、`src/mob_renderer.rs`
+- [ ] 檔案：`src/state.rs`、`src/particles.rs`、`src/mob_renderer.rs`
 - 步驟：
   1. 目前 `gpu_upload` 只量測 terrain buffer enqueue/create；加入 particle、UI、camera uniform 及 crack overlay buffer write 的時間。
   2. 確認所有 `queue.write_buffer` 呼叫都在 scope 內。
 - 驗收：`gpu_upload` 涵蓋所有 per-frame GPU buffer write。
 
 ### 1.4 Entity rendered/culled counters
-- [x] 檔案：`src/state.rs`、`src/mob_renderer.rs`
+- [ ] 檔案：`src/state.rs`、`src/mob_renderer.rs`
 - 步驟：
   1. 在 `State::render` 的 entity 提交路徑加入三個 counter：`entities_rendered`、`entities_frustum_culled`、`entities_occlusion_culled`（occlusion 尚未實作時為 0）。
   2. F3 顯示。
 - 驗收：F3 顯示實體渲染/剔除計數。
 
 ### 1.5 Save/network queue depth 與 region cache counters
-- [x] 檔案：`src/save.rs`、`src/state.rs`、`src/network/server.rs`、`src/network/client.rs`
+- [ ] 檔案：`src/save.rs`、`src/state.rs`、`src/network/server.rs`、`src/network/client.rs`
 - 步驟：
   1. `SaveManager` 加入 `pending_save_queue_depth` 與 `region_cache_bytes` counter（`save.rs:477` 的 `region_cache` HashMap）。
   2. `NetworkServer` / `NetworkClient` 加入 inbound/outbound queue depth counter。
@@ -70,7 +71,7 @@
 - 驗收：autosave 與多人加入時 F3 顯示 queue 深度變化。
 
 ### 1.6 建立固定 seed 場景
-- [x] 檔案：`performance/benchmarks/`（新增目錄與場景描述檔）
+- [ ] 檔案：`performance/benchmarks/`（新增目錄與場景描述檔）
 - 步驟：建立以下可重播場景的描述與 seed：
   1. 開放地形，視距 8/16，靜止及快速旋轉。
   2. 洞穴或建築內，大量 Chunk 在視錐內但被遮擋。
@@ -83,7 +84,7 @@
 - 驗收：每個場景有明確 seed、座標、操作步驟與預期瓶頸。
 
 ### 1.7 記錄正式硬件基線
-- [x] 檔案：`performance/baselines/`（新增目錄）
+- [ ] 檔案：`performance/baselines/`（新增目錄）
 - 步驟：
   1. 在固定場景下執行 `cargo run --release`，記錄 CPU/GPU frame time 的 p50、p95、p99 和 1% low。
   2. 記錄 working set、queue depth 與 upload bytes。
@@ -92,13 +93,13 @@
 
 ## 驗收條件
 
-- [x] 支援的 adapter 下 F3 顯示 7 個 GPU pass timings。
-- [x] `lighting` 與 `gpu_upload` scope 完整涵蓋各自工作。
-- [x] Entity rendered/culled counters 顯示。
-- [x] Save/network queue depth 與 region cache counters 顯示。
-- [x] 8 個固定 seed 場景已建立且可重播。
-- [x] 正式硬件基線報告已保存。
-- [x] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
+- [ ] 支援的 adapter 下 F3 顯示 7 個 GPU pass timings。
+- [ ] `lighting` 與 `gpu_upload` scope 完整涵蓋各自工作。
+- [ ] Entity rendered/culled counters 顯示。
+- [ ] Save/network queue depth 與 region cache counters 顯示。
+- [ ] 8 個固定 seed 場景已建立且可重播。
+- [ ] 正式硬件基線報告已保存。
+- [ ] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
 
 ## 風險與回退
 

@@ -1,7 +1,8 @@
 # 任務 13：Section visibility 與 Entity occlusion
 
 > 對應計畫：`14_performance_optimization.md` Phase 5.1 + 5.2 + 5.3
-> 狀態：✅ 已完成
+> 狀態：Partial
+> 審核回退：見 [`15_performance_audit_repair_plan.md`](15_performance_audit_repair_plan.md)；async LOS worker 無地形資料且永遠回 visible，stale graph/occluder/section ownership 亦未達驗收，待 R6 修復。
 > 前置：任務 1（基線）、任務 11（section meshing）、任務 12（section storage）
 > 目標：加入便宜的剔除階層與保守遮擋剔除，跳過被地形遮擋的 terrain section 與 entity 渲染。
 > Commit 訊息：`perf(culling): add section visibility and conservative entity occlusion`
@@ -17,7 +18,7 @@
 ## 子任務清單
 
 ### 13.1 便宜剔除階層
-- [x] 檔案：`src/state.rs`、`src/chunk_render.rs`
+- [ ] 檔案：`src/state.rs`、`src/chunk_render.rs`
 - 步驟：
   1. 所有 terrain section 與 entity submission 依序執行：
      1. render distance
@@ -29,7 +30,7 @@
 - 驗收：剔除階層按順序執行，前一階段不通過即跳過後續。
 
 ### 13.2 Section occlusion graph
-- [x] 檔案：`src/chunk_render.rs`、`src/world.rs`、`src/state.rs`
+- [ ] 檔案：`src/chunk_render.rs`、`src/world.rs`、`src/state.rs`
 - 步驟：
   1. meshing worker 對每個 section 的透明/可通行 voxel 做 flood fill。
   2. 建立六個 section faces 的 pairwise connectivity bitmask。
@@ -39,7 +40,7 @@
 - 驗收：洞穴/建築內場景 terrain draw call 顯著下降。
 
 ### 13.3 非同步 Entity LOS
-- [x] 檔案：`src/state.rs`、`src/mob_renderer.rs`
+- [ ] 檔案：`src/state.rs`、`src/mob_renderer.rs`
 - 步驟：
   1. 對仍可能可見而且 mesh 成本較高的 entity，從 camera 到 AABB center/corners 做 bounded voxel LOS。
   2. 使用獨立低優先級 queue，不能與 terrain meshing 爭奪全部 Rayon threads。
@@ -56,7 +57,7 @@
 - 驗收：在牆後 1,000 entities 場景，render submission 和 upload 顯著下降。
 
 ### 13.4 快速恢復驗證
-- [x] 檔案：手動視覺測試
+- [ ] 檔案：手動視覺測試
 - 步驟：
   1. 快速轉身時沒有明顯 pop-in。
   2. 開門、拆牆後 occlusion 正確恢復。
@@ -64,7 +65,7 @@
 - 驗收：快速轉身及拆牆時無明顯 pop-in；無實體永久消失。
 
 ### 13.5 Counter 整合
-- [x] 檔案：`src/perf.rs`、`src/state.rs`
+- [ ] 檔案：`src/perf.rs`、`src/state.rs`
 - 步驟：
   1. 確認任務 1 的 `entities_occlusion_culled` counter 接入。
   2. 加入 `sections_occlusion_culled` counter。
@@ -73,14 +74,14 @@
 
 ## 驗收條件
 
-- [x] 剔除階層按順序執行（distance -> frustum -> section visibility -> LOS）。
-- [x] 洞穴/建築內場景 terrain draw call 下降。
-- [x] 在牆後 1,000 entities 場景，render submission 和 upload 顯著下降。
-- [x] 快速轉身、開門、拆牆時沒有明顯 pop-in。
-- [x] 所有不確定狀態均 fail-open，不會出現實體永久消失。
-- [x] 權威 AI、physics、pickup、damage 不受 occlusion 影響。
-- [x] F3 顯示 culling counters。
-- [x] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
+- [ ] 剔除階層按順序執行（distance -> frustum -> section visibility -> LOS）。
+- [ ] 洞穴/建築內場景 terrain draw call 下降。
+- [ ] 在牆後 1,000 entities 場景，render submission 和 upload 顯著下降。
+- [ ] 快速轉身、開門、拆牆時沒有明顯 pop-in。
+- [ ] 所有不確定狀態均 fail-open，不會出現實體永久消失。
+- [ ] 權威 AI、physics、pickup、damage 不受 occlusion 影響。
+- [ ] F3 顯示 culling counters。
+- [ ] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
 
 ## 風險與回退
 

@@ -217,6 +217,15 @@ Behavioral tests are mostly inline `#[cfg(test)]` tests. The package has no
 `src/lib.rs`, so `tests/passive_mob_tests.rs` cannot directly exercise internal
 modules and remains a placeholder.
 
+The performance plans 01–14 are currently `Partial`, not proof that the
+optimizations are complete. The authoritative status and outstanding
+correctness/artifact gates are tracked in
+[`performance/performance_track.md`](performance/performance_track.md) and
+[`performance/15_performance_audit_repair_plan.md`](performance/15_performance_audit_repair_plan.md).
+In particular, the host-authoritative model above remains the target invariant;
+the known joining-client entity simulation/replication gap is a release blocker
+assigned to R4, not an alternate authority model.
+
 Use:
 
 ```text

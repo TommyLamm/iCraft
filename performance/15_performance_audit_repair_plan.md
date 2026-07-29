@@ -359,3 +359,21 @@ R0 先把文件狀態改回 Partial/Pending，保存目前失敗 reproductions
 - 8 個固定場景具可重播 before/after artifacts。
 - 所有數值改善宣稱能從 raw artifact重算；沒有證據的百分比不得勾選。
 - `performance_track.md`、01–14 plans、總計畫與 `ARCHITECTURE.md` 狀態一致。
+
+### 目前缺口清單
+
+| 目前缺口 | 對應審核結論 | 負責輪次 | 關閉證據 |
+|---|---|---|---|
+| mesh revision 已變更但 scheduler 未必 enqueue | 任務 02 Fail | R1 | mutation → queue → worker → visible revision 整合測試 |
+| save 無 bounded ownership/revision ACK，Windows replace 非 atomic | 任務 03 Fail | R2 | fault-injection、crash/restart 與 highest-revision persistence 測試 |
+| catch-up mailbox full 可 silent drop，排序及跨 channel revision 未定義 | 任務 04 Fail | R3 | capacity=1、slow/multi-client 與 unloaded Chunk checksum |
+| joining client 仍自行模擬 living entities；host pause/death policy 錯誤 | multiplayer release blocker、任務 05 Partial | R4 | host/client entity/world/health checksum 與 pause/death 場景 |
+| GPU timestamp/readback、queue telemetry、bounded drain、完整 fixed-tick/redstone/entity harness 缺失 | 任務 01/05/06/07 Fail 或 Partial | R5 | supported/unsupported timestamp tests、burst budget、30/60/144/240 FPS checksum |
+| arena lifecycle/handle safety、AO decode、section ownership、conservative culling 未完成 | 任務 10/11/13 Fail | R6 | allocator property tests、CPU/WGSL golden、section revision/culling tests |
+| render scratch/hand/ring completion/paletted demotion 未完成 | 任務 08 Fail、09/12 Partial | R7 | allocation instrumentation、GPU completion、representation/microbench tests |
+| FPS cap 與真正 dynamic resolution 缺失或畫面錯誤 | 任務 14 Fail | R8 | frame-deadline test與 scaled target/upscale 視覺驗證 |
+| 缺實際 GPU/window、host/client、fault-injection、固定場景 before/after、PGO A/B raw artifacts | 全部任務的 artifact gate | R9 | 8 場景可重播報告、checksums、raw output 與 non-PGO/PGO A/B |
+
+R0 保存的現行失敗 reproduction 索引見
+[`repro/README.md`](repro/README.md)；在上述關閉證據齊全前，01–14 維持
+`Partial`。

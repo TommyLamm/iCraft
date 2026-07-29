@@ -1,7 +1,8 @@
 # 任務 12：Paletted ChunkSection
 
 > 對應計畫：`14_performance_optimization.md` Phase 4.1 + 4.2 + 4.3
-> 狀態：✅ 已完成
+> 狀態：Partial
+> 審核回退：見 [`15_performance_audit_repair_plan.md`](15_performance_audit_repair_plan.md)；基本 palette/packed light 已存在，但 storage 不 demote、外部仍可 match representation、memory counter 不反映實際 representation，且缺 microbenchmark，待 R7、R9 修復。
 > 前置：任務 1（基線）、建議任務 11（section 切分基礎）
 > 目標：以 Empty/Uniform/Paletted/Global section storage 取代固定 voxel 陣列，降低 Chunk CPU 記憶體至少 40%。
 > Commit 訊息：`perf(memory): introduce paletted chunk sections and packed lighting`
@@ -24,7 +25,7 @@
 ## 子任務清單
 
 ### 12.1 Storage access abstraction
-- [x] 檔案：`src/world.rs`、`src/chunk_manager.rs`
+- [ ] 檔案：`src/world.rs`、`src/chunk_manager.rs`
 - 步驟：
   1. 先建立 storage access abstraction（trait 或方法），外部系統不得直接索引固定 `chunk.blocks[x][y][z]`。
   2. 所有 `chunk.blocks[x][y][z]` 直接存取改為通過 abstraction。
@@ -32,7 +33,7 @@
 - 驗收：外部系統不直接索引 `chunk.blocks`；`Chunk::blocks` 可改為 private。
 
 ### 12.2 Block storage 支援 Empty/Uniform/Paletted/Global
-- [x] 檔案：`src/world.rs`
+- [ ] 檔案：`src/world.rs`
 - 步驟：
   1. 每個 16³ section 的 block storage 支援：
      - `Empty`（全空氣）
@@ -44,7 +45,7 @@
 - 驗收：簡單 section 不固定支付 4 KiB；mutation 正確轉換 representation。
 
 ### 12.3 Light nibble packing
-- [x] 檔案：`src/world.rs`、`src/lighting.rs`
+- [ ] 檔案：`src/world.rs`、`src/lighting.rs`
 - 步驟：
   1. sky light 和 block light 各為 0-15，合併進同一 byte 的兩個 nibble。
   2. 全零/全 15 light section 使用 uniform representation。
@@ -52,14 +53,14 @@
 - 驗收：light section 記憶體減半；lighting 結果不變。
 
 ### 12.4 Optional state/fluid storage
-- [x] 檔案：`src/world.rs`、`src/fluid.rs`
+- [ ] 檔案：`src/world.rs`、`src/fluid.rs`
 - 步驟：
   1. block state 與 fluid level 全零時不配置 storage。
   2. 首次非零 mutation 才建立 optional packed array。
 - 驗收：無 fluid/state 的 section 不佔用額外記憶體。
 
 ### 12.5 Section metadata counts
-- [x] 檔案：`src/world.rs`
+- [ ] 檔案：`src/world.rs`
 - 步驟：
   1. section 保存 non-air、opaque、random-tick、fluid、emitter、redstone component counts。
   2. 支援 O(1) early-out（例如全 air section 跳過 meshing/lighting）。
@@ -67,7 +68,7 @@
 - 驗收：O(1) early-out 減少無效工作。
 
 ### 12.6 Save/network wire format 相容
-- [x] 檔案：`src/save.rs`、`src/network/protocol.rs`
+- [ ] 檔案：`src/save.rs`、`src/network/protocol.rs`
 - 步驟：
   1. save/network wire format 初期保持不變，在 serialization 邊界 flatten。
   2. 對現有世界做 load -> save -> load checksum。
@@ -75,7 +76,7 @@
 - 驗收：存檔格式向後相容；load -> save -> load checksum 一致。
 
 ### 12.7 Microbenchmark 防退化
-- [x] 檔案：`src/world.rs`（測試區段）
+- [ ] 檔案：`src/world.rs`（測試區段）
 - 步驟：
   1. microbenchmark `get_block`、`set_block`、lighting、physics collision 和 meshing。
   2. palette 不能以明顯 CPU regression 換取未使用的記憶體節省。
@@ -84,14 +85,14 @@
 
 ## 驗收條件
 
-- [x] 視距 16 的 Chunk CPU 記憶體降低至少 40%（以實測 working set 與分項 counter 驗證）。
-- [x] 外部系統不直接索引 `chunk.blocks`。
-- [x] light section 記憶體減半。
-- [x] 無 fluid/state 的 section 不佔用額外記憶體。
-- [x] O(1) early-out 生效。
-- [x] 存檔格式向後相容；load -> save -> load checksum 一致。
-- [x] microbenchmark 無明顯退化。
-- [x] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
+- [ ] 視距 16 的 Chunk CPU 記憶體降低至少 40%（以實測 working set 與分項 counter 驗證）。
+- [ ] 外部系統不直接索引 `chunk.blocks`。
+- [ ] light section 記憶體減半。
+- [ ] 無 fluid/state 的 section 不佔用額外記憶體。
+- [ ] O(1) early-out 生效。
+- [ ] 存檔格式向後相容；load -> save -> load checksum 一致。
+- [ ] microbenchmark 無明顯退化。
+- [ ] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
 
 ## 風險與回退
 
