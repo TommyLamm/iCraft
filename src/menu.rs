@@ -170,6 +170,9 @@ pub struct GameSettings {
     pub mp_server_address: String,
     pub mp_join_port: String,
     pub mp_username: String,
+    pub render_scale: f32,
+    pub dynamic_resolution: bool,
+    pub entity_distance_scale: f32,
 }
 
 impl Default for GameSettings {
@@ -191,6 +194,9 @@ impl Default for GameSettings {
             mp_server_address: "127.0.0.1".to_string(),
             mp_join_port: "25565".to_string(),
             mp_username: "PLAYER".to_string(),
+            render_scale: 1.0,
+            dynamic_resolution: false,
+            entity_distance_scale: 1.0,
         }
     }
 }
@@ -277,6 +283,19 @@ impl GameSettings {
                 "mp_server_address" => self.mp_server_address = value.to_string(),
                 "mp_join_port" => self.mp_join_port = value.to_string(),
                 "mp_username" => self.mp_username = value.to_string(),
+                "render_scale" => {
+                    self.render_scale =
+                        value.parse::<f32>().unwrap_or(self.render_scale).clamp(0.5, 1.0)
+                }
+                "dynamic_resolution" => {
+                    self.dynamic_resolution = parse_bool(value, self.dynamic_resolution)
+                }
+                "entity_distance_scale" => {
+                    self.entity_distance_scale = value
+                        .parse::<f32>()
+                        .unwrap_or(self.entity_distance_scale)
+                        .clamp(0.5, 2.0)
+                }
                 _ => {}
             }
         }
@@ -417,7 +436,10 @@ impl GameSettings {
                 "mp_host_port:{}\n",
                 "mp_server_address:{}\n",
                 "mp_join_port:{}\n",
-                "mp_username:{}\n"
+                "mp_username:{}\n",
+                "render_scale:{}\n",
+                "dynamic_resolution:{}\n",
+                "entity_distance_scale:{}\n"
             ),
             settings.fov,
             settings.sensitivity,
@@ -448,6 +470,9 @@ impl GameSettings {
             settings.mp_server_address,
             settings.mp_join_port,
             settings.mp_username,
+            settings.render_scale,
+            settings.dynamic_resolution,
+            settings.entity_distance_scale,
         )
     }
 
@@ -992,7 +1017,7 @@ pub struct Menu {
     rebinding: Option<ControlAction>,
     message: Option<String>,
     pub settings: GameSettings,
-    immediate_present_supported: bool,
+    supported_present_modes: Vec<wgpu::PresentMode>,
 }
 
 impl Menu {
@@ -1033,8 +1058,7 @@ impl Menu {
             .copied()
             .find(|format| format.is_srgb())
             .unwrap_or(caps.formats[0]);
-        let immediate_present_supported =
-            caps.present_modes.contains(&wgpu::PresentMode::Immediate);
+        let supported_present_modes = caps.present_modes.clone();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -1184,7 +1208,7 @@ impl Menu {
             rebinding: None,
             message: None,
             settings,
-            immediate_present_supported,
+            supported_present_modes,
         }
     }
 
@@ -1620,12 +1644,19 @@ impl Menu {
             }
             (true, _, Some(3)) => {
                 if self.settings.vsync {
-                    if !self.immediate_present_supported {
+                    let has_uncapped = self
+                        .supported_present_modes
+                        .contains(&wgpu::PresentMode::Mailbox)
+                        || self
+                            .supported_present_modes
+                            .contains(&wgpu::PresentMode::Immediate);
+                    if !has_uncapped {
                         self.message = Some("VSYNC REQUIRED ON THIS DISPLAY".to_string());
                         return;
                     }
                     self.settings.vsync = false;
-                    self.config.present_mode = wgpu::PresentMode::Immediate;
+                    self.config.present_mode =
+                        present_mode(false, &self.supported_present_modes);
                 } else {
                     self.settings.vsync = true;
                     self.config.present_mode = wgpu::PresentMode::Fifo;
@@ -2423,10 +2454,14 @@ fn apply_fullscreen(window: &Window, enabled: bool) {
 }
 
 fn present_mode(vsync: bool, modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
-    if vsync || !modes.contains(&wgpu::PresentMode::Immediate) {
+    if vsync {
         wgpu::PresentMode::Fifo
-    } else {
+    } else if modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else if modes.contains(&wgpu::PresentMode::Immediate) {
         wgpu::PresentMode::Immediate
+    } else {
+        wgpu::PresentMode::Fifo
     }
 }
 

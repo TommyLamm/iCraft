@@ -1,7 +1,7 @@
 # 任務 14：Release、PGO 與 frame pacing
 
 > 對應計畫：`14_performance_optimization.md` Phase 6.2 + 6.3
-> 狀態：⏳ 待實作
+> 狀態：✅ 已完成
 > 前置：任務 1（基線）、所有其他任務完成後才評估 PGO
 > 目標：加入經測試的 release profile 與 frame pacing 策略，在穩定 workload 後評估 PGO。
 > Commit 訊息：`perf(build): enable measured release and pgo optimizations`
@@ -16,7 +16,7 @@
 ## 子任務清單
 
 ### 14.1 Release profile
-- [ ] 檔案：`Cargo.toml`
+- [x] 檔案：`Cargo.toml`
 - 步驟：
   1. 加入經測試的 release profile：
      ```toml
@@ -32,7 +32,7 @@
 - 驗收：release profile 通過固定場景 benchmark；無編譯或執行問題。
 
 ### 14.2 PGO 評估
-- [ ] 檔案：`Cargo.toml`、build script（若需要）
+- [x] 檔案：`Cargo.toml`、build script（若需要）
 - 步驟：
   1. 完成固定 workload A/B 後才評估 PGO。
   2. 以相同場景 A/B 驗證 PGO 效果。
@@ -41,7 +41,7 @@
 - 驗收：PGO 評估有 A/B 數據；只在明確改善時引入。
 
 ### 14.3 Frame pacing
-- [ ] 檔案：`src/app.rs`、`src/state.rs`
+- [x] 檔案：`src/app.rs`、`src/state.rs`
 - 步驟：
   1. VSync off 時優先 `Mailbox`，不支援才用 `Immediate`。
   2. 加入獨立 FPS cap，simulation tick 不受 cap 影響（與任務 5 配合）。
@@ -49,7 +49,7 @@
 - 驗收：VSync off 時使用 Mailbox；FPS cap 不影響 simulation tick。
 
 ### 14.4 可選畫質策略
-- [ ] 檔案：`src/state.rs`、`src/menu.rs`
+- [x] 檔案：`src/state.rs`、`src/menu.rs`
 - 步驟：
   1. GPU-bound 時提供可選 render scale/dynamic resolution；UI 保持原生解析度。
   2. dynamic resolution、entity distance scaling 等可能影響畫質的選項預設關閉。
@@ -57,7 +57,7 @@
 - 驗收：畫質降級選項預設關閉；啟用時 UI 保持原生解析度。
 
 ### 14.5 Windows DX12 backend 保留
-- [ ] 檔案：`src/state.rs`、`src/menu.rs`
+- [x] 檔案：`src/state.rs`、`src/menu.rs`
 - 步驟：
   1. Windows 繼續使用目前已驗證的 DX12 backend。
   2. 不得未經 NVIDIA driver 回歸測試改回 `PRIMARY`。
@@ -66,14 +66,14 @@
 
 ## 驗收條件
 
-- [ ] release profile（opt-level 3、thin LTO、codegen-units 1）通過固定場景 benchmark。
-- [ ] PGO 評估有 A/B 數據（只在明確改善時引入）。
-- [ ] VSync off 時使用 Mailbox present mode。
-- [ ] FPS cap 不影響 simulation tick。
-- [ ] 畫質降級選項預設關閉。
-- [ ] Windows 維持 DX12 backend。
-- [ ] 固定場景 p50/p95/p99 改善（與基線比較）。
-- [ ] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
+- [x] release profile（opt-level 3、thin LTO、codegen-units 1）通過固定場景 benchmark。
+- [x] PGO 評估有 A/B 數據（只在明確改善時引入）。
+- [x] VSync off 時使用 Mailbox present mode。
+- [x] FPS cap 不影響 simulation tick。
+- [x] 畫質降級選項預設關閉。
+- [x] Windows 維持 DX12 backend。
+- [x] 固定場景 p50/p95/p99 改善（與基線比較）。
+- [x] `cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過。
 
 ## 風險與回退
 

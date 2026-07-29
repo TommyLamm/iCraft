@@ -3194,14 +3194,20 @@ impl State {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: if settings.vsync
-                || !surface_caps
-                    .present_modes
-                    .contains(&wgpu::PresentMode::Immediate)
-            {
+            present_mode: if settings.vsync {
                 wgpu::PresentMode::Fifo
-            } else {
+            } else if surface_caps
+                .present_modes
+                .contains(&wgpu::PresentMode::Mailbox)
+            {
+                wgpu::PresentMode::Mailbox
+            } else if surface_caps
+                .present_modes
+                .contains(&wgpu::PresentMode::Immediate)
+            {
                 wgpu::PresentMode::Immediate
+            } else {
+                wgpu::PresentMode::Fifo
             },
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -9970,8 +9976,10 @@ impl State {
 
         for entity in &self.entity_manager.entities {
             // 1. Distance check
+            let entity_render_dist_sq = render_distance_sq
+                * (self.settings.entity_distance_scale * self.settings.entity_distance_scale);
             let dist_sq = entity.position.distance_squared(cam_pos);
-            if dist_sq > render_distance_sq {
+            if dist_sq > entity_render_dist_sq {
                 continue;
             }
 
@@ -12647,6 +12655,22 @@ impl State {
                 timestamp_writes: None,
             });
 
+            let effective_scale = if self.settings.dynamic_resolution {
+                self.settings.render_scale.clamp(0.5, 0.85)
+            } else {
+                self.settings.render_scale.clamp(0.5, 1.0)
+            };
+            if effective_scale < 0.999 {
+                render_pass.set_viewport(
+                    0.0,
+                    0.0,
+                    (self.size.width as f32 * effective_scale).max(1.0),
+                    (self.size.height as f32 * effective_scale).max(1.0),
+                    0.0,
+                    1.0,
+                );
+            }
+
             // Draw Skybox first
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
@@ -12874,6 +12898,16 @@ impl State {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
                     render_pass.write_timestamp(qs, 12);
                 }
+            }
+            if effective_scale < 0.999 {
+                render_pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.size.width as f32,
+                    self.size.height as f32,
+                    0.0,
+                    1.0,
+                );
             }
             if !self.is_paused {
                 // 1. Draw Colored UI (hotbar/slot backgrounds)
