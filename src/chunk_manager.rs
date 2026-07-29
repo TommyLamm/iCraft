@@ -85,6 +85,7 @@ pub struct ChunkManager {
     pub dirty_chunks: crate::save::DirtyChunkSet,
     water_updates: FluidUpdateQueue,
     lava_updates: FluidUpdateQueue,
+    pending_mesh_invalidations: HashSet<(i32, i32)>,
 }
 
 impl ChunkManager {
@@ -101,7 +102,20 @@ impl ChunkManager {
             dirty_chunks: crate::save::DirtyChunkSet::new(),
             water_updates: FluidUpdateQueue::new(),
             lava_updates: FluidUpdateQueue::new(),
+            pending_mesh_invalidations: HashSet::new(),
         }
+    }
+
+    fn record_mesh_invalidation(&mut self, wx: i32, wz: i32) {
+        mark_block_mesh_dependencies(&mut self.pending_mesh_invalidations, wx, wz);
+    }
+
+    pub(crate) fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
+        self.pending_mesh_invalidations.remove(coord);
+    }
+
+    pub(crate) fn drain_mesh_invalidations(&mut self) -> HashSet<(i32, i32)> {
+        std::mem::take(&mut self.pending_mesh_invalidations)
     }
 
     pub fn mark_dirty(&mut self, cx: i32, cz: i32) {
@@ -211,6 +225,7 @@ impl ChunkManager {
                 if chunk.get_block_state(bx as i32, by as i32, bz as i32) != state {
                     chunk.set_block_state(bx as i32, by as i32, bz as i32, state);
                     self.dirty_chunks.mark_dirty(cx, cz);
+                    self.record_mesh_invalidation(wx, wz);
                 }
             }
         }
@@ -230,6 +245,7 @@ impl ChunkManager {
                 chunk.update_heightmap(bx, bz);
                 self.schedule_fluid_neighbors(wx, wy, wz);
                 self.dirty_chunks.mark_dirty(cx, cz);
+                self.record_mesh_invalidation(wx, wz);
             }
         }
     }
@@ -256,6 +272,7 @@ impl ChunkManager {
                 if chunk.get_sky_light(bx, by, bz) != val {
                     chunk.set_sky_light(bx, by, bz, val);
                     self.dirty_chunks.mark_dirty(cx, cz);
+                    self.record_mesh_invalidation(wx, wz);
                 }
             }
         }
@@ -276,6 +293,7 @@ impl ChunkManager {
                 if chunk.get_block_light(bx, by, bz) != val {
                     chunk.set_block_light(bx, by, bz, val);
                     self.dirty_chunks.mark_dirty(cx, cz);
+                    self.record_mesh_invalidation(wx, wz);
                 }
             }
         }
@@ -299,6 +317,7 @@ impl ChunkManager {
                     chunk.set_fluid_level(bx, by, bz, updated);
                     self.schedule_fluid_neighbors(wx, wy, wz);
                     self.dirty_chunks.mark_dirty(cx, cz);
+                    self.record_mesh_invalidation(wx, wz);
                 }
             }
         }
@@ -326,6 +345,7 @@ impl ChunkManager {
                     chunk.set_fluid_level(bx, by, bz, updated);
                     self.schedule_fluid_neighbors(wx, wy, wz);
                     self.dirty_chunks.mark_dirty(cx, cz);
+                    self.record_mesh_invalidation(wx, wz);
                 }
             }
         }
@@ -507,6 +527,21 @@ mod tests {
             dependencies(0, 0),
             HashSet::from([(0, 0), (-1, 0), (0, -1), (-1, -1)])
         );
+    }
+
+    #[test]
+    fn direct_storage_mutations_emit_mesh_invalidation_dependencies() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+
+        manager.set_block(15, 80, 8, BlockType::Stone);
+
+        assert_eq!(
+            manager.drain_mesh_invalidations(),
+            HashSet::from([(0, 0), (1, 0)])
+        );
+        assert!(manager.drain_mesh_invalidations().is_empty());
     }
 
     #[test]

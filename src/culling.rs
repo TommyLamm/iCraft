@@ -1,7 +1,7 @@
+use glam::Vec3;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{channel, sync_channel, Receiver, SyncSender};
 use std::thread;
-use glam::Vec3;
 
 use crate::chunk_manager::ChunkManager;
 use crate::chunk_render::{Frustum, MeshBounds};
@@ -40,6 +40,31 @@ impl SectionConnectivity {
             let bit = (in_face as u64) * 6 + (out_face as u64);
             self.mask |= 1 << bit;
         }
+    }
+}
+
+/// A dirty mesh must never expose connectivity computed for an older
+/// revision. Invalid entries deliberately resolve to FULL so visibility
+/// traversal fails open until the matching worker result is integrated.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SectionConnectivityState {
+    Invalid,
+    Valid(SectionConnectivity),
+}
+
+impl SectionConnectivityState {
+    #[inline]
+    pub fn fail_open(self) -> SectionConnectivity {
+        match self {
+            Self::Invalid => SectionConnectivity::FULL,
+            Self::Valid(connectivity) => connectivity,
+        }
+    }
+}
+
+impl Default for SectionConnectivityState {
+    fn default() -> Self {
+        Self::Invalid
     }
 }
 
@@ -129,12 +154,24 @@ pub fn compute_section_connectivity(
             let z = rem / 16;
             let x = rem % 16;
 
-            if x == 15 { touched_faces |= 1 << 0; } // +X
-            if x == 0  { touched_faces |= 1 << 1; } // -X
-            if ly == 15 { touched_faces |= 1 << 2; } // +Y
-            if ly == 0  { touched_faces |= 1 << 3; } // -Y
-            if z == 15 { touched_faces |= 1 << 4; } // +Z
-            if z == 0  { touched_faces |= 1 << 5; } // -Z
+            if x == 15 {
+                touched_faces |= 1 << 0;
+            } // +X
+            if x == 0 {
+                touched_faces |= 1 << 1;
+            } // -X
+            if ly == 15 {
+                touched_faces |= 1 << 2;
+            } // +Y
+            if ly == 0 {
+                touched_faces |= 1 << 3;
+            } // -Y
+            if z == 15 {
+                touched_faces |= 1 << 4;
+            } // +Z
+            if z == 0 {
+                touched_faces |= 1 << 5;
+            } // -Z
 
             let neighbors = [
                 if x < 15 { Some(idx + 1) } else { None },
@@ -203,11 +240,14 @@ pub fn traverse_section_visibility<F>(
     });
 
     while let Some(node) = queue.pop_front() {
-        let connectivity = get_connectivity(node.x, node.sec_y, node.z)
-            .unwrap_or(SectionConnectivity::FULL);
+        let connectivity =
+            get_connectivity(node.x, node.sec_y, node.z).unwrap_or(SectionConnectivity::FULL);
 
         for out_face in 0..6u8 {
-            if node.entry_face.map_or(true, |in_f| connectivity.is_connected(in_f, out_face)) {
+            if node
+                .entry_face
+                .map_or(true, |in_f| connectivity.is_connected(in_f, out_face))
+            {
                 let (target_x, target_y_raw, target_z, opposite_entry) = match out_face {
                     0 => (node.x + 1, node.sec_y as i32, node.z, 1u8),
                     1 => (node.x - 1, node.sec_y as i32, node.z, 0u8),
@@ -257,6 +297,27 @@ pub fn traverse_section_visibility<F>(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_connectivity_fails_open() {
+        let connectivity = SectionConnectivityState::Invalid.fail_open();
+        for in_face in 0..6 {
+            for out_face in 0..6 {
+                assert!(connectivity.is_connected(in_face, out_face));
+            }
+        }
+    }
+
+    #[test]
+    fn valid_connectivity_preserves_the_computed_mask() {
+        let state = SectionConnectivityState::Valid(SectionConnectivity::NONE);
+        assert_eq!(state.fail_open(), SectionConnectivity::NONE);
+    }
+}
+
 /// Fast 3D DDA voxel line-of-sight raycast.
 pub fn is_los_blocked<F>(origin: Vec3, target: Vec3, mut is_occluder: F) -> bool
 where
@@ -277,13 +338,43 @@ where
     let target_y = target.y.floor() as i32;
     let target_z = target.z.floor() as i32;
 
-    let step_x = if norm.x > 0.0 { 1 } else if norm.x < 0.0 { -1 } else { 0 };
-    let step_y = if norm.y > 0.0 { 1 } else if norm.y < 0.0 { -1 } else { 0 };
-    let step_z = if norm.z > 0.0 { 1 } else if norm.z < 0.0 { -1 } else { 0 };
+    let step_x = if norm.x > 0.0 {
+        1
+    } else if norm.x < 0.0 {
+        -1
+    } else {
+        0
+    };
+    let step_y = if norm.y > 0.0 {
+        1
+    } else if norm.y < 0.0 {
+        -1
+    } else {
+        0
+    };
+    let step_z = if norm.z > 0.0 {
+        1
+    } else if norm.z < 0.0 {
+        -1
+    } else {
+        0
+    };
 
-    let delta_x = if step_x != 0 { (1.0 / norm.x.abs()).min(100.0) } else { 100.0 };
-    let delta_y = if step_y != 0 { (1.0 / norm.y.abs()).min(100.0) } else { 100.0 };
-    let delta_z = if step_z != 0 { (1.0 / norm.z.abs()).min(100.0) } else { 100.0 };
+    let delta_x = if step_x != 0 {
+        (1.0 / norm.x.abs()).min(100.0)
+    } else {
+        100.0
+    };
+    let delta_y = if step_y != 0 {
+        (1.0 / norm.y.abs()).min(100.0)
+    } else {
+        100.0
+    };
+    let delta_z = if step_z != 0 {
+        (1.0 / norm.z.abs()).min(100.0)
+    } else {
+        100.0
+    };
 
     let mut t_max_x = if step_x > 0 {
         (x as f32 + 1.0 - origin.x) * delta_x
@@ -437,7 +528,10 @@ impl EntityLosManager {
         }
 
         if entity.entity_type.is_projectile()
-            || matches!(entity.entity_type, EntityType::EnderDragon | EntityType::Wither | EntityType::EndCrystal)
+            || matches!(
+                entity.entity_type,
+                EntityType::EnderDragon | EntityType::Wither | EntityType::EndCrystal
+            )
         {
             return true;
         }

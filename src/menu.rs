@@ -284,8 +284,10 @@ impl GameSettings {
                 "mp_join_port" => self.mp_join_port = value.to_string(),
                 "mp_username" => self.mp_username = value.to_string(),
                 "render_scale" => {
-                    self.render_scale =
-                        value.parse::<f32>().unwrap_or(self.render_scale).clamp(0.5, 1.0)
+                    self.render_scale = value
+                        .parse::<f32>()
+                        .unwrap_or(self.render_scale)
+                        .clamp(0.5, 1.0)
                 }
                 "dynamic_resolution" => {
                     self.dynamic_resolution = parse_bool(value, self.dynamic_resolution)
@@ -1655,8 +1657,7 @@ impl Menu {
                         return;
                     }
                     self.settings.vsync = false;
-                    self.config.present_mode =
-                        present_mode(false, &self.supported_present_modes);
+                    self.config.present_mode = present_mode(false, &self.supported_present_modes);
                 } else {
                     self.settings.vsync = true;
                     self.config.present_mode = wgpu::PresentMode::Fifo;

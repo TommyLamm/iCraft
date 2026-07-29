@@ -70,7 +70,7 @@ pub fn explode(
     center: Vec3,
     radius: f32,
     chunk_manager: &mut ChunkManager,
-    chunk_meshes: &mut std::collections::HashMap<(i32, i32), crate::state::ChunkMesh>,
+    dirty_meshes: &mut std::collections::HashSet<(i32, i32)>,
     player_physics: &mut PlayerPhysics,
     player_state: &mut PlayerState,
     break_blocks: bool,
@@ -138,12 +138,7 @@ pub fn explode(
         }
         blocks_removed.extend(unsupported_removed);
 
-        // Mark chunk meshes dirty
-        for (chx, chz) in dirty_chunks {
-            if let Some(mesh) = chunk_meshes.get_mut(&(chx, chz)) {
-                mesh.mark_dirty();
-            }
-        }
+        dirty_meshes.extend(dirty_chunks);
     }
 
     // 3. Player damage and knockback
@@ -286,7 +281,7 @@ pub fn spawn_mobs(
 pub fn update_mobs(
     entity_manager: &mut EntityManager,
     chunk_manager: &mut ChunkManager,
-    chunk_meshes: &mut std::collections::HashMap<(i32, i32), crate::state::ChunkMesh>,
+    dirty_meshes: &mut std::collections::HashSet<(i32, i32)>,
     player_physics: &mut PlayerPhysics,
     player_state: &mut PlayerState,
     game_mode: GameMode,
@@ -597,7 +592,7 @@ pub fn update_mobs(
             exp_pos,
             3.0, // radius
             chunk_manager,
-            chunk_meshes,
+            dirty_meshes,
             player_physics,
             player_state,
             break_blocks,
@@ -750,7 +745,7 @@ mod tests {
             .chunks
             .insert((0, 0), crate::world::Chunk::new(0, 0));
         manager.set_block(2, 10, 2, crate::world::BlockType::Stone);
-        let mut meshes = std::collections::HashMap::new();
+        let mut meshes = std::collections::HashSet::new();
         let mut physics = PlayerPhysics::new(Vec3::new(100.0, 100.0, 100.0));
         let mut player = PlayerState::new();
         let center = Vec3::new(2.5, 10.5, 2.5);
@@ -812,7 +807,7 @@ mod tests {
             }
 
             let mut chunk_manager = ChunkManager::new(1);
-            let mut chunk_meshes = std::collections::HashMap::new();
+            let mut chunk_meshes = std::collections::HashSet::new();
             let mut player_physics = PlayerPhysics::new(Vec3::new(0.0, 1.0, 0.0));
             let mut player_state = PlayerState::new();
             let mut audio_manager = crate::audio::AudioManager::new();
@@ -852,7 +847,7 @@ mod tests {
         entity_manager.spawn(EntityType::Creeper, Vec3::new(2.0, 1.0, 0.0));
 
         let mut chunk_manager = ChunkManager::new(1);
-        let mut chunk_meshes = std::collections::HashMap::new();
+        let mut chunk_meshes = std::collections::HashSet::new();
         let mut player_physics = PlayerPhysics::new(Vec3::new(0.0, 1.0, 0.0));
         let mut player_state = PlayerState::new();
         let mut audio_manager = crate::audio::AudioManager::new();
@@ -892,7 +887,7 @@ mod tests {
         entity_manager.get_by_id_mut(remote_id).unwrap().velocity = expected_velocity;
 
         let mut chunk_manager = ChunkManager::new(1);
-        let mut chunk_meshes = std::collections::HashMap::new();
+        let mut chunk_meshes = std::collections::HashSet::new();
         let mut player_physics = PlayerPhysics::new(Vec3::ZERO);
         let mut player_state = PlayerState::new();
         let mut audio_manager = crate::audio::AudioManager::new();
@@ -945,7 +940,7 @@ mod tests {
         }
 
         let mut chunk_manager = ChunkManager::new(1);
-        let mut chunk_meshes = std::collections::HashMap::new();
+        let mut chunk_meshes = std::collections::HashSet::new();
         let mut player_physics = PlayerPhysics::new(Vec3::ZERO);
         let mut player_state = PlayerState::new();
         let mut audio_manager = crate::audio::AudioManager::new();

@@ -683,7 +683,8 @@ pub fn render_mobs<'a>(
             EntityType::Creeper => {
                 // Creeper swelling expansion scale during fuse count down
                 let scale = if entity.is_ignited {
-                    let progress = ((1.5f32 - entity.action_cooldown) / 1.5f32).clamp(0.0f32, 1.0f32);
+                    let progress =
+                        ((1.5f32 - entity.action_cooldown) / 1.5f32).clamp(0.0f32, 1.0f32);
                     1.0 + 0.15 * progress * (time * 35.0).sin().abs()
                 } else {
                     1.0

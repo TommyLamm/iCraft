@@ -41,7 +41,7 @@ fn check_cliff_ahead(entity: &Entity, chunk_manager: &ChunkManager) -> bool {
 pub fn update_passive_mobs(
     entity_manager: &mut EntityManager,
     chunk_manager: &mut ChunkManager,
-    chunk_meshes: &mut std::collections::HashMap<(i32, i32), crate::state::ChunkMesh>,
+    dirty_meshes: &mut std::collections::HashSet<(i32, i32)>,
     player_physics: &PlayerPhysics,
     inventory: &mut crate::inventory::Inventory,
     game_mode: GameMode,
@@ -125,11 +125,7 @@ pub fn update_passive_mobs(
 
                         let mut dirty_chunks = std::collections::HashSet::new();
                         mark_block_mesh_dependencies(&mut dirty_chunks, sx, sz);
-                        for chunk_position in dirty_chunks {
-                            if let Some(mesh) = chunk_meshes.get_mut(&chunk_position) {
-                                mesh.mark_dirty();
-                            }
-                        }
+                        dirty_meshes.extend(dirty_chunks);
                     }
                     entity_manager.entities[i].has_wool = true; // wool grows back!
                 }

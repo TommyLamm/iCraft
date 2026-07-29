@@ -12,7 +12,7 @@
 |---|---|---|---|---|---|---|
 | 0 | 火把索引與週期掃描移除 | （不在 01–14 審核回退範圍） | Complete | — | - | `cargo test --release`（366 unit + 1 integration）；torch index focused tests 2 passed |
 | 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Partial | R5、R9 | - | GPU/window 與固定場景 artifact 缺失 |
-| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Partial | R1 | - | mesh dirty enqueue correctness 未驗收 |
+| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Partial | R1（已完成） | - | R1 correctness 已驗收；整體 Complete 仍受第 6 節 artifact/clippy gate 約束 |
 | 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Partial | R2 | - | ACK、fault-injection、atomic replace 未驗收 |
 | 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Partial | R3、R5 | - | backpressure/order/bounded drain 未驗收 |
 | 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Partial | R4、R5、R9 | - | 只有合成測試；缺 world checksum |

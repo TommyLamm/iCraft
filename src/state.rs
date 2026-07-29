@@ -4,6 +4,7 @@ use crate::chunk_render::{
     select_lod_for_bounds, DrawCandidate, DrawLayer, Frustum, LodLevel, LodThresholds, MeshBounds,
     TerrainVertex,
 };
+use crate::chunk_schedule::DependencyReason;
 use crate::crafting::RecipeManager;
 use crate::interaction::{raycast, RaycastTargetPolicy};
 use crate::inventory::{
@@ -722,6 +723,157 @@ mod remote_sync_tests {
     }
 
     #[test]
+    fn mesh_invalidation_queues_latest_revision_and_invalidates_connectivity() {
+        let coord = (2, -3);
+        let mut meshes = std::collections::HashMap::from([(coord, ChunkMesh::pending())]);
+        let mesh = meshes.get_mut(&coord).unwrap();
+        mesh.section_connectivity
+            .fill(crate::culling::SectionConnectivityState::Valid(
+                crate::culling::SectionConnectivity::NONE,
+            ));
+        mesh.meshed_revision = mesh.revision;
+        let mut scheduler = crate::chunk_schedule::ChunkStreamingScheduler::new();
+
+        assert!(invalidate_mesh_and_enqueue(
+            &mut meshes,
+            &mut scheduler,
+            coord,
+            DependencyReason::Block,
+            (0, 0),
+        ));
+        let first_revision = meshes[&coord].revision;
+        assert!(meshes[&coord]
+            .section_connectivity
+            .iter()
+            .all(|state| *state == crate::culling::SectionConnectivityState::Invalid));
+        assert!(!invalidate_mesh_and_enqueue(
+            &mut meshes,
+            &mut scheduler,
+            coord,
+            DependencyReason::Light,
+            (0, 0),
+        ));
+        assert_eq!(scheduler.dirty_len(), 1);
+        let work = scheduler.dirty_work(&coord).unwrap();
+        assert_eq!(work.revision, first_revision + 1);
+        assert_eq!(work.reason, DependencyReason::Light);
+        assert!(!chunk_mesh_result_is_current(
+            Some((7, first_revision)),
+            7,
+            first_revision,
+            1,
+            1,
+            Some(7),
+            Some(work.revision),
+        ));
+    }
+
+    #[test]
+    fn mutation_scheduler_worker_chain_commits_only_the_latest_visible_revision() {
+        let coord = (0, 0);
+        let lifetime = 9;
+        let generation = 4;
+        let mut meshes = std::collections::HashMap::from([(coord, ChunkMesh::pending())]);
+        let mut scheduler = crate::chunk_schedule::ChunkStreamingScheduler::new();
+
+        invalidate_mesh_and_enqueue(
+            &mut meshes,
+            &mut scheduler,
+            coord,
+            DependencyReason::BreakPlace,
+            coord,
+        );
+        let stale_work = scheduler.pop_nearest_dirty(coord, 1).unwrap();
+
+        invalidate_mesh_and_enqueue(
+            &mut meshes,
+            &mut scheduler,
+            coord,
+            DependencyReason::Fluid,
+            coord,
+        );
+        assert!(!chunk_mesh_result_is_current(
+            Some((lifetime, stale_work.revision)),
+            lifetime,
+            stale_work.revision,
+            generation,
+            generation,
+            Some(lifetime),
+            Some(meshes[&coord].revision),
+        ));
+
+        let latest_work = scheduler.pop_nearest_dirty(coord, 1).unwrap();
+        assert!(chunk_mesh_result_is_current(
+            Some((lifetime, latest_work.revision)),
+            lifetime,
+            latest_work.revision,
+            generation,
+            generation,
+            Some(lifetime),
+            Some(meshes[&coord].revision),
+        ));
+        let mesh = meshes.get_mut(&coord).unwrap();
+        mesh.section_connectivity
+            .fill(crate::culling::SectionConnectivityState::Valid(
+                crate::culling::SectionConnectivity::FULL,
+            ));
+        mesh.meshed_revision = latest_work.revision;
+        assert_eq!(mesh.meshed_revision, mesh.revision);
+        assert!(mesh
+            .section_connectivity
+            .iter()
+            .all(|state| matches!(state, crate::culling::SectionConnectivityState::Valid(_))));
+    }
+
+    #[test]
+    fn boundary_and_diagonal_ao_dependencies_queue_once() {
+        let coords = [(0, 0), (1, 0), (0, 1), (1, 1)];
+        let mut meshes = coords
+            .into_iter()
+            .map(|coord| (coord, ChunkMesh::pending()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut scheduler = crate::chunk_schedule::ChunkStreamingScheduler::new();
+        let mut dependencies = std::collections::HashSet::new();
+        mark_block_mesh_dependencies(&mut dependencies, 15, 15);
+
+        for coord in dependencies {
+            let reason = if coord == (0, 0) {
+                DependencyReason::BreakPlace
+            } else {
+                DependencyReason::Ao
+            };
+            invalidate_mesh_and_enqueue(&mut meshes, &mut scheduler, coord, reason, (0, 0));
+        }
+
+        assert_eq!(scheduler.dirty_len(), 4);
+        assert_eq!(
+            scheduler.dirty_work(&(0, 0)).unwrap().reason,
+            DependencyReason::BreakPlace
+        );
+        for coord in [(1, 0), (0, 1), (1, 1)] {
+            assert_eq!(
+                scheduler.dirty_work(&coord).unwrap().reason,
+                DependencyReason::Ao
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_mesh_mutations_cannot_bypass_the_invalidation_api() {
+        let forbidden = concat!("mesh.", "mark_", "dirty()");
+        for (path, source) in [
+            ("state.rs", include_str!("state.rs")),
+            ("mob.rs", include_str!("mob.rs")),
+            ("passive_mob.rs", include_str!("passive_mob.rs")),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} bypasses invalidate_chunk_mesh"
+            );
+        }
+    }
+
+    #[test]
     fn mesh_snapshot_owns_the_neighbor_halo() {
         let mut chunks = std::collections::HashMap::new();
         let mut center = Chunk::new(0, 0);
@@ -1046,7 +1198,8 @@ pub struct GpuMeshLevel {
 
 pub struct ChunkMesh {
     levels: Option<[GpuMeshLevel; 3]>,
-    pub section_connectivity: [crate::culling::SectionConnectivity; crate::world::SECTION_COUNT],
+    pub section_connectivity:
+        [crate::culling::SectionConnectivityState; crate::world::SECTION_COUNT],
     revision: u64,
     meshed_revision: u64,
 }
@@ -1055,14 +1208,17 @@ impl ChunkMesh {
     fn pending() -> Self {
         Self {
             levels: None,
-            section_connectivity: [crate::culling::SectionConnectivity::FULL; crate::world::SECTION_COUNT],
+            section_connectivity: [crate::culling::SectionConnectivityState::Invalid;
+                crate::world::SECTION_COUNT],
             revision: 0,
             meshed_revision: u64::MAX,
         }
     }
 
-    pub fn mark_dirty(&mut self) {
+    fn invalidate(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+        self.section_connectivity
+            .fill(crate::culling::SectionConnectivityState::Invalid);
     }
 
     fn needs_rebuild(&self) -> bool {
@@ -1105,6 +1261,20 @@ impl ChunkMesh {
     fn gpu_buffer_objects(&self) -> usize {
         0
     }
+}
+
+fn invalidate_mesh_and_enqueue(
+    chunk_meshes: &mut std::collections::HashMap<(i32, i32), ChunkMesh>,
+    scheduler: &mut crate::chunk_schedule::ChunkStreamingScheduler,
+    coord: (i32, i32),
+    reason: DependencyReason,
+    player_chunk: (i32, i32),
+) -> bool {
+    let Some(mesh) = chunk_meshes.get_mut(&coord) else {
+        return false;
+    };
+    mesh.invalidate();
+    scheduler.enqueue_dirty(coord, reason, mesh.revision, player_chunk)
 }
 
 #[derive(Clone, Copy)]
@@ -1369,11 +1539,7 @@ impl State {
             self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
             broadcast.push(((x, y, z), new_block));
         }
-        for coord in dirty_chunks {
-            if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
-                mesh.mark_dirty();
-            }
-        }
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
         // Fan each authoritative batch mutation out to connected clients.
         for ((x, y, z), block) in broadcast {
             self.broadcast_block_change(x, y, z, block);
@@ -1675,17 +1841,19 @@ impl State {
         }
         for explosion in events.explosions {
             if explosion.break_blocks && authoritative {
+                let mut dirty_meshes = std::collections::HashSet::new();
                 let removed = crate::mob::explode(
                     explosion.position,
                     explosion.radius,
                     &mut self.chunk_manager,
-                    &mut self.chunk_meshes,
+                    &mut dirty_meshes,
                     &mut self.player_physics,
                     &mut self.player_state,
                     true,
                     GameMode::Creative,
                     0.0,
                 );
+                self.invalidate_chunk_meshes(dirty_meshes, DependencyReason::Mob);
                 for (x, y, z) in removed {
                     self.broadcast_block_change(x, y, z, BlockType::Air);
                 }
@@ -5483,10 +5651,47 @@ impl State {
         lifetime
     }
 
-    pub fn mark_chunk_dirty(&mut self, coord: (i32, i32)) {
-        if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
-            mesh.mark_dirty();
-            self.scheduler.mark_dirty(coord);
+    fn invalidate_chunk_mesh(&mut self, coord: (i32, i32), reason: DependencyReason) -> bool {
+        self.chunk_manager.acknowledge_mesh_invalidation(&coord);
+        let player_chunk = (
+            (self.player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32,
+            (self.player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32,
+        );
+        invalidate_mesh_and_enqueue(
+            &mut self.chunk_meshes,
+            &mut self.scheduler,
+            coord,
+            reason,
+            player_chunk,
+        )
+    }
+
+    fn invalidate_chunk_meshes(
+        &mut self,
+        coords: impl IntoIterator<Item = (i32, i32)>,
+        reason: DependencyReason,
+    ) {
+        for coord in coords {
+            self.invalidate_chunk_mesh(coord, reason);
+        }
+    }
+
+    /// Applies the same one-voxel halo dependency used by `MeshSnapshot`.
+    /// Cardinal and diagonal dependents are tagged as derived AO work.
+    fn invalidate_block_mesh_dependencies(&mut self, wx: i32, wz: i32, reason: DependencyReason) {
+        let owner = (
+            wx.div_euclid(CHUNK_WIDTH as i32),
+            wz.div_euclid(CHUNK_DEPTH as i32),
+        );
+        let mut dependencies = std::collections::HashSet::new();
+        mark_block_mesh_dependencies(&mut dependencies, wx, wz);
+        for coord in dependencies {
+            let dependency_reason = if coord == owner {
+                reason
+            } else {
+                DependencyReason::Ao
+            };
+            self.invalidate_chunk_mesh(coord, dependency_reason);
         }
     }
 
@@ -5549,7 +5754,7 @@ impl State {
                     self.chunk_manager.chunks.insert(result.coord, result.chunk);
                     self.chunk_lifetimes.insert(result.coord, result.lifetime);
                     self.chunk_meshes.insert(result.coord, ChunkMesh::pending());
-                    self.scheduler.mark_dirty(result.coord);
+                    self.invalidate_chunk_mesh(result.coord, DependencyReason::ChunkLoad);
 
                     // Restore persisted redstone component metadata before any
                     // redstone tick runs, so freshly-rebuilt `ComponentState`
@@ -5571,7 +5776,7 @@ impl State {
                         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&result.coord) {
                             Self::restore_chunk_payload(chunk, &blocks, &block_states);
                         }
-                        self.mark_chunk_dirty(result.coord);
+                        self.invalidate_chunk_mesh(result.coord, DependencyReason::Network);
                     }
                     if let Some(changes) = self.pending_block_changes.remove(&result.coord) {
                         for ((x, y, z), (block, state)) in changes {
@@ -5604,10 +5809,10 @@ impl State {
                     }
                     lighting_elapsed += lighting_started.elapsed();
                     for neighbor in surrounding_chunk_coords(cx, cz) {
-                        self.mark_chunk_dirty(neighbor);
+                        self.invalidate_chunk_mesh(neighbor, DependencyReason::ChunkLoad);
                     }
                     for coord in dirty {
-                        self.mark_chunk_dirty(coord);
+                        self.invalidate_chunk_mesh(coord, DependencyReason::Light);
                     }
                 }
                 TerrainWorkerResult::Meshed(result) => {
@@ -5647,7 +5852,10 @@ impl State {
                         &result.bundle,
                     );
                     mesh.levels = Some(levels);
-                    mesh.section_connectivity = result.bundle.section_connectivity;
+                    mesh.section_connectivity = result
+                        .bundle
+                        .section_connectivity
+                        .map(crate::culling::SectionConnectivityState::Valid);
                     let upload_elapsed = upload_started.elapsed();
                     gpu_upload_elapsed += upload_elapsed;
                     let gpu_bytes = mesh.gpu_bytes() as u64;
@@ -5716,26 +5924,26 @@ impl State {
         });
     }
 
-    fn schedule_chunk_mesh(&mut self, coord: (i32, i32), default_sky_light: u8) {
+    fn schedule_chunk_mesh(&mut self, coord: (i32, i32), default_sky_light: u8) -> bool {
         if self.chunk_mesh_in_flight.contains_key(&coord)
             || self.chunk_mesh_in_flight.len() >= MAX_CHUNK_MESH_JOBS
         {
-            return;
+            return false;
         }
         let Some(chunk) = self.chunk_manager.chunks.get(&coord).cloned() else {
-            return;
+            return false;
         };
         let Some(mesh) = self.chunk_meshes.get(&coord) else {
-            return;
+            return false;
         };
         let Some(lifetime) = self.chunk_lifetimes.get(&coord).copied() else {
-            return;
+            return false;
         };
         let revision = mesh.revision;
         let Some(snapshot) =
             MeshSnapshot::capture(coord, &self.chunk_manager.chunks, default_sky_light)
         else {
-            return;
+            return false;
         };
         self.scheduler.remove_dirty(&coord);
         self.chunk_mesh_in_flight
@@ -5752,12 +5960,15 @@ impl State {
                 bundle,
             }));
         });
+        true
     }
 
     pub fn update_chunks(&mut self) {
         if !self.network_ready {
             return;
         }
+        let unreported_mutations = self.chunk_manager.drain_mesh_invalidations();
+        self.invalidate_chunk_meshes(unreported_mutations, DependencyReason::Block);
         let player_pos = self.player_physics.position;
         let px = (player_pos.x / 16.0).floor() as i32;
         let pz = (player_pos.z / 16.0).floor() as i32;
@@ -5802,7 +6013,7 @@ impl State {
             for &(cx, cz) in &to_unload {
                 for neighbor in surrounding_chunk_coords(cx, cz) {
                     if self.chunk_manager.chunks.contains_key(&neighbor) {
-                        self.mark_chunk_dirty(neighbor);
+                        self.invalidate_chunk_mesh(neighbor, DependencyReason::ChunkLoad);
                     }
                 }
                 self.chunk_lifetimes.remove(&(cx, cz));
@@ -5839,6 +6050,7 @@ impl State {
             self.scheduler.last_player_chunk = Some((px, pz));
             self.scheduler.last_render_distance = r;
             self.scheduler.last_dimension = Some(self.current_dimension);
+            self.scheduler.reprioritize_dirty((px, pz));
         }
 
         // 2. Dispatch chunk loads from precomputed spiral load queue
@@ -5861,30 +6073,37 @@ impl State {
         // 3. Dispatch dirty meshes prioritized by distance to player
         let available_mesh_slots =
             MAX_CHUNK_MESH_JOBS.saturating_sub(self.chunk_mesh_in_flight.len());
-        if available_mesh_slots > 0 && !self.scheduler.dirty_chunk_meshes.is_empty() {
+        if available_mesh_slots > 0 && self.scheduler.dirty_len() > 0 {
             let default_sky_light = if self.current_dimension.has_sky_light() {
                 15
             } else {
                 0
             };
             let r_i32 = r as i32;
-            let mut candidates: Vec<(i32, i32, i32)> = Vec::new();
-            for &(cx, cz) in &self.scheduler.dirty_chunk_meshes {
-                let dx = cx - px;
-                let dz = cz - pz;
-                if dx.abs() <= r_i32 && dz.abs() <= r_i32 {
-                    if let Some(mesh) = self.chunk_meshes.get(&(cx, cz)) {
-                        if mesh.needs_rebuild()
-                            && !self.chunk_mesh_in_flight.contains_key(&(cx, cz))
-                        {
-                            candidates.push((cx, cz, dx * dx + dz * dz));
-                        }
-                    }
+            let mut dispatched = 0;
+            let mut deferred = Vec::with_capacity(self.chunk_mesh_in_flight.len());
+            while dispatched < available_mesh_slots {
+                let Some(work) = self.scheduler.pop_nearest_dirty((px, pz), r_i32) else {
+                    break;
+                };
+                let Some(mesh) = self.chunk_meshes.get(&work.coord) else {
+                    continue;
+                };
+                if !mesh.needs_rebuild() {
+                    continue;
+                }
+                if self.chunk_mesh_in_flight.contains_key(&work.coord) {
+                    deferred.push(work);
+                    continue;
+                }
+                if self.schedule_chunk_mesh(work.coord, default_sky_light) {
+                    dispatched += 1;
+                } else {
+                    deferred.push(work);
                 }
             }
-            candidates.sort_by_key(|&(_, _, dist)| dist);
-            for (cx, cz, _) in candidates.into_iter().take(available_mesh_slots) {
-                self.schedule_chunk_mesh((cx, cz), default_sky_light);
+            for work in deferred {
+                self.scheduler.requeue_dirty(work, (px, pz));
             }
         }
     }
@@ -6017,11 +6236,7 @@ impl State {
                 self.broadcast_block_change(x, y, z, block);
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
             }
-            for (cx, cz) in dirty {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
-                    mesh.mark_dirty();
-                }
-            }
+            self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
         }
 
         self.lava_tick_timer += dt;
@@ -6033,11 +6248,7 @@ impl State {
                 self.broadcast_block_change(x, y, z, block);
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
             }
-            for (cx, cz) in dirty {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
-                    mesh.mark_dirty();
-                }
-            }
+            self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
         }
 
         if self.is_authoritative() {
@@ -6439,11 +6650,7 @@ impl State {
                             &mut dirty_chunks,
                         );
                         mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-                        for (dcx, dcz) in dirty_chunks {
-                            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                                mesh.mark_dirty();
-                            }
-                        }
+                        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Mob);
                         self.broadcast_block_change(wx, ry, wz, BlockType::Air);
                     }
                 }
@@ -6554,10 +6761,11 @@ impl State {
             self.weather.current,
             crate::weather::Weather::Rain | crate::weather::Weather::Thunder
         );
+        let mut mob_dirty_meshes = std::collections::HashSet::new();
         let exploded_blocks = crate::mob::update_mobs(
             &mut self.entity_manager,
             &mut self.chunk_manager,
-            &mut self.chunk_meshes,
+            &mut mob_dirty_meshes,
             &mut self.player_physics,
             &mut self.player_state,
             self.game_mode,
@@ -6570,6 +6778,7 @@ impl State {
             crate::enchantment::protection_multiplier(&self.inventory.armor, false),
             authoritative,
         );
+        self.invalidate_chunk_meshes(mob_dirty_meshes, DependencyReason::Mob);
         for (x, y, z) in exploded_blocks {
             self.broadcast_block_change(x, y, z, BlockType::Air);
         }
@@ -6580,10 +6789,11 @@ impl State {
 
         // Update passive mobs
         let passive_mobs_started = Instant::now();
+        let mut passive_dirty_meshes = std::collections::HashSet::new();
         let grazed_blocks = crate::passive_mob::update_passive_mobs(
             &mut self.entity_manager,
             &mut self.chunk_manager,
-            &mut self.chunk_meshes,
+            &mut passive_dirty_meshes,
             &self.player_physics,
             &mut self.inventory,
             self.game_mode,
@@ -6591,6 +6801,7 @@ impl State {
             self.total_time,
             authoritative,
         );
+        self.invalidate_chunk_meshes(passive_dirty_meshes, DependencyReason::Mob);
         for (x, y, z) in grazed_blocks {
             self.broadcast_block_change(x, y, z, BlockType::Dirt);
         }
@@ -7160,11 +7371,8 @@ impl State {
             }
         }
         mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
-        for chunk_pos in dirty_chunks {
-            if let Some(mesh) = self.chunk_meshes.get_mut(&chunk_pos) {
-                mesh.mark_dirty();
-            }
-        }
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Weather);
+        self.invalidate_block_mesh_dependencies(wx, wz, DependencyReason::Weather);
         // Fan weather-driven block placement out to connected clients.
         self.broadcast_block_change(wx, wy, wz, block);
     }
@@ -7400,11 +7608,7 @@ impl State {
             broadcast.push(((wx, wy, wz), mutation.new_block));
         }
 
-        for (dcx, dcz) in dirty_chunks {
-            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                mesh.mark_dirty();
-            }
-        }
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Redstone);
 
         // Fan the redstone-driven block mutations out to connected clients.
         for ((x, y, z), block) in broadcast {
@@ -7416,17 +7620,19 @@ impl State {
                 crate::redstone::RedstoneAction::Explode { pos } => {
                     let center =
                         Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
+                    let mut dirty_meshes = std::collections::HashSet::new();
                     let removed = crate::mob::explode(
                         center,
                         4.0,
                         &mut self.chunk_manager,
-                        &mut self.chunk_meshes,
+                        &mut dirty_meshes,
                         &mut self.player_physics,
                         &mut self.player_state,
                         true,
                         self.game_mode,
                         1.0,
                     );
+                    self.invalidate_chunk_meshes(dirty_meshes, DependencyReason::Redstone);
                     for (x, y, z) in removed {
                         self.broadcast_block_change(x, y, z, BlockType::Air);
                     }
@@ -7544,11 +7750,7 @@ impl State {
             crate::redstone::Direction::North,
         );
         self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
-        for (dcx, dcz) in dirty_chunks {
-            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                mesh.mark_dirty();
-            }
-        }
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
         self.broadcast_block_change(x, y, z, block);
     }
 
@@ -7578,11 +7780,7 @@ impl State {
         else {
             return;
         };
-        for (dcx, dcz) in dirty_chunks {
-            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                mesh.mark_dirty();
-            }
-        }
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Network);
     }
 
     /// Client-side application of a full chunk payload sent by the host during
@@ -7598,9 +7796,7 @@ impl State {
     ) {
         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
             Self::restore_chunk_payload(chunk, &blocks, &block_states);
-            if let Some(mesh) = self.chunk_meshes.get_mut(&(cx, cz)) {
-                mesh.mark_dirty();
-            }
+            self.invalidate_chunk_mesh((cx, cz), DependencyReason::Network);
             // Re-seed boundary lighting so neighbors pick up the overwritten
             // column heights and light values.
             let mut dirty_chunks = std::collections::HashSet::new();
@@ -7622,16 +7818,10 @@ impl State {
                         lighting_cz,
                         &mut dirty_chunks,
                     );
-                    if let Some(mesh) = self.chunk_meshes.get_mut(&(lighting_cx, lighting_cz)) {
-                        mesh.mark_dirty();
-                    }
+                    self.invalidate_chunk_mesh((lighting_cx, lighting_cz), DependencyReason::Light);
                 }
             }
-            for coord in dirty_chunks {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&coord) {
-                    mesh.mark_dirty();
-                }
-            }
+            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
         } else {
             // Chunk not streamed in yet; buffer for deferred application.
             self.pending_chunk_payloads
@@ -7774,11 +7964,7 @@ impl State {
 
         self.check_and_break_unsupported_above(wx, wy, wz, &mut dirty_chunks);
 
-        for (dcx, dcz) in dirty_chunks {
-            if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                mesh.mark_dirty();
-            }
-        }
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::BreakPlace);
 
         // Fan the authoritative break out to connected clients.
         self.broadcast_block_change(wx, wy, wz, BlockType::Air);
@@ -7840,11 +8026,7 @@ impl State {
                 );
                 mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
-                for (dcx, dcz) in dirty_chunks {
-                    if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                        mesh.mark_dirty();
-                    }
-                }
+                self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::BreakPlace);
 
                 self.broadcast_block_change(x, y, z, BlockType::Air);
 
@@ -7912,11 +8094,7 @@ impl State {
                     );
                 }
                 mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
-                for (dcx, dcz) in dirty_chunks {
-                    if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                        mesh.mark_dirty();
-                    }
-                }
+                self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::BreakPlace);
 
                 self.broadcast_block_change(x, y, z, block);
 
@@ -8768,11 +8946,7 @@ impl State {
 
                     let mut dirty_chunks = std::collections::HashSet::new();
                     mark_block_mesh_dependencies(&mut dirty_chunks, pos.0, pos.2);
-                    for (dcx, dcz) in dirty_chunks {
-                        if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                            mesh.mark_dirty();
-                        }
-                    }
+                    self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Redstone);
                     self.audio_manager.play_sound(sound);
                     return;
                 }
@@ -9109,11 +9283,7 @@ impl State {
 
             mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
 
-            for (dcx, dcz) in dirty_chunks {
-                if let Some(mesh) = self.chunk_meshes.get_mut(&(dcx, dcz)) {
-                    mesh.mark_dirty();
-                }
-            }
+            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::BreakPlace);
 
             // Fan the authoritative player-driven mutation out to clients.
             if let Some(block) = result_block {
@@ -9847,7 +10017,7 @@ impl State {
                 |x, sy, z| {
                     self.chunk_meshes
                         .get(&(x, z))
-                        .map(|m| m.section_connectivity[sy])
+                        .map(|m| m.section_connectivity[sy].fail_open())
                 },
                 &mut self.visible_sections_scratch,
             );
@@ -9884,7 +10054,10 @@ impl State {
             if !fail_open_section_vis {
                 let mut chunk_visible = false;
                 for sec_y in 0..16usize {
-                    if self.visible_sections_scratch.contains(&(coord.0, sec_y, coord.1)) {
+                    if self
+                        .visible_sections_scratch
+                        .contains(&(coord.0, sec_y, coord.1))
+                    {
                         chunk_visible = true;
                         break;
                     }
@@ -9998,7 +10171,10 @@ impl State {
 
             if !fail_open_section_vis {
                 let valid_y = sec_y.clamp(0, 15) as usize;
-                if !self.visible_sections_scratch.contains(&(sec_x, valid_y, sec_z)) {
+                if !self
+                    .visible_sections_scratch
+                    .contains(&(sec_x, valid_y, sec_z))
+                {
                     entities_occlusion_culled += 1;
                     continue;
                 }
