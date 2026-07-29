@@ -3,7 +3,9 @@
 > 對應計畫：`14_performance_optimization.md` Phase 1.3
 > 狀態：Partial
 > 原完成宣告時間：2026-07-28T06:03:00Z
-> 審核回退：見 [`15_performance_audit_repair_plan.md`](15_performance_audit_repair_plan.md)；bounded queue、revision/ACK、錯誤傳遞與 Windows atomic replace 待 R2 修復。
+> R2 durability 修復已於 2026-07-30 完成；見
+> [`repair/R2_save_durability_ack_atomic.md`](repair/R2_save_durability_ack_atomic.md)。
+> 本任務仍為 Partial，因固定場景 autosave p95 before/after artifact 尚未補齊。
 > 前置：任務 1（基線）
 > 目標：將 Chunk 壓縮與 region I/O 從主線程移至背景 worker，autosave 只 snapshot dirty chunks，消除 autosave 期間的長幀。
 > Commit 訊息：`perf(save): move chunk compression off-thread and batch region writes`

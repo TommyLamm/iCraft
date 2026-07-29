@@ -720,7 +720,7 @@ impl WorldMetadata {
 
     fn save(&self, world_dir: &Path) -> std::io::Result<()> {
         fs::create_dir_all(world_dir.join("regions"))?;
-        fs::write(
+        crate::save::atomic_write(
             world_dir.join(META_FILE),
             format!(
                 "name:{}\nseed:{}\ngame_mode:{}\ndifficulty:{}\nlast_played:{}\n",
@@ -729,7 +729,8 @@ impl WorldMetadata {
                 game_mode_name(self.game_mode),
                 self.difficulty.as_str(),
                 self.last_played
-            ),
+            )
+            .as_bytes(),
         )
     }
 }
@@ -789,7 +790,7 @@ pub fn update_world_metadata(
     seed: u32,
     game_mode: GameMode,
     difficulty: Difficulty,
-) {
+) -> std::io::Result<()> {
     let mut metadata = WorldMetadata::load(world_dir)
         .or_else(|| legacy_metadata(world_dir))
         .unwrap_or_else(|| WorldMetadata {
@@ -808,7 +809,7 @@ pub fn update_world_metadata(
     metadata.game_mode = game_mode;
     metadata.difficulty = difficulty;
     metadata.last_played = unix_now();
-    let _ = metadata.save(world_dir);
+    metadata.save(world_dir)
 }
 
 fn legacy_metadata(directory: &Path) -> Option<WorldMetadata> {

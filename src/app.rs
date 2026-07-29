@@ -199,13 +199,21 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
+                let mut may_exit = true;
                 if let Some(Runtime::Game(state)) = &mut self.runtime {
                     state.is_saving = true;
+                    state.save_error = None;
                     let _ = state.render();
                     state.shutdown_network();
-                    state.save_synchronously();
+                    if let Err(error) = state.save_synchronously() {
+                        state.is_saving = false;
+                        state.save_error = Some(error.to_string());
+                        may_exit = false;
+                    }
                 }
-                event_loop.exit();
+                if may_exit {
+                    event_loop.exit();
+                }
             }
             WindowEvent::Focused(focused) => {
                 if let Some(Runtime::Game(state)) = &mut self.runtime {
@@ -266,7 +274,11 @@ impl ApplicationHandler for App {
                         if !pressed && button == MouseButton::Left {
                             state.left_mouse_pressed = false;
                         }
-                        if state.connection_lost {
+                        if state.save_error.is_some() {
+                            if pressed && button == MouseButton::Left {
+                                return_to_menu = state.handle_save_error_click();
+                            }
+                        } else if state.connection_lost {
                             if pressed && button == MouseButton::Left {
                                 return_to_menu = state.handle_connection_lost_click();
                             }

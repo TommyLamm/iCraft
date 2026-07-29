@@ -1681,28 +1681,22 @@ impl State {
         self.player_physics.set_flying(false);
         self.jump_taps.reset();
         let source = self.current_dimension;
-        for chunk in self.chunk_manager.chunks.values() {
-            if self
-                .chunk_manager
-                .dirty_chunks
-                .is_dirty(chunk.chunk_x, chunk.chunk_z)
-            {
-                let redstone_metadata = self.redstone.collect_chunk_metadata(
-                    &self.chunk_manager,
-                    chunk.chunk_x,
-                    chunk.chunk_z,
-                );
+        let tracker = self.chunk_manager.dirty_chunks.clone();
+        for ((cx, cz), revision) in tracker.dirty_revisions() {
+            if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
+                let redstone_metadata =
+                    self.redstone
+                        .collect_chunk_metadata(&self.chunk_manager, cx, cz);
                 let snapshot = crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
                     source,
                     chunk,
                     redstone_metadata,
                 );
-                let _ = self
-                    .save_tx
-                    .send(crate::save::SaveCommand::SaveChunk { snapshot });
+                if let Err(error) = self.enqueue_chunk_save(snapshot, tracker.clone(), revision) {
+                    eprintln!("[Save] Could not queue dimension-switch chunk: {error}");
+                }
             }
         }
-        self.chunk_manager.dirty_chunks.clear();
 
         let mut destination =
             crate::dimension::transform_position(source, target, self.player_physics.position);
@@ -1712,7 +1706,9 @@ impl State {
             destination = Vec3::new(8.5, 80.0, 8.5);
         }
 
-        self.save_current_dimension_entities();
+        if let Err(error) = self.save_current_dimension_entities() {
+            eprintln!("[Save] Could not save dimension entities: {error}");
+        }
         self.current_dimension = target;
         let render_distance = self.chunk_manager.render_distance;
         self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
@@ -3041,10 +3037,11 @@ pub struct State {
     pub lava_damage_timer: f32,
     pub cactus_damage_timer: f32,
     pub save_manager: std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>,
-    pub save_tx: std::sync::mpsc::Sender<crate::save::SaveCommand>,
-    save_queue_depth: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    pub save_tx: crate::save::SaveQueue,
+    save_queue_stats: std::sync::Arc<crate::save::SaveQueueStats>,
     pub autosave_timer: f32,
     pub is_saving: bool,
+    pub save_error: Option<String>,
     pub is_sprinting: bool,
     pub base_fov: f32,
     pub w_click_timer: f32,
@@ -3396,110 +3393,13 @@ impl State {
             save_manager.lock().unwrap().load_current_dimension()
         };
 
-        // Spawn background worker thread
-        let save_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let (save_tx, save_rx) = std::sync::mpsc::channel::<crate::save::SaveCommand>();
-        let save_manager_clone = std::sync::Arc::clone(&save_manager);
-        let save_depth_clone = std::sync::Arc::clone(&save_queue_depth);
-        std::thread::spawn(move || {
-            let mut pending_chunks: std::collections::HashMap<
-                (crate::dimension::Dimension, i32, i32),
-                crate::save::UncompressedChunkSnapshot,
-            > = std::collections::HashMap::new();
-            let mut pending_level_player: Option<(
-                crate::save::LevelData,
-                crate::save::PlayerData,
-            )> = None;
-
-            let flush_pending =
-                |chunks: &mut std::collections::HashMap<
-                    (crate::dimension::Dimension, i32, i32),
-                    crate::save::UncompressedChunkSnapshot,
-                >,
-                 level_player: &mut Option<(crate::save::LevelData, crate::save::PlayerData)>,
-                 mgr_arc: &std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>,
-                 depth_arc: &std::sync::Arc<std::sync::atomic::AtomicU32>| {
-                    if chunks.is_empty() && level_player.is_none() {
-                        return;
-                    }
-                    let mut count = 0usize;
-                    let mut mgr = mgr_arc.lock().unwrap();
-                    if let Some((level, player)) = level_player.take() {
-                        let _ = mgr.save_player_and_level(&level, &player);
-                        count += 1;
-                    }
-                    if !chunks.is_empty() {
-                        count += chunks.len();
-                        let snapshots: Vec<_> = chunks.drain().map(|(_, v)| v).collect();
-                        let mut by_dim: std::collections::HashMap<
-                            crate::dimension::Dimension,
-                            Vec<crate::save::UncompressedChunkSnapshot>,
-                        > = std::collections::HashMap::new();
-                        for snap in snapshots {
-                            by_dim.entry(snap.dimension).or_default().push(snap);
-                        }
-                        for (dim, dim_snaps) in by_dim {
-                            let _ = mgr.save_chunks_batch_in(dim, &dim_snaps);
-                        }
-                    }
-                    depth_arc.fetch_sub(count as u32, std::sync::atomic::Ordering::Relaxed);
-                };
-
-            loop {
-                let cmd = if pending_chunks.is_empty() && pending_level_player.is_none() {
-                    match save_rx.recv() {
-                        Ok(c) => c,
-                        Err(_) => break,
-                    }
-                } else {
-                    match save_rx.try_recv() {
-                        Ok(c) => c,
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {
-                            flush_pending(
-                                &mut pending_chunks,
-                                &mut pending_level_player,
-                                &save_manager_clone,
-                                &save_depth_clone,
-                            );
-                            continue;
-                        }
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                            flush_pending(
-                                &mut pending_chunks,
-                                &mut pending_level_player,
-                                &save_manager_clone,
-                                &save_depth_clone,
-                            );
-                            break;
-                        }
-                    }
-                };
-
-                match cmd {
-                    crate::save::SaveCommand::SaveChunk { snapshot } => {
-                        let key = (snapshot.dimension, snapshot.chunk_x, snapshot.chunk_z);
-                        if pending_chunks.insert(key, snapshot).is_none() {
-                            save_depth_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                    crate::save::SaveCommand::SaveLevelAndPlayer(level, player) => {
-                        if pending_level_player.is_none() {
-                            save_depth_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        pending_level_player = Some((level, player));
-                    }
-                    crate::save::SaveCommand::Flush(ack_tx) => {
-                        flush_pending(
-                            &mut pending_chunks,
-                            &mut pending_level_player,
-                            &save_manager_clone,
-                            &save_depth_clone,
-                        );
-                        let _ = ack_tx.send(());
-                    }
-                }
-            }
-        });
+        // The save queue is bounded by unique chunk keys and coalesces newer
+        // revisions before the worker sees them.
+        let save_tx = crate::save::spawn_save_worker(
+            std::sync::Arc::clone(&save_manager),
+            crate::save::SAVE_QUEUE_CAPACITY,
+        );
+        let save_queue_stats = save_tx.stats();
 
         // Initialize physics and keyboard input
         let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
@@ -4656,9 +4556,10 @@ impl State {
             cactus_damage_timer: 0.0,
             save_manager,
             save_tx,
-            save_queue_depth,
+            save_queue_stats,
             autosave_timer: 0.0,
             is_saving: false,
+            save_error: None,
             is_sprinting: false,
             base_fov,
             w_click_timer: 0.0,
@@ -5412,14 +5313,74 @@ impl State {
             .play_sound(crate::audio::SoundId::UiClick);
         self.shutdown_network();
         if self.is_authoritative() {
-            self.save_synchronously();
+            if let Err(error) = self.save_synchronously() {
+                self.is_saving = false;
+                self.save_error = Some(error.to_string());
+                return false;
+            }
         }
         true
     }
 
-    pub fn trigger_background_save(&self) {
+    pub fn handle_save_error_click(&mut self) -> bool {
+        let Some(_) = self.save_error else {
+            return false;
+        };
+        let [x, y] = self.mouse_ndc;
+        if !(-0.3..=0.3).contains(&x) {
+            return false;
+        }
+
+        if (0.02..=0.12).contains(&y) {
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::UiClick);
+            self.save_error = None;
+            self.is_saving = true;
+            let _ = self.render();
+            match self.save_synchronously() {
+                Ok(()) => true,
+                Err(error) => {
+                    self.is_saving = false;
+                    self.save_error = Some(error.to_string());
+                    false
+                }
+            }
+        } else if (-0.16..=-0.06).contains(&y) {
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::UiClick);
+            self.save_error = None;
+            self.is_saving = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn enqueue_chunk_save(
+        &self,
+        snapshot: crate::save::UncompressedChunkSnapshot,
+        tracker: crate::save::DirtyChunkSet,
+        revision: u64,
+    ) -> crate::save::SaveResult<()> {
+        let cx = snapshot.chunk_x;
+        let cz = snapshot.chunk_z;
+        if !tracker.begin_save(cx, cz, revision) {
+            return Ok(());
+        }
+        if let Err(error) = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
+            snapshot,
+            revision,
+            tracker: tracker.clone(),
+        }) {
+            tracker.acknowledge_failed(cx, cz, revision);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn trigger_background_save(&self) -> crate::save::SaveResult<()> {
         if !self.is_authoritative() {
-            return;
+            return Ok(());
         }
         let world_dir = self.save_manager.lock().unwrap().world_dir.clone();
         crate::menu::update_world_metadata(
@@ -5427,7 +5388,12 @@ impl State {
             self.world_seed,
             self.game_mode,
             self.difficulty,
-        );
+        )
+        .map_err(|error| crate::save::SaveError::Io {
+            operation: "update world metadata",
+            path: world_dir.join("world.meta"),
+            message: error.to_string(),
+        })?;
         let level = crate::save::LevelData {
             seed: self.world_seed,
             time: self.world_time.ticks,
@@ -5442,12 +5408,11 @@ impl State {
             &self.inventory,
             self.advancement_manager.progress.clone(),
         );
-        let _ = self
-            .save_tx
-            .send(crate::save::SaveCommand::SaveLevelAndPlayer(level, player));
+        self.save_tx
+            .send(crate::save::SaveCommand::SaveLevelAndPlayer(level, player))?;
 
-        let dirty_coords = self.chunk_manager.dirty_chunks.drain();
-        for (cx, cz) in dirty_coords {
+        let tracker = self.chunk_manager.dirty_chunks.clone();
+        for ((cx, cz), revision) in tracker.dirty_revisions() {
             if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
                 let redstone_metadata =
                     self.redstone
@@ -5457,39 +5422,45 @@ impl State {
                     chunk,
                     redstone_metadata,
                 );
-                let _ = self
-                    .save_tx
-                    .send(crate::save::SaveCommand::SaveChunk { snapshot });
+                self.enqueue_chunk_save(snapshot, tracker.clone(), revision)?;
             }
         }
-        let _ = self
-            .save_manager
+        self.save_manager
             .lock()
-            .unwrap()
-            .save_current_dimension(self.current_dimension);
-        self.save_current_dimension_entities();
+            .unwrap_or_else(|error| error.into_inner())
+            .save_current_dimension(self.current_dimension)
+            .map_err(|error| crate::save::SaveError::Io {
+                operation: "save current dimension",
+                path: world_dir.join("dimension.dat"),
+                message: error.to_string(),
+            })?;
+        self.save_current_dimension_entities()?;
+        Ok(())
     }
 
-    pub fn save_synchronously(&self) {
+    pub fn save_synchronously(&self) -> crate::save::SaveResult<()> {
         if !self.is_authoritative() {
-            return;
+            return Ok(());
         }
         // Mark all currently loaded chunks dirty for complete save and quit flush
         for &coord in self.chunk_manager.chunks.keys() {
             self.chunk_manager.dirty_chunks.mark_dirty(coord.0, coord.1);
         }
-        self.trigger_background_save();
+        self.trigger_background_save()?;
 
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        let _ = self.save_tx.send(crate::save::SaveCommand::Flush(ack_tx));
-        let _ = ack_rx.recv();
+        self.save_tx.send(crate::save::SaveCommand::Flush(ack_tx))?;
+        ack_rx
+            .recv()
+            .map_err(|_| crate::save::SaveError::QueueClosed)??;
         println!("[Save] Synchronously saved world state.");
+        Ok(())
     }
 
-    pub fn save_current_dimension_entities(&self) {
+    pub fn save_current_dimension_entities(&self) -> crate::save::SaveResult<()> {
         let save_manager = match self.save_manager.lock() {
             Ok(mgr) => mgr,
-            Err(_) => return,
+            Err(error) => error.into_inner(),
         };
         let persistent_entities: Vec<crate::save::EntitySaveData> = self
             .entity_manager
@@ -5499,7 +5470,14 @@ impl State {
             .filter(|data| data.should_persist())
             .collect();
 
-        let _ = save_manager.save_entities_in(self.current_dimension, &persistent_entities);
+        let path = save_manager.entities_file_path(self.current_dimension);
+        save_manager
+            .save_entities_in(self.current_dimension, &persistent_entities)
+            .map_err(|error| crate::save::SaveError::Io {
+                operation: "save entities",
+                path,
+                message: error.to_string(),
+            })
     }
 
     pub fn load_current_dimension_entities(&mut self) {
@@ -5993,20 +5971,28 @@ impl State {
                 }
             }
             for &(cx, cz) in &to_unload {
+                let tracker = self.chunk_manager.dirty_chunks.clone();
+                let revision = tracker.dirty_revision(cx, cz);
+                let redstone_metadata = revision.map(|_| {
+                    self.redstone
+                        .collect_chunk_metadata(&self.chunk_manager, cx, cz)
+                });
                 if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                    if self.is_authoritative() && self.chunk_manager.dirty_chunks.remove(cx, cz) {
-                        let redstone_metadata =
-                            self.redstone
-                                .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                        let snapshot =
-                            crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
-                                self.current_dimension,
-                                &chunk,
-                                redstone_metadata,
-                            );
-                        let _ = self
-                            .save_tx
-                            .send(crate::save::SaveCommand::SaveChunk { snapshot });
+                    if self.is_authoritative() {
+                        if let (Some(revision), Some(redstone_metadata)) =
+                            (revision, redstone_metadata)
+                        {
+                            let snapshot =
+                                crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
+                                    self.current_dimension,
+                                    &chunk,
+                                    redstone_metadata,
+                                );
+                            if let Err(error) = self.enqueue_chunk_save(snapshot, tracker, revision)
+                            {
+                                eprintln!("[Save] Could not queue unloaded chunk: {error}");
+                            }
+                        }
                     }
                 }
             }
@@ -6208,10 +6194,17 @@ impl State {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::UiClick);
                 self.is_saving = true;
+                self.save_error = None;
                 let _ = self.render();
                 self.shutdown_network();
-                self.save_synchronously();
-                return true;
+                return match self.save_synchronously() {
+                    Ok(()) => true,
+                    Err(error) => {
+                        self.is_saving = false;
+                        self.save_error = Some(error.to_string());
+                        false
+                    }
+                };
             }
         }
         false
@@ -6224,7 +6217,9 @@ impl State {
         self.autosave_timer += dt;
         if self.is_authoritative() && self.autosave_timer >= 300.0 {
             self.autosave_timer = 0.0;
-            self.trigger_background_save();
+            if let Err(error) = self.trigger_background_save() {
+                eprintln!("[Save] Could not enqueue autosave: {error}");
+            }
         }
 
         self.water_tick_timer += dt;
@@ -10023,9 +10018,11 @@ impl State {
             );
         }
 
-        self.perf_counters.save_queue_depth =
-            self.save_queue_depth
-                .load(std::sync::atomic::Ordering::Relaxed) as u64;
+        self.perf_counters.save_queue_depth = self.save_queue_stats.depth();
+        self.perf_counters.save_queue_bytes = self.save_queue_stats.queued_bytes();
+        self.perf_counters.save_in_flight = self.save_queue_stats.in_flight();
+        self.perf_counters.save_in_flight_bytes = self.save_queue_stats.in_flight_bytes();
+        self.perf_counters.save_drop = self.save_queue_stats.dropped();
         if let Ok(mgr) = self.save_manager.try_lock() {
             self.perf_counters.loaded_region_cache_bytes = mgr.region_cache_bytes();
         }
@@ -10357,7 +10354,7 @@ impl State {
         let mut ui_line_vertices = std::mem::take(&mut self.ui_line_vertices_scratch);
         ui_vertices.clear();
         ui_line_vertices.clear();
-        if self.is_saving {
+        if self.is_saving || self.save_error.is_some() {
             let bg_color = [0.1, 0.1, 0.1, 0.75];
             ui_vertices.push(UiVertex {
                 position: [-1.0, 1.0, 0.0],
@@ -10384,6 +10381,33 @@ impl State {
                 color: bg_color,
             });
 
+            if self.save_error.is_some() {
+                let [mouse_x, mouse_y] = self.mouse_ndc;
+                for (y0, y1) in [(0.02, 0.12), (-0.16, -0.06)] {
+                    let hovered = (-0.3..=0.3).contains(&mouse_x) && (y0..=y1).contains(&mouse_y);
+                    add_ui_quad(
+                        &mut ui_vertices,
+                        -0.3,
+                        0.3,
+                        y0,
+                        y1,
+                        if hovered {
+                            [0.45, 0.18, 0.14, 1.0]
+                        } else {
+                            [0.22, 0.08, 0.07, 1.0]
+                        },
+                    );
+                    add_ui_border(
+                        &mut ui_line_vertices,
+                        -0.3,
+                        0.3,
+                        y0,
+                        y1,
+                        [0.9, 0.55, 0.45, 1.0],
+                    );
+                }
+            }
+
             let draw_centered_text =
                 |s: &str,
                  y: f32,
@@ -10399,15 +10423,55 @@ impl State {
                     add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
                 };
 
-            draw_centered_text(
-                "SAVING WORLD...",
-                0.0,
-                0.03,
-                0.06,
-                0.012,
-                [1.0, 1.0, 1.0, 1.0],
-                &mut ui_line_vertices,
-            );
+            if let Some(error) = &self.save_error {
+                draw_centered_text(
+                    "SAVE FAILED",
+                    0.38,
+                    0.03,
+                    0.06,
+                    0.012,
+                    [1.0, 0.35, 0.28, 1.0],
+                    &mut ui_line_vertices,
+                );
+                let reason: String = error.chars().take(56).collect();
+                draw_centered_text(
+                    &reason,
+                    0.25,
+                    0.015,
+                    0.03,
+                    0.006,
+                    [1.0, 0.8, 0.7, 1.0],
+                    &mut ui_line_vertices,
+                );
+                draw_centered_text(
+                    "RETRY",
+                    0.05,
+                    0.025,
+                    0.05,
+                    0.01,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
+                draw_centered_text(
+                    "QUIT WITHOUT SAVING",
+                    -0.13,
+                    0.018,
+                    0.036,
+                    0.007,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
+            } else {
+                draw_centered_text(
+                    "SAVING WORLD...",
+                    0.0,
+                    0.03,
+                    0.06,
+                    0.012,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
+            }
 
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
@@ -12472,8 +12536,11 @@ impl State {
                     self.debug_str_scratch.clear();
                     let _ = write!(
                         self.debug_str_scratch,
-                        "SAVE Q: {} | REGION CACHE: {:.2} MB | NET Q: {}",
+                        "SAVE Q: {} ({:.2} MB) | IN FLIGHT: {} | COALESCE: {} | REGION: {:.2} MB | NET Q: {}",
                         self.perf_counters.save_queue_depth,
+                        self.perf_counters.save_queue_bytes as f64 / (1024.0 * 1024.0),
+                        self.perf_counters.save_in_flight,
+                        self.perf_counters.save_drop,
                         self.perf_counters.loaded_region_cache_bytes as f64 / (1024.0 * 1024.0),
                         self.perf_counters.network_queue_depth
                     );

@@ -4,13 +4,77 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 const PLAYER_SAVE_MAGIC: &[u8; 8] = b"ICRPLR01";
 const PLAYER_SAVE_VERSION: u16 = 1;
+pub const SAVE_QUEUE_CAPACITY: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveError {
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        message: String,
+    },
+    Serialization(String),
+    RegionCorruption {
+        path: PathBuf,
+        chunk_x: i32,
+        chunk_z: i32,
+        message: String,
+    },
+    QueueClosed,
+    WorkerPanic(String),
+}
+
+impl SaveError {
+    fn io(
+        operation: &'static str,
+        path: impl Into<PathBuf>,
+        error: impl std::fmt::Display,
+    ) -> Self {
+        Self::Io {
+            operation,
+            path: path.into(),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io {
+                operation,
+                path,
+                message,
+            } => write!(f, "{operation} failed for {}: {message}", path.display()),
+            Self::Serialization(message) => write!(f, "save serialization failed: {message}"),
+            Self::RegionCorruption {
+                path,
+                chunk_x,
+                chunk_z,
+                message,
+            } => write!(
+                f,
+                "region corruption at {} while saving chunk ({chunk_x}, {chunk_z}): {message}",
+                path.display()
+            ),
+            Self::QueueClosed => write!(f, "save worker queue is closed"),
+            Self::WorkerPanic(message) => write!(f, "save worker panicked: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for SaveError {}
+
+pub type SaveResult<T> = Result<T, SaveError>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LevelData {
@@ -448,60 +512,158 @@ impl ChunkSaveData {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveState {
+    Dirty(u64),
+    InFlight(u64),
+    Persisted(u64),
+}
+
+#[derive(Debug)]
+struct DirtyChunkSetInner {
+    id: u64,
+    states: Mutex<HashMap<(i32, i32), SaveState>>,
+}
+
+static NEXT_DIRTY_SET_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone)]
 pub struct DirtyChunkSet {
-    dirty: std::sync::Mutex<HashSet<(i32, i32)>>,
+    inner: Arc<DirtyChunkSetInner>,
+}
+
+impl Default for DirtyChunkSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DirtyChunkSet {
     pub fn new() -> Self {
         Self {
-            dirty: std::sync::Mutex::new(HashSet::new()),
+            inner: Arc::new(DirtyChunkSetInner {
+                id: NEXT_DIRTY_SET_ID.fetch_add(1, Ordering::Relaxed),
+                states: Mutex::new(HashMap::new()),
+            }),
         }
     }
 
-    pub fn mark_dirty(&self, cx: i32, cz: i32) {
-        if let Ok(mut set) = self.dirty.lock() {
-            set.insert((cx, cz));
-        }
+    pub fn id(&self) -> u64 {
+        self.inner.id
+    }
+
+    pub fn mark_dirty(&self, cx: i32, cz: i32) -> u64 {
+        let mut states = self.inner.states.lock().unwrap_or_else(|e| e.into_inner());
+        let next_revision = match states.get(&(cx, cz)).copied() {
+            Some(SaveState::Dirty(revision))
+            | Some(SaveState::InFlight(revision))
+            | Some(SaveState::Persisted(revision)) => revision.saturating_add(1),
+            None => 1,
+        };
+        states.insert((cx, cz), SaveState::Dirty(next_revision));
+        next_revision
     }
 
     pub fn is_dirty(&self, cx: i32, cz: i32) -> bool {
-        if let Ok(set) = self.dirty.lock() {
-            set.contains(&(cx, cz))
-        } else {
-            false
-        }
+        matches!(
+            self.inner
+                .states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&(cx, cz)),
+            Some(SaveState::Dirty(_))
+        )
     }
 
     pub fn remove(&self, cx: i32, cz: i32) -> bool {
-        if let Ok(mut set) = self.dirty.lock() {
-            set.remove(&(cx, cz))
+        self.inner
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(cx, cz))
+            .is_some()
+    }
+
+    pub fn clear(&self) {
+        self.inner
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    pub fn dirty_revisions(&self) -> Vec<((i32, i32), u64)> {
+        self.inner
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|(&coord, &state)| match state {
+                SaveState::Dirty(revision) => Some((coord, revision)),
+                SaveState::InFlight(_) | SaveState::Persisted(_) => None,
+            })
+            .collect()
+    }
+
+    pub fn dirty_revision(&self, cx: i32, cz: i32) -> Option<u64> {
+        match self
+            .inner
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(cx, cz))
+            .copied()
+        {
+            Some(SaveState::Dirty(revision)) => Some(revision),
+            Some(SaveState::InFlight(_)) | Some(SaveState::Persisted(_)) | None => None,
+        }
+    }
+
+    pub fn begin_save(&self, cx: i32, cz: i32, revision: u64) -> bool {
+        let mut states = self.inner.states.lock().unwrap_or_else(|e| e.into_inner());
+        if states.get(&(cx, cz)) == Some(&SaveState::Dirty(revision)) {
+            states.insert((cx, cz), SaveState::InFlight(revision));
+            true
         } else {
             false
         }
     }
 
-    pub fn clear(&self) {
-        if let Ok(mut set) = self.dirty.lock() {
-            set.clear();
+    pub fn acknowledge_persisted(&self, cx: i32, cz: i32, revision: u64) {
+        let mut states = self.inner.states.lock().unwrap_or_else(|e| e.into_inner());
+        if states.get(&(cx, cz)) == Some(&SaveState::InFlight(revision)) {
+            states.insert((cx, cz), SaveState::Persisted(revision));
         }
     }
 
-    pub fn drain(&self) -> HashSet<(i32, i32)> {
-        if let Ok(mut set) = self.dirty.lock() {
-            std::mem::take(&mut *set)
-        } else {
-            HashSet::new()
+    pub fn acknowledge_failed(&self, cx: i32, cz: i32, revision: u64) {
+        let mut states = self.inner.states.lock().unwrap_or_else(|e| e.into_inner());
+        if states.get(&(cx, cz)) == Some(&SaveState::InFlight(revision)) {
+            states.insert((cx, cz), SaveState::Dirty(revision));
         }
+    }
+
+    pub fn state(&self, cx: i32, cz: i32) -> Option<SaveState> {
+        self.inner
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(cx, cz))
+            .copied()
     }
 
     pub fn len(&self) -> usize {
-        self.dirty.lock().map(|set| set.len()).unwrap_or(0)
+        self.inner
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|state| matches!(state, SaveState::Dirty(_)))
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.dirty.lock().map(|set| set.is_empty()).unwrap_or(true)
+        self.len() == 0
     }
 }
 
@@ -607,6 +769,20 @@ impl UncompressedChunkSnapshot {
     }
 
     pub fn to_chunk_save_data(&self) -> ChunkSaveData {
+        self.try_to_chunk_save_data()
+            .unwrap_or_else(|_| ChunkSaveData {
+                chunk_x: self.chunk_x,
+                chunk_z: self.chunk_z,
+                blocks: Vec::new(),
+                sky_light: Vec::new(),
+                block_light: Vec::new(),
+                fluid_levels: Vec::new(),
+                redstone_metadata: Vec::new(),
+                block_states: Vec::new(),
+            })
+    }
+
+    pub fn try_to_chunk_save_data(&self) -> SaveResult<ChunkSaveData> {
         let mut blocks = Vec::with_capacity(16 * 256 * 16);
         let mut block_states_raw = Vec::with_capacity(16 * 256 * 16);
         let mut sky_light = Vec::with_capacity(16 * 256 * 16);
@@ -629,28 +805,569 @@ impl UncompressedChunkSnapshot {
             Vec::new()
         } else {
             bincode::serialize(&self.redstone_metadata)
-                .ok()
-                .and_then(|bytes| compress_bytes(&bytes).ok())
-                .unwrap_or_default()
+                .map_err(|error| SaveError::Serialization(error.to_string()))
+                .and_then(|bytes| {
+                    compress_bytes(&bytes)
+                        .map_err(|error| SaveError::Serialization(error.to_string()))
+                })?
         };
 
-        ChunkSaveData {
+        Ok(ChunkSaveData {
             chunk_x: self.chunk_x,
             chunk_z: self.chunk_z,
-            blocks: compress_bytes(&blocks).unwrap_or_default(),
-            sky_light: compress_bytes(&sky_light).unwrap_or_default(),
-            block_light: compress_bytes(&block_light).unwrap_or_default(),
-            fluid_levels: compress_bytes(&fluid_levels).unwrap_or_default(),
+            blocks: compress_bytes(&blocks)
+                .map_err(|error| SaveError::Serialization(error.to_string()))?,
+            sky_light: compress_bytes(&sky_light)
+                .map_err(|error| SaveError::Serialization(error.to_string()))?,
+            block_light: compress_bytes(&block_light)
+                .map_err(|error| SaveError::Serialization(error.to_string()))?,
+            fluid_levels: compress_bytes(&fluid_levels)
+                .map_err(|error| SaveError::Serialization(error.to_string()))?,
             redstone_metadata: redstone_metadata_bytes,
-            block_states: compress_bytes(&block_states_raw).unwrap_or_default(),
-        }
+            block_states: compress_bytes(&block_states_raw)
+                .map_err(|error| SaveError::Serialization(error.to_string()))?,
+        })
+    }
+
+    pub fn estimated_bytes(&self) -> u64 {
+        let voxel_count =
+            crate::world::CHUNK_WIDTH * crate::world::CHUNK_HEIGHT * crate::world::CHUNK_DEPTH;
+        (voxel_count * (std::mem::size_of::<BlockType>() + 4 * std::mem::size_of::<u8>())
+            + self.redstone_metadata.len()
+                * std::mem::size_of::<crate::redstone::RedstoneComponentMetadata>()) as u64
     }
 }
 
 pub enum SaveCommand {
-    SaveChunk { snapshot: UncompressedChunkSnapshot },
+    SaveChunk {
+        snapshot: UncompressedChunkSnapshot,
+        revision: u64,
+        tracker: DirtyChunkSet,
+    },
     SaveLevelAndPlayer(LevelData, PlayerData),
-    Flush(std::sync::mpsc::Sender<()>),
+    Flush(std::sync::mpsc::Sender<SaveResult<()>>),
+}
+
+type SaveKey = (crate::dimension::Dimension, i32, i32, u64);
+
+#[derive(Clone)]
+struct PendingChunkSave {
+    snapshot: UncompressedChunkSnapshot,
+    revision: u64,
+    tracker: DirtyChunkSet,
+    bytes: u64,
+}
+
+impl PendingChunkSave {
+    fn key(&self) -> SaveKey {
+        (
+            self.snapshot.dimension,
+            self.snapshot.chunk_x,
+            self.snapshot.chunk_z,
+            self.tracker.id(),
+        )
+    }
+
+    fn acknowledge_persisted(&self) {
+        self.tracker.acknowledge_persisted(
+            self.snapshot.chunk_x,
+            self.snapshot.chunk_z,
+            self.revision,
+        );
+    }
+
+    fn acknowledge_failed(&self) {
+        self.tracker.acknowledge_failed(
+            self.snapshot.chunk_x,
+            self.snapshot.chunk_z,
+            self.revision,
+        );
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct SaveQueueStats {
+    queued_items: AtomicU64,
+    queued_bytes: AtomicU64,
+    in_flight: AtomicU64,
+    in_flight_bytes: AtomicU64,
+    dropped: AtomicU64,
+}
+
+impl SaveQueueStats {
+    pub fn depth(&self) -> u64 {
+        self.queued_items.load(Ordering::Relaxed) + self.in_flight.load(Ordering::Relaxed)
+    }
+
+    pub fn queued_bytes(&self) -> u64 {
+        self.queued_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn in_flight(&self) -> u64 {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    pub fn in_flight_bytes(&self) -> u64 {
+        self.in_flight_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Default)]
+struct SaveQueueState {
+    pending_chunks: HashMap<SaveKey, PendingChunkSave>,
+    failed_chunks: HashMap<SaveKey, PendingChunkSave>,
+    pending_level_player: Option<(LevelData, PlayerData)>,
+    failed_level_player: Option<(LevelData, PlayerData)>,
+    flush_waiters: VecDeque<std::sync::mpsc::Sender<SaveResult<()>>>,
+    flush_error: Option<SaveError>,
+    closed: bool,
+}
+
+impl SaveQueueState {
+    fn work_items(&self) -> usize {
+        self.pending_chunks.len()
+            + self.failed_chunks.len()
+            + usize::from(self.pending_level_player.is_some())
+            + usize::from(self.failed_level_player.is_some())
+    }
+}
+
+struct SaveQueueInner {
+    state: Mutex<SaveQueueState>,
+    work_available: Condvar,
+    capacity_available: Condvar,
+    capacity: usize,
+    stats: Arc<SaveQueueStats>,
+    last_error: Mutex<Option<SaveError>>,
+    producers: AtomicU64,
+}
+
+pub struct SaveQueue {
+    inner: Arc<SaveQueueInner>,
+}
+
+impl Clone for SaveQueue {
+    fn clone(&self) -> Self {
+        self.inner.producers.fetch_add(1, Ordering::Relaxed);
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Drop for SaveQueue {
+    fn drop(&mut self) {
+        if self.inner.producers.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.closed = true;
+        for waiter in state.flush_waiters.drain(..) {
+            let _ = waiter.send(Err(SaveError::QueueClosed));
+        }
+        self.inner.work_available.notify_all();
+        self.inner.capacity_available.notify_all();
+    }
+}
+
+impl SaveQueue {
+    pub fn send(&self, command: SaveCommand) -> SaveResult<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            drop(state);
+            if let SaveCommand::SaveChunk {
+                snapshot,
+                revision,
+                tracker,
+            } = command
+            {
+                tracker.acknowledge_failed(snapshot.chunk_x, snapshot.chunk_z, revision);
+            }
+            return Err(SaveError::QueueClosed);
+        }
+
+        match command {
+            SaveCommand::SaveChunk {
+                snapshot,
+                revision,
+                tracker,
+            } => {
+                let task = PendingChunkSave {
+                    bytes: snapshot.estimated_bytes(),
+                    snapshot,
+                    revision,
+                    tracker,
+                };
+                let key = task.key();
+
+                if let Some(failed) = state.failed_chunks.remove(&key) {
+                    self.inner
+                        .stats
+                        .queued_bytes
+                        .fetch_sub(failed.bytes, Ordering::Relaxed);
+                    self.inner
+                        .stats
+                        .queued_items
+                        .fetch_sub(1, Ordering::Relaxed);
+                    self.inner.stats.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+
+                if let Some(existing) = state.pending_chunks.get(&key) {
+                    if existing.revision > revision {
+                        self.inner.stats.dropped.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                } else {
+                    while state.work_items()
+                        + self.inner.stats.in_flight.load(Ordering::Relaxed) as usize
+                        >= self.inner.capacity
+                        && !state.closed
+                    {
+                        state = self
+                            .inner
+                            .capacity_available
+                            .wait(state)
+                            .unwrap_or_else(|error| error.into_inner());
+                    }
+                    if state.closed {
+                        task.acknowledge_failed();
+                        return Err(SaveError::QueueClosed);
+                    }
+                    self.inner
+                        .stats
+                        .queued_items
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+
+                if let Some(replaced) = state.pending_chunks.insert(key, task) {
+                    self.inner
+                        .stats
+                        .queued_bytes
+                        .fetch_sub(replaced.bytes, Ordering::Relaxed);
+                    self.inner.stats.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                let bytes = state.pending_chunks.get(&key).unwrap().bytes;
+                self.inner
+                    .stats
+                    .queued_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
+            }
+            SaveCommand::SaveLevelAndPlayer(level, player) => {
+                if state.pending_level_player.is_none() && state.failed_level_player.is_none() {
+                    while state.work_items()
+                        + self.inner.stats.in_flight.load(Ordering::Relaxed) as usize
+                        >= self.inner.capacity
+                        && !state.closed
+                    {
+                        state = self
+                            .inner
+                            .capacity_available
+                            .wait(state)
+                            .unwrap_or_else(|error| error.into_inner());
+                    }
+                    if state.closed {
+                        return Err(SaveError::QueueClosed);
+                    }
+                    self.inner
+                        .stats
+                        .queued_items
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.inner.stats.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                state.failed_level_player = None;
+                state.pending_level_player = Some((level, player));
+            }
+            SaveCommand::Flush(waiter) => {
+                if state.flush_waiters.is_empty() {
+                    state.flush_error = None;
+                }
+                if state.pending_chunks.is_empty() {
+                    let failed = std::mem::take(&mut state.failed_chunks);
+                    for (key, task) in failed {
+                        if task.tracker.begin_save(
+                            task.snapshot.chunk_x,
+                            task.snapshot.chunk_z,
+                            task.revision,
+                        ) {
+                            state.pending_chunks.insert(key, task);
+                        } else {
+                            self.inner
+                                .stats
+                                .queued_items
+                                .fetch_sub(1, Ordering::Relaxed);
+                            self.inner
+                                .stats
+                                .queued_bytes
+                                .fetch_sub(task.bytes, Ordering::Relaxed);
+                        }
+                    }
+                }
+                if state.pending_level_player.is_none() {
+                    state.pending_level_player = state.failed_level_player.take();
+                }
+                state.flush_waiters.push_back(waiter);
+            }
+        }
+        self.inner.work_available.notify_one();
+        Ok(())
+    }
+
+    pub fn stats(&self) -> Arc<SaveQueueStats> {
+        Arc::clone(&self.inner.stats)
+    }
+
+    pub fn last_error(&self) -> Option<SaveError> {
+        self.inner
+            .last_error
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+#[derive(Clone)]
+struct SaveBatch {
+    chunks: Vec<PendingChunkSave>,
+    level_player: Option<(LevelData, PlayerData)>,
+}
+
+pub fn spawn_save_worker(manager: Arc<Mutex<SaveManager>>, capacity: usize) -> SaveQueue {
+    let inner = Arc::new(SaveQueueInner {
+        state: Mutex::new(SaveQueueState::default()),
+        work_available: Condvar::new(),
+        capacity_available: Condvar::new(),
+        capacity: capacity.max(1),
+        stats: Arc::new(SaveQueueStats::default()),
+        last_error: Mutex::new(None),
+        producers: AtomicU64::new(1),
+    });
+    let queue = SaveQueue {
+        inner: Arc::clone(&inner),
+    };
+
+    std::thread::Builder::new()
+        .name("icraft-save".to_string())
+        .spawn(move || run_save_worker(inner, manager))
+        .expect("failed to spawn save worker");
+    queue
+}
+
+fn run_save_worker(inner: Arc<SaveQueueInner>, manager: Arc<Mutex<SaveManager>>) {
+    loop {
+        let batch = {
+            let mut state = inner
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            while state.pending_chunks.is_empty()
+                && state.pending_level_player.is_none()
+                && state.flush_waiters.is_empty()
+                && !state.closed
+            {
+                state = inner
+                    .work_available
+                    .wait(state)
+                    .unwrap_or_else(|error| error.into_inner());
+            }
+            if state.closed {
+                return;
+            }
+
+            let chunks: Vec<_> = state.pending_chunks.drain().map(|(_, task)| task).collect();
+            let level_player = state.pending_level_player.take();
+            let item_count = chunks.len() + usize::from(level_player.is_some());
+            let byte_count = chunks.iter().map(|task| task.bytes).sum::<u64>();
+            inner
+                .stats
+                .queued_items
+                .fetch_sub(item_count as u64, Ordering::Relaxed);
+            inner
+                .stats
+                .queued_bytes
+                .fetch_sub(byte_count, Ordering::Relaxed);
+            inner
+                .stats
+                .in_flight
+                .fetch_add(item_count as u64, Ordering::Relaxed);
+            inner
+                .stats
+                .in_flight_bytes
+                .fetch_add(byte_count, Ordering::Relaxed);
+            inner.capacity_available.notify_all();
+            SaveBatch {
+                chunks,
+                level_player,
+            }
+        };
+
+        let panic_backup = batch.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            persist_save_batch(&manager, batch)
+        }));
+        let (failed_chunks, failed_level_player, error, completed_items, completed_bytes) =
+            match result {
+                Ok(outcome) => outcome,
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    for task in &panic_backup.chunks {
+                        task.acknowledge_failed();
+                    }
+                    let completed_items = panic_backup.chunks.len()
+                        + usize::from(panic_backup.level_player.is_some());
+                    let completed_bytes = panic_backup.chunks.iter().map(|task| task.bytes).sum();
+                    (
+                        panic_backup.chunks,
+                        panic_backup.level_player,
+                        Some(SaveError::WorkerPanic(message)),
+                        completed_items,
+                        completed_bytes,
+                    )
+                }
+            };
+
+        inner
+            .stats
+            .in_flight
+            .fetch_sub(completed_items as u64, Ordering::Relaxed);
+        inner
+            .stats
+            .in_flight_bytes
+            .fetch_sub(completed_bytes, Ordering::Relaxed);
+        inner.capacity_available.notify_all();
+
+        let mut state = inner
+            .state
+            .lock()
+            .unwrap_or_else(|lock_error| lock_error.into_inner());
+        for task in failed_chunks {
+            let key = task.key();
+            if state.failed_chunks.insert(key, task).is_none() {
+                inner.stats.queued_items.fetch_add(1, Ordering::Relaxed);
+            }
+            let bytes = state.failed_chunks.get(&key).unwrap().bytes;
+            inner.stats.queued_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+        if let Some(level_player) = failed_level_player {
+            if state.failed_level_player.replace(level_player).is_none() {
+                inner.stats.queued_items.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        if let Some(error) = &error {
+            *inner
+                .last_error
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error.clone());
+            eprintln!("[Save] {error}");
+            if !state.flush_waiters.is_empty() && state.flush_error.is_none() {
+                state.flush_error = Some(error.clone());
+            }
+        }
+
+        if state.pending_chunks.is_empty() && state.pending_level_player.is_none() {
+            let flush_result = state.flush_error.take().map_or(Ok(()), Err);
+            if flush_result.is_ok()
+                && state.failed_chunks.is_empty()
+                && state.failed_level_player.is_none()
+            {
+                *inner
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner()) = None;
+            }
+            for waiter in state.flush_waiters.drain(..) {
+                let _ = waiter.send(flush_result.clone());
+            }
+        }
+    }
+}
+
+fn persist_save_batch(
+    manager: &Arc<Mutex<SaveManager>>,
+    batch: SaveBatch,
+) -> (
+    Vec<PendingChunkSave>,
+    Option<(LevelData, PlayerData)>,
+    Option<SaveError>,
+    usize,
+    u64,
+) {
+    let completed_items = batch.chunks.len() + usize::from(batch.level_player.is_some());
+    let completed_bytes = batch.chunks.iter().map(|task| task.bytes).sum();
+    let mut first_error = None;
+    let mut failed_chunks = Vec::new();
+    let mut failed_level_player = None;
+    let mut manager = manager.lock().unwrap_or_else(|error| error.into_inner());
+
+    #[cfg(test)]
+    if std::mem::take(&mut manager.panic_next_worker_save) {
+        panic!("injected save worker panic");
+    }
+
+    if let Some((level, player)) = batch.level_player {
+        if let Err(error) = manager.save_player_and_level(&level, &player) {
+            first_error.get_or_insert_with(|| {
+                SaveError::io("save level and player", manager.world_dir.clone(), &error)
+            });
+            failed_level_player = Some((level, player));
+        }
+    }
+
+    let mut groups: HashMap<(crate::dimension::Dimension, i32, i32), Vec<PendingChunkSave>> =
+        HashMap::new();
+    for task in batch.chunks {
+        groups
+            .entry((
+                task.snapshot.dimension,
+                task.snapshot.chunk_x.div_euclid(32),
+                task.snapshot.chunk_z.div_euclid(32),
+            ))
+            .or_default()
+            .push(task);
+    }
+
+    for ((dimension, _, _), tasks) in groups {
+        let snapshots: Vec<_> = tasks.iter().map(|task| task.snapshot.clone()).collect();
+        match manager.save_chunks_batch_in(dimension, &snapshots) {
+            Ok(()) => {
+                for task in &tasks {
+                    task.acknowledge_persisted();
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert_with(|| error.clone());
+                for task in &tasks {
+                    task.acknowledge_failed();
+                }
+                failed_chunks.extend(tasks);
+            }
+        }
+    }
+
+    (
+        failed_chunks,
+        failed_level_player,
+        first_error,
+        completed_items,
+        completed_bytes,
+    )
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -663,6 +1380,37 @@ pub struct SaveManager {
     pub world_dir: PathBuf,
     region_cache: HashMap<(crate::dimension::Dimension, i32, i32), RegionData>,
     lru_order: VecDeque<(crate::dimension::Dimension, i32, i32)>,
+    #[cfg(test)]
+    panic_next_worker_save: bool,
+    #[cfg(test)]
+    fail_next_serialization: bool,
+}
+
+static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+thread_local! {
+    static ATOMIC_WRITE_FAILPOINT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn atomic_write_should_fail(stage: u8) -> bool {
+    ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.get() == stage)
+}
+
+#[cfg(not(test))]
+fn atomic_write_should_fail(_stage: u8) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn atomic_write_should_crash(stage: &str) -> bool {
+    std::env::var("ICRAFT_TEST_ATOMIC_CRASH_STAGE").as_deref() == Ok(stage)
+}
+
+#[cfg(not(test))]
+fn atomic_write_should_crash(_stage: &str) -> bool {
+    false
 }
 
 pub fn atomic_write<P: AsRef<Path>>(path: P, bytes: &[u8]) -> io::Result<()> {
@@ -670,25 +1418,95 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension("tmp");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("save");
+    let tmp_path = path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
     {
-        let mut file = File::create(&tmp_path)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
         file.write_all(bytes)?;
+        file.flush()?;
         file.sync_all()?;
     }
-    if let Err(e) = fs::rename(&tmp_path, path) {
-        if path.exists() {
-            let _ = fs::remove_file(path);
-            if let Err(e2) = fs::rename(&tmp_path, path) {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(e2);
-            }
-        } else {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e);
-        }
+
+    if atomic_write_should_crash("before_replace") {
+        std::process::abort();
     }
+
+    if atomic_write_should_fail(1) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "injected failure before atomic replacement",
+        ));
+    }
+
+    if let Err(error) = replace_file_atomically(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    if atomic_write_should_crash("after_replace") {
+        std::process::abort();
+    }
+
+    if atomic_write_should_fail(2) {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "injected failure after atomic replacement",
+        ));
+    }
+
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source_wide: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let result = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub fn compress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
@@ -755,10 +1573,34 @@ impl SaveManager {
             world_dir,
             region_cache: HashMap::new(),
             lru_order: VecDeque::new(),
+            #[cfg(test)]
+            panic_next_worker_save: false,
+            #[cfg(test)]
+            fail_next_serialization: false,
         }
     }
 
+    #[cfg(test)]
+    fn inject_worker_panic_once(&mut self) {
+        self.panic_next_worker_save = true;
+    }
+
+    #[cfg(test)]
+    fn inject_serialization_failure_once(&mut self) {
+        self.fail_next_serialization = true;
+    }
+
     fn touch_region(&mut self, key: (crate::dimension::Dimension, i32, i32)) {
+        if !self.region_cache.contains_key(&key) {
+            if let Some(pos) = self
+                .lru_order
+                .iter()
+                .position(|candidate| candidate == &key)
+            {
+                self.lru_order.remove(pos);
+            }
+            return;
+        }
         if let Some(pos) = self.lru_order.iter().position(|k| k == &key) {
             self.lru_order.remove(pos);
         }
@@ -871,7 +1713,9 @@ impl SaveManager {
             }
         }
 
-        self.touch_region((dimension, rx, rz));
+        if self.region_cache.contains_key(&(dimension, rx, rz)) {
+            self.touch_region((dimension, rx, rz));
+        }
         self.evict_lru_regions();
 
         let region = self.region_cache.get(&(dimension, rx, rz))?;
@@ -883,7 +1727,7 @@ impl SaveManager {
         }
     }
 
-    pub fn save_chunk(&mut self, cx: i32, cz: i32, data: ChunkSaveData) -> io::Result<()> {
+    pub fn save_chunk(&mut self, cx: i32, cz: i32, data: ChunkSaveData) -> SaveResult<()> {
         self.save_chunk_in(crate::dimension::Dimension::Overworld, cx, cz, data)
     }
 
@@ -891,7 +1735,13 @@ impl SaveManager {
         &mut self,
         dimension: crate::dimension::Dimension,
         snapshots: &[UncompressedChunkSnapshot],
-    ) -> io::Result<()> {
+    ) -> SaveResult<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_serialization) {
+            return Err(SaveError::Serialization(
+                "injected serialization failure".to_string(),
+            ));
+        }
         if snapshots.is_empty() {
             return Ok(());
         }
@@ -906,21 +1756,21 @@ impl SaveManager {
             let region_file = self
                 .region_dir(dimension)
                 .join(format!("r.{}.{}.bin", rx, rz));
+            let representative = (snaps[0].chunk_x, snaps[0].chunk_z);
+            let region =
+                self.load_region_for_write(&region_file, representative.0, representative.1)?;
+            self.region_cache.insert((dimension, rx, rz), region);
 
-            if !self.region_cache.contains_key(&(dimension, rx, rz)) {
-                if region_file.exists() {
-                    if let Ok(mut file) = File::open(&region_file) {
-                        let mut bytes = Vec::new();
-                        if file.read_to_end(&mut bytes).is_ok() {
-                            if let Ok(region_data) = bincode::deserialize::<RegionData>(&bytes) {
-                                self.region_cache.insert((dimension, rx, rz), region_data);
-                            }
-                        }
-                    }
-                }
+            let mut serialized_chunks = Vec::with_capacity(snaps.len());
+            for snap in &snaps {
+                let lx = snap.chunk_x.rem_euclid(32) as u8;
+                let lz = snap.chunk_z.rem_euclid(32) as u8;
+                let data = snap.try_to_chunk_save_data()?;
+                let serialized_chunk = bincode::serialize(&data)
+                    .map_err(|error| SaveError::Serialization(error.to_string()))?;
+                serialized_chunks.push(((lx, lz), serialized_chunk));
             }
 
-            self.touch_region((dimension, rx, rz));
             let region = self
                 .region_cache
                 .entry((dimension, rx, rz))
@@ -928,19 +1778,16 @@ impl SaveManager {
                     chunks: HashMap::new(),
                 });
 
-            for snap in snaps {
-                let lx = snap.chunk_x.rem_euclid(32) as u8;
-                let lz = snap.chunk_z.rem_euclid(32) as u8;
-                let data = snap.to_chunk_save_data();
-                let serialized_chunk = bincode::serialize(&data)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                region.chunks.insert((lx, lz), serialized_chunk);
+            for (coord, serialized_chunk) in serialized_chunks {
+                region.chunks.insert(coord, serialized_chunk);
             }
 
-            let serialized_region =
-                bincode::serialize(region).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            let serialized_region = bincode::serialize(region)
+                .map_err(|error| SaveError::Serialization(error.to_string()))?;
 
-            atomic_write(&region_file, &serialized_region)?;
+            atomic_write(&region_file, &serialized_region)
+                .map_err(|error| SaveError::io("atomic region replacement", &region_file, error))?;
+            self.touch_region((dimension, rx, rz));
             self.evict_lru_regions();
         }
         Ok(())
@@ -952,7 +1799,7 @@ impl SaveManager {
         cx: i32,
         cz: i32,
         data: ChunkSaveData,
-    ) -> io::Result<()> {
+    ) -> SaveResult<()> {
         let rx = cx.div_euclid(32);
         let rz = cz.div_euclid(32);
         let lx = cx.rem_euclid(32) as u8;
@@ -961,20 +1808,9 @@ impl SaveManager {
             .region_dir(dimension)
             .join(format!("r.{}.{}.bin", rx, rz));
 
-        if !self.region_cache.contains_key(&(dimension, rx, rz)) {
-            if region_file.exists() {
-                if let Ok(mut file) = File::open(&region_file) {
-                    let mut bytes = Vec::new();
-                    if file.read_to_end(&mut bytes).is_ok() {
-                        if let Ok(region_data) = bincode::deserialize::<RegionData>(&bytes) {
-                            self.region_cache.insert((dimension, rx, rz), region_data);
-                        }
-                    }
-                }
-            }
-        }
+        let region = self.load_region_for_write(&region_file, cx, cz)?;
+        self.region_cache.insert((dimension, rx, rz), region);
 
-        self.touch_region((dimension, rx, rz));
         let region = self
             .region_cache
             .entry((dimension, rx, rz))
@@ -982,17 +1818,70 @@ impl SaveManager {
                 chunks: HashMap::new(),
             });
 
-        let serialized_chunk =
-            bincode::serialize(&data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let serialized_chunk = bincode::serialize(&data)
+            .map_err(|error| SaveError::Serialization(error.to_string()))?;
 
         region.chunks.insert((lx, lz), serialized_chunk);
 
-        let serialized_region =
-            bincode::serialize(region).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let serialized_region = bincode::serialize(region)
+            .map_err(|error| SaveError::Serialization(error.to_string()))?;
 
-        atomic_write(&region_file, &serialized_region)?;
+        atomic_write(&region_file, &serialized_region)
+            .map_err(|error| SaveError::io("atomic region replacement", &region_file, error))?;
+        self.touch_region((dimension, rx, rz));
         self.evict_lru_regions();
         Ok(())
+    }
+
+    fn load_region_for_write(
+        &self,
+        region_file: &Path,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> SaveResult<RegionData> {
+        if !region_file.exists() {
+            return Ok(RegionData {
+                chunks: HashMap::new(),
+            });
+        }
+
+        let bytes = fs::read(region_file).map_err(|error| SaveError::RegionCorruption {
+            path: region_file.to_path_buf(),
+            chunk_x,
+            chunk_z,
+            message: format!("could not read existing region: {error}"),
+        })?;
+        bincode::deserialize(&bytes).map_err(|error| SaveError::RegionCorruption {
+            path: region_file.to_path_buf(),
+            chunk_x,
+            chunk_z,
+            message: format!("could not deserialize existing region: {error}"),
+        })
+    }
+
+    pub fn salvage_readable_region(&self, source: &Path, destination: &Path) -> SaveResult<usize> {
+        let bytes = fs::read(source)
+            .map_err(|error| SaveError::io("read region for salvage", source, error))?;
+        let region: RegionData =
+            bincode::deserialize(&bytes).map_err(|error| SaveError::RegionCorruption {
+                path: source.to_path_buf(),
+                chunk_x: 0,
+                chunk_z: 0,
+                message: format!("region container is not readable: {error}"),
+            })?;
+        let readable_chunks: HashMap<_, _> = region
+            .chunks
+            .into_iter()
+            .filter(|(_, bytes)| deserialize_chunk_save_data(bytes).is_some())
+            .collect();
+        let count = readable_chunks.len();
+        let serialized = bincode::serialize(&RegionData {
+            chunks: readable_chunks,
+        })
+        .map_err(|error| SaveError::Serialization(error.to_string()))?;
+        atomic_write(destination, &serialized)
+            .map_err(|error| SaveError::io("write salvaged region", destination, error))?;
+        Ok(count)
     }
 
     pub fn save_current_dimension(&self, dimension: crate::dimension::Dimension) -> io::Result<()> {
@@ -1705,5 +2594,372 @@ mod tests {
         assert_eq!(loaded[0].position, [1.0, 65.0, 2.0]);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("icraft_{label}_{}_{}", std::process::id(), unique))
+    }
+
+    fn unstarted_save_queue(capacity: usize) -> SaveQueue {
+        SaveQueue {
+            inner: Arc::new(SaveQueueInner {
+                state: Mutex::new(SaveQueueState::default()),
+                work_available: Condvar::new(),
+                capacity_available: Condvar::new(),
+                capacity,
+                stats: Arc::new(SaveQueueStats::default()),
+                last_error: Mutex::new(None),
+                producers: AtomicU64::new(1),
+            }),
+        }
+    }
+
+    #[test]
+    fn stale_ack_cannot_clear_a_newer_dirty_revision() {
+        let tracker = DirtyChunkSet::new();
+        let first = tracker.mark_dirty(2, -4);
+        assert!(tracker.begin_save(2, -4, first));
+        let second = tracker.mark_dirty(2, -4);
+
+        tracker.acknowledge_persisted(2, -4, first);
+        assert_eq!(tracker.state(2, -4), Some(SaveState::Dirty(second)));
+
+        assert!(tracker.begin_save(2, -4, second));
+        tracker.acknowledge_persisted(2, -4, second);
+        assert_eq!(tracker.state(2, -4), Some(SaveState::Persisted(second)));
+    }
+
+    #[test]
+    fn latest_revision_replaces_older_pending_snapshot() {
+        let queue = unstarted_save_queue(1);
+        let tracker = DirtyChunkSet::new();
+        let chunk = Chunk::new(1, 2);
+
+        let first = tracker.mark_dirty(1, 2);
+        assert!(tracker.begin_save(1, 2, first));
+        queue
+            .send(SaveCommand::SaveChunk {
+                snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
+                    crate::dimension::Dimension::Overworld,
+                    &chunk,
+                    Vec::new(),
+                ),
+                revision: first,
+                tracker: tracker.clone(),
+            })
+            .unwrap();
+
+        let second = tracker.mark_dirty(1, 2);
+        assert!(tracker.begin_save(1, 2, second));
+        queue
+            .send(SaveCommand::SaveChunk {
+                snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
+                    crate::dimension::Dimension::Overworld,
+                    &chunk,
+                    Vec::new(),
+                ),
+                revision: second,
+                tracker,
+            })
+            .unwrap();
+
+        let state = queue
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.pending_chunks.len(), 1);
+        assert_eq!(
+            state.pending_chunks.values().next().unwrap().revision,
+            second
+        );
+        assert_eq!(queue.stats().depth(), 1);
+        assert_eq!(queue.stats().dropped(), 1);
+    }
+
+    #[test]
+    fn flush_propagates_io_failure_and_keeps_chunk_dirty_for_retry() {
+        let world_dir = unique_test_dir("save_flush_failure");
+        let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
+        fs::remove_dir_all(world_dir.join("regions")).unwrap();
+        File::create(world_dir.join("regions")).unwrap();
+
+        let queue = spawn_save_worker(Arc::clone(&manager), 2);
+        let tracker = DirtyChunkSet::new();
+        let revision = tracker.mark_dirty(0, 0);
+        assert!(tracker.begin_save(0, 0, revision));
+        let chunk = Chunk::new(0, 0);
+        queue
+            .send(SaveCommand::SaveChunk {
+                snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
+                    crate::dimension::Dimension::Overworld,
+                    &chunk,
+                    Vec::new(),
+                ),
+                revision,
+                tracker: tracker.clone(),
+            })
+            .unwrap();
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        queue.send(SaveCommand::Flush(ack_tx)).unwrap();
+
+        let result = ack_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("save worker did not ACK flush");
+        assert!(result.is_err());
+        assert_eq!(tracker.state(0, 0), Some(SaveState::Dirty(revision)));
+        assert_eq!(queue.stats().depth(), 1);
+        assert_eq!(queue.stats().in_flight(), 0);
+
+        drop(queue);
+        drop(manager);
+        fs::remove_file(world_dir.join("regions")).unwrap();
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_existing_region_is_never_overwritten() {
+        let world_dir = unique_test_dir("region_corruption");
+        let mut manager = SaveManager::new(&world_dir);
+        let first = Chunk::new(0, 0);
+        manager
+            .save_chunk(0, 0, ChunkSaveData::from_chunk(&first))
+            .unwrap();
+
+        let region_path = world_dir.join("regions/r.0.0.bin");
+        let corrupt_bytes = b"not a bincode region".to_vec();
+        fs::write(&region_path, &corrupt_bytes).unwrap();
+
+        let second = Chunk::new(1, 0);
+        let error = manager
+            .save_chunk(1, 0, ChunkSaveData::from_chunk(&second))
+            .unwrap_err();
+        assert!(matches!(error, SaveError::RegionCorruption { .. }));
+        assert_eq!(fs::read(&region_path).unwrap(), corrupt_bytes);
+
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_replace_faults_leave_a_complete_old_or_new_file() {
+        let world_dir = unique_test_dir("atomic_replace");
+        fs::create_dir_all(&world_dir).unwrap();
+        let path = world_dir.join("level.dat");
+        atomic_write(&path, b"old complete value").unwrap();
+
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(1));
+        assert!(atomic_write(&path, b"new complete value").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old complete value");
+
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(2));
+        assert!(atomic_write(&path, b"new complete value").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"new complete value");
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(0));
+
+        assert!(fs::read_dir(&world_dir).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_replace_survives_process_crash_before_and_after_replace() {
+        let world_dir = unique_test_dir("atomic_process_crash");
+        fs::create_dir_all(&world_dir).unwrap();
+        let path = world_dir.join("level.dat");
+        atomic_write(&path, b"old complete value").unwrap();
+        let test_binary = std::env::current_exe().unwrap();
+
+        let before = std::process::Command::new(&test_binary)
+            .args([
+                "--ignored",
+                "--exact",
+                "save::tests::atomic_replace_crash_child",
+            ])
+            .env("ICRAFT_TEST_ATOMIC_CRASH_STAGE", "before_replace")
+            .env("ICRAFT_TEST_ATOMIC_CRASH_PATH", &path)
+            .output()
+            .unwrap();
+        assert!(!before.status.success());
+        assert_eq!(fs::read(&path).unwrap(), b"old complete value");
+
+        let after = std::process::Command::new(&test_binary)
+            .args([
+                "--ignored",
+                "--exact",
+                "save::tests::atomic_replace_crash_child",
+            ])
+            .env("ICRAFT_TEST_ATOMIC_CRASH_STAGE", "after_replace")
+            .env("ICRAFT_TEST_ATOMIC_CRASH_PATH", &path)
+            .output()
+            .unwrap();
+        assert!(!after.status.success());
+        assert_eq!(fs::read(&path).unwrap(), b"new complete value");
+
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "helper subprocess for atomic_replace_survives_process_crash_before_and_after_replace"]
+    fn atomic_replace_crash_child() {
+        let path = std::env::var_os("ICRAFT_TEST_ATOMIC_CRASH_PATH")
+            .map(PathBuf::from)
+            .expect("missing crash-test path");
+        atomic_write(path, b"new complete value").unwrap();
+        panic!("atomic crash failpoint did not abort");
+    }
+
+    #[test]
+    fn missing_region_load_does_not_create_phantom_lru_keys() {
+        let world_dir = unique_test_dir("region_lru");
+        let mut manager = SaveManager::new(&world_dir);
+        assert!(manager.load_chunk(1024, 1024).is_none());
+        assert!(manager.lru_order.is_empty());
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn enqueue_failure_restores_in_flight_revision_to_dirty() {
+        let queue = unstarted_save_queue(1);
+        queue
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .closed = true;
+        let tracker = DirtyChunkSet::new();
+        let revision = tracker.mark_dirty(0, 0);
+        assert!(tracker.begin_save(0, 0, revision));
+        let chunk = Chunk::new(0, 0);
+        let error = queue
+            .send(SaveCommand::SaveChunk {
+                snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
+                    crate::dimension::Dimension::Overworld,
+                    &chunk,
+                    Vec::new(),
+                ),
+                revision,
+                tracker: tracker.clone(),
+            })
+            .unwrap_err();
+        assert_eq!(error, SaveError::QueueClosed);
+        assert_eq!(tracker.state(0, 0), Some(SaveState::Dirty(revision)));
+    }
+
+    #[test]
+    fn worker_panic_is_acked_as_error_and_snapshot_is_retained() {
+        let world_dir = unique_test_dir("save_worker_panic");
+        let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
+        manager
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .inject_worker_panic_once();
+        let queue = spawn_save_worker(Arc::clone(&manager), 2);
+        let tracker = DirtyChunkSet::new();
+        let revision = tracker.mark_dirty(0, 0);
+        assert!(tracker.begin_save(0, 0, revision));
+        let chunk = Chunk::new(0, 0);
+        queue
+            .send(SaveCommand::SaveChunk {
+                snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
+                    crate::dimension::Dimension::Overworld,
+                    &chunk,
+                    Vec::new(),
+                ),
+                revision,
+                tracker: tracker.clone(),
+            })
+            .unwrap();
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        queue.send(SaveCommand::Flush(ack_tx)).unwrap();
+        let error = ack_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, SaveError::WorkerPanic(_)));
+        assert_eq!(tracker.state(0, 0), Some(SaveState::Dirty(revision)));
+        assert_eq!(queue.stats().depth(), 1);
+        drop(queue);
+        drop(manager);
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn serialization_failure_is_propagated_and_retryable() {
+        let world_dir = unique_test_dir("save_serialize_failure");
+        let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
+        manager
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .inject_serialization_failure_once();
+        let queue = spawn_save_worker(Arc::clone(&manager), 2);
+        let tracker = DirtyChunkSet::new();
+        let revision = tracker.mark_dirty(0, 0);
+        assert!(tracker.begin_save(0, 0, revision));
+        let chunk = Chunk::new(0, 0);
+        queue
+            .send(SaveCommand::SaveChunk {
+                snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
+                    crate::dimension::Dimension::Overworld,
+                    &chunk,
+                    Vec::new(),
+                ),
+                revision,
+                tracker: tracker.clone(),
+            })
+            .unwrap();
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        queue.send(SaveCommand::Flush(ack_tx)).unwrap();
+        let error = ack_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, SaveError::Serialization(_)));
+        assert_eq!(tracker.state(0, 0), Some(SaveState::Dirty(revision)));
+
+        let (retry_tx, retry_rx) = std::sync::mpsc::channel();
+        queue.send(SaveCommand::Flush(retry_tx)).unwrap();
+        retry_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(tracker.state(0, 0), Some(SaveState::Persisted(revision)));
+        drop(queue);
+        drop(manager);
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn salvage_copies_only_readable_chunks_without_mutating_source() {
+        let world_dir = unique_test_dir("region_salvage");
+        let manager = SaveManager::new(&world_dir);
+        let source = world_dir.join("corrupt-region.bin");
+        let destination = world_dir.join("salvaged-region.bin");
+        let valid = bincode::serialize(&ChunkSaveData::from_chunk(&Chunk::new(0, 0))).unwrap();
+        let region = RegionData {
+            chunks: [((0, 0), valid), ((1, 0), b"broken chunk".to_vec())]
+                .into_iter()
+                .collect(),
+        };
+        let source_bytes = bincode::serialize(&region).unwrap();
+        fs::write(&source, &source_bytes).unwrap();
+
+        assert_eq!(
+            manager
+                .salvage_readable_region(&source, &destination)
+                .unwrap(),
+            1
+        );
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+        let salvaged: RegionData = bincode::deserialize(&fs::read(destination).unwrap()).unwrap();
+        assert_eq!(salvaged.chunks.len(), 1);
+        assert!(salvaged.chunks.contains_key(&(0, 0)));
+        fs::remove_dir_all(world_dir).unwrap();
     }
 }

@@ -81,6 +81,9 @@
 
 ### 2.2 重做 save ownership、ACK 與 atomic replacement
 
+> R2 已於 2026-07-30 完成並通過 fault-injection、debug/release 全測試；
+> 詳見 [`repair/R2_save_durability_ack_atomic.md`](repair/R2_save_durability_ack_atomic.md)。
+
 涉及：
 
 - `src/save.rs`

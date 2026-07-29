@@ -1232,9 +1232,9 @@ impl TextureAtlas {
             for x in 0..16 {
                 let grass_h = if (x % 3 == 0) || (x % 5 == 0) { 5 } else { 3 };
                 if y < grass_h {
-                    img.put_pixel(1 * 16 + x, 0 * 16 + y, Rgba([100, 160, 60, 255]));
+                    img.put_pixel(16 + x, y, Rgba([100, 160, 60, 255]));
                 } else {
-                    img.put_pixel(1 * 16 + x, 0 * 16 + y, Rgba([120, 80, 50, 255]));
+                    img.put_pixel(16 + x, y, Rgba([120, 80, 50, 255]));
                 }
             }
         }
@@ -1510,7 +1510,7 @@ impl TextureAtlas {
         // Row 9: Mob Skins
         // Col 0: Zombie Face (front)
         {
-            let ox = 0 * 16;
+            let ox = 0;
             let oy = 9 * 16;
             for y in 0..16 {
                 for x in 0..16 {
@@ -1736,8 +1736,8 @@ impl TextureAtlas {
         // Row 10: Passive Mob Skins
         // Col 0: Pig Face, Col 1: Pig Body (pink)
         {
-            let ox0 = 0 * 16;
-            let ox1 = 1 * 16;
+            let ox0 = 0;
+            let ox1 = 16;
             let oy = 10 * 16;
             for y in 0..16 {
                 for x in 0..16 {

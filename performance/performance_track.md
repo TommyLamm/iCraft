@@ -1,6 +1,6 @@
 # Performance Optimization Track
 
-> 更新日期：2026-07-29
+> 更新日期：2026-07-30
 > 來源計畫：`14_performance_optimization.md`（同目錄）  
 > 原則：每個任務獨立量測、驗證及回退；沒有改善 p95/p99 或記憶體的高複雜度改動不繼續擴大。  
 > 詳細計畫：本目錄下 `01_*.md` ~ `14_*.md`，每個任務一份獨立 plan（含子任務、驗收條件、風險）。
@@ -13,7 +13,7 @@
 | 0 | 火把索引與週期掃描移除 | （不在 01–14 審核回退範圍） | Complete | — | - | `cargo test --release`（366 unit + 1 integration）；torch index focused tests 2 passed |
 | 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Partial | R5、R9 | - | GPU/window 與固定場景 artifact 缺失 |
 | 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Partial | R1（已完成） | - | R1 correctness 已驗收；整體 Complete 仍受第 6 節 artifact/clippy gate 約束 |
-| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Partial | R2 | - | ACK、fault-injection、atomic replace 未驗收 |
+| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Partial | R2（已完成） | - | durability/ACK/fault-injection 已驗收；固定場景 autosave p95 artifact 仍缺 |
 | 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Partial | R3、R5 | - | backpressure/order/bounded drain 未驗收 |
 | 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Partial | R4、R5、R9 | - | 只有合成測試；缺 world checksum |
 | 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Partial | R5 | - | sleep fast-path 與獨立 reference 未驗收 |
@@ -283,7 +283,6 @@
 | 現有基線只使用 render distance 8 | 不得作為 render distance 16 的 buffer/memory/performance claims 證據 | R9 |
 | 缺少 host/client world、entity、health checksum | multiplayer authority 與 catch-up 最終收斂未驗證 | R3、R4、R9 |
 | 缺少 slow-client、capacity=1 與多 client backpressure 場景 | catch-up Chunk 可能永久缺漏，可靠封包順序亦未驗證 | R3、R9 |
-| 缺少 save enqueue/I/O/replace crash fault-injection | 無法證明失敗後 dirty ownership、舊/新檔完整性與 revision ACK 正確 | R2、R9 |
 | 缺少 CPU packing ↔ WGSL decode parity/golden | packed AO 與其他 shader decode 不能宣告視覺等價 | R6、R9 |
 | 缺少 30/60/144/240 FPS headless full-world checksum | fixed tick 目前只由合成位移測試支撐 | R5、R9 |
 | 缺少 non-PGO/PGO 相同 workload A/B | PGO 與 release 性能改善不可宣告 | R9 |

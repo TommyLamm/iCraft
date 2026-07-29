@@ -164,8 +164,10 @@ are deferred and replayed after stream-in.
 
 `SaveManager` owns serialization, legacy-player upgrades, atomic sidecar writes,
 compressed chunk data, region caching, and dimension-aware paths. Five-minute
-autosaves and unload saves run in the background; window close and “Save and
-Quit” flush synchronously.
+autosaves and unload saves use a bounded latest-wins queue with per-Chunk
+dirty/in-flight/persisted revisions. Worker ACKs carry real save errors; failed
+snapshots remain retryable. Window close and “Save and Quit” flush synchronously,
+and a failed flush stays in-game with retry/abandon controls.
 
 Transient state includes projectiles, particles, remote-player snapshots,
 workstation progress, active effects, advancement UI state, and Creative flight.

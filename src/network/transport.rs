@@ -55,29 +55,8 @@ impl Connection {
 
 impl ConnectionReader {
     pub async fn recv(&mut self) -> io::Result<Packet> {
-        loop {
-            if self.frame_len.is_none() {
-                while self.buf.len() < LEN_HEADER {
-                    let mut tmp = [0u8; 4096];
-                    let n = self.stream.read(&mut tmp).await?;
-                    if n == 0 {
-                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
-                    }
-                    self.buf.extend_from_slice(&tmp[..n]);
-                }
-                let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
-                if len > MAX_PACKET_SIZE {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("packet length {len} exceeds maximum {MAX_PACKET_SIZE}"),
-                    ));
-                }
-                self.buf.drain(0..LEN_HEADER);
-                self.frame_len = Some(len as usize);
-            }
-
-            let need = self.frame_len.unwrap();
-            while self.buf.len() < need {
+        if self.frame_len.is_none() {
+            while self.buf.len() < LEN_HEADER {
                 let mut tmp = [0u8; 4096];
                 let n = self.stream.read(&mut tmp).await?;
                 if n == 0 {
@@ -85,12 +64,30 @@ impl ConnectionReader {
                 }
                 self.buf.extend_from_slice(&tmp[..n]);
             }
-
-            let body: Vec<u8> = self.buf.drain(0..need).collect();
-            self.frame_len = None;
-            return Packet::decode(&body)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+            let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
+            if len > MAX_PACKET_SIZE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("packet length {len} exceeds maximum {MAX_PACKET_SIZE}"),
+                ));
+            }
+            self.buf.drain(0..LEN_HEADER);
+            self.frame_len = Some(len as usize);
         }
+
+        let need = self.frame_len.unwrap();
+        while self.buf.len() < need {
+            let mut tmp = [0u8; 4096];
+            let n = self.stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
+            }
+            self.buf.extend_from_slice(&tmp[..n]);
+        }
+
+        let body: Vec<u8> = self.buf.drain(0..need).collect();
+        self.frame_len = None;
+        Packet::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
 
