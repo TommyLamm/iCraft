@@ -23,3 +23,9 @@ This directory contains standard, reproducible benchmark scenarios for performan
    ```
 2. Press `F3` in-game to display the extended observability HUD.
 3. Record CPU average/p95/p99 per scope, GPU pass timings, queue depths, and memory working set.
+
+## R9 fixed-scene artifact protocol
+
+Use `performance/tools/Invoke-R9Matrix.ps1` for eight scenes at render distance 16; each run records warmup, sample, and repetition metadata. Validate and summarize with `Validate-R9Jsonl.ps1` and `Measure-R9Runs.ps1`. Missing metrics are fatal, never zero-filled. The stable JSONL frame schema includes timestamps, scene/repetition/phase, frame/cpu/gpu timings, working set, upload, draw calls, buffer bytes, queue depth/delay, and a correctness checksum.
+
+Acceptance is predeclared: five repetitions per scene, exact checksum parity, and PGO inclusion only when median CPU p50 improves at least 3%, CPU p95/p99 regress no more than 1%, working set regresses no more than 5%, and correctness is unchanged. `Compare-R9Pgo.ps1` records the gate without fabricating results. Capture contemporaneous host/GPU/driver/OS/git/settings with `New-R9Manifest.ps1`; fixtures and dry-run checks are under `performance/tools/tests`.

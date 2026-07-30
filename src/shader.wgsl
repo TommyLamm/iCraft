@@ -34,6 +34,7 @@ struct VertexOutput {
     @location(1) @interpolate(flat) light_level: f32,
     @location(2) world_pos: vec3<f32>,
     @location(3) ao: f32,
+    @location(4) tint_color: vec4<f32>,
 };
 
 @vertex
@@ -59,12 +60,13 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.light_level = model.light_level;
     out.world_pos = model.position;
     out.ao = model.ao;
+    out.tint_color = vec4<f32>(1.0);
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = textureSample(t_diffuse, s_diffuse, in.tex_coords);
+    let color = textureSample(t_diffuse, s_diffuse, in.tex_coords) * in.tint_color;
     if (color.a < 0.5) {
         discard;
     }
@@ -160,7 +162,13 @@ fn vs_terrain(model: TerrainVertexInput) -> TerrainVertexOutput {
     out.light_level = f32(light_ao_raw & 0x3FFFu);
 
     let ao_raw = (light_ao_raw >> 14u) & 0x03u;
-    out.ao = select(f32(ao_raw) / 3.0, 1.0, ao_raw >= 3u);
+    // CPU packs AO as a four-level discrete code. Keep this mapping exactly
+    // in sync with TerrainVertex::ao (3/2/1/0 -> 1/.75/.5/.25).
+    out.ao = select(0.25,
+        select(0.5,
+            select(0.75, 1.0, ao_raw == 3u),
+            ao_raw == 2u),
+        ao_raw == 1u);
 
     out.world_pos = world_pos;
     return out;
@@ -194,6 +202,7 @@ fn vs_crosshair(model: VertexInput) -> VertexOutput {
     out.light_level = model.light_level;
     out.world_pos = model.position;
     out.ao = model.ao;
+    out.tint_color = vec4<f32>(1.0);
     return out;
 }
 
@@ -410,6 +419,7 @@ fn vs_instanced_mob(
     out.light_level = instance.light_level;
     out.world_pos = world_pos;
     out.ao = 1.0;
+    out.tint_color = vec4<f32>(1.0);
     return out;
 }
 
@@ -426,6 +436,8 @@ struct ParticleInstanceInput {
     @location(6) lifetime: f32,
     @location(7) fade_scale: u32,
     @location(8) tex_coords: vec4<f32>,
+    @location(9) color: vec4<f32>,
+    @location(10) light_level: f32,
 };
 
 @vertex
@@ -455,9 +467,10 @@ fn vs_instanced_particle(
     var out: VertexOutput;
     out.clip_position = camera.view_proj * vec4<f32>(world_pos, 1.0);
     out.tex_coords = vec2<f32>(u, v);
-    out.light_level = 240.0;
+    out.light_level = instance.light_level;
     out.world_pos = world_pos;
     out.ao = 1.0;
+    out.tint_color = instance.color;
     return out;
 }
 

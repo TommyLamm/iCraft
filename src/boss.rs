@@ -6,7 +6,7 @@
 
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::Dimension;
-use crate::entity::{EntityManager, EntityType};
+use crate::entity::{EntityIterationKind, EntityManager, EntityType};
 use crate::inventory::{GameMode, Item};
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
 use glam::Vec3;
@@ -111,16 +111,20 @@ fn ensure_nether_mob(
     player_pos: Vec3,
     time: f32,
 ) {
-    let nether_count = entities
-        .entities
-        .iter()
-        .filter(|entity| {
-            matches!(
-                entity.entity_type,
-                EntityType::Blaze | EntityType::Piglin | EntityType::Husk
-            ) && entity.health > 0.0
+    // Global cap maintenance: count only indexed hostile buckets, not a
+    // candidate radius/target query.
+    debug_assert!(crate::entity::is_global_entity_maintenance(
+        EntityIterationKind::GlobalCleanup
+    ));
+    let nether_count = [EntityType::Blaze, EntityType::Piglin, EntityType::Husk]
+        .into_iter()
+        .map(|kind| {
+            entities
+                .get_entities_by_type(kind)
+                .filter(|entity| entity.health > 0.0)
+                .count()
         })
-        .count();
+        .sum::<usize>();
     if nether_count >= NETHER_MOB_CAP || chunks.chunks.is_empty() {
         return;
     }
@@ -154,21 +158,14 @@ fn ensure_nether_mob(
 
 fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, time: f32) {
     let dragon_exists = entities
-        .entities
-        .iter()
-        .any(|entity| entity.entity_type == EntityType::EnderDragon);
+        .get_entities_by_type(EntityType::EnderDragon)
+        .next()
+        .is_some();
     let dragon_completed = chunks.chunks.values().any(|chunk| {
-        chunk.sections.iter().any(|sec| match &sec.blocks {
-            crate::world::BlockStorage::Empty => false,
-            crate::world::BlockStorage::Uniform(b) => *b == BlockType::DragonEgg,
-            crate::world::BlockStorage::Paletted1 { palette, .. }
-            | crate::world::BlockStorage::Paletted2 { palette, .. }
-            | crate::world::BlockStorage::Paletted4 { palette, .. }
-            | crate::world::BlockStorage::Paletted8 { palette, .. } => {
-                palette.contains(&BlockType::DragonEgg)
-            }
-            crate::world::BlockStorage::Global(arr) => arr.contains(&BlockType::DragonEgg),
-        })
+        chunk
+            .sections
+            .iter()
+            .any(|section| section.contains_block(BlockType::DragonEgg))
     });
 
     // The dragon egg is the persistent world marker that prevents a defeated
@@ -191,9 +188,8 @@ fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, ti
     }
 
     let shulker_count = entities
-        .entities
-        .iter()
-        .filter(|entity| entity.entity_type == EntityType::Shulker && entity.health > 0.0)
+        .get_entities_by_type(EntityType::Shulker)
+        .filter(|entity| entity.health > 0.0)
         .count();
     if shulker_count >= SHULKER_CAP {
         return;
@@ -226,9 +222,10 @@ fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, ti
     let index = mix64(time.to_bits() as u64 ^ shulker_count as u64) as usize % candidates.len();
     let (x, y, z) = candidates[index];
     let pos = Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5);
-    if !entities.entities.iter().any(|entity| {
-        entity.entity_type == EntityType::Shulker && entity.position.distance_squared(pos) < 4.0
-    }) {
+    if !entities
+        .query_radius_types(pos, 2.0, &[EntityType::Shulker])
+        .any(|entity| entity.position.distance_squared(pos) < 4.0)
+    {
         entities.spawn(EntityType::Shulker, pos);
     }
 }
@@ -249,15 +246,19 @@ pub fn update_dimension_entities(
     collect_deaths(entities, &mut events);
 
     let crystal_positions: Vec<Vec3> = entities
-        .entities
-        .iter()
-        .filter(|entity| entity.entity_type == EntityType::EndCrystal && entity.health > 0.0)
+        .get_entities_by_type(EntityType::EndCrystal)
+        .filter(|entity| entity.health > 0.0)
         .map(|entity| entity.position)
         .collect();
     let mut pending_spawns = Vec::new();
     let mut removed_projectiles = Vec::new();
     let is_creative = game_mode == GameMode::Creative;
 
+    // Global simulation maintenance: every live entity receives its timer
+    // tick/physics update; this is intentionally not a candidate query.
+    debug_assert!(crate::entity::is_global_entity_maintenance(
+        EntityIterationKind::GlobalSimulation
+    ));
     for entity in &mut entities.entities {
         entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
         entity.ai_timer += dt;
@@ -356,7 +357,7 @@ pub fn update_dimension_entities(
             projectile.ai_timer = 0.0;
         }
     }
-    entities.update_spatial_indexes();
+    entities.sync_positions();
     events
 }
 
@@ -537,6 +538,11 @@ fn projectile_hit(
 
 fn collect_deaths(entities: &mut EntityManager, events: &mut BossEvents) {
     let mut dead_ids = Vec::new();
+    // Global cleanup maintenance: consume dead boss-owned entities exactly
+    // once. This pass is deliberately exhaustive and does not select targets.
+    debug_assert!(crate::entity::is_global_entity_maintenance(
+        EntityIterationKind::GlobalCleanup
+    ));
     for entity in &entities.entities {
         // Projectile/particle/item entities intentionally have max_health == 0;
         // they expire through their own lifetime rules rather than the mob-death
@@ -656,20 +662,23 @@ where
 }
 
 pub fn active_boss_hud(entities: &EntityManager) -> Option<BossHud> {
-    entities.entities.iter().find_map(|entity| {
-        let title = entity.entity_type.boss_name()?;
-        let progress = if entity.max_health > 0.0 {
-            (entity.health / entity.max_health).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        Some(BossHud {
-            entity_id: entity.id,
-            boss_type: entity.entity_type,
-            title,
-            progress,
+    [EntityType::EnderDragon, EntityType::Wither]
+        .into_iter()
+        .flat_map(|kind| entities.get_entities_by_type(kind))
+        .find_map(|entity| {
+            let title = entity.entity_type.boss_name()?;
+            let progress = if entity.max_health > 0.0 {
+                (entity.health / entity.max_health).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            Some(BossHud {
+                entity_id: entity.id,
+                boss_type: entity.entity_type,
+                title,
+                progress,
+            })
         })
-    })
 }
 
 fn open_surface_y(chunks: &ChunkManager, wx: i32, wz: i32) -> Option<i32> {

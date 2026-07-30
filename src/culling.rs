@@ -1,6 +1,7 @@
 use glam::Vec3;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{channel, sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread;
 
 use crate::chunk_manager::ChunkManager;
@@ -76,23 +77,46 @@ impl Default for SectionConnectivityState {
 #[inline]
 pub fn is_section_occluder(block: crate::world::BlockType) -> bool {
     use crate::world::BlockType;
-    if block == BlockType::Air {
-        return false;
-    }
-    let props = block.properties();
-    if !props.is_solid {
-        return false;
-    }
-    if block == BlockType::Glass {
-        return false;
-    }
-    if matches!(
+    // Keep this allow-list deliberately conservative: only blocks whose model is
+    // a complete opaque cube may seal a section. New block types fail open.
+    matches!(
         block,
-        BlockType::OakLeaves | BlockType::BirchLeaves | BlockType::SpruceLeaves
-    ) {
-        return false;
-    }
-    true
+        BlockType::Grass
+            | BlockType::Dirt
+            | BlockType::Stone
+            | BlockType::Sand
+            | BlockType::Gravel
+            | BlockType::OakLog
+            | BlockType::OakPlanks
+            | BlockType::Cobblestone
+            | BlockType::Bedrock
+            | BlockType::CoalOre
+            | BlockType::IronOre
+            | BlockType::GoldOre
+            | BlockType::DiamondOre
+            | BlockType::RedstoneOre
+            | BlockType::Brick
+            | BlockType::StoneBrick
+            | BlockType::Snow
+            | BlockType::Clay
+            | BlockType::Sandstone
+            | BlockType::Obsidian
+            | BlockType::BirchLog
+            | BlockType::BirchPlanks
+            | BlockType::SpruceLog
+            | BlockType::SprucePlanks
+            | BlockType::Pumpkin
+            | BlockType::Melon
+            | BlockType::Dispenser
+            | BlockType::Dropper
+            | BlockType::NoteBlock
+            | BlockType::Netherrack
+            | BlockType::SoulSand
+            | BlockType::Glowstone
+            | BlockType::EndStone
+            | BlockType::Purpur
+            | BlockType::NetherBrick
+    )
 }
 
 /// Compute pairwise face connectivity for a 16x16x16 section inside a Chunk.
@@ -316,6 +340,41 @@ mod tests {
         let state = SectionConnectivityState::Valid(SectionConnectivity::NONE);
         assert_eq!(state.fail_open(), SectionConnectivity::NONE);
     }
+
+    #[test]
+    fn transparent_and_partial_blocks_fail_open() {
+        use crate::world::BlockType;
+        for block in [
+            BlockType::Air,
+            BlockType::Glass,
+            BlockType::Ice,
+            BlockType::Water,
+            BlockType::Lava,
+            BlockType::OakLeaves,
+            BlockType::BirchLeaves,
+            BlockType::SpruceLeaves,
+            BlockType::Torch,
+            BlockType::OakDoor,
+            BlockType::OakTrapdoor,
+            BlockType::Chest,
+            BlockType::Cactus,
+            BlockType::TallGrass,
+            BlockType::EndPortal,
+        ] {
+            assert!(!is_section_occluder(block), "{block:?} must fail open");
+        }
+    }
+
+    #[test]
+    fn opaque_cube_blocks_los() {
+        assert!(is_los_blocked(
+            Vec3::new(0.2, 1.2, 0.2),
+            Vec3::new(3.8, 1.2, 0.2),
+            |x, y, z| {
+                (x, y, z) == (1, 1, 0) && is_section_occluder(crate::world::BlockType::Stone)
+            }
+        ));
+    }
 }
 
 /// Fast 3D DDA voxel line-of-sight raycast.
@@ -435,17 +494,55 @@ where
     false
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LosIdentity {
+    pub dimension: crate::dimension::Dimension,
+    pub generation: u64,
+    pub chunk_revisions: HashMap<(i32, i32), u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoxelOcclusionSnapshot {
+    pub identity: LosIdentity,
+    pub voxels: HashMap<(i32, i32, i32), crate::world::BlockType>,
+}
+
+impl VoxelOcclusionSnapshot {
+    pub const MAX_VOXELS: usize = 16_384;
+    pub fn is_occluder(&self, x: i32, y: i32, z: i32) -> bool {
+        self.voxels
+            .get(&(x, y, z))
+            .copied()
+            .map(is_section_occluder)
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Clone)]
 pub struct EntityLosRequest {
     pub entity_id: u64,
     pub camera_pos: Vec3,
     pub target_pos: Vec3,
     pub camera_cell: (i32, i32, i32),
+    pub snapshot: Arc<VoxelOcclusionSnapshot>,
+    pub identity: LosIdentity,
 }
 
 pub struct EntityLosResult {
     pub entity_id: u64,
     pub camera_cell: (i32, i32, i32),
     pub is_visible: bool,
+    pub identity: LosIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CullingCounters {
+    pub distance: u64,
+    pub frustum: u64,
+    pub section: u64,
+    pub los: u64,
+    pub fail_open: u64,
+    pub stale: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -460,6 +557,8 @@ pub struct EntityLosManager {
     request_tx: SyncSender<EntityLosRequest>,
     result_rx: Receiver<EntityLosResult>,
     cache: HashMap<u64, LosCacheEntry>,
+    current_identity: Option<LosIdentity>,
+    pub counters: CullingCounters,
 }
 
 impl EntityLosManager {
@@ -471,17 +570,15 @@ impl EntityLosManager {
             .name("entity_los_worker".to_string())
             .spawn(move || {
                 while let Ok(req) = req_rx.recv() {
-                    // For async thread LOS check, run bounded raycast
-                    let blocked = is_los_blocked(req.camera_pos, req.target_pos, |_x, _y, _z| {
-                        // In background worker thread, if no spatial lookup is passed,
-                        // we can perform a conservative test or assume raycast test
-                        false
+                    let blocked = is_los_blocked(req.camera_pos, req.target_pos, |x, y, z| {
+                        req.snapshot.is_occluder(x, y, z)
                     });
 
                     let _ = res_tx.send(EntityLosResult {
                         entity_id: req.entity_id,
                         camera_cell: req.camera_cell,
                         is_visible: !blocked,
+                        identity: req.identity,
                     });
                 }
             })
@@ -491,27 +588,75 @@ impl EntityLosManager {
             request_tx: req_tx,
             result_rx: res_rx,
             cache: HashMap::new(),
+            current_identity: None,
+            counters: CullingCounters::default(),
         }
+    }
+
+    pub fn set_current_identity(&mut self, identity: LosIdentity) {
+        if self.current_identity.as_ref() != Some(&identity) {
+            self.cache.clear();
+        }
+        self.current_identity = Some(identity);
+    }
+
+    fn make_snapshot(
+        &mut self,
+        cam_pos: Vec3,
+        target_pos: Vec3,
+        manager: &ChunkManager,
+    ) -> Option<Arc<VoxelOcclusionSnapshot>> {
+        let identity = self
+            .current_identity
+            .clone()
+            .unwrap_or_else(|| LosIdentity {
+                dimension: manager.dimension,
+                generation: 0,
+                chunk_revisions: manager.dirty_chunks.dirty_revisions().into_iter().collect(),
+            });
+        if self.current_identity.is_none() {
+            self.current_identity = Some(identity.clone());
+        }
+        let min = cam_pos.min(target_pos).floor().as_ivec3() - glam::IVec3::splat(1);
+        let max = cam_pos.max(target_pos).ceil().as_ivec3() + glam::IVec3::splat(1);
+        let volume = (max.x - min.x + 1) as usize
+            * (max.y - min.y + 1) as usize
+            * (max.z - min.z + 1) as usize;
+        if volume > VoxelOcclusionSnapshot::MAX_VOXELS {
+            self.counters.fail_open += 1;
+            return None;
+        }
+        let mut voxels = HashMap::with_capacity(volume);
+        for x in min.x..=max.x {
+            for y in min.y..=max.y {
+                for z in min.z..=max.z {
+                    voxels.insert((x, y, z), manager.get_block(x, y, z));
+                }
+            }
+        }
+        Some(Arc::new(VoxelOcclusionSnapshot { identity, voxels }))
     }
 
     pub fn poll_results(&mut self) {
         while let Ok(res) = self.result_rx.try_recv() {
+            if self.current_identity.as_ref() != Some(&res.identity) {
+                self.counters.stale += 1;
+                continue;
+            }
             let entry = self.cache.entry(res.entity_id).or_insert(LosCacheEntry {
                 camera_cell: res.camera_cell,
                 is_visible: true,
                 ttl: 30,
                 hysteresis_count: 0,
             });
-
             entry.camera_cell = res.camera_cell;
             entry.is_visible = res.is_visible;
             entry.ttl = 30;
-
-            if res.is_visible {
-                entry.hysteresis_count = 0;
+            entry.hysteresis_count = if res.is_visible {
+                0
             } else {
-                entry.hysteresis_count = entry.hysteresis_count.saturating_add(1);
-            }
+                entry.hysteresis_count.saturating_add(1)
+            };
         }
     }
 
@@ -524,6 +669,7 @@ impl EntityLosManager {
     ) -> bool {
         let dist_sq = entity.position.distance_squared(cam_pos);
         if dist_sq <= 16.0 * 16.0 {
+            self.counters.distance += 1;
             return true;
         }
 
@@ -533,10 +679,12 @@ impl EntityLosManager {
                 EntityType::EnderDragon | EntityType::Wither | EntityType::EndCrystal
             )
         {
+            self.counters.fail_open += 1;
             return true;
         }
 
         if entity.entity_type == EntityType::RemotePlayer && dist_sq <= 32.0 * 32.0 {
+            self.counters.distance += 1;
             return true;
         }
 
@@ -552,6 +700,9 @@ impl EntityLosManager {
 
         // Fast synchronous check using DDA against chunk manager
         let target_pos = entity.position + Vec3::new(0.0, 0.8, 0.0);
+        let Some(snapshot) = self.make_snapshot(cam_pos, target_pos, chunk_manager) else {
+            return true;
+        };
         let blocked = is_los_blocked(cam_pos, target_pos, |x, y, z| {
             let block = chunk_manager.get_block(x, y, z);
             is_section_occluder(block)
@@ -577,12 +728,21 @@ impl EntityLosManager {
             return false;
         }
 
-        let _ = self.request_tx.try_send(EntityLosRequest {
-            entity_id: entity.id,
-            camera_pos: cam_pos,
-            target_pos,
-            camera_cell: cam_cell,
-        });
+        if self
+            .request_tx
+            .try_send(EntityLosRequest {
+                entity_id: entity.id,
+                camera_pos: cam_pos,
+                target_pos,
+                camera_cell: cam_cell,
+                identity: snapshot.identity.clone(),
+                snapshot,
+            })
+            .is_err()
+        {
+            self.counters.fail_open += 1;
+            self.cache.remove(&entity.id);
+        }
 
         true
     }

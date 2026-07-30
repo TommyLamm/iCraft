@@ -49,6 +49,9 @@ pub fn update_passive_mobs(
     time: f32,
     authoritative: bool,
 ) -> Vec<(i32, i32, i32)> {
+    if !authoritative {
+        return Vec::new();
+    }
     let player_pos = player_physics.position;
     let mut hearts_to_spawn = Vec::new();
     let mut baby_mobs_to_spawn = Vec::new();
@@ -57,9 +60,10 @@ pub fn update_passive_mobs(
     // Collect entities and process their individual AI
     let entity_len = entity_manager.entities.len();
     for i in 0..entity_len {
-        let (entity_type, pos, invuln, age, breed_timer, breed_cd, _has_wool) = {
+        let (entity_id, entity_type, pos, invuln, age, breed_timer, breed_cd, _has_wool) = {
             let e = &entity_manager.entities[i];
             (
+                e.id,
                 e.entity_type,
                 e.position,
                 e.invulnerable_time,
@@ -152,17 +156,17 @@ pub fn update_passive_mobs(
         } else if breed_timer > 0.0 {
             // Seeking mating partner
             let mut nearest_partner = None;
+            let mut nearest_partner_id = None;
             let mut nearest_dist_sq = 999999.0;
-            for j in 0..entity_len {
-                if i == j {
-                    continue;
-                }
-                let partner = &entity_manager.entities[j];
-                if partner.entity_type == entity_type && partner.breeding_timer > 0.0 {
+            for partner in
+                entity_manager.query_radius_types(pos, 128.0, std::slice::from_ref(&entity_type))
+            {
+                if partner.id != entity_id && partner.breeding_timer > 0.0 {
                     let dist_sq = pos.distance_squared(partner.position);
                     if dist_sq < nearest_dist_sq {
                         nearest_dist_sq = dist_sq;
                         nearest_partner = Some(partner.position);
+                        nearest_partner_id = Some(partner.id);
                     }
                 }
             }
@@ -178,15 +182,14 @@ pub fn update_passive_mobs(
                     entity_manager.entities[i].breeding_timer = 0.0;
                     entity_manager.entities[i].breed_cooldown = 300.0;
 
-                    // Find and update partner
-                    for j in 0..entity_len {
-                        if entity_manager.entities[j].entity_type == entity_type
-                            && entity_manager.entities[j].breeding_timer > 0.0
-                        {
-                            if entity_manager.entities[j].position.distance_squared(pos) <= 2.25 {
-                                entity_manager.entities[j].breeding_timer = 0.0;
-                                entity_manager.entities[j].breed_cooldown = 300.0;
-                                break;
+                    // Find and update partner by id after the immutable query.
+                    if let Some(partner_id) = nearest_partner_id {
+                        if let Some(partner) = entity_manager.get_by_id_mut(partner_id) {
+                            if partner.position.distance_squared(pos) <= 2.25
+                                && partner.breeding_timer > 0.0
+                            {
+                                partner.breeding_timer = 0.0;
+                                partner.breed_cooldown = 300.0;
                             }
                         }
                     }
@@ -202,9 +205,10 @@ pub fn update_passive_mobs(
             // Follow nearest adult parent
             let mut nearest_adult = None;
             let mut nearest_dist_sq = 999999.0;
-            for j in 0..entity_len {
-                let adult = &entity_manager.entities[j];
-                if adult.entity_type == entity_type && adult.age >= 0.0 {
+            for adult in
+                entity_manager.query_radius_types(pos, 128.0, std::slice::from_ref(&entity_type))
+            {
+                if adult.age >= 0.0 {
                     let dist_sq = pos.distance_squared(adult.position);
                     if dist_sq < nearest_dist_sq {
                         nearest_dist_sq = dist_sq;
@@ -314,7 +318,7 @@ pub fn update_passive_mobs(
         }
     }
 
-    entity_manager.update_spatial_indexes();
+    entity_manager.sync_positions();
     block_changes
 }
 
@@ -443,5 +447,29 @@ mod tests {
         ));
         assert_eq!(inventory.count_item(Item::Egg), 1);
         assert!(entities.entities.is_empty());
+    }
+
+    #[test]
+    fn partner_query_matches_independent_radius_oracle() {
+        let mut entities = EntityManager::new();
+        let center = Vec3::new(0.0, 64.0, 0.0);
+        let near = entities.spawn(EntityType::Cow, Vec3::new(3.0, 64.0, 4.0));
+        entities.spawn(EntityType::Cow, Vec3::new(40.0, 64.0, 0.0));
+        entities.spawn(EntityType::Pig, Vec3::new(2.0, 64.0, 0.0));
+        let indexed: std::collections::HashSet<u64> = entities
+            .query_radius_types(center, 8.0, &[EntityType::Cow])
+            .map(|entity| entity.id)
+            .collect();
+        let oracle: std::collections::HashSet<u64> = entities
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.entity_type == EntityType::Cow
+                    && entity.position.distance_squared(center) <= 64.0
+            })
+            .map(|entity| entity.id)
+            .collect();
+        assert_eq!(indexed, oracle);
+        assert!(indexed.contains(&near));
     }
 }

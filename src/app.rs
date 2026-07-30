@@ -1,11 +1,11 @@
 use crate::menu::{GameSettings, Menu, MenuAction};
 use crate::state::State;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
-    event_loop::ActiveEventLoop,
+    event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
@@ -62,10 +62,34 @@ fn non_repeating_press(pressed: bool, repeat: bool) -> bool {
     pressed && !repeat
 }
 
+fn frame_interval(fps_cap: u32) -> Option<Duration> {
+    (fps_cap > 0).then(|| Duration::from_secs_f64(1.0 / fps_cap as f64))
+}
+
+fn next_frame_deadline(
+    previous: Option<Instant>,
+    now: Instant,
+    interval: Option<Duration>,
+) -> Option<Instant> {
+    let interval = interval?;
+    let mut deadline = previous.unwrap_or(now);
+    if deadline <= now {
+        let behind = now.duration_since(deadline).as_nanos() / interval.as_nanos().max(1);
+        deadline += interval.saturating_mul((behind as u32).saturating_add(1));
+    } else {
+        // A cap change can leave the previous deadline farther away than one
+        // interval at the new rate.  Bound it relative to this reference time
+        // so switching caps takes effect on the new cadence immediately.
+        deadline = deadline.min(now + interval);
+    }
+    Some(deadline)
+}
+
 pub struct App {
     runtime: Option<Runtime>,
     window: Option<Arc<Window>>,
     last_render_time: Instant,
+    frame_deadline: Option<Instant>,
     pending_transition: Option<PendingRuntimeTransition>,
     /// Latest keyboard modifier state, tracked so Shift+Q can be detected
     /// even while UI screens swallow plain key events.
@@ -78,6 +102,7 @@ impl App {
             runtime: None,
             window: None,
             last_render_time: Instant::now(),
+            frame_deadline: None,
             pending_transition: None,
             modifiers: winit::event::Modifiers::default(),
         }
@@ -103,6 +128,7 @@ impl App {
                 state.set_paused(false);
                 self.runtime = Some(Runtime::Game(state));
                 self.last_render_time = Instant::now();
+                self.frame_deadline = None;
             }
         }
     }
@@ -116,6 +142,7 @@ impl App {
         let menu = pollster::block_on(Menu::new(window, settings));
         self.runtime = Some(Runtime::Menu(menu));
         self.last_render_time = Instant::now();
+        self.frame_deadline = None;
     }
 
     fn apply_pending_transition(&mut self, event_loop: &ActiveEventLoop) {
@@ -166,6 +193,7 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.runtime = Some(Runtime::Menu(menu));
         self.last_render_time = Instant::now();
+        self.frame_deadline = None;
     }
 
     fn device_event(
@@ -380,6 +408,13 @@ impl ApplicationHandler for App {
             },
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
+                let interval = self.runtime_fps_interval();
+                if let Some(deadline) = self.frame_deadline {
+                    if now < deadline {
+                        return;
+                    }
+                }
+                self.frame_deadline = next_frame_deadline(self.frame_deadline, now, interval);
                 let dt = now
                     .duration_since(self.last_render_time)
                     .as_secs_f32()
@@ -388,7 +423,9 @@ impl ApplicationHandler for App {
                 match &mut self.runtime {
                     Some(Runtime::Menu(menu)) => {
                         menu.update(dt);
-                        menu.window.request_redraw();
+                        if interval.is_none() {
+                            menu.window.request_redraw();
+                        }
                         match menu.render() {
                             Ok(()) => {}
                             Err(wgpu::SurfaceError::Lost) => menu.resize(menu.window.inner_size()),
@@ -398,7 +435,9 @@ impl ApplicationHandler for App {
                     }
                     Some(Runtime::Game(state)) => {
                         state.update(dt);
-                        state.window.request_redraw();
+                        if interval.is_none() {
+                            state.window.request_redraw();
+                        }
                         match state.render() {
                             Ok(()) => {}
                             Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
@@ -415,11 +454,41 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.apply_pending_transition(event_loop);
+        let interval = self.runtime_fps_interval();
+        if let Some(deadline) = self.frame_deadline {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            if Instant::now() >= deadline {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        } else if interval.is_none() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        } else {
+            let deadline = next_frame_deadline(None, Instant::now(), interval);
+            self.frame_deadline = deadline;
+            if let Some(deadline) = deadline {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            }
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.pending_transition = None;
         self.runtime = None;
+    }
+}
+
+impl App {
+    fn runtime_fps_interval(&self) -> Option<Duration> {
+        match &self.runtime {
+            Some(Runtime::Menu(menu)) => frame_interval(menu.settings.fps_cap),
+            Some(Runtime::Game(state)) => frame_interval(state.settings.fps_cap),
+            None => None,
+        }
     }
 }
 
@@ -680,5 +749,40 @@ mod tests {
 
         assert!(!chat_open);
         assert!(!paused);
+    }
+
+    #[test]
+    fn frame_deadlines_cover_common_caps_and_uncapped_mode() {
+        assert_eq!(frame_interval(0), None);
+        for cap in [30, 60, 144] {
+            let interval = frame_interval(cap).unwrap();
+            assert!(interval > Duration::ZERO);
+            let now = Instant::now();
+            assert_eq!(
+                next_frame_deadline(None, now, Some(interval)),
+                Some(now + interval)
+            );
+        }
+    }
+
+    #[test]
+    fn late_deadlines_skip_missed_slots_without_drift() {
+        let interval = frame_interval(60).unwrap();
+        let start = Instant::now();
+        let late = start + interval * 5 + interval / 2;
+        let next = next_frame_deadline(Some(start), late, Some(interval)).unwrap();
+        assert!(next > late);
+        assert!(next - late <= interval);
+    }
+
+    #[test]
+    fn deadline_reset_supports_cap_changes() {
+        let now = Instant::now();
+        let old = next_frame_deadline(None, now, frame_interval(30));
+        let new_interval = frame_interval(144).unwrap();
+        let changed = next_frame_deadline(old, now, Some(new_interval)).unwrap();
+        assert!(changed > now);
+        assert_eq!(changed, now + new_interval);
+        assert_eq!(next_frame_deadline(old, now, None), None);
     }
 }

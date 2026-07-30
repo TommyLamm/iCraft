@@ -20,6 +20,15 @@ pub enum Dimension {
 }
 
 impl Dimension {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Overworld),
+            1 => Some(Self::Nether),
+            2 => Some(Self::End),
+            _ => None,
+        }
+    }
+
     pub const fn name(self) -> &'static str {
         match self {
             Self::Overworld => "Overworld",

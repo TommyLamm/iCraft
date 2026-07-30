@@ -265,6 +265,13 @@ pub struct RedstoneSystem {
     tick: u64,
     dirty: HashSet<BlockPos>,
     sleeping: bool,
+    /// The normalized set of plate positions occupied on the previous tick.
+    /// Keeping this separate from raw player positions makes duplicate players
+    /// and ordering irrelevant when deciding whether a sleeping system can
+    /// return without scanning its pressure plates.
+    previous_plate_occupants: HashSet<BlockPos>,
+    #[cfg(test)]
+    pressure_plate_scans: u64,
 }
 
 #[allow(dead_code)]
@@ -529,11 +536,12 @@ impl RedstoneSystem {
     pub fn tick(&mut self, manager: &mut ChunkManager, occupants: &[BlockPos]) -> RedstoneUpdate {
         self.tick = self.tick.wrapping_add(1);
         self.sync_loaded_chunks(manager);
+        let normalized_occupants = normalize_plate_occupants(self, manager, occupants);
 
         if self.sleeping
             && self.dirty.is_empty()
             && self.scheduled.is_empty()
-            && occupants.is_empty()
+            && normalized_occupants == self.previous_plate_occupants
         {
             return RedstoneUpdate::default();
         }
@@ -550,6 +558,7 @@ impl RedstoneSystem {
         if self.dirty.is_empty() && self.scheduled.is_empty() {
             self.sleeping = true;
         }
+        self.previous_plate_occupants = normalized_occupants;
 
         update
     }
@@ -645,6 +654,10 @@ impl RedstoneSystem {
         occupants: &[BlockPos],
         mutations: &mut Vec<BlockMutation>,
     ) {
+        #[cfg(test)]
+        {
+            self.pressure_plate_scans += 1;
+        }
         let plates: Vec<BlockPos> = self
             .components
             .iter()
@@ -1220,6 +1233,24 @@ fn sub(a: BlockPos, b: BlockPos) -> BlockPos {
     (a.0 - b.0, a.1 - b.1, a.2 - b.2)
 }
 
+fn normalize_plate_occupants(
+    system: &RedstoneSystem,
+    manager: &ChunkManager,
+    occupants: &[BlockPos],
+) -> HashSet<BlockPos> {
+    occupants
+        .iter()
+        .map(|&(x, y, z)| (x, y - 1, z))
+        .filter(|pos| {
+            system.components.contains_key(pos)
+                && matches!(
+                    get_block(manager, *pos),
+                    BlockType::PressurePlate | BlockType::PressurePlatePowered
+                )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1429,6 +1460,92 @@ mod tests {
         system.tick(&mut manager, &[]);
         assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlate);
         assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoor);
+    }
+
+    #[test]
+    fn sleeping_constant_plate_occupant_skips_pressure_plate_scan() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        place(
+            &mut system,
+            &mut manager,
+            0,
+            BlockType::PressurePlate,
+            Direction::East,
+        );
+
+        let occupant = (0, Y + 1, 0);
+        system.tick(&mut manager, &[occupant]);
+        system.tick(&mut manager, &[occupant]);
+        assert!(system.is_sleeping());
+        let scans = system.pressure_plate_scans;
+
+        let update = system.tick(&mut manager, &[occupant]);
+        assert!(update.mutations.is_empty());
+        assert_eq!(system.pressure_plate_scans, scans);
+        assert!(system.is_sleeping());
+    }
+
+    #[test]
+    fn occupant_movement_wakes_sleeping_pressure_plate_processing() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        place(
+            &mut system,
+            &mut manager,
+            0,
+            BlockType::PressurePlate,
+            Direction::East,
+        );
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::OakDoor,
+            Direction::East,
+        );
+
+        let occupant = (0, Y + 1, 0);
+        system.tick(&mut manager, &[occupant]);
+        system.tick(&mut manager, &[occupant]);
+        assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlatePowered);
+        assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoorOpen);
+        assert!(system.is_sleeping());
+
+        let scans = system.pressure_plate_scans;
+        let update = system.tick(&mut manager, &[]);
+        assert!(!update.mutations.is_empty());
+        assert_eq!(manager.get_block(0, Y, 0), BlockType::PressurePlate);
+        assert_eq!(manager.get_block(1, Y, 0), BlockType::OakDoor);
+        assert!(system.pressure_plate_scans > scans);
+    }
+
+    #[test]
+    fn pressure_plate_output_matches_independent_occupancy_oracle() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        let plates = [(0, Y, 0), (2, Y, 0)];
+        for &(x, y, z) in &plates {
+            manager.set_block(x, y, z, BlockType::PressurePlate);
+            system.on_block_changed(&manager, (x, y, z), Direction::North);
+        }
+
+        let occupants = [(0, Y + 1, 0), (0, Y + 1, 0), (9, Y + 1, 9)];
+        system.tick(&mut manager, &occupants);
+
+        // Small independent oracle: a plate is powered iff an occupant stands
+        // exactly one block above its x/z coordinate.
+        for &(x, y, z) in &plates {
+            let occupied = occupants
+                .iter()
+                .any(|&(ox, oy, oz)| ox == x && oz == z && oy == y + 1);
+            let expected = if occupied {
+                BlockType::PressurePlatePowered
+            } else {
+                BlockType::PressurePlate
+            };
+            assert_eq!(manager.get_block(x, y, z), expected);
+        }
     }
 
     #[test]
@@ -1737,15 +1854,85 @@ mod tests {
         components: &mut HashMap<BlockPos, ComponentState>,
         manager: &ChunkManager,
     ) -> bool {
+        // Deliberately small reference model.  Keep this independent from the
+        // production evaluator: it only models the fixture primitives used by
+        // the differential tests (sources, wires, repeaters and consumers).
+        fn reference_output(
+            manager: &ChunkManager,
+            snapshot: &HashMap<BlockPos, ComponentState>,
+            pos: BlockPos,
+            block: BlockType,
+            _state: ComponentState,
+        ) -> u8 {
+            let own_source = matches!(
+                block,
+                BlockType::LeverOn
+                    | BlockType::StoneButtonPressed
+                    | BlockType::PressurePlatePowered
+                    | BlockType::RedstoneTorch
+                    | BlockType::RepeaterPowered
+            );
+            if own_source {
+                return 15;
+            }
+            if matches!(
+                block,
+                BlockType::Lever | BlockType::StoneButton | BlockType::PressurePlate
+            ) {
+                return 0;
+            }
+            // Repeater timing is represented by the concrete block variant;
+            // an unpowered repeater emits nothing until its scheduled tick
+            // flips it to RepeaterPowered.
+            if block == BlockType::Repeater {
+                return 0;
+            }
+
+            let mut best = 0;
+            for offset in NEIGHBORS {
+                let neighbor = add(pos, offset);
+                let Some(neighbor_state) = snapshot.get(&neighbor).copied() else {
+                    continue;
+                };
+                let neighbor_block = get_block(manager, neighbor);
+                let mut emitted = neighbor_state.signal.power;
+                if matches!(
+                    neighbor_block,
+                    BlockType::RepeaterPowered | BlockType::ComparatorPowered
+                ) && add(neighbor, neighbor_state.facing.delta()) != pos
+                {
+                    emitted = 0;
+                }
+                if matches!(neighbor_block, BlockType::Repeater | BlockType::Comparator) {
+                    emitted = 0;
+                }
+                if neighbor_block == BlockType::RedstoneWire
+                    && matches!(block, BlockType::RedstoneWire)
+                {
+                    emitted = emitted.saturating_sub(1);
+                }
+                best = best.max(emitted);
+            }
+
+            best
+        }
+
         for _ in 0..MAX_PROPAGATION_PASSES {
             let snapshot = components.clone();
             let mut changed = false;
             for (&pos, state) in components.iter_mut() {
                 let block = get_block(manager, pos);
-                let new_power = desired_power(manager, &snapshot, pos, block, *state);
+                let new_power = reference_output(manager, &snapshot, pos, block, *state);
                 let new_charge = if new_power == 0 {
                     ChargeKind::Unpowered
-                } else if is_strong_source(block) {
+                } else if matches!(
+                    block,
+                    BlockType::LeverOn
+                        | BlockType::StoneButtonPressed
+                        | BlockType::PressurePlatePowered
+                        | BlockType::RedstoneTorch
+                        | BlockType::RepeaterPowered
+                ) {
                     ChargeKind::Strong
                 } else {
                     ChargeKind::Weak
@@ -1786,6 +1973,8 @@ mod tests {
             manager.set_block(x, Y, 0, BlockType::RedstoneWire);
             system.on_block_changed(&manager, (x, Y, 0), Direction::North);
         }
+        manager.set_block(21, Y, 0, BlockType::OakDoor);
+        system.on_block_changed(&manager, (21, Y, 0), Direction::East);
 
         // Action 1: Toggle lever ON and tick
         system.interact(&mut manager, (0, Y, 0));

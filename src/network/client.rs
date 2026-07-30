@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -5,8 +6,37 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{self, Instant};
 
-use super::protocol::{Action, LightningStrike, Packet, PlayerId, PROTOCOL_VERSION};
+use super::protocol::{
+    Action, EntityStateWire, LightningStrike, Packet, PlayerEffectWire, PlayerId, PROTOCOL_VERSION,
+};
 use super::transport::Connection;
+
+/// The client/game boundary is the app-level inbound queue (network client ->
+/// game thread).  Account ownership only after the synchronous send accepts it;
+/// transport socket writes are intentionally not included because the OS owns
+/// that buffering.  Reliable replication (including revision-gated catch-up)
+/// remains FIFO on this same inbound boundary.
+fn send_to_game(
+    sender: &Sender<ClientToGame>,
+    event: ClientToGame,
+) -> Result<(), std::sync::mpsc::SendError<ClientToGame>> {
+    let bytes = std::mem::size_of_val(&event) as u64;
+    crate::perf::tracked_send(
+        sender,
+        event,
+        bytes,
+        &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
+    )
+}
+
+#[derive(Clone)]
+struct ClientEventSender(Sender<ClientToGame>);
+
+impl ClientEventSender {
+    fn send(&self, event: ClientToGame) -> Result<(), std::sync::mpsc::SendError<ClientToGame>> {
+        send_to_game(&self.0, event)
+    }
+}
 
 #[derive(Debug)]
 pub enum ClientToGame {
@@ -40,6 +70,8 @@ pub enum ClientToGame {
         action: Action,
     },
     BlockChange {
+        dimension: u8,
+        revision: u64,
         x: i32,
         y: i32,
         z: i32,
@@ -55,10 +87,43 @@ pub enum ClientToGame {
         drops: Vec<crate::network::protocol::ItemWire>,
     },
     ChunkData {
+        dimension: u8,
         cx: i32,
         cz: i32,
+        revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+    },
+    EntitySpawn {
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    EntityState {
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    EntityDespawn {
+        dimension: u8,
+        sequence: u64,
+        entity_id: u64,
+    },
+    PlayerHealth {
+        sequence: u64,
+        player_id: PlayerId,
+        health: f32,
+        max_health: f32,
+        hunger: f32,
+        saturation: f32,
+        oxygen: f32,
+        is_dead: bool,
+        death_reason: u8,
+    },
+    PlayerEffect {
+        sequence: u64,
+        player_id: PlayerId,
+        effects: Vec<PlayerEffectWire>,
     },
     TimeSync {
         ticks: u64,
@@ -111,6 +176,150 @@ pub enum GameToClient {
 
 pub struct NetworkClient;
 
+#[derive(Debug)]
+struct BufferedBlockChange {
+    x: i32,
+    y: i32,
+    z: i32,
+    block: u32,
+    state: u8,
+}
+
+#[derive(Default)]
+struct RevisionGate {
+    applied: HashMap<(u8, i32, i32), u64>,
+    buffered: HashMap<(u8, i32, i32), BTreeMap<u64, BufferedBlockChange>>,
+}
+
+#[derive(Default)]
+struct ReplicationGate {
+    entity_sequences: HashMap<u64, u64>,
+    health_sequences: HashMap<PlayerId, u64>,
+    effect_sequences: HashMap<PlayerId, u64>,
+}
+
+impl ReplicationGate {
+    fn accept_entity(&mut self, entity_id: u64, sequence: u64) -> bool {
+        let latest = self.entity_sequences.entry(entity_id).or_default();
+        if sequence <= *latest {
+            return false;
+        }
+        *latest = sequence;
+        true
+    }
+
+    fn accept_health(&mut self, player_id: PlayerId, sequence: u64) -> bool {
+        let latest = self.health_sequences.entry(player_id).or_default();
+        if sequence <= *latest {
+            return false;
+        }
+        *latest = sequence;
+        true
+    }
+
+    fn accept_effect(&mut self, player_id: PlayerId, sequence: u64) -> bool {
+        let latest = self.effect_sequences.entry(player_id).or_default();
+        if sequence <= *latest {
+            return false;
+        }
+        *latest = sequence;
+        true
+    }
+}
+
+impl RevisionGate {
+    fn accept_block_change(
+        &mut self,
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        state: u8,
+    ) -> Vec<ClientToGame> {
+        let key = (dimension, x.div_euclid(16), z.div_euclid(16));
+        let current = self.applied.get(&key).copied().unwrap_or(0);
+        if revision <= current {
+            return Vec::new();
+        }
+        self.buffered.entry(key).or_default().insert(
+            revision,
+            BufferedBlockChange {
+                x,
+                y,
+                z,
+                block,
+                state,
+            },
+        );
+        self.flush_contiguous(key)
+    }
+
+    fn accept_snapshot(
+        &mut self,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        blocks: Vec<u8>,
+        block_states: Vec<u8>,
+    ) -> Vec<ClientToGame> {
+        let key = (dimension, cx, cz);
+        let current = self.applied.get(&key).copied().unwrap_or(0);
+        if revision < current {
+            return Vec::new();
+        }
+        self.applied.insert(key, revision);
+        if let Some(changes) = self.buffered.get_mut(&key) {
+            changes.retain(|buffered_revision, _| *buffered_revision > revision);
+        }
+        let mut events = vec![ClientToGame::ChunkData {
+            dimension,
+            cx,
+            cz,
+            revision,
+            blocks,
+            block_states,
+        }];
+        events.extend(self.flush_contiguous(key));
+        events
+    }
+
+    fn flush_contiguous(&mut self, key: (u8, i32, i32)) -> Vec<ClientToGame> {
+        let mut events = Vec::new();
+        loop {
+            let next_revision = self
+                .applied
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+            let change = self
+                .buffered
+                .get_mut(&key)
+                .and_then(|changes| changes.remove(&next_revision));
+            let Some(change) = change else {
+                break;
+            };
+            self.applied.insert(key, next_revision);
+            events.push(ClientToGame::BlockChange {
+                dimension: key.0,
+                revision: next_revision,
+                x: change.x,
+                y: change.y,
+                z: change.z,
+                block: change.block,
+                state: change.state,
+            });
+        }
+        if self.buffered.get(&key).is_some_and(BTreeMap::is_empty) {
+            self.buffered.remove(&key);
+        }
+        events
+    }
+}
+
 fn authoritative_weather_event(packet: &Packet) -> Option<ClientToGame> {
     match packet {
         Packet::TimeSync {
@@ -136,6 +345,7 @@ impl NetworkClient {
         client_to_game: Sender<ClientToGame>,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
+            let client_to_game = ClientEventSender(client_to_game);
             let runtime = match tokio::runtime::Runtime::new() {
                 Ok(runtime) => runtime,
                 Err(error) => {
@@ -159,7 +369,7 @@ async fn run_client(
     server_addr: String,
     username: String,
     game_to_client: Receiver<GameToClient>,
-    client_to_game: Sender<ClientToGame>,
+    client_to_game: ClientEventSender,
 ) {
     eprintln!("[NetworkClient] Connecting to {server_addr}...");
     let _ = client_to_game.send(ClientToGame::StatusUpdate {
@@ -252,6 +462,8 @@ async fn run_client(
 
     let (mut reader, mut writer) = connection.into_split();
     let mut tick = time::interval(Duration::from_millis(10));
+    let mut revision_gate = RevisionGate::default();
+    let mut replication_gate = ReplicationGate::default();
     loop {
         tokio::select! {
             incoming = reader.recv() => {
@@ -269,11 +481,143 @@ async fn run_client(
                         });
                     }
                     Ok(Packet::PlayerAction { id, action, .. }) => { let _ = client_to_game.send(ClientToGame::PlayerAction { id, action }); }
-                    Ok(Packet::BlockChange { x, y, z, block, state, .. }) => { let _ = client_to_game.send(ClientToGame::BlockChange { x, y, z, block, state }); }
+                    Ok(Packet::BlockChange {
+                        dimension,
+                        revision,
+                        x,
+                        y,
+                        z,
+                        block,
+                        state,
+                        ..
+                    }) => {
+                        for event in revision_gate.accept_block_change(
+                            dimension, revision, x, y, z, block, state,
+                        ) {
+                            let _ = client_to_game.send(event);
+                        }
+                    }
                     Ok(Packet::BlockActionResult { x, y, z, success, consumed_item, drops, .. }) => {
                         let _ = client_to_game.send(ClientToGame::BlockActionResult { x, y, z, success, consumed_item, drops });
                     }
-                    Ok(Packet::ChunkData { cx, cz, blocks, block_states, .. }) => { let _ = client_to_game.send(ClientToGame::ChunkData { cx, cz, blocks, block_states }); }
+                    Ok(Packet::ChunkData {
+                        dimension,
+                        cx,
+                        cz,
+                        revision,
+                        blocks,
+                        block_states,
+                        ..
+                    }) => {
+                        for event in revision_gate.accept_snapshot(
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                            blocks,
+                            block_states,
+                        ) {
+                            let _ = client_to_game.send(event);
+                        }
+                        if writer
+                            .send(&Packet::ChunkAck {
+                                protocol_version: PROTOCOL_VERSION,
+                                dimension,
+                                cx,
+                                cz,
+                                revision,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            let _ = client_to_game.send(ClientToGame::Disconnected {
+                                reason: "connection lost".into(),
+                            });
+                            break;
+                        }
+                    }
+                    Ok(Packet::EntitySpawn {
+                        dimension,
+                        sequence,
+                        state,
+                        ..
+                    }) => {
+                        if replication_gate.accept_entity(state.entity_id, sequence) {
+                            let _ = client_to_game.send(ClientToGame::EntitySpawn {
+                                dimension,
+                                sequence,
+                                state,
+                            });
+                        }
+                    }
+                    Ok(Packet::EntityState {
+                        dimension,
+                        sequence,
+                        state,
+                        ..
+                    }) => {
+                        if replication_gate.accept_entity(state.entity_id, sequence) {
+                            let _ = client_to_game.send(ClientToGame::EntityState {
+                                dimension,
+                                sequence,
+                                state,
+                            });
+                        }
+                    }
+                    Ok(Packet::EntityDespawn {
+                        dimension,
+                        sequence,
+                        entity_id,
+                        ..
+                    }) => {
+                        if replication_gate.accept_entity(entity_id, sequence) {
+                            let _ = client_to_game.send(ClientToGame::EntityDespawn {
+                                dimension,
+                                sequence,
+                                entity_id,
+                            });
+                        }
+                    }
+                    Ok(Packet::PlayerHealth {
+                        sequence,
+                        player_id,
+                        health,
+                        max_health,
+                        hunger,
+                        saturation,
+                        oxygen,
+                        is_dead,
+                        death_reason,
+                        ..
+                    }) => {
+                        if replication_gate.accept_health(player_id, sequence) {
+                            let _ = client_to_game.send(ClientToGame::PlayerHealth {
+                                sequence,
+                                player_id,
+                                health,
+                                max_health,
+                                hunger,
+                                saturation,
+                                oxygen,
+                                is_dead,
+                                death_reason,
+                            });
+                        }
+                    }
+                    Ok(Packet::PlayerEffect {
+                        sequence,
+                        player_id,
+                        effects,
+                        ..
+                    }) => {
+                        if replication_gate.accept_effect(player_id, sequence) {
+                            let _ = client_to_game.send(ClientToGame::PlayerEffect {
+                                sequence,
+                                player_id,
+                                effects,
+                            });
+                        }
+                    }
                     Ok(packet @ Packet::TimeSync { .. })
                     | Ok(packet @ Packet::LightningStrike { .. }) => {
                         if let Some(event) = authoritative_weather_event(&packet) {
@@ -304,7 +648,14 @@ async fn run_client(
             _ = tick.tick() => {
                 let mut latest_position = None;
                 loop {
-                    match game_to_client.try_recv() {
+                    // game -> client is the app-level outbound queue.  Position
+                    // bursts are coalesced below, but each removed command is
+                    // still dequeued exactly once from the raw channel.
+                    match crate::perf::tracked_try_recv(
+                        &game_to_client,
+                        std::mem::size_of::<GameToClient>() as u64,
+                        &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
+                    ) {
                         Ok(GameToClient::SendPosition {
                             sequence,
                             sender_time_millis,
@@ -330,7 +681,16 @@ async fn run_client(
                             }
                         }
                         Ok(GameToClient::RequestBlockChange { x, y, z, block }) => {
-                            if writer.send(&Packet::BlockChange { protocol_version: PROTOCOL_VERSION, x, y, z, block, state: 0 }).await.is_err() {
+                            if writer.send(&Packet::BlockChange {
+                                protocol_version: PROTOCOL_VERSION,
+                                dimension: 0,
+                                revision: 0,
+                                x,
+                                y,
+                                z,
+                                block,
+                                state: 0,
+                            }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send BlockChange");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
@@ -357,6 +717,7 @@ async fn run_client(
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            crate::perf::queue_stats(crate::perf::QueueCategory::Outbound).cancel();
                             eprintln!("[NetworkClient] Disconnecting: game_to_client channel closed (State dropped?)");
                             return;
                         }
@@ -505,6 +866,8 @@ mod tests {
 
         host_tx
             .send(HostToServer::BroadcastBlockChange {
+                dimension: 0,
+                revision: 1,
                 x: 7,
                 y: 80,
                 z: -9,
@@ -514,8 +877,10 @@ mod tests {
             .unwrap();
         host_tx
             .send(HostToServer::SendChunk {
+                dimension: 0,
                 cx: -2,
                 cz: 5,
+                revision: 1,
                 blocks: vec![1, 2, 3, 4],
                 block_states: vec![0, 0, 0, 0],
                 to: player_id,
@@ -553,11 +918,12 @@ mod tests {
                 z: -9,
                 block: 3,
                 state: 0,
+                ..
             }
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            ClientToGame::ChunkData { cx: -2, cz: 5, blocks, block_states: _ } if blocks == &vec![1, 2, 3, 4]
+            ClientToGame::ChunkData { cx: -2, cz: 5, blocks, block_states: _, .. } if blocks == &vec![1, 2, 3, 4]
         )));
         assert!(events.iter().any(|e| matches!(
             e,
@@ -571,6 +937,33 @@ mod tests {
             e,
             ClientToGame::LightningStrike(received) if *received == strike
         )));
+
+        let mut accepted = false;
+        let mut acknowledged = false;
+        for _ in 0..4 {
+            match server_rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                ServerToHost::CatchupAccepted {
+                    id,
+                    dimension: 0,
+                    cx: -2,
+                    cz: 5,
+                    revision: 1,
+                } if id == player_id => accepted = true,
+                ServerToHost::CatchupAck {
+                    id,
+                    dimension: 0,
+                    cx: -2,
+                    cz: 5,
+                    revision: 1,
+                } if id == player_id => acknowledged = true,
+                _ => {}
+            }
+            if accepted && acknowledged {
+                break;
+            }
+        }
+        assert!(accepted, "server did not accept the catch-up transfer");
+        assert!(acknowledged, "client did not ACK the catch-up transfer");
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
@@ -703,5 +1096,325 @@ mod tests {
         server
             .join()
             .expect("server thread panicked during shutdown");
+    }
+
+    #[test]
+    fn revision_gate_orders_cross_channel_snapshot_and_block_change() {
+        let mut gate = RevisionGate::default();
+        assert!(gate.accept_block_change(0, 2, 1, 70, 1, 4, 0).is_empty());
+
+        let events = gate.accept_snapshot(0, 0, 0, 1, vec![1, 2], vec![0, 0]);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            ClientToGame::ChunkData {
+                dimension: 0,
+                cx: 0,
+                cz: 0,
+                revision: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &events[1],
+            ClientToGame::BlockChange {
+                dimension: 0,
+                revision: 2,
+                x: 1,
+                y: 70,
+                z: 1,
+                block: 4,
+                ..
+            }
+        ));
+
+        assert!(gate
+            .accept_snapshot(0, 0, 0, 1, vec![9], vec![9])
+            .is_empty());
+        assert!(gate.accept_block_change(0, 1, 1, 70, 1, 9, 0).is_empty());
+
+        let mut same_revision = RevisionGate::default();
+        assert!(same_revision
+            .accept_block_change(0, 5, 1, 70, 1, 4, 0)
+            .is_empty());
+        assert_eq!(
+            same_revision
+                .accept_snapshot(0, 0, 0, 5, vec![1], vec![0])
+                .len(),
+            1
+        );
+        assert!(same_revision.buffered.is_empty());
+    }
+
+    #[test]
+    fn revision_gate_multi_client_checksum_converges() {
+        fn checksum(chunk: &crate::world::Chunk) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for x in 0..16 {
+                for y in 0..256 {
+                    for z in 0..16 {
+                        hash ^= chunk.get_block_local(x, y, z) as u8 as u64;
+                        hash = hash.wrapping_mul(0x100_0000_01b3);
+                    }
+                }
+            }
+            hash
+        }
+
+        let mut snapshot_chunk = crate::world::Chunk::new(0, 0);
+        snapshot_chunk.set_block_local(1, 70, 1, crate::world::BlockType::Stone);
+        let snapshot = crate::save::ChunkSaveData::from_chunk(&snapshot_chunk);
+        let mut host = snapshot_chunk.clone();
+        host.set_block_local(2, 70, 2, crate::world::BlockType::Dirt);
+
+        for _ in 0..2 {
+            let mut gate = RevisionGate::default();
+            let mut events = gate.accept_block_change(
+                0,
+                2,
+                2,
+                70,
+                2,
+                crate::world::BlockType::Dirt.to_wire(),
+                0,
+            );
+            assert!(events.is_empty());
+            events.extend(gate.accept_snapshot(
+                0,
+                0,
+                0,
+                1,
+                snapshot.blocks.clone(),
+                snapshot.block_states.clone(),
+            ));
+
+            let mut client = crate::world::Chunk::new(0, 0);
+            for event in events {
+                match event {
+                    ClientToGame::ChunkData {
+                        blocks,
+                        block_states,
+                        ..
+                    } => {
+                        crate::save::ChunkSaveData {
+                            chunk_x: 0,
+                            chunk_z: 0,
+                            blocks,
+                            sky_light: Vec::new(),
+                            block_light: Vec::new(),
+                            fluid_levels: Vec::new(),
+                            redstone_metadata: Vec::new(),
+                            block_states,
+                            mutation_revision: 1,
+                        }
+                        .restore_to_chunk(&mut client);
+                    }
+                    ClientToGame::BlockChange { x, y, z, block, .. } => {
+                        client.set_block_local(
+                            x.rem_euclid(16) as usize,
+                            y as usize,
+                            z.rem_euclid(16) as usize,
+                            crate::world::BlockType::from_wire(block).unwrap(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(checksum(&client), checksum(&host));
+        }
+    }
+
+    #[test]
+    fn replication_gate_rejects_stale_entity_health_and_effect_state() {
+        let mut gate = ReplicationGate::default();
+        assert!(gate.accept_entity(9, 1));
+        assert!(!gate.accept_entity(9, 1));
+        assert!(!gate.accept_entity(9, 0));
+        assert!(gate.accept_entity(9, 2));
+        assert!(gate.accept_entity(10, 1));
+
+        assert!(gate.accept_health(4, 7));
+        assert!(!gate.accept_health(4, 7));
+        assert!(!gate.accept_health(4, 6));
+        assert!(gate.accept_effect(4, 7));
+        assert!(!gate.accept_effect(4, 7));
+    }
+
+    #[test]
+    fn host_client_entity_health_and_effect_replication_converges() {
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = mpsc::channel();
+        let (server_tx, server_rx) = mpsc::channel();
+        let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
+
+        let (game_tx, game_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let client = NetworkClient::spawn(addr, "replica".into(), game_rx, event_tx);
+        let player_id = match wait_for_event(&event_rx) {
+            ClientToGame::Connected { player_id, .. } => player_id,
+            other => panic!("expected Connected, got {other:?}"),
+        };
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            ServerToHost::ClientJoined { id, .. } if id == player_id
+        ));
+
+        let state = |x| EntityStateWire {
+            entity_id: 77,
+            entity_type: crate::entity::EntityType::Zombie.to_wire(),
+            position: [x, 64.0, 0.0],
+            velocity: [1.0, 0.0, 0.0],
+            yaw: 0.5,
+            pitch: 0.0,
+            health: 18.0,
+            animation_state: 1,
+        };
+        host_tx
+            .send(HostToServer::BroadcastEntitySpawn {
+                dimension: 0,
+                sequence: 1,
+                state: state(0.0),
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::BroadcastEntityState {
+                dimension: 0,
+                sequence: 2,
+                state: state(2.0),
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::BroadcastEntityState {
+                dimension: 0,
+                sequence: 3,
+                state: state(3.0),
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::BroadcastPlayerHealth {
+                sequence: 3,
+                player_id,
+                health: 14.0,
+                max_health: 20.0,
+                hunger: 17.0,
+                saturation: 2.0,
+                oxygen: 280.0,
+                is_dead: false,
+                death_reason: 0,
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::BroadcastPlayerEffect {
+                sequence: 3,
+                player_id,
+                effects: vec![PlayerEffectWire {
+                    kind: 0,
+                    level: 2,
+                    remaining_seconds: 30.0,
+                }],
+            })
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_spawn = false;
+        let mut latest_entity_x = None;
+        let mut health = None;
+        let mut effects = None;
+        while std::time::Instant::now() < deadline
+            && (!saw_spawn || latest_entity_x != Some(3.0) || health.is_none() || effects.is_none())
+        {
+            let Ok(event) = event_rx.recv_timeout(Duration::from_millis(250)) else {
+                continue;
+            };
+            match event {
+                ClientToGame::EntitySpawn { state, .. } if state.entity_id == 77 => {
+                    saw_spawn = true;
+                }
+                ClientToGame::EntityState { state, .. } if state.entity_id == 77 => {
+                    latest_entity_x = Some(state.position[0]);
+                }
+                ClientToGame::PlayerHealth {
+                    player_id: id,
+                    health: value,
+                    ..
+                } if id == player_id => health = Some(value),
+                ClientToGame::PlayerEffect {
+                    player_id: id,
+                    effects: value,
+                    ..
+                } if id == player_id => effects = Some(value),
+                _ => {}
+            }
+        }
+        assert!(saw_spawn);
+        assert_eq!(latest_entity_x, Some(3.0));
+        assert_eq!(health, Some(14.0));
+        assert_eq!(effects.unwrap()[0].level, 2);
+
+        host_tx
+            .send(HostToServer::BroadcastEntityDespawn {
+                dimension: 0,
+                sequence: 4,
+                entity_id: 77,
+            })
+            .unwrap();
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::EntityDespawn {
+                sequence: 4,
+                entity_id: 77,
+                ..
+            }
+        ));
+
+        game_tx.send(GameToClient::Disconnect).unwrap();
+        client.join().unwrap();
+        host_tx.send(HostToServer::Stop).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn queue_accounting_covers_success_and_closed_paths() {
+        let stats = crate::perf::SharedQueueStats::new();
+        let (tx, rx) = mpsc::channel();
+        crate::perf::tracked_send(
+            &tx,
+            ClientToGame::StatusUpdate {
+                message: "ok".into(),
+            },
+            16,
+            &stats,
+        )
+        .unwrap();
+        assert_eq!(stats.depth(), 1);
+        let _ = crate::perf::tracked_try_recv(&rx, 16, &stats).unwrap();
+        assert_eq!(stats.depth(), 0);
+
+        drop(rx);
+        assert!(crate::perf::tracked_send(
+            &tx,
+            ClientToGame::StatusUpdate {
+                message: "closed".into()
+            },
+            16,
+            &stats,
+        )
+        .is_err());
+        assert_eq!(stats.drops(), 1);
+    }
+
+    #[test]
+    fn queue_accounting_closed_consumer_is_cancelled() {
+        let stats = crate::perf::SharedQueueStats::new();
+        let (tx, rx) = mpsc::channel::<GameToClient>();
+        drop(tx);
+        assert!(matches!(
+            crate::perf::tracked_try_recv(&rx, 32, &stats),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        stats.cancel();
+        assert_eq!(stats.cancels(), 1);
     }
 }

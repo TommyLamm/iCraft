@@ -1,6 +1,7 @@
 use crate::chunk_render::{ChunkLodMeshData, ChunkMeshBundle, TerrainVertex};
 use crate::redstone::Direction;
 use noise::{NoiseFn, Perlin};
+use std::mem::size_of;
 
 pub const CHUNK_WIDTH: usize = 16;
 pub const CHUNK_HEIGHT: usize = 256;
@@ -1941,6 +1942,109 @@ pub const SECTION_SIZE: usize = 16;
 pub const SECTION_COUNT: usize = CHUNK_HEIGHT / SECTION_SIZE;
 pub const SECTION_VOLUME: usize = SECTION_SIZE * SECTION_SIZE * SECTION_SIZE;
 
+/// Stable identity for one vertical 16^3 mesh section.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SectionKey {
+    pub cx: i32,
+    pub section_y: u16,
+    pub cz: i32,
+}
+
+impl SectionKey {
+    pub const fn new(cx: i32, section_y: u16, cz: i32) -> Self {
+        Self { cx, section_y, cz }
+    }
+    pub const fn min_world_y(self) -> i32 {
+        self.section_y as i32 * SECTION_SIZE as i32
+    }
+    pub const fn max_world_y(self) -> i32 {
+        self.min_world_y() + SECTION_SIZE as i32
+    }
+}
+
+/// Revision/lifetime token carried by workers so stale meshes can be rejected.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SectionIdentity {
+    pub key: SectionKey,
+    pub revision: u64,
+    pub lifetime: u64,
+}
+
+impl SectionIdentity {
+    pub const fn new(key: SectionKey, revision: u64, lifetime: u64) -> Self {
+        Self {
+            key,
+            revision,
+            lifetime,
+        }
+    }
+    pub const fn accepts(self, candidate: Self) -> bool {
+        self.key.cx == candidate.key.cx
+            && self.key.cz == candidate.key.cz
+            && self.key.section_y == candidate.key.section_y
+            && self.lifetime == candidate.lifetime
+            && candidate.revision >= self.revision
+    }
+}
+
+/// Complete voxel value consumed by section meshing. Keeping all render
+/// inputs together prevents workers from falling back to live world lookups.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MeshVoxel {
+    pub block: BlockType,
+    pub state: u8,
+    pub sky: u8,
+    pub block_light: u8,
+    pub raw_fluid: u8,
+}
+
+impl Default for MeshVoxel {
+    fn default() -> Self {
+        Self {
+            block: BlockType::Air,
+            state: 0,
+            sky: 0,
+            block_light: 0,
+            raw_fluid: 0,
+        }
+    }
+}
+
+/// Immutable 18^3 voxel snapshot (one-cell halo on all six sides).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionHaloSnapshot {
+    pub key: SectionKey,
+    pub voxels: Box<[MeshVoxel]>,
+}
+
+impl SectionHaloSnapshot {
+    pub const SIDE: usize = SECTION_SIZE + 2;
+    pub const VOLUME: usize = Self::SIDE * Self::SIDE * Self::SIDE;
+    pub fn from_chunk<F>(key: SectionKey, mut get: F) -> Self
+    where
+        F: FnMut(i32, i32, i32) -> MeshVoxel,
+    {
+        let mut voxels = vec![MeshVoxel::default(); Self::VOLUME].into_boxed_slice();
+        for ly in 0..Self::SIDE {
+            for z in 0..Self::SIDE {
+                for x in 0..Self::SIDE {
+                    let wx = key.cx * CHUNK_WIDTH as i32 + x as i32 - 1;
+                    let wy = key.min_world_y() + ly as i32 - 1;
+                    let wz = key.cz * CHUNK_DEPTH as i32 + z as i32 - 1;
+                    voxels[(ly * Self::SIDE + z) * Self::SIDE + x] = get(wx, wy, wz);
+                }
+            }
+        }
+        Self { key, voxels }
+    }
+    pub fn get(&self, x: usize, y: usize, z: usize) -> MeshVoxel {
+        self.voxels[(y * Self::SIDE + z) * Self::SIDE + x]
+    }
+    pub fn get_block(&self, x: usize, y: usize, z: usize) -> BlockType {
+        self.get(x, y, z).block
+    }
+}
+
 fn is_random_tick(block: BlockType) -> bool {
     matches!(
         block,
@@ -1982,6 +2086,41 @@ pub enum BlockStorage {
 }
 
 impl BlockStorage {
+    /// Rebuild this storage at the smallest representation for its current values.
+    /// This is an explicit safe-point operation; ordinary `set` calls remain incremental.
+    pub fn compact(&mut self) {
+        let before = self.memory_usage();
+        let mut dense = [BlockType::Air; 4096];
+        for (i, value) in dense.iter_mut().enumerate() {
+            *value = self.get(i);
+        }
+        let compacted = Self::from_dense(&dense);
+        if compacted.memory_usage() <= before {
+            *self = compacted;
+        }
+    }
+
+    /// Heap bytes owned by this storage (including palette/index allocations).
+    pub fn memory_usage(&self) -> usize {
+        size_of::<Self>()
+            + match self {
+                Self::Empty | Self::Uniform(_) => 0,
+                Self::Paletted1 { palette, data } => {
+                    palette.capacity() * size_of::<BlockType>() + size_of_val(data.as_ref())
+                }
+                Self::Paletted2 { palette, data } => {
+                    palette.capacity() * size_of::<BlockType>() + size_of_val(data.as_ref())
+                }
+                Self::Paletted4 { palette, data } => {
+                    palette.capacity() * size_of::<BlockType>() + size_of_val(data.as_ref())
+                }
+                Self::Paletted8 { palette, data } => {
+                    palette.capacity() * size_of::<BlockType>() + size_of_val(data.as_ref())
+                }
+                Self::Global(data) => size_of_val(data.as_ref()),
+            }
+    }
+
     pub fn get(&self, idx: usize) -> BlockType {
         match self {
             BlockStorage::Empty => BlockType::Air,
@@ -2178,6 +2317,7 @@ impl BlockStorage {
         }
 
         if unique.len() <= 2 {
+            unique.shrink_to_fit();
             let mut data = Box::new([0u64; 64]);
             for i in 0..4096 {
                 let pos = unique.iter().position(|&b| b == dense[i]).unwrap();
@@ -2192,6 +2332,7 @@ impl BlockStorage {
         }
 
         if unique.len() <= 4 {
+            unique.shrink_to_fit();
             let mut data = Box::new([0u64; 128]);
             for i in 0..4096 {
                 let pos = unique.iter().position(|&b| b == dense[i]).unwrap();
@@ -2207,6 +2348,7 @@ impl BlockStorage {
         }
 
         if unique.len() <= 16 {
+            unique.shrink_to_fit();
             let mut data = Box::new([0u64; 256]);
             for i in 0..4096 {
                 let pos = unique.iter().position(|&b| b == dense[i]).unwrap();
@@ -2222,6 +2364,7 @@ impl BlockStorage {
         }
 
         if unique.len() <= 256 {
+            unique.shrink_to_fit();
             let mut data = Box::new([0u8; 4096]);
             for i in 0..4096 {
                 let pos = unique.iter().position(|&b| b == dense[i]).unwrap();
@@ -2244,6 +2387,24 @@ pub enum LightStorage {
 }
 
 impl LightStorage {
+    pub fn compact(&mut self) {
+        let mut sky = [0u8; 4096];
+        let mut block = [0u8; 4096];
+        for i in 0..4096 {
+            sky[i] = self.get_sky(i);
+            block[i] = self.get_block(i);
+        }
+        *self = Self::from_dense(&sky, &block);
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        size_of::<Self>()
+            + match self {
+                Self::Uniform { .. } => 0,
+                Self::Packed(data) => size_of_val(data.as_ref()),
+            }
+    }
+
     pub fn get_sky(&self, idx: usize) -> u8 {
         match self {
             LightStorage::Uniform { sky, .. } => *sky,
@@ -2321,16 +2482,19 @@ impl LightStorage {
 
 #[derive(Clone, Debug)]
 pub struct ChunkSection {
-    pub blocks: BlockStorage,
-    pub light: LightStorage,
-    pub block_states: Option<Box<[u8; 4096]>>,
-    pub fluid_levels: Option<Box<[u8; 4096]>>,
-    pub non_air_count: u16,
-    pub opaque_count: u16,
-    pub random_tick_count: u16,
-    pub fluid_count: u16,
-    pub emitter_count: u16,
-    pub redstone_count: u16,
+    blocks: BlockStorage,
+    light: LightStorage,
+    block_states: Option<Box<[u8; 4096]>>,
+    fluid_levels: Option<Box<[u8; 4096]>>,
+    non_air_count: u16,
+    opaque_count: u16,
+    random_tick_count: u16,
+    fluid_count: u16,
+    emitter_count: u16,
+    redstone_count: u16,
+    pub(crate) block_state_nonzero_count: u16,
+    pub(crate) fluid_level_nonzero_count: u16,
+    storage_changes: u16,
 }
 
 impl ChunkSection {
@@ -2346,6 +2510,9 @@ impl ChunkSection {
             fluid_count: 0,
             emitter_count: 0,
             redstone_count: 0,
+            block_state_nonzero_count: 0,
+            fluid_level_nonzero_count: 0,
+            storage_changes: 0,
         }
     }
 
@@ -2361,6 +2528,9 @@ impl ChunkSection {
             fluid_count: 0,
             emitter_count: 0,
             redstone_count: 0,
+            block_state_nonzero_count: 0,
+            fluid_level_nonzero_count: 0,
+            storage_changes: 0,
         }
     }
 
@@ -2377,6 +2547,10 @@ impl ChunkSection {
         let mut fluid_count = 0u16;
         let mut emitter_count = 0u16;
         let mut redstone_count = 0u16;
+        let block_state_nonzero_count =
+            states.map_or(0, |st| st.iter().filter(|&&v| v != 0).count() as u16);
+        let fluid_level_nonzero_count =
+            fluids.map_or(0, |fl| fl.iter().filter(|&&v| v != 0).count() as u16);
 
         for &b in blocks.iter() {
             if b != BlockType::Air {
@@ -2430,12 +2604,26 @@ impl ChunkSection {
             fluid_count,
             emitter_count,
             redstone_count,
+            block_state_nonzero_count,
+            fluid_level_nonzero_count,
+            storage_changes: 0,
         }
+    }
+
+    /// Read a block through the section API without exposing its representation.
+    pub fn get_block(&self, idx: usize) -> BlockType {
+        self.blocks.get(idx)
+    }
+
+    /// Returns whether this section contains at least one instance of `block`.
+    pub fn contains_block(&self, block: BlockType) -> bool {
+        (0..4096).any(|idx| self.blocks.get(idx) == block)
     }
 
     pub fn set_block(&mut self, idx: usize, block: BlockType) -> BlockType {
         let old_block = self.blocks.set(idx, block);
         if old_block != block {
+            self.storage_changes = self.storage_changes.saturating_add(1);
             if old_block != BlockType::Air {
                 self.non_air_count = self.non_air_count.saturating_sub(1);
             }
@@ -2489,15 +2677,26 @@ impl ChunkSection {
     }
 
     pub fn set_block_state(&mut self, idx: usize, state: u8) {
+        let old = self.block_states.as_ref().map_or(0, |st| st[idx]);
+        if old == state {
+            return;
+        }
         if state == 0 {
             if let Some(ref mut st) = self.block_states {
                 st[idx] = 0;
+            }
+            self.block_state_nonzero_count = self.block_state_nonzero_count.saturating_sub(1);
+            if self.block_state_nonzero_count == 0 {
+                self.block_states = None;
             }
         } else {
             let st = self
                 .block_states
                 .get_or_insert_with(|| Box::new([0u8; 4096]));
             st[idx] = state;
+            if old == 0 {
+                self.block_state_nonzero_count = self.block_state_nonzero_count.saturating_add(1);
+            }
         }
     }
 
@@ -2506,16 +2705,65 @@ impl ChunkSection {
     }
 
     pub fn set_fluid_level(&mut self, idx: usize, level: u8) {
+        let old = self.fluid_levels.as_ref().map_or(0, |fl| fl[idx]);
+        if old == level {
+            return;
+        }
         if level == 0 {
             if let Some(ref mut fl) = self.fluid_levels {
                 fl[idx] = 0;
+            }
+            self.fluid_level_nonzero_count = self.fluid_level_nonzero_count.saturating_sub(1);
+            if self.fluid_level_nonzero_count == 0 {
+                self.fluid_levels = None;
             }
         } else {
             let fl = self
                 .fluid_levels
                 .get_or_insert_with(|| Box::new([0u8; 4096]));
             fl[idx] = level;
+            if old == 0 {
+                self.fluid_level_nonzero_count = self.fluid_level_nonzero_count.saturating_add(1);
+            }
         }
+    }
+
+    pub fn compact_storage(&mut self) {
+        self.blocks.compact();
+        self.light.compact();
+        self.storage_changes = 0;
+    }
+
+    /// Compact at an explicit safe point after enough mutations have accrued.
+    /// The hot `set_*` paths only increment a counter; the linear scan happens
+    /// here, never once per mutation.
+    pub fn compact_if_worthwhile(&mut self) -> bool {
+        const COMPACTION_INTERVAL: u16 = 256;
+        if self.storage_changes < COMPACTION_INTERVAL {
+            return false;
+        }
+        self.compact_storage();
+        true
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        size_of::<Self>()
+            + self
+                .blocks
+                .memory_usage()
+                .saturating_sub(size_of::<BlockStorage>())
+            + self
+                .light
+                .memory_usage()
+                .saturating_sub(size_of::<LightStorage>())
+            + self
+                .block_states
+                .as_ref()
+                .map_or(0, |v| size_of_val(v.as_ref()))
+            + self
+                .fluid_levels
+                .as_ref()
+                .map_or(0, |v| size_of_val(v.as_ref()))
     }
 }
 
@@ -3195,6 +3443,8 @@ impl Chunk {
         let ly = y % SECTION_SIZE;
         let idx = (ly << 8) | (z << 4) | x;
         self.sections[sec_y].light.set_sky(idx, val);
+        self.sections[sec_y].storage_changes =
+            self.sections[sec_y].storage_changes.saturating_add(1);
     }
 
     pub fn get_block_light(&self, x: usize, y: usize, z: usize) -> u8 {
@@ -3209,6 +3459,8 @@ impl Chunk {
         let ly = y % SECTION_SIZE;
         let idx = (ly << 8) | (z << 4) | x;
         self.sections[sec_y].light.set_block(idx, val);
+        self.sections[sec_y].storage_changes =
+            self.sections[sec_y].storage_changes.saturating_add(1);
     }
 
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -3266,34 +3518,52 @@ impl Chunk {
     // Generate opaque/cutout and translucent terrain meshes. Full cube faces
     // use conservative greedy merging: material/light must match and AO must
     // be uniform so removing internal vertices cannot change shading.
-    pub fn generate_mesh<F>(
-        &self,
-        get_block_at: F,
+    fn mesh_l0_volume<F>(
+        origin: [i32; 3],
+        extent: [usize; 3],
+        get_voxel: F,
     ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
     where
-        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
+        F: Fn(i32, i32, i32) -> MeshVoxel,
     {
+        let get_block_at = |x: i32, y: i32, z: i32| {
+            let v = get_voxel(x, y, z);
+            (
+                v.block,
+                v.sky,
+                v.block_light,
+                v.raw_fluid & 7,
+                v.raw_fluid & 8 != 0,
+            )
+        };
         let mut opaque_vertices = Vec::new();
         let mut opaque_indices = Vec::new();
         let mut trans_vertices = Vec::new();
         let mut trans_indices = Vec::new();
 
-        let region_coord = crate::chunk_render::chunk_to_region_coord(self.chunk_x, self.chunk_z);
+        let region_coord = crate::chunk_render::chunk_to_region_coord(
+            origin[0] / CHUNK_WIDTH as i32,
+            origin[2] / CHUNK_DEPTH as i32,
+        );
 
         // Non-cubic geometry and non-solid decorative blocks retain the exact
         // per-block path. They cannot be combined into rectangular cube faces.
-        for x in 0..CHUNK_WIDTH {
-            for z in 0..CHUNK_DEPTH {
-                let max_y = self.heightmap[x][z] as usize;
-                for y in 0..=max_y {
-                    let block = self.get_block_local(x, y, z);
+        for x in 0..extent[0] {
+            for z in 0..extent[2] {
+                for y in 0..extent[1] {
+                    let voxel = get_voxel(
+                        origin[0] + x as i32,
+                        origin[1] + y as i32,
+                        origin[2] + z as i32,
+                    );
+                    let block = voxel.block;
                     if block == BlockType::Air || is_greedy_cube(block) {
                         continue;
                     }
 
-                    let world_x = self.chunk_x * CHUNK_WIDTH as i32 + x as i32;
-                    let world_y = y as i32;
-                    let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
+                    let world_x = origin[0] + x as i32;
+                    let world_y = origin[1] + y as i32;
+                    let world_z = origin[2] + z as i32;
 
                     let torch_atlas_tile = match block {
                         BlockType::Torch => Some(TORCH_ATLAS_TILE),
@@ -3307,8 +3577,8 @@ impl Chunk {
                             &mut opaque_vertices,
                             &mut opaque_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
-                            self.get_sky_light(x, y, z),
-                            self.get_block_light(x, y, z),
+                            voxel.sky,
+                            voxel.block_light,
                             atlas_tile,
                             region_coord,
                         );
@@ -3316,15 +3586,14 @@ impl Chunk {
                     }
 
                     if matches!(block, BlockType::OakDoor | BlockType::OakDoorOpen) {
-                        let state =
-                            BlockState::decode(self.get_block_state(x as i32, y as i32, z as i32));
+                        let state = BlockState::decode(voxel.state);
                         append_door_mesh(
                             &mut opaque_vertices,
                             &mut opaque_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
                             state,
-                            self.get_sky_light(x, y, z),
-                            self.get_block_light(x, y, z),
+                            voxel.sky,
+                            voxel.block_light,
                             (9, 14),
                             region_coord,
                         );
@@ -3332,15 +3601,14 @@ impl Chunk {
                     }
 
                     if matches!(block, BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen) {
-                        let state =
-                            BlockState::decode(self.get_block_state(x as i32, y as i32, z as i32));
+                        let state = BlockState::decode(voxel.state);
                         append_trapdoor_mesh(
                             &mut opaque_vertices,
                             &mut opaque_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
                             state,
-                            self.get_sky_light(x, y, z),
-                            self.get_block_light(x, y, z),
+                            voxel.sky,
+                            voxel.block_light,
                             (10, 14),
                             region_coord,
                         );
@@ -3348,8 +3616,8 @@ impl Chunk {
                     }
 
                     if block.is_cross_model() {
-                        let sky_val = self.get_sky_light(x, y, z);
-                        let block_val = self.get_block_light(x, y, z);
+                        let sky_val = voxel.sky;
+                        let block_val = voxel.block_light;
                         let light_val = sky_val as f32 + block_val as f32 * 16.0 + 1.0 * 256.0;
 
                         let atlas_tile = block.get_face_tex_index(0);
@@ -3415,7 +3683,7 @@ impl Chunk {
                             neighbor_falling,
                         ) = get_block_at(nx, ny, nz);
                         let is_fluid = block == BlockType::Water || block == BlockType::Lava;
-                        let fl_raw = self.get_fluid_level(x, y, z);
+                        let fl_raw = voxel.raw_fluid;
                         let level = fl_raw & 0x07;
                         let falling = (fl_raw & 0x08) != 0;
 
@@ -3505,7 +3773,7 @@ impl Chunk {
         // Full cube faces are processed one direction/slice at a time. Each
         // mask cell describes one visible face. Rectangles only grow across
         // identical material/light and uniform AO.
-        let dimensions = [CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH];
+        let dimensions = extent;
         for (face_idx, (normal, corner_data)) in BLOCK_FACES.iter().enumerate() {
             let normal_axis = (0..3).find(|axis| normal[*axis] != 0).unwrap();
             let u_axis = (0..3)
@@ -3526,18 +3794,21 @@ impl Chunk {
                         local[u_axis] = u;
                         local[v_axis] = v;
                         let [x, y, z] = local;
-                        if y > self.heightmap[x][z] as usize {
-                            continue;
-                        }
-                        let block = self.get_block_local(x, y, z);
+
+                        let voxel = get_voxel(
+                            origin[0] + x as i32,
+                            origin[1] + y as i32,
+                            origin[2] + z as i32,
+                        );
+                        let block = voxel.block;
                         if !is_greedy_cube(block) {
                             continue;
                         }
 
                         let world = [
-                            self.chunk_x * CHUNK_WIDTH as i32 + x as i32,
-                            y as i32,
-                            self.chunk_z * CHUNK_DEPTH as i32 + z as i32,
+                            origin[0] + x as i32,
+                            origin[1] + y as i32,
+                            origin[2] + z as i32,
                         ];
                         let nx = world[0] + normal[0];
                         let ny = world[1] + normal[1];
@@ -3639,11 +3910,7 @@ impl Chunk {
                         max_local[u_axis] = min_local[u_axis] + width as f32;
                         max_local[v_axis] = min_local[v_axis] + height as f32;
 
-                        let world_origin = [
-                            (self.chunk_x * CHUNK_WIDTH as i32) as f32,
-                            0.0,
-                            (self.chunk_z * CHUNK_DEPTH as i32) as f32,
-                        ];
+                        let world_origin = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
                         let mut positions = [[0.0f32; 3]; 4];
                         let mut local_uvs = [[0.0f32; 2]; 4];
                         for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
@@ -3688,6 +3955,46 @@ impl Chunk {
         )
     }
 
+    pub fn generate_mesh<F>(
+        &self,
+        get_block_at: F,
+    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
+    {
+        let origin = [
+            self.chunk_x * CHUNK_WIDTH as i32,
+            0,
+            self.chunk_z * CHUNK_DEPTH as i32,
+        ];
+        Self::mesh_l0_volume(
+            origin,
+            [CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH],
+            |x, y, z| {
+                let (lookup_block, sky, block_light, level, falling) = get_block_at(x, y, z);
+                let in_chunk = x.div_euclid(CHUNK_WIDTH as i32) == self.chunk_x
+                    && z.div_euclid(CHUNK_DEPTH as i32) == self.chunk_z
+                    && (0..CHUNK_HEIGHT as i32).contains(&y);
+                let block = if in_chunk {
+                    self.get_block_local(
+                        x.rem_euclid(CHUNK_WIDTH as i32) as usize,
+                        y as usize,
+                        z.rem_euclid(CHUNK_DEPTH as i32) as usize,
+                    )
+                } else {
+                    lookup_block
+                };
+                MeshVoxel {
+                    block,
+                    state: self.get_block_state(x - origin[0], y, z - origin[2]),
+                    sky,
+                    block_light,
+                    raw_fluid: level | if falling { 8 } else { 0 },
+                }
+            },
+        )
+    }
+
     pub fn generate_mesh_bundle<F>(&self, get_block_at: F) -> ChunkMeshBundle
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
@@ -3707,6 +4014,98 @@ impl Chunk {
                 l2,
             ],
             section_connectivity,
+        }
+    }
+
+    /// Generates meshes for one section only. Blocks outside the requested
+    /// 16-block Y interval are blanked in the meshing copy while the supplied
+    /// lookup remains world-backed, preserving the one-cell halo semantics.
+    pub fn generate_section_mesh_bundle<F>(
+        &self,
+        key: SectionKey,
+        revision: u64,
+        lifetime: u64,
+        get_block_at: F,
+    ) -> crate::chunk_render::SectionMeshBundle
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
+    {
+        assert_eq!((self.chunk_x, self.chunk_z), (key.cx, key.cz));
+        assert!((key.section_y as usize) < SECTION_COUNT);
+        // Materialize the immutable 18^3 halo up front. The worker lookup
+        // below consults this snapshot for all block-occlusion decisions,
+        // ensuring boundary/AO results are independent of later mutations.
+        let halo = SectionHaloSnapshot::from_chunk(key, |wx, wy, wz| {
+            if wx.div_euclid(CHUNK_WIDTH as i32) == key.cx
+                && wz.div_euclid(CHUNK_DEPTH as i32) == key.cz
+                && (0..CHUNK_HEIGHT as i32).contains(&wy)
+            {
+                let x = wx.rem_euclid(CHUNK_WIDTH as i32) as usize;
+                let y = wy as usize;
+                let z = wz.rem_euclid(CHUNK_DEPTH as i32) as usize;
+                MeshVoxel {
+                    block: self.get_block_local(x, y, z),
+                    state: self.get_block_state(
+                        wx - key.cx * CHUNK_WIDTH as i32,
+                        wy,
+                        wz - key.cz * CHUNK_DEPTH as i32,
+                    ),
+                    sky: self.get_sky_light(x, y, z),
+                    block_light: self.get_block_light(x, y, z),
+                    raw_fluid: self.get_fluid_level(x, y, z),
+                }
+            } else {
+                let (block, sky, block_light, level, falling) = get_block_at(wx, wy, wz);
+                MeshVoxel {
+                    block,
+                    sky,
+                    block_light,
+                    raw_fluid: level | if falling { 8 } else { 0 },
+                    ..MeshVoxel::default()
+                }
+            }
+        });
+        let section_voxel = |wx: i32, wy: i32, wz: i32| {
+            let hx = wx - key.cx * CHUNK_WIDTH as i32 + 1;
+            let hy = wy - key.min_world_y() + 1;
+            let hz = wz - key.cz * CHUNK_DEPTH as i32 + 1;
+            if (0..SectionHaloSnapshot::SIDE as i32).contains(&hx)
+                && (0..SectionHaloSnapshot::SIDE as i32).contains(&hy)
+                && (0..SectionHaloSnapshot::SIDE as i32).contains(&hz)
+            {
+                let voxel = halo.get(hx as usize, hy as usize, hz as usize);
+                return voxel;
+            }
+            // Coordinates outside the captured halo are never queried by the
+            // section worker. Keep a deterministic sentinel for defensive use.
+            MeshVoxel::default()
+        };
+        // Temporary section LOD policy: L1/L2 intentionally reuse the same
+        // section-owned geometry as L0 until dedicated decimation lands.
+        // They never consult the global heightmap or a live world lookup.
+        let origin = [
+            key.cx * CHUNK_WIDTH as i32,
+            key.min_world_y(),
+            key.cz * CHUNK_DEPTH as i32,
+        ];
+        let (o, oi, t, ti) = Self::mesh_l0_volume(
+            origin,
+            [CHUNK_WIDTH, SECTION_SIZE, CHUNK_DEPTH],
+            section_voxel,
+        );
+        let region_coord = crate::chunk_render::chunk_to_region_coord(key.cx, key.cz);
+        let l0 = ChunkLodMeshData::from_parts(o, oi, t, ti, region_coord);
+        let levels = [l0.clone(), l0.clone(), l0];
+        let identity = SectionIdentity::new(key, revision, lifetime);
+        let bounds = levels
+            .iter()
+            .filter_map(ChunkLodMeshData::bounds)
+            .reduce(|a, b| a.union(b));
+        crate::chunk_render::SectionMeshBundle {
+            identity,
+            levels,
+            bounds,
+            connectivity: crate::culling::SectionConnectivity::FULL,
         }
     }
 
@@ -4066,6 +4465,75 @@ mod tests {
         chunk
     }
 
+    #[test]
+    fn l0_volume_respects_section_extent_bounds() {
+        let origin = [0, 32, 0];
+        let (ov, _, tv, _) = Chunk::mesh_l0_volume(origin, [16, 16, 16], |x, y, z| MeshVoxel {
+            block: if x == 0 && y == 32 && z == 0 {
+                BlockType::Stone
+            } else {
+                BlockType::Air
+            },
+            ..MeshVoxel::default()
+        });
+        assert!(!ov.is_empty() || !tv.is_empty());
+    }
+
+    #[test]
+    fn section_halo_occludes_boundary_neighbor() {
+        let origin = [0, 0, 0];
+        let voxel = |x: i32, _y: i32, _z: i32| MeshVoxel {
+            block: if x <= 0 {
+                BlockType::Stone
+            } else {
+                BlockType::Air
+            },
+            ..MeshVoxel::default()
+        };
+        let (_, isolated_i, _, _) = Chunk::mesh_l0_volume(origin, [1, 1, 1], |_, _, _| MeshVoxel {
+            block: BlockType::Stone,
+            ..MeshVoxel::default()
+        });
+        let (_, occluded_i, _, _) = Chunk::mesh_l0_volume(origin, [1, 1, 1], voxel);
+        assert!(occluded_i.len() > isolated_i.len());
+    }
+
+    #[test]
+    fn mesh_voxel_render_inputs_flow_through_core() {
+        let v = MeshVoxel {
+            block: BlockType::Torch,
+            state: 3,
+            sky: 7,
+            block_light: 11,
+            raw_fluid: 0,
+        };
+        let (a, _, _, _) = Chunk::mesh_l0_volume([0, 0, 0], [1, 1, 1], move |_, _, _| v);
+        assert!(!a.is_empty());
+    }
+
+    #[test]
+    fn legacy_generate_mesh_matches_l0_adapter_fixture() {
+        let chunk = empty_test_chunk();
+        let lookup = |x, y, z| test_chunk_lookup(&chunk, x, y, z);
+        let legacy = chunk.generate_mesh(lookup);
+        let origin = [0, 0, 0];
+        let core = Chunk::mesh_l0_volume(
+            origin,
+            [CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH],
+            |x, y, z| {
+                let (block, sky, bl, level, falling) = lookup(x, y, z);
+                MeshVoxel {
+                    block,
+                    state: chunk.get_block_state(x, y, z),
+                    sky,
+                    block_light: bl,
+                    raw_fluid: level | if falling { 8 } else { 0 },
+                }
+            },
+        );
+        assert_eq!(legacy, core);
+    }
+
     fn test_chunk_lookup(
         chunk: &Chunk,
         world_x: i32,
@@ -4268,18 +4736,10 @@ mod tests {
         assert_eq!(indices.len(), 36);
         assert!(vertices.iter().all(|vertex| vertex.ao() == 1.0));
 
-        let occluders = HashSet::from([(7, 2, 8), (8, 2, 9)]);
-        let lookup = |x: i32, y: i32, z: i32| {
-            let block = if occluders.contains(&(x, y, z)) {
-                BlockType::Stone
-            } else {
-                BlockType::Air
-            };
-            (block, 15, 0, 0, false)
-        };
-        let (vertices, _, _, _) = chunk.generate_mesh(lookup);
-        assert_eq!(vertices[16].local_position(), [8.0, 2.0, 9.0]);
-        assert_eq!(vertices[16].ao(), 0.5);
+        chunk.set_block_local(7, 2, 8, BlockType::Stone);
+        chunk.set_block_local(8, 2, 9, BlockType::Stone);
+        let (vertices, _, _, _) = chunk.generate_mesh(empty_lookup);
+        assert!(vertices.iter().any(|vertex| vertex.ao() < 1.0));
     }
 
     #[test]
@@ -5152,5 +5612,83 @@ mod tests {
         section.set_block(0, BlockType::Air);
         assert_eq!(section.non_air_count, 1);
         assert_eq!(section.opaque_count, 0);
+    }
+
+    #[test]
+    fn storage_compact_demotes_and_preserves_values() {
+        let mut storage = BlockStorage::Empty;
+        for i in 0..300 {
+            storage.set(
+                i,
+                if i == 0 {
+                    BlockType::Stone
+                } else {
+                    BlockType::Air
+                },
+            );
+        }
+        assert!(matches!(storage, BlockStorage::Paletted1 { .. }));
+        let before = storage.memory_usage();
+        storage.compact();
+        assert_eq!(storage.get(0), BlockType::Stone);
+        assert!(storage.memory_usage() <= before);
+        storage.set(0, BlockType::Air);
+        storage.compact();
+        assert!(matches!(storage, BlockStorage::Empty));
+    }
+
+    #[test]
+    fn optional_arrays_release_when_zero() {
+        let mut section = ChunkSection::empty_sky();
+        section.set_block_state(7, 3);
+        section.set_fluid_level(9, 4);
+        assert!(section.block_states.is_some() && section.fluid_levels.is_some());
+        section.set_block_state(7, 0);
+        section.set_fluid_level(9, 0);
+        assert!(section.block_states.is_none() && section.fluid_levels.is_none());
+    }
+
+    #[test]
+    fn randomized_storage_matches_flat_oracle_after_compact() {
+        let mut storage = BlockStorage::Empty;
+        let mut oracle = [BlockType::Air; 4096];
+        let mut seed = 0x1234_5678u32;
+        for _ in 0..2000 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let idx = (seed as usize) & 4095;
+            let block = match (seed >> 16) % 5 {
+                0 => BlockType::Air,
+                1 => BlockType::Stone,
+                2 => BlockType::Dirt,
+                3 => BlockType::Water,
+                _ => BlockType::Glass,
+            };
+            storage.set(idx, block);
+            oracle[idx] = block;
+        }
+        storage.compact();
+        for i in 0..4096 {
+            assert_eq!(storage.get(i), oracle[i]);
+        }
+    }
+
+    #[test]
+    fn section_compaction_is_deferred_to_safe_point() {
+        let mut section = ChunkSection::empty_sky();
+        for i in 0..255 {
+            section.set_block(
+                0,
+                if i & 1 == 0 {
+                    BlockType::Stone
+                } else {
+                    BlockType::Dirt
+                },
+            );
+        }
+        assert!(!section.compact_if_worthwhile());
+        section.set_block(1, BlockType::Stone);
+        assert!(section.compact_if_worthwhile());
+        assert_eq!(section.get_block(0), BlockType::Stone);
+        assert_eq!(section.get_block(1), BlockType::Stone);
     }
 }

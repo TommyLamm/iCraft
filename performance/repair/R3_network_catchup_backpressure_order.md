@@ -1,10 +1,19 @@
 # 任務 15-R3：network catch-up backpressure、order 與持久來源
 
 > 對應計畫：`15_performance_audit_repair_plan.md` 第 2.3 節
-> 狀態：待修復
+> 狀態：完成（2026-07-30）
 > 前置：R0（文件狀態回退）
 > 目標：以 `(player, dimension, chunk, revision)` 管理傳輸所有權、server 明確接受後才 dequeue、mailbox full 要 retry 不可 silent drop、flatten/Zlib 移到 bounded worker、用持久可回收 mutation/revision index 建立 catch-up，並定義 snapshot 與後續 BlockChange 順序。
 > Commit 訊息：`fix(perf): reliable network catch-up with backpressure and persistent revision index`
+
+## 完成摘要
+
+- Protocol v6 為 `ChunkData`／`BlockChange` 加入 dimension + revision，並加入 `ChunkAck`。
+- State 以 ACK-owned `(player, dimension, chunk, revision)` entry 管理傳輸；timeout 會 retry，超過上限套用可觀測的 slow-client disconnect policy。
+- 每個 client 使用獨立 bounded mailbox；full 會回報 `CatchupBackpressured` 與累積 counter，不再 silent drop。
+- snapshot flatten/Zlib 與 unloaded persisted-chunk load 移到 capacity 8 worker；主線程每幀全域最多提交 2 筆。
+- `mutation_revisions.bin` 只保留每 chunk 最新 revision；chunk 存檔也帶實際 revision，避免尚未落盤的舊 snapshot 被錯標為新版本。
+- client revision gate 會先緩衝跨 channel gap，再以 snapshot base revision 釋放連續 BlockChange；過期 snapshot/change 直接丟棄。
 
 ## 相關程式碼位置（已核對）
 
@@ -27,7 +36,7 @@
 ## 子任務清單
 
 ### 3.1 傳輸所有權與 server ACK dequeue
-- [ ] 檔案：`src/network/server.rs`、`src/state.rs`
+- [x] 檔案：`src/network/server.rs`、`src/state.rs`
 - 步驟：
   1. 每筆 catch-up payload 標記 `(player, dimension, chunk, revision)` 作為傳輸所有權。
   2. server 確認 client 已接受（ack 封包或 in-flight 上限內）後才從 queue dequeue。
@@ -36,7 +45,7 @@
 - 驗收：mailbox capacity=1、慢 client 仍可最終收斂，無 Chunk 永久缺漏。
 
 ### 3.2 mailbox full retry 不可 silent drop
-- [ ] 檔案：`src/network/server.rs`、`src/state.rs`
+- [x] 檔案：`src/network/server.rs`、`src/state.rs`
 - 步驟：
   1. `CatchupMailbox::replace` 滿時不再回 `false` 被忽略；改為保留/retry 並記錄 `catchup_mailbox_full` counter。
   2. 定義 slow client policy：降速、暫停新 snapshot、或斷線，必須明確且可觀測。
@@ -45,7 +54,7 @@
 - 驗收：mailbox full 時不丟 Chunk；slow client policy 可觀測。
 
 ### 3.3 flatten/Zlib 移到 bounded worker
-- [ ] 檔案：`src/network/server.rs`、`src/save.rs`、`src/state.rs`
+- [x] 檔案：`src/network/server.rs`、`src/save.rs`、`src/state.rs`
 - 步驟：
   1. join payload 的 `ChunkSaveData::from_chunk` 與 Zlib 壓縮（`src/network/server.rs:175-203`）移到 bounded worker thread。
   2. 主線程只提交 immutable request（chunk 座標、revision、Arc 參考）。
@@ -54,7 +63,7 @@
 - 驗收：catch-up 壓力場景中主線程不執行 flatten/Zlib。
 
 ### 3.4 持久可回收 mutation/revision index
-- [ ] 檔案：`src/state.rs`、`src/save.rs`
+- [x] 檔案：`src/state.rs`、`src/save.rs`
 - 步驟：
   1. 建立持久 mutation/revision index，記錄每個 Chunk 的歷史 mutation revision，不依賴 host 當下 loaded set。
   2. 取代目前只增不減、join 時全量排序的 `mutated_chunks` HashSet。
@@ -63,7 +72,7 @@
 - 驗收：新玩家加入時可取得已 unload Chunk 的最新 snapshot。
 
 ### 3.5 距離 priority + 同 Chunk latest revision wins
-- [ ] 檔案：`src/network/server.rs`
+- [x] 檔案：`src/network/server.rs`
 - 步驟：
   1. catch-up queue 以 `(distance_to_player, dimension, chunk)` 排序，近距優先。
   2. 同一 Chunk 多個 revision 只保留最新 revision 傳輸。
@@ -72,7 +81,7 @@
 - 驗收：近距 Chunk 先到；同 Chunk 舊 revision 不覆蓋新 revision。
 
 ### 3.6 snapshot 與後續 BlockChange 順序
-- [ ] 檔案：`src/network/protocol.rs`、`src/network/client.rs`
+- [x] 檔案：`src/network/protocol.rs`、`src/network/client.rs`
 - 步驟：
   1. 定義 Chunk snapshot 與其後 BlockChange 的全域順序：snapshot 帶 base revision，後續 change 帶遞增 revision。
   2. client 不得用較舊 snapshot 覆寫新 mutation；以 revision 比較丟棄過期 snapshot/change。
@@ -81,7 +90,7 @@
 - 驗收：client checksum 與 host 收斂，無舊 snapshot 覆蓋。
 
 ### 3.7 catch-up 收斂整合測試
-- [ ] 檔案：`src/network/server.rs`（測試模組）、`src/network/client.rs`（測試模組）
+- [x] 檔案：`src/network/server.rs`（測試模組）、`src/network/client.rs`（測試模組）
 - 步驟：
   1. mailbox capacity=1、慢 client、多 client、unloaded mutated Chunk 場景各自斷言 checksum 收斂。
   2. 近距 Chunk 先到；可靠 chat/control/block packet 保序。
@@ -91,12 +100,12 @@
 
 ## 驗收條件
 
-- [ ] mailbox capacity=1、慢 client、多 client、unloaded mutated Chunk 均可最終收斂 checksum。
-- [ ] 沒有 Chunk 永久缺漏；近距 Chunk 先到。
-- [ ] 可靠 chat/control/block packet 保序。
-- [ ] catch-up 壓力場景中主線程不執行 flatten/Zlib，每幀總 budget 不隨 client 數線性放大。
-- [ ] server 明確接受後才 dequeue；mailbox full 不 silent drop。
-- [ ] snapshot 與後續 BlockChange 順序正確，無舊 snapshot 覆蓋。
+- [x] mailbox capacity=1、慢 client、多 client、unloaded mutated Chunk 均可最終收斂 checksum。
+- [x] 沒有 Chunk 永久缺漏；近距 Chunk 先到。
+- [x] 可靠 chat/control/block packet 保序。
+- [x] catch-up 壓力場景中主線程不執行 flatten/Zlib，每幀總 budget 不隨 client 數線性放大。
+- [x] server 明確接受後才 dequeue；mailbox full 不 silent drop。
+- [x] snapshot 與後續 BlockChange 順序正確，無舊 snapshot 覆蓋。
 
 ## 風險與回退
 

@@ -42,6 +42,10 @@ pub struct ParticleInstance {
     pub lifetime: f32,
     pub fade_scale: u32,
     pub tex_coords: [f32; 4],
+    /// Per-particle tint (linear RGBA), defaulting to opaque white.
+    pub color: [f32; 4],
+    /// Packed world-light value consumed by the shared lighting shader.
+    pub light_level: f32,
 }
 
 impl ParticleInstance {
@@ -84,6 +88,16 @@ impl ParticleInstance {
                     offset: 32,
                     shader_location: 8,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 48,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 64,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Float32,
                 },
             ],
         }
@@ -131,6 +145,10 @@ pub struct Particle {
     pub stretch_y: f32,
     /// When true the particle shrinks as it ages (used for smoke).
     pub fade_scale: bool,
+    /// Per-particle tint (linear RGBA). Kept white for existing spawn paths.
+    pub color: [f32; 4],
+    /// Packed light/brightness value; 240 preserves the legacy full-light path.
+    pub light_level: f32,
 }
 
 pub struct ParticleSystem {
@@ -185,6 +203,8 @@ impl ParticleSystem {
             gravity,
             stretch_y: stretch_y.max(0.05),
             fade_scale: false,
+            color: [1.0; 4],
+            light_level: 240.0,
         });
     }
 
@@ -214,6 +234,8 @@ impl ParticleSystem {
                 lifetime: p.lifetime,
                 fade_scale: if p.fade_scale { 1 } else { 0 },
                 tex_coords: p.tex_coords,
+                color: p.color,
+                light_level: p.light_level,
             });
         }
         count as u32
@@ -530,5 +552,46 @@ mod tests {
             8.0,
         );
         assert_eq!(sys.particles[0].stretch_y, 8.0);
+    }
+
+    #[test]
+    fn particle_instance_layout_has_stable_color_and_light_offsets() {
+        assert_eq!(std::mem::size_of::<ParticleInstance>(), 68);
+        assert_eq!(std::mem::offset_of!(ParticleInstance, color), 48);
+        assert_eq!(std::mem::offset_of!(ParticleInstance, light_level), 64);
+
+        let layout = ParticleInstance::layout();
+        assert_eq!(layout.array_stride, 68);
+        assert_eq!(layout.attributes[7].offset, 48);
+        assert_eq!(layout.attributes[7].shader_location, 9);
+        assert_eq!(layout.attributes[8].offset, 64);
+        assert_eq!(layout.attributes[8].shader_location, 10);
+    }
+
+    #[test]
+    fn compile_instances_preserves_legacy_white_full_light_math() {
+        let mut sys = ParticleSystem::new();
+        sys.spawn(Vec3::ZERO, Vec3::ZERO, 0.1, 1.0, [0.0, 0.0, 1.0, 1.0], 0.0);
+        let mut instances = Vec::new();
+        assert_eq!(sys.compile_instances(&mut instances), 1);
+        let instance = instances[0];
+        assert_eq!(instance.color, [1.0; 4]);
+        assert_eq!(instance.light_level, 240.0);
+        // 240 encodes block light 15, yielding the same full-light multiplier
+        // as the previous hard-coded particle shader path.
+        let block_light = (instance.light_level % 256.0 / 16.0).floor();
+        assert_eq!(block_light, 15.0);
+    }
+
+    #[test]
+    fn compile_instances_carries_custom_color_and_light() {
+        let mut sys = ParticleSystem::new();
+        sys.spawn(Vec3::ZERO, Vec3::ZERO, 0.1, 1.0, [0.0, 0.0, 1.0, 1.0], 0.0);
+        sys.particles[0].color = [0.2, 0.4, 0.8, 0.75];
+        sys.particles[0].light_level = 34.0;
+        let mut instances = Vec::new();
+        sys.compile_instances(&mut instances);
+        assert_eq!(instances[0].color, [0.2, 0.4, 0.8, 0.75]);
+        assert_eq!(instances[0].light_level, 34.0);
     }
 }

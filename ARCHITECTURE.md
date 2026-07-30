@@ -60,7 +60,7 @@ the primary Vulkan path has caused a verified NVIDIA driver crash.
 4. Builds initial terrain meshes and starts background services.
 5. Streams the remaining render distance incrementally.
 
-Joining clients wait for a successful protocol-v5 login before using the host's
+Joining clients wait for a successful protocol-v7 login before using the host's
 seed and synchronized world state.
 
 ### Per-frame update

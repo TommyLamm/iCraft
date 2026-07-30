@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PotionWire {
@@ -206,6 +206,25 @@ pub struct LightningStrike {
     pub visual_seed: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EntityStateWire {
+    pub entity_id: u64,
+    pub entity_type: u8,
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub health: f32,
+    pub animation_state: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlayerEffectWire {
+    pub kind: u8,
+    pub level: u8,
+    pub remaining_seconds: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Packet {
     Handshake {
@@ -249,6 +268,8 @@ pub enum Packet {
     },
     BlockChange {
         protocol_version: u32,
+        dimension: u8,
+        revision: u64,
         x: i32,
         y: i32,
         z: i32,
@@ -257,11 +278,56 @@ pub enum Packet {
     },
     ChunkData {
         protocol_version: u32,
+        dimension: u8,
         cx: i32,
         cz: i32,
+        revision: u64,
         blocks: Vec<u8>,
         #[serde(default)]
         block_states: Vec<u8>,
+    },
+    ChunkAck {
+        protocol_version: u32,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+    },
+    EntitySpawn {
+        protocol_version: u32,
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    EntityState {
+        protocol_version: u32,
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    EntityDespawn {
+        protocol_version: u32,
+        dimension: u8,
+        sequence: u64,
+        entity_id: u64,
+    },
+    PlayerHealth {
+        protocol_version: u32,
+        sequence: u64,
+        player_id: PlayerId,
+        health: f32,
+        max_health: f32,
+        hunger: f32,
+        saturation: f32,
+        oxygen: f32,
+        is_dead: bool,
+        death_reason: u8,
+    },
+    PlayerEffect {
+        protocol_version: u32,
+        sequence: u64,
+        player_id: PlayerId,
+        effects: Vec<PlayerEffectWire>,
     },
     TimeSync {
         protocol_version: u32,
@@ -329,6 +395,24 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::ChunkData {
+                protocol_version, ..
+            }
+            | Packet::ChunkAck {
+                protocol_version, ..
+            }
+            | Packet::EntitySpawn {
+                protocol_version, ..
+            }
+            | Packet::EntityState {
+                protocol_version, ..
+            }
+            | Packet::EntityDespawn {
+                protocol_version, ..
+            }
+            | Packet::PlayerHealth {
+                protocol_version, ..
+            }
+            | Packet::PlayerEffect {
                 protocol_version, ..
             }
             | Packet::TimeSync {
@@ -452,6 +536,8 @@ mod tests {
     fn block_change_roundtrip() {
         let p = Packet::BlockChange {
             protocol_version: v(),
+            dimension: 0,
+            revision: 1,
             x: -10,
             y: 64,
             z: 200,
@@ -466,8 +552,10 @@ mod tests {
     fn chunk_data_roundtrip() {
         let p = Packet::ChunkData {
             protocol_version: v(),
+            dimension: 0,
             cx: -3,
             cz: 4,
+            revision: 1,
             blocks: vec![0u8; 4096],
             block_states: Vec::new(),
         };
@@ -636,6 +724,8 @@ mod tests {
     fn block_change_and_chunk_data_state_roundtrip() {
         let bc = Packet::BlockChange {
             protocol_version: v(),
+            dimension: 0,
+            revision: 7,
             x: 10,
             y: 64,
             z: -5,
@@ -647,12 +737,85 @@ mod tests {
 
         let cd = Packet::ChunkData {
             protocol_version: v(),
+            dimension: 0,
             cx: 2,
             cz: -3,
+            revision: 7,
             blocks: vec![1, 2, 3],
             block_states: vec![4, 5, 6],
         };
         let decoded_cd = Packet::decode(&cd.encode()).unwrap();
         assert_eq!(cd, decoded_cd);
+
+        let ack = Packet::ChunkAck {
+            protocol_version: v(),
+            dimension: 0,
+            cx: 2,
+            cz: -3,
+            revision: 7,
+        };
+        assert_eq!(ack, Packet::decode(&ack.encode()).unwrap());
+    }
+
+    #[test]
+    fn entity_lifecycle_and_player_authority_roundtrip() {
+        let state = EntityStateWire {
+            entity_id: 42,
+            entity_type: 3,
+            position: [1.0, 70.0, -2.0],
+            velocity: [0.25, 0.0, -0.5],
+            yaw: 1.25,
+            pitch: -0.2,
+            health: 17.0,
+            animation_state: 0b0000_0111,
+        };
+        for packet in [
+            Packet::EntitySpawn {
+                protocol_version: v(),
+                dimension: 0,
+                sequence: 8,
+                state,
+            },
+            Packet::EntityState {
+                protocol_version: v(),
+                dimension: 0,
+                sequence: 9,
+                state,
+            },
+            Packet::EntityDespawn {
+                protocol_version: v(),
+                dimension: 0,
+                sequence: 10,
+                entity_id: state.entity_id,
+            },
+        ] {
+            assert_eq!(packet, Packet::decode(&packet.encode()).unwrap());
+        }
+
+        let health = Packet::PlayerHealth {
+            protocol_version: v(),
+            sequence: 11,
+            player_id: 7,
+            health: 12.0,
+            max_health: 20.0,
+            hunger: 16.0,
+            saturation: 3.0,
+            oxygen: 240.0,
+            is_dead: false,
+            death_reason: 0,
+        };
+        assert_eq!(health, Packet::decode(&health.encode()).unwrap());
+
+        let effects = Packet::PlayerEffect {
+            protocol_version: v(),
+            sequence: 11,
+            player_id: 7,
+            effects: vec![PlayerEffectWire {
+                kind: 2,
+                level: 1,
+                remaining_seconds: 15.5,
+            }],
+        };
+        assert_eq!(effects, Packet::decode(&effects.encode()).unwrap());
     }
 }

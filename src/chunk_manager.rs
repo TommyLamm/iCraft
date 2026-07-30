@@ -1,4 +1,7 @@
-use crate::world::{BlockSupportStatus, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{
+    BlockSupportStatus, BlockType, Chunk, MeshVoxel, SectionHaloSnapshot, SectionKey, CHUNK_DEPTH,
+    CHUNK_HEIGHT, CHUNK_WIDTH, SECTION_COUNT, SECTION_SIZE,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 type BlockPos = (i32, i32, i32);
@@ -36,6 +39,57 @@ pub(crate) fn mark_block_mesh_dependencies(dirty: &mut HashSet<(i32, i32)>, wx: 
     }
     if let (Some(affected_cx), Some(affected_cz)) = (x_neighbor, z_neighbor) {
         dirty.insert((affected_cx, affected_cz));
+    }
+}
+
+/// Marks the owner section and only sections that can observe a one-cell halo
+/// sample (including edges/corners). This is the exact 3-D counterpart to the
+/// legacy chunk dependency helper.
+pub(crate) fn mark_section_mesh_dependencies(
+    dirty: &mut HashSet<SectionKey>,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+) {
+    if !(0..CHUNK_HEIGHT as i32).contains(&wy) {
+        return;
+    }
+    let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+    let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+    let sy = (wy as usize / SECTION_SIZE) as i32;
+    let lx = wx.rem_euclid(CHUNK_WIDTH as i32);
+    let lz = wz.rem_euclid(CHUNK_DEPTH as i32);
+    let ly = wy.rem_euclid(SECTION_SIZE as i32);
+    let xs = if lx == 0 {
+        [-1, 0]
+    } else if lx == 15 {
+        [0, 1]
+    } else {
+        [0, 0]
+    };
+    let zs = if lz == 0 {
+        [-1, 0]
+    } else if lz == 15 {
+        [0, 1]
+    } else {
+        [0, 0]
+    };
+    let ys = if ly == 0 {
+        [-1, 0]
+    } else if ly == 15 {
+        [0, 1]
+    } else {
+        [0, 0]
+    };
+    for dx in xs {
+        for dz in zs {
+            for dy in ys {
+                let target = sy + dy;
+                if (0..SECTION_COUNT as i32).contains(&target) {
+                    dirty.insert(SectionKey::new(cx + dx, target as u16, cz + dz));
+                }
+            }
+        }
     }
 }
 
@@ -178,6 +232,37 @@ impl ChunkManager {
 
     pub fn get_block(&self, wx: i32, wy: i32, wz: i32) -> BlockType {
         self.get_loaded_block(wx, wy, wz).unwrap_or(BlockType::Air)
+    }
+
+    /// Captures the complete 18^3 worker input for a section. Missing chunks
+    /// and out-of-range Y use an explicit air/zero-light sentinel; sky above
+    /// the dimension retains full skylight only when the dimension has sky.
+    pub fn capture_section_halo(&self, key: SectionKey) -> SectionHaloSnapshot {
+        SectionHaloSnapshot::from_chunk(key, |wx, wy, wz| {
+            if !(0..CHUNK_HEIGHT as i32).contains(&wy) {
+                return MeshVoxel {
+                    sky: if wy >= CHUNK_HEIGHT as i32 && self.dimension.has_sky_light() {
+                        15
+                    } else {
+                        0
+                    },
+                    ..MeshVoxel::default()
+                };
+            }
+            let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) else {
+                return MeshVoxel::default();
+            };
+            let Some(chunk) = self.chunks.get(&(cx, cz)) else {
+                return MeshVoxel::default();
+            };
+            MeshVoxel {
+                block: chunk.get_block_local(bx, by, bz),
+                state: chunk.get_block_state(bx as i32, by as i32, bz as i32),
+                sky: chunk.get_sky_light(bx, by, bz),
+                block_light: chunk.get_block_light(bx, by, bz),
+                raw_fluid: chunk.get_fluid_level(bx, by, bz),
+            }
+        })
     }
 
     /// Returns `None` when the coordinate is outside world height or its chunk
@@ -542,6 +627,18 @@ mod tests {
             HashSet::from([(0, 0), (1, 0)])
         );
         assert!(manager.drain_mesh_invalidations().is_empty());
+    }
+
+    #[test]
+    fn section_dependencies_include_xyz_edges_and_corners() {
+        let mut set = HashSet::new();
+        mark_section_mesh_dependencies(&mut set, 15, 15, 15);
+        assert_eq!(set.len(), 8);
+        assert!(set.contains(&SectionKey::new(0, 0, 0)));
+        assert!(set.contains(&SectionKey::new(1, 1, 1)));
+        let mut interior = HashSet::new();
+        mark_section_mesh_dependencies(&mut interior, 7, 7, 7);
+        assert_eq!(interior, [SectionKey::new(0, 0, 0)].into_iter().collect());
     }
 
     #[test]

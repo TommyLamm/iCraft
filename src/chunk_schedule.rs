@@ -1,4 +1,5 @@
 use crate::dimension::Dimension;
+use crate::world::{SectionIdentity, SectionKey};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 pub const UNLOAD_HYSTERESIS: i32 = 2;
@@ -6,6 +7,123 @@ pub const MAX_INTEGRATE_TIME_MS: u64 = 3;
 pub const MAX_INTEGRATE_MESHES: usize = 4;
 pub const MAX_INTEGRATE_UPLOAD_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
 pub const MAX_DIRTY_MESH_QUEUE: usize = 16_384;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DirtySectionWork {
+    pub identity: SectionIdentity,
+    pub reason: DependencyReason,
+    pub distance_sq: u64,
+}
+
+/// Persistent section queue kept separate from legacy chunk scheduling.
+#[derive(Default)]
+pub struct SectionMeshScheduler {
+    pending: HashMap<SectionKey, DirtySectionWork>,
+    priority: BTreeSet<(u64, i32, u16, i32)>,
+    pub in_flight: HashMap<SectionKey, SectionIdentity>,
+}
+
+impl SectionMeshScheduler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn enqueue(
+        &mut self,
+        identity: SectionIdentity,
+        reason: DependencyReason,
+        player_chunk: (i32, i32),
+    ) {
+        let key = identity.key;
+        if let Some(old) = self.pending.insert(
+            key,
+            DirtySectionWork {
+                identity,
+                reason,
+                distance_sq: section_distance(key, player_chunk),
+            },
+        ) {
+            self.priority
+                .remove(&(old.distance_sq, key.cx, key.section_y, key.cz));
+        }
+        let work = self.pending[&key];
+        self.priority
+            .insert((work.distance_sq, key.cx, key.section_y, key.cz));
+    }
+    pub fn pop_nearest(
+        &mut self,
+        player_chunk: (i32, i32),
+        distance: i32,
+    ) -> Option<DirtySectionWork> {
+        let item = self.priority.iter().copied().find(|(_, cx, _, cz)| {
+            (cx - player_chunk.0).abs() <= distance && (cz - player_chunk.1).abs() <= distance
+        })?;
+        self.priority.remove(&item);
+        self.pending
+            .remove(&SectionKey::new(item.1, item.2, item.3))
+    }
+    pub fn mark_in_flight(&mut self, work: DirtySectionWork) {
+        self.in_flight.insert(work.identity.key, work.identity);
+    }
+    pub fn complete(&mut self, identity: SectionIdentity) -> bool {
+        self.in_flight
+            .get(&identity.key)
+            .is_some_and(|current| *current == identity)
+            && {
+                self.in_flight.remove(&identity.key);
+                true
+            }
+    }
+    pub fn remove(&mut self, key: SectionKey) -> Option<DirtySectionWork> {
+        if let Some(old) = self.pending.remove(&key) {
+            self.priority
+                .remove(&(old.distance_sq, key.cx, key.section_y, key.cz));
+            return Some(old);
+        }
+        None
+    }
+    pub fn remove_chunk(&mut self, cx: i32, cz: i32) {
+        let keys: Vec<_> = self
+            .pending
+            .keys()
+            .copied()
+            .filter(|k| k.cx == cx && k.cz == cz)
+            .collect();
+        for key in keys {
+            self.remove(key);
+        }
+        self.in_flight.retain(|key, _| key.cx != cx || key.cz != cz);
+    }
+    pub fn requeue(&mut self, work: DirtySectionWork, player_chunk: (i32, i32)) {
+        self.enqueue(work.identity, work.reason, player_chunk);
+    }
+    pub fn reprioritize(&mut self, player_chunk: (i32, i32)) {
+        let works: Vec<_> = self
+            .pending
+            .values()
+            .map(|w| (w.identity, w.reason))
+            .collect();
+        self.pending.clear();
+        self.priority.clear();
+        for (identity, reason) in works {
+            self.enqueue(identity, reason, player_chunk);
+        }
+    }
+    pub fn is_in_flight(&self, key: SectionKey) -> bool {
+        self.in_flight.contains_key(&key)
+    }
+    pub fn bounded(&self, max_items: usize) -> usize {
+        self.pending.len().min(max_items)
+    }
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+fn section_distance(key: SectionKey, player: (i32, i32)) -> u64 {
+    let dx = i64::from(key.cx) - i64::from(player.0);
+    let dz = i64::from(key.cz) - i64::from(player.1);
+    (dx * dx + dz * dz) as u64
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DependencyReason {
@@ -260,5 +378,26 @@ mod tests {
             scheduler.pop_nearest_dirty((10, 0), 16).unwrap().coord,
             (8, 0)
         );
+    }
+
+    #[test]
+    fn section_scheduler_deduplicates_and_rejects_stale_completion() {
+        let key = SectionKey::new(2, 3, 4);
+        let mut scheduler = SectionMeshScheduler::new();
+        scheduler.enqueue(
+            SectionIdentity::new(key, 1, 7),
+            DependencyReason::Block,
+            (0, 0),
+        );
+        scheduler.enqueue(
+            SectionIdentity::new(key, 2, 7),
+            DependencyReason::Light,
+            (0, 0),
+        );
+        assert_eq!(scheduler.len(), 1);
+        let work = scheduler.pop_nearest((0, 0), 10).unwrap();
+        scheduler.mark_in_flight(work);
+        assert!(!scheduler.complete(SectionIdentity::new(key, 1, 7)));
+        assert!(scheduler.complete(work.identity));
     }
 }

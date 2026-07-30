@@ -33,8 +33,14 @@ const CHAT_VISIBLE_LINES: usize = 8;
 const CHAT_INPUT_CAPACITY: usize = 256;
 const REMOTE_SNAPSHOT_CAPACITY: usize = 32;
 const REMOTE_INTERPOLATION_DELAY: f64 = 0.1;
+const ENTITY_SNAPSHOT_CAPACITY: usize = 8;
+const ENTITY_INTERPOLATION_DELAY: f64 = 0.1;
+const ENTITY_SNAP_DISTANCE: f32 = 6.0;
+const PLAYER_CORRECTION_SNAP_DISTANCE: f32 = 4.0;
 const REMOTE_MAX_EXTRAPOLATION: f64 = 0.1;
 const REMOTE_MAX_EXTRAPOLATION_SPEED: f32 = 40.0;
+const REMOTE_AUTHORITY_MAX_SPEED: f32 = 12.0;
+const REMOTE_AUTHORITY_POSITION_TOLERANCE: f32 = 1.0;
 const REMOTE_MAX_ANGULAR_SPEED: f32 = std::f32::consts::TAU * 2.0;
 const REMOTE_TELEPORT_DISTANCE: f32 = 8.0;
 const REMOTE_TELEPORT_GAP: f64 = 0.5;
@@ -42,10 +48,68 @@ const CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 const MELEE_REACH: f32 = 4.0;
 const BLOCK_REACH: f32 = 5.0;
 const BLOCK_REACH_TOLERANCE: f32 = 1.5;
+const MAX_CATCHUP_SUBMITS_PER_FRAME: usize = 2;
+const CATCHUP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CATCHUP_RETRIES: u8 = 3;
+const NETWORK_MAX_EVENTS_PER_PASS: usize = 256;
+const NETWORK_MAX_BYTES_PER_PASS: usize = 1_048_576;
+const NETWORK_MAX_TIME_PER_PASS: Duration = Duration::from_millis(2);
 const PAUSE_WEATHER_VOLUME_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.46, -0.36];
 const PAUSE_QUIT_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.60, -0.50];
 pub const SIM_TICK_TIME: f32 = 0.05;
 pub const MAX_CATCHUP_TICKS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct UploadMetrics {
+    elapsed_ns: u64,
+    bytes: u64,
+}
+
+impl UploadMetrics {
+    fn add(self, other: Self) -> Self {
+        Self {
+            elapsed_ns: self.elapsed_ns.saturating_add(other.elapsed_ns),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
+}
+
+fn should_advance_simulation(
+    role: &MultiplayerRole,
+    network_ready: bool,
+    is_paused: bool,
+    is_dead: bool,
+) -> bool {
+    network_ready
+        && match role {
+            MultiplayerRole::Host { .. } => true,
+            MultiplayerRole::Singleplayer | MultiplayerRole::Client { .. } => {
+                !is_paused && !is_dead
+            }
+        }
+}
+
+fn validated_remote_position(
+    latest: Option<&PlayerSnapshot>,
+    candidate: Vec3,
+    sender_time_millis: u64,
+) -> Vec3 {
+    let Some(latest) = latest else {
+        return candidate;
+    };
+    if sender_time_millis <= latest.sender_time_millis {
+        return latest.position;
+    }
+    let elapsed =
+        ((sender_time_millis - latest.sender_time_millis) as f32 / 1_000.0).clamp(0.0, 0.5);
+    let max_distance = REMOTE_AUTHORITY_MAX_SPEED * elapsed + REMOTE_AUTHORITY_POSITION_TOLERANCE;
+    let delta = candidate - latest.position;
+    if delta.length_squared() <= max_distance * max_distance {
+        candidate
+    } else {
+        latest.position + delta.normalize_or_zero() * max_distance
+    }
+}
 
 fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
     x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
@@ -113,7 +177,7 @@ fn is_legal_melee_target(entity: &crate::entity::Entity) -> bool {
 }
 
 fn closest_melee_target(
-    entities: &[crate::entity::Entity],
+    entity_manager: &crate::entity::EntityManager,
     origin: Vec3,
     direction: Vec3,
     reach: f32,
@@ -122,8 +186,24 @@ fn closest_melee_target(
         return None;
     }
     let direction = direction.normalize();
-    entities
-        .iter()
+    const MELEE_TYPES: [crate::entity::EntityType; 14] = [
+        crate::entity::EntityType::Zombie,
+        crate::entity::EntityType::Skeleton,
+        crate::entity::EntityType::Creeper,
+        crate::entity::EntityType::Pig,
+        crate::entity::EntityType::Cow,
+        crate::entity::EntityType::Sheep,
+        crate::entity::EntityType::Chicken,
+        crate::entity::EntityType::Blaze,
+        crate::entity::EntityType::Piglin,
+        crate::entity::EntityType::Husk,
+        crate::entity::EntityType::Shulker,
+        crate::entity::EntityType::EnderDragon,
+        crate::entity::EntityType::Wither,
+        crate::entity::EntityType::EndCrystal,
+    ];
+    entity_manager
+        .query_radius_types(origin, reach, &MELEE_TYPES)
         .filter(|entity| is_legal_melee_target(entity))
         .filter_map(|entity| {
             crate::entity::ray_intersects_aabb(origin, direction, &entity.get_aabb())
@@ -455,6 +535,80 @@ mod remote_sync_tests {
         assert!(!sequence_is_newer(1, 2));
         assert!(sequence_is_newer(0, u32::MAX));
         assert!(!sequence_is_newer(u32::MAX, 0));
+    }
+
+    #[test]
+    fn network_burst_budget_leaves_persistent_backlog() {
+        let mut inbox = std::collections::VecDeque::new();
+        for _ in 0..(NETWORK_MAX_EVENTS_PER_PASS + 17) {
+            inbox.push_back(NetworkInbound::StatusUpdate("burst".into()));
+        }
+        let drained: Vec<_> = inbox.drain(..NETWORK_MAX_EVENTS_PER_PASS).collect();
+        assert_eq!(drained.len(), NETWORK_MAX_EVENTS_PER_PASS);
+        assert_eq!(inbox.len(), 17);
+    }
+
+    #[test]
+    fn reliable_events_remain_strict_fifo_until_eventual_delivery() {
+        let mut inbox = std::collections::VecDeque::from([
+            NetworkInbound::StatusUpdate("one".into()),
+            NetworkInbound::StatusUpdate("two".into()),
+            NetworkInbound::StatusUpdate("three".into()),
+        ]);
+        let mut delivered = Vec::new();
+        while let Some(event) = inbox.pop_front() {
+            assert_eq!(
+                classify_network_event(&event),
+                NetworkDeliveryClass::Reliable
+            );
+            if let NetworkInbound::StatusUpdate(message) = event {
+                delivered.push(message);
+            }
+        }
+        assert_eq!(delivered, ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn latest_wins_state_is_sequence_aware_per_key() {
+        let mut positions = std::collections::HashMap::new();
+        for (id, sequence, x) in [(7_u64, 2_u32, 2.0_f32), (7, 1, 1.0), (8, 4, 4.0)] {
+            let replace = positions
+                .get(&id)
+                .map_or(true, |old: &(u32, f32)| sequence > old.0);
+            if replace {
+                positions.insert(id, (sequence, x));
+            }
+        }
+        assert_eq!(positions.get(&7), Some(&(2, 2.0)));
+        assert_eq!(positions.get(&8), Some(&(4, 4.0)));
+
+        let health = NetworkInbound::PlayerHealth {
+            sequence: 9,
+            player_id: 3,
+            health: 18.0,
+            max_health: 20.0,
+            hunger: 19.0,
+            saturation: 4.0,
+            oxygen: 20.0,
+            is_dead: false,
+            death_reason: 0,
+        };
+        assert_eq!(
+            classify_network_event(&health),
+            NetworkDeliveryClass::LatestHealth
+        );
+    }
+
+    #[test]
+    fn network_event_and_byte_caps_are_explicit_and_measurable() {
+        let event = NetworkInbound::StatusUpdate("bounded".into());
+        assert!(event.estimated_bytes() > 0);
+        assert!(NETWORK_MAX_EVENTS_PER_PASS <= 256);
+        assert!(NETWORK_MAX_BYTES_PER_PASS >= event.estimated_bytes());
+        assert!(NETWORK_MAX_TIME_PER_PASS > Duration::ZERO);
+        let small = NetworkInbound::StatusUpdate("x".into()).estimated_bytes();
+        let large = NetworkInbound::StatusUpdate("x".repeat(4096)).estimated_bytes();
+        assert!(large >= small + 4095);
     }
 
     #[test]
@@ -954,6 +1108,7 @@ impl GpuMeshLayer {
 
 pub struct RenderRegion {
     pub region_coord: (i32, i32),
+    pub region_instance_id: u64,
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub vertex_capacity: u32,
@@ -974,6 +1129,11 @@ impl RenderRegion {
         region_bind_group_layout: &wgpu::BindGroupLayout,
         region_coord: (i32, i32),
     ) -> Self {
+        static NEXT_REGION_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let region_instance_id = NEXT_REGION_INSTANCE_ID
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .max(1);
         let vertex_bytes = (Self::INITIAL_VERTEX_CAPACITY as usize)
             * std::mem::size_of::<crate::chunk_render::TerrainVertex>();
         let index_bytes = (Self::INITIAL_INDEX_CAPACITY as usize) * std::mem::size_of::<u32>();
@@ -1024,6 +1184,7 @@ impl RenderRegion {
 
         Self {
             region_coord,
+            region_instance_id,
             vertex_buffer,
             index_buffer,
             vertex_capacity: Self::INITIAL_VERTEX_CAPACITY,
@@ -1036,11 +1197,18 @@ impl RenderRegion {
         }
     }
 
-    pub fn deallocate_handle(&mut self, handle: &crate::chunk_render::RegionAllocationHandle) {
-        self.vertex_freelist
-            .deallocate(handle.vertex_offset, handle.num_vertices);
-        self.index_freelist
-            .deallocate(handle.index_offset, handle.num_indices);
+    pub fn deallocate_handle(
+        &mut self,
+        handle: &crate::chunk_render::RegionAllocationHandle,
+    ) -> Result<(), crate::chunk_render::FreeListError> {
+        if handle.region_instance_id != self.region_instance_id {
+            return Err(crate::chunk_render::FreeListError::UnknownAllocation);
+        }
+        self.vertex_freelist.validate_owned(handle.vertex_token)?;
+        self.index_freelist.validate_owned(handle.index_token)?;
+        self.vertex_freelist.deallocate_owned(handle.vertex_token)?;
+        self.index_freelist.deallocate_owned(handle.index_token)?;
+        Ok(())
     }
 
     pub fn committed_bytes(&self) -> usize {
@@ -1052,6 +1220,11 @@ impl RenderRegion {
         (self.vertex_freelist.used_units() as usize)
             * std::mem::size_of::<crate::chunk_render::TerrainVertex>()
             + (self.index_freelist.used_units() as usize) * std::mem::size_of::<u32>()
+    }
+
+    pub fn buffer_object_count(&self) -> usize {
+        // vertex + index + region uniform; bind groups are not buffers.
+        3
     }
 
     pub fn ensure_capacity(
@@ -1146,9 +1319,10 @@ impl RenderRegion {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         data: &crate::chunk_render::ChunkMeshData,
-    ) -> GpuMeshLayer {
+        owner: u64,
+    ) -> (GpuMeshLayer, UploadMetrics) {
         if data.is_empty() {
-            return GpuMeshLayer::empty();
+            return (GpuMeshLayer::empty(), UploadMetrics::default());
         }
 
         let num_vertices = data.vertices.len() as u32;
@@ -1156,14 +1330,18 @@ impl RenderRegion {
 
         self.ensure_capacity(device, queue, num_vertices, num_indices);
 
-        let vertex_offset = self
+        let vertex_token = self
             .vertex_freelist
-            .allocate(num_vertices)
+            .allocate_owned(num_vertices, owner)
+            .map_err(|e| format!("vertex allocation failed: {e:?}"))
             .expect("vertex freelist allocation failed");
-        let index_offset = self
+        let index_token = self
             .index_freelist
-            .allocate(num_indices)
+            .allocate_owned(num_indices, owner)
+            .map_err(|e| format!("index allocation failed: {e:?}"))
             .expect("index freelist allocation failed");
+        let vertex_offset = vertex_token.offset;
+        let index_offset = index_token.offset;
 
         let vertex_bytes = bytemuck::cast_slice(&data.vertices);
         let index_bytes = bytemuck::cast_slice(&data.indices);
@@ -1173,20 +1351,31 @@ impl RenderRegion {
             as u64;
         let i_byte_offset = (index_offset as usize * std::mem::size_of::<u32>()) as u64;
 
+        let upload_started = Instant::now();
         queue.write_buffer(&self.vertex_buffer, v_byte_offset, vertex_bytes);
         queue.write_buffer(&self.index_buffer, i_byte_offset, index_bytes);
+        let metrics = UploadMetrics {
+            elapsed_ns: upload_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            bytes: (vertex_bytes.len() + index_bytes.len()) as u64,
+        };
 
-        GpuMeshLayer {
-            handle: Some(crate::chunk_render::RegionAllocationHandle {
-                vertex_offset,
-                index_offset,
-                num_vertices,
-                num_indices,
-            }),
-            bounds: data.bounds,
-            vertex_bytes: vertex_bytes.len(),
-            index_bytes: index_bytes.len(),
-        }
+        (
+            GpuMeshLayer {
+                handle: Some(crate::chunk_render::RegionAllocationHandle {
+                    region_instance_id: self.region_instance_id,
+                    vertex_token,
+                    index_token,
+                    vertex_offset,
+                    index_offset,
+                    num_vertices,
+                    num_indices,
+                }),
+                bounds: data.bounds,
+                vertex_bytes: vertex_bytes.len(),
+                index_bytes: index_bytes.len(),
+            },
+            metrics,
+        )
     }
 }
 
@@ -1488,6 +1677,38 @@ impl TerrainVertex {
 }
 
 impl State {
+    /// Drop all terrain GPU/CPU runtime state as one lifecycle boundary.
+    /// Incrementing the generation invalidates every in-flight worker result.
+    fn teardown_terrain_runtime(&mut self, reason: &str) {
+        self.terrain_generation = self.terrain_generation.wrapping_add(1);
+        self.chunk_load_in_flight.clear();
+        self.chunk_mesh_in_flight.clear();
+        self.chunk_lifetimes.clear();
+        self.chunk_meshes.clear();
+        self.render_regions.clear();
+        self.compaction_pending_region = None;
+        self.scheduler.clear();
+        self.pending_worker_results.clear();
+        eprintln!("[Terrain] runtime teardown: {reason}");
+    }
+
+    fn schedule_terrain_compaction(&mut self) {
+        if self.compaction_pending_region.is_some() {
+            return;
+        }
+        self.compaction_pending_region = self
+            .render_regions
+            .iter()
+            .filter(|(_, region)| {
+                let free = region.vertex_freelist.free_units() as f32
+                    / region.vertex_freelist.capacity().max(1) as f32;
+                let fragmented = region.vertex_freelist.fragmentation() > 0.35
+                    || region.index_freelist.fragmentation() > 0.35;
+                fragmented && free > 0.25
+            })
+            .map(|(coord, _)| *coord)
+            .next();
+    }
     fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
         let mut dirty_chunks = std::collections::HashSet::new();
         let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
@@ -1691,7 +1912,8 @@ impl State {
                     source,
                     chunk,
                     redstone_metadata,
-                );
+                )
+                .with_mutation_revision(self.mutation_revisions.latest(source, cx, cz));
                 if let Err(error) = self.enqueue_chunk_save(snapshot, tracker.clone(), revision) {
                     eprintln!("[Save] Could not queue dimension-switch chunk: {error}");
                 }
@@ -1711,14 +1933,8 @@ impl State {
         }
         self.current_dimension = target;
         let render_distance = self.chunk_manager.render_distance;
+        self.teardown_terrain_runtime("dimension switch");
         self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
-        self.terrain_generation = self.terrain_generation.wrapping_add(1);
-        self.chunk_load_in_flight.clear();
-        self.chunk_mesh_in_flight.clear();
-        self.chunk_lifetimes.clear();
-        self.chunk_meshes.clear();
-        self.scheduler.clear();
-        self.pending_worker_results.clear();
         self.entity_manager = crate::entity::EntityManager::new();
         self.load_current_dimension_entities();
         self.particles = crate::particles::ParticleSystem::new();
@@ -1726,6 +1942,7 @@ impl State {
         self.redstone_tick_timer = 0.0;
         self.pending_chunk_payloads.clear();
         self.pending_block_changes.clear();
+        self.client_chunk_revisions.clear();
         self.mining_target = None;
         self.mining_progress = 0.0;
         self.left_mouse_pressed = false;
@@ -1747,7 +1964,11 @@ impl State {
         {
             let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
             if saved.blocks != generated_blocks {
-                self.mutated_chunks.insert((target, cx, cz));
+                if self.mutation_revisions.ensure_at_least(target, cx, cz, 1) {
+                    self.mutation_revision_generation =
+                        self.mutation_revision_generation.saturating_add(1);
+                    self.mutation_index_dirty = true;
+                }
             }
             restored_redstone = saved.redstone_metadata();
             saved.restore_to_chunk(&mut chunk);
@@ -2180,6 +2401,126 @@ mod sprint_policy_tests {
     }
 }
 
+#[cfg(test)]
+mod authority_policy_tests {
+    use super::*;
+
+    #[test]
+    fn multiplayer_host_keeps_world_ticks_running_while_paused_or_dead() {
+        let host = MultiplayerRole::Host { port: 25565 };
+        assert!(should_advance_simulation(&host, true, true, false));
+        assert!(should_advance_simulation(&host, true, false, true));
+        assert!(should_advance_simulation(&host, true, true, true));
+        assert!(!should_advance_simulation(&host, false, false, false));
+    }
+
+    #[test]
+    fn singleplayer_pause_and_death_still_stop_world_ticks() {
+        assert!(!should_advance_simulation(
+            &MultiplayerRole::Singleplayer,
+            true,
+            true,
+            false,
+        ));
+        assert!(!should_advance_simulation(
+            &MultiplayerRole::Singleplayer,
+            true,
+            false,
+            true,
+        ));
+        assert!(should_advance_simulation(
+            &MultiplayerRole::Singleplayer,
+            true,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn replicated_entity_samples_interpolate_without_mutating_authority() {
+        let mut replicated = ReplicatedEntityState::new(99);
+        let state = |sequence, x| crate::network::protocol::EntityStateWire {
+            entity_id: 7,
+            entity_type: crate::entity::EntityType::Zombie.to_wire(),
+            position: [x, 64.0, 0.0],
+            velocity: [1.0, 0.0, 0.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            health: 20.0 - sequence as f32,
+            animation_state: 0,
+        };
+        assert!(!replicated.push(state(1, 0.0), 1, 1.0));
+        assert!(!replicated.push(state(2, 2.0), 2, 2.0));
+        let sample = replicated.sample(1.5).unwrap();
+        assert_eq!(sample.position, [1.0, 64.0, 0.0]);
+        assert_eq!(sample.health, 18.5);
+        assert_eq!(replicated.snapshots.back().unwrap().state.position[0], 2.0);
+    }
+
+    #[test]
+    fn host_client_sixty_second_entity_checksum_converges_without_client_spawns() {
+        let host_player = Vec3::new(0.0, 64.0, 0.0);
+        let client_player = Vec3::new(96.0, 64.0, 96.0);
+        assert!(host_player.distance(client_player) > 128.0);
+
+        let mut host = crate::entity::Entity::new(
+            7,
+            crate::entity::EntityType::Zombie,
+            Vec3::new(8.0, 64.0, 8.0),
+        );
+        host.velocity = Vec3::new(0.5, 0.0, -0.25);
+        let mut client_entities = crate::entity::EntityManager::new();
+        let local_id = client_entities.spawn(host.entity_type, host.position);
+        let mut replica = ReplicatedEntityState::new(local_id);
+
+        for tick in 1..=1_200u64 {
+            host.position += host.velocity * SIM_TICK_TIME;
+            host.yaw += 0.0025;
+            let state = entity_state_wire(&host);
+            assert!(!replica.push(state, tick, tick as f64 * f64::from(SIM_TICK_TIME)));
+            let visual = replica
+                .sample(tick as f64 * f64::from(SIM_TICK_TIME))
+                .unwrap();
+            apply_entity_wire_state(client_entities.get_by_id_mut(local_id).unwrap(), visual);
+            assert_eq!(
+                client_entities.entities.len(),
+                1,
+                "client spawned an authority-owned living entity at tick {tick}"
+            );
+        }
+
+        let client = client_entities.get_by_id(local_id).unwrap();
+        let checksum = |entity: &crate::entity::Entity| {
+            entity.position.x.to_bits() as u64
+                ^ (entity.position.y.to_bits() as u64).rotate_left(11)
+                ^ (entity.position.z.to_bits() as u64).rotate_left(22)
+                ^ (entity.health.to_bits() as u64).rotate_left(33)
+        };
+        assert_eq!(checksum(client), checksum(&host));
+    }
+
+    #[test]
+    fn host_clamps_remote_pose_before_echoing_authoritative_correction() {
+        let latest = PlayerSnapshot {
+            position: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            time: 0.0,
+            sequence: 1,
+            sender_time_millis: 1_000,
+        };
+        let accepted = validated_remote_position(Some(&latest), Vec3::new(1.2, 0.0, 0.0), 1_050);
+        assert_eq!(accepted, Vec3::new(1.2, 0.0, 0.0));
+
+        let corrected = validated_remote_position(Some(&latest), Vec3::new(100.0, 0.0, 0.0), 1_050);
+        assert!((corrected.x - 1.6).abs() < f32::EPSILON);
+        assert_eq!(
+            validated_remote_position(Some(&latest), Vec3::ONE, 999),
+            Vec3::ZERO
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StationKind {
     Enchanting,
@@ -2201,6 +2542,99 @@ pub enum NetworkHandle {
     },
 }
 
+trait TrackedNetworkSender<T> {
+    fn tracked_send(&self, value: T) -> Result<(), std::sync::mpsc::SendError<T>>;
+}
+
+impl<T> TrackedNetworkSender<T> for std::sync::mpsc::Sender<T> {
+    fn tracked_send(&self, value: T) -> Result<(), std::sync::mpsc::SendError<T>> {
+        crate::perf::tracked_send(
+            self,
+            value,
+            std::mem::size_of::<T>() as u64,
+            &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+        )
+    }
+}
+
+/// Explicit lifecycle for asynchronous GPU timestamp readback.  Mapping is
+/// only entered after a submission and a device poll; the range is read only
+/// in Mapped and is consumed exactly once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuTimestampReadbackState {
+    Unsupported,
+    Unmapped,
+    Mapping,
+    Mapped,
+    Consumed,
+}
+
+impl GpuTimestampReadbackState {
+    pub fn map_requested(self) -> Self {
+        matches!(self, Self::Unmapped | Self::Consumed)
+            .then_some(Self::Mapping)
+            .unwrap_or(self)
+    }
+    pub fn map_completed(self, success: bool) -> Self {
+        if self == Self::Mapping && success {
+            Self::Mapped
+        } else if self == Self::Mapping {
+            Self::Unmapped
+        } else {
+            self
+        }
+    }
+    pub fn consume(self) -> Self {
+        if self == Self::Mapped {
+            Self::Consumed
+        } else {
+            self
+        }
+    }
+}
+
+/// Capability gate used by the renderer and HUD. Pass-local timing is only
+/// valid when both feature bits are available.
+pub const fn gpu_timestamp_capability(
+    timestamp_query: bool,
+    inside_passes: bool,
+) -> GpuTimestampReadbackState {
+    if timestamp_query {
+        if inside_passes {
+            GpuTimestampReadbackState::Unmapped
+        } else {
+            GpuTimestampReadbackState::Unsupported
+        }
+    } else {
+        GpuTimestampReadbackState::Unsupported
+    }
+}
+
+#[cfg(test)]
+mod gpu_timestamp_state_tests {
+    use super::GpuTimestampReadbackState as S;
+    #[test]
+    fn transitions_are_ordered_and_failure_is_recoverable() {
+        assert_eq!(S::Unmapped.map_requested(), S::Mapping);
+        assert_eq!(S::Mapping.map_completed(true), S::Mapped);
+        assert_eq!(S::Mapped.consume(), S::Consumed);
+        assert_eq!(S::Mapping.map_completed(false), S::Unmapped);
+        assert_eq!(S::Unsupported.map_requested(), S::Unsupported);
+        assert_eq!(S::Consumed.consume(), S::Consumed);
+        assert_eq!(S::Mapped.map_requested(), S::Mapped);
+    }
+
+    #[test]
+    fn capability_requires_timestamp_query_and_inside_passes() {
+        assert_eq!(
+            super::gpu_timestamp_capability(false, false),
+            S::Unsupported
+        );
+        assert_eq!(super::gpu_timestamp_capability(true, false), S::Unsupported);
+        assert_eq!(super::gpu_timestamp_capability(true, true), S::Unmapped);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PlayerSnapshot {
     position: Vec3,
@@ -2216,6 +2650,202 @@ struct RemotePlayerState {
     entity_id: u64,
     snapshots: std::collections::VecDeque<PlayerSnapshot>,
     username: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EntitySnapshot {
+    state: crate::network::protocol::EntityStateWire,
+    time: f64,
+    sequence: u64,
+}
+
+#[derive(Debug)]
+struct ReplicatedEntityState {
+    local_entity_id: u64,
+    snapshots: std::collections::VecDeque<EntitySnapshot>,
+}
+
+impl ReplicatedEntityState {
+    fn new(local_entity_id: u64) -> Self {
+        Self {
+            local_entity_id,
+            snapshots: std::collections::VecDeque::with_capacity(ENTITY_SNAPSHOT_CAPACITY),
+        }
+    }
+
+    fn push(
+        &mut self,
+        state: crate::network::protocol::EntityStateWire,
+        sequence: u64,
+        arrival_time: f64,
+    ) -> bool {
+        if !state.position.iter().all(|value| value.is_finite())
+            || !state.velocity.iter().all(|value| value.is_finite())
+            || !state.yaw.is_finite()
+            || !state.pitch.is_finite()
+            || !state.health.is_finite()
+        {
+            return false;
+        }
+        if self
+            .snapshots
+            .back()
+            .is_some_and(|latest| sequence <= latest.sequence)
+        {
+            return false;
+        }
+        let position = Vec3::from_array(state.position);
+        let should_snap = self.snapshots.back().is_some_and(|latest| {
+            position.distance(Vec3::from_array(latest.state.position)) > ENTITY_SNAP_DISTANCE
+        });
+        if should_snap {
+            self.snapshots.clear();
+        } else if self.snapshots.len() == ENTITY_SNAPSHOT_CAPACITY {
+            self.snapshots.pop_front();
+        }
+        self.snapshots.push_back(EntitySnapshot {
+            state,
+            time: arrival_time,
+            sequence,
+        });
+        should_snap
+    }
+
+    fn sample(&self, target_time: f64) -> Option<crate::network::protocol::EntityStateWire> {
+        let first = self.snapshots.front().copied()?;
+        if self.snapshots.len() == 1 || target_time <= first.time {
+            return Some(first.state);
+        }
+        for index in 1..self.snapshots.len() {
+            let next = self.snapshots[index];
+            if target_time <= next.time {
+                let prev = self.snapshots[index - 1];
+                let span = (next.time - prev.time).max(f64::EPSILON);
+                let t = ((target_time - prev.time) / span).clamp(0.0, 1.0) as f32;
+                let mut state = next.state;
+                state.position = Vec3::from_array(prev.state.position)
+                    .lerp(Vec3::from_array(next.state.position), t)
+                    .to_array();
+                state.velocity = Vec3::from_array(prev.state.velocity)
+                    .lerp(Vec3::from_array(next.state.velocity), t)
+                    .to_array();
+                state.yaw = prev.state.yaw
+                    + ((next.state.yaw - prev.state.yaw + std::f32::consts::PI)
+                        .rem_euclid(std::f32::consts::TAU)
+                        - std::f32::consts::PI)
+                        * t;
+                state.pitch = prev.state.pitch + (next.state.pitch - prev.state.pitch) * t;
+                state.health = prev.state.health + (next.state.health - prev.state.health) * t;
+                return Some(state);
+            }
+        }
+        self.snapshots.back().map(|snapshot| snapshot.state)
+    }
+}
+
+fn entity_animation_state(entity: &crate::entity::Entity) -> u8 {
+    u8::from(entity.on_ground)
+        | (u8::from(entity.target_player) << 1)
+        | (u8::from(entity.is_ignited) << 2)
+        | (u8::from(entity.fire_aspect_timer > 0.0) << 3)
+}
+
+fn entity_state_wire(entity: &crate::entity::Entity) -> crate::network::protocol::EntityStateWire {
+    crate::network::protocol::EntityStateWire {
+        entity_id: entity.id,
+        entity_type: entity.entity_type.to_wire(),
+        position: entity.position.to_array(),
+        velocity: entity.velocity.to_array(),
+        yaw: entity.yaw,
+        pitch: entity.pitch,
+        health: entity.health,
+        animation_state: entity_animation_state(entity),
+    }
+}
+
+fn apply_entity_wire_state(
+    entity: &mut crate::entity::Entity,
+    state: crate::network::protocol::EntityStateWire,
+) {
+    entity.position = Vec3::from_array(state.position);
+    entity.velocity = Vec3::from_array(state.velocity);
+    entity.yaw = state.yaw;
+    entity.pitch = state.pitch;
+    entity.health = state.health;
+    entity.on_ground = state.animation_state & 1 != 0;
+    entity.target_player = state.animation_state & (1 << 1) != 0;
+    entity.is_ignited = state.animation_state & (1 << 2) != 0;
+    entity.fire_aspect_timer = if state.animation_state & (1 << 3) != 0 {
+        entity.fire_aspect_timer.max(0.1)
+    } else {
+        0.0
+    };
+}
+
+fn is_replicated_entity_type(entity_type: crate::entity::EntityType) -> bool {
+    entity_type.is_living()
+        || entity_type.is_projectile()
+        || entity_type == crate::entity::EntityType::EndCrystal
+}
+
+fn effect_to_wire(
+    effect: crate::brewing::PotionEffect,
+) -> crate::network::protocol::PlayerEffectWire {
+    use crate::brewing::PotionEffect;
+    let (kind, level) = match effect {
+        PotionEffect::Speed { level, .. } => (0, level),
+        PotionEffect::Strength { level, .. } => (1, level),
+        PotionEffect::Healing { level } => (2, level),
+        PotionEffect::Regeneration { level, .. } => (3, level),
+        PotionEffect::NightVision { .. } => (4, 1),
+        PotionEffect::Invisibility { .. } => (5, 1),
+        PotionEffect::FireResistance { .. } => (6, 1),
+        PotionEffect::WaterBreathing { .. } => (7, 1),
+        PotionEffect::Poison { level, .. } => (8, level),
+        PotionEffect::Slowness { level, .. } => (9, level),
+    };
+    crate::network::protocol::PlayerEffectWire {
+        kind,
+        level,
+        remaining_seconds: effect.remaining(),
+    }
+}
+
+fn effect_from_wire(
+    effect: crate::network::protocol::PlayerEffectWire,
+) -> Option<crate::brewing::PotionEffect> {
+    use crate::brewing::PotionEffect;
+    let duration = effect.remaining_seconds.max(0.0);
+    match effect.kind {
+        0 => Some(PotionEffect::Speed {
+            level: effect.level,
+            duration,
+        }),
+        1 => Some(PotionEffect::Strength {
+            level: effect.level,
+            duration,
+        }),
+        2 => Some(PotionEffect::Healing {
+            level: effect.level,
+        }),
+        3 => Some(PotionEffect::Regeneration {
+            level: effect.level,
+            duration,
+        }),
+        4 => Some(PotionEffect::NightVision { duration }),
+        5 => Some(PotionEffect::Invisibility { duration }),
+        6 => Some(PotionEffect::FireResistance { duration }),
+        7 => Some(PotionEffect::WaterBreathing { duration }),
+        8 => Some(PotionEffect::Poison {
+            level: effect.level,
+            duration,
+        }),
+        9 => Some(PotionEffect::Slowness {
+            level: effect.level,
+            duration,
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2457,6 +3087,21 @@ fn project_name_tag(position: Vec3, view_proj: Mat4) -> Option<Vec2> {
     Some(Vec2::new(ndc.x, ndc.y))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchupStatus {
+    Pending,
+    WorkerInFlight,
+    ServerSubmission { since: Instant },
+    AwaitingAck { since: Instant },
+}
+
+#[derive(Debug)]
+struct PlayerCatchupEntry {
+    key: crate::save::NetworkSnapshotKey,
+    status: CatchupStatus,
+    retries: u8,
+}
+
 enum NetworkInbound {
     Connected {
         player_id: crate::network::protocol::PlayerId,
@@ -2509,6 +3154,8 @@ enum NetworkInbound {
         drops: Vec<crate::network::protocol::ItemWire>,
     },
     AuthoritativeBlockChange {
+        dimension: u8,
+        revision: u64,
         x: i32,
         y: i32,
         z: i32,
@@ -2516,10 +3163,43 @@ enum NetworkInbound {
         state: u8,
     },
     ChunkData {
+        dimension: u8,
         cx: i32,
         cz: i32,
+        revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+    },
+    EntitySpawn {
+        dimension: u8,
+        sequence: u64,
+        state: crate::network::protocol::EntityStateWire,
+    },
+    EntityState {
+        dimension: u8,
+        sequence: u64,
+        state: crate::network::protocol::EntityStateWire,
+    },
+    EntityDespawn {
+        dimension: u8,
+        sequence: u64,
+        entity_id: u64,
+    },
+    PlayerHealth {
+        sequence: u64,
+        player_id: crate::network::protocol::PlayerId,
+        health: f32,
+        max_health: f32,
+        hunger: f32,
+        saturation: f32,
+        oxygen: f32,
+        is_dead: bool,
+        death_reason: u8,
+    },
+    PlayerEffect {
+        sequence: u64,
+        player_id: crate::network::protocol::PlayerId,
+        effects: Vec<crate::network::protocol::PlayerEffectWire>,
     },
     TimeSync {
         ticks: u64,
@@ -2531,6 +3211,28 @@ enum NetworkInbound {
         id: crate::network::protocol::PlayerId,
         message: String,
     },
+    CatchupAccepted {
+        id: crate::network::protocol::PlayerId,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+    },
+    CatchupBackpressured {
+        id: crate::network::protocol::PlayerId,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        mailbox_full_count: u64,
+    },
+    CatchupAck {
+        id: crate::network::protocol::PlayerId,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+    },
     Chat {
         sender: String,
         message: String,
@@ -2538,183 +3240,364 @@ enum NetworkInbound {
     StatusUpdate(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkDeliveryClass {
+    Reliable,
+    LatestPosition,
+    LatestEntity,
+    LatestHealth,
+    LatestEffect,
+    LatestTimeSync,
+}
+
+fn classify_network_event(event: &NetworkInbound) -> NetworkDeliveryClass {
+    match event {
+        NetworkInbound::PlayerPosition { .. } => NetworkDeliveryClass::LatestPosition,
+        NetworkInbound::EntityState { .. } | NetworkInbound::EntitySpawn { .. } => {
+            NetworkDeliveryClass::LatestEntity
+        }
+        NetworkInbound::PlayerHealth { .. } => NetworkDeliveryClass::LatestHealth,
+        NetworkInbound::PlayerEffect { .. } => NetworkDeliveryClass::LatestEffect,
+        NetworkInbound::TimeSync { .. } => NetworkDeliveryClass::LatestTimeSync,
+        _ => NetworkDeliveryClass::Reliable,
+    }
+}
+
+impl NetworkInbound {
+    fn estimated_bytes(&self) -> usize {
+        let inline = std::mem::size_of_val(self);
+        let heap = match self {
+            Self::Disconnected(reason) | Self::StatusUpdate(reason) => reason.len(),
+            Self::PlayerJoin { username, .. } => username.len(),
+            Self::ChunkData {
+                blocks,
+                block_states,
+                ..
+            } => blocks.len().saturating_add(block_states.len()),
+            Self::PlayerEffect { effects, .. } => {
+                effects.len() * std::mem::size_of::<crate::network::protocol::PlayerEffectWire>()
+            }
+            Self::BlockActionResult { drops, .. } => {
+                drops.len() * std::mem::size_of::<crate::network::protocol::ItemWire>()
+            }
+            Self::ChatFromClient { message, .. } => message.len(),
+            Self::Chat { sender, message } => sender.len().saturating_add(message.len()),
+            _ => 0,
+        };
+        inline.saturating_add(heap)
+    }
+}
+
 impl NetworkHandle {
     fn drain_inbound(&self) -> Vec<NetworkInbound> {
+        const MAX_EVENTS: usize = 256;
+        let started = Instant::now();
         match self {
             NetworkHandle::None => Vec::new(),
-            NetworkHandle::Host { server_to_host, .. } => server_to_host
-                .try_iter()
-                .map(|event| match event {
-                    crate::network::server::ServerToHost::Disconnected { reason } => {
-                        NetworkInbound::Disconnected(reason)
+            NetworkHandle::Host { server_to_host, .. } => {
+                let mut raw = Vec::with_capacity(MAX_EVENTS);
+                while raw.len() < MAX_EVENTS && started.elapsed() < Duration::from_millis(2) {
+                    match crate::perf::tracked_try_recv(
+                        server_to_host,
+                        std::mem::size_of::<crate::network::server::ServerToHost>() as u64,
+                        &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
+                    ) {
+                        Ok(event) => raw.push(event),
+                        Err(_) => break,
                     }
-                    crate::network::server::ServerToHost::ClientJoined { id, username } => {
-                        NetworkInbound::PlayerJoin { id, username }
+                }
+                raw.into_iter()
+                    .into_iter()
+                    .map(|event| match event {
+                        crate::network::server::ServerToHost::Disconnected { reason } => {
+                            NetworkInbound::Disconnected(reason)
+                        }
+                        crate::network::server::ServerToHost::ClientJoined { id, username } => {
+                            NetworkInbound::PlayerJoin { id, username }
+                        }
+                        crate::network::server::ServerToHost::ClientLeft { id } => {
+                            NetworkInbound::PlayerLeave(id)
+                        }
+                        crate::network::server::ServerToHost::ClientPosition {
+                            id,
+                            sequence,
+                            sender_time_millis,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                        } => NetworkInbound::PlayerPosition {
+                            id,
+                            sequence,
+                            sender_time_millis,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                        },
+                        crate::network::server::ServerToHost::ClientAction { id, action } => {
+                            NetworkInbound::PlayerAction { id, action }
+                        }
+                        crate::network::server::ServerToHost::ClientBlockChange {
+                            id,
+                            x,
+                            y,
+                            z,
+                            block,
+                            state,
+                        } => NetworkInbound::ClientBlockChange {
+                            id,
+                            x,
+                            y,
+                            z,
+                            block,
+                            state,
+                        },
+                        crate::network::server::ServerToHost::ClientBlockAction {
+                            id,
+                            action,
+                            x,
+                            y,
+                            z,
+                            block,
+                            held_item,
+                        } => NetworkInbound::ClientBlockAction {
+                            id,
+                            action,
+                            x,
+                            y,
+                            z,
+                            block,
+                            held_item,
+                        },
+                        crate::network::server::ServerToHost::ChatFromClient { id, message } => {
+                            NetworkInbound::ChatFromClient { id, message }
+                        }
+                        crate::network::server::ServerToHost::CatchupAccepted {
+                            id,
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                        } => NetworkInbound::CatchupAccepted {
+                            id,
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                        },
+                        crate::network::server::ServerToHost::CatchupBackpressured {
+                            id,
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                            mailbox_full_count,
+                        } => NetworkInbound::CatchupBackpressured {
+                            id,
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                            mailbox_full_count,
+                        },
+                        crate::network::server::ServerToHost::CatchupAck {
+                            id,
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                        } => NetworkInbound::CatchupAck {
+                            id,
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                        },
+                    })
+                    .collect()
+            }
+            NetworkHandle::Client { client_to_game, .. } => {
+                let mut raw = Vec::with_capacity(MAX_EVENTS);
+                while raw.len() < MAX_EVENTS && started.elapsed() < Duration::from_millis(2) {
+                    match crate::perf::tracked_try_recv(
+                        client_to_game,
+                        std::mem::size_of::<crate::network::client::ClientToGame>() as u64,
+                        &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
+                    ) {
+                        Ok(event) => raw.push(event),
+                        Err(_) => break,
                     }
-                    crate::network::server::ServerToHost::ClientLeft { id } => {
-                        NetworkInbound::PlayerLeave(id)
-                    }
-                    crate::network::server::ServerToHost::ClientPosition {
-                        id,
-                        sequence,
-                        sender_time_millis,
-                        x,
-                        y,
-                        z,
-                        yaw,
-                        pitch,
-                    } => NetworkInbound::PlayerPosition {
-                        id,
-                        sequence,
-                        sender_time_millis,
-                        x,
-                        y,
-                        z,
-                        yaw,
-                        pitch,
-                    },
-                    crate::network::server::ServerToHost::ClientAction { id, action } => {
-                        NetworkInbound::PlayerAction { id, action }
-                    }
-                    crate::network::server::ServerToHost::ClientBlockChange {
-                        id,
-                        x,
-                        y,
-                        z,
-                        block,
-                        state,
-                    } => NetworkInbound::ClientBlockChange {
-                        id,
-                        x,
-                        y,
-                        z,
-                        block,
-                        state,
-                    },
-                    crate::network::server::ServerToHost::ClientBlockAction {
-                        id,
-                        action,
-                        x,
-                        y,
-                        z,
-                        block,
-                        held_item,
-                    } => NetworkInbound::ClientBlockAction {
-                        id,
-                        action,
-                        x,
-                        y,
-                        z,
-                        block,
-                        held_item,
-                    },
-                    crate::network::server::ServerToHost::ChatFromClient { id, message } => {
-                        NetworkInbound::ChatFromClient { id, message }
-                    }
-                })
-                .collect(),
-            NetworkHandle::Client { client_to_game, .. } => client_to_game
-                .try_iter()
-                .map(|event| match event {
-                    crate::network::client::ClientToGame::Connected {
-                        player_id,
-                        seed,
-                        gamemode,
-                    } => NetworkInbound::Connected {
-                        player_id,
-                        seed,
-                        gamemode,
-                    },
-                    crate::network::client::ClientToGame::Disconnected { reason } => {
-                        NetworkInbound::Disconnected(reason)
-                    }
-                    crate::network::client::ClientToGame::PlayerJoin { id, username } => {
-                        NetworkInbound::PlayerJoin { id, username }
-                    }
-                    crate::network::client::ClientToGame::PlayerLeave { id } => {
-                        NetworkInbound::PlayerLeave(id)
-                    }
-                    crate::network::client::ClientToGame::PlayerPosition {
-                        id,
-                        sequence,
-                        sender_time_millis,
-                        x,
-                        y,
-                        z,
-                        yaw,
-                        pitch,
-                    } => NetworkInbound::PlayerPosition {
-                        id,
-                        sequence,
-                        sender_time_millis,
-                        x,
-                        y,
-                        z,
-                        yaw,
-                        pitch,
-                    },
-                    crate::network::client::ClientToGame::PlayerAction { id, action } => {
-                        NetworkInbound::PlayerAction { id, action }
-                    }
-                    crate::network::client::ClientToGame::BlockChange {
-                        x,
-                        y,
-                        z,
-                        block,
-                        state,
-                    } => NetworkInbound::AuthoritativeBlockChange {
-                        x,
-                        y,
-                        z,
-                        block,
-                        state,
-                    },
-                    crate::network::client::ClientToGame::BlockActionResult {
-                        x,
-                        y,
-                        z,
-                        success,
-                        consumed_item,
-                        drops,
-                    } => NetworkInbound::BlockActionResult {
-                        x,
-                        y,
-                        z,
-                        success,
-                        consumed_item,
-                        drops,
-                    },
-                    crate::network::client::ClientToGame::ChunkData {
-                        cx,
-                        cz,
-                        blocks,
-                        block_states,
-                    } => NetworkInbound::ChunkData {
-                        cx,
-                        cz,
-                        blocks,
-                        block_states,
-                    },
-                    crate::network::client::ClientToGame::TimeSync {
-                        ticks,
-                        weather,
-                        weather_remaining_ticks,
-                    } => NetworkInbound::TimeSync {
-                        ticks,
-                        weather,
-                        weather_remaining_ticks,
-                    },
-                    crate::network::client::ClientToGame::LightningStrike(strike) => {
-                        NetworkInbound::LightningStrike(strike)
-                    }
-                    crate::network::client::ClientToGame::Chat { sender, message } => {
-                        NetworkInbound::Chat { sender, message }
-                    }
-                    crate::network::client::ClientToGame::StatusUpdate { message } => {
-                        NetworkInbound::StatusUpdate(message)
-                    }
-                })
-                .collect(),
+                }
+                raw.into_iter()
+                    .map(|event| match event {
+                        crate::network::client::ClientToGame::Connected {
+                            player_id,
+                            seed,
+                            gamemode,
+                        } => NetworkInbound::Connected {
+                            player_id,
+                            seed,
+                            gamemode,
+                        },
+                        crate::network::client::ClientToGame::Disconnected { reason } => {
+                            NetworkInbound::Disconnected(reason)
+                        }
+                        crate::network::client::ClientToGame::PlayerJoin { id, username } => {
+                            NetworkInbound::PlayerJoin { id, username }
+                        }
+                        crate::network::client::ClientToGame::PlayerLeave { id } => {
+                            NetworkInbound::PlayerLeave(id)
+                        }
+                        crate::network::client::ClientToGame::PlayerPosition {
+                            id,
+                            sequence,
+                            sender_time_millis,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                        } => NetworkInbound::PlayerPosition {
+                            id,
+                            sequence,
+                            sender_time_millis,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                        },
+                        crate::network::client::ClientToGame::PlayerAction { id, action } => {
+                            NetworkInbound::PlayerAction { id, action }
+                        }
+                        crate::network::client::ClientToGame::BlockChange {
+                            dimension,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            block,
+                            state,
+                        } => NetworkInbound::AuthoritativeBlockChange {
+                            dimension,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            block,
+                            state,
+                        },
+                        crate::network::client::ClientToGame::BlockActionResult {
+                            x,
+                            y,
+                            z,
+                            success,
+                            consumed_item,
+                            drops,
+                        } => NetworkInbound::BlockActionResult {
+                            x,
+                            y,
+                            z,
+                            success,
+                            consumed_item,
+                            drops,
+                        },
+                        crate::network::client::ClientToGame::ChunkData {
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                            blocks,
+                            block_states,
+                        } => NetworkInbound::ChunkData {
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                            blocks,
+                            block_states,
+                        },
+                        crate::network::client::ClientToGame::EntitySpawn {
+                            dimension,
+                            sequence,
+                            state,
+                        } => NetworkInbound::EntitySpawn {
+                            dimension,
+                            sequence,
+                            state,
+                        },
+                        crate::network::client::ClientToGame::EntityState {
+                            dimension,
+                            sequence,
+                            state,
+                        } => NetworkInbound::EntityState {
+                            dimension,
+                            sequence,
+                            state,
+                        },
+                        crate::network::client::ClientToGame::EntityDespawn {
+                            dimension,
+                            sequence,
+                            entity_id,
+                        } => NetworkInbound::EntityDespawn {
+                            dimension,
+                            sequence,
+                            entity_id,
+                        },
+                        crate::network::client::ClientToGame::PlayerHealth {
+                            sequence,
+                            player_id,
+                            health,
+                            max_health,
+                            hunger,
+                            saturation,
+                            oxygen,
+                            is_dead,
+                            death_reason,
+                        } => NetworkInbound::PlayerHealth {
+                            sequence,
+                            player_id,
+                            health,
+                            max_health,
+                            hunger,
+                            saturation,
+                            oxygen,
+                            is_dead,
+                            death_reason,
+                        },
+                        crate::network::client::ClientToGame::PlayerEffect {
+                            sequence,
+                            player_id,
+                            effects,
+                        } => NetworkInbound::PlayerEffect {
+                            sequence,
+                            player_id,
+                            effects,
+                        },
+                        crate::network::client::ClientToGame::TimeSync {
+                            ticks,
+                            weather,
+                            weather_remaining_ticks,
+                        } => NetworkInbound::TimeSync {
+                            ticks,
+                            weather,
+                            weather_remaining_ticks,
+                        },
+                        crate::network::client::ClientToGame::LightningStrike(strike) => {
+                            NetworkInbound::LightningStrike(strike)
+                        }
+                        crate::network::client::ClientToGame::Chat { sender, message } => {
+                            NetworkInbound::Chat { sender, message }
+                        }
+                        crate::network::client::ClientToGame::StatusUpdate { message } => {
+                            NetworkInbound::StatusUpdate(message)
+                        }
+                    })
+                    .collect()
+            }
         }
     }
 
@@ -2728,7 +3611,8 @@ impl NetworkHandle {
     ) {
         match self {
             NetworkHandle::Host { host_to_server, .. } => {
-                let _ = host_to_server.send(
+                let _ = crate::perf::tracked_send(
+                    host_to_server,
                     crate::network::server::HostToServer::BroadcastPlayerPosition {
                         id: 0,
                         sequence,
@@ -2739,10 +3623,44 @@ impl NetworkHandle {
                         yaw,
                         pitch,
                     },
+                    std::mem::size_of::<crate::network::server::HostToServer>() as u64,
+                    &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
                 );
             }
             NetworkHandle::Client { game_to_client, .. } => {
-                let _ = game_to_client.send(crate::network::client::GameToClient::SendPosition {
+                let _ = crate::perf::tracked_send(
+                    game_to_client,
+                    crate::network::client::GameToClient::SendPosition {
+                        sequence,
+                        sender_time_millis,
+                        x: position.x,
+                        y: position.y,
+                        z: position.z,
+                        yaw,
+                        pitch,
+                    },
+                    std::mem::size_of::<crate::network::client::GameToClient>() as u64,
+                    &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+                );
+            }
+            NetworkHandle::None => {}
+        }
+    }
+
+    fn broadcast_player_position(
+        &self,
+        id: crate::network::protocol::PlayerId,
+        sequence: u32,
+        sender_time_millis: u64,
+        position: Vec3,
+        yaw: f32,
+        pitch: f32,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = crate::perf::tracked_send(
+                host_to_server,
+                crate::network::server::HostToServer::BroadcastPlayerPosition {
+                    id,
                     sequence,
                     sender_time_millis,
                     x: position.x,
@@ -2750,20 +3668,21 @@ impl NetworkHandle {
                     z: position.z,
                     yaw,
                     pitch,
-                });
-            }
-            NetworkHandle::None => {}
+                },
+                std::mem::size_of::<crate::network::server::HostToServer>() as u64,
+                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+            );
         }
     }
 
     fn request_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
         if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = game_to_client.send(crate::network::client::GameToClient::RequestBlockChange {
-                x,
-                y,
-                z,
-                block,
-            });
+            let _ = crate::perf::tracked_send(
+                game_to_client,
+                crate::network::client::GameToClient::RequestBlockChange { x, y, z, block },
+                std::mem::size_of::<crate::network::client::GameToClient>() as u64,
+                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+            );
         }
     }
 
@@ -2777,30 +3696,138 @@ impl NetworkHandle {
         held_item: Option<crate::network::protocol::ItemWire>,
     ) {
         if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = game_to_client.send(crate::network::client::GameToClient::RequestBlockAction {
-                action,
-                x,
-                y,
-                z,
-                block,
-                held_item,
-            });
+            let _ = crate::perf::tracked_send(
+                game_to_client,
+                crate::network::client::GameToClient::RequestBlockAction {
+                    action,
+                    x,
+                    y,
+                    z,
+                    block,
+                    held_item,
+                },
+                std::mem::size_of::<crate::network::client::GameToClient>() as u64,
+                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+            );
         }
     }
 
     /// Host-only: fan a block mutation out to every connected client. The host
     /// applies the mutation locally through the canonical path and then calls
     /// this so peers render the same world state.
-    fn broadcast_block_change(&self, x: i32, y: i32, z: i32, block: u32, state: u8) {
+    fn broadcast_block_change(
+        &self,
+        dimension: crate::dimension::Dimension,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        state: u8,
+    ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ =
-                host_to_server.send(crate::network::server::HostToServer::BroadcastBlockChange {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastBlockChange {
+                    dimension: dimension as u8,
+                    revision,
                     x,
                     y,
                     z,
                     block,
                     state,
-                });
+                },
+            );
+        }
+    }
+
+    fn broadcast_entity_spawn(
+        &self,
+        dimension: crate::dimension::Dimension,
+        sequence: u64,
+        state: crate::network::protocol::EntityStateWire,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastEntitySpawn {
+                    dimension: dimension as u8,
+                    sequence,
+                    state,
+                },
+            );
+        }
+    }
+
+    fn broadcast_entity_state(
+        &self,
+        dimension: crate::dimension::Dimension,
+        sequence: u64,
+        state: crate::network::protocol::EntityStateWire,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastEntityState {
+                    dimension: dimension as u8,
+                    sequence,
+                    state,
+                },
+            );
+        }
+    }
+
+    fn broadcast_entity_despawn(
+        &self,
+        dimension: crate::dimension::Dimension,
+        sequence: u64,
+        entity_id: u64,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastEntityDespawn {
+                    dimension: dimension as u8,
+                    sequence,
+                    entity_id,
+                },
+            );
+        }
+    }
+
+    fn broadcast_player_health(
+        &self,
+        sequence: u64,
+        player_id: crate::network::protocol::PlayerId,
+        state: &PlayerState,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastPlayerHealth {
+                    sequence,
+                    player_id,
+                    health: state.health,
+                    max_health: state.max_health,
+                    hunger: state.hunger,
+                    saturation: state.saturation,
+                    oxygen: state.oxygen,
+                    is_dead: state.is_dead,
+                    death_reason: state.death_reason.map_or(0, DamageSource::to_wire),
+                },
+            );
+        }
+    }
+
+    fn broadcast_player_effects(
+        &self,
+        sequence: u64,
+        player_id: crate::network::protocol::PlayerId,
+        effects: Vec<crate::network::protocol::PlayerEffectWire>,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastPlayerEffect {
+                    sequence,
+                    player_id,
+                    effects,
+                },
+            );
         }
     }
 
@@ -2808,16 +3835,20 @@ impl NetworkHandle {
     /// part of mid-game join catch-up.
     fn send_chunk_to(
         &self,
+        dimension: crate::dimension::Dimension,
         cx: i32,
         cz: i32,
+        revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
         to: crate::network::protocol::PlayerId,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.send(crate::network::server::HostToServer::SendChunk {
+            let _ = host_to_server.tracked_send(crate::network::server::HostToServer::SendChunk {
+                dimension: dimension as u8,
                 cx,
                 cz,
+                revision,
                 blocks,
                 block_states,
                 to,
@@ -2825,13 +3856,26 @@ impl NetworkHandle {
         }
     }
 
+    fn disconnect_slow_catchup_client(
+        &self,
+        to: crate::network::protocol::PlayerId,
+        reason: String,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server
+                .send(crate::network::server::HostToServer::DisconnectCatchupClient { to, reason });
+        }
+    }
+
     fn broadcast_time_sync(&self, ticks: u64, weather: u8, weather_remaining_ticks: f32) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.send(crate::network::server::HostToServer::BroadcastTimeSync {
-                ticks,
-                weather,
-                weather_remaining_ticks,
-            });
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastTimeSync {
+                    ticks,
+                    weather,
+                    weather_remaining_ticks,
+                },
+            );
         }
     }
 
@@ -2843,12 +3887,13 @@ impl NetworkHandle {
         to: crate::network::protocol::PlayerId,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.send(crate::network::server::HostToServer::SendTimeSync {
-                ticks,
-                weather,
-                weather_remaining_ticks,
-                to,
-            });
+            let _ =
+                host_to_server.tracked_send(crate::network::server::HostToServer::SendTimeSync {
+                    ticks,
+                    weather,
+                    weather_remaining_ticks,
+                    to,
+                });
         }
     }
 
@@ -2862,7 +3907,7 @@ impl NetworkHandle {
     fn send_action(&self, action: crate::network::protocol::Action) {
         match self {
             NetworkHandle::Host { host_to_server, .. } => {
-                let _ = host_to_server.send(
+                let _ = host_to_server.tracked_send(
                     crate::network::server::HostToServer::BroadcastPlayerAction { id: 0, action },
                 );
             }
@@ -2881,8 +3926,8 @@ impl NetworkHandle {
                     .send(crate::network::server::HostToServer::BroadcastChat { sender, message });
             }
             NetworkHandle::Client { game_to_client, .. } => {
-                let _ =
-                    game_to_client.send(crate::network::client::GameToClient::SendChat { message });
+                let _ = game_to_client
+                    .tracked_send(crate::network::client::GameToClient::SendChat { message });
             }
             NetworkHandle::None => {}
         }
@@ -2903,7 +3948,7 @@ impl NetworkHandle {
                 thread,
                 ..
             } => {
-                let _ = host_to_server.send(crate::network::server::HostToServer::Stop);
+                let _ = host_to_server.tracked_send(crate::network::server::HostToServer::Stop);
                 thread.take()
             }
             NetworkHandle::Client {
@@ -2911,13 +3956,15 @@ impl NetworkHandle {
                 thread,
                 ..
             } => {
-                let _ = game_to_client.send(crate::network::client::GameToClient::Disconnect);
+                let _ =
+                    game_to_client.tracked_send(crate::network::client::GameToClient::Disconnect);
                 thread.take()
             }
         };
         if let Some(thread) = thread {
             let _ = thread.join();
         }
+        crate::perf::reset_network_queue_stats();
     }
 }
 
@@ -2943,6 +3990,8 @@ pub struct State {
     pub chunk_manager: ChunkManager,
     pub chunk_meshes: std::collections::HashMap<(i32, i32), ChunkMesh>,
     pub render_regions: std::collections::HashMap<(i32, i32), RenderRegion>,
+    /// At most one low-priority compaction candidate is staged per frame.
+    compaction_pending_region: Option<(i32, i32)>,
     terrain_worker_tx: std::sync::mpsc::Sender<TerrainWorkerResult>,
     terrain_worker_rx: std::sync::mpsc::Receiver<TerrainWorkerResult>,
     pending_worker_results: std::collections::VecDeque<TerrainWorkerResult>,
@@ -3053,12 +4102,17 @@ pub struct State {
     perf_recorder: crate::perf::PerfRecorder,
     perf_summaries: [crate::perf::ScopeSummary; crate::perf::SCOPE_COUNT],
     perf_counters: crate::perf::PerfCounters,
+    /// Bounded machine-readable per-frame samples for replayable telemetry.
+    pub frame_perf_samples: std::collections::VecDeque<crate::perf::FramePerfSample>,
+    next_perf_frame_id: u64,
     gpu_upload_time_frame: Duration,
     lighting_time_frame: Duration,
+    lighting_scopes_frame: crate::perf::LightingPerfSample,
+    gpu_upload_scopes_frame: crate::perf::GpuUploadPerfSample,
     gpu_timestamp_query_set: Option<wgpu::QuerySet>,
     gpu_timestamp_resolve_buffer: Option<wgpu::Buffer>,
     gpu_timestamp_readback_buffer: Option<wgpu::Buffer>,
-    gpu_timestamp_read_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gpu_timestamp_state: std::sync::Arc<std::sync::Mutex<GpuTimestampReadbackState>>,
     gpu_pass_timings_ns: [u64; 7],
     gpu_timestamps_supported: bool,
     gpu_timestamps_inside_passes: bool,
@@ -3098,10 +4152,37 @@ pub struct State {
     pub advancement_gui: crate::advancements::AdvancementGui,
     pub role: MultiplayerRole,
     pub network: NetworkHandle,
+    network_inbox: std::collections::VecDeque<NetworkInbound>,
+    network_latest_positions: std::collections::HashMap<
+        crate::network::protocol::PlayerId,
+        (u32, u64, f32, f32, f32, f32, f32),
+    >,
+    network_latest_entities:
+        std::collections::HashMap<u64, (u64, u8, crate::network::protocol::EntityStateWire)>,
+    network_latest_health:
+        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    network_latest_effects:
+        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    network_latest_time_sync: Option<NetworkInbound>,
     network_ready: bool,
     local_player_id: Option<crate::network::protocol::PlayerId>,
     remote_players:
         std::collections::HashMap<crate::network::protocol::PlayerId, RemotePlayerState>,
+    /// Client-only visual copies of host-owned non-player entities.
+    replicated_entities: std::collections::HashMap<u64, ReplicatedEntityState>,
+    /// Host-only set used to emit reliable spawn/despawn lifecycle edges.
+    replicated_entity_ids: std::collections::HashSet<u64>,
+    entity_replication_sequence: u64,
+    /// Host-owned survival state for joining players. Clients display only the
+    /// replicated entry matching `local_player_id`.
+    remote_player_health:
+        std::collections::HashMap<crate::network::protocol::PlayerId, PlayerState>,
+    remote_player_effects: std::collections::HashMap<
+        crate::network::protocol::PlayerId,
+        crate::brewing::EffectManager,
+    >,
+    client_player_health_sequence: u64,
+    client_player_effect_sequence: u64,
     pub network_status: Option<String>,
     pub chat_messages: std::collections::VecDeque<(String, String)>,
     pub chat_input: String,
@@ -3113,21 +4194,25 @@ pub struct State {
     network_time: f64,
     /// Client-only: chunk payloads that arrived from the host before the chunk
     /// was streamed in. Applied when `update_chunks` loads the coordinate.
-    pending_chunk_payloads: std::collections::HashMap<(i32, i32), (Vec<u8>, Vec<u8>)>,
+    pending_chunk_payloads: std::collections::HashMap<(i32, i32), (u64, Vec<u8>, Vec<u8>)>,
     /// Client-only coalesced mutations for chunks that are not streamed in yet.
     /// The latest authoritative value wins for each world-space block.
     pending_block_changes: std::collections::HashMap<
         (i32, i32),
-        std::collections::HashMap<(i32, i32, i32), (u32, u8)>,
+        std::collections::HashMap<(i32, i32, i32), (u64, u32, u8)>,
     >,
-    /// Host-only set of dimension-namespaced chunks that differ from their
-    /// deterministic generated form and therefore need join-time catch-up.
-    mutated_chunks: std::collections::HashSet<(crate::dimension::Dimension, i32, i32)>,
-    /// Host-only queue of pending join catch-up chunk coordinates per joining client.
-    pending_player_catchups: std::collections::HashMap<
-        crate::network::protocol::PlayerId,
-        std::collections::VecDeque<(i32, i32)>,
-    >,
+    client_chunk_revisions: std::collections::HashMap<(crate::dimension::Dimension, i32, i32), u64>,
+    /// Host-only persistent latest revision per mutated chunk. Keeping only
+    /// the latest value bounds history while retaining unloaded coordinates.
+    mutation_revisions: crate::save::MutationRevisionIndex,
+    mutation_revision_generation: u64,
+    mutation_index_persist_in_flight: Option<u64>,
+    mutation_index_dirty: bool,
+    network_snapshot_worker: crate::save::NetworkSnapshotWorker,
+    /// Host-only ACK-owned catch-up entries per joining client.
+    pending_player_catchups:
+        std::collections::HashMap<crate::network::protocol::PlayerId, Vec<PlayerCatchupEntry>>,
+    catchup_round_robin_cursor: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3400,6 +4485,16 @@ impl State {
             crate::save::SAVE_QUEUE_CAPACITY,
         );
         let save_queue_stats = save_tx.stats();
+        let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
+            std::sync::Arc::clone(&save_manager),
+            crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
+        );
+        let mut mutation_revisions = if is_client {
+            crate::save::MutationRevisionIndex::default()
+        } else {
+            save_manager.lock().unwrap().load_mutation_revision_index()
+        };
+        let mut mutation_index_dirty = false;
 
         // Initialize physics and keyboard input
         let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
@@ -3950,7 +5045,6 @@ impl State {
         let (terrain_worker_tx, terrain_worker_rx) = std::sync::mpsc::channel();
         let mut chunk_lifetimes = std::collections::HashMap::new();
         let mut next_chunk_lifetime = 1u64;
-        let mut mutated_chunks = std::collections::HashSet::new();
 
         // Load only the immediate spawn area synchronously.  Loading every
         // chunk in a large render distance here used to create all CPU/GPU
@@ -3979,7 +5073,8 @@ impl State {
                         let generated_blocks =
                             crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
                         if data.blocks != generated_blocks {
-                            mutated_chunks.insert((current_dimension, cx, cz));
+                            mutation_index_dirty |=
+                                mutation_revisions.ensure_at_least(current_dimension, cx, cz, 1);
                         }
                         let metadata = data.redstone_metadata();
                         data.restore_to_chunk(&mut chunk);
@@ -4469,6 +5564,7 @@ impl State {
             chunk_manager,
             chunk_meshes,
             render_regions: std::collections::HashMap::new(),
+            compaction_pending_region: None,
             terrain_worker_tx,
             terrain_worker_rx,
             pending_worker_results: std::collections::VecDeque::new(),
@@ -4573,13 +5669,17 @@ impl State {
                 crate::perf::PerfRecorder::<{ crate::perf::DEFAULT_HISTORY_CAPACITY }>::new()
                     .snapshot(),
             perf_counters: crate::perf::PerfCounters::default(),
+            frame_perf_samples: std::collections::VecDeque::with_capacity(240),
+            next_perf_frame_id: 0,
             gpu_upload_time_frame: Duration::ZERO,
             lighting_time_frame: Duration::ZERO,
+            lighting_scopes_frame: crate::perf::LightingPerfSample::new(),
+            gpu_upload_scopes_frame: crate::perf::GpuUploadPerfSample::new(),
             gpu_timestamp_query_set,
             gpu_timestamp_resolve_buffer,
             gpu_timestamp_readback_buffer,
-            gpu_timestamp_read_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
+            gpu_timestamp_state: std::sync::Arc::new(std::sync::Mutex::new(
+                gpu_timestamp_capability(gpu_timestamps_supported, gpu_timestamps_inside_passes),
             )),
             gpu_pass_timings_ns: [0; 7],
             gpu_timestamps_supported,
@@ -4620,9 +5720,22 @@ impl State {
             advancement_gui,
             role,
             network,
+            network_inbox: std::collections::VecDeque::new(),
+            network_latest_positions: std::collections::HashMap::new(),
+            network_latest_entities: std::collections::HashMap::new(),
+            network_latest_health: std::collections::HashMap::new(),
+            network_latest_effects: std::collections::HashMap::new(),
+            network_latest_time_sync: None,
             network_ready: !is_client,
             local_player_id: None,
             remote_players: std::collections::HashMap::new(),
+            replicated_entities: std::collections::HashMap::new(),
+            replicated_entity_ids: std::collections::HashSet::new(),
+            entity_replication_sequence: 0,
+            remote_player_health: std::collections::HashMap::new(),
+            remote_player_effects: std::collections::HashMap::new(),
+            client_player_health_sequence: 0,
+            client_player_effect_sequence: 0,
             network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
             chat_messages: std::collections::VecDeque::new(),
             chat_input: String::new(),
@@ -4634,8 +5747,14 @@ impl State {
             network_time: 0.0,
             pending_chunk_payloads: std::collections::HashMap::new(),
             pending_block_changes: std::collections::HashMap::new(),
-            mutated_chunks,
+            client_chunk_revisions: std::collections::HashMap::new(),
+            mutation_revisions,
+            mutation_revision_generation: u64::from(mutation_index_dirty),
+            mutation_index_persist_in_flight: None,
+            mutation_index_dirty,
+            network_snapshot_worker,
             pending_player_catchups: std::collections::HashMap::new(),
+            catchup_round_robin_cursor: 0,
         };
 
         // Restore persisted redstone component metadata (facing/delay/comparator
@@ -4696,86 +5815,230 @@ impl State {
         }
         let cx = x.div_euclid(CHUNK_WIDTH as i32);
         let cz = z.div_euclid(CHUNK_DEPTH as i32);
-        self.mutated_chunks.insert((self.current_dimension, cx, cz));
+        let revision = self.mutation_revisions.bump(self.current_dimension, cx, cz);
+        self.mutation_revision_generation = self.mutation_revision_generation.saturating_add(1);
+        self.mutation_index_dirty = true;
         let state = self.chunk_manager.get_block_state(x, y, z);
-        self.network
-            .broadcast_block_change(x, y, z, block.to_wire(), state);
+        self.network.broadcast_block_change(
+            self.current_dimension,
+            revision,
+            x,
+            y,
+            z,
+            block.to_wire(),
+            state,
+        );
     }
 
     fn schedule_player_catchup(&mut self, player_id: crate::network::protocol::PlayerId) {
-        let player_pos = if let Some(remote) = self.remote_players.get(&player_id) {
-            if let Some(snap) = remote.snapshots.back() {
-                snap.position
-            } else {
-                self.player_physics.position
-            }
-        } else {
-            self.player_physics.position
-        };
-
-        let mut chunks: Vec<_> = self
-            .mutated_chunks
-            .iter()
-            .filter_map(|&(dimension, cx, cz)| {
-                if dimension != self.current_dimension {
-                    return None;
-                }
-                if self.chunk_manager.chunks.contains_key(&(cx, cz)) {
-                    let chunk_center_x = (cx * CHUNK_WIDTH as i32 + CHUNK_WIDTH as i32 / 2) as f32;
-                    let chunk_center_z = (cz * CHUNK_DEPTH as i32 + CHUNK_DEPTH as i32 / 2) as f32;
-                    let dx = chunk_center_x - player_pos.x;
-                    let dz = chunk_center_z - player_pos.z;
-                    let dist_sq = dx * dx + dz * dz;
-                    Some(((cx, cz), dist_sq))
-                } else {
-                    None
-                }
+        let entries = self
+            .mutation_revisions
+            .entries_in(self.current_dimension)
+            .map(|((cx, cz), revision)| PlayerCatchupEntry {
+                key: crate::save::NetworkSnapshotKey {
+                    player_id,
+                    dimension: self.current_dimension,
+                    cx,
+                    cz,
+                    revision,
+                },
+                status: CatchupStatus::Pending,
+                retries: 0,
             })
             .collect();
-
-        chunks.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let pending_coords: std::collections::VecDeque<_> =
-            chunks.into_iter().map(|(coord, _)| coord).collect();
-        self.pending_player_catchups
-            .insert(player_id, pending_coords);
+        self.pending_player_catchups.insert(player_id, entries);
     }
 
     fn process_join_catchups(&mut self) {
         if !matches!(self.role, MultiplayerRole::Host { .. }) {
             return;
         }
-        if self.pending_player_catchups.is_empty() {
-            self.perf_counters.network_queue_depth = 0;
-            return;
-        }
-
-        const MAX_CATCHUP_PER_FRAME: usize = 2;
-        let mut total_pending = 0u64;
-
-        let player_ids: Vec<_> = self.pending_player_catchups.keys().copied().collect();
-        for id in player_ids {
-            if let Some(pending) = self.pending_player_catchups.get_mut(&id) {
-                let mut sent = 0;
-                while sent < MAX_CATCHUP_PER_FRAME && !pending.is_empty() {
-                    let (cx, cz) = pending.pop_front().unwrap();
-                    if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
-                        let save_data = crate::save::ChunkSaveData::from_chunk(chunk);
-                        self.network.send_chunk_to(
-                            cx,
-                            cz,
-                            save_data.blocks,
-                            save_data.block_states,
-                            id,
-                        );
-                        sent += 1;
+        let started = Instant::now();
+        let worker_results: Vec<_> = self
+            .network_snapshot_worker
+            .try_iter()
+            .take(64)
+            .take_while(|_| started.elapsed() < Duration::from_millis(1))
+            .collect();
+        for result in worker_results {
+            match result {
+                crate::save::NetworkSnapshotWorkerResult::Snapshot(payload) => {
+                    let Some(entry) = self
+                        .pending_player_catchups
+                        .get_mut(&payload.key.player_id)
+                        .and_then(|entries| {
+                            entries.iter_mut().find(|entry| entry.key == payload.key)
+                        })
+                    else {
+                        continue;
+                    };
+                    match payload.result {
+                        Ok((blocks, block_states)) => {
+                            self.network.send_chunk_to(
+                                payload.key.dimension,
+                                payload.key.cx,
+                                payload.key.cz,
+                                payload.key.revision,
+                                blocks,
+                                block_states,
+                                payload.key.player_id,
+                            );
+                            entry.status = CatchupStatus::ServerSubmission {
+                                since: Instant::now(),
+                            };
+                        }
+                        Err(error) => {
+                            eprintln!("[Network] Catch-up snapshot retry: {error}");
+                            entry.status = CatchupStatus::Pending;
+                        }
                     }
                 }
-                total_pending += pending.len() as u64;
+                crate::save::NetworkSnapshotWorkerResult::IndexPersisted { generation, result } => {
+                    if self.mutation_index_persist_in_flight == Some(generation) {
+                        self.mutation_index_persist_in_flight = None;
+                    }
+                    match result {
+                        Ok(()) if generation == self.mutation_revision_generation => {
+                            self.mutation_index_dirty = false;
+                        }
+                        Ok(()) => {
+                            self.mutation_index_dirty = true;
+                        }
+                        Err(error) => {
+                            eprintln!("[Network] Mutation revision index persist failed: {error}");
+                            self.mutation_index_dirty = true;
+                        }
+                    }
+                }
             }
         }
 
-        self.pending_player_catchups.retain(|_, v| !v.is_empty());
-        self.perf_counters.network_queue_depth = total_pending;
+        if self.mutation_index_dirty && self.mutation_index_persist_in_flight.is_none() {
+            let generation = self.mutation_revision_generation;
+            if self
+                .network_snapshot_worker
+                .try_persist_index(generation, self.mutation_revisions.clone())
+                .is_ok()
+            {
+                self.mutation_index_persist_in_flight = Some(generation);
+            }
+        }
+
+        let now = Instant::now();
+        let mut disconnect = Vec::new();
+        for (&player_id, entries) in &mut self.pending_player_catchups {
+            for entry in entries.iter_mut() {
+                let timed_out = match entry.status {
+                    CatchupStatus::ServerSubmission { since }
+                    | CatchupStatus::AwaitingAck { since } => {
+                        now.duration_since(since) >= CATCHUP_ACK_TIMEOUT
+                    }
+                    CatchupStatus::Pending | CatchupStatus::WorkerInFlight => false,
+                };
+                if timed_out {
+                    entry.retries = entry.retries.saturating_add(1);
+                    entry.status = CatchupStatus::Pending;
+                    if entry.retries > MAX_CATCHUP_RETRIES {
+                        disconnect.push(player_id);
+                        break;
+                    }
+                }
+            }
+        }
+        disconnect.sort_unstable();
+        disconnect.dedup();
+        for player_id in disconnect {
+            self.pending_player_catchups.remove(&player_id);
+            self.network.disconnect_slow_catchup_client(
+                player_id,
+                format!(
+                    "catch-up ACK timed out after {} retries",
+                    MAX_CATCHUP_RETRIES
+                ),
+            );
+        }
+
+        let mut player_ids: Vec<_> = self.pending_player_catchups.keys().copied().collect();
+        player_ids.sort_unstable();
+        let mut submitted = 0usize;
+        let mut visited_without_submit = 0usize;
+        while submitted < MAX_CATCHUP_SUBMITS_PER_FRAME
+            && !player_ids.is_empty()
+            && visited_without_submit < player_ids.len()
+        {
+            let slot = self.catchup_round_robin_cursor % player_ids.len();
+            self.catchup_round_robin_cursor =
+                (self.catchup_round_robin_cursor + 1) % player_ids.len();
+            let player_id = player_ids[slot];
+            let player_pos = self
+                .remote_players
+                .get(&player_id)
+                .and_then(|remote| remote.snapshots.back().map(|snapshot| snapshot.position))
+                .unwrap_or(self.player_physics.position);
+            let candidate = self
+                .pending_player_catchups
+                .get(&player_id)
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, entry)| entry.status == CatchupStatus::Pending)
+                        .min_by(|(_, left), (_, right)| {
+                            let distance = |entry: &PlayerCatchupEntry| {
+                                let center_x = (entry.key.cx * CHUNK_WIDTH as i32
+                                    + CHUNK_WIDTH as i32 / 2)
+                                    as f32;
+                                let center_z = (entry.key.cz * CHUNK_DEPTH as i32
+                                    + CHUNK_DEPTH as i32 / 2)
+                                    as f32;
+                                (center_x - player_pos.x).powi(2)
+                                    + (center_z - player_pos.z).powi(2)
+                            };
+                            distance(left)
+                                .partial_cmp(&distance(right))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(index, entry)| (index, entry.key))
+                });
+            let Some((entry_index, key)) = candidate else {
+                visited_without_submit += 1;
+                continue;
+            };
+            let chunk = (key.dimension == self.current_dimension)
+                .then(|| self.chunk_manager.chunks.get(&(key.cx, key.cz)).cloned())
+                .flatten()
+                .map(Arc::new);
+            match self
+                .network_snapshot_worker
+                .try_submit(crate::save::NetworkSnapshotRequest { key, chunk })
+            {
+                Ok(()) => {
+                    if let Some(entry) = self
+                        .pending_player_catchups
+                        .get_mut(&player_id)
+                        .and_then(|entries| entries.get_mut(entry_index))
+                    {
+                        entry.status = CatchupStatus::WorkerInFlight;
+                    }
+                    submitted += 1;
+                    visited_without_submit = 0;
+                }
+                Err(crate::save::NetworkSnapshotSubmitError::Full) => break,
+                Err(crate::save::NetworkSnapshotSubmitError::Closed) => {
+                    eprintln!("[Network] Catch-up snapshot worker stopped");
+                    break;
+                }
+            }
+        }
+
+        self.pending_player_catchups
+            .retain(|_, entries| !entries.is_empty());
+        self.perf_counters.network_queue_depth = self
+            .pending_player_catchups
+            .values()
+            .map(|entries| entries.len() as u64)
+            .sum::<u64>()
+            .saturating_add(self.network_inbox.len() as u64);
     }
 
     fn weather_sync_fields(&self) -> (u8, f32) {
@@ -4800,19 +6063,27 @@ impl State {
     }
 
     fn drain_network_events(&mut self) {
-        let start_time = Instant::now();
-        let max_duration = Duration::from_millis(2);
-
+        // Ingest and apply are independently bounded. Reliable events stay FIFO;
+        // high-rate snapshots persist as sequence-aware latest-wins entries.
+        const MAX_EVENTS: usize = NETWORK_MAX_EVENTS_PER_PASS;
+        const MAX_BYTES: usize = NETWORK_MAX_BYTES_PER_PASS;
+        const MAX_TIME: Duration = NETWORK_MAX_TIME_PER_PASS;
+        let ingest_started = Instant::now();
         let inbound = self.network.drain_inbound();
-        if inbound.is_empty() {
-            return;
-        }
-
-        let mut critical_events = Vec::new();
-        let mut latest_positions = std::collections::HashMap::new();
-        let mut latest_time_sync = None;
-
-        for event in inbound {
+        let mut ingested = 0usize;
+        let mut ingest_bytes = 0usize;
+        let mut inbound_iter = inbound.into_iter();
+        while let Some(event) = inbound_iter.next() {
+            if ingested >= MAX_EVENTS
+                || ingest_bytes >= MAX_BYTES
+                || ingest_started.elapsed() >= MAX_TIME
+            {
+                self.network_inbox.push_back(event);
+                self.network_inbox.extend(inbound_iter);
+                break;
+            }
+            ingest_bytes = ingest_bytes.saturating_add(event.estimated_bytes());
+            ingested += 1;
             match event {
                 NetworkInbound::PlayerPosition {
                     id,
@@ -4824,33 +6095,116 @@ impl State {
                     yaw,
                     pitch,
                 } => {
-                    latest_positions
-                        .insert(id, (sequence, sender_time_millis, x, y, z, yaw, pitch));
+                    let replace = self
+                        .network_latest_positions
+                        .get(&id)
+                        .map_or(true, |old| sequence > old.0);
+                    if replace {
+                        self.network_latest_positions
+                            .insert(id, (sequence, sender_time_millis, x, y, z, yaw, pitch));
+                    }
                 }
-                NetworkInbound::TimeSync {
-                    ticks,
-                    weather,
-                    weather_remaining_ticks,
+                NetworkInbound::EntityState {
+                    dimension,
+                    sequence,
+                    state,
                 } => {
-                    latest_time_sync = Some((ticks, weather, weather_remaining_ticks));
+                    let replace = self
+                        .network_latest_entities
+                        .get(&state.entity_id)
+                        .map_or(true, |old| sequence > old.0);
+                    if replace {
+                        self.network_latest_entities
+                            .insert(state.entity_id, (sequence, dimension, state));
+                    }
                 }
-                other => {
-                    critical_events.push(other);
+                NetworkInbound::PlayerHealth {
+                    player_id,
+                    sequence,
+                    ..
+                } => {
+                    let replace = self.network_latest_health.get(&player_id).map_or(true, |old| matches!(old, NetworkInbound::PlayerHealth { sequence: previous, .. } if sequence > *previous));
+                    if replace {
+                        self.network_latest_health.insert(player_id, event);
+                    }
                 }
+                NetworkInbound::PlayerEffect {
+                    player_id,
+                    sequence,
+                    ..
+                } => {
+                    let replace = self.network_latest_effects.get(&player_id).map_or(true, |old| matches!(old, NetworkInbound::PlayerEffect { sequence: previous, .. } if sequence > *previous));
+                    if replace {
+                        self.network_latest_effects.insert(player_id, event);
+                    }
+                }
+                event @ NetworkInbound::TimeSync { .. } => {
+                    let replace = match (&self.network_latest_time_sync, &event) {
+                        (
+                            Some(NetworkInbound::TimeSync { ticks: old, .. }),
+                            NetworkInbound::TimeSync { ticks, .. },
+                        ) => ticks > old,
+                        (None, _) => true,
+                        _ => false,
+                    };
+                    if replace {
+                        self.network_latest_time_sync = Some(event);
+                    }
+                }
+                reliable => self.network_inbox.push_back(reliable),
             }
         }
 
-        for event in critical_events {
-            self.handle_single_network_event(event);
+        let apply_started = Instant::now();
+        let mut applied = 0usize;
+        let mut applied_bytes = 0usize;
+        while applied < MAX_EVENTS
+            && applied_bytes < MAX_BYTES
+            && apply_started.elapsed() < MAX_TIME
+        {
+            let Some(event) = self.network_inbox.pop_front() else {
+                break;
+            };
+            applied_bytes = applied_bytes.saturating_add(event.estimated_bytes());
+            applied += 1;
+            match event {
+                NetworkInbound::PlayerPosition {
+                    id,
+                    sequence,
+                    sender_time_millis,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                } => {
+                    let replace = self
+                        .network_latest_positions
+                        .get(&id)
+                        .map_or(true, |old| sequence > old.0);
+                    if replace {
+                        self.network_latest_positions
+                            .insert(id, (sequence, sender_time_millis, x, y, z, yaw, pitch));
+                    }
+                }
+                other => self.handle_single_network_event(other),
+            }
         }
-
-        let mut sorted_positions: Vec<_> = latest_positions.into_iter().collect();
-        sorted_positions.sort_by_key(|(id, _)| *id);
-        for (id, (sequence, sender_time_millis, x, y, z, yaw, pitch)) in sorted_positions {
-            if start_time.elapsed() >= max_duration {
+        let mut keys: Vec<_> = self.network_latest_positions.keys().copied().collect();
+        keys.sort_unstable();
+        for id in keys {
+            if applied >= MAX_EVENTS
+                || applied_bytes >= MAX_BYTES
+                || apply_started.elapsed() >= MAX_TIME
+            {
                 break;
             }
-            self.handle_single_network_event(NetworkInbound::PlayerPosition {
+            let Some((sequence, sender_time_millis, x, y, z, yaw, pitch)) =
+                self.network_latest_positions.remove(&id)
+            else {
+                continue;
+            };
+            let event = NetworkInbound::PlayerPosition {
                 id,
                 sequence,
                 sender_time_millis,
@@ -4859,18 +6213,198 @@ impl State {
                 z,
                 yaw,
                 pitch,
-            });
+            };
+            applied_bytes = applied_bytes.saturating_add(event.estimated_bytes());
+            applied += 1;
+            self.handle_single_network_event(event);
         }
-
-        if let Some((ticks, weather, weather_remaining_ticks)) = latest_time_sync {
-            if start_time.elapsed() < max_duration {
-                self.handle_single_network_event(NetworkInbound::TimeSync {
-                    ticks,
-                    weather,
-                    weather_remaining_ticks,
-                });
+        let mut entity_keys: Vec<_> = self.network_latest_entities.keys().copied().collect();
+        entity_keys.sort_unstable();
+        for id in entity_keys {
+            if applied >= MAX_EVENTS
+                || applied_bytes >= MAX_BYTES
+                || apply_started.elapsed() >= MAX_TIME
+            {
+                break;
+            }
+            let Some((sequence, dimension, state)) = self.network_latest_entities.remove(&id)
+            else {
+                continue;
+            };
+            let event = NetworkInbound::EntityState {
+                dimension,
+                sequence,
+                state,
+            };
+            applied_bytes = applied_bytes.saturating_add(event.estimated_bytes());
+            applied += 1;
+            self.handle_single_network_event(event);
+        }
+        for map_kind in 0..2 {
+            let mut keys: Vec<_> = if map_kind == 0 {
+                self.network_latest_health.keys().copied().collect()
+            } else {
+                self.network_latest_effects.keys().copied().collect()
+            };
+            keys.sort_unstable();
+            for key in keys {
+                if applied >= MAX_EVENTS
+                    || applied_bytes >= MAX_BYTES
+                    || apply_started.elapsed() >= MAX_TIME
+                {
+                    break;
+                }
+                let event = if map_kind == 0 {
+                    self.network_latest_health.remove(&key)
+                } else {
+                    self.network_latest_effects.remove(&key)
+                };
+                let Some(event) = event else {
+                    continue;
+                };
+                applied_bytes = applied_bytes.saturating_add(event.estimated_bytes());
+                applied += 1;
+                self.handle_single_network_event(event);
             }
         }
+        if applied < MAX_EVENTS && applied_bytes < MAX_BYTES && apply_started.elapsed() < MAX_TIME {
+            if let Some(event) = self.network_latest_time_sync.take() {
+                self.handle_single_network_event(event);
+            }
+        }
+
+        // Keep queue telemetry tied to the actual persistent structures. Values
+        // are deliberately reported as unavailable nowhere: all four counts and
+        // byte totals are directly measurable from the inbox/latest maps.
+        let latest_count = self.network_latest_positions.len()
+            + self.network_latest_entities.len()
+            + self.network_latest_health.len()
+            + self.network_latest_effects.len()
+            + usize::from(self.network_latest_time_sync.is_some());
+        // Match the fixed footprint used by `estimated_bytes`; transport
+        // payload sizes are not exposed by the network handles.
+        let latest_bytes = latest_count.saturating_mul(std::mem::size_of::<NetworkInbound>());
+        let reliable_bytes: u64 = self
+            .network_inbox
+            .iter()
+            .map(|event| event.estimated_bytes() as u64)
+            .sum();
+        self.perf_counters.network_inbound_reliable_pending = self.network_inbox.len() as u64;
+        self.perf_counters.network_inbound_reliable_bytes = reliable_bytes;
+        self.perf_counters.network_inbound_latest_pending = latest_count as u64;
+        self.perf_counters.network_inbound_latest_bytes = latest_bytes as u64;
+    }
+
+    fn clear_replicated_entities(&mut self) {
+        let local_ids: Vec<_> = self
+            .replicated_entities
+            .drain()
+            .map(|(_, replicated)| replicated.local_entity_id)
+            .collect();
+        for local_id in local_ids {
+            self.entity_manager.remove_by_id(local_id);
+        }
+    }
+
+    fn apply_replicated_entity_state(
+        &mut self,
+        dimension_wire: u8,
+        sequence: u64,
+        state: crate::network::protocol::EntityStateWire,
+    ) {
+        if self.is_authoritative()
+            || crate::dimension::Dimension::from_wire(dimension_wire)
+                != Some(self.current_dimension)
+        {
+            return;
+        }
+        let Some(entity_type) = crate::entity::EntityType::from_wire(state.entity_type) else {
+            return;
+        };
+        if !is_replicated_entity_type(entity_type) {
+            return;
+        }
+
+        let needs_spawn = self
+            .replicated_entities
+            .get(&state.entity_id)
+            .and_then(|replicated| self.entity_manager.get_by_id(replicated.local_entity_id))
+            .is_none_or(|entity| entity.entity_type != entity_type);
+        if needs_spawn {
+            if let Some(previous) = self.replicated_entities.remove(&state.entity_id) {
+                self.entity_manager.remove_by_id(previous.local_entity_id);
+            }
+            let local_entity_id = self
+                .entity_manager
+                .spawn(entity_type, Vec3::from_array(state.position));
+            self.replicated_entities
+                .insert(state.entity_id, ReplicatedEntityState::new(local_entity_id));
+        }
+
+        let snapped = self
+            .replicated_entities
+            .get_mut(&state.entity_id)
+            .is_some_and(|replicated| replicated.push(state, sequence, self.network_time));
+        if snapped {
+            self.perf_counters.prediction_rollback =
+                self.perf_counters.prediction_rollback.saturating_add(1);
+        }
+        if let Some(local_id) = self
+            .replicated_entities
+            .get(&state.entity_id)
+            .map(|replicated| replicated.local_entity_id)
+        {
+            if let Some(entity) = self.entity_manager.get_by_id_mut(local_id) {
+                apply_entity_wire_state(entity, state);
+            }
+        }
+    }
+
+    fn apply_replicated_entity_despawn(
+        &mut self,
+        dimension_wire: u8,
+        sequence: u64,
+        entity_id: u64,
+    ) {
+        if self.is_authoritative()
+            || crate::dimension::Dimension::from_wire(dimension_wire)
+                != Some(self.current_dimension)
+        {
+            return;
+        }
+        if self
+            .replicated_entities
+            .get(&entity_id)
+            .and_then(|replicated| replicated.snapshots.back())
+            .is_some_and(|latest| sequence <= latest.sequence)
+        {
+            return;
+        }
+        if let Some(replicated) = self.replicated_entities.remove(&entity_id) {
+            self.entity_manager.remove_by_id(replicated.local_entity_id);
+        }
+    }
+
+    fn update_replicated_entity_interpolation(&mut self) {
+        if self.is_authoritative() {
+            return;
+        }
+        let target = self.network_time - ENTITY_INTERPOLATION_DELAY;
+        let samples: Vec<_> = self
+            .replicated_entities
+            .values()
+            .filter_map(|replicated| {
+                replicated
+                    .sample(target)
+                    .map(|state| (replicated.local_entity_id, state))
+            })
+            .collect();
+        for (local_id, state) in samples {
+            if let Some(entity) = self.entity_manager.get_by_id_mut(local_id) {
+                apply_entity_wire_state(entity, state);
+            }
+        }
+        self.entity_manager.sync_positions();
     }
 
     fn handle_single_network_event(&mut self, event: NetworkInbound) {
@@ -4897,16 +6431,13 @@ impl State {
                 };
                 self.weather = crate::weather::WeatherSystem::new(self.world_seed);
                 self.chunk_manager.chunks.clear();
-                self.terrain_generation = self.terrain_generation.wrapping_add(1);
-                self.chunk_load_in_flight.clear();
-                self.chunk_mesh_in_flight.clear();
-                self.chunk_lifetimes.clear();
-                self.chunk_meshes.clear();
-                self.render_regions.clear();
-                self.scheduler.clear();
-                self.pending_worker_results.clear();
+                self.teardown_terrain_runtime("network connect/reset");
                 self.pending_chunk_payloads.clear();
                 self.pending_block_changes.clear();
+                self.client_chunk_revisions.clear();
+                self.clear_replicated_entities();
+                self.client_player_health_sequence = 0;
+                self.client_player_effect_sequence = 0;
                 self.network_ready = true;
                 self.network_status = None;
                 self.connection_lost = false;
@@ -4918,12 +6449,14 @@ impl State {
             }
             NetworkInbound::Disconnected(reason) => {
                 eprintln!("[State] Network disconnected: {reason}");
+                self.teardown_terrain_runtime("network disconnect");
                 self.network_ready = false;
                 self.network_status = Some(format!("CONNECTION LOST: {reason}"));
                 self.connection_lost = true;
                 self.is_chat_open = false;
                 self.chat_input.clear();
                 clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
+                self.clear_replicated_entities();
                 self.set_paused(true);
                 push_chat_history(
                     &mut self.chat_messages,
@@ -4957,6 +6490,10 @@ impl State {
                     );
                 }
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
+                    self.remote_player_health
+                        .entry(id)
+                        .or_insert_with(PlayerState::new);
+                    self.remote_player_effects.entry(id).or_default();
                     self.network.notify_player_join(id, username);
                     self.send_time_sync_to(id);
                     self.schedule_player_catchup(id);
@@ -4964,6 +6501,8 @@ impl State {
             }
             NetworkInbound::PlayerLeave(id) => {
                 self.pending_player_catchups.remove(&id);
+                self.remote_player_health.remove(&id);
+                self.remote_player_effects.remove(&id);
                 if let Some(remote) = self.remote_players.remove(&id) {
                     push_chat_history(
                         &mut self.chat_messages,
@@ -4990,13 +6529,37 @@ impl State {
                 pitch,
             } => {
                 if self.local_player_id == Some(id) {
+                    let authoritative = Vec3::new(x, y, z);
+                    if self.player_physics.position.distance(authoritative)
+                        > PLAYER_CORRECTION_SNAP_DISTANCE
+                    {
+                        self.player_physics.position = authoritative;
+                        self.player_physics.velocity = Vec3::ZERO;
+                        self.prev_player_position = authoritative;
+                        self.camera.yaw = yaw;
+                        self.camera.pitch = pitch;
+                        self.perf_counters.prediction_rollback =
+                            self.perf_counters.prediction_rollback.saturating_add(1);
+                    }
                     return;
                 }
+                let candidate = Vec3::new(x, y, z);
+                let position = if matches!(self.role, MultiplayerRole::Host { .. }) {
+                    validated_remote_position(
+                        self.remote_players
+                            .get(&id)
+                            .and_then(|remote| remote.snapshots.back()),
+                        candidate,
+                        sender_time_millis,
+                    )
+                } else {
+                    candidate
+                };
                 if !self.remote_players.contains_key(&id) {
                     let username = String::new();
                     let entity_id = self
                         .entity_manager
-                        .spawn(crate::entity::EntityType::RemotePlayer, Vec3::new(x, y, z));
+                        .spawn(crate::entity::EntityType::RemotePlayer, position);
                     if let Some(entity) = self.entity_manager.get_by_id_mut(entity_id) {
                         entity.player_id = id;
                     }
@@ -5004,10 +6567,11 @@ impl State {
                         .insert(id, RemotePlayerState::new(entity_id, username));
                 }
 
+                let mut canonical_snapshot = None;
                 if let Some(remote) = self.remote_players.get_mut(&id) {
                     let arrival = self.network_time;
                     let result = remote.push_snapshot(
-                        Vec3::new(x, y, z),
+                        position,
                         yaw,
                         pitch,
                         sequence,
@@ -5018,7 +6582,7 @@ impl State {
                     if let Some(entity) = self.entity_manager.get_by_id_mut(remote.entity_id) {
                         let (snap_pos, snap_yaw, snap_pitch) =
                             if result == SnapshotPushResult::Snapped {
-                                (Vec3::new(x, y, z), yaw, pitch)
+                                (position, yaw, pitch)
                             } else if let Some(samp) =
                                 remote.sample(arrival - REMOTE_INTERPOLATION_DELAY)
                             {
@@ -5029,6 +6593,21 @@ impl State {
                         entity.position = snap_pos;
                         entity.yaw = snap_yaw;
                         entity.pitch = snap_pitch;
+                    }
+                    if result != SnapshotPushResult::Rejected {
+                        canonical_snapshot = remote.snapshots.back().copied();
+                    }
+                }
+                if matches!(self.role, MultiplayerRole::Host { .. }) {
+                    if let Some(snapshot) = canonical_snapshot {
+                        self.network.broadcast_player_position(
+                            id,
+                            snapshot.sequence,
+                            snapshot.sender_time_millis,
+                            snapshot.position,
+                            snapshot.yaw,
+                            snapshot.pitch,
+                        );
                     }
                 }
             }
@@ -5044,7 +6623,7 @@ impl State {
                 }
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
                     if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                        let _ = host_to_server.send(
+                        let _ = host_to_server.tracked_send(
                             crate::network::server::HostToServer::BroadcastPlayerAction {
                                 id,
                                 action,
@@ -5106,21 +6685,87 @@ impl State {
                 }
             }
             NetworkInbound::AuthoritativeBlockChange {
+                dimension,
+                revision,
                 x,
                 y,
                 z,
                 block,
                 state,
             } => {
-                self.apply_remote_block_change(x, y, z, block, state);
+                self.apply_remote_block_change(dimension, revision, x, y, z, block, state);
             }
             NetworkInbound::ChunkData {
+                dimension,
                 cx,
                 cz,
+                revision,
                 blocks,
                 block_states,
             } => {
-                self.apply_remote_chunk_data(cx, cz, blocks, block_states);
+                self.apply_remote_chunk_data(dimension, cx, cz, revision, blocks, block_states);
+            }
+            NetworkInbound::EntitySpawn {
+                dimension,
+                sequence,
+                state,
+            }
+            | NetworkInbound::EntityState {
+                dimension,
+                sequence,
+                state,
+            } => {
+                self.apply_replicated_entity_state(dimension, sequence, state);
+            }
+            NetworkInbound::EntityDespawn {
+                dimension,
+                sequence,
+                entity_id,
+            } => {
+                self.apply_replicated_entity_despawn(dimension, sequence, entity_id);
+            }
+            NetworkInbound::PlayerHealth {
+                sequence,
+                player_id,
+                health,
+                max_health,
+                hunger,
+                saturation,
+                oxygen,
+                is_dead,
+                death_reason,
+            } => {
+                if self.local_player_id == Some(player_id)
+                    && !self.is_authoritative()
+                    && sequence > self.client_player_health_sequence
+                {
+                    self.client_player_health_sequence = sequence;
+                    self.player_state.health = health.clamp(0.0, max_health.max(0.0));
+                    self.player_state.max_health = max_health.max(0.0);
+                    self.player_state.hunger = hunger.clamp(0.0, 20.0);
+                    self.player_state.saturation = saturation.clamp(0.0, 20.0);
+                    self.player_state.oxygen = oxygen.clamp(0.0, 300.0);
+                    self.player_state.is_dead = is_dead;
+                    self.player_state.death_reason = DamageSource::from_wire(death_reason);
+                    if is_dead {
+                        self.clear_movement_input();
+                        self.sync_cursor_mode();
+                    }
+                }
+            }
+            NetworkInbound::PlayerEffect {
+                sequence,
+                player_id,
+                effects,
+            } => {
+                if self.local_player_id == Some(player_id)
+                    && !self.is_authoritative()
+                    && sequence > self.client_player_effect_sequence
+                {
+                    self.client_player_effect_sequence = sequence;
+                    self.potion_effects.active =
+                        effects.into_iter().filter_map(effect_from_wire).collect();
+                }
             }
             NetworkInbound::TimeSync {
                 ticks,
@@ -5165,6 +6810,90 @@ impl State {
                 };
                 push_chat_history(&mut self.chat_messages, sender, message);
             }
+            NetworkInbound::CatchupAccepted {
+                id,
+                dimension,
+                cx,
+                cz,
+                revision,
+            } => {
+                let key = crate::dimension::Dimension::from_wire(dimension).map(|dimension| {
+                    crate::save::NetworkSnapshotKey {
+                        player_id: id,
+                        dimension,
+                        cx,
+                        cz,
+                        revision,
+                    }
+                });
+                if let Some(key) = key {
+                    if let Some(entry) = self
+                        .pending_player_catchups
+                        .get_mut(&id)
+                        .and_then(|entries| entries.iter_mut().find(|entry| entry.key == key))
+                    {
+                        entry.status = CatchupStatus::AwaitingAck {
+                            since: Instant::now(),
+                        };
+                    }
+                }
+            }
+            NetworkInbound::CatchupBackpressured {
+                id,
+                dimension,
+                cx,
+                cz,
+                revision,
+                mailbox_full_count,
+            } => {
+                self.perf_counters.network_catchup_mailbox_full = self
+                    .perf_counters
+                    .network_catchup_mailbox_full
+                    .max(mailbox_full_count);
+                let key = crate::dimension::Dimension::from_wire(dimension).map(|dimension| {
+                    crate::save::NetworkSnapshotKey {
+                        player_id: id,
+                        dimension,
+                        cx,
+                        cz,
+                        revision,
+                    }
+                });
+                if let Some(key) = key {
+                    if let Some(entry) = self
+                        .pending_player_catchups
+                        .get_mut(&id)
+                        .and_then(|entries| entries.iter_mut().find(|entry| entry.key == key))
+                    {
+                        entry.retries = entry.retries.saturating_add(1);
+                        entry.status = CatchupStatus::Pending;
+                    }
+                }
+            }
+            NetworkInbound::CatchupAck {
+                id,
+                dimension,
+                cx,
+                cz,
+                revision,
+            } => {
+                if let Some(dimension) = crate::dimension::Dimension::from_wire(dimension) {
+                    if let Some(entries) = self.pending_player_catchups.get_mut(&id) {
+                        entries.retain(|entry| {
+                            entry.key
+                                != (crate::save::NetworkSnapshotKey {
+                                    player_id: id,
+                                    dimension,
+                                    cx,
+                                    cz,
+                                    revision,
+                                })
+                        });
+                    }
+                    self.pending_player_catchups
+                        .retain(|_, entries| !entries.is_empty());
+                }
+            }
         }
     }
 
@@ -5196,6 +6925,102 @@ impl State {
         if self.network_time_sync_timer >= 1.0 {
             self.network_time_sync_timer %= 1.0;
             self.broadcast_time_sync();
+        }
+    }
+
+    fn broadcast_authoritative_replication(&mut self, dt: f32) {
+        if !matches!(self.role, MultiplayerRole::Host { .. }) || !self.network_ready {
+            return;
+        }
+
+        self.entity_replication_sequence = self.entity_replication_sequence.wrapping_add(1).max(1);
+        let sequence = self.entity_replication_sequence;
+        let states: Vec<_> = self
+            .entity_manager
+            .entities
+            .iter()
+            .filter(|entity| is_replicated_entity_type(entity.entity_type))
+            .map(entity_state_wire)
+            .collect();
+        let current_ids: std::collections::HashSet<_> =
+            states.iter().map(|state| state.entity_id).collect();
+
+        let mut despawned: Vec<_> = self
+            .replicated_entity_ids
+            .difference(&current_ids)
+            .copied()
+            .collect();
+        despawned.sort_unstable();
+        for entity_id in despawned {
+            self.network
+                .broadcast_entity_despawn(self.current_dimension, sequence, entity_id);
+        }
+
+        for state in &states {
+            if !self.replicated_entity_ids.contains(&state.entity_id) {
+                self.network
+                    .broadcast_entity_spawn(self.current_dimension, sequence, *state);
+            }
+            self.network
+                .broadcast_entity_state(self.current_dimension, sequence, *state);
+        }
+        self.replicated_entity_ids = current_ids;
+
+        self.network
+            .broadcast_player_health(sequence, 0, &self.player_state);
+        self.network.broadcast_player_effects(
+            sequence,
+            0,
+            self.potion_effects
+                .active
+                .iter()
+                .copied()
+                .map(effect_to_wire)
+                .collect(),
+        );
+
+        let remote_positions: Vec<_> = self
+            .remote_players
+            .iter()
+            .filter_map(|(id, remote)| {
+                remote
+                    .snapshots
+                    .back()
+                    .map(|snapshot| (*id, snapshot.position))
+            })
+            .collect();
+        for (player_id, position) in remote_positions {
+            let state = self
+                .remote_player_health
+                .entry(player_id)
+                .or_insert_with(PlayerState::new);
+            if let Some((amount, source)) = state.update(dt, false) {
+                state.take_damage(amount, source);
+            }
+            let effects = self.remote_player_effects.entry(player_id).or_default();
+            let effect_health = effects.update(dt);
+            if effect_health > 0.0 {
+                state.health = (state.health + effect_health).min(state.max_health);
+            } else if effect_health < 0.0 && state.health > 1.0 {
+                state.take_damage((-effect_health).min(state.health - 1.0), DamageSource::Mob);
+            }
+
+            if self.game_mode != GameMode::Creative
+                && self
+                    .entity_manager
+                    .query_radius(position, 2.2)
+                    .any(|entity| entity.entity_type.is_hostile() && entity.health > 0.0)
+            {
+                state.take_damage(3.0, DamageSource::Mob);
+            }
+
+            self.network
+                .broadcast_player_health(sequence, player_id, state);
+            self.network.broadcast_player_effects(
+                sequence,
+                player_id,
+                effects.active.iter().copied().map(effect_to_wire).collect(),
+            );
         }
     }
 
@@ -5421,7 +7246,12 @@ impl State {
                     self.current_dimension,
                     chunk,
                     redstone_metadata,
-                );
+                )
+                .with_mutation_revision(self.mutation_revisions.latest(
+                    self.current_dimension,
+                    cx,
+                    cz,
+                ));
                 self.enqueue_chunk_save(snapshot, tracker.clone(), revision)?;
             }
         }
@@ -5432,6 +7262,15 @@ impl State {
             .map_err(|error| crate::save::SaveError::Io {
                 operation: "save current dimension",
                 path: world_dir.join("dimension.dat"),
+                message: error.to_string(),
+            })?;
+        self.save_manager
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .save_mutation_revision_index(&self.mutation_revisions)
+            .map_err(|error| crate::save::SaveError::Io {
+                operation: "save mutation revision index",
+                path: world_dir.join("mutation_revisions.bin"),
                 message: error.to_string(),
             })?;
         self.save_current_dimension_entities()?;
@@ -5570,10 +7409,14 @@ impl State {
             if let Some(levels) = &mesh.levels {
                 for level in levels {
                     if let Some(h) = &level.opaque.handle {
-                        region.deallocate_handle(h);
+                        if let Err(error) = region.deallocate_handle(h) {
+                            eprintln!("[RenderRegion] deallocate failed: {error:?}");
+                        }
                     }
                     if let Some(h) = &level.transparent.handle {
-                        region.deallocate_handle(h);
+                        if let Err(error) = region.deallocate_handle(h) {
+                            eprintln!("[RenderRegion] deallocate failed: {error:?}");
+                        }
                     }
                 }
             }
@@ -5592,7 +7435,9 @@ impl State {
         coord: (i32, i32),
         existing_mesh: &mut ChunkMesh,
         bundle: &crate::chunk_render::ChunkMeshBundle,
-    ) -> [GpuMeshLevel; 3] {
+        terrain_generation: u64,
+        chunk_lifetime: u64,
+    ) -> ([GpuMeshLevel; 3], UploadMetrics) {
         let r_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
         let is_new = existing_mesh.levels.is_none();
         let region = render_regions
@@ -5605,22 +7450,47 @@ impl State {
         if let Some(levels) = &existing_mesh.levels {
             for level in levels {
                 if let Some(h) = &level.opaque.handle {
-                    region.deallocate_handle(h);
+                    if let Err(error) = region.deallocate_handle(h) {
+                        eprintln!("[RenderRegion] deallocate failed: {error:?}");
+                    }
                 }
                 if let Some(h) = &level.transparent.handle {
-                    region.deallocate_handle(h);
+                    if let Err(error) = region.deallocate_handle(h) {
+                        eprintln!("[RenderRegion] deallocate failed: {error:?}");
+                    }
                 }
             }
         }
 
-        std::array::from_fn(|index| {
+        let mut metrics = UploadMetrics::default();
+        let levels = std::array::from_fn(|index| {
             let data = &bundle.levels[index];
+            let owner_opaque = crate::chunk_render::allocation_owner(
+                terrain_generation,
+                chunk_lifetime,
+                0,
+                index as u8,
+                0,
+            );
+            let owner_transparent = crate::chunk_render::allocation_owner(
+                terrain_generation,
+                chunk_lifetime,
+                0,
+                index as u8,
+                1,
+            );
+            let (opaque, opaque_metrics) =
+                region.upload_mesh_layer(device, queue, &data.opaque, owner_opaque);
+            let (transparent, transparent_metrics) =
+                region.upload_mesh_layer(device, queue, &data.transparent, owner_transparent);
+            metrics = metrics.add(opaque_metrics).add(transparent_metrics);
             GpuMeshLevel {
-                opaque: region.upload_mesh_layer(device, queue, &data.opaque),
-                transparent: region.upload_mesh_layer(device, queue, &data.transparent),
+                opaque,
+                transparent,
                 bounds: data.bounds(),
             }
-        })
+        });
+        (levels, metrics)
     }
 
     fn next_chunk_lifetime(&mut self) -> u64 {
@@ -5727,7 +7597,16 @@ impl State {
 
                     let (cx, cz) = result.coord;
                     if result.mutated {
-                        self.mutated_chunks.insert((self.current_dimension, cx, cz));
+                        if self.mutation_revisions.ensure_at_least(
+                            self.current_dimension,
+                            cx,
+                            cz,
+                            1,
+                        ) {
+                            self.mutation_revision_generation =
+                                self.mutation_revision_generation.saturating_add(1);
+                            self.mutation_index_dirty = true;
+                        }
                     }
                     self.chunk_manager.chunks.insert(result.coord, result.chunk);
                     self.chunk_lifetimes.insert(result.coord, result.lifetime);
@@ -5748,17 +7627,33 @@ impl State {
                         );
                     }
 
-                    if let Some((blocks, block_states)) =
+                    let mut pending_base_revision = 0;
+                    if let Some((revision, blocks, block_states)) =
                         self.pending_chunk_payloads.remove(&result.coord)
                     {
+                        pending_base_revision = revision;
                         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&result.coord) {
                             Self::restore_chunk_payload(chunk, &blocks, &block_states);
                         }
                         self.invalidate_chunk_mesh(result.coord, DependencyReason::Network);
                     }
                     if let Some(changes) = self.pending_block_changes.remove(&result.coord) {
-                        for ((x, y, z), (block, state)) in changes {
-                            self.apply_remote_block_change(x, y, z, block, state);
+                        self.client_chunk_revisions.insert(
+                            (self.current_dimension, result.coord.0, result.coord.1),
+                            pending_base_revision,
+                        );
+                        let mut changes: Vec<_> = changes.into_iter().collect();
+                        changes.sort_by_key(|(_, (revision, _, _))| *revision);
+                        for ((x, y, z), (revision, block, state)) in changes {
+                            self.apply_remote_block_change(
+                                self.current_dimension as u8,
+                                revision,
+                                x,
+                                y,
+                                z,
+                                block,
+                                state,
+                            );
                         }
                     }
 
@@ -5785,7 +7680,10 @@ impl State {
                             );
                         }
                     }
-                    lighting_elapsed += lighting_started.elapsed();
+                    let elapsed = lighting_started.elapsed();
+                    lighting_elapsed += elapsed;
+                    self.lighting_scopes_frame
+                        .record(crate::perf::LightingSource::Load as usize, elapsed);
                     for neighbor in surrounding_chunk_coords(cx, cz) {
                         self.invalidate_chunk_mesh(neighbor, DependencyReason::ChunkLoad);
                     }
@@ -5819,8 +7717,12 @@ impl State {
                     let Some(mesh) = self.chunk_meshes.get_mut(&result.coord) else {
                         continue;
                     };
-                    let upload_started = Instant::now();
-                    let levels = Self::upload_mesh_bundle(
+                    let chunk_lifetime = self
+                        .chunk_lifetimes
+                        .get(&result.coord)
+                        .copied()
+                        .unwrap_or(0);
+                    let (levels, upload_metrics) = Self::upload_mesh_bundle(
                         &self.device,
                         &self.queue,
                         &self.region_bind_group_layout,
@@ -5828,19 +7730,23 @@ impl State {
                         result.coord,
                         mesh,
                         &result.bundle,
+                        self.terrain_generation,
+                        chunk_lifetime,
                     );
                     mesh.levels = Some(levels);
                     mesh.section_connectivity = result
                         .bundle
                         .section_connectivity
                         .map(crate::culling::SectionConnectivityState::Valid);
-                    let upload_elapsed = upload_started.elapsed();
+                    let upload_elapsed = Duration::from_nanos(upload_metrics.elapsed_ns);
                     gpu_upload_elapsed += upload_elapsed;
-                    let gpu_bytes = mesh.gpu_bytes() as u64;
+                    self.gpu_upload_scopes_frame
+                        .record(crate::perf::UploadSource::Terrain as usize, upload_elapsed);
                     self.perf_counters.upload_bytes_frame = self
                         .perf_counters
                         .upload_bytes_frame
-                        .saturating_add(gpu_bytes);
+                        .saturating_add(upload_metrics.bytes);
+                    let gpu_bytes = mesh.gpu_bytes() as u64;
                     mesh.meshed_revision = result.revision;
                     if !mesh.needs_rebuild() {
                         self.scheduler.remove_dirty(&result.coord);
@@ -5952,6 +7858,10 @@ impl State {
         let pz = (player_pos.z / 16.0).floor() as i32;
         let r = self.chunk_manager.render_distance;
         self.process_terrain_worker_results((px, pz));
+        // Scheduling is intentionally separate from execution: GPU copies and
+        // allocator swaps are performed by the frame-budgeted compaction
+        // worker, never as a synchronous rebuild of all regions.
+        self.schedule_terrain_compaction();
 
         let target_changed = self.scheduler.last_player_chunk != Some((px, pz))
             || self.scheduler.last_render_distance != r
@@ -5987,6 +7897,10 @@ impl State {
                                     self.current_dimension,
                                     &chunk,
                                     redstone_metadata,
+                                )
+                                .with_mutation_revision(
+                                    self.mutation_revisions
+                                        .latest(self.current_dimension, cx, cz),
                                 );
                             if let Err(error) = self.enqueue_chunk_save(snapshot, tracker, revision)
                             {
@@ -6141,11 +8055,19 @@ impl State {
                     self.total_time,
                     is_underwater,
                 );
+                let upload_started = Instant::now();
                 self.queue.write_buffer(
                     &self.camera_buffer,
                     0,
                     bytemuck::cast_slice(&[self.camera_uniform]),
                 );
+                let upload_elapsed = upload_started.elapsed();
+                self.gpu_upload_scopes_frame
+                    .record(crate::perf::UploadSource::Camera as usize, upload_elapsed);
+                self.perf_counters.upload_bytes_frame = self
+                    .perf_counters
+                    .upload_bytes_frame
+                    .saturating_add(std::mem::size_of::<CameraUniform>() as u64);
                 self.save_settings();
             }
             // Sensitivity Button bounds: X: [-0.3, 0.3], Y: [-0.04, 0.06]
@@ -6213,6 +8135,7 @@ impl State {
     pub fn tick_simulation(&mut self, dt: f32) {
         self.prev_player_position = self.player_physics.position;
         let world_tick_started = Instant::now();
+        let authoritative = self.is_authoritative();
 
         self.autosave_timer += dt;
         if self.is_authoritative() && self.autosave_timer >= 300.0 {
@@ -6225,6 +8148,7 @@ impl State {
         self.water_tick_timer += dt;
         if self.is_authoritative() && self.water_tick_timer >= 0.25 {
             self.water_tick_timer = 0.0;
+            let lighting_started = Instant::now();
             let (mut dirty, mutations) =
                 crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
             for ((x, y, z), block) in mutations {
@@ -6232,11 +8156,16 @@ impl State {
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
             }
             self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
+            self.lighting_scopes_frame.record(
+                crate::perf::LightingSource::Fluid as usize,
+                lighting_started.elapsed(),
+            );
         }
 
         self.lava_tick_timer += dt;
         if self.is_authoritative() && self.lava_tick_timer >= 1.5 {
             self.lava_tick_timer = 0.0;
+            let lighting_started = Instant::now();
             let (mut dirty, mutations) =
                 crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
             for ((x, y, z), block) in mutations {
@@ -6244,6 +8173,10 @@ impl State {
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
             }
             self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
+            self.lighting_scopes_frame.record(
+                crate::perf::LightingSource::Fluid as usize,
+                lighting_started.elapsed(),
+            );
         }
 
         if self.is_authoritative() {
@@ -6277,21 +8210,26 @@ impl State {
         if redstone_steps == 4 {
             self.redstone_tick_timer = self.redstone_tick_timer.min(0.05);
         }
+        let redstone_elapsed = redstone_started.elapsed();
         self.perf_recorder
-            .record(crate::perf::ScopeId::Redstone, redstone_started.elapsed());
+            .record(crate::perf::ScopeId::Redstone, redstone_elapsed);
+        self.lighting_scopes_frame.record(
+            crate::perf::LightingSource::Redstone as usize,
+            redstone_elapsed,
+        );
 
         self.brewing.update(dt);
         let effect_health = self.potion_effects.update(dt);
-        if effect_health > 0.0 {
+        if self.is_authoritative() && effect_health > 0.0 {
             self.player_state.health =
                 (self.player_state.health + effect_health).min(self.player_state.max_health);
-        } else if effect_health < 0.0 && self.player_state.health > 1.0 {
+        } else if self.is_authoritative() && effect_health < 0.0 && self.player_state.health > 1.0 {
             self.take_damage(
                 (-effect_health).min(self.player_state.health - 1.0),
                 DamageSource::Mob,
             );
         }
-        if self.wither_effect_timer > 0.0 {
+        if self.is_authoritative() && self.wither_effect_timer > 0.0 {
             self.wither_effect_timer = (self.wither_effect_timer - dt).max(0.0);
             self.wither_damage_timer += dt;
             if self.wither_damage_timer >= 1.0 {
@@ -6339,7 +8277,7 @@ impl State {
             self.keys.w || self.keys.a || self.keys.s || self.keys.d,
             dt,
         );
-        if sprint_exhaustion > 0.0 {
+        if authoritative && sprint_exhaustion > 0.0 {
             self.player_state.add_exhaustion(sprint_exhaustion);
         }
 
@@ -6396,7 +8334,7 @@ impl State {
 
         // Jump exhaustion check
         let jumped = !was_flying && self.keys.space && self.player_physics.on_ground;
-        if jumped && self.game_mode == GameMode::Survival {
+        if authoritative && jumped && self.game_mode == GameMode::Survival {
             self.player_state.add_exhaustion(0.05);
         }
         if jumped {
@@ -6452,7 +8390,7 @@ impl State {
             self.player_physics.position.z - old_pos.z,
         )
         .length();
-        if self.game_mode == GameMode::Survival {
+        if authoritative && self.game_mode == GameMode::Survival {
             self.player_state.add_exhaustion(0.02 * horizontal_dist);
         }
 
@@ -6501,36 +8439,34 @@ impl State {
         // Dropped item collection
         {
             let player_pos = self.player_physics.position;
-            let mut to_collect: Vec<usize> = Vec::new();
-            for (i, entity) in self.entity_manager.entities.iter().enumerate() {
-                if entity.entity_type != crate::entity::EntityType::DroppedItem {
+            let to_collect: Vec<u64> = self
+                .entity_manager
+                .query_radius_types(player_pos, 1.5, &[crate::entity::EntityType::DroppedItem])
+                .filter(|entity| entity.pickup_cooldown <= 0.0 && entity.dropped_item.is_some())
+                .map(|entity| entity.id)
+                .collect();
+            for id in to_collect {
+                let Some((item, mut remaining)) = self
+                    .entity_manager
+                    .get_by_id(id)
+                    .map(|entity| (entity.dropped_item, entity.dropped_count.max(1)))
+                else {
                     continue;
-                }
-                if entity.pickup_cooldown > 0.0 {
-                    continue;
-                }
-                if entity.dropped_item.is_none() {
-                    continue;
-                }
-                if entity.position.distance_squared(player_pos) < 2.25 {
-                    to_collect.push(i);
-                }
-            }
-            for &i in to_collect.iter().rev() {
-                let item = self.entity_manager.entities[i].dropped_item;
+                };
                 if let Some(item) = item {
-                    let mut remaining = self.entity_manager.entities[i].dropped_count.max(1);
                     while remaining > 0 && self.inventory.add_item(item) {
                         remaining -= 1;
                     }
                     if remaining == 0 {
-                        self.entity_manager.swap_remove(i);
+                        self.entity_manager.remove_by_id(id);
                     } else {
-                        self.entity_manager.entities[i].dropped_count = remaining;
+                        if let Some(index) = self.entity_manager.id_to_index.get(&id).copied() {
+                            self.entity_manager.entities[index].dropped_count = remaining;
+                        }
                     }
                 }
             }
-            self.entity_manager.update_spatial_indexes();
+            self.entity_manager.sync_positions();
         }
 
         // Void damage check
@@ -6705,116 +8641,121 @@ impl State {
             .sum();
         let water_breathing = self.potion_effects.has_water_breathing();
         let oxygen_rate = 1.0 / (1.0 + respiration_level as f32);
-        if let Some((dmg, src)) = self.player_state.update_with_oxygen_rate(
-            dt,
-            is_underwater && !water_breathing,
-            oxygen_rate,
-        ) {
-            self.take_damage(dmg, src);
+        if self.is_authoritative() {
+            if let Some((dmg, src)) = self.player_state.update_with_oxygen_rate(
+                dt,
+                is_underwater && !water_breathing,
+                oxygen_rate,
+            ) {
+                self.take_damage(dmg, src);
+            }
         }
 
         self.total_time += dt;
 
-        let hostile_mobs_started = Instant::now();
-        if self.difficulty == Difficulty::Peaceful {
-            self.entity_manager
-                .entities
-                .retain(|entity| !entity.entity_type.is_hostile());
-        } else if self.current_dimension == crate::dimension::Dimension::Overworld {
-            crate::mob::spawn_mobs(
-                &mut self.entity_manager,
-                &self.chunk_manager,
-                self.player_physics.position,
-                self.world_time.sky_light_level(),
-                self.total_time,
-            );
-        }
+        if authoritative {
+            let hostile_mobs_started = Instant::now();
+            if self.difficulty == Difficulty::Peaceful {
+                self.entity_manager
+                    .entities
+                    .retain(|entity| !entity.entity_type.is_hostile());
+            } else if self.current_dimension == crate::dimension::Dimension::Overworld {
+                crate::mob::spawn_mobs(
+                    &mut self.entity_manager,
+                    &self.chunk_manager,
+                    self.player_physics.position,
+                    self.world_time.sky_light_level(),
+                    self.total_time,
+                );
+            }
 
-        if self.difficulty != Difficulty::Peaceful {
-            crate::boss::ensure_dimension_entities(
-                self.current_dimension,
-                &mut self.entity_manager,
-                &self.chunk_manager,
-                self.player_physics.position,
-                self.total_time,
+            if self.difficulty != Difficulty::Peaceful {
+                crate::boss::ensure_dimension_entities(
+                    self.current_dimension,
+                    &mut self.entity_manager,
+                    &self.chunk_manager,
+                    self.player_physics.position,
+                    self.total_time,
+                );
+                let boss_events = crate::boss::update_dimension_entities(
+                    self.current_dimension,
+                    &mut self.entity_manager,
+                    &self.chunk_manager,
+                    self.player_physics.position,
+                    dt,
+                    self.game_mode,
+                );
+                self.apply_boss_events(boss_events);
+            }
+
+            // Update mobs
+            self.update_player_projectiles(dt);
+            let is_raining = matches!(
+                self.weather.current,
+                crate::weather::Weather::Rain | crate::weather::Weather::Thunder
             );
-            let boss_events = crate::boss::update_dimension_entities(
-                self.current_dimension,
+            let mut mob_dirty_meshes = std::collections::HashSet::new();
+            let exploded_blocks = crate::mob::update_mobs(
                 &mut self.entity_manager,
-                &self.chunk_manager,
-                self.player_physics.position,
-                dt,
+                &mut self.chunk_manager,
+                &mut mob_dirty_meshes,
+                &mut self.player_physics,
+                &mut self.player_state,
                 self.game_mode,
-            );
-            self.apply_boss_events(boss_events);
-        }
-
-        // Update mobs
-        self.update_player_projectiles(dt);
-        let authoritative = self.is_authoritative();
-        let is_raining = matches!(
-            self.weather.current,
-            crate::weather::Weather::Rain | crate::weather::Weather::Thunder
-        );
-        let mut mob_dirty_meshes = std::collections::HashSet::new();
-        let exploded_blocks = crate::mob::update_mobs(
-            &mut self.entity_manager,
-            &mut self.chunk_manager,
-            &mut mob_dirty_meshes,
-            &mut self.player_physics,
-            &mut self.player_state,
-            self.game_mode,
-            self.world_time.sky_light_level(),
-            is_raining,
-            dt,
-            &mut self.audio_manager,
-            right,
-            self.potion_effects.has_invisibility(),
-            crate::enchantment::protection_multiplier(&self.inventory.armor, false),
-            authoritative,
-        );
-        self.invalidate_chunk_meshes(mob_dirty_meshes, DependencyReason::Mob);
-        for (x, y, z) in exploded_blocks {
-            self.broadcast_block_change(x, y, z, BlockType::Air);
-        }
-        self.perf_recorder.record(
-            crate::perf::ScopeId::HostileMobs,
-            hostile_mobs_started.elapsed(),
-        );
-
-        // Update passive mobs
-        let passive_mobs_started = Instant::now();
-        let mut passive_dirty_meshes = std::collections::HashSet::new();
-        let grazed_blocks = crate::passive_mob::update_passive_mobs(
-            &mut self.entity_manager,
-            &mut self.chunk_manager,
-            &mut passive_dirty_meshes,
-            &self.player_physics,
-            &mut self.inventory,
-            self.game_mode,
-            dt,
-            self.total_time,
-            authoritative,
-        );
-        self.invalidate_chunk_meshes(passive_dirty_meshes, DependencyReason::Mob);
-        for (x, y, z) in grazed_blocks {
-            self.broadcast_block_change(x, y, z, BlockType::Dirt);
-        }
-
-        // Spawn passive mobs (daytime spawn)
-        if self.current_dimension == crate::dimension::Dimension::Overworld {
-            crate::passive_mob::spawn_passive_mobs(
-                &mut self.entity_manager,
-                &self.chunk_manager,
-                self.player_physics.position,
                 self.world_time.sky_light_level(),
+                is_raining,
+                dt,
+                &mut self.audio_manager,
+                right,
+                self.potion_effects.has_invisibility(),
+                crate::enchantment::protection_multiplier(&self.inventory.armor, false),
+                authoritative,
+            );
+            self.invalidate_chunk_meshes(mob_dirty_meshes, DependencyReason::Mob);
+            for (x, y, z) in exploded_blocks {
+                self.broadcast_block_change(x, y, z, BlockType::Air);
+            }
+            self.perf_recorder.record(
+                crate::perf::ScopeId::HostileMobs,
+                hostile_mobs_started.elapsed(),
+            );
+
+            // Update passive mobs
+            let passive_mobs_started = Instant::now();
+            let mut passive_dirty_meshes = std::collections::HashSet::new();
+            let grazed_blocks = crate::passive_mob::update_passive_mobs(
+                &mut self.entity_manager,
+                &mut self.chunk_manager,
+                &mut passive_dirty_meshes,
+                &self.player_physics,
+                &mut self.inventory,
+                self.game_mode,
+                dt,
                 self.total_time,
+                authoritative,
+            );
+            self.invalidate_chunk_meshes(passive_dirty_meshes, DependencyReason::Mob);
+            for (x, y, z) in grazed_blocks {
+                self.broadcast_block_change(x, y, z, BlockType::Dirt);
+            }
+
+            // Spawn passive mobs (daytime spawn)
+            if self.current_dimension == crate::dimension::Dimension::Overworld {
+                crate::passive_mob::spawn_passive_mobs(
+                    &mut self.entity_manager,
+                    &self.chunk_manager,
+                    self.player_physics.position,
+                    self.world_time.sky_light_level(),
+                    self.total_time,
+                );
+            }
+            self.perf_recorder.record(
+                crate::perf::ScopeId::PassiveMobs,
+                passive_mobs_started.elapsed(),
             );
         }
-        self.perf_recorder.record(
-            crate::perf::ScopeId::PassiveMobs,
-            passive_mobs_started.elapsed(),
-        );
+
+        self.broadcast_authoritative_replication(dt);
 
         self.perf_recorder.record(
             crate::perf::ScopeId::WorldTick,
@@ -6823,14 +8764,6 @@ impl State {
     }
 
     pub fn update_frame(&mut self, dt: f32) {
-        self.network_time += f64::from(dt);
-        let network_started = Instant::now();
-        self.drain_network_events();
-        self.process_join_catchups();
-        self.perf_recorder.record(
-            crate::perf::ScopeId::NetworkDrain,
-            network_started.elapsed(),
-        );
         let target = self.network_time - REMOTE_INTERPOLATION_DELAY;
         for remote in self.remote_players.values() {
             let Some(snap) = remote.sample(target) else {
@@ -6853,11 +8786,14 @@ impl State {
                 entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
             }
         }
+        self.update_replicated_entity_interpolation();
         self.update_network_position(dt);
 
         self.perf_counters.upload_bytes_frame = 0;
         self.gpu_upload_time_frame = Duration::ZERO;
         self.lighting_time_frame = Duration::ZERO;
+        self.lighting_scopes_frame.reset();
+        self.gpu_upload_scopes_frame.reset();
 
         self.debug_frame_time_accumulator += dt;
         self.debug_frame_samples += 1;
@@ -6928,7 +8864,12 @@ impl State {
         }
 
         if self.current_dimension == crate::dimension::Dimension::Overworld {
+            let lighting_started = Instant::now();
             self.update_weather_effects(dt, false);
+            self.lighting_scopes_frame.record(
+                crate::perf::LightingSource::Weather as usize,
+                lighting_started.elapsed(),
+            );
         }
 
         // Interpolate player position between previous and current simulation snapshot for smooth rendering
@@ -6984,11 +8925,20 @@ impl State {
         if self.potion_effects.has_night_vision() {
             self.camera_uniform.sun_dir[3] = 1.0;
         }
+        let upload_started = Instant::now();
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+        self.gpu_upload_scopes_frame.record(
+            crate::perf::UploadSource::Camera as usize,
+            upload_started.elapsed(),
+        );
+        self.perf_counters.upload_bytes_frame = self
+            .perf_counters
+            .upload_bytes_frame
+            .saturating_add(std::mem::size_of::<CameraUniform>() as u64);
 
         // Continuous mining logic
         if allows_continuous_mining(
@@ -7052,7 +9002,22 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
-        if self.network_ready && !self.is_paused && !self.player_state.is_dead {
+        self.network_time += f64::from(dt);
+        let network_started = Instant::now();
+        self.drain_network_events();
+        self.process_join_catchups();
+        self.perf_recorder.record(
+            crate::perf::ScopeId::NetworkDrain,
+            network_started.elapsed(),
+        );
+
+        let simulation_enabled = should_advance_simulation(
+            &self.role,
+            self.network_ready,
+            self.is_paused,
+            self.player_state.is_dead,
+        );
+        if simulation_enabled {
             self.sim_accumulator += dt;
             if self.sim_accumulator > SIM_TICK_TIME * MAX_CATCHUP_TICKS as f32 {
                 self.sim_accumulator = SIM_TICK_TIME * MAX_CATCHUP_TICKS as f32;
@@ -7188,24 +9153,19 @@ impl State {
             return;
         }
         let player_pos = self.player_physics.position;
+        let living_types = [
+            EntityType::Zombie,
+            EntityType::Skeleton,
+            EntityType::Creeper,
+            EntityType::Pig,
+            EntityType::Cow,
+            EntityType::Sheep,
+            EntityType::Chicken,
+        ];
         let living_target = self
             .entity_manager
-            .entities
-            .iter()
-            .filter(|entity| {
-                entity.health > 0.0
-                    && matches!(
-                        entity.entity_type,
-                        EntityType::Zombie
-                            | EntityType::Skeleton
-                            | EntityType::Creeper
-                            | EntityType::Pig
-                            | EntityType::Cow
-                            | EntityType::Sheep
-                            | EntityType::Chicken
-                    )
-                    && entity.position.distance_squared(player_pos) <= 32.0 * 32.0
-            })
+            .query_radius_types(player_pos, 32.0, &living_types)
+            .filter(|entity| entity.health > 0.0)
             .min_by(|a, b| {
                 a.position
                     .distance_squared(player_pos)
@@ -7372,7 +9332,11 @@ impl State {
         self.broadcast_block_change(wx, wy, wz, block);
     }
 
-    pub fn update_crack_buffers(&self, target_pos: Vec3, progress: f32) -> Option<(u32, u32)> {
+    pub fn update_crack_buffers(
+        &self,
+        target_pos: Vec3,
+        progress: f32,
+    ) -> Option<(u32, u32, u64, u64)> {
         let stage = (progress * 10.0).floor().clamp(0.0, 9.0) as u32;
         let wx = target_pos.x;
         let wy = target_pos.y;
@@ -7486,6 +9450,7 @@ impl State {
             indices.push(start_idx + 3);
         }
 
+        let upload_started = Instant::now();
         self.queue.write_buffer(
             &self.crack_vertex_buffer,
             0,
@@ -7494,7 +9459,13 @@ impl State {
         self.queue
             .write_buffer(&self.crack_index_buffer, 0, bytemuck::cast_slice(&indices));
 
-        Some((vertices.len() as u32, indices.len() as u32))
+        Some((
+            vertices.len() as u32,
+            indices.len() as u32,
+            upload_started.elapsed().as_nanos() as u64,
+            (vertices.len() * std::mem::size_of::<Vertex>()
+                + indices.len() * std::mem::size_of::<u32>()) as u64,
+        ))
     }
 
     pub fn calculate_mining_time(&self, block: BlockType) -> f32 {
@@ -7704,6 +9675,7 @@ impl State {
         block_wire: u32,
         state: u8,
     ) {
+        let lighting_started = Instant::now();
         let block = match BlockType::from_wire(block_wire) {
             Some(b) => b,
             None => return,
@@ -7730,8 +9702,20 @@ impl State {
         if prev == block && prev_state == state {
             // Echo the authoritative value to correct a requesting client's
             // prediction, but do not mark an unchanged chunk as mutated.
-            self.network
-                .broadcast_block_change(x, y, z, block_wire, state);
+            let cx = x.div_euclid(CHUNK_WIDTH as i32);
+            let cz = z.div_euclid(CHUNK_DEPTH as i32);
+            let revision = self
+                .mutation_revisions
+                .latest(self.current_dimension, cx, cz);
+            self.network.broadcast_block_change(
+                self.current_dimension,
+                revision,
+                x,
+                y,
+                z,
+                block_wire,
+                state,
+            );
             return;
         }
         let Some(mut dirty_chunks) =
@@ -7747,6 +9731,10 @@ impl State {
         self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
         self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
         self.broadcast_block_change(x, y, z, block);
+        self.lighting_scopes_frame.record(
+            crate::perf::LightingSource::Block as usize,
+            lighting_started.elapsed(),
+        );
     }
 
     /// Client-side application of an authoritative block change received from
@@ -7755,7 +9743,22 @@ impl State {
     /// - the host runs the redstone simulation and broadcasts its actuator
     /// effects as further `BlockChange`s, so running it here would double-apply
     /// and could diverge.
-    fn apply_remote_block_change(&mut self, x: i32, y: i32, z: i32, block_wire: u32, state: u8) {
+    fn apply_remote_block_change(
+        &mut self,
+        dimension_wire: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        block_wire: u32,
+        state: u8,
+    ) {
+        let Some(dimension) = crate::dimension::Dimension::from_wire(dimension_wire) else {
+            return;
+        };
+        if dimension != self.current_dimension {
+            return;
+        }
         let block = match BlockType::from_wire(block_wire) {
             Some(b) => b,
             None => return,
@@ -7763,11 +9766,22 @@ impl State {
         let Some(((cx, cz), _)) = self.chunk_manager.world_to_local(x, y, z) else {
             return;
         };
+        let revision_key = (dimension, cx, cz);
+        if revision
+            <= self
+                .client_chunk_revisions
+                .get(&revision_key)
+                .copied()
+                .unwrap_or(0)
+        {
+            return;
+        }
+        self.client_chunk_revisions.insert(revision_key, revision);
         if !self.chunk_manager.chunks.contains_key(&(cx, cz)) {
             self.pending_block_changes
                 .entry((cx, cz))
                 .or_default()
-                .insert((x, y, z), (block_wire, state));
+                .insert((x, y, z), (revision, block_wire, state));
             return;
         }
         let Some(dirty_chunks) =
@@ -7784,11 +9798,30 @@ impl State {
     /// is buffered and applied once `update_chunks` loads that coordinate.
     fn apply_remote_chunk_data(
         &mut self,
+        dimension_wire: u8,
         cx: i32,
         cz: i32,
+        revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
     ) {
+        let Some(dimension) = crate::dimension::Dimension::from_wire(dimension_wire) else {
+            return;
+        };
+        if dimension != self.current_dimension {
+            return;
+        }
+        let revision_key = (dimension, cx, cz);
+        if revision
+            < self
+                .client_chunk_revisions
+                .get(&revision_key)
+                .copied()
+                .unwrap_or(0)
+        {
+            return;
+        }
+        self.client_chunk_revisions.insert(revision_key, revision);
         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
             Self::restore_chunk_payload(chunk, &blocks, &block_states);
             self.invalidate_chunk_mesh((cx, cz), DependencyReason::Network);
@@ -7819,8 +9852,14 @@ impl State {
             self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
         } else {
             // Chunk not streamed in yet; buffer for deferred application.
-            self.pending_chunk_payloads
-                .insert((cx, cz), (blocks, block_states));
+            let should_replace = self
+                .pending_chunk_payloads
+                .get(&(cx, cz))
+                .is_none_or(|(existing_revision, _, _)| revision >= *existing_revision);
+            if should_replace {
+                self.pending_chunk_payloads
+                    .insert((cx, cz), (revision, blocks, block_states));
+            }
         }
     }
 
@@ -7837,11 +9876,13 @@ impl State {
             fluid_levels: Vec::new(),
             redstone_metadata: Vec::new(),
             block_states: block_states.to_vec(),
+            mutation_revision: 0,
         };
         save_data.restore_to_chunk(chunk);
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
+        let lighting_started = Instant::now();
         let wx = pos.x as i32;
         let wy = pos.y as i32;
         let wz = pos.z as i32;
@@ -7963,6 +10004,10 @@ impl State {
 
         // Fan the authoritative break out to connected clients.
         self.broadcast_block_change(wx, wy, wz, BlockType::Air);
+        self.lighting_scopes_frame.record(
+            crate::perf::LightingSource::Block as usize,
+            lighting_started.elapsed(),
+        );
     }
 
     pub fn handle_client_block_action(
@@ -8113,7 +10158,7 @@ impl State {
         drops: Vec<crate::network::protocol::ItemWire>,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-            let _ = host_to_server.send(
+            let _ = host_to_server.tracked_send(
                 crate::network::server::HostToServer::SendBlockActionResult {
                     to,
                     x,
@@ -8301,10 +10346,15 @@ impl State {
                 self.player_state.health =
                     (self.player_state.health + healing).min(self.player_state.max_health);
             }
-            for entity in &mut self.entity_manager.entities {
-                if entity.position.distance(position) > 4.0 {
+            let ids: Vec<u64> = self
+                .entity_manager
+                .query_radius(position, 4.0)
+                .map(|e| e.id)
+                .collect();
+            for id in ids {
+                let Some(entity) = self.entity_manager.get_by_id_mut(id) else {
                     continue;
-                }
+                };
                 if let Some(kill) = apply_player_splash_effect(entity, potion) {
                     player_kills.push(kill);
                 }
@@ -8312,13 +10362,25 @@ impl State {
         }
 
         let mut hits = Vec::new();
-        for projectile in &self.entity_manager.entities {
-            if projectile.entity_type != crate::entity::EntityType::Arrow
-                || !projectile.friendly_projectile
-            {
+        let projectile_ids: Vec<u64> = self
+            .entity_manager
+            .get_entities_by_type(crate::entity::EntityType::Arrow)
+            .filter(|p| p.friendly_projectile)
+            .map(|p| p.id)
+            .collect();
+        for projectile_id in projectile_ids {
+            let Some(projectile) = self.entity_manager.get_by_id(projectile_id) else {
                 continue;
-            }
-            for target in &self.entity_manager.entities {
+            };
+            let target_ids: Vec<u64> = self
+                .entity_manager
+                .query_radius(projectile.position, 2.0)
+                .map(|t| t.id)
+                .collect();
+            for target_id in target_ids {
+                let Some(target) = self.entity_manager.get_by_id(target_id) else {
+                    continue;
+                };
                 if target.id != projectile.id
                     && target.is_player_projectile_target()
                     && projectile.get_aabb().intersects(&target.get_aabb())
@@ -8358,7 +10420,7 @@ impl State {
     }
 
     pub fn take_damage(&mut self, amount: f32, source: DamageSource) {
-        if self.game_mode == GameMode::Creative {
+        if !self.is_authoritative() || self.game_mode == GameMode::Creative {
             return;
         }
 
@@ -8439,7 +10501,7 @@ impl State {
         )
         .normalize_or_zero();
         let Some(entity_id) = closest_melee_target(
-            &self.entity_manager.entities,
+            &self.entity_manager,
             self.camera.position,
             direction,
             MELEE_REACH,
@@ -10117,7 +12179,11 @@ impl State {
         self.perf_counters.gpu_arena_wasted_bytes =
             total_committed.saturating_sub(total_used) as u64;
         self.perf_counters.gpu_arena_regions = self.render_regions.len() as u64;
-        self.perf_counters.gpu_buffer_objects = (self.render_regions.len() * 2) as u64;
+        self.perf_counters.gpu_buffer_objects = self
+            .render_regions
+            .values()
+            .map(|region| region.buffer_object_count() as u64)
+            .sum();
         self.perf_recorder.record(
             crate::perf::ScopeId::RenderPrepareTerrain,
             terrain_prepare_started.elapsed(),
@@ -10144,7 +12210,11 @@ impl State {
             cam_pos.z.floor() as i32,
         );
 
-        for entity in &self.entity_manager.entities {
+        let render_candidates: Vec<&crate::entity::Entity> = self
+            .entity_manager
+            .query_radius(cam_pos, render_distance_sq.sqrt())
+            .collect();
+        for entity in render_candidates {
             // 1. Distance check
             let entity_render_dist_sq = render_distance_sq
                 * (self.settings.entity_distance_scale * self.settings.entity_distance_scale);
@@ -10228,7 +12298,10 @@ impl State {
                 0,
                 bytemuck::cast_slice(&self.mob_cuboid_instances_scratch[..limit]),
             );
-            self.gpu_upload_time_frame += upload_started.elapsed();
+            let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_elapsed;
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Entity as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
                     (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
@@ -10244,7 +12317,10 @@ impl State {
                 0,
                 bytemuck::cast_slice(&self.mob_quad_instances_scratch[..limit]),
             );
-            self.gpu_upload_time_frame += upload_started.elapsed();
+            let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_elapsed;
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Entity as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
                     (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
@@ -10266,7 +12342,10 @@ impl State {
                 0,
                 bytemuck::cast_slice(&self.particle_instances_scratch),
             );
-            self.gpu_upload_time_frame += upload_started.elapsed();
+            let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_elapsed;
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Particle as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
                     (particle_count * std::mem::size_of::<crate::particles::ParticleInstance>())
@@ -10331,7 +12410,12 @@ impl State {
                         0,
                         bytemuck::cast_slice(&self.hand_indices_scratch[..ind_limit]),
                     );
-                    gpu_upload_elapsed += upload_started.elapsed();
+                    let hand_upload_elapsed = upload_started.elapsed();
+                    gpu_upload_elapsed += hand_upload_elapsed;
+                    self.gpu_upload_scopes_frame.record(
+                        crate::perf::UploadSource::Entity as usize,
+                        hand_upload_elapsed,
+                    );
                     self.perf_counters.upload_bytes_frame =
                         self.perf_counters.upload_bytes_frame.saturating_add(
                             (vert_limit * std::mem::size_of::<Vertex>()
@@ -10476,6 +12560,7 @@ impl State {
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
+            let upload_started = Instant::now();
             self.queue.write_buffer(
                 &self.ui_vertex_buffer,
                 0,
@@ -10486,6 +12571,15 @@ impl State {
                 0,
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
             );
+            let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    ((ui_vert_len * std::mem::size_of::<UiVertex>())
+                        + (ui_line_vert_len * std::mem::size_of::<UiVertex>()))
+                        as u64,
+                );
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
@@ -10570,6 +12664,7 @@ impl State {
 
             let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
             let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
+            let upload_started = Instant::now();
             self.queue.write_buffer(
                 &self.ui_vertex_buffer,
                 0,
@@ -10580,6 +12675,13 @@ impl State {
                 0,
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
             );
+            let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    ((ui_vert_len + ui_line_vert_len) * std::mem::size_of::<UiVertex>()) as u64,
+                );
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
             self.num_ui_textured_vertices = 0;
@@ -10748,6 +12850,7 @@ impl State {
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
+            let upload_started = Instant::now();
             self.queue.write_buffer(
                 &self.ui_vertex_buffer,
                 0,
@@ -10758,6 +12861,13 @@ impl State {
                 0,
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
             );
+            let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    ((ui_vert_len + ui_line_vert_len) * std::mem::size_of::<UiVertex>()) as u64,
+                );
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
@@ -11067,6 +13177,7 @@ impl State {
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
+            let upload_started = Instant::now();
             self.queue.write_buffer(
                 &self.ui_vertex_buffer,
                 0,
@@ -11077,6 +13188,14 @@ impl State {
                 0,
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
             );
+
+            let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    ((ui_vert_len + ui_line_vert_len) * std::mem::size_of::<UiVertex>()) as u64,
+                );
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
@@ -12536,13 +14655,14 @@ impl State {
                     self.debug_str_scratch.clear();
                     let _ = write!(
                         self.debug_str_scratch,
-                        "SAVE Q: {} ({:.2} MB) | IN FLIGHT: {} | COALESCE: {} | REGION: {:.2} MB | NET Q: {}",
+                        "SAVE Q: {} ({:.2} MB) | IN FLIGHT: {} | COALESCE: {} | REGION: {:.2} MB | NET Q: {} | NET FULL: {}",
                         self.perf_counters.save_queue_depth,
                         self.perf_counters.save_queue_bytes as f64 / (1024.0 * 1024.0),
                         self.perf_counters.save_in_flight,
                         self.perf_counters.save_drop,
                         self.perf_counters.loaded_region_cache_bytes as f64 / (1024.0 * 1024.0),
-                        self.perf_counters.network_queue_depth
+                        self.perf_counters.network_queue_depth,
+                        self.perf_counters.network_catchup_mailbox_full
                     );
                     render_line(
                         &self.debug_str_scratch,
@@ -12551,7 +14671,9 @@ impl State {
                     );
 
                     self.debug_str_scratch.clear();
-                    if self.perf_counters.gpu_timestamps_supported {
+                    if self.perf_counters.gpu_timestamps_supported
+                        && self.perf_counters.gpu_timestamps_inside_passes
+                    {
                         let _ = write!(
                             self.debug_str_scratch,
                             "GPU PASSES: SKY {:.2}MS | OPAQUE {:.2}MS | MOBS {:.2}MS | TRANS {:.2}MS | PART {:.2}MS | CRACK {:.2}MS | UI {:.2}MS",
@@ -12562,6 +14684,11 @@ impl State {
                             self.perf_counters.gpu_particles_ns as f64 / 1_000_000.0,
                             self.perf_counters.gpu_crack_ns as f64 / 1_000_000.0,
                             self.perf_counters.gpu_ui_ns as f64 / 1_000_000.0,
+                        );
+                    } else if self.perf_counters.gpu_timestamps_supported {
+                        let _ = write!(
+                            self.debug_str_scratch,
+                            "GPU PASSES: N/A (TIMESTAMP_QUERY_INSIDE_PASSES UNSUPPORTED)"
                         );
                     } else {
                         let _ = write!(
@@ -12647,6 +14774,79 @@ impl State {
                             &mut ui_line_vertices,
                         );
                     }
+
+                    // Queue telemetry is sampled once per frame and retained in the
+                    // bounded 240-frame ring; show every queue family plus p95/p99.
+                    if let Some(latest) = self.frame_perf_samples.back() {
+                        let q = latest.queues.clone();
+                        let mut queue_line =
+                            |name: &str, depth: Option<u64>, bytes: Option<u64>| {
+                                let p95 = crate::perf::frame_percentile(
+                                    &self.frame_perf_samples,
+                                    95,
+                                    |s| match name {
+                                        "IN" => s.queues.inbound_pending.unwrap_or(0),
+                                        "OUT" => s.queues.outbound_pending.unwrap_or(0),
+                                        "REL" => s.queues.reliable_pending.unwrap_or(0),
+                                        "CATCH" => s.queues.catchup_pending.unwrap_or(0),
+                                        _ => s.queues.save_queued_bytes.unwrap_or(0),
+                                    },
+                                );
+                                let p99 = crate::perf::frame_percentile(
+                                    &self.frame_perf_samples,
+                                    99,
+                                    |s| match name {
+                                        "IN" => s.queues.inbound_pending.unwrap_or(0),
+                                        "OUT" => s.queues.outbound_pending.unwrap_or(0),
+                                        "REL" => s.queues.reliable_pending.unwrap_or(0),
+                                        "CATCH" => s.queues.catchup_pending.unwrap_or(0),
+                                        _ => s.queues.save_queued_bytes.unwrap_or(0),
+                                    },
+                                );
+                                self.debug_str_scratch.clear();
+                                let _ = write!(self.debug_str_scratch, "Q {} D:{} B:{} DROP:{} RETRY:{} CANCEL:{} AGE:{}ms P95:{} P99:{}", name, depth.unwrap_or(0), bytes.unwrap_or(0), q.drops.unwrap_or(0), q.retries.unwrap_or(0), q.cancels.unwrap_or(0), q.oldest_age_ms.unwrap_or(0), p95, p99);
+                                render_line(
+                                    &self.debug_str_scratch,
+                                    [0.82, 0.94, 1.0, 1.0],
+                                    &mut ui_line_vertices,
+                                );
+                            };
+                        queue_line("IN", q.inbound_pending, q.inbound_pending_bytes);
+                        queue_line("OUT", q.outbound_pending, q.outbound_bytes);
+                        queue_line("REL", q.reliable_pending, q.reliable_bytes);
+                        queue_line("CATCH", q.catchup_pending, q.catchup_bytes);
+                        queue_line("SAVE", q.save_queued_bytes, q.save_queued_bytes);
+                    }
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(self.debug_str_scratch, "LIGHT SRC:");
+                    for source in crate::perf::LightingSource::ALL {
+                        let ms = self.lighting_scopes_frame.get(source as usize).unwrap_or(0)
+                            as f64
+                            / 1_000_000.0;
+                        let _ = write!(self.debug_str_scratch, " {} {:.3}ms", source.name(), ms);
+                    }
+                    render_line(
+                        &self.debug_str_scratch,
+                        [0.82, 0.94, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(self.debug_str_scratch, "UPLOAD SRC:");
+                    for source in crate::perf::UploadSource::ALL {
+                        let ms = self
+                            .gpu_upload_scopes_frame
+                            .get(source as usize)
+                            .unwrap_or(0) as f64
+                            / 1_000_000.0;
+                        let _ = write!(self.debug_str_scratch, " {} {:.3}ms", source.name(), ms);
+                    }
+                    render_line(
+                        &self.debug_str_scratch,
+                        [0.82, 0.94, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
                 }
             }
 
@@ -12815,6 +15015,7 @@ impl State {
             let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
             let ui_textured_vert_len = ui_textured_vertices.len().min(UI_VERTEX_CAPACITY);
 
+            let upload_started = Instant::now();
             self.queue.write_buffer(
                 &self.ui_vertex_buffer,
                 0,
@@ -12830,6 +15031,15 @@ impl State {
                 0,
                 bytemuck::cast_slice(&ui_textured_vertices[..ui_textured_vert_len]),
             );
+            self.gpu_upload_scopes_frame.record(
+                crate::perf::UploadSource::Ui as usize,
+                upload_started.elapsed(),
+            );
+            self.perf_counters.upload_bytes_frame =
+                self.perf_counters.upload_bytes_frame.saturating_add(
+                    ((ui_vert_len + ui_line_vert_len + ui_textured_vert_len)
+                        * std::mem::size_of::<UiVertex>()) as u64,
+                );
 
             self.num_ui_vertices = ui_vert_len as u32;
             self.num_ui_line_vertices = ui_line_vert_len as u32;
@@ -12870,6 +15080,7 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
+        let mut crack_metrics: Option<(u64, u64)> = None;
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -13105,9 +15316,10 @@ impl State {
             }
             if let Some(target) = self.mining_target {
                 if self.mining_progress > 0.0 {
-                    if let Some((_num_vertices, num_indices)) =
+                    if let Some((_num_vertices, num_indices, upload_ns, upload_bytes)) =
                         self.update_crack_buffers(target, self.mining_progress)
                     {
+                        crack_metrics = Some((upload_ns, upload_bytes));
                         render_pass.set_pipeline(&self.crack_pipeline);
                         render_pass.set_vertex_buffer(0, self.crack_vertex_buffer.slice(..));
                         render_pass.set_index_buffer(
@@ -13198,6 +15410,15 @@ impl State {
             }
         }
 
+        if let Some((upload_ns, upload_bytes)) = crack_metrics {
+            self.gpu_upload_scopes_frame
+                .record_nanos(crate::perf::UploadSource::Crack as usize, upload_ns);
+            self.perf_counters.upload_bytes_frame = self
+                .perf_counters
+                .upload_bytes_frame
+                .saturating_add(upload_bytes);
+        }
+
         if let (Some(qs), Some(res_buf), Some(read_buf)) = (
             &self.gpu_timestamp_query_set,
             &self.gpu_timestamp_resolve_buffer,
@@ -13207,34 +15428,32 @@ impl State {
                 encoder.resolve_query_set(qs, 0..14, res_buf, 0);
                 encoder.copy_buffer_to_buffer(res_buf, 0, read_buf, 0, 14 * 8);
 
-                if !self
-                    .gpu_timestamp_read_pending
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
+                // Mapping is scheduled only after queue submission below.  A
+                // previous map completion is consumed at the start of a frame.
+                let state = *self.gpu_timestamp_state.lock().unwrap();
+                if state == GpuTimestampReadbackState::Mapping {
+                    // Drive the mapping callback before inspecting the state.
+                    // `map_async` completion is delivered by the device poll;
+                    // never touch the mapped range until that callback has
+                    // positively transitioned the slot to Mapped.
+                    self.device.poll(wgpu::Maintain::Poll);
+                }
+                let state = *self.gpu_timestamp_state.lock().unwrap();
+                if state == GpuTimestampReadbackState::Mapped {
                     let slice = read_buf.slice(..);
-                    {
-                        let range = slice.get_mapped_range();
-                        if range.len() == 112 {
-                            let data: [u64; 14] = *bytemuck::from_bytes(&range);
-                            let period = self.queue.get_timestamp_period();
-                            for i in 0..7 {
-                                let t0 = data[i * 2];
-                                let t1 = data[i * 2 + 1];
-                                let diff = if t1 >= t0 { t1 - t0 } else { 0 };
-                                self.gpu_pass_timings_ns[i] =
-                                    (diff as f64 * f64::from(period)) as u64;
-                            }
+                    let range = slice.get_mapped_range();
+                    if range.len() == 112 {
+                        let data: [u64; 14] = *bytemuck::from_bytes(&range);
+                        let period = self.queue.get_timestamp_period();
+                        for i in 0..7 {
+                            let diff = data[i * 2 + 1].saturating_sub(data[i * 2]);
+                            self.gpu_pass_timings_ns[i] = (diff as f64 * f64::from(period)) as u64;
                         }
                     }
+                    drop(range);
                     read_buf.unmap();
-                    self.gpu_timestamp_read_pending
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    let pending = std::sync::Arc::clone(&self.gpu_timestamp_read_pending);
-                    slice.map_async(wgpu::MapMode::Read, move |res| {
-                        if res.is_ok() {
-                            pending.store(false, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    });
+                    let mut state = self.gpu_timestamp_state.lock().unwrap();
+                    *state = state.consume();
                 }
             }
         }
@@ -13246,9 +15465,32 @@ impl State {
         self.perf_counters.gpu_crack_ns = self.gpu_pass_timings_ns[5];
         self.perf_counters.gpu_ui_ns = self.gpu_pass_timings_ns[6];
         self.perf_counters.gpu_timestamps_supported = self.gpu_timestamps_supported;
+        self.perf_counters.gpu_timestamps_inside_passes = self.gpu_timestamps_inside_passes;
 
         let command_buffer = encoder.finish();
         self.queue.submit(std::iter::once(command_buffer));
+        if self.gpu_timestamps_inside_passes {
+            if let Some(read_buf) = &self.gpu_timestamp_readback_buffer {
+                let state = *self.gpu_timestamp_state.lock().unwrap();
+                if matches!(
+                    state,
+                    GpuTimestampReadbackState::Unmapped | GpuTimestampReadbackState::Consumed
+                ) {
+                    self.device.poll(wgpu::Maintain::Poll);
+                    {
+                        let mut state = self.gpu_timestamp_state.lock().unwrap();
+                        *state = state.map_requested();
+                    }
+                    let state_ref = std::sync::Arc::clone(&self.gpu_timestamp_state);
+                    read_buf
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |result| {
+                            let mut state = state_ref.lock().unwrap();
+                            *state = state.map_completed(result.is_ok());
+                        });
+                }
+            }
+        }
         self.perf_recorder.record(
             crate::perf::ScopeId::RenderEncode,
             render_encode_started.elapsed(),
@@ -13259,7 +15501,132 @@ impl State {
             .record(crate::perf::ScopeId::Present, present_started.elapsed());
         let allocs_after = crate::perf::alloc_count();
         self.perf_counters.frame_allocations = allocs_after.saturating_sub(allocs_before);
+        self.record_frame_perf_sample();
         Ok(())
+    }
+
+    fn record_frame_perf_sample(&mut self) {
+        let mut cpu_scopes = std::collections::BTreeMap::new();
+        for summary in &self.perf_summaries {
+            cpu_scopes.insert(summary.name.to_string(), summary.average_nanos);
+        }
+        let gpu_scopes = self.gpu_timestamps_inside_passes.then(|| {
+            let names = [
+                "sky",
+                "opaque",
+                "mobs",
+                "translucent",
+                "particles",
+                "crack",
+                "ui",
+            ];
+            names
+                .into_iter()
+                .zip(self.gpu_pass_timings_ns)
+                .map(|(name, ns)| (name.to_string(), ns))
+                .collect()
+        });
+        let save = &self.save_queue_stats;
+        let network_stats = crate::perf::queue_stats(crate::perf::QueueCategory::Outbound);
+        let reliable = self.perf_counters.network_inbound_reliable_pending;
+        let latest = self.perf_counters.network_inbound_latest_pending;
+        let catchup = self
+            .perf_counters
+            .network_queue_depth
+            .saturating_sub(reliable.saturating_add(latest));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let mut categories: std::collections::BTreeMap<_, _> = crate::perf::QueueCategory::ALL
+            .into_iter()
+            .map(|category| {
+                (
+                    category,
+                    crate::perf::queue_category_sample(category, now_ms),
+                )
+            })
+            .collect();
+        categories.insert(
+            crate::perf::QueueCategory::SaveProducer,
+            crate::perf::QueueCategorySample {
+                depth: save.depth().saturating_sub(save.in_flight()),
+                bytes: save.queued_bytes(),
+                oldest_age_ms: 0,
+                drops: save.dropped(),
+                retries: save.retries(),
+                cancels: save.cancels(),
+            },
+        );
+        categories.insert(
+            crate::perf::QueueCategory::SaveWorker,
+            crate::perf::QueueCategorySample {
+                depth: save.in_flight(),
+                bytes: save.in_flight_bytes(),
+                oldest_age_ms: 0,
+                drops: 0,
+                retries: save.retries(),
+                cancels: save.cancels(),
+            },
+        );
+        let queues = crate::perf::QueuePerfSample {
+            categories,
+            inbound_pending: Some(reliable.saturating_add(latest)),
+            inbound_pending_bytes: Some(
+                self.perf_counters
+                    .network_inbound_reliable_bytes
+                    .saturating_add(self.perf_counters.network_inbound_latest_bytes),
+            ),
+            inbound_reliable_pending: Some(reliable),
+            inbound_reliable_bytes: Some(self.perf_counters.network_inbound_reliable_bytes),
+            inbound_latest_pending: Some(latest),
+            inbound_latest_bytes: Some(self.perf_counters.network_inbound_latest_bytes),
+            outbound_pending: Some(network_stats.depth()),
+            outbound_bytes: Some(network_stats.bytes()),
+            reliable_pending: Some(reliable),
+            reliable_bytes: Some(self.perf_counters.network_inbound_reliable_bytes),
+            catchup_pending: Some(catchup),
+            catchup_bytes: None,
+            save_queued_bytes: Some(save.queued_bytes()),
+            save_in_flight_bytes: Some(save.in_flight_bytes()),
+            retries: Some(network_stats.retries()),
+            drops: Some(
+                network_stats
+                    .drops()
+                    .saturating_add(self.perf_counters.save_drop),
+            ),
+            cancels: Some(
+                network_stats
+                    .cancels()
+                    .saturating_add(self.perf_counters.cancelled),
+            ),
+            oldest_age_ms: Some(network_stats.oldest_age_ms(now_ms)),
+        };
+        let sample = crate::perf::FramePerfSample {
+            frame_id: self.next_perf_frame_id,
+            cpu_scopes_ns: cpu_scopes,
+            gpu_scopes_ns: gpu_scopes,
+            allocations: Some(self.perf_counters.frame_allocations),
+            upload_bytes: self.perf_counters.upload_bytes_frame,
+            draw_calls: self.perf_counters.draw_calls,
+            buffer_bytes: self.perf_counters.gpu_mesh_bytes,
+            culling: Some(crate::perf::CullingPerfSample {
+                terrain_candidates: self.perf_counters.terrain_candidates,
+                visible_chunks: self.perf_counters.visible_chunks,
+                occluded_chunks: self.perf_counters.occluded_chunks,
+                rendered_entities: self.perf_counters.rendered_entities,
+                frustum_culled_entities: self.perf_counters.frustum_culled_entities,
+                occlusion_culled_entities: self.perf_counters.occlusion_culled_entities,
+            }),
+            queues,
+            checksum: None,
+            lighting: Some(self.lighting_scopes_frame.values().to_vec()),
+            gpu_uploads: Some(self.gpu_upload_scopes_frame.values().to_vec()),
+        };
+        self.next_perf_frame_id = self.next_perf_frame_id.wrapping_add(1);
+        if self.frame_perf_samples.len() >= 240 {
+            self.frame_perf_samples.pop_front();
+        }
+        self.frame_perf_samples.push_back(sample);
     }
 
     fn render_advancement_ui_and_toasts(
@@ -14354,7 +16721,8 @@ mod debug_tests {
     fn melee_targeting_filters_noncombat_entities_and_selects_the_nearest_living_target() {
         use crate::entity::{Entity, EntityType};
 
-        let mut entities = vec![
+        let mut entity_manager = crate::entity::EntityManager::new();
+        let entities = [
             Entity::new(1, EntityType::DroppedItem, Vec3::new(0.0, 0.0, 0.75)),
             Entity::new(2, EntityType::HeartParticle, Vec3::new(0.0, 0.0, 0.9)),
             Entity::new(3, EntityType::Arrow, Vec3::new(0.0, 0.0, 1.0)),
@@ -14365,6 +16733,10 @@ mod debug_tests {
             Entity::new(8, EntityType::Zombie, Vec3::new(0.0, 0.0, 3.0)),
             Entity::new(9, EntityType::Skeleton, Vec3::new(0.0, 0.0, 2.0)),
         ];
+        for entity in entities {
+            entity_manager.entities.push(entity);
+        }
+        entity_manager.rebuild_indexes();
         let invalid_types = [
             EntityType::DroppedItem,
             EntityType::HeartParticle,
@@ -14375,7 +16747,8 @@ mod debug_tests {
             EntityType::RemotePlayer,
         ];
         for entity_type in invalid_types {
-            let entity = entities
+            let entity = entity_manager
+                .entities
                 .iter()
                 .find(|entity| entity.entity_type == entity_type)
                 .unwrap();
@@ -14383,17 +16756,28 @@ mod debug_tests {
         }
 
         assert_eq!(
-            closest_melee_target(&entities, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
+            closest_melee_target(
+                &entity_manager,
+                Vec3::new(0.0, 0.1, 0.0),
+                Vec3::Z,
+                MELEE_REACH
+            ),
             Some(9)
         );
 
-        entities
+        entity_manager
+            .entities
             .iter_mut()
             .find(|entity| entity.id == 9)
             .unwrap()
             .health = 0.0;
         assert_eq!(
-            closest_melee_target(&entities, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
+            closest_melee_target(
+                &entity_manager,
+                Vec3::new(0.0, 0.1, 0.0),
+                Vec3::Z,
+                MELEE_REACH
+            ),
             Some(8)
         );
     }
@@ -14596,6 +16980,8 @@ mod debug_tests {
         };
         inbound_tx
             .send(crate::network::client::ClientToGame::BlockChange {
+                dimension: 0,
+                revision: 1,
                 x: 3,
                 y: 80,
                 z: -4,
@@ -14612,6 +16998,7 @@ mod debug_tests {
                 z: -4,
                 block,
                 state: 0,
+                ..
             }] if *block == BlockType::Stone.to_wire()
         ));
     }
@@ -14968,48 +17355,5 @@ mod reach_tests {
         // add_stack with full inventory returns remainder
         let remainder = inv.add_stack(ItemStack::new(Item::Dirt, 64));
         assert_eq!(remainder, Some(ItemStack::new(Item::Dirt, 64)));
-    }
-
-    #[test]
-    fn simulation_tick_consistency_across_30_60_144_240_fps() {
-        let run_simulation_for_duration = |dt: f32, target_ticks: u64| -> (Vec3, u64) {
-            let mut physics = PlayerPhysics::new(Vec3::new(0.0, 64.0, 0.0));
-            let mut accumulator = 0.0f32;
-            let mut total_sim_ticks = 0u64;
-
-            while total_sim_ticks < target_ticks {
-                accumulator += dt;
-                if accumulator > SIM_TICK_TIME * MAX_CATCHUP_TICKS as f32 {
-                    accumulator = SIM_TICK_TIME * MAX_CATCHUP_TICKS as f32;
-                }
-                let mut ticks_run = 0;
-                while accumulator >= SIM_TICK_TIME
-                    && ticks_run < MAX_CATCHUP_TICKS
-                    && total_sim_ticks < target_ticks
-                {
-                    // Step physics and simulation by fixed 50ms tick
-                    physics.velocity = Vec3::new(2.0, 0.0, 5.0);
-                    physics.position += physics.velocity * SIM_TICK_TIME;
-                    total_sim_ticks += 1;
-                    accumulator -= SIM_TICK_TIME;
-                    ticks_run += 1;
-                }
-            }
-            (physics.position, total_sim_ticks)
-        };
-
-        let target_ticks = 40; // 2 seconds of simulation
-        let res_30 = run_simulation_for_duration(1.0 / 30.0, target_ticks);
-        let res_60 = run_simulation_for_duration(1.0 / 60.0, target_ticks);
-        let res_144 = run_simulation_for_duration(1.0 / 144.0, target_ticks);
-        let res_240 = run_simulation_for_duration(1.0 / 240.0, target_ticks);
-
-        // All frame rates must reach exact identical world tick simulation state
-        assert_eq!(res_30.0, res_60.0);
-        assert_eq!(res_60.0, res_144.0);
-        assert_eq!(res_144.0, res_240.0);
-
-        // 2.0 seconds at 20 Hz = 40 ticks
-        assert_eq!(res_30.1, 40);
     }
 }

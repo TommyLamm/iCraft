@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
 use std::thread::JoinHandle;
@@ -8,8 +8,61 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::time::{self, Instant};
 
-use super::protocol::{Action, LightningStrike, Packet, PlayerId, PROTOCOL_VERSION};
+use super::protocol::{
+    Action, EntityStateWire, LightningStrike, Packet, PlayerEffectWire, PlayerId, PROTOCOL_VERSION,
+};
 use super::transport::Connection;
+
+enum QueuedPacket {
+    Reliable(Packet),
+    Outbound(Packet),
+}
+
+fn packet_bytes(packet: &Packet) -> u64 {
+    packet.encode().len() as u64
+}
+
+fn queue_stats() -> Arc<crate::perf::SharedQueueStats> {
+    crate::perf::queue_stats(crate::perf::QueueCategory::Outbound)
+}
+
+fn queue_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis().min(u64::MAX as u128) as u64)
+}
+
+async fn reliable_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet) -> bool {
+    let bytes = packet_bytes(&packet);
+    let stats = crate::perf::queue_stats(crate::perf::QueueCategory::Reliable);
+    match time::timeout(
+        RELIABLE_ENQUEUE_TIMEOUT,
+        tx.send(QueuedPacket::Reliable(packet)),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            stats.enqueue(bytes, queue_now_ms());
+            true
+        }
+        Ok(Err(_)) => {
+            stats.drop_item();
+            false
+        }
+        Err(_) => {
+            stats.retry();
+            stats.drop_item();
+            false
+        }
+    }
+}
+fn best_effort_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet) {
+    let bytes = packet_bytes(&packet);
+    match tx.try_send(QueuedPacket::Outbound(packet)) {
+        Ok(()) => queue_stats().enqueue(bytes, queue_now_ms()),
+        Err(_) => queue_stats().drop_item(),
+    }
+}
 
 const CLIENT_QUEUE_CAPACITY: usize = 64;
 const HOST_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -64,11 +117,35 @@ pub enum ServerToHost {
         id: PlayerId,
         message: String,
     },
+    CatchupAccepted {
+        id: PlayerId,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+    },
+    CatchupBackpressured {
+        id: PlayerId,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        mailbox_full_count: u64,
+    },
+    CatchupAck {
+        id: PlayerId,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+    },
 }
 
 #[derive(Debug)]
 pub enum HostToServer {
     BroadcastBlockChange {
+        dimension: u8,
+        revision: u64,
         x: i32,
         y: i32,
         z: i32,
@@ -85,11 +162,48 @@ pub enum HostToServer {
         drops: Vec<crate::network::protocol::ItemWire>,
     },
     SendChunk {
+        dimension: u8,
         cx: i32,
         cz: i32,
+        revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
         to: PlayerId,
+    },
+    DisconnectCatchupClient {
+        to: PlayerId,
+        reason: String,
+    },
+    BroadcastEntitySpawn {
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    BroadcastEntityState {
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    BroadcastEntityDespawn {
+        dimension: u8,
+        sequence: u64,
+        entity_id: u64,
+    },
+    BroadcastPlayerHealth {
+        sequence: u64,
+        player_id: PlayerId,
+        health: f32,
+        max_health: f32,
+        hunger: f32,
+        saturation: f32,
+        oxygen: f32,
+        is_dead: bool,
+        death_reason: u8,
+    },
+    BroadcastPlayerEffect {
+        sequence: u64,
+        player_id: PlayerId,
+        effects: Vec<PlayerEffectWire>,
     },
     BroadcastTimeSync {
         ticks: u64,
@@ -135,23 +249,40 @@ const MAX_CATCHUP_QUEUE_DEPTH: usize = 32;
 struct ClientSession {
     id: PlayerId,
     username: String,
-    out_tx: mpsc::Sender<Packet>,
+    out_tx: mpsc::Sender<QueuedPacket>,
     pose_mailbox: Arc<PoseMailbox>,
+    state_mailbox: Arc<StateMailbox>,
     catchup_mailbox: Arc<CatchupMailbox>,
     cancel_tx: watch::Sender<bool>,
 }
 
 type Sessions = Arc<Mutex<HashMap<PlayerId, ClientSession>>>;
 
-#[derive(Default)]
 struct PoseMailbox {
     pending: Mutex<HashMap<PlayerId, Packet>>,
     notify: Notify,
+    stats: Arc<crate::perf::SharedQueueStats>,
+}
+
+impl Default for PoseMailbox {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            notify: Notify::new(),
+            stats: crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+        }
+    }
 }
 
 impl PoseMailbox {
     async fn replace(&self, player_id: PlayerId, packet: Packet) {
-        self.pending.lock().await.insert(player_id, packet);
+        let bytes = packet_bytes(&packet);
+        let mut pending = self.pending.lock().await;
+        if let Some(old) = pending.insert(player_id, packet) {
+            self.stats.dequeue(packet_bytes(&old));
+        }
+        self.stats.enqueue(bytes, queue_now_ms());
+        drop(pending);
         self.notify.notify_one();
     }
 
@@ -163,6 +294,9 @@ impl PoseMailbox {
             .drain()
             .map(|(_, packet)| packet)
             .collect();
+        for packet in &packets {
+            self.stats.dequeue(packet_bytes(packet));
+        }
         packets.sort_by_key(|packet| match packet {
             Packet::PlayerPosition { id, .. } => *id,
             _ => PlayerId::MAX,
@@ -171,36 +305,154 @@ impl PoseMailbox {
     }
 }
 
-#[derive(Default)]
-struct CatchupMailbox {
-    pending: Mutex<HashMap<(i32, i32), Packet>>,
-    notify: Notify,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum StateMailboxKey {
+    Entity(u64),
+    PlayerHealth(PlayerId),
+    PlayerEffect(PlayerId),
 }
 
-impl CatchupMailbox {
-    async fn replace(&self, cx: i32, cz: i32, packet: Packet) -> bool {
-        let mut guard = self.pending.lock().await;
-        if guard.len() >= MAX_CATCHUP_QUEUE_DEPTH && !guard.contains_key(&(cx, cz)) {
-            return false;
+struct StateMailbox {
+    pending: Mutex<HashMap<StateMailboxKey, Packet>>,
+    notify: Notify,
+    stats: Arc<crate::perf::SharedQueueStats>,
+}
+
+impl Default for StateMailbox {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            notify: Notify::new(),
+            stats: crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
         }
-        guard.insert((cx, cz), packet);
+    }
+}
+
+impl StateMailbox {
+    async fn replace(&self, packet: Packet) {
+        let (key, sequence) = match &packet {
+            Packet::EntityState {
+                sequence, state, ..
+            } => (StateMailboxKey::Entity(state.entity_id), *sequence),
+            Packet::PlayerHealth {
+                sequence,
+                player_id,
+                ..
+            } => (StateMailboxKey::PlayerHealth(*player_id), *sequence),
+            Packet::PlayerEffect {
+                sequence,
+                player_id,
+                ..
+            } => (StateMailboxKey::PlayerEffect(*player_id), *sequence),
+            _ => return,
+        };
+        let mut pending = self.pending.lock().await;
+        let existing_sequence = pending.get(&key).and_then(|existing| match existing {
+            Packet::EntityState { sequence, .. }
+            | Packet::PlayerHealth { sequence, .. }
+            | Packet::PlayerEffect { sequence, .. } => Some(*sequence),
+            _ => None,
+        });
+        if existing_sequence.is_some_and(|existing| existing > sequence) {
+            return;
+        }
+        let bytes = packet_bytes(&packet);
+        if let Some(old) = pending.insert(key, packet) {
+            self.stats.dequeue(packet_bytes(&old));
+        }
+        self.stats.enqueue(bytes, queue_now_ms());
+        drop(pending);
         self.notify.notify_one();
-        true
     }
 
     async fn drain(&self) -> Vec<Packet> {
-        let mut packets: Vec<_> = self
-            .pending
-            .lock()
-            .await
-            .drain()
-            .map(|(_, packet)| packet)
-            .collect();
-        packets.sort_by_key(|packet| match packet {
-            Packet::ChunkData { cx, cz, .. } => (*cx, *cz),
-            _ => (0, 0),
-        });
-        packets
+        let mut packets: Vec<_> = self.pending.lock().await.drain().collect();
+        for (_, packet) in &packets {
+            self.stats.dequeue(packet_bytes(packet));
+        }
+        packets.sort_by_key(|(key, _)| *key);
+        packets.into_iter().map(|(_, packet)| packet).collect()
+    }
+}
+
+struct CatchupMailbox {
+    capacity: usize,
+    pending: Mutex<VecDeque<Packet>>,
+    notify: Notify,
+    full_count: AtomicU64,
+    stats: Arc<crate::perf::SharedQueueStats>,
+}
+
+impl CatchupMailbox {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            pending: Mutex::new(VecDeque::new()),
+            notify: Notify::new(),
+            full_count: AtomicU64::new(0),
+            stats: crate::perf::queue_stats(crate::perf::QueueCategory::CatchUp),
+        }
+    }
+
+    async fn replace(&self, packet: Packet) -> Result<(), u64> {
+        let key = match &packet {
+            Packet::ChunkData {
+                dimension,
+                cx,
+                cz,
+                revision,
+                ..
+            } => (*dimension, *cx, *cz, *revision),
+            _ => return Ok(()),
+        };
+        let mut guard = self.pending.lock().await;
+        let incoming_bytes = packet_bytes(&packet);
+        if let Some(existing) = guard.iter_mut().find(|candidate| {
+            matches!(
+                candidate,
+                Packet::ChunkData {
+                    dimension,
+                    cx,
+                    cz,
+                    ..
+                } if (*dimension, *cx, *cz) == (key.0, key.1, key.2)
+            )
+        }) {
+            let old_bytes = packet_bytes(existing);
+            let existing_revision = match existing {
+                Packet::ChunkData { revision, .. } => *revision,
+                _ => 0,
+            };
+            if key.3 >= existing_revision {
+                *existing = packet;
+                self.stats.dequeue(old_bytes);
+                self.stats.enqueue(incoming_bytes, queue_now_ms());
+            }
+            self.notify.notify_one();
+            return Ok(());
+        }
+        if guard.len() >= self.capacity {
+            let count = self.full_count.fetch_add(1, Ordering::Relaxed) + 1;
+            self.stats.drop_item();
+            return Err(count);
+        }
+        let bytes = packet_bytes(&packet);
+        guard.push_back(packet);
+        self.stats.enqueue(bytes, queue_now_ms());
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    async fn pop(&self) -> Option<Packet> {
+        let mut guard = self.pending.lock().await;
+        let packet = guard.pop_front();
+        if let Some(packet) = &packet {
+            self.stats.dequeue(packet_bytes(packet));
+        }
+        if !guard.is_empty() {
+            self.notify.notify_one();
+        }
+        packet
     }
 
     #[allow(dead_code)]
@@ -209,17 +461,25 @@ impl CatchupMailbox {
     }
 }
 
+impl Default for CatchupMailbox {
+    fn default() -> Self {
+        Self::with_capacity(MAX_CATCHUP_QUEUE_DEPTH)
+    }
+}
+
 async fn queue_initial_roster(
-    tx: &mpsc::Sender<Packet>,
+    tx: &mpsc::Sender<QueuedPacket>,
     roster: impl IntoIterator<Item = (PlayerId, String)>,
-) -> Result<(), mpsc::error::SendError<Packet>> {
+) -> Result<(), mpsc::error::SendError<QueuedPacket>> {
     for (id, username) in roster {
-        tx.send(Packet::PlayerJoin {
+        let packet = Packet::PlayerJoin {
             protocol_version: PROTOCOL_VERSION,
             id,
             username,
-        })
-        .await?;
+        };
+        let bytes = packet_bytes(&packet);
+        tx.send(QueuedPacket::Outbound(packet)).await?;
+        queue_stats().enqueue(bytes, queue_now_ms());
     }
     Ok(())
 }
@@ -314,11 +574,18 @@ impl NetworkServer {
                     let mut latest_positions = HashMap::new();
                     loop {
                         match host_to_server.try_recv() {
-                            Ok(HostToServer::Stop) => return,
+                            Ok(HostToServer::Stop) => {
+                                queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
+                                return
+                            }
                             Ok(command @ HostToServer::BroadcastPlayerPosition { id, .. }) => {
+                                queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
                                 latest_positions.insert(id, command);
                             }
-                            Ok(command) => self.handle_host_command(command).await,
+                            Ok(command) => {
+                                queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
+                                self.handle_host_command(command).await
+                            }
                             Err(std_mpsc::TryRecvError::Empty) => break,
                             Err(std_mpsc::TryRecvError::Disconnected) => return,
                         }
@@ -403,10 +670,12 @@ impl NetworkServer {
         let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
         let roster_tx = out_tx.clone();
         let pose_mailbox = Arc::new(PoseMailbox::default());
+        let state_mailbox = Arc::new(StateMailbox::default());
         let catchup_mailbox = Arc::new(CatchupMailbox::default());
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let (mut reader, mut writer) = connection.into_split();
         let writer_pose_mailbox = Arc::clone(&pose_mailbox);
+        let writer_state_mailbox = Arc::clone(&state_mailbox);
         let writer_catchup_mailbox = Arc::clone(&catchup_mailbox);
         let mut send_task = tokio::spawn(async move {
             let mut keepalive =
@@ -414,9 +683,15 @@ impl NetworkServer {
 
             loop {
                 tokio::select! {
+                    biased;
                     queued = out_rx.recv() => {
                         match queued {
-                            Some(packet) => {
+                            Some(queued) => {
+                                let (packet, stats) = match queued {
+                                    QueuedPacket::Reliable(packet) => (packet, crate::perf::QueueCategory::Reliable),
+                                    QueuedPacket::Outbound(packet) => (packet, crate::perf::QueueCategory::Outbound),
+                                };
+                                crate::perf::queue_stats(stats).dequeue(packet_bytes(&packet));
                                 if writer.send(&packet).await.is_err() {
                                     eprintln!("[NetworkServer] Send task: writer send failed for queued packet");
                                     break;
@@ -436,8 +711,16 @@ impl NetworkServer {
                             }
                         }
                     }
+                    _ = writer_state_mailbox.notify.notified() => {
+                        for packet in writer_state_mailbox.drain().await {
+                            if writer.send(&packet).await.is_err() {
+                                eprintln!("[NetworkServer] Send task: writer send failed for state");
+                                return;
+                            }
+                        }
+                    }
                     _ = writer_catchup_mailbox.notify.notified() => {
-                        for packet in writer_catchup_mailbox.drain().await {
+                        if let Some(packet) = writer_catchup_mailbox.pop().await {
                             if writer.send(&packet).await.is_err() {
                                 eprintln!("[NetworkServer] Send task: writer send failed for catchup chunk");
                                 return;
@@ -463,6 +746,7 @@ impl NetworkServer {
                 username: handshake.clone(),
                 out_tx,
                 pose_mailbox: Arc::clone(&pose_mailbox),
+                state_mailbox: Arc::clone(&state_mailbox),
                 catchup_mailbox: Arc::clone(&catchup_mailbox),
                 cancel_tx,
             },
@@ -558,6 +842,24 @@ impl NetworkServer {
                                 break;
                             }
                         }
+                        Ok(Ok(Packet::ChunkAck {
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                            ..
+                        })) => {
+                            if server_to_host.send(ServerToHost::CatchupAck {
+                                id,
+                                dimension,
+                                cx,
+                                cz,
+                                revision,
+                            }).is_err() {
+                                disconnect_reason = "host channel closed (CatchupAck)".into();
+                                break;
+                            }
+                        }
                         Ok(Ok(Packet::Keepalive { .. })) => {}
                         Ok(Ok(Packet::Disconnect { reason, .. })) => {
                             disconnect_reason = format!("client sent Disconnect: {reason}");
@@ -633,8 +935,10 @@ impl NetworkServer {
 
     async fn handle_host_command(&self, command: HostToServer) {
         if let HostToServer::SendChunk {
+            dimension,
             cx,
             cz,
+            revision,
             blocks,
             block_states,
             to,
@@ -642,14 +946,50 @@ impl NetworkServer {
         {
             let packet = Packet::ChunkData {
                 protocol_version: PROTOCOL_VERSION,
+                dimension,
                 cx,
                 cz,
+                revision,
                 blocks,
                 block_states,
             };
-            if let Some(session) = self.sessions.lock().await.get(&to) {
-                session.catchup_mailbox.replace(cx, cz, packet).await;
+            let mailbox = self
+                .sessions
+                .lock()
+                .await
+                .get(&to)
+                .map(|session| Arc::clone(&session.catchup_mailbox));
+            if let Some(mailbox) = mailbox {
+                match mailbox.replace(packet).await {
+                    Ok(()) => {
+                        let _ = self.server_to_host.send(ServerToHost::CatchupAccepted {
+                            id: to,
+                            dimension,
+                            cx,
+                            cz,
+                            revision,
+                        });
+                    }
+                    Err(mailbox_full_count) => {
+                        let _ = self
+                            .server_to_host
+                            .send(ServerToHost::CatchupBackpressured {
+                                id: to,
+                                dimension,
+                                cx,
+                                cz,
+                                revision,
+                                mailbox_full_count,
+                            });
+                    }
+                }
             }
+            return;
+        }
+
+        if let HostToServer::DisconnectCatchupClient { to, reason } = command {
+            eprintln!("[NetworkServer] Applying slow catch-up policy to Player ID {to}: {reason}");
+            Self::evict_slow_clients(&self.sessions, &self.server_to_host, vec![to]).await;
             return;
         }
 
@@ -682,9 +1022,61 @@ impl NetworkServer {
             return;
         }
 
+        let state_packet = match &command {
+            HostToServer::BroadcastEntityState {
+                dimension,
+                sequence,
+                state,
+            } => Some(Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
+                dimension: *dimension,
+                sequence: *sequence,
+                state: *state,
+            }),
+            HostToServer::BroadcastPlayerHealth {
+                sequence,
+                player_id,
+                health,
+                max_health,
+                hunger,
+                saturation,
+                oxygen,
+                is_dead,
+                death_reason,
+            } => Some(Packet::PlayerHealth {
+                protocol_version: PROTOCOL_VERSION,
+                sequence: *sequence,
+                player_id: *player_id,
+                health: *health,
+                max_health: *max_health,
+                hunger: *hunger,
+                saturation: *saturation,
+                oxygen: *oxygen,
+                is_dead: *is_dead,
+                death_reason: *death_reason,
+            }),
+            HostToServer::BroadcastPlayerEffect {
+                sequence,
+                player_id,
+                effects,
+            } => Some(Packet::PlayerEffect {
+                protocol_version: PROTOCOL_VERSION,
+                sequence: *sequence,
+                player_id: *player_id,
+                effects: effects.clone(),
+            }),
+            _ => None,
+        };
+        if let Some(packet) = state_packet {
+            Self::broadcast_state(&self.sessions, packet).await;
+            return;
+        }
+
         let reliable_broadcast = matches!(
             &command,
             HostToServer::BroadcastBlockChange { .. }
+                | HostToServer::BroadcastEntitySpawn { .. }
+                | HostToServer::BroadcastEntityDespawn { .. }
                 | HostToServer::BroadcastChat { .. }
                 | HostToServer::NotifyPlayerJoin { .. }
                 | HostToServer::BroadcastTimeSync { .. }
@@ -692,6 +1084,8 @@ impl NetworkServer {
         );
         let (packet, recipient) = match command {
             HostToServer::BroadcastBlockChange {
+                dimension,
+                revision,
                 x,
                 y,
                 z,
@@ -700,11 +1094,39 @@ impl NetworkServer {
             } => (
                 Packet::BlockChange {
                     protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    revision,
                     x,
                     y,
                     z,
                     block,
                     state,
+                },
+                None,
+            ),
+            HostToServer::BroadcastEntitySpawn {
+                dimension,
+                sequence,
+                state,
+            } => (
+                Packet::EntitySpawn {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    sequence,
+                    state,
+                },
+                None,
+            ),
+            HostToServer::BroadcastEntityDespawn {
+                dimension,
+                sequence,
+                entity_id,
+            } => (
+                Packet::EntityDespawn {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    sequence,
+                    entity_id,
                 },
                 None,
             ),
@@ -765,6 +1187,11 @@ impl NetworkServer {
             HostToServer::BroadcastPlayerPosition { .. } => {
                 unreachable!("player positions use the latest-wins pose channel")
             }
+            HostToServer::BroadcastEntityState { .. }
+            | HostToServer::BroadcastPlayerHealth { .. }
+            | HostToServer::BroadcastPlayerEffect { .. } => {
+                unreachable!("state packets use the latest-wins state channel")
+            }
             HostToServer::BroadcastPlayerAction { id, action } => (
                 Packet::PlayerAction {
                     protocol_version: PROTOCOL_VERSION,
@@ -792,6 +1219,9 @@ impl NetworkServer {
             HostToServer::SendChunk { .. } => {
                 unreachable!("chunk data payloads use catchup_mailbox")
             }
+            HostToServer::DisconnectCatchupClient { .. } => {
+                unreachable!("catch-up disconnects are handled before packet mapping")
+            }
             HostToServer::Stop => return,
         };
 
@@ -816,10 +1246,7 @@ impl NetworkServer {
             // Targeted catch-up data is reliable. Bound the wait so a client
             // that has stopped draining its queue is disconnected instead of
             // stalling the host command loop forever.
-            if !matches!(
-                time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.send(packet)).await,
-                Ok(Ok(()))
-            ) {
+            if !reliable_send(&tx, packet).await {
                 return vec![id];
             }
         }
@@ -837,10 +1264,7 @@ impl NetworkServer {
         for (id, tx) in senders {
             let packet = packet.clone();
             sends.spawn(async move {
-                let delivered = matches!(
-                    time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.send(packet)).await,
-                    Ok(Ok(()))
-                );
+                let delivered = reliable_send(&tx, packet).await;
                 (!delivered).then_some(id)
             });
         }
@@ -871,7 +1295,7 @@ impl NetworkServer {
             };
             let _ = session.cancel_tx.send(true);
             eprintln!(
-                "[NetworkServer] Disconnecting slow client '{}' (Player ID: {}): reliable queue did not drain",
+                "[NetworkServer] Disconnecting slow client '{}' (Player ID: {}): outbound backpressure policy",
                 session.username, id
             );
             let _ = server_to_host.send(ServerToHost::ClientLeft { id });
@@ -903,6 +1327,18 @@ impl NetworkServer {
         }
     }
 
+    async fn broadcast_state(sessions: &Sessions, packet: Packet) {
+        let mailboxes: Vec<_> = sessions
+            .lock()
+            .await
+            .values()
+            .map(|session| Arc::clone(&session.state_mailbox))
+            .collect();
+        for mailbox in mailboxes {
+            mailbox.replace(packet.clone()).await;
+        }
+    }
+
     async fn broadcast_to(sessions: &Sessions, packet: Packet) {
         let senders: Vec<_> = sessions
             .lock()
@@ -911,7 +1347,7 @@ impl NetworkServer {
             .map(|session| session.out_tx.clone())
             .collect();
         for tx in senders {
-            let _ = tx.try_send(packet.clone());
+            best_effort_send(&tx, packet.clone());
         }
     }
 }
@@ -949,10 +1385,19 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 match tokio::net::TcpStream::connect(&self.addr).await {
-                    Ok(stream) => break stream,
+                    Ok(stream) if stream.local_addr().ok() != stream.peer_addr().ok() => {
+                        break stream;
+                    }
+                    Ok(_) if Instant::now() < deadline => {
+                        // On Windows, connecting before the server has bound can
+                        // transiently self-connect when the reserved server port
+                        // is selected as the client's ephemeral port.
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
                     Err(_) if Instant::now() < deadline => {
                         time::sleep(Duration::from_millis(10)).await;
                     }
+                    Ok(_) => panic!("server did not start before the connection deadline"),
                     Err(error) => panic!("server did not start: {error}"),
                 }
             }
@@ -1092,6 +1537,8 @@ mod tests {
         client
             .send(&Packet::BlockChange {
                 protocol_version: PROTOCOL_VERSION,
+                dimension: 0,
+                revision: 0,
                 x: 3,
                 y: 80,
                 z: -4,
@@ -1247,6 +1694,7 @@ mod tests {
                 username: "alex".into(),
                 out_tx,
                 pose_mailbox: Arc::clone(&pose_mailbox),
+                state_mailbox: Arc::new(StateMailbox::default()),
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
             },
@@ -1299,9 +1747,9 @@ mod tests {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let (observer_out_tx, mut observer_out_rx) = mpsc::channel(1);
         observer_out_tx
-            .try_send(Packet::Keepalive {
+            .try_send(QueuedPacket::Outbound(Packet::Keepalive {
                 protocol_version: PROTOCOL_VERSION,
-            })
+            }))
             .unwrap();
         sessions.lock().await.insert(
             1,
@@ -1310,6 +1758,7 @@ mod tests {
                 username: "observer".into(),
                 out_tx: observer_out_tx,
                 pose_mailbox: Arc::new(PoseMailbox::default()),
+                state_mailbox: Arc::new(StateMailbox::default()),
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
             },
@@ -1323,6 +1772,7 @@ mod tests {
                 username: "departing".into(),
                 out_tx: departing_out_tx,
                 pose_mailbox: Arc::new(PoseMailbox::default()),
+                state_mailbox: Arc::new(StateMailbox::default()),
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
             },
@@ -1339,9 +1789,12 @@ mod tests {
 
         let observer = tokio::spawn(async move {
             time::sleep(Duration::from_millis(25)).await;
-            let queued = observer_out_rx.recv().await.unwrap();
-            let joined = observer_out_rx.recv().await.unwrap();
-            let left = observer_out_rx.recv().await.unwrap();
+            let unwrap_packet = |queued| match queued {
+                QueuedPacket::Reliable(packet) | QueuedPacket::Outbound(packet) => packet,
+            };
+            let queued = unwrap_packet(observer_out_rx.recv().await.unwrap());
+            let joined = unwrap_packet(observer_out_rx.recv().await.unwrap());
+            let left = unwrap_packet(observer_out_rx.recv().await.unwrap());
             (queued, joined, left)
         });
 
@@ -1380,9 +1833,9 @@ mod tests {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let (out_tx, _out_rx) = mpsc::channel(1);
         out_tx
-            .try_send(Packet::Keepalive {
+            .try_send(QueuedPacket::Outbound(Packet::Keepalive {
                 protocol_version: PROTOCOL_VERSION,
-            })
+            }))
             .unwrap();
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         sessions.lock().await.insert(
@@ -1392,6 +1845,7 @@ mod tests {
                 username: "slow-client".into(),
                 out_tx,
                 pose_mailbox: Arc::new(PoseMailbox::default()),
+                state_mailbox: Arc::new(StateMailbox::default()),
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx,
             },
@@ -1489,6 +1943,8 @@ mod tests {
             Duration::from_millis(250),
             client.send(&Packet::BlockChange {
                 protocol_version: PROTOCOL_VERSION,
+                dimension: 0,
+                revision: 0,
                 x: 7,
                 y: 80,
                 z: -3,
@@ -1905,28 +2361,152 @@ mod tests {
 
     #[tokio::test]
     async fn catchup_mailbox_is_latest_wins_and_bounded() {
-        let mailbox = CatchupMailbox::default();
+        let mailbox = CatchupMailbox::with_capacity(1);
         let p1 = Packet::ChunkData {
             protocol_version: PROTOCOL_VERSION,
+            dimension: 0,
             cx: 1,
             cz: 2,
+            revision: 1,
             blocks: vec![1],
             block_states: vec![],
         };
         let p2 = Packet::ChunkData {
             protocol_version: PROTOCOL_VERSION,
+            dimension: 0,
             cx: 1,
             cz: 2,
+            revision: 2,
             blocks: vec![2],
             block_states: vec![],
         };
-        assert!(mailbox.replace(1, 2, p1).await);
+        let p3 = Packet::ChunkData {
+            protocol_version: PROTOCOL_VERSION,
+            dimension: 0,
+            cx: 2,
+            cz: 2,
+            revision: 1,
+            blocks: vec![3],
+            block_states: vec![],
+        };
+        assert!(mailbox.replace(p1).await.is_ok());
         assert_eq!(mailbox.len().await, 1);
-        assert!(mailbox.replace(1, 2, p2.clone()).await);
+        assert!(mailbox.replace(p2.clone()).await.is_ok());
         assert_eq!(mailbox.len().await, 1);
+        assert_eq!(mailbox.replace(p3.clone()).await, Err(1));
 
-        let drained = mailbox.drain().await;
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0], p2);
+        assert_eq!(mailbox.pop().await, Some(p2));
+        assert!(mailbox.replace(p3.clone()).await.is_ok());
+        assert_eq!(mailbox.pop().await, Some(p3));
+    }
+
+    #[tokio::test]
+    async fn catchup_mailbox_preserves_distance_priority_insertion_order() {
+        let mailbox = CatchupMailbox::with_capacity(2);
+        let near = Packet::ChunkData {
+            protocol_version: PROTOCOL_VERSION,
+            dimension: 0,
+            cx: 10,
+            cz: 10,
+            revision: 1,
+            blocks: vec![1],
+            block_states: vec![],
+        };
+        let farther = Packet::ChunkData {
+            protocol_version: PROTOCOL_VERSION,
+            dimension: 0,
+            cx: -10,
+            cz: -10,
+            revision: 1,
+            blocks: vec![2],
+            block_states: vec![],
+        };
+        mailbox.replace(near.clone()).await.unwrap();
+        mailbox.replace(farther.clone()).await.unwrap();
+        assert_eq!(mailbox.pop().await, Some(near));
+        assert_eq!(mailbox.pop().await, Some(farther));
+    }
+
+    #[tokio::test]
+    async fn slow_client_backpressure_does_not_starve_other_mailboxes() {
+        let slow = CatchupMailbox::with_capacity(1);
+        let fast = CatchupMailbox::with_capacity(1);
+        let packet = |cx, value| Packet::ChunkData {
+            protocol_version: PROTOCOL_VERSION,
+            dimension: 0,
+            cx,
+            cz: 0,
+            revision: 1,
+            blocks: vec![value],
+            block_states: vec![],
+        };
+
+        slow.replace(packet(0, 1)).await.unwrap();
+        assert_eq!(slow.replace(packet(1, 2)).await, Err(1));
+        fast.replace(packet(2, 3)).await.unwrap();
+        assert_eq!(fast.pop().await, Some(packet(2, 3)));
+        assert_eq!(slow.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn entity_state_mailbox_is_latest_wins_per_entity() {
+        let mailbox = StateMailbox::default();
+        let state = |entity_id, x| EntityStateWire {
+            entity_id,
+            entity_type: 0,
+            position: [x, 64.0, 0.0],
+            velocity: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            health: 20.0,
+            animation_state: 0,
+        };
+        mailbox
+            .replace(Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
+                dimension: 0,
+                sequence: 1,
+                state: state(7, 1.0),
+            })
+            .await;
+        mailbox
+            .replace(Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
+                dimension: 0,
+                sequence: 2,
+                state: state(7, 2.0),
+            })
+            .await;
+        mailbox
+            .replace(Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
+                dimension: 0,
+                sequence: 1,
+                state: state(7, -1.0),
+            })
+            .await;
+        mailbox
+            .replace(Packet::EntityState {
+                protocol_version: PROTOCOL_VERSION,
+                dimension: 0,
+                sequence: 2,
+                state: state(8, 8.0),
+            })
+            .await;
+
+        let packets = mailbox.drain().await;
+        assert_eq!(packets.len(), 2);
+        assert!(packets.iter().any(|packet| matches!(
+            packet,
+            Packet::EntityState {
+                sequence: 2,
+                state,
+                ..
+            } if state.entity_id == 7 && state.position[0] == 2.0
+        )));
+        assert!(packets.iter().any(|packet| matches!(
+            packet,
+            Packet::EntityState { state, .. } if state.entity_id == 8
+        )));
     }
 }

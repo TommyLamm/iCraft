@@ -2,6 +2,129 @@ use crate::inventory::{Inventory, Item};
 use crate::state::Vertex;
 use glam::Vec3;
 
+/// Cache identity for the static first-person hand mesh. Animation values are
+/// deliberately excluded so walking/attacking only updates the uniform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HandMeshKey {
+    pub held_item: Item,
+}
+
+/// Per-frame transform uploaded alongside the cached hand mesh.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HandAnimationUniform {
+    pub transform: [[f32; 4]; 4],
+}
+
+impl HandAnimationUniform {
+    pub fn identity() -> Self {
+        Self {
+            transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
+        }
+    }
+
+    pub fn from_swings(walk_swing: f32, attack_swing: f32) -> Self {
+        // The static mesh is authored at the neutral hand pitch/fist position;
+        // these are the same delta pitch and offsets used by the legacy path.
+        let delta_pitch = walk_swing * 0.08 - attack_swing * 0.5;
+        let offset = glam::Vec3::new(
+            -0.1 * attack_swing,
+            walk_swing * 0.03 + 0.1 * attack_swing,
+            0.25 * attack_swing,
+        );
+        // Rotate around the fist pivot (the arm's attachment point), matching
+        // the legacy per-primitive pitch while keeping the neutral mesh fixed.
+        let pivot = glam::Vec3::new(0.42, -0.42, 0.95);
+        let transform = glam::Mat4::from_translation(offset)
+            * glam::Mat4::from_translation(pivot)
+            * glam::Mat4::from_rotation_x(delta_pitch)
+            * glam::Mat4::from_translation(-pivot);
+        Self {
+            transform: transform.to_cols_array_2d(),
+        }
+    }
+
+    pub fn matrix(self) -> glam::Mat4 {
+        glam::Mat4::from_cols_array_2d(&self.transform)
+    }
+}
+
+pub fn hand_mesh_key(inventory: &Inventory) -> HandMeshKey {
+    HandMeshKey {
+        held_item: inventory.hotbar[inventory.selected]
+            .map(|stack| stack.item)
+            .unwrap_or(Item::Air),
+    }
+}
+
+pub fn should_rebuild_hand_mesh(previous: Option<HandMeshKey>, next: HandMeshKey) -> bool {
+    previous != Some(next)
+}
+
+/// Builds the animation-independent mesh for a held-item key.
+pub fn build_first_person_hand_base_mesh(
+    key: HandMeshKey,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    build_first_person_hand_base_mesh_into(key.held_item, vertices, indices);
+}
+
+fn build_first_person_hand_base_mesh_into(
+    held_item: Item,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+) {
+    vertices.clear();
+    indices.clear();
+    let hand_yaw = -0.35_f32;
+    let hand_pitch = -0.25_f32;
+    let fist_pos = Vec3::new(0.42, -0.42, 0.95);
+    add_cuboid_view(
+        vertices,
+        indices,
+        Vec3::new(0.24, 0.24, 1.2),
+        Vec3::new(0.0, 0.0, -0.55),
+        fist_pos,
+        hand_yaw,
+        hand_pitch,
+        [9; 6],
+        10,
+        1.0,
+    );
+    if held_item != Item::Air {
+        let item_pos = fist_pos + Vec3::new(-0.08, 0.06, 0.25);
+        if held_item.renders_flat() {
+            let (tex_col, tex_row) = held_item.properties().tex_coords;
+            add_sprite_view(
+                vertices, indices, 0.3, item_pos, hand_yaw, hand_pitch, tex_col, tex_row, 1.0,
+            );
+        } else if let Some((tex_cols, tex_row)) = held_item_texture(held_item) {
+            add_cuboid_view(
+                vertices,
+                indices,
+                Vec3::splat(0.18),
+                Vec3::ZERO,
+                item_pos,
+                hand_yaw,
+                hand_pitch,
+                tex_cols,
+                tex_row,
+                1.0,
+            );
+        }
+    }
+}
+
+/// Applies a per-frame animation transform to a cached base mesh.
+pub fn apply_hand_animation(vertices: &mut [Vertex], animation: HandAnimationUniform) {
+    let matrix = animation.matrix();
+    for vertex in vertices {
+        let p = matrix.transform_point3(Vec3::from_array(vertex.position));
+        vertex.position = p.to_array();
+    }
+}
+
 /// Returns the texture columns and row for the held item in the hand.
 /// Block items use the block's top-face texture; non-block items use their
 /// own inventory icon tile.
@@ -30,63 +153,11 @@ pub fn build_first_person_hand_mesh_into(
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
 ) {
-    vertices.clear();
-    indices.clear();
-
-    // The arm is an elongated rectangular box angled from off-screen
-    // bottom-right toward the fist, like Minecraft's first-person arm
-    // connecting back to the body.
-    let hand_yaw = -0.35_f32;
-    let hand_pitch = -0.25_f32 + walk_swing * 0.08 - attack_swing * 0.5;
-
-    let attack_offset = Vec3::new(-0.1 * attack_swing, 0.1 * attack_swing, 0.25 * attack_swing);
-    let fist_pos = Vec3::new(0.42, -0.42 + walk_swing * 0.03, 0.95) + attack_offset;
-
-    // Right arm: plain player skin tile (col 9, row 10) with no face/eye features.
-    add_cuboid_view(
+    build_first_person_hand_base_mesh(hand_mesh_key(inventory), vertices, indices);
+    apply_hand_animation(
         vertices,
-        indices,
-        Vec3::new(0.24, 0.24, 1.2),
-        Vec3::new(0.0, 0.0, -0.55),
-        fist_pos,
-        hand_yaw,
-        hand_pitch,
-        [9; 6],
-        10,
-        1.0,
+        HandAnimationUniform::from_swings(walk_swing, attack_swing),
     );
-
-    // Held item: full-cube blocks render as a small cube textured with the
-    // block's top face; flat items (flowers, seeds, tools, food, ...) render
-    // as a sprite quad. Both sit slightly in front of the fist.
-    let held_item = inventory.hotbar[inventory.selected]
-        .map(|stack| stack.item)
-        .unwrap_or(Item::Air);
-    if held_item != Item::Air {
-        let item_offset = Vec3::new(-0.08, 0.06, 0.25);
-        let item_pos = fist_pos + item_offset;
-        let item_yaw = hand_yaw;
-        let item_pitch = hand_pitch;
-        if held_item.renders_flat() {
-            let (tex_col, tex_row) = held_item.properties().tex_coords;
-            add_sprite_view(
-                vertices, indices, 0.3, item_pos, item_yaw, item_pitch, tex_col, tex_row, 1.0,
-            );
-        } else if let Some((tex_cols, tex_row)) = held_item_texture(held_item) {
-            add_cuboid_view(
-                vertices,
-                indices,
-                Vec3::new(0.18, 0.18, 0.18),
-                Vec3::new(0.0, 0.0, 0.0),
-                item_pos,
-                item_yaw,
-                item_pitch,
-                tex_cols,
-                tex_row,
-                1.0,
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -325,5 +396,38 @@ mod tests {
         let (block_vertices, block_indices) = build_first_person_hand_mesh(&block_inv, 0.0, 0.0);
         assert_eq!(block_vertices.len(), empty_vertices.len() + 24);
         assert_eq!(block_indices.len(), empty_indices.len() + 36);
+    }
+
+    #[test]
+    fn base_mesh_is_animation_independent_and_rebuild_only_on_key_change() {
+        let mut inv = Inventory::new();
+        inv.hotbar[0] = Some(ItemStack::new(crate::inventory::Item::Stone, 1));
+        let key = hand_mesh_key(&inv);
+        let mut a = (Vec::new(), Vec::new());
+        let mut b = (Vec::new(), Vec::new());
+        build_first_person_hand_base_mesh(key, &mut a.0, &mut a.1);
+        build_first_person_hand_base_mesh(key, &mut b.0, &mut b.1);
+        assert_eq!(
+            bytemuck::cast_slice::<Vertex, u8>(&a.0),
+            bytemuck::cast_slice::<Vertex, u8>(&b.0)
+        );
+        assert_eq!(a.1, b.1);
+        assert!(!should_rebuild_hand_mesh(Some(key), key));
+        assert!(should_rebuild_hand_mesh(None, key));
+        assert!(should_rebuild_hand_mesh(
+            Some(key),
+            HandMeshKey {
+                held_item: Item::Air
+            }
+        ));
+    }
+
+    #[test]
+    fn animation_uniform_changes_with_walk_and_attack() {
+        let idle = HandAnimationUniform::from_swings(0.0, 0.0);
+        let swing = HandAnimationUniform::from_swings(0.5, 0.25);
+        assert_ne!(idle.transform, swing.transform);
+        let bytes = bytemuck::bytes_of(&swing);
+        assert_eq!(bytes.len(), std::mem::size_of::<HandAnimationUniform>());
     }
 }

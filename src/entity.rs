@@ -28,6 +28,59 @@ pub enum EntityType {
 }
 
 impl EntityType {
+    pub const fn to_wire(self) -> u8 {
+        match self {
+            Self::Zombie => 0,
+            Self::Skeleton => 1,
+            Self::Creeper => 2,
+            Self::Arrow => 3,
+            Self::Pig => 4,
+            Self::Cow => 5,
+            Self::Sheep => 6,
+            Self::Chicken => 7,
+            Self::HeartParticle => 8,
+            Self::DroppedItem => 9,
+            Self::SplashPotion => 10,
+            Self::Blaze => 11,
+            Self::Piglin => 12,
+            Self::Husk => 13,
+            Self::Shulker => 14,
+            Self::EnderDragon => 15,
+            Self::Wither => 16,
+            Self::EndCrystal => 17,
+            Self::WitherSkull => 18,
+            Self::DragonBreath => 19,
+            Self::RemotePlayer => 20,
+        }
+    }
+
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Zombie),
+            1 => Some(Self::Skeleton),
+            2 => Some(Self::Creeper),
+            3 => Some(Self::Arrow),
+            4 => Some(Self::Pig),
+            5 => Some(Self::Cow),
+            6 => Some(Self::Sheep),
+            7 => Some(Self::Chicken),
+            8 => Some(Self::HeartParticle),
+            9 => Some(Self::DroppedItem),
+            10 => Some(Self::SplashPotion),
+            11 => Some(Self::Blaze),
+            12 => Some(Self::Piglin),
+            13 => Some(Self::Husk),
+            14 => Some(Self::Shulker),
+            15 => Some(Self::EnderDragon),
+            16 => Some(Self::Wither),
+            17 => Some(Self::EndCrystal),
+            18 => Some(Self::WitherSkull),
+            19 => Some(Self::DragonBreath),
+            20 => Some(Self::RemotePlayer),
+            _ => None,
+        }
+    }
+
     pub fn is_passive(self) -> bool {
         matches!(self, Self::Pig | Self::Cow | Self::Sheep | Self::Chicken)
     }
@@ -402,6 +455,23 @@ pub struct EntityScratch {
     pub usize_list: Vec<usize>,
 }
 
+/// Classification used by the R5.9 query audit.  Global simulation and
+/// cleanup passes intentionally visit every entity; candidate selection must
+/// instead go through the type/spatial indexes below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityIterationKind {
+    GlobalSimulation,
+    GlobalCleanup,
+    CandidateQuery,
+}
+
+pub const fn is_global_entity_maintenance(kind: EntityIterationKind) -> bool {
+    matches!(
+        kind,
+        EntityIterationKind::GlobalSimulation | EntityIterationKind::GlobalCleanup
+    )
+}
+
 impl EntityScratch {
     #[allow(dead_code)]
     pub fn clear(&mut self) {
@@ -422,6 +492,9 @@ pub struct EntityManager {
     pub id_to_index: HashMap<u64, usize>,
     pub type_buckets: HashMap<EntityType, Vec<u64>>,
     pub spatial_buckets: HashMap<(i32, i32), Vec<u64>>,
+    /// Last bucket recorded for each entity. This lets position changes move a
+    /// single id between buckets without rebuilding the whole index.
+    entity_chunks: HashMap<u64, (i32, i32)>,
     #[allow(dead_code)]
     pub scratch: EntityScratch,
     next_id: u64,
@@ -434,6 +507,7 @@ impl EntityManager {
             id_to_index: HashMap::new(),
             type_buckets: HashMap::new(),
             spatial_buckets: HashMap::new(),
+            entity_chunks: HashMap::new(),
             scratch: EntityScratch::default(),
             next_id: 1,
         }
@@ -441,6 +515,7 @@ impl EntityManager {
 
     pub fn rebuild_indexes(&mut self) {
         self.id_to_index.clear();
+        self.entity_chunks.clear();
         for vec in self.type_buckets.values_mut() {
             vec.clear();
         }
@@ -462,23 +537,59 @@ impl EntityManager {
                 .entry(chunk_pos)
                 .or_default()
                 .push(entity.id);
+            self.entity_chunks.insert(entity.id, chunk_pos);
         }
     }
 
+    fn chunk_for(position: Vec3) -> (i32, i32) {
+        (
+            (position.x / 16.0).floor() as i32,
+            (position.z / 16.0).floor() as i32,
+        )
+    }
+
+    /// Synchronize one entity after its position has been changed in place.
+    pub fn sync_entity_position(&mut self, id: u64) {
+        let Some(&idx) = self.id_to_index.get(&id) else {
+            return;
+        };
+        let Some(entity) = self.entities.get(idx) else {
+            return;
+        };
+        let new_chunk = Self::chunk_for(entity.position);
+        let old_chunk = self.entity_chunks.get(&id).copied();
+        if old_chunk == Some(new_chunk) {
+            return;
+        }
+        if let Some(old) = old_chunk {
+            if let Some(bucket) = self.spatial_buckets.get_mut(&old) {
+                bucket.retain(|&candidate| candidate != id);
+            }
+            if self.spatial_buckets.get(&old).is_some_and(Vec::is_empty) {
+                self.spatial_buckets.remove(&old);
+            }
+        }
+        self.spatial_buckets.entry(new_chunk).or_default().push(id);
+        self.entity_chunks.insert(id, new_chunk);
+    }
+
+    /// Synchronize all positions using the tracked bucket map. Unlike the old
+    /// implementation this does not clear/repopulate every bucket.
+    pub fn sync_positions(&mut self) {
+        let mut ids = std::mem::take(&mut self.scratch.id_list);
+        ids.clear();
+        ids.extend(self.entities.iter().map(|entity| entity.id));
+        for &id in &ids {
+            self.sync_entity_position(id);
+        }
+        self.scratch.id_list = ids;
+    }
+
+    /// Compatibility shim for callers outside the entity runtime. New code
+    /// should use `sync_positions`; this now performs incremental maintenance.
+    #[deprecated(note = "use sync_positions")]
     pub fn update_spatial_indexes(&mut self) {
-        for vec in self.spatial_buckets.values_mut() {
-            vec.clear();
-        }
-        for entity in &self.entities {
-            let chunk_pos = (
-                (entity.position.x / 16.0).floor() as i32,
-                (entity.position.z / 16.0).floor() as i32,
-            );
-            self.spatial_buckets
-                .entry(chunk_pos)
-                .or_default()
-                .push(entity.id);
-        }
+        self.sync_positions();
     }
 
     pub fn get_by_id(&self, id: u64) -> Option<&Entity> {
@@ -508,8 +619,9 @@ impl EntityManager {
         self.entities.push(entity);
         self.id_to_index.insert(id, idx);
         self.type_buckets.entry(entity_type).or_default().push(id);
-        let chunk_pos = ((pos.x / 16.0).floor() as i32, (pos.z / 16.0).floor() as i32);
+        let chunk_pos = Self::chunk_for(pos);
         self.spatial_buckets.entry(chunk_pos).or_default().push(id);
+        self.entity_chunks.insert(id, chunk_pos);
         id
     }
 
@@ -523,8 +635,9 @@ impl EntityManager {
         self.entities.push(entity);
         self.id_to_index.insert(id, idx);
         self.type_buckets.entry(entity_type).or_default().push(id);
-        let chunk_pos = ((pos.x / 16.0).floor() as i32, (pos.z / 16.0).floor() as i32);
+        let chunk_pos = Self::chunk_for(pos);
         self.spatial_buckets.entry(chunk_pos).or_default().push(id);
+        self.entity_chunks.insert(id, chunk_pos);
         id
     }
 
@@ -539,12 +652,26 @@ impl EntityManager {
         if let Some(bucket) = self.type_buckets.get_mut(&removed.entity_type) {
             bucket.retain(|&id| id != removed.id);
         }
-        let removed_chunk_pos = (
-            (removed.position.x / 16.0).floor() as i32,
-            (removed.position.z / 16.0).floor() as i32,
-        );
+        if self
+            .type_buckets
+            .get(&removed.entity_type)
+            .is_some_and(Vec::is_empty)
+        {
+            self.type_buckets.remove(&removed.entity_type);
+        }
+        let removed_chunk_pos = self
+            .entity_chunks
+            .remove(&removed.id)
+            .unwrap_or_else(|| Self::chunk_for(removed.position));
         if let Some(bucket) = self.spatial_buckets.get_mut(&removed_chunk_pos) {
             bucket.retain(|&id| id != removed.id);
+        }
+        if self
+            .spatial_buckets
+            .get(&removed_chunk_pos)
+            .is_some_and(Vec::is_empty)
+        {
+            self.spatial_buckets.remove(&removed_chunk_pos);
         }
         removed
     }
@@ -561,8 +688,14 @@ impl EntityManager {
     where
         F: FnMut(&Entity) -> bool,
     {
-        self.entities.retain(&mut f);
-        self.rebuild_indexes();
+        let mut index = 0;
+        while index < self.entities.len() {
+            if f(&self.entities[index]) {
+                index += 1;
+            } else {
+                self.swap_remove(index);
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -571,6 +704,7 @@ impl EntityManager {
         self.id_to_index.clear();
         self.type_buckets.clear();
         self.spatial_buckets.clear();
+        self.entity_chunks.clear();
     }
 
     pub fn count_passive(&self) -> usize {
@@ -609,6 +743,33 @@ impl EntityManager {
             .into_iter()
             .flatten()
             .filter_map(|id| self.get_by_id(*id))
+    }
+
+    /// Return entities in a horizontal radius using the spatial buckets. The
+    /// squared-distance test keeps callers from doing a full entity scan.
+    pub fn query_radius(&self, center: Vec3, radius: f32) -> impl Iterator<Item = &Entity> {
+        let radius_sq = radius.max(0.0) * radius.max(0.0);
+        let min_x = ((center.x - radius) / 16.0).floor() as i32;
+        let max_x = ((center.x + radius) / 16.0).floor() as i32;
+        let min_z = ((center.z - radius) / 16.0).floor() as i32;
+        let max_z = ((center.z + radius) / 16.0).floor() as i32;
+        self.spatial_buckets
+            .iter()
+            .filter(move |((x, z), _)| *x >= min_x && *x <= max_x && *z >= min_z && *z <= max_z)
+            .flat_map(|(_, ids)| ids.iter())
+            .filter_map(|id| self.get_by_id(*id))
+            .filter(move |entity| entity.position.distance_squared(center) <= radius_sq)
+    }
+
+    /// Radius query restricted to one or more entity types.
+    pub fn query_radius_types<'a>(
+        &'a self,
+        center: Vec3,
+        radius: f32,
+        types: &'a [EntityType],
+    ) -> impl Iterator<Item = &'a Entity> + 'a {
+        self.query_radius(center, radius)
+            .filter(move |entity| types.contains(&entity.entity_type))
     }
 }
 
@@ -661,6 +822,19 @@ pub fn ray_intersects_aabb(origin: Vec3, dir: Vec3, aabb: &AABB) -> Option<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r59_iteration_classification_keeps_candidate_queries_distinct() {
+        assert!(is_global_entity_maintenance(
+            EntityIterationKind::GlobalSimulation
+        ));
+        assert!(is_global_entity_maintenance(
+            EntityIterationKind::GlobalCleanup
+        ));
+        assert!(!is_global_entity_maintenance(
+            EntityIterationKind::CandidateQuery
+        ));
+    }
 
     #[test]
     fn test_entity_manager_counts_passive_and_hostile() {
@@ -834,5 +1008,36 @@ mod tests {
                     == crate::inventory::Item::Dirt),
             "Dirt should have been added to the inventory"
         );
+    }
+
+    #[test]
+    fn incremental_indexes_match_rebuild_oracle_after_lifecycle() {
+        let mut em = EntityManager::new();
+        let a = em.spawn(EntityType::Zombie, Vec3::new(1.0, 0.0, 1.0));
+        let b = em.spawn(EntityType::Cow, Vec3::new(20.0, 0.0, 1.0));
+        let c = em.spawn(EntityType::Cow, Vec3::new(1.0, 0.0, 20.0));
+        em.get_by_id_mut(a).unwrap().position = Vec3::new(33.0, 0.0, 1.0);
+        em.sync_entity_position(a);
+        em.remove_by_id(b);
+        em.retain(|entity| entity.id != c);
+
+        let mut oracle = EntityManager::new();
+        oracle.entities = em
+            .entities
+            .iter()
+            .map(|entity| Entity {
+                id: entity.id,
+                ..Entity::new(entity.id, entity.entity_type, entity.position)
+            })
+            .collect();
+        oracle.rebuild_indexes();
+        assert_eq!(em.id_to_index, oracle.id_to_index);
+        assert_eq!(em.type_buckets, oracle.type_buckets);
+        assert_eq!(em.spatial_buckets, oracle.spatial_buckets);
+        assert!(em.spatial_buckets.values().all(|bucket| {
+            let mut ids = bucket.clone();
+            ids.sort_unstable();
+            ids.windows(2).all(|pair| pair[0] != pair[1])
+        }));
     }
 }

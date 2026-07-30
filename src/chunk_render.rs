@@ -5,7 +5,7 @@
 //! background mesh workers and covered by ordinary unit tests.
 
 use glam::{Mat4, Vec3, Vec4};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// Vertex format used by terrain meshes.
 ///
@@ -260,6 +260,28 @@ impl ChunkLodMeshData {
 pub struct ChunkMeshBundle {
     pub levels: [ChunkLodMeshData; 3],
     pub section_connectivity: [crate::culling::SectionConnectivity; crate::world::SECTION_COUNT],
+}
+
+/// CPU result for exactly one 16^3 section. `identity` is checked when a
+/// worker result is integrated; the three levels intentionally mirror the
+/// legacy chunk bundle until renderer cutover is complete.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectionMeshBundle {
+    pub identity: crate::world::SectionIdentity,
+    pub levels: [ChunkLodMeshData; 3],
+    pub bounds: Option<MeshBounds>,
+    pub connectivity: crate::culling::SectionConnectivity,
+}
+
+impl SectionMeshBundle {
+    pub fn level(&self, lod: LodLevel) -> &ChunkLodMeshData {
+        &self.levels[lod as usize]
+    }
+    pub fn is_current(&self, current: crate::world::SectionIdentity) -> bool {
+        self.identity.key == current.key
+            && self.identity.lifetime == current.lifetime
+            && self.identity.revision == current.revision
+    }
 }
 
 impl ChunkMeshBundle {
@@ -544,10 +566,31 @@ pub fn chunk_to_region_coord(cx: i32, cz: i32) -> (i32, i32) {
 /// Handle representing a suballocation range inside a render region's GPU buffers.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RegionAllocationHandle {
+    pub region_instance_id: u64,
+    pub vertex_token: AllocationToken,
+    pub index_token: AllocationToken,
     pub vertex_offset: u32,
     pub index_offset: u32,
     pub num_vertices: u32,
     pub num_indices: u32,
+}
+
+/// Stable owner identity for a terrain allocation.  Packed explicitly so stale
+/// uploads from an older terrain generation/chunk lifetime cannot be freed by
+/// a later mesh occupying the same range.
+pub fn allocation_owner(
+    terrain_generation: u64,
+    chunk_lifetime: u64,
+    section_y: u16,
+    lod: u8,
+    layer: u8,
+) -> u64 {
+    terrain_generation
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(chunk_lifetime.rotate_left(17))
+        .wrapping_add((section_y as u64) << 32)
+        .wrapping_add((lod as u64) << 8)
+        .wrapping_add(layer as u64)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -561,6 +604,44 @@ pub struct FreeListBlock {
 pub struct FreeList {
     capacity: u32,
     free_blocks: Vec<FreeListBlock>,
+    /// Live allocations keyed by offset. Keeping this side table makes
+    /// deallocation transactional: malformed, stale, and double frees are
+    /// rejected instead of corrupting the free list.
+    allocations: BTreeMap<u32, AllocationRecord>,
+    next_generation: u64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct AllocationRecord {
+    count: u32,
+    generation: u64,
+    owner: u64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AllocationToken {
+    pub offset: u32,
+    pub count: u32,
+    pub generation: u64,
+    pub owner: u64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FreeListError {
+    ZeroSizedAllocation,
+    OutOfBounds,
+    Overlap,
+    UnknownAllocation,
+    StaleGeneration,
+    WrongOwner,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CompactionMove {
+    pub from: u32,
+    pub to: u32,
+    pub count: u32,
+    pub generation: u64,
 }
 
 impl FreeList {
@@ -575,6 +656,8 @@ impl FreeList {
             } else {
                 Vec::new()
             },
+            allocations: BTreeMap::new(),
+            next_generation: 1,
         }
     }
 
@@ -583,11 +666,15 @@ impl FreeList {
     }
 
     pub fn used_units(&self) -> u32 {
-        self.capacity - self.free_units()
+        self.capacity.saturating_sub(self.free_units())
     }
 
     pub fn free_units(&self) -> u32 {
         self.free_blocks.iter().map(|b| b.count).sum()
+    }
+
+    pub fn counters_consistent(&self) -> bool {
+        self.free_units().checked_add(self.used_units()) == Some(self.capacity)
     }
 
     pub fn largest_free_block(&self) -> u32 {
@@ -599,46 +686,152 @@ impl FreeList {
     }
 
     pub fn allocate(&mut self, count: u32) -> Option<u32> {
-        if count == 0 {
-            return Some(0);
-        }
-        for i in 0..self.free_blocks.len() {
-            if self.free_blocks[i].count >= count {
-                let offset = self.free_blocks[i].offset;
-                self.free_blocks[i].offset += count;
-                self.free_blocks[i].count -= count;
-                if self.free_blocks[i].count == 0 {
-                    self.free_blocks.remove(i);
-                }
-                return Some(offset);
-            }
-        }
-        None
+        self.allocate_owned(count, 0).ok().map(|token| token.offset)
     }
 
-    pub fn deallocate(&mut self, offset: u32, count: u32) {
+    pub fn allocate_owned(
+        &mut self,
+        count: u32,
+        owner: u64,
+    ) -> Result<AllocationToken, FreeListError> {
         if count == 0 {
-            return;
+            return Err(FreeListError::ZeroSizedAllocation);
+        }
+        let index = self
+            .free_blocks
+            .iter()
+            .position(|b| b.count >= count)
+            .ok_or(FreeListError::OutOfBounds)?;
+        let offset = self.free_blocks[index].offset;
+        let new_end = offset
+            .checked_add(count)
+            .ok_or(FreeListError::OutOfBounds)?;
+        if new_end > self.capacity {
+            return Err(FreeListError::OutOfBounds);
+        }
+        self.free_blocks[index].offset = new_end;
+        self.free_blocks[index].count -= count;
+        if self.free_blocks[index].count == 0 {
+            self.free_blocks.remove(index);
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.checked_add(1).unwrap_or(1);
+        self.allocations.insert(
+            offset,
+            AllocationRecord {
+                count,
+                generation,
+                owner,
+            },
+        );
+        Ok(AllocationToken {
+            offset,
+            count,
+            generation,
+            owner,
+        })
+    }
+
+    pub fn deallocate(&mut self, offset: u32, count: u32) -> Result<(), FreeListError> {
+        if count == 0 {
+            return Err(FreeListError::ZeroSizedAllocation);
+        }
+        let end = offset
+            .checked_add(count)
+            .ok_or(FreeListError::OutOfBounds)?;
+        if end > self.capacity {
+            return Err(FreeListError::OutOfBounds);
+        }
+        let record = self
+            .allocations
+            .get(&offset)
+            .copied()
+            .ok_or(FreeListError::UnknownAllocation)?;
+        if record.count != count {
+            return Err(FreeListError::StaleGeneration);
+        }
+        self.deallocate_record(offset, count, record)
+    }
+
+    pub fn deallocate_owned(&mut self, token: AllocationToken) -> Result<(), FreeListError> {
+        let record = self
+            .allocations
+            .get(&token.offset)
+            .copied()
+            .ok_or(FreeListError::UnknownAllocation)?;
+        if record.count != token.count || record.generation != token.generation {
+            return Err(FreeListError::StaleGeneration);
+        }
+        if record.owner != token.owner {
+            return Err(FreeListError::WrongOwner);
+        }
+        self.deallocate_record(token.offset, token.count, record)
+    }
+
+    pub fn validate_owned(&self, token: AllocationToken) -> Result<(), FreeListError> {
+        let record = self
+            .allocations
+            .get(&token.offset)
+            .copied()
+            .ok_or(FreeListError::UnknownAllocation)?;
+        if record.count != token.count || record.generation != token.generation {
+            return Err(FreeListError::StaleGeneration);
+        }
+        if record.owner != token.owner {
+            return Err(FreeListError::WrongOwner);
+        }
+        Ok(())
+    }
+
+    fn deallocate_record(
+        &mut self,
+        offset: u32,
+        count: u32,
+        _record: AllocationRecord,
+    ) -> Result<(), FreeListError> {
+        let end = offset
+            .checked_add(count)
+            .ok_or(FreeListError::OutOfBounds)?;
+        if end > self.capacity {
+            return Err(FreeListError::OutOfBounds);
         }
         let insert_idx = self
             .free_blocks
             .binary_search_by_key(&offset, |b| b.offset)
             .unwrap_or_else(|idx| idx);
 
+        if insert_idx > 0 {
+            let prev = &self.free_blocks[insert_idx - 1];
+            if prev.offset.checked_add(prev.count) > Some(offset) {
+                return Err(FreeListError::Overlap);
+            }
+        }
+        if let Some(next) = self.free_blocks.get(insert_idx) {
+            if end > next.offset {
+                return Err(FreeListError::Overlap);
+            }
+        }
         self.free_blocks
             .insert(insert_idx, FreeListBlock { offset, count });
+        self.allocations.remove(&offset);
 
         let mut i = 0;
         while i + 1 < self.free_blocks.len() {
-            if self.free_blocks[i].offset + self.free_blocks[i].count
-                == self.free_blocks[i + 1].offset
+            if self.free_blocks[i]
+                .offset
+                .checked_add(self.free_blocks[i].count)
+                == Some(self.free_blocks[i + 1].offset)
             {
-                self.free_blocks[i].count += self.free_blocks[i + 1].count;
+                self.free_blocks[i].count = self.free_blocks[i]
+                    .count
+                    .checked_add(self.free_blocks[i + 1].count)
+                    .expect("free block overflow");
                 self.free_blocks.remove(i + 1);
             } else {
                 i += 1;
             }
         }
+        Ok(())
     }
 
     pub fn resize(&mut self, new_capacity: u32) {
@@ -648,7 +841,63 @@ impl FreeList {
         let added = new_capacity - self.capacity;
         let old_capacity = self.capacity;
         self.capacity = new_capacity;
-        self.deallocate(old_capacity, added);
+        // The appended range is unallocated by construction.
+        self.free_blocks.push(FreeListBlock {
+            offset: old_capacity,
+            count: added,
+        });
+        self.free_blocks.sort_by_key(|b| b.offset);
+        let mut i = 0;
+        while i + 1 < self.free_blocks.len() {
+            if self.free_blocks[i]
+                .offset
+                .checked_add(self.free_blocks[i].count)
+                == Some(self.free_blocks[i + 1].offset)
+            {
+                self.free_blocks[i].count += self.free_blocks[i + 1].count;
+                self.free_blocks.remove(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Returns a deterministic low-priority compaction plan and applies the
+    /// corresponding ranges to allocator metadata. The caller must copy GPU
+    /// data according to the returned moves before rendering the next frame.
+    pub fn compact(&mut self) -> Vec<CompactionMove> {
+        let mut cursor = 0u32;
+        let mut moves = Vec::new();
+        let live: Vec<_> = self
+            .allocations
+            .iter()
+            .map(|(&from, record)| (from, *record))
+            .collect();
+        self.allocations.clear();
+        for (from, record) in live {
+            let to = cursor;
+            if from != to {
+                moves.push(CompactionMove {
+                    from,
+                    to,
+                    count: record.count,
+                    generation: record.generation,
+                });
+            }
+            self.allocations.insert(to, record);
+            cursor = cursor
+                .checked_add(record.count)
+                .expect("allocation sum overflow");
+        }
+        self.free_blocks = if cursor < self.capacity {
+            vec![FreeListBlock {
+                offset: cursor,
+                count: self.capacity - cursor,
+            }]
+        } else {
+            Vec::new()
+        };
+        moves
     }
 
     pub fn fragmentation(&self) -> f32 {
@@ -951,17 +1200,122 @@ mod tests {
         assert_eq!(a2, 30);
         assert_eq!(list.free_units(), 30);
 
-        list.deallocate(a1, 30);
+        list.deallocate(a1, 30).unwrap();
         assert_eq!(list.free_units(), 60);
 
         let a3 = list.allocate(20).unwrap();
         assert_eq!(a3, 0);
         assert_eq!(list.free_units(), 40);
 
-        list.deallocate(a2, 40);
-        list.deallocate(a3, 20);
+        list.deallocate(a2, 40).unwrap();
+        list.deallocate(a3, 20).unwrap();
         assert_eq!(list.free_units(), 100);
         assert_eq!(list.largest_free_block(), 100);
         assert_eq!(list.fragmentation(), 0.0);
+    }
+
+    #[test]
+    fn freelist_rejects_stale_double_free_and_out_of_bounds() {
+        let mut list = FreeList::new(16);
+        let token = list.allocate_owned(4, 7).unwrap();
+        assert_eq!(list.deallocate_owned(token), Ok(()));
+        assert_eq!(
+            list.deallocate_owned(token),
+            Err(FreeListError::UnknownAllocation)
+        );
+        assert_eq!(list.deallocate(15, 2), Err(FreeListError::OutOfBounds));
+        let token = list.allocate_owned(3, 7).unwrap();
+        let mut stale = token;
+        stale.generation += 1;
+        assert_eq!(
+            list.deallocate_owned(stale),
+            Err(FreeListError::StaleGeneration)
+        );
+        let mut wrong_owner = token;
+        wrong_owner.owner = 8;
+        assert_eq!(
+            list.deallocate_owned(wrong_owner),
+            Err(FreeListError::WrongOwner)
+        );
+    }
+
+    #[test]
+    fn owned_tokens_reject_wrong_owner_and_counters_stay_bounded() {
+        let mut list = FreeList::new(16);
+        let token = list.allocate_owned(4, 7).unwrap();
+        assert!(matches!(
+            list.deallocate_owned(AllocationToken { owner: 8, ..token }),
+            Err(FreeListError::WrongOwner)
+        ));
+        assert!(list.counters_consistent());
+        assert!(list.deallocate_owned(token).is_ok());
+        assert!(list.counters_consistent());
+    }
+
+    #[test]
+    fn allocation_owner_changes_across_runtime_identity() {
+        assert_ne!(
+            allocation_owner(1, 2, 0, 0, 0),
+            allocation_owner(2, 2, 0, 0, 0)
+        );
+        assert_ne!(
+            allocation_owner(1, 2, 0, 0, 0),
+            allocation_owner(1, 3, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn freelist_compaction_preserves_capacity_and_non_overlap() {
+        let mut list = FreeList::new(32);
+        let a = list.allocate(8).unwrap();
+        let b = list.allocate(4).unwrap();
+        list.deallocate(a, 8).unwrap();
+        let moves = list.compact();
+        assert_eq!(list.used_units() + list.free_units(), list.capacity());
+        assert!(moves.iter().all(|m| m.from != m.to));
+        assert_eq!(
+            list.free_blocks()
+                .windows(2)
+                .all(|w| w[0].offset + w[0].count <= w[1].offset),
+            true
+        );
+        let _ = b;
+    }
+
+    #[test]
+    fn freelist_deterministic_randomized_invariants() {
+        let mut list = FreeList::new(257);
+        let mut live = Vec::new();
+        let mut seed = 0x9e37_79b9u32;
+        for _ in 0..200 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            if !live.is_empty() && seed & 1 == 0 {
+                let index = (seed as usize) % live.len();
+                let (offset, count) = live.swap_remove(index);
+                list.deallocate(offset, count).unwrap();
+            } else {
+                let count = seed % 9 + 1;
+                if let Some(offset) = list.allocate(count) {
+                    live.push((offset, count));
+                }
+            }
+            assert_eq!(list.used_units() + list.free_units(), list.capacity());
+            assert!(
+                list.free_blocks()
+                    .windows(2)
+                    .all(|w| w[0].offset.checked_add(w[0].count) == Some(w[1].offset))
+                    || list
+                        .free_blocks()
+                        .windows(2)
+                        .all(|w| { w[0].offset.checked_add(w[0].count).unwrap() < w[1].offset })
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_shader_uses_discrete_ao_mapping() {
+        let shader = include_str!("shader.wgsl");
+        assert!(shader.contains("ao_raw == 3u") && shader.contains("ao_raw == 2u"));
+        assert!(shader.contains("ao_raw == 1u") && shader.contains("0.25"));
     }
 }

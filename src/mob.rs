@@ -1,5 +1,5 @@
 use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
-use crate::entity::{Entity, EntityManager, EntityType};
+use crate::entity::{Entity, EntityIterationKind, EntityManager, EntityType};
 use crate::inventory::GameMode;
 use crate::physics::PlayerPhysics;
 use crate::player::PlayerState;
@@ -292,10 +292,18 @@ pub fn update_mobs(
     listener_right: Vec3,
     player_invisible: bool,
     damage_multiplier: f32,
-    break_blocks: bool,
+    is_host: bool,
 ) -> Vec<(i32, i32, i32)> {
+    if !is_host {
+        return Vec::new();
+    }
     let player_pos = player_physics.position;
 
+    // Global cleanup maintenance: retain/despawn is exhaustive by design;
+    // it is not a radius/type candidate query.
+    debug_assert!(crate::entity::is_global_entity_maintenance(
+        EntityIterationKind::GlobalCleanup
+    ));
     // Despawn out-of-bounds mobs
     entity_manager.retain(|entity| {
         if entity.entity_type == EntityType::RemotePlayer
@@ -313,6 +321,12 @@ pub fn update_mobs(
     let mut explosions = Vec::new();
     let mut player_hit = None;
 
+    // Global simulation maintenance: each locally simulated entity receives
+    // one physics/AI tick. Candidate targeting is distance-gated in this pass
+    // and does not scan a second entity collection.
+    debug_assert!(crate::entity::is_global_entity_maintenance(
+        EntityIterationKind::GlobalSimulation
+    ));
     for entity in &mut entity_manager.entities {
         if entity.entity_type == EntityType::RemotePlayer {
             continue;
@@ -595,7 +609,7 @@ pub fn update_mobs(
             dirty_meshes,
             player_physics,
             player_state,
-            break_blocks,
+            is_host,
             game_mode,
             damage_multiplier,
         ));
@@ -631,11 +645,28 @@ pub fn update_mobs(
     let mut items_to_drop = Vec::new();
     let mut death_sounds = Vec::new();
 
-    for entity in &entity_manager.entities {
-        if entity.health <= 0.0
-            && entity.entity_type.is_living()
-            && entity.entity_type != EntityType::RemotePlayer
-        {
+    // Indexed death-candidate query: only living type buckets participate;
+    // projectiles/items/remote players are excluded without a full scan.
+    let death_candidates = [
+        EntityType::Zombie,
+        EntityType::Skeleton,
+        EntityType::Creeper,
+        EntityType::Pig,
+        EntityType::Cow,
+        EntityType::Sheep,
+        EntityType::Chicken,
+        EntityType::Blaze,
+        EntityType::Piglin,
+        EntityType::Husk,
+        EntityType::Shulker,
+        EntityType::EnderDragon,
+        EntityType::Wither,
+    ];
+    for entity in death_candidates
+        .into_iter()
+        .flat_map(|kind| entity_manager.get_entities_by_type(kind))
+    {
+        if entity.health <= 0.0 {
             death_sounds.push(entity.position);
             match entity.entity_type {
                 EntityType::Zombie => {
@@ -673,7 +704,7 @@ pub fn update_mobs(
         }
     }
 
-    entity_manager.update_spatial_indexes();
+    entity_manager.sync_positions();
     blocks_removed
 }
 

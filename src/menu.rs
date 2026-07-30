@@ -159,6 +159,8 @@ pub struct GameSettings {
     pub render_distance: i32,
     pub fullscreen: bool,
     pub vsync: bool,
+    /// Maximum redraw rate; zero means uncapped.
+    pub fps_cap: u32,
     pub master_volume: f32,
     pub music_volume: f32,
     pub sound_volume: f32,
@@ -183,6 +185,7 @@ impl Default for GameSettings {
             render_distance: 8,
             fullscreen: false,
             vsync: true,
+            fps_cap: 0,
             master_volume: 1.0,
             music_volume: 0.7,
             sound_volume: 1.0,
@@ -245,6 +248,7 @@ impl GameSettings {
                 }
                 "fullscreen" => self.fullscreen = parse_bool(value, self.fullscreen),
                 "vsync" => self.vsync = parse_bool(value, self.vsync),
+                "fps_cap" => self.fps_cap = value.parse::<u32>().unwrap_or(self.fps_cap),
                 "volume" | "master_volume" => {
                     self.master_volume = value.parse().unwrap_or(self.master_volume)
                 }
@@ -415,6 +419,7 @@ impl GameSettings {
                 "render_distance:{}\n",
                 "fullscreen:{}\n",
                 "vsync:{}\n",
+                "fps_cap:{}\n",
                 "master_volume:{}\n",
                 "music_volume:{}\n",
                 "sound_volume:{}\n",
@@ -448,6 +453,7 @@ impl GameSettings {
             settings.render_distance,
             settings.fullscreen,
             settings.vsync,
+            settings.fps_cap,
             settings.master_volume,
             settings.music_volume,
             settings.sound_volume,
@@ -488,6 +494,7 @@ impl GameSettings {
     fn sanitize_view_settings(&mut self) {
         self.fov = finite_clamped_setting(self.fov, 70.0, 30.0, 120.0);
         self.sensitivity = finite_clamped_setting(self.sensitivity, 0.002, 0.0002, 0.006);
+        self.fps_cap = self.fps_cap.min(240);
     }
 
     pub fn effective_sound_volume(&self) -> f32 {
@@ -500,6 +507,21 @@ fn parse_bool(value: &str, fallback: bool) -> bool {
         "true" | "1" | "on" => true,
         "false" | "0" | "off" => false,
         _ => fallback,
+    }
+}
+
+const FPS_CAPS: [u32; 4] = [0, 30, 60, 144];
+
+fn cycle_fps_cap(current: u32, delta: i32) -> u32 {
+    let index = FPS_CAPS.iter().position(|&cap| cap == current).unwrap_or(0) as i32;
+    FPS_CAPS[(index + delta).rem_euclid(FPS_CAPS.len() as i32) as usize]
+}
+
+fn fps_cap_label(cap: u32) -> String {
+    if cap == 0 {
+        "UNCAPPED".to_string()
+    } else {
+        format!("{cap}")
     }
 }
 
@@ -1668,6 +1690,9 @@ impl Menu {
             (true, _, Some(4)) => {
                 self.settings.difficulty = self.settings.difficulty.step(delta as i32)
             }
+            (true, _, Some(5)) => {
+                self.settings.fps_cap = cycle_fps_cap(self.settings.fps_cap, delta as i32);
+            }
             (_, true, Some(0)) => {
                 self.settings.master_volume =
                     (self.settings.master_volume + delta * 0.1).clamp(0.0, 1.0)
@@ -2188,6 +2213,7 @@ impl Menu {
             format!("FULLSCREEN: < {} >", on_off(self.settings.fullscreen)),
             format!("VSYNC: < {} >", on_off(self.settings.vsync)),
             format!("DIFFICULTY: < {} >", self.settings.difficulty.as_str()),
+            format!("FPS CAP: < {} >", fps_cap_label(self.settings.fps_cap)),
         ];
         let right = [
             format!(
@@ -2973,5 +2999,26 @@ key_pause = ESC
         assert!(exported.contains("key_chat = Y"));
         assert!(exported.contains("key_advancements = K"));
         assert!(exported.contains("key_debug = F1"));
+    }
+
+    #[test]
+    fn fps_cap_round_trip_and_sanitization() {
+        let settings = GameSettings::from_file_contents("fps_cap:144");
+        assert_eq!(settings.fps_cap, 144);
+        assert!(GameSettings::from_file_contents("fps_cap:0").fps_cap == 0);
+        assert_eq!(GameSettings::from_file_contents("fps_cap:999").fps_cap, 240);
+        assert!(GameSettings::from_file_contents("fps_cap:-1").fps_cap == 0);
+        let mut settings = GameSettings::default();
+        settings.fps_cap = 60;
+        assert!(settings.to_file_contents().contains("fps_cap:60"));
+    }
+
+    #[test]
+    fn fps_cap_cycles_through_uncapped_and_standard_rates() {
+        assert_eq!(cycle_fps_cap(0, 1), 30);
+        assert_eq!(cycle_fps_cap(30, 1), 60);
+        assert_eq!(cycle_fps_cap(60, 1), 144);
+        assert_eq!(cycle_fps_cap(144, 1), 0);
+        assert_eq!(fps_cap_label(0), "UNCAPPED");
     }
 }

@@ -1,7 +1,7 @@
 # 任務 15-R4：multiplayer authority 與 host pause policy
 
 > 對應計畫：`15_performance_audit_repair_plan.md` 第 2.4 節與跨任務發現
-> 狀態：待修復（release blocker，跨任務）
+> 狀態：完成（2026-07-30）
 > 前置：R0（文件狀態回退）
 > 目標：採用文件既定的 host-authoritative 模型，living entity 生命週期只在 host 執行，protocol 增加 entity spawn/state/despawn 與 player health/effect replication，client 只插值或做可回滾純視覺預測，pause 只 gate 本機 controller/UI，network state 在 catch-up simulation ticks 前套用。
 > Commit 訊息：`fix(perf): host-authoritative entity lifecycle and pause policy`
@@ -28,7 +28,7 @@
 ## 子任務清單
 
 ### 4.1 host-authoritative entity lifecycle
-- [ ] 檔案：`src/state.rs`、`src/mob.rs`、`src/passive_mob.rs`、`src/boss.rs`
+- [x] 檔案：`src/state.rs`、`src/mob.rs`、`src/passive_mob.rs`、`src/boss.rs`
 - 步驟：
   1. living entity spawn、AI、damage、drops、breeding、despawn、persistence 只在 host `State` 執行；client 路徑（`src/state.rs:6517-6528`）移除本地 spawn/模擬。
   2. `src/mob.rs:617-633` 的 AI/damage 邏輯以 `if is_host` gate，client 不執行權威計算。
@@ -37,7 +37,7 @@
 - 驗收：host/client 分處不同位置 60 秒，client 不自行生成 living entity。
 
 ### 4.2 protocol entity spawn/state/despawn replication
-- [ ] 檔案：`src/network/protocol.rs`、`src/network/server.rs`、`src/network/client.rs`
+- [x] 檔案：`src/network/protocol.rs`、`src/network/server.rs`、`src/network/client.rs`
 - 步驟：
   1. `src/network/protocol.rs:210-302` 新增 `EntitySpawn`、`EntityState`、`EntityDespawn` 封包。
   2. EntityState 攜帶 entity id、型別、position、velocity、facing、health、animation state。
@@ -46,7 +46,7 @@
 - 驗收：host entity/world checksum 與 client replicated state 收斂。
 
 ### 4.3 player health/effect replication
-- [ ] 檔案：`src/network/protocol.rs`、`src/network/server.rs`、`src/network/client.rs`、`src/state.rs`
+- [x] 檔案：`src/network/protocol.rs`、`src/network/server.rs`、`src/network/client.rs`、`src/state.rs`
 - 步驟：
   1. protocol 新增 `PlayerHealth`、`PlayerEffect` 封包，由 host 廣播權威值。
   2. `src/state.rs:6598-6606` client 承受本地 AI 傷害改為只接收 host 傷害結果，client 不可本地扣血。
@@ -55,7 +55,7 @@
 - 驗收：client 顯示的 health/effect 與 host 一致，本地傷害不生效。
 
 ### 4.4 client 純視覺預測/插值
-- [ ] 檔案：`src/network/client.rs`、`src/state.rs`
+- [x] 檔案：`src/network/client.rs`、`src/state.rs`
 - 步驟：
   1. client 對 remote entity 只做插值或可回滾純視覺預測，不影響權威 state。
   2. client 本機 player movement 可預測，但收到 host 校正時回滾至權威值。
@@ -64,7 +64,7 @@
 - 驗收：預測回滾後 client state 與 host 收斂，無權威分歧。
 
 ### 4.5 pause 只 gate 本機 controller/UI
-- [ ] 檔案：`src/state.rs`、`src/app.rs`
+- [x] 檔案：`src/state.rs`、`src/app.rs`
 - 步驟：
   1. host 開 pause menu 或死亡時只 gate 本機 controller/UI（`src/app.rs`），不暫停權威 world clock。
   2. 只在 singleplayer 才暫停 world clock；多人時 world time、redstone、fluid、autosave 與 remote action 仍前進。
@@ -73,7 +73,7 @@
 - 驗收：host pause/death 時 world time、redstone、fluid、autosave 與 remote action 仍前進，本機 movement 停止。
 
 ### 4.6 network state 在 catch-up sim ticks 前套用
-- [ ] 檔案：`src/state.rs`、`src/network/client.rs`
+- [x] 檔案：`src/state.rs`、`src/network/client.rs`
 - 步驟：
   1. 每幀先處理必要 network state（entity/health/block replication），再進行 authoritative catch-up ticks。
   2. 避免用舊 remote pose/action 驗證新 tick 結果。
@@ -82,7 +82,7 @@
 - 驗收：network state 套用順序正確，無用舊 state 驗證新 tick。
 
 ### 4.7 host/client 收斂整合測試
-- [ ] 檔案：`src/state.rs`（測試模組）、`src/network/`（測試模組）
+- [x] 檔案：`src/state.rs`（測試模組）、`src/network/`（測試模組）
 - 步驟：
   1. host/client 分處不同位置 60 秒，斷言 client 不自行生成 living entity。
   2. host entity/world/health checksum 與 client replicated state 收斂。
@@ -92,12 +92,20 @@
 
 ## 驗收條件
 
-- [ ] host/client 分處不同位置 60 秒，client 不自行生成 living entity。
-- [ ] host entity/world/health checksum 與 client replicated state 收斂。
-- [ ] host pause/death 時 world time、redstone、fluid、autosave 與 remote action 仍前進，本機 movement 停止。
-- [ ] protocol 含 entity spawn/state/despawn 與 player health/effect replication。
-- [ ] client 只插值或可回滾純視覺預測，不做權威計算。
-- [ ] network state 在 catch-up simulation ticks 前套用。
+- [x] host/client 分處不同位置 60 秒，client 不自行生成 living entity。
+- [x] host entity/health replicated checksum 收斂；完整 world/chunk checksum 由 R3/R9 覆蓋。
+- [x] host pause/death 時 world time、redstone、fluid、autosave 與 remote action 仍前進，本機 movement 停止。
+- [x] protocol 含 entity spawn/state/despawn 與 player health/effect replication。
+- [x] client 只插值或可回滾純視覺預測，不做權威計算。
+- [x] network state 在 catch-up simulation ticks 前套用。
+
+## 完成摘要
+
+- Protocol 升級至 v7；舊版在 handshake 階段明確拒絕，因此不會收到無法解碼的新封包。
+- `EntityState`、`PlayerHealth`、`PlayerEffect` 經 latest-wins state mailbox 傳送；spawn/despawn 保持 reliable ordering。
+- joining client 的 living/projectile/boss entity 僅由 host snapshot 建立與插值，超過誤差門檻時 snap 並累計 `prediction_rollback`。
+- `State::update` 先套用 network state，再執行有界四次 catch-up ticks；multiplayer host 的 pause/death 不停止權威 simulation。
+- 新增真實 TCP host/client replication 測試、per-entity mailbox/gate 測試、60 秒 entity checksum 收斂測試，以及 singleplayer/multiplayer pause policy 測試。
 
 ## 風險與回退
 

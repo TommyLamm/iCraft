@@ -14,8 +14,8 @@
 | 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Partial | R5、R9 | - | GPU/window 與固定場景 artifact 缺失 |
 | 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Partial | R1（已完成） | - | R1 correctness 已驗收；整體 Complete 仍受第 6 節 artifact/clippy gate 約束 |
 | 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Partial | R2（已完成） | - | durability/ACK/fault-injection 已驗收；固定場景 autosave p95 artifact 仍缺 |
-| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Partial | R3、R5 | - | backpressure/order/bounded drain 未驗收 |
-| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Partial | R4、R5、R9 | - | 只有合成測試；缺 world checksum |
+| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Partial | R3（已完成）、R5 | - | R3 reliability/order/revision correctness 已驗收；固定場景 latency artifact 仍缺 |
+| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Partial | R5、R9 | R4 已完成 multiplayer host pause/death policy 與 network-before-tick ordering | 仍缺完整 world checksum |
 | 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Partial | R5 | - | sleep fast-path 與獨立 reference 未驗收 |
 | 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Partial | R5 | - | index 增量維護與主要消費路徑未驗收 |
 | 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Partial | R7 | - | 穩態 allocation 與 hand cache 未驗收 |
@@ -264,11 +264,13 @@
 
 ## 驗證紀錄
 
-審核前曾執行：
+最近一次驗證：
 
-- `cargo test --release`：主程式 368 tests + integration 1 test，全數通過。
+- `cargo test --all-targets --release`：主程式 396 passed、1 ignored helper；integration 1 passed。
 - `cargo fmt --all -- --check`：全數通過。
-- `cargo check --release`：無 error / warning 阻擋，編譯通過。
+- `cargo build --release`：通過（僅既有 dead-code warnings）。
+- R3 focused tests：capacity=1/latest-wins、per-client backpressure isolation、ACK、跨 channel revision order、多 client chunk checksum、unloaded persisted snapshot 全數通過。
+- `cargo clippy --all-targets --all-features`：本機 toolchain 無可用 `cargo-clippy` component，未執行。
 - Perf ring focused tests：3 passed。
 - Torch index focused release tests：2 passed。
 - Dimension focused release tests：9 passed。
@@ -281,8 +283,8 @@
 | 未執行實際 GPU/window 視覺驗證 | GPU timestamp、AO、instancing、arena、culling 與 dynamic resolution 的畫面正確性未知 | R5、R6、R7、R8、R9 |
 | 未建立 8 個固定 seed 場景及可重播 raw artifact | 不能審計 p50/p95/p99、1% low、working set 或 before/after 百分比 | R9 |
 | 現有基線只使用 render distance 8 | 不得作為 render distance 16 的 buffer/memory/performance claims 證據 | R9 |
-| 缺少 host/client world、entity、health checksum | multiplayer authority 與 catch-up 最終收斂未驗證 | R3、R4、R9 |
-| 缺少 slow-client、capacity=1 與多 client backpressure 場景 | catch-up Chunk 可能永久缺漏，可靠封包順序亦未驗證 | R3、R9 |
+| 缺少完整 host/client world checksum | R4 已加入 60 秒 entity/health 收斂與 TCP replication 測試；R3 已加入 chunk checksum/revision 收斂測試，完整跨系統 world checksum 留待 R9 | R9 |
+| 缺少長時間實機 slow-client 壓力 artifact | R3 已涵蓋 capacity=1、獨立 mailbox 與 retry correctness；仍需固定場景 p95/p99 證據 | R9 |
 | 缺少 CPU packing ↔ WGSL decode parity/golden | packed AO 與其他 shader decode 不能宣告視覺等價 | R6、R9 |
 | 缺少 30/60/144/240 FPS headless full-world checksum | fixed tick 目前只由合成位移測試支撐 | R5、R9 |
 | 缺少 non-PGO/PGO 相同 workload A/B | PGO 與 release 性能改善不可宣告 | R9 |

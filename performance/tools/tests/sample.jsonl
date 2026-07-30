@@ -1,0 +1,2 @@
+{"timestampUtc":"2026-07-30T00:00:00Z","frameIndex":0,"sceneId":"01","repetition":1,"phase":"sample","frameTimeMs":16.0,"cpuMs":5.0,"gpuMs":4.0,"workingSetBytes":1000,"uploadBytes":20,"drawCalls":10,"bufferBytes":2000,"queueDepth":1,"queueDelayMs":0.2,"checksum":"abc"}
+{"timestampUtc":"2026-07-30T00:00:01Z","frameIndex":1,"sceneId":"01","repetition":1,"phase":"sample","frameTimeMs":17.0,"cpuMs":5.5,"gpuMs":4.1,"workingSetBytes":1010,"uploadBytes":21,"drawCalls":11,"bufferBytes":2000,"queueDepth":2,"queueDelayMs":0.3,"checksum":"abc"}

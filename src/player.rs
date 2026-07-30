@@ -9,6 +9,34 @@ pub enum DamageSource {
     Lightning,
 }
 
+impl DamageSource {
+    pub const fn to_wire(self) -> u8 {
+        match self {
+            Self::Fall => 1,
+            Self::Void => 2,
+            Self::Hunger => 3,
+            Self::Mob => 4,
+            Self::Explosion => 5,
+            Self::Drowning => 6,
+            Self::Lightning => 7,
+        }
+    }
+
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Fall),
+            2 => Some(Self::Void),
+            3 => Some(Self::Hunger),
+            4 => Some(Self::Mob),
+            5 => Some(Self::Explosion),
+            6 => Some(Self::Drowning),
+            7 => Some(Self::Lightning),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct PlayerState {
     pub health: f32,     // 0 ~ 20 (10 hearts)
     pub max_health: f32, // 20

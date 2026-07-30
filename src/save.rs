@@ -14,6 +14,212 @@ use std::sync::{Arc, Condvar, Mutex};
 const PLAYER_SAVE_MAGIC: &[u8; 8] = b"ICRPLR01";
 const PLAYER_SAVE_VERSION: u16 = 1;
 pub const SAVE_QUEUE_CAPACITY: usize = 128;
+pub const NETWORK_SNAPSHOT_QUEUE_CAPACITY: usize = 8;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct MutationRevisionIndex {
+    revisions: HashMap<(crate::dimension::Dimension, i32, i32), u64>,
+}
+
+impl MutationRevisionIndex {
+    pub fn bump(&mut self, dimension: crate::dimension::Dimension, cx: i32, cz: i32) -> u64 {
+        let revision = self
+            .revisions
+            .get(&(dimension, cx, cz))
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.revisions.insert((dimension, cx, cz), revision);
+        revision
+    }
+
+    pub fn ensure_at_least(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+    ) -> bool {
+        let entry = self.revisions.entry((dimension, cx, cz)).or_insert(0);
+        if *entry >= revision {
+            return false;
+        }
+        *entry = revision;
+        true
+    }
+
+    pub fn latest(&self, dimension: crate::dimension::Dimension, cx: i32, cz: i32) -> u64 {
+        self.revisions
+            .get(&(dimension, cx, cz))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn entries_in(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> impl Iterator<Item = ((i32, i32), u64)> + '_ {
+        self.revisions
+            .iter()
+            .filter(move |((entry_dimension, _, _), _)| *entry_dimension == dimension)
+            .map(|((_, cx, cz), revision)| ((*cx, *cz), *revision))
+    }
+
+    pub fn len(&self) -> usize {
+        self.revisions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.revisions.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NetworkSnapshotKey {
+    pub player_id: crate::network::protocol::PlayerId,
+    pub dimension: crate::dimension::Dimension,
+    pub cx: i32,
+    pub cz: i32,
+    pub revision: u64,
+}
+
+pub struct NetworkSnapshotRequest {
+    pub key: NetworkSnapshotKey,
+    pub chunk: Option<Arc<Chunk>>,
+}
+
+pub struct NetworkSnapshotPayload {
+    pub key: NetworkSnapshotKey,
+    pub result: Result<(Vec<u8>, Vec<u8>), String>,
+}
+
+pub enum NetworkSnapshotWorkerResult {
+    Snapshot(NetworkSnapshotPayload),
+    IndexPersisted {
+        generation: u64,
+        result: Result<(), String>,
+    },
+}
+
+enum NetworkSnapshotWorkerCommand {
+    Snapshot(NetworkSnapshotRequest),
+    PersistIndex {
+        generation: u64,
+        index: MutationRevisionIndex,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkSnapshotSubmitError {
+    Full,
+    Closed,
+}
+
+pub struct NetworkSnapshotWorker {
+    tx: std::sync::mpsc::SyncSender<NetworkSnapshotWorkerCommand>,
+    rx: std::sync::mpsc::Receiver<NetworkSnapshotWorkerResult>,
+}
+
+impl NetworkSnapshotWorker {
+    pub fn try_submit(
+        &self,
+        request: NetworkSnapshotRequest,
+    ) -> Result<(), NetworkSnapshotSubmitError> {
+        self.tx
+            .try_send(NetworkSnapshotWorkerCommand::Snapshot(request))
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => NetworkSnapshotSubmitError::Full,
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    NetworkSnapshotSubmitError::Closed
+                }
+            })
+    }
+
+    pub fn try_persist_index(
+        &self,
+        generation: u64,
+        index: MutationRevisionIndex,
+    ) -> Result<(), NetworkSnapshotSubmitError> {
+        self.tx
+            .try_send(NetworkSnapshotWorkerCommand::PersistIndex { generation, index })
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => NetworkSnapshotSubmitError::Full,
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    NetworkSnapshotSubmitError::Closed
+                }
+            })
+    }
+
+    pub fn try_iter(&self) -> std::sync::mpsc::TryIter<'_, NetworkSnapshotWorkerResult> {
+        self.rx.try_iter()
+    }
+}
+
+pub fn spawn_network_snapshot_worker(
+    manager: Arc<Mutex<SaveManager>>,
+    capacity: usize,
+) -> NetworkSnapshotWorker {
+    let (tx, worker_rx) = std::sync::mpsc::sync_channel(capacity.max(1));
+    let (result_tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("icraft-network-snapshot".into())
+        .spawn(move || {
+            while let Ok(command) = worker_rx.recv() {
+                let result = match command {
+                    NetworkSnapshotWorkerCommand::Snapshot(request) => {
+                        let data = if let Some(chunk) = request.chunk {
+                            let mut data = ChunkSaveData::from_chunk(&chunk);
+                            data.mutation_revision = request.key.revision;
+                            Some(data)
+                        } else {
+                            manager
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .load_chunk_in(
+                                    request.key.dimension,
+                                    request.key.cx,
+                                    request.key.cz,
+                                )
+                        };
+                        let result = match data {
+                            Some(data) if data.mutation_revision >= request.key.revision => {
+                                Ok((data.blocks, data.block_states))
+                            }
+                            Some(data) => Err(format!(
+                                "persisted snapshot for {:?} chunk ({}, {}) is revision {}, waiting for {}",
+                                request.key.dimension,
+                                request.key.cx,
+                                request.key.cz,
+                                data.mutation_revision,
+                                request.key.revision
+                            )),
+                            None => Err(format!(
+                                "snapshot source unavailable for {:?} chunk ({}, {})",
+                                request.key.dimension, request.key.cx, request.key.cz
+                            )),
+                        };
+                        NetworkSnapshotWorkerResult::Snapshot(NetworkSnapshotPayload {
+                            key: request.key,
+                            result,
+                        })
+                    }
+                    NetworkSnapshotWorkerCommand::PersistIndex { generation, index } => {
+                        let result = manager
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .save_mutation_revision_index(&index)
+                            .map_err(|error| error.to_string());
+                        NetworkSnapshotWorkerResult::IndexPersisted { generation, result }
+                    }
+                };
+                if result_tx.send(result).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("failed to spawn network snapshot worker");
+    NetworkSnapshotWorker { tx, rx }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveError {
@@ -367,6 +573,8 @@ pub struct ChunkSaveData {
     pub redstone_metadata: Vec<u8>,
     #[serde(default)]
     pub block_states: Vec<u8>,
+    #[serde(default)]
+    pub mutation_revision: u64,
 }
 
 impl ChunkSaveData {
@@ -417,6 +625,7 @@ impl ChunkSaveData {
             fluid_levels: compress_bytes(&fluid_levels).unwrap_or_default(),
             redstone_metadata,
             block_states: compress_bytes(&block_states_raw).unwrap_or_default(),
+            mutation_revision: 0,
         }
     }
 
@@ -689,6 +898,7 @@ pub struct UncompressedChunkSnapshot {
         [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT]; crate::world::CHUNK_WIDTH],
     >,
     pub redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
+    pub mutation_revision: u64,
 }
 
 impl UncompressedChunkSnapshot {
@@ -765,7 +975,13 @@ impl UncompressedChunkSnapshot {
             block_light,
             fluid_levels,
             redstone_metadata,
+            mutation_revision: 0,
         }
+    }
+
+    pub fn with_mutation_revision(mut self, revision: u64) -> Self {
+        self.mutation_revision = revision;
+        self
     }
 
     pub fn to_chunk_save_data(&self) -> ChunkSaveData {
@@ -779,6 +995,7 @@ impl UncompressedChunkSnapshot {
                 fluid_levels: Vec::new(),
                 redstone_metadata: Vec::new(),
                 block_states: Vec::new(),
+                mutation_revision: self.mutation_revision,
             })
     }
 
@@ -826,6 +1043,7 @@ impl UncompressedChunkSnapshot {
             redstone_metadata: redstone_metadata_bytes,
             block_states: compress_bytes(&block_states_raw)
                 .map_err(|error| SaveError::Serialization(error.to_string()))?,
+            mutation_revision: self.mutation_revision,
         })
     }
 
@@ -892,6 +1110,8 @@ pub struct SaveQueueStats {
     in_flight: AtomicU64,
     in_flight_bytes: AtomicU64,
     dropped: AtomicU64,
+    retries: AtomicU64,
+    cancels: AtomicU64,
 }
 
 impl SaveQueueStats {
@@ -913,6 +1133,18 @@ impl SaveQueueStats {
 
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+    pub fn retries(&self) -> u64 {
+        self.retries.load(Ordering::Relaxed)
+    }
+    pub fn cancels(&self) -> u64 {
+        self.cancels.load(Ordering::Relaxed)
+    }
+    pub(crate) fn record_retry(&self) {
+        self.retries.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn record_cancel(&self) {
+        self.cancels.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1257,6 +1489,7 @@ fn run_save_worker(inner: Arc<SaveQueueInner>, manager: Arc<Mutex<SaveManager>>)
             .lock()
             .unwrap_or_else(|lock_error| lock_error.into_inner());
         for task in failed_chunks {
+            inner.stats.record_retry();
             let key = task.key();
             if state.failed_chunks.insert(key, task).is_none() {
                 inner.stats.queued_items.fetch_add(1, Ordering::Relaxed);
@@ -1523,15 +1756,35 @@ pub fn decompress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// Deserializes a `ChunkSaveData` from persisted chunk bytes with full backward
-/// compatibility. Saves written before the redstone metadata sidecar existed
-/// only contain the historical six fields; bincode 1.x is a strict binary
-/// format and does not synthesize missing fields from `#[serde(default)]`, so
-/// we try the current shape first and fall back to the legacy shape (filling
-/// the sidecar with an empty vector) when the new deserializer rejects the
-/// bytes. This keeps pre-sidecar saves readable without a migration pass.
+/// compatibility. Bincode 1.x does not synthesize newly-added fields from
+/// `#[serde(default)]`, so every historical shape needs an explicit fallback.
 fn deserialize_chunk_save_data(bytes: &[u8]) -> Option<ChunkSaveData> {
     if let Ok(data) = bincode::deserialize::<ChunkSaveData>(bytes) {
         return Some(data);
+    }
+    #[derive(serde::Deserialize)]
+    struct PreviousChunkSaveData {
+        chunk_x: i32,
+        chunk_z: i32,
+        blocks: Vec<u8>,
+        sky_light: Vec<u8>,
+        block_light: Vec<u8>,
+        fluid_levels: Vec<u8>,
+        redstone_metadata: Vec<u8>,
+        block_states: Vec<u8>,
+    }
+    if let Ok(previous) = bincode::deserialize::<PreviousChunkSaveData>(bytes) {
+        return Some(ChunkSaveData {
+            chunk_x: previous.chunk_x,
+            chunk_z: previous.chunk_z,
+            blocks: previous.blocks,
+            sky_light: previous.sky_light,
+            block_light: previous.block_light,
+            fluid_levels: previous.fluid_levels,
+            redstone_metadata: previous.redstone_metadata,
+            block_states: previous.block_states,
+            mutation_revision: 0,
+        });
     }
     #[derive(serde::Deserialize)]
     struct LegacyChunkSaveData {
@@ -1553,6 +1806,7 @@ fn deserialize_chunk_save_data(bytes: &[u8]) -> Option<ChunkSaveData> {
             fluid_levels: legacy.fluid_levels,
             redstone_metadata: Vec::new(),
             block_states: Vec::new(),
+            mutation_revision: 0,
         })
 }
 
@@ -1886,6 +2140,19 @@ impl SaveManager {
 
     pub fn save_current_dimension(&self, dimension: crate::dimension::Dimension) -> io::Result<()> {
         atomic_write(self.world_dir.join("dimension.dat"), &[dimension as u8])
+    }
+
+    pub fn save_mutation_revision_index(&self, index: &MutationRevisionIndex) -> io::Result<()> {
+        let bytes = bincode::serialize(index)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        atomic_write(self.world_dir.join("mutation_revisions.bin"), &bytes)
+    }
+
+    pub fn load_mutation_revision_index(&self) -> MutationRevisionIndex {
+        fs::read(self.world_dir.join("mutation_revisions.bin"))
+            .ok()
+            .and_then(|bytes| bincode::deserialize(&bytes).ok())
+            .unwrap_or_default()
     }
 
     pub fn load_current_dimension(&self) -> crate::dimension::Dimension {
@@ -2960,6 +3227,80 @@ mod tests {
         let salvaged: RegionData = bincode::deserialize(&fs::read(destination).unwrap()).unwrap();
         assert_eq!(salvaged.chunks.len(), 1);
         assert!(salvaged.chunks.contains_key(&(0, 0)));
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn mutation_index_and_unloaded_snapshot_source_survive_reload() {
+        fn wait_payload(worker: &NetworkSnapshotWorker) -> NetworkSnapshotPayload {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                if let Some(NetworkSnapshotWorkerResult::Snapshot(payload)) =
+                    worker.try_iter().next()
+                {
+                    return payload;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "unloaded snapshot worker timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        let world_dir = unique_test_dir("network_revision_index");
+        let mut manager = SaveManager::new(&world_dir);
+        let chunk = Chunk::new(7, -4);
+        let mut saved = ChunkSaveData::from_chunk(&chunk);
+        saved.mutation_revision = 1;
+        let expected_blocks = saved.blocks.clone();
+        manager
+            .save_chunk_in(crate::dimension::Dimension::Overworld, 7, -4, saved)
+            .unwrap();
+
+        let mut index = MutationRevisionIndex::default();
+        assert_eq!(index.bump(crate::dimension::Dimension::Overworld, 7, -4), 1);
+        assert_eq!(index.bump(crate::dimension::Dimension::Overworld, 7, -4), 2);
+        manager.save_mutation_revision_index(&index).unwrap();
+        drop(manager);
+
+        let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
+        let reloaded = manager.lock().unwrap().load_mutation_revision_index();
+        assert_eq!(
+            reloaded.latest(crate::dimension::Dimension::Overworld, 7, -4),
+            2
+        );
+        let worker = spawn_network_snapshot_worker(Arc::clone(&manager), 1);
+        let key = NetworkSnapshotKey {
+            player_id: 11,
+            dimension: crate::dimension::Dimension::Overworld,
+            cx: 7,
+            cz: -4,
+            revision: 2,
+        };
+        worker
+            .try_submit(NetworkSnapshotRequest { key, chunk: None })
+            .unwrap();
+        let stale = wait_payload(&worker);
+        assert_eq!(stale.key, key);
+        assert!(
+            stale.result.unwrap_err().contains("waiting for 2"),
+            "persisted revision must not be mislabeled as current"
+        );
+
+        let mut current = ChunkSaveData::from_chunk(&chunk);
+        current.mutation_revision = 2;
+        manager
+            .lock()
+            .unwrap()
+            .save_chunk_in(crate::dimension::Dimension::Overworld, 7, -4, current)
+            .unwrap();
+        worker
+            .try_submit(NetworkSnapshotRequest { key, chunk: None })
+            .unwrap();
+        let payload = wait_payload(&worker);
+        assert_eq!(payload.key, key);
+        assert_eq!(payload.result.unwrap().0, expected_blocks);
         fs::remove_dir_all(world_dir).unwrap();
     }
 }
