@@ -85,6 +85,10 @@ fn next_frame_deadline(
     Some(deadline)
 }
 
+fn frame_delta(last_render_time: Instant, now: Instant) -> f32 {
+    now.duration_since(last_render_time).as_secs_f32()
+}
+
 pub struct App {
     runtime: Option<Runtime>,
     window: Option<Arc<Window>>,
@@ -415,10 +419,7 @@ impl ApplicationHandler for App {
                     }
                 }
                 self.frame_deadline = next_frame_deadline(self.frame_deadline, now, interval);
-                let dt = now
-                    .duration_since(self.last_render_time)
-                    .as_secs_f32()
-                    .min(0.1);
+                let dt = frame_delta(self.last_render_time, now);
                 self.last_render_time = now;
                 match &mut self.runtime {
                     Some(Runtime::Menu(menu)) => {
@@ -784,5 +785,14 @@ mod tests {
         assert!(changed > now);
         assert_eq!(changed, now + new_interval);
         assert_eq!(next_frame_deadline(old, now, None), None);
+    }
+
+    #[test]
+    fn frame_delta_preserves_elapsed_time_beyond_fps_interval() {
+        let last = Instant::now();
+        let elapsed = Duration::from_millis(250);
+        let measured = frame_delta(last, last + elapsed);
+        assert!(measured >= 0.249);
+        assert!(measured < 0.251);
     }
 }
