@@ -1,0 +1,48 @@
+{
+  "schema": "icraft.r9.manifest.v2",
+  "capturedUtc": "2026-07-30T14:29:17.8420914Z",
+  "host": "TOMMY",
+  "os": [
+    {
+      "Caption": "Microsoft Windows 11 专业版",
+      "Version": "10.0.26200",
+      "BuildNumber": "26200",
+      "OSArchitecture": "64 位"
+    }
+  ],
+  "cpu": [
+    {
+      "Name": "AMD Ryzen 7 5700X 8-Core Processor             ",
+      "NumberOfLogicalProcessors": 16,
+      "MaxClockSpeed": 3401
+    }
+  ],
+  "memory": [
+    {
+      "TotalPhysicalMemory": 34281488384,
+      "Manufacturer": "Micro-Star International Co., Ltd.",
+      "Model": "MS-7B85"
+    }
+  ],
+  "gpu": [
+    {
+      "Name": "NVIDIA GeForce RTX 5070 Ti",
+      "DriverVersion": "32.0.16.1074",
+      "VideoModeDescription": "3840 x 2160 x 4294967296 种颜色",
+      "AdapterRAM": 4293918720
+    }
+  ],
+  "git": {
+    "commit": "5008d74fbc34843b930c920c300ea3344bddad0d",
+    "dirty": true,
+    "root": "F:\\Desktop\\MC"
+  },
+  "settings": {},
+  "capture": {
+    "wgpuBackend": "dx12",
+    "resolution": "1280x720",
+    "renderDistance": 16,
+    "suppliedSettingsPath": null
+  },
+  "powershell": "7.6.3"
+}

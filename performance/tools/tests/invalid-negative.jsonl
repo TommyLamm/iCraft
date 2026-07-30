@@ -1,0 +1,1 @@
+{"timestampUtc":"2026-07-30T00:00:00Z","frameIndex":0,"sceneId":"01","repetition":1,"phase":"sample","frameTimeMs":"NaN","cpuMs":5,"gpuMs":4,"workingSetBytes":1000,"uploadBytes":20,"drawCalls":10,"bufferBytes":2000,"queueDepth":1,"queueDelayMs":0.2,"saveQueueDepth":0,"saveQueueDelayMs":0,"networkQueueDepth":1,"networkQueueDelayMs":0.2,"checksum":"abc"}

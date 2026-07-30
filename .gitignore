@@ -5,3 +5,4 @@ target2/
 .worktrees/
 saves/
 settings.txt
+performance/reports/**/profiles/

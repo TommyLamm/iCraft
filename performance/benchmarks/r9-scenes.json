@@ -1,0 +1,14 @@
+{
+  "$schema": "icraft.r9.scene-matrix.v1",
+  "renderDistance": 16,
+  "scenes": [
+    { "id": "01", "name": "overworld-static-spin", "seed": 1337001, "focus": "frustum culling, terrain draw calls, vertex count", "replay": "Load the spawn area, hold the camera-spin input for the sample window, and do not mutate blocks." },
+    { "id": "02", "name": "cave-occlusion-stress", "seed": 1337002, "focus": "occlusion candidates and hidden chunk overhead", "replay": "Load the marked cave fixture and rotate through the four cardinal views without changing blocks." },
+    { "id": "03", "name": "high-speed-flight-streaming", "seed": 1337003, "focus": "chunk generation, meshing, and worker queue depth", "replay": "Fly the recorded straight-line route at the fixed speed; restart from the same seed for every repetition." },
+    { "id": "04", "name": "high-density-redstone", "seed": 1337004, "focus": "20 Hz redstone propagation and latency", "replay": "Activate the same lever sequence from the fixture; leave the camera stationary during sampling." },
+    { "id": "05", "name": "fluid-lighting-stress", "seed": 1337005, "focus": "fluid/light propagation and mesh invalidation", "replay": "Run the fixture's water and torch mutation sequence once during warmup, then observe." },
+    { "id": "06", "name": "entity-crowd-wall-occlusion", "seed": 1337006, "focus": "entity update, mesh assembly, and culling", "replay": "Spawn the fixture crowd before warmup and alternate the two marked camera cells during sampling." },
+    { "id": "07", "name": "autosave-continuous-dirty", "seed": 1337007, "focus": "save I/O, queue depth, and region cache memory", "replay": "Apply the fixed block mutation cadence; allow autosave to run and do not manually save." },
+    { "id": "08", "name": "multiplayer-host-client-join", "seed": 1337008, "focus": "packet encoding, interpolation, and network queues", "replay": "Start the host and client from the fixture script, join once, and keep both peers on the recorded route." }
+  ]
+}
