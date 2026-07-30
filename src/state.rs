@@ -1,5 +1,8 @@
 use crate::camera::{Camera, CameraUniform};
-use crate::chunk_manager::{mark_block_mesh_dependencies, surrounding_chunk_coords, ChunkManager};
+use crate::chunk_manager::{
+    mark_block_mesh_dependencies, mark_section_mesh_dependencies, surrounding_chunk_coords,
+    ChunkManager,
+};
 use crate::chunk_render::{
     select_lod_for_bounds, DrawCandidate, DrawLayer, Frustum, LodLevel, LodThresholds, MeshBounds,
     TerrainVertex,
@@ -17,7 +20,10 @@ use crate::physics::{
     PLAYER_STANDING_HEIGHT,
 };
 use crate::player::{DamageSource, PlayerState};
-use crate::world::{Biome, BlockType, Chunk, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{
+    Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
+    SECTION_COUNT,
+};
 use glam::{Mat4, Vec2, Vec3};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -54,6 +60,10 @@ const MAX_CATCHUP_RETRIES: u8 = 3;
 const NETWORK_MAX_EVENTS_PER_PASS: usize = 256;
 const NETWORK_MAX_BYTES_PER_PASS: usize = 1_048_576;
 const NETWORK_MAX_TIME_PER_PASS: Duration = Duration::from_millis(2);
+const GPU_TIMESTAMP_READBACK_SLOT_COUNT: usize = 2;
+const GPU_TIMESTAMP_QUERY_COUNT: u32 = 14;
+const GPU_TIMESTAMP_READBACK_BYTES: u64 = GPU_TIMESTAMP_QUERY_COUNT as u64 * 8;
+const SECTION_STORAGE_COMPACTIONS_PER_FRAME: usize = 4;
 const PAUSE_WEATHER_VOLUME_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.46, -0.36];
 const PAUSE_QUIT_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.60, -0.50];
 pub const SIM_TICK_TIME: f32 = 0.05;
@@ -539,28 +549,34 @@ mod remote_sync_tests {
 
     #[test]
     fn network_burst_budget_leaves_persistent_backlog() {
-        let mut inbox = std::collections::VecDeque::new();
+        let mut staging = NetworkStaging::default();
         for _ in 0..(NETWORK_MAX_EVENTS_PER_PASS + 17) {
-            inbox.push_back(NetworkInbound::StatusUpdate("burst".into()));
+            staging.stage(NetworkInbound::StatusUpdate("burst".into()));
         }
-        let drained: Vec<_> = inbox.drain(..NETWORK_MAX_EVENTS_PER_PASS).collect();
-        assert_eq!(drained.len(), NETWORK_MAX_EVENTS_PER_PASS);
-        assert_eq!(inbox.len(), 17);
+        for _ in 0..NETWORK_MAX_EVENTS_PER_PASS {
+            assert!(staging.pop_next_if_fits(usize::MAX).is_some());
+        }
+        assert_eq!(staging.reliable_len(), 17);
     }
 
     #[test]
     fn reliable_events_remain_strict_fifo_until_eventual_delivery() {
-        let mut inbox = std::collections::VecDeque::from([
+        let mut staging = NetworkStaging::default();
+        for event in [
             NetworkInbound::StatusUpdate("one".into()),
             NetworkInbound::StatusUpdate("two".into()),
             NetworkInbound::StatusUpdate("three".into()),
-        ]);
+        ] {
+            staging.stage(event);
+        }
+        let first_bytes = staging.reliable.front().unwrap().estimated_bytes();
+        assert!(staging
+            .pop_next_if_fits(first_bytes.saturating_sub(1))
+            .is_none());
+        assert_eq!(staging.reliable_len(), 3);
+
         let mut delivered = Vec::new();
-        while let Some(event) = inbox.pop_front() {
-            assert_eq!(
-                classify_network_event(&event),
-                NetworkDeliveryClass::Reliable
-            );
+        while let Some((event, _)) = staging.pop_next_if_fits(usize::MAX) {
             if let NetworkInbound::StatusUpdate(message) = event {
                 delivered.push(message);
             }
@@ -570,33 +586,82 @@ mod remote_sync_tests {
 
     #[test]
     fn latest_wins_state_is_sequence_aware_per_key() {
-        let mut positions = std::collections::HashMap::new();
+        let mut staging = NetworkStaging::default();
         for (id, sequence, x) in [(7_u64, 2_u32, 2.0_f32), (7, 1, 1.0), (8, 4, 4.0)] {
-            let replace = positions
-                .get(&id)
-                .map_or(true, |old: &(u32, f32)| sequence > old.0);
-            if replace {
-                positions.insert(id, (sequence, x));
-            }
+            staging.stage(NetworkInbound::PlayerPosition {
+                id,
+                sequence,
+                sender_time_millis: sequence as u64,
+                x,
+                y: 0.0,
+                z: 0.0,
+                yaw: 0.0,
+                pitch: 0.0,
+            });
         }
-        assert_eq!(positions.get(&7), Some(&(2, 2.0)));
-        assert_eq!(positions.get(&8), Some(&(4, 4.0)));
+        for sequence in [9, 8, 10] {
+            staging.stage(NetworkInbound::PlayerHealth {
+                sequence,
+                player_id: 3,
+                health: sequence as f32,
+                max_health: 20.0,
+                hunger: 19.0,
+                saturation: 4.0,
+                oxygen: 20.0,
+                is_dead: false,
+                death_reason: 0,
+            });
+            staging.stage(NetworkInbound::PlayerEffect {
+                sequence,
+                player_id: 3,
+                effects: Vec::new(),
+            });
+        }
+        for ticks in [40, 30, 50] {
+            staging.stage(NetworkInbound::TimeSync {
+                ticks,
+                weather: 0,
+                weather_remaining_ticks: 0.0,
+            });
+        }
+        for sequence in [4, 3, 5] {
+            staging.stage(NetworkInbound::EntityState {
+                dimension: 0,
+                sequence,
+                state: crate::network::protocol::EntityStateWire {
+                    entity_id: 99,
+                    entity_type: crate::entity::EntityType::Zombie.to_wire(),
+                    position: [sequence as f32, 0.0, 0.0],
+                    velocity: [0.0; 3],
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    health: 20.0,
+                    animation_state: 0,
+                },
+            });
+        }
 
-        let health = NetworkInbound::PlayerHealth {
-            sequence: 9,
-            player_id: 3,
-            health: 18.0,
-            max_health: 20.0,
-            hunger: 19.0,
-            saturation: 4.0,
-            oxygen: 20.0,
-            is_dead: false,
-            death_reason: 0,
-        };
-        assert_eq!(
-            classify_network_event(&health),
-            NetworkDeliveryClass::LatestHealth
-        );
+        assert_eq!(staging.latest_positions.len(), 2);
+        assert!(matches!(
+            staging.latest_positions.get(&7),
+            Some(NetworkInbound::PlayerPosition { sequence: 2, .. })
+        ));
+        assert!(matches!(
+            staging.latest_health.get(&3),
+            Some(NetworkInbound::PlayerHealth { sequence: 10, .. })
+        ));
+        assert!(matches!(
+            staging.latest_effects.get(&3),
+            Some(NetworkInbound::PlayerEffect { sequence: 10, .. })
+        ));
+        assert!(matches!(
+            staging.latest_entities.get(&(0, 99)),
+            Some(NetworkInbound::EntityState { sequence: 5, .. })
+        ));
+        assert!(matches!(
+            staging.latest_time_sync,
+            Some(NetworkInbound::TimeSync { ticks: 50, .. })
+        ));
     }
 
     #[test]
@@ -838,41 +903,35 @@ mod remote_sync_tests {
             Dimension::Overworld,
         ));
 
-        assert!(chunk_mesh_result_is_current(
-            Some((7, 11)),
-            7,
-            11,
+        let key = SectionKey::new(1, 2, 3);
+        let current = SectionIdentity::new(key, 11, 7);
+        assert!(section_mesh_result_is_current(
+            Some(current),
+            current,
             3,
             3,
-            Some(7),
-            Some(11),
+            Some(current),
         ));
-        assert!(!chunk_mesh_result_is_current(
-            Some((7, 10)),
-            7,
-            11,
+        assert!(!section_mesh_result_is_current(
+            Some(SectionIdentity::new(key, 10, 7)),
+            current,
             3,
             3,
-            Some(7),
-            Some(11),
+            Some(current),
         ));
-        assert!(!chunk_mesh_result_is_current(
-            Some((7, 11)),
-            7,
-            11,
+        assert!(!section_mesh_result_is_current(
+            Some(current),
+            current,
             3,
             3,
-            Some(7),
-            Some(12),
+            Some(SectionIdentity::new(key, 12, 7)),
         ));
-        assert!(!chunk_mesh_result_is_current(
-            Some((7, 11)),
-            7,
-            11,
+        assert!(!section_mesh_result_is_current(
+            Some(current),
+            current,
             2,
             3,
-            Some(7),
-            Some(11),
+            Some(current),
         ));
     }
 
@@ -880,45 +939,45 @@ mod remote_sync_tests {
     fn mesh_invalidation_queues_latest_revision_and_invalidates_connectivity() {
         let coord = (2, -3);
         let mut meshes = std::collections::HashMap::from([(coord, ChunkMesh::pending())]);
-        let mesh = meshes.get_mut(&coord).unwrap();
-        mesh.section_connectivity
-            .fill(crate::culling::SectionConnectivityState::Valid(
-                crate::culling::SectionConnectivity::NONE,
-            ));
-        mesh.meshed_revision = mesh.revision;
-        let mut scheduler = crate::chunk_schedule::ChunkStreamingScheduler::new();
+        let key = SectionKey::new(coord.0, 5, coord.1);
+        let section = meshes
+            .get_mut(&coord)
+            .unwrap()
+            .section_mut(key.section_y as usize)
+            .unwrap();
+        section.connectivity = crate::culling::SectionConnectivityState::Valid(
+            crate::culling::SectionConnectivity::NONE,
+        );
+        section.meshed_revision = section.revision;
+        let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
 
-        assert!(invalidate_mesh_and_enqueue(
-            &mut meshes,
-            &mut scheduler,
-            coord,
+        section.invalidate();
+        let first_revision = section.revision;
+        scheduler.enqueue(
+            SectionIdentity::new(key, first_revision, 7),
             DependencyReason::Block,
             (0, 0),
-        ));
-        let first_revision = meshes[&coord].revision;
-        assert!(meshes[&coord]
-            .section_connectivity
-            .iter()
-            .all(|state| *state == crate::culling::SectionConnectivityState::Invalid));
-        assert!(!invalidate_mesh_and_enqueue(
-            &mut meshes,
-            &mut scheduler,
-            coord,
+        );
+        assert_eq!(
+            section.connectivity,
+            crate::culling::SectionConnectivityState::Invalid
+        );
+        section.invalidate();
+        scheduler.enqueue(
+            SectionIdentity::new(key, section.revision, 7),
             DependencyReason::Light,
             (0, 0),
-        ));
-        assert_eq!(scheduler.dirty_len(), 1);
-        let work = scheduler.dirty_work(&coord).unwrap();
-        assert_eq!(work.revision, first_revision + 1);
+        );
+        assert_eq!(scheduler.len(), 1);
+        let work = scheduler.pop_nearest((0, 0), 8).unwrap();
+        assert_eq!(work.identity.revision, first_revision + 1);
         assert_eq!(work.reason, DependencyReason::Light);
-        assert!(!chunk_mesh_result_is_current(
-            Some((7, first_revision)),
-            7,
-            first_revision,
+        assert!(!section_mesh_result_is_current(
+            Some(SectionIdentity::new(key, first_revision, 7)),
+            SectionIdentity::new(key, first_revision, 7),
             1,
             1,
-            Some(7),
-            Some(work.revision),
+            Some(work.identity),
         ));
     }
 
@@ -928,55 +987,44 @@ mod remote_sync_tests {
         let lifetime = 9;
         let generation = 4;
         let mut meshes = std::collections::HashMap::from([(coord, ChunkMesh::pending())]);
-        let mut scheduler = crate::chunk_schedule::ChunkStreamingScheduler::new();
-
-        invalidate_mesh_and_enqueue(
-            &mut meshes,
-            &mut scheduler,
-            coord,
+        let key = SectionKey::new(0, 4, 0);
+        let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
+        let section = meshes.get_mut(&coord).unwrap().section_mut(4).unwrap();
+        section.invalidate();
+        scheduler.enqueue(
+            SectionIdentity::new(key, section.revision, lifetime),
             DependencyReason::BreakPlace,
             coord,
         );
-        let stale_work = scheduler.pop_nearest_dirty(coord, 1).unwrap();
+        let stale_work = scheduler.pop_nearest(coord, 1).unwrap();
+        scheduler.mark_in_flight(stale_work);
 
-        invalidate_mesh_and_enqueue(
-            &mut meshes,
-            &mut scheduler,
-            coord,
-            DependencyReason::Fluid,
-            coord,
+        section.invalidate();
+        let current = SectionIdentity::new(key, section.revision, lifetime);
+        scheduler.enqueue(current, DependencyReason::Fluid, coord);
+        assert!(!section_mesh_result_is_current(
+            Some(stale_work.identity),
+            stale_work.identity,
+            generation,
+            generation,
+            Some(current),
+        ));
+
+        scheduler.complete(stale_work.identity);
+        let latest_work = scheduler.pop_nearest(coord, 1).unwrap();
+        assert!(section_mesh_result_is_current(
+            Some(latest_work.identity),
+            latest_work.identity,
+            generation,
+            generation,
+            Some(current),
+        ));
+        let section = meshes.get_mut(&coord).unwrap().section_mut(4).unwrap();
+        section.connectivity = crate::culling::SectionConnectivityState::Valid(
+            crate::culling::SectionConnectivity::FULL,
         );
-        assert!(!chunk_mesh_result_is_current(
-            Some((lifetime, stale_work.revision)),
-            lifetime,
-            stale_work.revision,
-            generation,
-            generation,
-            Some(lifetime),
-            Some(meshes[&coord].revision),
-        ));
-
-        let latest_work = scheduler.pop_nearest_dirty(coord, 1).unwrap();
-        assert!(chunk_mesh_result_is_current(
-            Some((lifetime, latest_work.revision)),
-            lifetime,
-            latest_work.revision,
-            generation,
-            generation,
-            Some(lifetime),
-            Some(meshes[&coord].revision),
-        ));
-        let mesh = meshes.get_mut(&coord).unwrap();
-        mesh.section_connectivity
-            .fill(crate::culling::SectionConnectivityState::Valid(
-                crate::culling::SectionConnectivity::FULL,
-            ));
-        mesh.meshed_revision = latest_work.revision;
-        assert_eq!(mesh.meshed_revision, mesh.revision);
-        assert!(mesh
-            .section_connectivity
-            .iter()
-            .all(|state| matches!(state, crate::culling::SectionConnectivityState::Valid(_))));
+        section.meshed_revision = latest_work.identity.revision;
+        assert_eq!(section.meshed_revision, section.revision);
     }
 
     #[test]
@@ -986,30 +1034,42 @@ mod remote_sync_tests {
             .into_iter()
             .map(|coord| (coord, ChunkMesh::pending()))
             .collect::<std::collections::HashMap<_, _>>();
-        let mut scheduler = crate::chunk_schedule::ChunkStreamingScheduler::new();
+        let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
         let mut dependencies = std::collections::HashSet::new();
-        mark_block_mesh_dependencies(&mut dependencies, 15, 15);
+        mark_section_mesh_dependencies(&mut dependencies, 15, 15, 15);
 
-        for coord in dependencies {
-            let reason = if coord == (0, 0) {
+        for key in dependencies {
+            let reason = if key == SectionKey::new(0, 0, 0) {
                 DependencyReason::BreakPlace
             } else {
                 DependencyReason::Ao
             };
-            invalidate_mesh_and_enqueue(&mut meshes, &mut scheduler, coord, reason, (0, 0));
-        }
-
-        assert_eq!(scheduler.dirty_len(), 4);
-        assert_eq!(
-            scheduler.dirty_work(&(0, 0)).unwrap().reason,
-            DependencyReason::BreakPlace
-        );
-        for coord in [(1, 0), (0, 1), (1, 1)] {
-            assert_eq!(
-                scheduler.dirty_work(&coord).unwrap().reason,
-                DependencyReason::Ao
+            let section = meshes
+                .get_mut(&(key.cx, key.cz))
+                .unwrap()
+                .section_mut(key.section_y as usize)
+                .unwrap();
+            section.invalidate();
+            scheduler.enqueue(
+                SectionIdentity::new(key, section.revision, 1),
+                reason,
+                (0, 0),
             );
         }
+
+        assert_eq!(scheduler.len(), 8);
+        let mut reasons = std::collections::HashMap::new();
+        while let Some(work) = scheduler.pop_nearest((0, 0), 2) {
+            reasons.insert(work.identity.key, work.reason);
+        }
+        assert_eq!(
+            reasons[&SectionKey::new(0, 0, 0)],
+            DependencyReason::BreakPlace
+        );
+        assert!(reasons
+            .iter()
+            .filter(|(key, _)| **key != SectionKey::new(0, 0, 0))
+            .all(|(_, reason)| *reason == DependencyReason::Ao));
     }
 
     #[test]
@@ -1201,14 +1261,35 @@ impl RenderRegion {
         &mut self,
         handle: &crate::chunk_render::RegionAllocationHandle,
     ) -> Result<(), crate::chunk_render::FreeListError> {
-        if handle.region_instance_id != self.region_instance_id {
+        if !region_allocation_handle_is_live(
+            self.region_instance_id,
+            &self.vertex_freelist,
+            &self.index_freelist,
+            handle,
+        ) {
             return Err(crate::chunk_render::FreeListError::UnknownAllocation);
         }
-        self.vertex_freelist.validate_owned(handle.vertex_token)?;
-        self.index_freelist.validate_owned(handle.index_token)?;
         self.vertex_freelist.deallocate_owned(handle.vertex_token)?;
         self.index_freelist.deallocate_owned(handle.index_token)?;
         Ok(())
+    }
+
+    fn handle_is_live(&self, handle: &crate::chunk_render::RegionAllocationHandle) -> bool {
+        region_allocation_handle_is_live(
+            self.region_instance_id,
+            &self.vertex_freelist,
+            &self.index_freelist,
+            handle,
+        )
+    }
+
+    fn empty_rebuild_worthwhile(&self) -> bool {
+        empty_region_rebuild_worthwhile(
+            self.vertex_freelist.used_units(),
+            self.index_freelist.used_units(),
+            self.vertex_capacity,
+            self.index_capacity,
+        )
     }
 
     pub fn committed_bytes(&self) -> usize {
@@ -1233,22 +1314,39 @@ impl RenderRegion {
         queue: &wgpu::Queue,
         needed_vertices: u32,
         needed_indices: u32,
-    ) {
+    ) -> Result<(), crate::chunk_render::FreeListError> {
         let mut grow_v = false;
         let mut new_v_cap = self.vertex_capacity;
         if self.vertex_freelist.largest_free_block() < needed_vertices {
             grow_v = true;
-            new_v_cap = (self.vertex_capacity + needed_vertices).max(self.vertex_capacity * 2);
+            new_v_cap = self
+                .vertex_capacity
+                .checked_add(needed_vertices)
+                .and_then(|needed| {
+                    self.vertex_capacity
+                        .checked_mul(2)
+                        .map(|doubled| needed.max(doubled))
+                })
+                .ok_or(crate::chunk_render::FreeListError::ArithmeticOverflow)?;
         }
 
         let mut grow_i = false;
         let mut new_i_cap = self.index_capacity;
         if self.index_freelist.largest_free_block() < needed_indices {
             grow_i = true;
-            new_i_cap = (self.index_capacity + needed_indices).max(self.index_capacity * 2);
+            new_i_cap = self
+                .index_capacity
+                .checked_add(needed_indices)
+                .and_then(|needed| {
+                    self.index_capacity
+                        .checked_mul(2)
+                        .map(|doubled| needed.max(doubled))
+                })
+                .ok_or(crate::chunk_render::FreeListError::ArithmeticOverflow)?;
         }
 
         if grow_v {
+            self.vertex_freelist.resize(new_v_cap)?;
             let vertex_bytes =
                 (new_v_cap as usize) * std::mem::size_of::<crate::chunk_render::TerrainVertex>();
             let new_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1278,11 +1376,11 @@ impl RenderRegion {
             }
 
             self.vertex_buffer = new_vertex_buffer;
-            self.vertex_freelist.resize(new_v_cap);
             self.vertex_capacity = new_v_cap;
         }
 
         if grow_i {
+            self.index_freelist.resize(new_i_cap)?;
             let index_bytes = (new_i_cap as usize) * std::mem::size_of::<u32>();
             let new_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Render Region Index Buffer (Resized)"),
@@ -1309,9 +1407,9 @@ impl RenderRegion {
             }
 
             self.index_buffer = new_index_buffer;
-            self.index_freelist.resize(new_i_cap);
             self.index_capacity = new_i_cap;
         }
+        Ok(())
     }
 
     pub fn upload_mesh_layer(
@@ -1328,7 +1426,10 @@ impl RenderRegion {
         let num_vertices = data.vertices.len() as u32;
         let num_indices = data.indices.len() as u32;
 
-        self.ensure_capacity(device, queue, num_vertices, num_indices);
+        self.ensure_capacity(device, queue, num_vertices, num_indices)
+            .unwrap_or_else(|error| {
+                panic!("render-region freelist capacity growth failed: {error:?}")
+            });
 
         let vertex_token = self
             .vertex_freelist
@@ -1379,26 +1480,67 @@ impl RenderRegion {
     }
 }
 
+fn region_allocation_handle_is_live(
+    region_instance_id: u64,
+    vertex_freelist: &crate::chunk_render::FreeList,
+    index_freelist: &crate::chunk_render::FreeList,
+    handle: &crate::chunk_render::RegionAllocationHandle,
+) -> bool {
+    handle.region_instance_id == region_instance_id
+        && vertex_freelist.validate_owned(handle.vertex_token).is_ok()
+        && index_freelist.validate_owned(handle.index_token).is_ok()
+}
+
+fn should_decrement_region_active_chunks(
+    mesh_has_resident_section: bool,
+    mesh_has_allocation_handles: bool,
+    mesh_has_matching_region_handle: bool,
+) -> bool {
+    mesh_has_resident_section && (!mesh_has_allocation_handles || mesh_has_matching_region_handle)
+}
+
+fn chunk_mesh_is_registered_with_region(mesh: &ChunkMesh, region: Option<&RenderRegion>) -> bool {
+    if !mesh.has_resident_section() {
+        return false;
+    }
+    let Some(region) = region else {
+        return false;
+    };
+    let (has_handles, has_matching_handle) =
+        mesh.allocation_handle_region_membership(region.region_instance_id);
+    !has_handles || has_matching_handle
+}
+
+fn empty_region_rebuild_worthwhile(
+    used_vertices: u32,
+    used_indices: u32,
+    vertex_capacity: u32,
+    index_capacity: u32,
+) -> bool {
+    used_vertices == 0
+        && used_indices == 0
+        && (vertex_capacity > RenderRegion::INITIAL_VERTEX_CAPACITY
+            || index_capacity > RenderRegion::INITIAL_INDEX_CAPACITY)
+}
+
 pub struct GpuMeshLevel {
     opaque: GpuMeshLayer,
     transparent: GpuMeshLayer,
     bounds: Option<MeshBounds>,
 }
 
-pub struct ChunkMesh {
+pub struct GpuSectionMesh {
     levels: Option<[GpuMeshLevel; 3]>,
-    pub section_connectivity:
-        [crate::culling::SectionConnectivityState; crate::world::SECTION_COUNT],
+    connectivity: crate::culling::SectionConnectivityState,
     revision: u64,
     meshed_revision: u64,
 }
 
-impl ChunkMesh {
+impl GpuSectionMesh {
     fn pending() -> Self {
         Self {
             levels: None,
-            section_connectivity: [crate::culling::SectionConnectivityState::Invalid;
-                crate::world::SECTION_COUNT],
+            connectivity: crate::culling::SectionConnectivityState::Invalid,
             revision: 0,
             meshed_revision: u64::MAX,
         }
@@ -1406,8 +1548,7 @@ impl ChunkMesh {
 
     fn invalidate(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        self.section_connectivity
-            .fill(crate::culling::SectionConnectivityState::Invalid);
+        self.connectivity = crate::culling::SectionConnectivityState::Invalid;
     }
 
     fn needs_rebuild(&self) -> bool {
@@ -1446,24 +1587,68 @@ impl ChunkMesh {
             })
             .sum()
     }
-
-    fn gpu_buffer_objects(&self) -> usize {
-        0
-    }
 }
 
-fn invalidate_mesh_and_enqueue(
-    chunk_meshes: &mut std::collections::HashMap<(i32, i32), ChunkMesh>,
-    scheduler: &mut crate::chunk_schedule::ChunkStreamingScheduler,
-    coord: (i32, i32),
-    reason: DependencyReason,
-    player_chunk: (i32, i32),
-) -> bool {
-    let Some(mesh) = chunk_meshes.get_mut(&coord) else {
-        return false;
-    };
-    mesh.invalidate();
-    scheduler.enqueue_dirty(coord, reason, mesh.revision, player_chunk)
+pub struct ChunkMesh {
+    sections: [GpuSectionMesh; SECTION_COUNT],
+}
+
+impl ChunkMesh {
+    fn pending() -> Self {
+        Self {
+            sections: std::array::from_fn(|_| GpuSectionMesh::pending()),
+        }
+    }
+
+    fn section(&self, section_y: usize) -> Option<&GpuSectionMesh> {
+        self.sections.get(section_y)
+    }
+
+    fn section_mut(&mut self, section_y: usize) -> Option<&mut GpuSectionMesh> {
+        self.sections.get_mut(section_y)
+    }
+
+    fn finest_bounds(&self) -> Option<MeshBounds> {
+        self.sections
+            .iter()
+            .filter_map(GpuSectionMesh::finest_bounds)
+            .reduce(|left, right| left.union(right))
+    }
+
+    fn total_indices(&self) -> usize {
+        self.sections
+            .iter()
+            .map(GpuSectionMesh::total_indices)
+            .sum()
+    }
+
+    fn gpu_bytes(&self) -> usize {
+        self.sections.iter().map(GpuSectionMesh::gpu_bytes).sum()
+    }
+
+    fn has_resident_section(&self) -> bool {
+        self.sections.iter().any(|section| section.levels.is_some())
+    }
+
+    fn allocation_handle_region_membership(&self, region_instance_id: u64) -> (bool, bool) {
+        let mut has_handles = false;
+        let mut has_matching_handle = false;
+        for section in &self.sections {
+            let Some(levels) = &section.levels else {
+                continue;
+            };
+            for level in levels {
+                for layer in [&level.opaque, &level.transparent] {
+                    let Some(handle) = layer.handle else {
+                        continue;
+                    };
+                    has_handles = true;
+                    has_matching_handle |= handle.region_instance_id == region_instance_id;
+                }
+            }
+        }
+        (has_handles, has_matching_handle)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1565,12 +1750,9 @@ struct ChunkLoadResult {
     redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
 }
 
-struct ChunkMeshResult {
-    coord: (i32, i32),
+struct SectionMeshResult {
     generation: u64,
-    lifetime: u64,
-    revision: u64,
-    bundle: crate::chunk_render::ChunkMeshBundle,
+    bundle: crate::chunk_render::SectionMeshBundle,
 }
 
 fn chunk_load_result_is_current(
@@ -1586,24 +1768,21 @@ fn chunk_load_result_is_current(
         && result_dimension == current_dimension
 }
 
-fn chunk_mesh_result_is_current(
-    expected_job: Option<(u64, u64)>,
-    result_lifetime: u64,
-    result_revision: u64,
+fn section_mesh_result_is_current(
+    expected_job: Option<SectionIdentity>,
+    result_identity: SectionIdentity,
     result_generation: u64,
     current_generation: u64,
-    current_lifetime: Option<u64>,
-    current_revision: Option<u64>,
+    current_identity: Option<SectionIdentity>,
 ) -> bool {
-    expected_job == Some((result_lifetime, result_revision))
+    expected_job == Some(result_identity)
         && result_generation == current_generation
-        && current_lifetime == Some(result_lifetime)
-        && current_revision == Some(result_revision)
+        && current_identity == Some(result_identity)
 }
 
 enum TerrainWorkerResult {
     Loaded(ChunkLoadResult),
-    Meshed(ChunkMeshResult),
+    SectionMeshed(SectionMeshResult),
 }
 
 #[repr(C)]
@@ -1682,11 +1861,13 @@ impl State {
     fn teardown_terrain_runtime(&mut self, reason: &str) {
         self.terrain_generation = self.terrain_generation.wrapping_add(1);
         self.chunk_load_in_flight.clear();
-        self.chunk_mesh_in_flight.clear();
+        self.section_scheduler.clear();
         self.chunk_lifetimes.clear();
         self.chunk_meshes.clear();
         self.render_regions.clear();
         self.compaction_pending_region = None;
+        self.section_storage_compaction_queue.clear();
+        self.section_storage_compaction_queued.clear();
         self.scheduler.clear();
         self.pending_worker_results.clear();
         eprintln!("[Terrain] runtime teardown: {reason}");
@@ -1699,15 +1880,48 @@ impl State {
         self.compaction_pending_region = self
             .render_regions
             .iter()
-            .filter(|(_, region)| {
-                let free = region.vertex_freelist.free_units() as f32
-                    / region.vertex_freelist.capacity().max(1) as f32;
-                let fragmented = region.vertex_freelist.fragmentation() > 0.35
-                    || region.index_freelist.fragmentation() > 0.35;
-                fragmented && free > 0.25
-            })
+            .filter(|(_, region)| region.empty_rebuild_worthwhile())
             .map(|(coord, _)| *coord)
             .next();
+    }
+
+    /// Consume at most one staged terrain compaction per frame. A live arena
+    /// cannot be compacted without rebasing every mesh handle and synchronizing
+    /// the GPU copies, so the runtime deliberately rebuilds only arenas with no
+    /// live allocations. This shrinks previously-grown empty buffers while
+    /// preserving the resident-chunk count; all other candidates fail safe.
+    fn process_terrain_compaction(&mut self) {
+        let Some(coord) = self.compaction_pending_region.take() else {
+            return;
+        };
+        let Some(region) = self.render_regions.get(&coord) else {
+            return;
+        };
+        if !region.empty_rebuild_worthwhile() {
+            return;
+        }
+        let active_chunks = region.active_chunks;
+        let mut rebuilt = RenderRegion::new(&self.device, &self.region_bind_group_layout, coord);
+        rebuilt.active_chunks = active_chunks;
+        self.render_regions.insert(coord, rebuilt);
+    }
+
+    fn process_section_storage_compaction(&mut self) {
+        for _ in 0..SECTION_STORAGE_COMPACTIONS_PER_FRAME {
+            let Some(key) = self.section_storage_compaction_queue.pop_front() else {
+                break;
+            };
+            self.section_storage_compaction_queued.remove(&key);
+            let Some(section) = self
+                .chunk_manager
+                .chunks
+                .get_mut(&(key.cx, key.cz))
+                .and_then(|chunk| chunk.sections.get_mut(key.section_y as usize))
+            else {
+                continue;
+            };
+            section.compact_if_worthwhile();
+        }
     }
     fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
         let mut dirty_chunks = std::collections::HashSet::new();
@@ -1956,18 +2170,25 @@ impl State {
         let cz = (destination.z / CHUNK_DEPTH as f32).floor() as i32;
         let mut chunk = crate::dimension::generate_chunk(target, cx, cz, self.world_seed);
         let mut restored_redstone = Vec::new();
-        if let Some(saved) = self
+        let saved_chunk = self
             .save_manager
             .lock()
             .unwrap()
-            .load_chunk_in(target, cx, cz)
-        {
+            .load_chunk_in(target, cx, cz);
+        if let Some(saved) = saved_chunk {
             let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
             if saved.blocks != generated_blocks {
-                if self.mutation_revisions.ensure_at_least(target, cx, cz, 1) {
-                    self.mutation_revision_generation =
-                        self.mutation_revision_generation.saturating_add(1);
-                    self.mutation_index_dirty = true;
+                match self.mutation_revisions.ensure_at_least(target, cx, cz, 1) {
+                    Ok(true) => {
+                        self.mutation_revision_generation =
+                            self.mutation_revision_generation.saturating_add(1);
+                        self.mutation_index_dirty = true;
+                    }
+                    Ok(false) => {}
+                    Err(error) => self.report_mutation_revision_error(
+                        error,
+                        "restoring a mutated destination chunk",
+                    ),
                 }
             }
             restored_redstone = saved.redstone_metadata();
@@ -2564,6 +2785,7 @@ impl<T> TrackedNetworkSender<T> for std::sync::mpsc::Sender<T> {
 pub enum GpuTimestampReadbackState {
     Unsupported,
     Unmapped,
+    CopyEncoded,
     Mapping,
     Mapped,
     Consumed,
@@ -2571,7 +2793,7 @@ pub enum GpuTimestampReadbackState {
 
 impl GpuTimestampReadbackState {
     pub fn map_requested(self) -> Self {
-        matches!(self, Self::Unmapped | Self::Consumed)
+        (self == Self::CopyEncoded)
             .then_some(Self::Mapping)
             .unwrap_or(self)
     }
@@ -2591,6 +2813,71 @@ impl GpuTimestampReadbackState {
             self
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GpuTimestampReadbackStatus {
+    state: GpuTimestampReadbackState,
+    submission_tag: Option<u64>,
+}
+
+impl GpuTimestampReadbackStatus {
+    fn unmapped() -> Self {
+        Self {
+            state: GpuTimestampReadbackState::Unmapped,
+            submission_tag: None,
+        }
+    }
+
+    fn reserve_copy(&mut self, submission_tag: u64) -> bool {
+        if !matches!(
+            self.state,
+            GpuTimestampReadbackState::Unmapped | GpuTimestampReadbackState::Consumed
+        ) {
+            return false;
+        }
+        self.state = GpuTimestampReadbackState::CopyEncoded;
+        self.submission_tag = Some(submission_tag);
+        true
+    }
+
+    fn begin_mapping(&mut self, submission_tag: u64) -> bool {
+        if self.state != GpuTimestampReadbackState::CopyEncoded
+            || self.submission_tag != Some(submission_tag)
+        {
+            return false;
+        }
+        self.state = self.state.map_requested();
+        true
+    }
+
+    fn map_completed(&mut self, submission_tag: u64, success: bool) {
+        if self.state != GpuTimestampReadbackState::Mapping
+            || self.submission_tag != Some(submission_tag)
+        {
+            return;
+        }
+        self.state = self.state.map_completed(success);
+        if !success {
+            self.submission_tag = None;
+        }
+    }
+
+    fn consume(&mut self, submission_tag: u64) -> bool {
+        if self.state != GpuTimestampReadbackState::Mapped
+            || self.submission_tag != Some(submission_tag)
+        {
+            return false;
+        }
+        self.state = self.state.consume();
+        self.submission_tag = None;
+        true
+    }
+}
+
+struct GpuTimestampReadbackSlot {
+    buffer: wgpu::Buffer,
+    status: std::sync::Arc<std::sync::Mutex<GpuTimestampReadbackStatus>>,
 }
 
 /// Capability gate used by the renderer and HUD. Pass-local timing is only
@@ -2615,13 +2902,33 @@ mod gpu_timestamp_state_tests {
     use super::GpuTimestampReadbackState as S;
     #[test]
     fn transitions_are_ordered_and_failure_is_recoverable() {
-        assert_eq!(S::Unmapped.map_requested(), S::Mapping);
+        assert_eq!(S::Unmapped.map_requested(), S::Unmapped);
+        assert_eq!(S::CopyEncoded.map_requested(), S::Mapping);
         assert_eq!(S::Mapping.map_completed(true), S::Mapped);
         assert_eq!(S::Mapped.consume(), S::Consumed);
         assert_eq!(S::Mapping.map_completed(false), S::Unmapped);
         assert_eq!(S::Unsupported.map_requested(), S::Unsupported);
         assert_eq!(S::Consumed.consume(), S::Consumed);
         assert_eq!(S::Mapped.map_requested(), S::Mapped);
+    }
+
+    #[test]
+    fn two_submission_tagged_slots_cannot_be_reused_while_mapping_or_mapped() {
+        let mut slots = [
+            super::GpuTimestampReadbackStatus::unmapped(),
+            super::GpuTimestampReadbackStatus::unmapped(),
+        ];
+        assert!(slots[0].reserve_copy(10));
+        assert!(slots[0].begin_mapping(10));
+        assert!(!slots[0].reserve_copy(11));
+        assert!(slots[1].reserve_copy(11));
+        assert!(slots[1].begin_mapping(11));
+
+        slots[0].map_completed(10, true);
+        assert!(!slots[0].reserve_copy(12));
+        assert!(slots[0].consume(10));
+        assert!(slots[0].reserve_copy(12));
+        assert_eq!(slots[0].submission_tag, Some(12));
     }
 
     #[test]
@@ -3253,9 +3560,7 @@ enum NetworkDeliveryClass {
 fn classify_network_event(event: &NetworkInbound) -> NetworkDeliveryClass {
     match event {
         NetworkInbound::PlayerPosition { .. } => NetworkDeliveryClass::LatestPosition,
-        NetworkInbound::EntityState { .. } | NetworkInbound::EntitySpawn { .. } => {
-            NetworkDeliveryClass::LatestEntity
-        }
+        NetworkInbound::EntityState { .. } => NetworkDeliveryClass::LatestEntity,
         NetworkInbound::PlayerHealth { .. } => NetworkDeliveryClass::LatestHealth,
         NetworkInbound::PlayerEffect { .. } => NetworkDeliveryClass::LatestEffect,
         NetworkInbound::TimeSync { .. } => NetworkDeliveryClass::LatestTimeSync,
@@ -3285,6 +3590,206 @@ impl NetworkInbound {
             _ => 0,
         };
         inline.saturating_add(heap)
+    }
+}
+
+#[derive(Default)]
+struct NetworkStaging {
+    reliable: std::collections::VecDeque<NetworkInbound>,
+    latest_positions: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    latest_entities: std::collections::HashMap<(u8, u64), NetworkInbound>,
+    latest_health: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    latest_effects: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    latest_time_sync: Option<NetworkInbound>,
+}
+
+impl NetworkStaging {
+    fn stage(&mut self, event: NetworkInbound) {
+        match classify_network_event(&event) {
+            NetworkDeliveryClass::Reliable => self.reliable.push_back(event),
+            NetworkDeliveryClass::LatestPosition => {
+                let NetworkInbound::PlayerPosition { id, sequence, .. } = &event else {
+                    unreachable!("position delivery class must contain a position event");
+                };
+                let replace = self.latest_positions.get(id).map_or(true, |previous| {
+                    matches!(
+                        previous,
+                        NetworkInbound::PlayerPosition {
+                            sequence: old_sequence,
+                            ..
+                        } if sequence_is_newer(*sequence, *old_sequence)
+                    )
+                });
+                if replace {
+                    self.latest_positions.insert(*id, event);
+                }
+            }
+            NetworkDeliveryClass::LatestEntity => {
+                let NetworkInbound::EntityState {
+                    dimension,
+                    sequence,
+                    state,
+                } = &event
+                else {
+                    unreachable!("entity delivery class must contain an entity-state event");
+                };
+                let key = (*dimension, state.entity_id);
+                let replace = self.latest_entities.get(&key).map_or(true, |previous| {
+                    matches!(
+                        previous,
+                        NetworkInbound::EntityState {
+                            sequence: old_sequence,
+                            ..
+                        } if sequence > old_sequence
+                    )
+                });
+                if replace {
+                    self.latest_entities.insert(key, event);
+                }
+            }
+            NetworkDeliveryClass::LatestHealth => {
+                let NetworkInbound::PlayerHealth {
+                    player_id,
+                    sequence,
+                    ..
+                } = &event
+                else {
+                    unreachable!("health delivery class must contain a health event");
+                };
+                let replace = self.latest_health.get(player_id).map_or(true, |previous| {
+                    matches!(
+                        previous,
+                        NetworkInbound::PlayerHealth {
+                            sequence: old_sequence,
+                            ..
+                        } if sequence > old_sequence
+                    )
+                });
+                if replace {
+                    self.latest_health.insert(*player_id, event);
+                }
+            }
+            NetworkDeliveryClass::LatestEffect => {
+                let NetworkInbound::PlayerEffect {
+                    player_id,
+                    sequence,
+                    ..
+                } = &event
+                else {
+                    unreachable!("effect delivery class must contain an effect event");
+                };
+                let replace = self.latest_effects.get(player_id).map_or(true, |previous| {
+                    matches!(
+                        previous,
+                        NetworkInbound::PlayerEffect {
+                            sequence: old_sequence,
+                            ..
+                        } if sequence > old_sequence
+                    )
+                });
+                if replace {
+                    self.latest_effects.insert(*player_id, event);
+                }
+            }
+            NetworkDeliveryClass::LatestTimeSync => {
+                let NetworkInbound::TimeSync { ticks, .. } = &event else {
+                    unreachable!("time-sync delivery class must contain a time-sync event");
+                };
+                let replace = self.latest_time_sync.as_ref().map_or(true, |previous| {
+                    matches!(
+                        previous,
+                        NetworkInbound::TimeSync {
+                            ticks: old_ticks,
+                            ..
+                        } if ticks > old_ticks
+                    )
+                });
+                if replace {
+                    self.latest_time_sync = Some(event);
+                }
+            }
+        }
+    }
+
+    fn take_smallest_if_fits<K>(
+        map: &mut std::collections::HashMap<K, NetworkInbound>,
+        remaining_bytes: usize,
+    ) -> Option<(NetworkInbound, usize)>
+    where
+        K: Copy + Ord + std::hash::Hash + Eq,
+    {
+        let key = map.keys().min().copied()?;
+        let event_bytes = map.get(&key)?.estimated_bytes();
+        if event_bytes > remaining_bytes {
+            return None;
+        }
+        map.remove(&key).map(|event| (event, event_bytes))
+    }
+
+    /// Remove one event only when its full estimated footprint fits. Reliable
+    /// events are considered first and never skipped, preserving strict FIFO.
+    fn pop_next_if_fits(&mut self, remaining_bytes: usize) -> Option<(NetworkInbound, usize)> {
+        if let Some(event) = self.reliable.front() {
+            let event_bytes = event.estimated_bytes();
+            if event_bytes > remaining_bytes {
+                return None;
+            }
+            return self.reliable.pop_front().map(|event| (event, event_bytes));
+        }
+
+        if !self.latest_positions.is_empty() {
+            return Self::take_smallest_if_fits(&mut self.latest_positions, remaining_bytes);
+        }
+        if !self.latest_entities.is_empty() {
+            return Self::take_smallest_if_fits(&mut self.latest_entities, remaining_bytes);
+        }
+        if !self.latest_health.is_empty() {
+            return Self::take_smallest_if_fits(&mut self.latest_health, remaining_bytes);
+        }
+        if !self.latest_effects.is_empty() {
+            return Self::take_smallest_if_fits(&mut self.latest_effects, remaining_bytes);
+        }
+        let event_bytes = self.latest_time_sync.as_ref()?.estimated_bytes();
+        if event_bytes > remaining_bytes {
+            return None;
+        }
+        self.latest_time_sync
+            .take()
+            .map(|event| (event, event_bytes))
+    }
+
+    fn reliable_len(&self) -> usize {
+        self.reliable.len()
+    }
+
+    fn latest_len(&self) -> usize {
+        self.latest_positions.len()
+            + self.latest_entities.len()
+            + self.latest_health.len()
+            + self.latest_effects.len()
+            + usize::from(self.latest_time_sync.is_some())
+    }
+
+    fn len(&self) -> usize {
+        self.reliable_len() + self.latest_len()
+    }
+
+    fn reliable_bytes(&self) -> u64 {
+        self.reliable
+            .iter()
+            .map(|event| event.estimated_bytes() as u64)
+            .sum()
+    }
+
+    fn latest_bytes(&self) -> u64 {
+        self.latest_positions
+            .values()
+            .chain(self.latest_entities.values())
+            .chain(self.latest_health.values())
+            .chain(self.latest_effects.values())
+            .chain(self.latest_time_sync.iter())
+            .map(|event| event.estimated_bytes() as u64)
+            .sum()
     }
 }
 
@@ -3913,7 +4418,7 @@ impl NetworkHandle {
             }
             NetworkHandle::Client { game_to_client, .. } => {
                 let _ = game_to_client
-                    .send(crate::network::client::GameToClient::SendAction { action });
+                    .tracked_send(crate::network::client::GameToClient::SendAction { action });
             }
             NetworkHandle::None => {}
         }
@@ -3922,8 +4427,9 @@ impl NetworkHandle {
     fn send_chat(&self, sender: String, message: String) {
         match self {
             NetworkHandle::Host { host_to_server, .. } => {
-                let _ = host_to_server
-                    .send(crate::network::server::HostToServer::BroadcastChat { sender, message });
+                let _ = host_to_server.tracked_send(
+                    crate::network::server::HostToServer::BroadcastChat { sender, message },
+                );
             }
             NetworkHandle::Client { game_to_client, .. } => {
                 let _ = game_to_client
@@ -3935,8 +4441,9 @@ impl NetworkHandle {
 
     fn notify_player_join(&self, id: crate::network::protocol::PlayerId, username: String) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server
-                .send(crate::network::server::HostToServer::NotifyPlayerJoin { id, username });
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::NotifyPlayerJoin { id, username },
+            );
         }
     }
 
@@ -3992,15 +4499,18 @@ pub struct State {
     pub render_regions: std::collections::HashMap<(i32, i32), RenderRegion>,
     /// At most one low-priority compaction candidate is staged per frame.
     compaction_pending_region: Option<(i32, i32)>,
+    section_storage_compaction_queue: std::collections::VecDeque<SectionKey>,
+    section_storage_compaction_queued: std::collections::HashSet<SectionKey>,
     terrain_worker_tx: std::sync::mpsc::Sender<TerrainWorkerResult>,
     terrain_worker_rx: std::sync::mpsc::Receiver<TerrainWorkerResult>,
     pending_worker_results: std::collections::VecDeque<TerrainWorkerResult>,
     scheduler: crate::chunk_schedule::ChunkStreamingScheduler,
+    section_scheduler: crate::chunk_schedule::SectionMeshScheduler,
     chunk_load_in_flight: std::collections::HashMap<(i32, i32), u64>,
-    chunk_mesh_in_flight: std::collections::HashMap<(i32, i32), (u64, u64)>,
     chunk_lifetimes: std::collections::HashMap<(i32, i32), u64>,
     next_chunk_lifetime: u64,
     terrain_generation: u64,
+    los_world_revision: u64,
     submitted_terrain_triangles: u64,
     submitted_terrain_draw_calls: usize,
     visible_chunk_count: usize,
@@ -4056,6 +4566,10 @@ pub struct State {
     mob_cuboid_instance_buffers: [wgpu::Buffer; 3],
     mob_quad_instance_buffers: [wgpu::Buffer; 3],
     particle_instance_buffers: [wgpu::Buffer; 3],
+    frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool<()>,
+    gpu_completion_tx: std::sync::mpsc::Sender<u64>,
+    gpu_completion_rx: std::sync::mpsc::Receiver<u64>,
+    next_gpu_submission_id: u64,
 
     mob_cuboid_instances_scratch: Vec<crate::mob_renderer::MobInstance>,
     mob_quad_instances_scratch: Vec<crate::mob_renderer::MobInstance>,
@@ -4111,24 +4625,24 @@ pub struct State {
     gpu_upload_scopes_frame: crate::perf::GpuUploadPerfSample,
     gpu_timestamp_query_set: Option<wgpu::QuerySet>,
     gpu_timestamp_resolve_buffer: Option<wgpu::Buffer>,
-    gpu_timestamp_readback_buffer: Option<wgpu::Buffer>,
-    gpu_timestamp_state: std::sync::Arc<std::sync::Mutex<GpuTimestampReadbackState>>,
+    gpu_timestamp_readback_slots: Vec<GpuTimestampReadbackSlot>,
     gpu_pass_timings_ns: [u64; 7],
+    gpu_pass_timings_valid: bool,
+    gpu_pass_timing_submission_tag: Option<u64>,
     gpu_timestamps_supported: bool,
     gpu_timestamps_inside_passes: bool,
     terrain_candidates_scratch: Vec<crate::chunk_render::DrawCandidate>,
     terrain_draw_plan_scratch: crate::chunk_render::DrawPlan,
     pub entity_los_manager: crate::culling::EntityLosManager,
     visible_sections_scratch: std::collections::HashSet<(i32, usize, i32)>,
+    section_visibility_scratch: crate::culling::SectionVisibilityScratch,
     mob_vertices_scratch: Vec<Vertex>,
     mob_indices_scratch: Vec<u32>,
     particle_vertices_scratch: Vec<Vertex>,
     particle_indices_scratch: Vec<u32>,
     hand_vertices_scratch: Vec<Vertex>,
     hand_indices_scratch: Vec<u32>,
-    last_held_item: Option<Item>,
-    last_hand_walk_swing: f32,
-    last_hand_attack_swing: f32,
+    last_hand_mesh_key: Option<crate::hand_renderer::HandMeshKey>,
     ui_vertices_scratch: Vec<UiVertex>,
     ui_line_vertices_scratch: Vec<UiVertex>,
     debug_str_scratch: String,
@@ -4152,18 +4666,7 @@ pub struct State {
     pub advancement_gui: crate::advancements::AdvancementGui,
     pub role: MultiplayerRole,
     pub network: NetworkHandle,
-    network_inbox: std::collections::VecDeque<NetworkInbound>,
-    network_latest_positions: std::collections::HashMap<
-        crate::network::protocol::PlayerId,
-        (u32, u64, f32, f32, f32, f32, f32),
-    >,
-    network_latest_entities:
-        std::collections::HashMap<u64, (u64, u8, crate::network::protocol::EntityStateWire)>,
-    network_latest_health:
-        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
-    network_latest_effects:
-        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
-    network_latest_time_sync: Option<NetworkInbound>,
+    network_staging: NetworkStaging,
     network_ready: bool,
     local_player_id: Option<crate::network::protocol::PlayerId>,
     remote_players:
@@ -4407,28 +4910,38 @@ impl State {
             .await
             .unwrap();
 
-        let (gpu_timestamp_query_set, gpu_timestamp_resolve_buffer, gpu_timestamp_readback_buffer) =
-            if gpu_timestamps_supported {
+        let (gpu_timestamp_query_set, gpu_timestamp_resolve_buffer, gpu_timestamp_readback_slots) =
+            if gpu_timestamps_inside_passes {
                 let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
                     label: Some("Timestamp Query Set"),
-                    count: 14,
+                    count: GPU_TIMESTAMP_QUERY_COUNT,
                     ty: wgpu::QueryType::Timestamp,
                 });
                 let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Timestamp Resolve Buffer"),
-                    size: 14 * 8,
+                    size: GPU_TIMESTAMP_READBACK_BYTES,
                     usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
                     mapped_at_creation: false,
                 });
-                let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Timestamp Readback Buffer"),
-                    size: 14 * 8,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
-                (Some(query_set), Some(resolve_buffer), Some(readback_buffer))
+                let readback_slots = (0..GPU_TIMESTAMP_READBACK_SLOT_COUNT)
+                    .map(|slot_index| GpuTimestampReadbackSlot {
+                        buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(match slot_index {
+                                0 => "Timestamp Readback Buffer 0",
+                                _ => "Timestamp Readback Buffer 1",
+                            }),
+                            size: GPU_TIMESTAMP_READBACK_BYTES,
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        }),
+                        status: std::sync::Arc::new(std::sync::Mutex::new(
+                            GpuTimestampReadbackStatus::unmapped(),
+                        )),
+                    })
+                    .collect();
+                (Some(query_set), Some(resolve_buffer), readback_slots)
             } else {
-                (None, None, None)
+                (None, None, Vec::new())
             };
 
         let surface_caps = surface.get_capabilities(&adapter);
@@ -4495,6 +5008,7 @@ impl State {
             save_manager.lock().unwrap().load_mutation_revision_index()
         };
         let mut mutation_index_dirty = false;
+        let mut mutation_index_load_error = None;
 
         // Initialize physics and keyboard input
         let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
@@ -5073,8 +5587,17 @@ impl State {
                         let generated_blocks =
                             crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
                         if data.blocks != generated_blocks {
-                            mutation_index_dirty |=
-                                mutation_revisions.ensure_at_least(current_dimension, cx, cz, 1);
+                            match mutation_revisions.ensure_at_least(current_dimension, cx, cz, 1) {
+                                Ok(changed) => mutation_index_dirty |= changed,
+                                Err(error) => {
+                                    let message = format!(
+                                        "Mutation revision tracking capacity was exhausted while \
+                                         restoring spawn chunk ({cx}, {cz}): {error}"
+                                    );
+                                    eprintln!("[Save] {message}");
+                                    mutation_index_load_error.get_or_insert(message);
+                                }
+                            }
                         }
                         let metadata = data.redstone_metadata();
                         data.restore_to_chunk(&mut chunk);
@@ -5542,6 +6065,7 @@ impl State {
             }
         };
 
+        let (gpu_completion_tx, gpu_completion_rx) = std::sync::mpsc::channel();
         let mut state = Self {
             window,
             surface,
@@ -5565,15 +6089,18 @@ impl State {
             chunk_meshes,
             render_regions: std::collections::HashMap::new(),
             compaction_pending_region: None,
+            section_storage_compaction_queue: std::collections::VecDeque::new(),
+            section_storage_compaction_queued: std::collections::HashSet::new(),
             terrain_worker_tx,
             terrain_worker_rx,
             pending_worker_results: std::collections::VecDeque::new(),
             scheduler: crate::chunk_schedule::ChunkStreamingScheduler::new(),
+            section_scheduler: crate::chunk_schedule::SectionMeshScheduler::new(),
             chunk_load_in_flight: std::collections::HashMap::new(),
-            chunk_mesh_in_flight: std::collections::HashMap::new(),
             chunk_lifetimes,
             next_chunk_lifetime,
             terrain_generation: 0,
+            los_world_revision: 0,
             submitted_terrain_triangles: 0,
             submitted_terrain_draw_calls: 0,
             visible_chunk_count: 0,
@@ -5623,6 +6150,13 @@ impl State {
             mob_cuboid_instance_buffers,
             mob_quad_instance_buffers,
             particle_instance_buffers,
+            frame_resource_pool: crate::gpu_frame_resources::FrameResourcePool::with_initial(
+                3,
+                [(), (), ()],
+            ),
+            gpu_completion_tx,
+            gpu_completion_rx,
+            next_gpu_submission_id: 1,
             mob_cuboid_instances_scratch: Vec::with_capacity(1024),
             mob_quad_instances_scratch: Vec::with_capacity(512),
             particle_instances_scratch: Vec::with_capacity(4096),
@@ -5655,7 +6189,7 @@ impl State {
             save_queue_stats,
             autosave_timer: 0.0,
             is_saving: false,
-            save_error: None,
+            save_error: mutation_index_load_error,
             is_sprinting: false,
             base_fov,
             w_click_timer: 0.0,
@@ -5677,26 +6211,26 @@ impl State {
             gpu_upload_scopes_frame: crate::perf::GpuUploadPerfSample::new(),
             gpu_timestamp_query_set,
             gpu_timestamp_resolve_buffer,
-            gpu_timestamp_readback_buffer,
-            gpu_timestamp_state: std::sync::Arc::new(std::sync::Mutex::new(
-                gpu_timestamp_capability(gpu_timestamps_supported, gpu_timestamps_inside_passes),
-            )),
+            gpu_timestamp_readback_slots,
             gpu_pass_timings_ns: [0; 7],
+            gpu_pass_timings_valid: false,
+            gpu_pass_timing_submission_tag: None,
             gpu_timestamps_supported,
             gpu_timestamps_inside_passes,
             terrain_candidates_scratch: Vec::with_capacity(256),
             terrain_draw_plan_scratch: crate::chunk_render::DrawPlan::default(),
             entity_los_manager: crate::culling::EntityLosManager::new(),
             visible_sections_scratch: std::collections::HashSet::new(),
+            section_visibility_scratch: crate::culling::SectionVisibilityScratch::with_capacity(
+                4096, 4096,
+            ),
             mob_vertices_scratch: Vec::with_capacity(1024),
             mob_indices_scratch: Vec::with_capacity(1536),
             particle_vertices_scratch: Vec::with_capacity(1024),
             particle_indices_scratch: Vec::with_capacity(1536),
             hand_vertices_scratch: Vec::with_capacity(256),
             hand_indices_scratch: Vec::with_capacity(384),
-            last_held_item: None,
-            last_hand_walk_swing: -1.0,
-            last_hand_attack_swing: -1.0,
+            last_hand_mesh_key: None,
             ui_vertices_scratch: Vec::with_capacity(2048),
             ui_line_vertices_scratch: Vec::with_capacity(4096),
             debug_str_scratch: String::with_capacity(128),
@@ -5720,12 +6254,7 @@ impl State {
             advancement_gui,
             role,
             network,
-            network_inbox: std::collections::VecDeque::new(),
-            network_latest_positions: std::collections::HashMap::new(),
-            network_latest_entities: std::collections::HashMap::new(),
-            network_latest_health: std::collections::HashMap::new(),
-            network_latest_effects: std::collections::HashMap::new(),
-            network_latest_time_sync: None,
+            network_staging: NetworkStaging::default(),
             network_ready: !is_client,
             local_player_id: None,
             remote_players: std::collections::HashMap::new(),
@@ -5772,6 +6301,8 @@ impl State {
                 .restore_chunk_metadata(&state.chunk_manager, cx, cz, &metadata);
         }
 
+        let initial_mesh_coords: Vec<_> = state.chunk_meshes.keys().copied().collect();
+        state.invalidate_chunk_meshes(initial_mesh_coords, DependencyReason::ChunkLoad);
         state.load_current_dimension_entities();
 
         state
@@ -5815,7 +6346,13 @@ impl State {
         }
         let cx = x.div_euclid(CHUNK_WIDTH as i32);
         let cz = z.div_euclid(CHUNK_DEPTH as i32);
-        let revision = self.mutation_revisions.bump(self.current_dimension, cx, cz);
+        let revision = match self.mutation_revisions.bump(self.current_dimension, cx, cz) {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.report_mutation_revision_error(error, "broadcasting a block mutation");
+                return;
+            }
+        };
         self.mutation_revision_generation = self.mutation_revision_generation.saturating_add(1);
         self.mutation_index_dirty = true;
         let state = self.chunk_manager.get_block_state(x, y, z);
@@ -5828,6 +6365,19 @@ impl State {
             block.to_wire(),
             state,
         );
+    }
+
+    fn report_mutation_revision_error(
+        &mut self,
+        error: crate::save::MutationRevisionIndexCapacityError,
+        operation: &str,
+    ) {
+        let message = format!(
+            "Mutation revision tracking capacity was exhausted while {operation}: {error}. \
+             Multiplayer mutation delivery has been stopped to avoid sending an untracked revision."
+        );
+        eprintln!("[Save] {message}");
+        self.save_error.get_or_insert(message);
     }
 
     fn schedule_player_catchup(&mut self, player_id: crate::network::protocol::PlayerId) {
@@ -6038,7 +6588,7 @@ impl State {
             .values()
             .map(|entries| entries.len() as u64)
             .sum::<u64>()
-            .saturating_add(self.network_inbox.len() as u64);
+            .saturating_add(self.network_staging.len() as u64);
     }
 
     fn weather_sync_fields(&self) -> (u8, f32) {
@@ -6063,96 +6613,14 @@ impl State {
     }
 
     fn drain_network_events(&mut self) {
-        // Ingest and apply are independently bounded. Reliable events stay FIFO;
-        // high-rate snapshots persist as sequence-aware latest-wins entries.
+        // Transport draining is bounded by `NetworkHandle`; every event it
+        // yields is classified immediately so an apply-budget boundary can
+        // never demote a latest-wins event into the reliable FIFO.
         const MAX_EVENTS: usize = NETWORK_MAX_EVENTS_PER_PASS;
         const MAX_BYTES: usize = NETWORK_MAX_BYTES_PER_PASS;
         const MAX_TIME: Duration = NETWORK_MAX_TIME_PER_PASS;
-        let ingest_started = Instant::now();
-        let inbound = self.network.drain_inbound();
-        let mut ingested = 0usize;
-        let mut ingest_bytes = 0usize;
-        let mut inbound_iter = inbound.into_iter();
-        while let Some(event) = inbound_iter.next() {
-            if ingested >= MAX_EVENTS
-                || ingest_bytes >= MAX_BYTES
-                || ingest_started.elapsed() >= MAX_TIME
-            {
-                self.network_inbox.push_back(event);
-                self.network_inbox.extend(inbound_iter);
-                break;
-            }
-            ingest_bytes = ingest_bytes.saturating_add(event.estimated_bytes());
-            ingested += 1;
-            match event {
-                NetworkInbound::PlayerPosition {
-                    id,
-                    sequence,
-                    sender_time_millis,
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    pitch,
-                } => {
-                    let replace = self
-                        .network_latest_positions
-                        .get(&id)
-                        .map_or(true, |old| sequence > old.0);
-                    if replace {
-                        self.network_latest_positions
-                            .insert(id, (sequence, sender_time_millis, x, y, z, yaw, pitch));
-                    }
-                }
-                NetworkInbound::EntityState {
-                    dimension,
-                    sequence,
-                    state,
-                } => {
-                    let replace = self
-                        .network_latest_entities
-                        .get(&state.entity_id)
-                        .map_or(true, |old| sequence > old.0);
-                    if replace {
-                        self.network_latest_entities
-                            .insert(state.entity_id, (sequence, dimension, state));
-                    }
-                }
-                NetworkInbound::PlayerHealth {
-                    player_id,
-                    sequence,
-                    ..
-                } => {
-                    let replace = self.network_latest_health.get(&player_id).map_or(true, |old| matches!(old, NetworkInbound::PlayerHealth { sequence: previous, .. } if sequence > *previous));
-                    if replace {
-                        self.network_latest_health.insert(player_id, event);
-                    }
-                }
-                NetworkInbound::PlayerEffect {
-                    player_id,
-                    sequence,
-                    ..
-                } => {
-                    let replace = self.network_latest_effects.get(&player_id).map_or(true, |old| matches!(old, NetworkInbound::PlayerEffect { sequence: previous, .. } if sequence > *previous));
-                    if replace {
-                        self.network_latest_effects.insert(player_id, event);
-                    }
-                }
-                event @ NetworkInbound::TimeSync { .. } => {
-                    let replace = match (&self.network_latest_time_sync, &event) {
-                        (
-                            Some(NetworkInbound::TimeSync { ticks: old, .. }),
-                            NetworkInbound::TimeSync { ticks, .. },
-                        ) => ticks > old,
-                        (None, _) => true,
-                        _ => false,
-                    };
-                    if replace {
-                        self.network_latest_time_sync = Some(event);
-                    }
-                }
-                reliable => self.network_inbox.push_back(reliable),
-            }
+        for event in self.network.drain_inbound() {
+            self.network_staging.stage(event);
         }
 
         let apply_started = Instant::now();
@@ -6162,137 +6630,21 @@ impl State {
             && applied_bytes < MAX_BYTES
             && apply_started.elapsed() < MAX_TIME
         {
-            let Some(event) = self.network_inbox.pop_front() else {
-                break;
-            };
-            applied_bytes = applied_bytes.saturating_add(event.estimated_bytes());
-            applied += 1;
-            match event {
-                NetworkInbound::PlayerPosition {
-                    id,
-                    sequence,
-                    sender_time_millis,
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    pitch,
-                } => {
-                    let replace = self
-                        .network_latest_positions
-                        .get(&id)
-                        .map_or(true, |old| sequence > old.0);
-                    if replace {
-                        self.network_latest_positions
-                            .insert(id, (sequence, sender_time_millis, x, y, z, yaw, pitch));
-                    }
-                }
-                other => self.handle_single_network_event(other),
-            }
-        }
-        let mut keys: Vec<_> = self.network_latest_positions.keys().copied().collect();
-        keys.sort_unstable();
-        for id in keys {
-            if applied >= MAX_EVENTS
-                || applied_bytes >= MAX_BYTES
-                || apply_started.elapsed() >= MAX_TIME
-            {
-                break;
-            }
-            let Some((sequence, sender_time_millis, x, y, z, yaw, pitch)) =
-                self.network_latest_positions.remove(&id)
+            let remaining_bytes = MAX_BYTES.saturating_sub(applied_bytes);
+            let Some((event, event_bytes)) = self.network_staging.pop_next_if_fits(remaining_bytes)
             else {
-                continue;
+                break;
             };
-            let event = NetworkInbound::PlayerPosition {
-                id,
-                sequence,
-                sender_time_millis,
-                x,
-                y,
-                z,
-                yaw,
-                pitch,
-            };
-            applied_bytes = applied_bytes.saturating_add(event.estimated_bytes());
+            applied_bytes = applied_bytes.saturating_add(event_bytes);
             applied += 1;
             self.handle_single_network_event(event);
         }
-        let mut entity_keys: Vec<_> = self.network_latest_entities.keys().copied().collect();
-        entity_keys.sort_unstable();
-        for id in entity_keys {
-            if applied >= MAX_EVENTS
-                || applied_bytes >= MAX_BYTES
-                || apply_started.elapsed() >= MAX_TIME
-            {
-                break;
-            }
-            let Some((sequence, dimension, state)) = self.network_latest_entities.remove(&id)
-            else {
-                continue;
-            };
-            let event = NetworkInbound::EntityState {
-                dimension,
-                sequence,
-                state,
-            };
-            applied_bytes = applied_bytes.saturating_add(event.estimated_bytes());
-            applied += 1;
-            self.handle_single_network_event(event);
-        }
-        for map_kind in 0..2 {
-            let mut keys: Vec<_> = if map_kind == 0 {
-                self.network_latest_health.keys().copied().collect()
-            } else {
-                self.network_latest_effects.keys().copied().collect()
-            };
-            keys.sort_unstable();
-            for key in keys {
-                if applied >= MAX_EVENTS
-                    || applied_bytes >= MAX_BYTES
-                    || apply_started.elapsed() >= MAX_TIME
-                {
-                    break;
-                }
-                let event = if map_kind == 0 {
-                    self.network_latest_health.remove(&key)
-                } else {
-                    self.network_latest_effects.remove(&key)
-                };
-                let Some(event) = event else {
-                    continue;
-                };
-                applied_bytes = applied_bytes.saturating_add(event.estimated_bytes());
-                applied += 1;
-                self.handle_single_network_event(event);
-            }
-        }
-        if applied < MAX_EVENTS && applied_bytes < MAX_BYTES && apply_started.elapsed() < MAX_TIME {
-            if let Some(event) = self.network_latest_time_sync.take() {
-                self.handle_single_network_event(event);
-            }
-        }
-
-        // Keep queue telemetry tied to the actual persistent structures. Values
-        // are deliberately reported as unavailable nowhere: all four counts and
-        // byte totals are directly measurable from the inbox/latest maps.
-        let latest_count = self.network_latest_positions.len()
-            + self.network_latest_entities.len()
-            + self.network_latest_health.len()
-            + self.network_latest_effects.len()
-            + usize::from(self.network_latest_time_sync.is_some());
-        // Match the fixed footprint used by `estimated_bytes`; transport
-        // payload sizes are not exposed by the network handles.
-        let latest_bytes = latest_count.saturating_mul(std::mem::size_of::<NetworkInbound>());
-        let reliable_bytes: u64 = self
-            .network_inbox
-            .iter()
-            .map(|event| event.estimated_bytes() as u64)
-            .sum();
-        self.perf_counters.network_inbound_reliable_pending = self.network_inbox.len() as u64;
-        self.perf_counters.network_inbound_reliable_bytes = reliable_bytes;
-        self.perf_counters.network_inbound_latest_pending = latest_count as u64;
-        self.perf_counters.network_inbound_latest_bytes = latest_bytes as u64;
+        self.perf_counters.network_inbound_reliable_pending =
+            self.network_staging.reliable_len() as u64;
+        self.perf_counters.network_inbound_reliable_bytes = self.network_staging.reliable_bytes();
+        self.perf_counters.network_inbound_latest_pending =
+            self.network_staging.latest_len() as u64;
+        self.perf_counters.network_inbound_latest_bytes = self.network_staging.latest_bytes();
     }
 
     fn clear_replicated_entities(&mut self) {
@@ -6329,7 +6681,7 @@ impl State {
             .replicated_entities
             .get(&state.entity_id)
             .and_then(|replicated| self.entity_manager.get_by_id(replicated.local_entity_id))
-            .is_none_or(|entity| entity.entity_type != entity_type);
+            .map_or(true, |entity| entity.entity_type != entity_type);
         if needs_spawn {
             if let Some(previous) = self.replicated_entities.remove(&state.entity_id) {
                 self.entity_manager.remove_by_id(previous.local_entity_id);
@@ -6399,12 +6751,13 @@ impl State {
                     .map(|state| (replicated.local_entity_id, state))
             })
             .collect();
+        let moved_ids: Vec<_> = samples.iter().map(|(local_id, _)| *local_id).collect();
         for (local_id, state) in samples {
             if let Some(entity) = self.entity_manager.get_by_id_mut(local_id) {
                 apply_entity_wire_state(entity, state);
             }
         }
-        self.entity_manager.sync_positions();
+        self.entity_manager.sync_entity_positions(&moved_ids);
     }
 
     fn handle_single_network_event(&mut self, event: NetworkInbound) {
@@ -7406,48 +7759,60 @@ impl State {
     ) {
         let r_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
         if let Some(region) = render_regions.get_mut(&r_coord) {
-            if let Some(levels) = &mesh.levels {
-                for level in levels {
-                    if let Some(h) = &level.opaque.handle {
-                        if let Err(error) = region.deallocate_handle(h) {
-                            eprintln!("[RenderRegion] deallocate failed: {error:?}");
+            let mesh_has_resident_section = mesh.has_resident_section();
+            let (mesh_has_handles, mesh_has_matching_handle) =
+                mesh.allocation_handle_region_membership(region.region_instance_id);
+            for section in &mesh.sections {
+                if let Some(levels) = &section.levels {
+                    for level in levels {
+                        if let Some(h) = &level.opaque.handle {
+                            if let Err(error) = region.deallocate_handle(h) {
+                                eprintln!("[RenderRegion] deallocate failed: {error:?}");
+                            }
                         }
-                    }
-                    if let Some(h) = &level.transparent.handle {
-                        if let Err(error) = region.deallocate_handle(h) {
-                            eprintln!("[RenderRegion] deallocate failed: {error:?}");
+                        if let Some(h) = &level.transparent.handle {
+                            if let Err(error) = region.deallocate_handle(h) {
+                                eprintln!("[RenderRegion] deallocate failed: {error:?}");
+                            }
                         }
                     }
                 }
             }
-            region.active_chunks = region.active_chunks.saturating_sub(1);
-            if region.active_chunks == 0 {
+            if should_decrement_region_active_chunks(
+                mesh_has_resident_section,
+                mesh_has_handles,
+                mesh_has_matching_handle,
+            ) {
+                region.active_chunks = region.active_chunks.saturating_sub(1);
+            }
+            let arena_is_empty =
+                region.vertex_freelist.used_units() == 0 && region.index_freelist.used_units() == 0;
+            if region.active_chunks == 0 && arena_is_empty {
                 render_regions.remove(&r_coord);
             }
         }
     }
 
-    fn upload_mesh_bundle(
+    fn upload_section_mesh_bundle(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         region_bind_group_layout: &wgpu::BindGroupLayout,
         render_regions: &mut std::collections::HashMap<(i32, i32), RenderRegion>,
-        coord: (i32, i32),
-        existing_mesh: &mut ChunkMesh,
-        bundle: &crate::chunk_render::ChunkMeshBundle,
+        existing_section: &mut GpuSectionMesh,
+        bundle: &crate::chunk_render::SectionMeshBundle,
         terrain_generation: u64,
-        chunk_lifetime: u64,
+        register_resident_chunk: bool,
     ) -> ([GpuMeshLevel; 3], UploadMetrics) {
+        let coord = (bundle.identity.key.cx, bundle.identity.key.cz);
         let r_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
-        let is_new = existing_mesh.levels.is_none();
         let region = render_regions
             .entry(r_coord)
             .or_insert_with(|| RenderRegion::new(device, region_bind_group_layout, r_coord));
-        if is_new {
+        if register_resident_chunk {
             region.active_chunks += 1;
         }
 
-        if let Some(levels) = &existing_mesh.levels {
+        if let Some(levels) = &existing_section.levels {
             for level in levels {
                 if let Some(h) = &level.opaque.handle {
                     if let Err(error) = region.deallocate_handle(h) {
@@ -7467,15 +7832,15 @@ impl State {
             let data = &bundle.levels[index];
             let owner_opaque = crate::chunk_render::allocation_owner(
                 terrain_generation,
-                chunk_lifetime,
-                0,
+                bundle.identity.lifetime,
+                bundle.identity.key.section_y,
                 index as u8,
                 0,
             );
             let owner_transparent = crate::chunk_render::allocation_owner(
                 terrain_generation,
-                chunk_lifetime,
-                0,
+                bundle.identity.lifetime,
+                bundle.identity.key.section_y,
                 index as u8,
                 1,
             );
@@ -7499,19 +7864,54 @@ impl State {
         lifetime
     }
 
-    fn invalidate_chunk_mesh(&mut self, coord: (i32, i32), reason: DependencyReason) -> bool {
-        self.chunk_manager.acknowledge_mesh_invalidation(&coord);
+    fn current_section_identity(&self, key: SectionKey) -> Option<SectionIdentity> {
+        let lifetime = self.chunk_lifetimes.get(&(key.cx, key.cz)).copied()?;
+        let revision = self
+            .chunk_meshes
+            .get(&(key.cx, key.cz))?
+            .section(key.section_y as usize)?
+            .revision;
+        Some(SectionIdentity::new(key, revision, lifetime))
+    }
+
+    fn invalidate_section_mesh(&mut self, key: SectionKey, reason: DependencyReason) -> bool {
+        self.chunk_manager
+            .acknowledge_section_mesh_invalidation(&key);
+        let Some(lifetime) = self.chunk_lifetimes.get(&(key.cx, key.cz)).copied() else {
+            return false;
+        };
+        let Some(section) = self
+            .chunk_meshes
+            .get_mut(&(key.cx, key.cz))
+            .and_then(|mesh| mesh.section_mut(key.section_y as usize))
+        else {
+            return false;
+        };
+        section.invalidate();
+        self.los_world_revision = self.los_world_revision.wrapping_add(1);
+        let identity = SectionIdentity::new(key, section.revision, lifetime);
         let player_chunk = (
             (self.player_physics.position.x / CHUNK_WIDTH as f32).floor() as i32,
             (self.player_physics.position.z / CHUNK_DEPTH as f32).floor() as i32,
         );
-        invalidate_mesh_and_enqueue(
-            &mut self.chunk_meshes,
-            &mut self.scheduler,
-            coord,
-            reason,
-            player_chunk,
-        )
+        self.section_scheduler
+            .enqueue(identity, reason, player_chunk);
+        if self.section_storage_compaction_queued.insert(key) {
+            self.section_storage_compaction_queue.push_back(key);
+        }
+        true
+    }
+
+    fn invalidate_chunk_mesh(&mut self, coord: (i32, i32), reason: DependencyReason) -> bool {
+        self.chunk_manager.acknowledge_mesh_invalidation(&coord);
+        let mut invalidated = false;
+        for section_y in 0..SECTION_COUNT {
+            invalidated |= self.invalidate_section_mesh(
+                SectionKey::new(coord.0, section_y as u16, coord.1),
+                reason,
+            );
+        }
+        invalidated
     }
 
     fn invalidate_chunk_meshes(
@@ -7526,20 +7926,27 @@ impl State {
 
     /// Applies the same one-voxel halo dependency used by `MeshSnapshot`.
     /// Cardinal and diagonal dependents are tagged as derived AO work.
-    fn invalidate_block_mesh_dependencies(&mut self, wx: i32, wz: i32, reason: DependencyReason) {
-        let owner = (
+    fn invalidate_block_mesh_dependencies(
+        &mut self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        reason: DependencyReason,
+    ) {
+        let owner = SectionKey::new(
             wx.div_euclid(CHUNK_WIDTH as i32),
+            (wy as usize / crate::world::SECTION_SIZE) as u16,
             wz.div_euclid(CHUNK_DEPTH as i32),
         );
         let mut dependencies = std::collections::HashSet::new();
-        mark_block_mesh_dependencies(&mut dependencies, wx, wz);
-        for coord in dependencies {
-            let dependency_reason = if coord == owner {
+        mark_section_mesh_dependencies(&mut dependencies, wx, wy, wz);
+        for key in dependencies {
+            let dependency_reason = if key == owner {
                 reason
             } else {
                 DependencyReason::Ao
             };
-            self.invalidate_chunk_mesh(coord, dependency_reason);
+            self.invalidate_section_mesh(key, dependency_reason);
         }
     }
 
@@ -7560,7 +7967,7 @@ impl State {
                 break;
             };
 
-            if let TerrainWorkerResult::Meshed(_) = &result {
+            if let TerrainWorkerResult::SectionMeshed(_) = &result {
                 let elapsed = integrate_started.elapsed();
                 if integrated_meshes >= crate::chunk_schedule::MAX_INTEGRATE_MESHES
                     || integrated_bytes >= crate::chunk_schedule::MAX_INTEGRATE_UPLOAD_BYTES
@@ -7597,15 +8004,22 @@ impl State {
 
                     let (cx, cz) = result.coord;
                     if result.mutated {
-                        if self.mutation_revisions.ensure_at_least(
+                        match self.mutation_revisions.ensure_at_least(
                             self.current_dimension,
                             cx,
                             cz,
                             1,
                         ) {
-                            self.mutation_revision_generation =
-                                self.mutation_revision_generation.saturating_add(1);
-                            self.mutation_index_dirty = true;
+                            Ok(true) => {
+                                self.mutation_revision_generation =
+                                    self.mutation_revision_generation.saturating_add(1);
+                                self.mutation_index_dirty = true;
+                            }
+                            Ok(false) => {}
+                            Err(error) => self.report_mutation_revision_error(
+                                error,
+                                "integrating a mutated streamed chunk",
+                            ),
                         }
                     }
                     self.chunk_manager.chunks.insert(result.coord, result.chunk);
@@ -7691,53 +8105,52 @@ impl State {
                         self.invalidate_chunk_mesh(coord, DependencyReason::Light);
                     }
                 }
-                TerrainWorkerResult::Meshed(result) => {
-                    let expected = self.chunk_mesh_in_flight.get(&result.coord).copied();
-                    if expected == Some((result.lifetime, result.revision)) {
-                        self.chunk_mesh_in_flight.remove(&result.coord);
+                TerrainWorkerResult::SectionMeshed(result) => {
+                    let identity = result.bundle.identity;
+                    let expected = self.section_scheduler.in_flight.get(&identity.key).copied();
+                    if expected == Some(identity) {
+                        self.section_scheduler.complete(identity);
                     }
-                    let current_lifetime = self.chunk_lifetimes.get(&result.coord).copied();
-                    let current_revision = self
-                        .chunk_meshes
-                        .get(&result.coord)
-                        .map(|mesh| mesh.revision);
-                    if !chunk_mesh_result_is_current(
+                    let current_identity = self.current_section_identity(identity.key);
+                    if !section_mesh_result_is_current(
                         expected,
-                        result.lifetime,
-                        result.revision,
+                        identity,
                         result.generation,
                         self.terrain_generation,
-                        current_lifetime,
-                        current_revision,
+                        current_identity,
                     ) {
                         self.perf_counters.stale_results =
                             self.perf_counters.stale_results.saturating_add(1);
                         continue;
                     }
-                    let Some(mesh) = self.chunk_meshes.get_mut(&result.coord) else {
+                    let coord = (identity.key.cx, identity.key.cz);
+                    let region_coord = crate::chunk_render::chunk_to_region_coord(coord.0, coord.1);
+                    let register_resident_chunk =
+                        self.chunk_meshes.get(&coord).is_some_and(|mesh| {
+                            !chunk_mesh_is_registered_with_region(
+                                mesh,
+                                self.render_regions.get(&region_coord),
+                            )
+                        });
+                    let Some(mesh) = self.chunk_meshes.get_mut(&coord) else {
                         continue;
                     };
-                    let chunk_lifetime = self
-                        .chunk_lifetimes
-                        .get(&result.coord)
-                        .copied()
-                        .unwrap_or(0);
-                    let (levels, upload_metrics) = Self::upload_mesh_bundle(
+                    let Some(section) = mesh.section_mut(identity.key.section_y as usize) else {
+                        continue;
+                    };
+                    let (levels, upload_metrics) = Self::upload_section_mesh_bundle(
                         &self.device,
                         &self.queue,
                         &self.region_bind_group_layout,
                         &mut self.render_regions,
-                        result.coord,
-                        mesh,
+                        section,
                         &result.bundle,
                         self.terrain_generation,
-                        chunk_lifetime,
+                        register_resident_chunk,
                     );
-                    mesh.levels = Some(levels);
-                    mesh.section_connectivity = result
-                        .bundle
-                        .section_connectivity
-                        .map(crate::culling::SectionConnectivityState::Valid);
+                    section.levels = Some(levels);
+                    section.connectivity =
+                        crate::culling::SectionConnectivityState::Valid(result.bundle.connectivity);
                     let upload_elapsed = Duration::from_nanos(upload_metrics.elapsed_ns);
                     gpu_upload_elapsed += upload_elapsed;
                     self.gpu_upload_scopes_frame
@@ -7746,11 +8159,8 @@ impl State {
                         .perf_counters
                         .upload_bytes_frame
                         .saturating_add(upload_metrics.bytes);
-                    let gpu_bytes = mesh.gpu_bytes() as u64;
-                    mesh.meshed_revision = result.revision;
-                    if !mesh.needs_rebuild() {
-                        self.scheduler.remove_dirty(&result.coord);
-                    }
+                    let gpu_bytes = section.gpu_bytes() as u64;
+                    section.meshed_revision = identity.revision;
                     integrated_meshes += 1;
                     integrated_bytes += gpu_bytes;
                 }
@@ -7808,39 +8218,34 @@ impl State {
         });
     }
 
-    fn schedule_chunk_mesh(&mut self, coord: (i32, i32), default_sky_light: u8) -> bool {
-        if self.chunk_mesh_in_flight.contains_key(&coord)
-            || self.chunk_mesh_in_flight.len() >= MAX_CHUNK_MESH_JOBS
+    fn schedule_section_mesh(&mut self, work: crate::chunk_schedule::DirtySectionWork) -> bool {
+        let key = work.identity.key;
+        if self.section_scheduler.is_in_flight(key)
+            || self.section_scheduler.in_flight.len() >= MAX_CHUNK_MESH_JOBS
         {
             return false;
         }
-        let Some(chunk) = self.chunk_manager.chunks.get(&coord).cloned() else {
+        if !self.chunk_manager.chunks.contains_key(&(key.cx, key.cz)) {
             return false;
-        };
-        let Some(mesh) = self.chunk_meshes.get(&coord) else {
-            return false;
-        };
-        let Some(lifetime) = self.chunk_lifetimes.get(&coord).copied() else {
-            return false;
-        };
-        let revision = mesh.revision;
-        let Some(snapshot) =
-            MeshSnapshot::capture(coord, &self.chunk_manager.chunks, default_sky_light)
+        }
+        let Some(section) = self
+            .chunk_meshes
+            .get(&(key.cx, key.cz))
+            .and_then(|mesh| mesh.section(key.section_y as usize))
         else {
             return false;
         };
-        self.scheduler.remove_dirty(&coord);
-        self.chunk_mesh_in_flight
-            .insert(coord, (lifetime, revision));
+        if !section.needs_rebuild() || self.current_section_identity(key) != Some(work.identity) {
+            return false;
+        }
+        let snapshot = self.chunk_manager.capture_section_halo(key);
+        self.section_scheduler.mark_in_flight(work);
         let sender = self.terrain_worker_tx.clone();
         let generation = self.terrain_generation;
         rayon::spawn(move || {
-            let bundle = chunk.generate_mesh_bundle(|x, y, z| snapshot.get(x, y, z));
-            let _ = sender.send(TerrainWorkerResult::Meshed(ChunkMeshResult {
-                coord,
+            let bundle = Chunk::generate_section_mesh_bundle_from_halo(work.identity, &snapshot);
+            let _ = sender.send(TerrainWorkerResult::SectionMeshed(SectionMeshResult {
                 generation,
-                lifetime,
-                revision,
                 bundle,
             }));
         });
@@ -7851,16 +8256,21 @@ impl State {
         if !self.network_ready {
             return;
         }
-        let unreported_mutations = self.chunk_manager.drain_mesh_invalidations();
-        self.invalidate_chunk_meshes(unreported_mutations, DependencyReason::Block);
+        let unreported_sections = self.chunk_manager.drain_section_mesh_invalidations();
+        for key in unreported_sections {
+            self.invalidate_section_mesh(key, DependencyReason::Block);
+        }
+        // Section invalidations are authoritative; drain the legacy chunk set
+        // so it cannot trigger a redundant whole-column rebuild.
+        self.chunk_manager.drain_mesh_invalidations();
         let player_pos = self.player_physics.position;
         let px = (player_pos.x / 16.0).floor() as i32;
         let pz = (player_pos.z / 16.0).floor() as i32;
         let r = self.chunk_manager.render_distance;
         self.process_terrain_worker_results((px, pz));
-        // Scheduling is intentionally separate from execution: GPU copies and
-        // allocator swaps are performed by the frame-budgeted compaction
-        // worker, never as a synchronous rebuild of all regions.
+        self.process_terrain_compaction();
+        // Only empty, previously-grown arenas are staged. Processing is
+        // bounded to one region per frame and never rebases a live handle.
         self.schedule_terrain_compaction();
 
         let target_changed = self.scheduler.last_player_chunk != Some((px, pz))
@@ -7917,7 +8327,7 @@ impl State {
                     }
                 }
                 self.chunk_lifetimes.remove(&(cx, cz));
-                self.chunk_mesh_in_flight.remove(&(cx, cz));
+                self.section_scheduler.remove_chunk(cx, cz);
                 self.scheduler.remove_dirty(&(cx, cz));
             }
             let mut removed_mesh_keys = Vec::new();
@@ -7951,6 +8361,7 @@ impl State {
             self.scheduler.last_render_distance = r;
             self.scheduler.last_dimension = Some(self.current_dimension);
             self.scheduler.reprioritize_dirty((px, pz));
+            self.section_scheduler.reprioritize((px, pz));
         }
 
         // 2. Dispatch chunk loads from precomputed spiral load queue
@@ -7972,38 +8383,40 @@ impl State {
 
         // 3. Dispatch dirty meshes prioritized by distance to player
         let available_mesh_slots =
-            MAX_CHUNK_MESH_JOBS.saturating_sub(self.chunk_mesh_in_flight.len());
-        if available_mesh_slots > 0 && self.scheduler.dirty_len() > 0 {
-            let default_sky_light = if self.current_dimension.has_sky_light() {
-                15
-            } else {
-                0
-            };
+            MAX_CHUNK_MESH_JOBS.saturating_sub(self.section_scheduler.in_flight.len());
+        if available_mesh_slots > 0 && self.section_scheduler.len() > 0 {
             let r_i32 = r as i32;
             let mut dispatched = 0;
-            let mut deferred = Vec::with_capacity(self.chunk_mesh_in_flight.len());
+            let mut deferred = Vec::with_capacity(self.section_scheduler.in_flight.len().max(1));
             while dispatched < available_mesh_slots {
-                let Some(work) = self.scheduler.pop_nearest_dirty((px, pz), r_i32) else {
+                let Some(work) = self.section_scheduler.pop_nearest((px, pz), r_i32) else {
                     break;
                 };
-                let Some(mesh) = self.chunk_meshes.get(&work.coord) else {
+                let key = work.identity.key;
+                let Some(section) = self
+                    .chunk_meshes
+                    .get(&(key.cx, key.cz))
+                    .and_then(|mesh| mesh.section(key.section_y as usize))
+                else {
                     continue;
                 };
-                if !mesh.needs_rebuild() {
+                if !section.needs_rebuild()
+                    || self.current_section_identity(key) != Some(work.identity)
+                {
                     continue;
                 }
-                if self.chunk_mesh_in_flight.contains_key(&work.coord) {
+                if self.section_scheduler.is_in_flight(key) {
                     deferred.push(work);
                     continue;
                 }
-                if self.schedule_chunk_mesh(work.coord, default_sky_light) {
+                if self.schedule_section_mesh(work) {
                     dispatched += 1;
                 } else {
                     deferred.push(work);
                 }
             }
             for work in deferred {
-                self.scheduler.requeue_dirty(work, (px, pz));
+                self.section_scheduler.requeue(work, (px, pz));
             }
         }
     }
@@ -8062,6 +8475,7 @@ impl State {
                     bytemuck::cast_slice(&[self.camera_uniform]),
                 );
                 let upload_elapsed = upload_started.elapsed();
+                self.gpu_upload_time_frame += upload_elapsed;
                 self.gpu_upload_scopes_frame
                     .record(crate::perf::UploadSource::Camera as usize, upload_elapsed);
                 self.perf_counters.upload_bytes_frame = self
@@ -8156,9 +8570,11 @@ impl State {
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
             }
             self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
+            let lighting_elapsed = lighting_started.elapsed();
+            self.lighting_time_frame += lighting_elapsed;
             self.lighting_scopes_frame.record(
                 crate::perf::LightingSource::Fluid as usize,
-                lighting_started.elapsed(),
+                lighting_elapsed,
             );
         }
 
@@ -8173,9 +8589,11 @@ impl State {
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
             }
             self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
+            let lighting_elapsed = lighting_started.elapsed();
+            self.lighting_time_frame += lighting_elapsed;
             self.lighting_scopes_frame.record(
                 crate::perf::LightingSource::Fluid as usize,
-                lighting_started.elapsed(),
+                lighting_elapsed,
             );
         }
 
@@ -8213,6 +8631,7 @@ impl State {
         let redstone_elapsed = redstone_started.elapsed();
         self.perf_recorder
             .record(crate::perf::ScopeId::Redstone, redstone_elapsed);
+        self.lighting_time_frame += redstone_elapsed;
         self.lighting_scopes_frame.record(
             crate::perf::LightingSource::Redstone as usize,
             redstone_elapsed,
@@ -8466,7 +8885,6 @@ impl State {
                     }
                 }
             }
-            self.entity_manager.sync_positions();
         }
 
         // Void damage check
@@ -8789,12 +9207,6 @@ impl State {
         self.update_replicated_entity_interpolation();
         self.update_network_position(dt);
 
-        self.perf_counters.upload_bytes_frame = 0;
-        self.gpu_upload_time_frame = Duration::ZERO;
-        self.lighting_time_frame = Duration::ZERO;
-        self.lighting_scopes_frame.reset();
-        self.gpu_upload_scopes_frame.reset();
-
         self.debug_frame_time_accumulator += dt;
         self.debug_frame_samples += 1;
         if self.debug_frame_time_accumulator >= DEBUG_STATS_INTERVAL {
@@ -8866,9 +9278,11 @@ impl State {
         if self.current_dimension == crate::dimension::Dimension::Overworld {
             let lighting_started = Instant::now();
             self.update_weather_effects(dt, false);
+            let lighting_elapsed = lighting_started.elapsed();
+            self.lighting_time_frame += lighting_elapsed;
             self.lighting_scopes_frame.record(
                 crate::perf::LightingSource::Weather as usize,
-                lighting_started.elapsed(),
+                lighting_elapsed,
             );
         }
 
@@ -8931,10 +9345,10 @@ impl State {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
-        self.gpu_upload_scopes_frame.record(
-            crate::perf::UploadSource::Camera as usize,
-            upload_started.elapsed(),
-        );
+        let upload_elapsed = upload_started.elapsed();
+        self.gpu_upload_time_frame += upload_elapsed;
+        self.gpu_upload_scopes_frame
+            .record(crate::perf::UploadSource::Camera as usize, upload_elapsed);
         self.perf_counters.upload_bytes_frame = self
             .perf_counters
             .upload_bytes_frame
@@ -9002,6 +9416,15 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
+        // Frame instrumentation starts before network ingestion and fixed ticks
+        // so catch-up simulation and terrain integration remain in this frame's
+        // aggregate and per-category samples.
+        self.perf_counters.upload_bytes_frame = 0;
+        self.gpu_upload_time_frame = Duration::ZERO;
+        self.lighting_time_frame = Duration::ZERO;
+        self.lighting_scopes_frame.reset();
+        self.gpu_upload_scopes_frame.reset();
+
         self.network_time += f64::from(dt);
         let network_started = Instant::now();
         self.drain_network_events();
@@ -9034,6 +9457,7 @@ impl State {
         }
 
         self.update_frame(dt);
+        self.process_section_storage_compaction();
     }
 
     fn update_weather_effects(&mut self, dt: f32, lightning_due: bool) {
@@ -9327,7 +9751,7 @@ impl State {
         }
         mark_block_mesh_dependencies(&mut dirty_chunks, wx, wz);
         self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Weather);
-        self.invalidate_block_mesh_dependencies(wx, wz, DependencyReason::Weather);
+        self.invalidate_block_mesh_dependencies(wx, wy, wz, DependencyReason::Weather);
         // Fan weather-driven block placement out to connected clients.
         self.broadcast_block_change(wx, wy, wz, block);
     }
@@ -9731,9 +10155,11 @@ impl State {
         self.check_and_break_unsupported_above(x, y, z, &mut dirty_chunks);
         self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
         self.broadcast_block_change(x, y, z, block);
+        let lighting_elapsed = lighting_started.elapsed();
+        self.lighting_time_frame += lighting_elapsed;
         self.lighting_scopes_frame.record(
             crate::perf::LightingSource::Block as usize,
-            lighting_started.elapsed(),
+            lighting_elapsed,
         );
     }
 
@@ -9855,7 +10281,9 @@ impl State {
             let should_replace = self
                 .pending_chunk_payloads
                 .get(&(cx, cz))
-                .is_none_or(|(existing_revision, _, _)| revision >= *existing_revision);
+                .map_or(true, |(existing_revision, _, _)| {
+                    revision >= *existing_revision
+                });
             if should_replace {
                 self.pending_chunk_payloads
                     .insert((cx, cz), (revision, blocks, block_states));
@@ -10004,9 +10432,11 @@ impl State {
 
         // Fan the authoritative break out to connected clients.
         self.broadcast_block_change(wx, wy, wz, BlockType::Air);
+        let lighting_elapsed = lighting_started.elapsed();
+        self.lighting_time_frame += lighting_elapsed;
         self.lighting_scopes_frame.record(
             crate::perf::LightingSource::Block as usize,
-            lighting_started.elapsed(),
+            lighting_elapsed,
         );
     }
 
@@ -10717,7 +11147,7 @@ impl State {
 
         if !is_left_click {
             let mut closest_entity: Option<(u64, f32)> = None;
-            for entity in &self.entity_manager.entities {
+            for entity in self.entity_manager.query_radius(self.camera.position, 4.0) {
                 if entity.entity_type == crate::entity::EntityType::Arrow
                     || entity.entity_type == crate::entity::EntityType::HeartParticle
                 {
@@ -12002,25 +12432,13 @@ impl State {
     }
 
     fn estimated_debug_memory_bytes(&self) -> usize {
-        let chunk_volume = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH;
-        let chunk_heap_bytes = chunk_volume
-            * (std::mem::size_of::<BlockType>() + 3 * std::mem::size_of::<u8>())
-            + CHUNK_WIDTH * CHUNK_DEPTH * std::mem::size_of::<u16>();
-        let chunks_bytes = self
+        let chunks_bytes: usize = self
             .chunk_manager
             .chunks
-            .len()
-            .saturating_mul(std::mem::size_of::<Chunk>() + chunk_heap_bytes);
-
-        let mesh_indices: usize = self
-            .chunk_meshes
             .values()
-            .map(ChunkMesh::total_indices)
+            .map(Chunk::memory_usage)
             .sum();
-        let mesh_vertices = mesh_indices.saturating_mul(2) / 3;
-        let mesh_bytes = mesh_vertices
-            .saturating_mul(std::mem::size_of::<TerrainVertex>())
-            .saturating_add(mesh_indices.saturating_mul(std::mem::size_of::<u32>()));
+        let mesh_bytes: usize = self.chunk_meshes.values().map(ChunkMesh::gpu_bytes).sum();
 
         let entities_bytes = self
             .entity_manager
@@ -12039,8 +12457,65 @@ impl State {
             .saturating_add(particles_bytes)
     }
 
+    fn poll_gpu_timestamp_readbacks(&mut self) {
+        if self
+            .gpu_timestamp_readback_slots
+            .iter()
+            .any(|slot| slot.status.lock().unwrap().state == GpuTimestampReadbackState::Mapping)
+        {
+            self.device.poll(wgpu::Maintain::Poll);
+        }
+
+        let mut newest_sample = None;
+        for slot in &self.gpu_timestamp_readback_slots {
+            let status = *slot.status.lock().unwrap();
+            if status.state != GpuTimestampReadbackState::Mapped {
+                continue;
+            }
+            let Some(submission_tag) = status.submission_tag else {
+                continue;
+            };
+
+            let slice = slot.buffer.slice(..);
+            let range = slice.get_mapped_range();
+            if range.len() == GPU_TIMESTAMP_READBACK_BYTES as usize {
+                let mut pass_timings_ns = [0; 7];
+                let period = f64::from(self.queue.get_timestamp_period());
+                for (pass_index, timing) in pass_timings_ns.iter_mut().enumerate() {
+                    let start_offset = pass_index * 16;
+                    let start = u64::from_ne_bytes(
+                        range[start_offset..start_offset + 8].try_into().unwrap(),
+                    );
+                    let end = u64::from_ne_bytes(
+                        range[start_offset + 8..start_offset + 16]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    *timing = (end.saturating_sub(start) as f64 * period) as u64;
+                }
+                let newest_known_tag = newest_sample
+                    .as_ref()
+                    .map(|(tag, _)| *tag)
+                    .or(self.gpu_pass_timing_submission_tag);
+                if newest_known_tag.map_or(true, |current| submission_tag > current) {
+                    newest_sample = Some((submission_tag, pass_timings_ns));
+                }
+            }
+            drop(range);
+            slot.buffer.unmap();
+            let consumed = slot.status.lock().unwrap().consume(submission_tag);
+            debug_assert!(consumed, "mapped timestamp slot must be consumed once");
+        }
+
+        if let Some((submission_tag, pass_timings_ns)) = newest_sample {
+            self.gpu_pass_timings_ns = pass_timings_ns;
+            self.gpu_pass_timings_valid = true;
+            self.gpu_pass_timing_submission_tag = Some(submission_tag);
+        }
+    }
+
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let allocs_before = crate::perf::alloc_count();
+        let allocs_before = crate::perf::thread_alloc_count();
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -12065,7 +12540,7 @@ impl State {
             || !self.chunk_meshes.contains_key(&(cam_sec_x, cam_sec_z));
 
         if !fail_open_section_vis {
-            crate::culling::traverse_section_visibility(
+            crate::culling::traverse_section_visibility_with_scratch(
                 cam_sec_x,
                 cam_sec_y_raw as usize,
                 cam_sec_z,
@@ -12074,9 +12549,11 @@ impl State {
                 |x, sy, z| {
                     self.chunk_meshes
                         .get(&(x, z))
-                        .map(|m| m.section_connectivity[sy].fail_open())
+                        .and_then(|mesh| mesh.section(sy))
+                        .map(|section| section.connectivity.fail_open())
                 },
                 &mut self.visible_sections_scratch,
+                &mut self.section_visibility_scratch,
             );
         }
 
@@ -12091,66 +12568,56 @@ impl State {
 
         let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
         self.terrain_candidates_scratch.clear();
-        let mut occluded_chunks = 0u64;
+        let mut occluded_sections = 0u64;
 
         for (&coord, mesh) in &self.chunk_meshes {
-            let Some(bounds) = mesh.finest_bounds() else {
-                continue;
-            };
+            for (section_y, section) in mesh.sections.iter().enumerate() {
+                let Some(bounds) = section.finest_bounds() else {
+                    continue;
+                };
 
-            // 1. Distance check
-            let distance_sq = bounds.center_distance_squared(cam_pos);
-            if distance_sq > render_distance_sq {
-                continue;
-            }
-
-            // 2. Frustum check
-            if !frustum.intersects_aabb(&bounds) {
-                continue;
-            }
-
-            // 3. Section visibility graph check
-            if !fail_open_section_vis {
-                let mut chunk_visible = false;
-                for sec_y in 0..16usize {
-                    if self
-                        .visible_sections_scratch
-                        .contains(&(coord.0, sec_y, coord.1))
-                    {
-                        chunk_visible = true;
-                        break;
-                    }
-                }
-                if !chunk_visible {
-                    occluded_chunks += 1;
+                let distance_sq = bounds.center_distance_squared(cam_pos);
+                if distance_sq > render_distance_sq || !frustum.intersects_aabb(&bounds) {
                     continue;
                 }
-            }
 
-            let lod = select_lod_for_bounds(cam_pos, bounds, lod_thresholds);
-            let Some(level) = mesh.level(lod) else {
-                continue;
-            };
+                if !fail_open_section_vis
+                    && !self
+                        .visible_sections_scratch
+                        .contains(&(coord.0, section_y, coord.1))
+                {
+                    occluded_sections += 1;
+                    continue;
+                }
 
-            if let Some(bounds) = level.opaque.bounds {
-                self.terrain_candidates_scratch.push(DrawCandidate::new(
-                    coord,
-                    bounds,
-                    level.opaque.num_indices(),
-                    DrawLayer::Opaque,
-                    lod,
-                    distance_sq,
-                ));
-            }
-            if let Some(bounds) = level.transparent.bounds {
-                self.terrain_candidates_scratch.push(DrawCandidate::new(
-                    coord,
-                    bounds,
-                    level.transparent.num_indices(),
-                    DrawLayer::Transparent,
-                    lod,
-                    distance_sq,
-                ));
+                let lod = select_lod_for_bounds(cam_pos, bounds, lod_thresholds);
+                let Some(level) = section.level(lod) else {
+                    continue;
+                };
+                let key = SectionKey::new(coord.0, section_y as u16, coord.1);
+
+                if let Some(bounds) = level.opaque.bounds {
+                    self.terrain_candidates_scratch
+                        .push(DrawCandidate::for_section(
+                            key,
+                            bounds,
+                            level.opaque.num_indices(),
+                            DrawLayer::Opaque,
+                            lod,
+                            distance_sq,
+                        ));
+                }
+                if let Some(bounds) = level.transparent.bounds {
+                    self.terrain_candidates_scratch
+                        .push(DrawCandidate::for_section(
+                            key,
+                            bounds,
+                            level.transparent.num_indices(),
+                            DrawLayer::Transparent,
+                            lod,
+                            distance_sq,
+                        ));
+                }
             }
         }
 
@@ -12163,11 +12630,11 @@ impl State {
         self.visible_chunk_count = draw_plan.visible_chunk_count();
         self.perf_counters.loaded_chunks = self.chunk_manager.chunks.len() as u64;
         self.perf_counters.visible_chunks = self.visible_chunk_count as u64;
-        self.perf_counters.occluded_chunks = occluded_chunks;
+        self.perf_counters.occluded_chunks = occluded_sections;
         self.perf_counters.terrain_candidates = terrain_candidate_count as u64;
         self.perf_counters.terrain_triangles = self.submitted_terrain_triangles;
         self.perf_counters.in_flight =
-            (self.chunk_load_in_flight.len() + self.chunk_mesh_in_flight.len()) as u64;
+            (self.chunk_load_in_flight.len() + self.section_scheduler.in_flight.len()) as u64;
         let total_committed: usize = self
             .render_regions
             .values()
@@ -12189,8 +12656,34 @@ impl State {
             terrain_prepare_started.elapsed(),
         );
 
-        self.frame_ring_index = (self.frame_ring_index + 1) % 3;
+        while let Ok(completed) = self.gpu_completion_rx.try_recv() {
+            self.frame_resource_pool.complete(completed);
+        }
+        let frame_submission_id = self.next_gpu_submission_id;
+        self.next_gpu_submission_id = self.next_gpu_submission_id.wrapping_add(1).max(1);
+        self.frame_ring_index = loop {
+            match self.frame_resource_pool.acquire(frame_submission_id) {
+                Ok(lease) => break lease.slot_id,
+                Err(crate::gpu_frame_resources::AcquireError::Exhausted { .. }) => {
+                    // The bounded three-slot pool never overwrites GPU-owned
+                    // instance data. Waiting is rare (only when CPU outruns all
+                    // configured frames in flight) and completion callbacks
+                    // reclaim the exact submission's slot.
+                    self.device.poll(wgpu::Maintain::Wait);
+                    while let Ok(completed) = self.gpu_completion_rx.try_recv() {
+                        self.frame_resource_pool.complete(completed);
+                    }
+                }
+            }
+        };
 
+        self.entity_los_manager.counters = crate::culling::CullingCounters::default();
+        self.entity_los_manager
+            .set_current_identity(crate::culling::LosIdentity {
+                dimension: self.current_dimension,
+                generation: self.terrain_generation,
+                world_revision: self.los_world_revision,
+            });
         // Poll entity LOS async results
         self.entity_los_manager.poll_results();
 
@@ -12202,7 +12695,6 @@ impl State {
         let mut entities_rendered = 0u64;
         let mut entities_frustum_culled = 0u64;
         let mut entities_occlusion_culled = 0u64;
-        let mut visible_entities = Vec::with_capacity(self.entity_manager.entities.len());
 
         let cam_cell = (
             cam_pos.x.floor() as i32,
@@ -12210,16 +12702,16 @@ impl State {
             cam_pos.z.floor() as i32,
         );
 
-        let render_candidates: Vec<&crate::entity::Entity> = self
+        for entity in self
             .entity_manager
             .query_radius(cam_pos, render_distance_sq.sqrt())
-            .collect();
-        for entity in render_candidates {
+        {
             // 1. Distance check
             let entity_render_dist_sq = render_distance_sq
                 * (self.settings.entity_distance_scale * self.settings.entity_distance_scale);
             let dist_sq = entity.position.distance_squared(cam_pos);
             if dist_sq > entity_render_dist_sq {
+                self.entity_los_manager.counters.distance += 1;
                 continue;
             }
 
@@ -12228,6 +12720,7 @@ impl State {
             let bounds = crate::chunk_render::MeshBounds::new(aabb.min, aabb.max);
             if !frustum.intersects_aabb(&bounds) {
                 entities_frustum_culled += 1;
+                self.entity_los_manager.counters.frustum += 1;
                 continue;
             }
 
@@ -12243,6 +12736,7 @@ impl State {
                     .contains(&(sec_x, valid_y, sec_z))
                 {
                     entities_occlusion_culled += 1;
+                    self.entity_los_manager.counters.section += 1;
                     continue;
                 }
             }
@@ -12259,20 +12753,18 @@ impl State {
             }
 
             entities_rendered += 1;
-            visible_entities.push(entity);
+            crate::mob_renderer::render_mobs(
+                std::iter::once(entity),
+                &self.chunk_manager,
+                &mut self.mob_cuboid_instances_scratch,
+                &mut self.mob_quad_instances_scratch,
+                self.total_time,
+            );
         }
 
         self.perf_counters.rendered_entities = entities_rendered;
         self.perf_counters.frustum_culled_entities = entities_frustum_culled;
         self.perf_counters.occlusion_culled_entities = entities_occlusion_culled;
-
-        crate::mob_renderer::render_mobs(
-            visible_entities,
-            &self.chunk_manager,
-            &mut self.mob_cuboid_instances_scratch,
-            &mut self.mob_quad_instances_scratch,
-            self.total_time,
-        );
 
         if self.third_person {
             crate::mob_renderer::render_local_player(
@@ -12374,22 +12866,11 @@ impl State {
                 0.0
             };
             let attack_swing = if self.left_mouse_pressed { 1.0 } else { 0.0 };
-            let current_held = self.inventory.hotbar[self.inventory.selected]
-                .map(|stack| stack.item)
-                .unwrap_or(Item::Air);
-            let item_changed = self.last_held_item != Some(current_held);
-            let swing_changed = (self.last_hand_walk_swing - walk_swing).abs() > 0.001
-                || (self.last_hand_attack_swing - attack_swing).abs() > 0.001;
-
-            if item_changed || swing_changed {
-                self.last_held_item = Some(current_held);
-                self.last_hand_walk_swing = walk_swing;
-                self.last_hand_attack_swing = attack_swing;
-
-                crate::hand_renderer::build_first_person_hand_mesh_into(
-                    &self.inventory,
-                    walk_swing,
-                    attack_swing,
+            let mesh_key = crate::hand_renderer::hand_mesh_key(&self.inventory);
+            if crate::hand_renderer::should_rebuild_hand_mesh(self.last_hand_mesh_key, mesh_key) {
+                self.last_hand_mesh_key = Some(mesh_key);
+                crate::hand_renderer::build_first_person_hand_base_mesh(
+                    mesh_key,
                     &mut self.hand_vertices_scratch,
                     &mut self.hand_indices_scratch,
                 );
@@ -12424,8 +12905,32 @@ impl State {
                         );
                 }
             }
-        } else {
-            self.hand_num_indices = 0;
+
+            // Animation is a per-frame uniform transform over the cached base
+            // mesh; walking and attacking never regenerate or upload vertices.
+            let animation =
+                crate::hand_renderer::HandAnimationUniform::from_swings(walk_swing, attack_swing);
+            let aspect = self.size.width.max(1) as f32 / self.size.height.max(1) as f32;
+            let hand_proj = Mat4::perspective_lh(f32::to_radians(70.0), aspect, 0.01, 10.0);
+            let combined = hand_proj * animation.matrix();
+            let mut hand_uniform = crate::camera::CameraUniform::new();
+            hand_uniform.view_proj = combined.to_cols_array_2d();
+            hand_uniform.inv_view_proj = combined.inverse().to_cols_array_2d();
+            hand_uniform.camera_pos = [0.0, 0.0, 0.0, 0.0];
+            let upload_started = Instant::now();
+            self.queue.write_buffer(
+                &self.hand_camera_buffer,
+                0,
+                bytemuck::bytes_of(&hand_uniform),
+            );
+            let elapsed = upload_started.elapsed();
+            gpu_upload_elapsed += elapsed;
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Entity as usize, elapsed);
+            self.perf_counters.upload_bytes_frame = self
+                .perf_counters
+                .upload_bytes_frame
+                .saturating_add(std::mem::size_of::<crate::camera::CameraUniform>() as u64);
         }
         entity_prepare_elapsed += hand_prepare_started.elapsed();
         self.perf_recorder.record(
@@ -12572,6 +13077,7 @@ impl State {
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
             );
             let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_elapsed;
             self.gpu_upload_scopes_frame
                 .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
@@ -12676,6 +13182,7 @@ impl State {
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
             );
             let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_elapsed;
             self.gpu_upload_scopes_frame
                 .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
@@ -12862,6 +13369,7 @@ impl State {
                 bytemuck::cast_slice(&ui_line_vertices[..ui_line_vert_len]),
             );
             let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_elapsed;
             self.gpu_upload_scopes_frame
                 .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
@@ -13190,6 +13698,7 @@ impl State {
             );
 
             let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_elapsed;
             self.gpu_upload_scopes_frame
                 .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
@@ -14582,6 +15091,26 @@ impl State {
                         &mut ui_line_vertices,
                     );
 
+                    let culling = self.entity_los_manager.counters;
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
+                        "CULL: DIST {} / FRUST {} / SEC {} / LOS {} / FAIL-OPEN {} / STALE {} / TIMEOUT {} / OVERFLOW {}",
+                        culling.distance,
+                        culling.frustum,
+                        culling.section,
+                        culling.los,
+                        culling.fail_open,
+                        culling.stale,
+                        culling.timeouts,
+                        culling.overflow
+                    );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
                     let terrain_indices = self.submitted_terrain_triangles.saturating_mul(3);
                     let rendered_indices = terrain_indices
                         + u64::from(self.mob_num_indices)
@@ -14615,7 +15144,7 @@ impl State {
                     self.debug_str_scratch.clear();
                     let _ = write!(
                         self.debug_str_scratch,
-                        "MEMORY EST: {:.1} MB",
+                        "MEMORY TRACKED: {:.1} MB",
                         self.estimated_debug_memory_bytes() as f64 / (1024.0 * 1024.0)
                     );
                     render_line(
@@ -14673,6 +15202,7 @@ impl State {
                     self.debug_str_scratch.clear();
                     if self.perf_counters.gpu_timestamps_supported
                         && self.perf_counters.gpu_timestamps_inside_passes
+                        && self.gpu_pass_timings_valid
                     {
                         let _ = write!(
                             self.debug_str_scratch,
@@ -14684,6 +15214,13 @@ impl State {
                             self.perf_counters.gpu_particles_ns as f64 / 1_000_000.0,
                             self.perf_counters.gpu_crack_ns as f64 / 1_000_000.0,
                             self.perf_counters.gpu_ui_ns as f64 / 1_000_000.0,
+                        );
+                    } else if self.perf_counters.gpu_timestamps_supported
+                        && self.perf_counters.gpu_timestamps_inside_passes
+                    {
+                        let _ = write!(
+                            self.debug_str_scratch,
+                            "GPU PASSES: N/A (WAITING FOR FIRST VALID TIMESTAMP SAMPLE)"
                         );
                     } else if self.perf_counters.gpu_timestamps_supported {
                         let _ = write!(
@@ -14778,44 +15315,59 @@ impl State {
                     // Queue telemetry is sampled once per frame and retained in the
                     // bounded 240-frame ring; show every queue family plus p95/p99.
                     if let Some(latest) = self.frame_perf_samples.back() {
-                        let q = latest.queues.clone();
-                        let mut queue_line =
-                            |name: &str, depth: Option<u64>, bytes: Option<u64>| {
-                                let p95 = crate::perf::frame_percentile(
-                                    &self.frame_perf_samples,
-                                    95,
-                                    |s| match name {
-                                        "IN" => s.queues.inbound_pending.unwrap_or(0),
-                                        "OUT" => s.queues.outbound_pending.unwrap_or(0),
-                                        "REL" => s.queues.reliable_pending.unwrap_or(0),
-                                        "CATCH" => s.queues.catchup_pending.unwrap_or(0),
-                                        _ => s.queues.save_queued_bytes.unwrap_or(0),
-                                    },
-                                );
-                                let p99 = crate::perf::frame_percentile(
-                                    &self.frame_perf_samples,
-                                    99,
-                                    |s| match name {
-                                        "IN" => s.queues.inbound_pending.unwrap_or(0),
-                                        "OUT" => s.queues.outbound_pending.unwrap_or(0),
-                                        "REL" => s.queues.reliable_pending.unwrap_or(0),
-                                        "CATCH" => s.queues.catchup_pending.unwrap_or(0),
-                                        _ => s.queues.save_queued_bytes.unwrap_or(0),
-                                    },
-                                );
-                                self.debug_str_scratch.clear();
-                                let _ = write!(self.debug_str_scratch, "Q {} D:{} B:{} DROP:{} RETRY:{} CANCEL:{} AGE:{}ms P95:{} P99:{}", name, depth.unwrap_or(0), bytes.unwrap_or(0), q.drops.unwrap_or(0), q.retries.unwrap_or(0), q.cancels.unwrap_or(0), q.oldest_age_ms.unwrap_or(0), p95, p99);
-                                render_line(
-                                    &self.debug_str_scratch,
-                                    [0.82, 0.94, 1.0, 1.0],
-                                    &mut ui_line_vertices,
-                                );
+                        let categories = latest.queues.categories.clone();
+                        for category in crate::perf::QueueCategory::ALL {
+                            let name = match category {
+                                crate::perf::QueueCategory::Inbound => "IN",
+                                crate::perf::QueueCategory::Outbound => "OUT",
+                                crate::perf::QueueCategory::Reliable => "REL",
+                                crate::perf::QueueCategory::CatchUp => "CATCH",
+                                crate::perf::QueueCategory::SaveProducer => "SAVE-P",
+                                crate::perf::QueueCategory::SaveWorker => "SAVE-W",
                             };
-                        queue_line("IN", q.inbound_pending, q.inbound_pending_bytes);
-                        queue_line("OUT", q.outbound_pending, q.outbound_bytes);
-                        queue_line("REL", q.reliable_pending, q.reliable_bytes);
-                        queue_line("CATCH", q.catchup_pending, q.catchup_bytes);
-                        queue_line("SAVE", q.save_queued_bytes, q.save_queued_bytes);
+                            let sample = categories.get(&category).cloned().unwrap_or_default();
+                            let p95 = crate::perf::frame_percentile(
+                                &self.frame_perf_samples,
+                                95,
+                                |frame| {
+                                    frame
+                                        .queues
+                                        .categories
+                                        .get(&category)
+                                        .map_or(0, |queue| queue.depth)
+                                },
+                            );
+                            let p99 = crate::perf::frame_percentile(
+                                &self.frame_perf_samples,
+                                99,
+                                |frame| {
+                                    frame
+                                        .queues
+                                        .categories
+                                        .get(&category)
+                                        .map_or(0, |queue| queue.depth)
+                                },
+                            );
+                            self.debug_str_scratch.clear();
+                            let _ = write!(
+                                self.debug_str_scratch,
+                                "Q {} D:{} B:{} DROP:{} RETRY:{} CANCEL:{} AGE:{}ms P95:{} P99:{}",
+                                name,
+                                sample.depth,
+                                sample.bytes,
+                                sample.drops,
+                                sample.retries,
+                                sample.cancels,
+                                sample.oldest_age_ms,
+                                p95,
+                                p99
+                            );
+                            render_line(
+                                &self.debug_str_scratch,
+                                [0.82, 0.94, 1.0, 1.0],
+                                &mut ui_line_vertices,
+                            );
+                        }
                     }
 
                     self.debug_str_scratch.clear();
@@ -15031,10 +15583,10 @@ impl State {
                 0,
                 bytemuck::cast_slice(&ui_textured_vertices[..ui_textured_vert_len]),
             );
-            self.gpu_upload_scopes_frame.record(
-                crate::perf::UploadSource::Ui as usize,
-                upload_started.elapsed(),
-            );
+            let upload_elapsed = upload_started.elapsed();
+            self.gpu_upload_time_frame += upload_elapsed;
+            self.gpu_upload_scopes_frame
+                .record(crate::perf::UploadSource::Ui as usize, upload_elapsed);
             self.perf_counters.upload_bytes_frame =
                 self.perf_counters.upload_bytes_frame.saturating_add(
                     ((ui_vert_len + ui_line_vert_len + ui_textured_vert_len)
@@ -15054,8 +15606,6 @@ impl State {
             ui_prepare_started.elapsed(),
         );
         self.gpu_upload_time_frame += gpu_upload_elapsed;
-        self.perf_recorder
-            .record(crate::perf::ScopeId::GpuUpload, self.gpu_upload_time_frame);
         let mut total_draw_calls = 1 + self.submitted_terrain_draw_calls as u64;
         total_draw_calls += u64::from(self.mob_cuboid_num_instances > 0)
             + u64::from(self.mob_quad_num_instances > 0);
@@ -15109,11 +15659,11 @@ impl State {
                 timestamp_writes: None,
             });
 
-            let effective_scale = if self.settings.dynamic_resolution {
-                self.settings.render_scale.clamp(0.5, 0.85)
-            } else {
-                self.settings.render_scale.clamp(0.5, 1.0)
-            };
+            // Viewport-only scaling renders the world into the surface's
+            // top-left corner; without an offscreen target and upscale pass it
+            // is not dynamic resolution. Keep world rendering native-sized
+            // until that complete path exists.
+            let effective_scale = 1.0_f32;
             if effective_scale < 0.999 {
                 render_pass.set_viewport(
                     0.0,
@@ -15154,7 +15704,12 @@ impl State {
                 let Some(layer) = self
                     .chunk_meshes
                     .get(&candidate.chunk_coord)
-                    .and_then(|mesh| mesh.level(lod))
+                    .and_then(|mesh| {
+                        candidate
+                            .section_y
+                            .and_then(|section_y| mesh.section(section_y as usize))
+                    })
+                    .and_then(|section| section.level(lod))
                     .map(|level| &level.opaque)
                 else {
                     continue;
@@ -15166,24 +15721,26 @@ impl State {
                     candidate.chunk_coord.0,
                     candidate.chunk_coord.1,
                 );
-                if bound_region != Some(region_coord) {
-                    if let Some(region) = self.render_regions.get(&region_coord) {
-                        render_pass.set_vertex_buffer(0, region.vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(
-                            region.index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        render_pass.set_bind_group(1, &region.bind_group, &[]);
-                        bound_region = Some(region_coord);
-                    } else {
-                        continue;
-                    }
+                let Some(region) = self.render_regions.get(&region_coord) else {
+                    continue;
+                };
+                if !region.handle_is_live(&handle) {
+                    continue;
                 }
-                render_pass.draw_indexed(
-                    handle.index_offset..(handle.index_offset + handle.num_indices),
-                    handle.vertex_offset as i32,
-                    0..1,
-                );
+                if bound_region != Some(region_coord) {
+                    render_pass.set_vertex_buffer(0, region.vertex_buffer.slice(..));
+                    render_pass
+                        .set_index_buffer(region.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.set_bind_group(1, &region.bind_group, &[]);
+                    bound_region = Some(region_coord);
+                }
+                let Some(index_end) = handle.index_offset.checked_add(handle.num_indices) else {
+                    continue;
+                };
+                let Ok(base_vertex) = i32::try_from(handle.vertex_offset) else {
+                    continue;
+                };
+                render_pass.draw_indexed(handle.index_offset..index_end, base_vertex, 0..1);
             }
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
@@ -15244,7 +15801,12 @@ impl State {
                 let Some(layer) = self
                     .chunk_meshes
                     .get(&candidate.chunk_coord)
-                    .and_then(|mesh| mesh.level(lod))
+                    .and_then(|mesh| {
+                        candidate
+                            .section_y
+                            .and_then(|section_y| mesh.section(section_y as usize))
+                    })
+                    .and_then(|section| section.level(lod))
                     .map(|level| &level.transparent)
                 else {
                     continue;
@@ -15256,24 +15818,26 @@ impl State {
                     candidate.chunk_coord.0,
                     candidate.chunk_coord.1,
                 );
-                if bound_region != Some(region_coord) {
-                    if let Some(region) = self.render_regions.get(&region_coord) {
-                        render_pass.set_vertex_buffer(0, region.vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(
-                            region.index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        render_pass.set_bind_group(1, &region.bind_group, &[]);
-                        bound_region = Some(region_coord);
-                    } else {
-                        continue;
-                    }
+                let Some(region) = self.render_regions.get(&region_coord) else {
+                    continue;
+                };
+                if !region.handle_is_live(&handle) {
+                    continue;
                 }
-                render_pass.draw_indexed(
-                    handle.index_offset..(handle.index_offset + handle.num_indices),
-                    handle.vertex_offset as i32,
-                    0..1,
-                );
+                if bound_region != Some(region_coord) {
+                    render_pass.set_vertex_buffer(0, region.vertex_buffer.slice(..));
+                    render_pass
+                        .set_index_buffer(region.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.set_bind_group(1, &region.bind_group, &[]);
+                    bound_region = Some(region_coord);
+                }
+                let Some(index_end) = handle.index_offset.checked_add(handle.num_indices) else {
+                    continue;
+                };
+                let Ok(base_vertex) = i32::try_from(handle.vertex_offset) else {
+                    continue;
+                };
+                render_pass.draw_indexed(handle.index_offset..index_end, base_vertex, 0..1);
             }
             if self.gpu_timestamps_inside_passes {
                 if let Some(qs) = &self.gpu_timestamp_query_set {
@@ -15411,6 +15975,7 @@ impl State {
         }
 
         if let Some((upload_ns, upload_bytes)) = crack_metrics {
+            self.gpu_upload_time_frame += Duration::from_nanos(upload_ns);
             self.gpu_upload_scopes_frame
                 .record_nanos(crate::perf::UploadSource::Crack as usize, upload_ns);
             self.perf_counters.upload_bytes_frame = self
@@ -15418,43 +15983,39 @@ impl State {
                 .upload_bytes_frame
                 .saturating_add(upload_bytes);
         }
+        self.perf_recorder
+            .record(crate::perf::ScopeId::GpuUpload, self.gpu_upload_time_frame);
 
-        if let (Some(qs), Some(res_buf), Some(read_buf)) = (
+        self.poll_gpu_timestamp_readbacks();
+        let mut timestamp_readback_slot = None;
+        if let (Some(query_set), Some(resolve_buffer)) = (
             &self.gpu_timestamp_query_set,
             &self.gpu_timestamp_resolve_buffer,
-            &self.gpu_timestamp_readback_buffer,
         ) {
-            if self.gpu_timestamps_inside_passes {
-                encoder.resolve_query_set(qs, 0..14, res_buf, 0);
-                encoder.copy_buffer_to_buffer(res_buf, 0, read_buf, 0, 14 * 8);
-
-                // Mapping is scheduled only after queue submission below.  A
-                // previous map completion is consumed at the start of a frame.
-                let state = *self.gpu_timestamp_state.lock().unwrap();
-                if state == GpuTimestampReadbackState::Mapping {
-                    // Drive the mapping callback before inspecting the state.
-                    // `map_async` completion is delivered by the device poll;
-                    // never touch the mapped range until that callback has
-                    // positively transitioned the slot to Mapped.
-                    self.device.poll(wgpu::Maintain::Poll);
+            for (slot_index, slot) in self.gpu_timestamp_readback_slots.iter().enumerate() {
+                if !slot
+                    .status
+                    .lock()
+                    .unwrap()
+                    .reserve_copy(frame_submission_id)
+                {
+                    continue;
                 }
-                let state = *self.gpu_timestamp_state.lock().unwrap();
-                if state == GpuTimestampReadbackState::Mapped {
-                    let slice = read_buf.slice(..);
-                    let range = slice.get_mapped_range();
-                    if range.len() == 112 {
-                        let data: [u64; 14] = *bytemuck::from_bytes(&range);
-                        let period = self.queue.get_timestamp_period();
-                        for i in 0..7 {
-                            let diff = data[i * 2 + 1].saturating_sub(data[i * 2]);
-                            self.gpu_pass_timings_ns[i] = (diff as f64 * f64::from(period)) as u64;
-                        }
-                    }
-                    drop(range);
-                    read_buf.unmap();
-                    let mut state = self.gpu_timestamp_state.lock().unwrap();
-                    *state = state.consume();
-                }
+                encoder.resolve_query_set(
+                    query_set,
+                    0..GPU_TIMESTAMP_QUERY_COUNT,
+                    resolve_buffer,
+                    0,
+                );
+                encoder.copy_buffer_to_buffer(
+                    resolve_buffer,
+                    0,
+                    &slot.buffer,
+                    0,
+                    GPU_TIMESTAMP_READBACK_BYTES,
+                );
+                timestamp_readback_slot = Some(slot_index);
+                break;
             }
         }
         self.perf_counters.gpu_sky_ns = self.gpu_pass_timings_ns[0];
@@ -15469,26 +16030,27 @@ impl State {
 
         let command_buffer = encoder.finish();
         self.queue.submit(std::iter::once(command_buffer));
-        if self.gpu_timestamps_inside_passes {
-            if let Some(read_buf) = &self.gpu_timestamp_readback_buffer {
-                let state = *self.gpu_timestamp_state.lock().unwrap();
-                if matches!(
-                    state,
-                    GpuTimestampReadbackState::Unmapped | GpuTimestampReadbackState::Consumed
-                ) {
-                    self.device.poll(wgpu::Maintain::Poll);
-                    {
-                        let mut state = self.gpu_timestamp_state.lock().unwrap();
-                        *state = state.map_requested();
-                    }
-                    let state_ref = std::sync::Arc::clone(&self.gpu_timestamp_state);
-                    read_buf
-                        .slice(..)
-                        .map_async(wgpu::MapMode::Read, move |result| {
-                            let mut state = state_ref.lock().unwrap();
-                            *state = state.map_completed(result.is_ok());
-                        });
-                }
+        let completion_tx = self.gpu_completion_tx.clone();
+        self.queue.on_submitted_work_done(move || {
+            let _ = completion_tx.send(frame_submission_id);
+        });
+        if let Some(slot_index) = timestamp_readback_slot {
+            let slot = &self.gpu_timestamp_readback_slots[slot_index];
+            if slot
+                .status
+                .lock()
+                .unwrap()
+                .begin_mapping(frame_submission_id)
+            {
+                let status = std::sync::Arc::clone(&slot.status);
+                slot.buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        status
+                            .lock()
+                            .unwrap()
+                            .map_completed(frame_submission_id, result.is_ok());
+                    });
             }
         }
         self.perf_recorder.record(
@@ -15499,7 +16061,7 @@ impl State {
         output.present();
         self.perf_recorder
             .record(crate::perf::ScopeId::Present, present_started.elapsed());
-        let allocs_after = crate::perf::alloc_count();
+        let allocs_after = crate::perf::thread_alloc_count();
         self.perf_counters.frame_allocations = allocs_after.saturating_sub(allocs_before);
         self.record_frame_perf_sample();
         Ok(())
@@ -15510,7 +16072,7 @@ impl State {
         for summary in &self.perf_summaries {
             cpu_scopes.insert(summary.name.to_string(), summary.average_nanos);
         }
-        let gpu_scopes = self.gpu_timestamps_inside_passes.then(|| {
+        let gpu_scopes = self.gpu_pass_timings_valid.then(|| {
             let names = [
                 "sky",
                 "opaque",
@@ -15527,13 +16089,8 @@ impl State {
                 .collect()
         });
         let save = &self.save_queue_stats;
-        let network_stats = crate::perf::queue_stats(crate::perf::QueueCategory::Outbound);
         let reliable = self.perf_counters.network_inbound_reliable_pending;
         let latest = self.perf_counters.network_inbound_latest_pending;
-        let catchup = self
-            .perf_counters
-            .network_queue_depth
-            .saturating_sub(reliable.saturating_add(latest));
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
@@ -15568,38 +16125,61 @@ impl State {
                 cancels: save.cancels(),
             },
         );
+        let inbound = categories
+            .get(&crate::perf::QueueCategory::Inbound)
+            .cloned()
+            .unwrap_or_default();
+        let outbound = categories
+            .get(&crate::perf::QueueCategory::Outbound)
+            .cloned()
+            .unwrap_or_default();
+        let reliable_queue = categories
+            .get(&crate::perf::QueueCategory::Reliable)
+            .cloned()
+            .unwrap_or_default();
+        let catchup_queue = categories
+            .get(&crate::perf::QueueCategory::CatchUp)
+            .cloned()
+            .unwrap_or_default();
+        let save_producer = categories
+            .get(&crate::perf::QueueCategory::SaveProducer)
+            .cloned()
+            .unwrap_or_default();
+        let save_worker = categories
+            .get(&crate::perf::QueueCategory::SaveWorker)
+            .cloned()
+            .unwrap_or_default();
+        let (retries, drops, cancels, oldest_age_ms) =
+            categories
+                .values()
+                .fold((0_u64, 0_u64, 0_u64, 0_u64), |totals, sample| {
+                    (
+                        totals.0.saturating_add(sample.retries),
+                        totals.1.saturating_add(sample.drops),
+                        totals.2.saturating_add(sample.cancels),
+                        totals.3.max(sample.oldest_age_ms),
+                    )
+                });
         let queues = crate::perf::QueuePerfSample {
             categories,
-            inbound_pending: Some(reliable.saturating_add(latest)),
-            inbound_pending_bytes: Some(
-                self.perf_counters
-                    .network_inbound_reliable_bytes
-                    .saturating_add(self.perf_counters.network_inbound_latest_bytes),
-            ),
+            inbound_pending: Some(inbound.depth),
+            inbound_pending_bytes: Some(inbound.bytes),
             inbound_reliable_pending: Some(reliable),
             inbound_reliable_bytes: Some(self.perf_counters.network_inbound_reliable_bytes),
             inbound_latest_pending: Some(latest),
             inbound_latest_bytes: Some(self.perf_counters.network_inbound_latest_bytes),
-            outbound_pending: Some(network_stats.depth()),
-            outbound_bytes: Some(network_stats.bytes()),
-            reliable_pending: Some(reliable),
-            reliable_bytes: Some(self.perf_counters.network_inbound_reliable_bytes),
-            catchup_pending: Some(catchup),
-            catchup_bytes: None,
-            save_queued_bytes: Some(save.queued_bytes()),
-            save_in_flight_bytes: Some(save.in_flight_bytes()),
-            retries: Some(network_stats.retries()),
-            drops: Some(
-                network_stats
-                    .drops()
-                    .saturating_add(self.perf_counters.save_drop),
-            ),
-            cancels: Some(
-                network_stats
-                    .cancels()
-                    .saturating_add(self.perf_counters.cancelled),
-            ),
-            oldest_age_ms: Some(network_stats.oldest_age_ms(now_ms)),
+            outbound_pending: Some(outbound.depth),
+            outbound_bytes: Some(outbound.bytes),
+            reliable_pending: Some(reliable_queue.depth),
+            reliable_bytes: Some(reliable_queue.bytes),
+            catchup_pending: Some(catchup_queue.depth),
+            catchup_bytes: Some(catchup_queue.bytes),
+            save_queued_bytes: Some(save_producer.bytes),
+            save_in_flight_bytes: Some(save_worker.bytes),
+            retries: Some(retries),
+            drops: Some(drops),
+            cancels: Some(cancels),
+            oldest_age_ms: Some(oldest_age_ms),
         };
         let sample = crate::perf::FramePerfSample {
             frame_id: self.next_perf_frame_id,
@@ -16475,6 +17055,73 @@ fn biome_debug_name(biome: Biome) -> &'static str {
 
 fn debug_chunk_coordinate(position: f32, chunk_size: usize) -> i32 {
     (position.floor() as i32).div_euclid(chunk_size as i32)
+}
+
+#[cfg(test)]
+mod render_region_lifecycle_tests {
+    use super::{
+        empty_region_rebuild_worthwhile, region_allocation_handle_is_live,
+        should_decrement_region_active_chunks, RenderRegion,
+    };
+    use crate::chunk_render::{FreeList, RegionAllocationHandle};
+
+    #[test]
+    fn active_chunk_count_changes_only_for_resident_mesh_in_current_region() {
+        assert!(!should_decrement_region_active_chunks(false, false, false));
+        assert!(should_decrement_region_active_chunks(true, false, false));
+        assert!(should_decrement_region_active_chunks(true, true, true));
+        assert!(!should_decrement_region_active_chunks(true, true, false));
+    }
+
+    #[test]
+    fn stale_region_instance_and_stale_tokens_are_rejected() {
+        let mut vertices = FreeList::new(16);
+        let mut indices = FreeList::new(24);
+        let vertex_token = vertices.allocate_owned(4, 7).unwrap();
+        let index_token = indices.allocate_owned(6, 7).unwrap();
+        let handle = RegionAllocationHandle {
+            region_instance_id: 41,
+            vertex_token,
+            index_token,
+            vertex_offset: vertex_token.offset,
+            index_offset: index_token.offset,
+            num_vertices: vertex_token.count,
+            num_indices: index_token.count,
+        };
+
+        assert!(region_allocation_handle_is_live(
+            41, &vertices, &indices, &handle
+        ));
+        assert!(!region_allocation_handle_is_live(
+            42, &vertices, &indices, &handle
+        ));
+        vertices.deallocate_owned(vertex_token).unwrap();
+        assert!(!region_allocation_handle_is_live(
+            41, &vertices, &indices, &handle
+        ));
+    }
+
+    #[test]
+    fn arena_rebuild_is_limited_to_empty_grown_regions() {
+        assert!(empty_region_rebuild_worthwhile(
+            0,
+            0,
+            RenderRegion::INITIAL_VERTEX_CAPACITY * 2,
+            RenderRegion::INITIAL_INDEX_CAPACITY
+        ));
+        assert!(!empty_region_rebuild_worthwhile(
+            1,
+            0,
+            RenderRegion::INITIAL_VERTEX_CAPACITY * 2,
+            RenderRegion::INITIAL_INDEX_CAPACITY
+        ));
+        assert!(!empty_region_rebuild_worthwhile(
+            0,
+            0,
+            RenderRegion::INITIAL_VERTEX_CAPACITY,
+            RenderRegion::INITIAL_INDEX_CAPACITY
+        ));
+    }
 }
 
 #[cfg(test)]
