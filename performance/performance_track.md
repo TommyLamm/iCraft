@@ -11,20 +11,20 @@
 | # | 任務 | 詳細計畫 | 狀態 | 審核修復輪次 | Commit | 驗證 |
 |---|---|---|---|---|---|---|
 | 0 | 火把索引與週期掃描移除 | （不在 01–14 審核回退範圍） | Complete | — | - | `cargo test --release`（366 unit + 1 integration）；torch index focused tests 2 passed |
-| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Partial | R5、R9 | - | GPU/window 與固定場景 artifact 缺失 |
+| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Partial | R5、R9 | - | runtime instrumentation 已接線；GPU/window 固定場景 artifact 缺失 |
 | 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Partial | R1（已完成） | - | R1 correctness 已驗收；整體 Complete 仍受第 6 節 artifact/clippy gate 約束 |
 | 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Partial | R2（已完成） | - | durability/ACK/fault-injection 已驗收；固定場景 autosave p95 artifact 仍缺 |
 | 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Partial | R3（已完成）、R5 | - | R3 reliability/order/revision correctness 已驗收；固定場景 latency artifact 仍缺 |
-| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Partial | R5、R9 | R4 已完成 multiplayer host pause/death policy 與 network-before-tick ordering | 仍缺完整 world checksum |
-| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Partial | R5 | - | sleep fast-path 與獨立 reference 未驗收 |
-| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Partial | R5 | - | index 增量維護與主要消費路徑未驗收 |
-| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Partial | R7 | - | 穩態 allocation 與 hand cache 未驗收 |
-| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Partial | R7、R9 | - | ring completion 與視覺/性能 parity 缺失 |
-| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Partial | R6 | - | lifecycle、handle safety、runtime compact 未驗收 |
-| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Partial | R6 | - | AO decode 錯誤；section ownership 未完成 |
-| 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Partial | R7、R9 | - | storage 不 demote；memory accounting/microbench 缺失 |
-| 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Partial | R6 | - | async LOS 永遠 visible；section culling 未完成 |
-| 14 | Release、PGO 與 frame pacing | [14_build_release.md](14_build_release.md) | Partial | R8、R9 | - | FPS cap、真正 dynamic resolution、PGO A/B 缺失 |
+| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Partial | R5、R9 | R4/R5 runtime repair | headless 30/60/144/240 checksum 通過；正式 replay artifact 缺失 |
+| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Partial | R5 | R5 runtime repair | sleep fast-path 與獨立 differential oracle 已通過；固定場景 artifact 缺失 |
+| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Partial | R5 | R5 runtime repair | 增量 index 與 bucket query 已接線；固定場景 artifact 缺失 |
+| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Partial | R7 | R7 runtime repair | hand cache/scratch 已接線；實機 allocation artifact 缺失 |
+| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Partial | R7、R9 | R7 runtime repair | completion-protected ring 已接線；視覺/性能 artifact 缺失 |
+| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Partial | R6 | R6 runtime repair | lifecycle/handle safety 已驗收；staged runtime compaction artifact 缺失 |
+| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Partial | R6 | R6 runtime repair | AO parity 與 16³ section runtime ownership已接線；視覺 artifact 缺失 |
+| 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Partial | R7、R9 | R7 runtime repair | storage demotion/memory accounting/microbench 已實作；正式 artifact 缺失 |
+| 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Partial | R6 | R6 runtime repair | section culling 與 snapshot LOS 已接線；實機視覺 artifact 缺失 |
+| 14 | Release、PGO 與 frame pacing | [14_build_release.md](14_build_release.md) | Partial | R8、R9 | R8 safe runtime path | FPS cap 已接線、錯誤 viewport scaling 已停用；PGO A/B 缺失 |
 
 狀態用語：
 
@@ -60,6 +60,14 @@
 - **任務 5（固定 tick）是任務 6、7 的前提**：redstone/entity 優化建立在 tick 語義明確化之後。
 - **任務 8->9->10->11->12->13 為渲染/記憶體路線的漸進鏈**：先消除穩態配置，再做 instancing，然後才動 GPU arena、packed vertex、paletted storage 與 occlusion。
 - **任務 14（build）最後執行**：PGO 需要穩定 workload 才有意義。
+
+### R9 artifact gate tooling（2026-07-30）
+
+固定 scene matrix、JSONL schema validator、summary percentile calculator、硬件
+manifest capture、PGO fail-closed comparison 與報告模板已建立，並由
+`performance/tools/Test-R9Tools.ps1` 驗證。這些是量測前的可重播工具，不是 GPU
+結果；目前沒有八場景 before/after raw artifact 或 PGO A/B 數據，因此 01–14
+仍維持 `Partial`，不得填入性能改善百分比。
 
 ## 目前進度
 
@@ -101,16 +109,10 @@
   bytes、GPU buffer objects、worker in-flight、stale results 與 tracked upload
   bytes 等 counters。
 
-仍需補完：
-
-- Adapter timestamp query 支援與 GPU pass timings。
-- `lighting` 目前主要量測 Chunk load propagation；還需涵蓋 block、fluid 及其他
-  runtime lighting mutation。
-- `gpu_upload` 目前是 CPU enqueue/create-buffer 量測，尚未完整涵蓋 particle、
-  UI、camera 及 crack buffer writes。
-- Entity rendered/frustum-culled/occlusion-culled counters。
-- Save/network queue depth、region cache bytes、cancelled worker 等 counters。
-- 固定 seed 場景、before/after 報告及正式硬件基線。
+R5 已補上 timestamp capability/readback state machine、lighting/upload scopes、
+entity/culling counters及 inbound/outbound/reliable/catch-up/save queue telemetry。
+仍需補完的是實際 adapter/device 的 readback artifact、固定 seed 場景
+before/after 報告及正式硬件基線；不支援 timestamp 的 adapter 明確顯示 N/A。
 
 ## 剩餘實作順序
 

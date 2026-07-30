@@ -1,8 +1,9 @@
 # Architecture
 
-> Last verified: 2026-07-29
-> Git baseline: branch `master`, commit
-> `fa89b1d0b9b9726072f9223811c72731eb1e0f05` (`fa89b1d`).
+> Last verified: 2026-07-30
+> Git baseline: checkpoint
+> `b13bbbb74325397d4a9334ba6158d895f222fbe7` (`b13bbbb`) plus the
+> uncommitted repair continuation documented under `performance/repair/`.
 >
 > This document is a concise navigation map. Source code remains authoritative.
 
@@ -84,20 +85,30 @@ Terrain CPU work is separated from GPU ownership:
 
 ```text
 ChunkManager chunks
-  -> owned mesh snapshot + neighbor halo
-  -> Rayon mesh job
-  -> generation/revision validation
-  -> RenderRegion GPU arena upload
+  -> SectionIdentity + owned 18³ halo snapshot
+  -> Rayon 16³ section mesh job
+  -> dimension/lifetime/section-revision validation
+  -> per-section RenderRegion GPU arena upload
   -> frustum/section visibility + LOD draw plan
   -> wgpu render passes
 ```
 
 `world.rs` produces terrain mesh data; `chunk_render.rs` defines terrain
 vertices, bounds, LOD data, draw planning, and region allocations.
-`culling.rs` performs bounded section visibility traversal.
+`culling.rs` performs bounded section visibility traversal and conservative
+snapshot-based entity LOS. Dirty connectivity fails open until the matching
+world revision is available.
 `chunk_schedule.rs` prioritizes bounded load/mesh work.
-`State::render` owns final submission and builds transient entity, particle,
-hand, and UI geometry.
+`State::render` owns final submission. Per-section terrain allocations carry
+exact generation/lifetime/revision identity; instance buffers use a bounded
+completion-protected frame-resource pool. The held-item base mesh is cached by
+item/model key and walk/swing animation is applied through a uniform instead of
+rebuilding CPU geometry.
+
+The event loop owns the optional FPS deadline while simulation consumes real
+elapsed time. The former viewport-only dynamic-resolution path is forced to
+native scale; it must not be re-enabled without an offscreen render target,
+upscale pass, and native-resolution UI.
 
 The high-level pass order is sky, opaque terrain, entities, translucent terrain,
 particles/effects, mining overlay, UI, and present.
@@ -219,14 +230,14 @@ Behavioral tests are mostly inline `#[cfg(test)]` tests. The package has no
 `src/lib.rs`, so `tests/passive_mob_tests.rs` cannot directly exercise internal
 modules and remains a placeholder.
 
-The performance plans 01–14 are currently `Partial`, not proof that the
-optimizations are complete. The authoritative status and outstanding
-correctness/artifact gates are tracked in
+The performance plans 01–14 remain `Partial` until their fixed-scene GPU/window
+and PGO artifacts exist; this status is not a claim that their runtime repair
+work is absent. The authoritative status and outstanding artifact gates are
+tracked in
 [`performance/performance_track.md`](performance/performance_track.md) and
 [`performance/15_performance_audit_repair_plan.md`](performance/15_performance_audit_repair_plan.md).
-In particular, the host-authoritative model above remains the target invariant;
-the known joining-client entity simulation/replication gap is a release blocker
-assigned to R4, not an alternate authority model.
+The host-authoritative model above remains the invariant; R4 repaired the
+joining-client simulation/replication and pause/death-policy gaps.
 
 Use:
 

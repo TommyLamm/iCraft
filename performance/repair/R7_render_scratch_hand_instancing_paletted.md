@@ -1,7 +1,7 @@
 # 任務 15-R7：render scratch、hand、instancing 與 paletted demotion
 
 > 對應計畫：`15_performance_audit_repair_plan.md` 第 4.1、4.2 節
-> 狀態：待修復
+> 狀態：runtime 主路徑已接線；實機 allocation artifact 待 R9
 > 前置：R6（arena/section meshing/culling 修復）
 > 目標：把 `visible_entities`、UI textured vertices、debug labels、uppercase-format 移到可重用 scratch/cache 並以實際 instrumentation 驗證零配置；hand 基礎 mesh 只在 held item/model 改變時重建；instance ring 加 GPU completion 保護；paletted storage 適時 demote 並以真實 representation 計算 memory counter；建立可執行 microbench。
 > Commit 訊息：`fix(perf): reuse render scratch, hand mesh timing, instance fence and paletted demotion`

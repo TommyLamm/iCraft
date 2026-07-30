@@ -2,13 +2,17 @@
 
 > 審核日期：2026-07-29  
 > 審核基線：`master` / `5f1ee4d`  
-> 狀態：待修復  
+> 狀態：修復續作已落地；01–14 仍受第 6 節實機 artifact gate 約束
 > 範圍：`performance/01`–`14`、`performance/14_performance_optimization.md`、`ARCHITECTURE.md` 與其對應實作  
 > 原則：先修資料遺失、世界分歧與畫面錯誤，再補完未落實的優化，最後才重新宣告性能成果。
 
-## 1. 審核結論
+## 1. 原始審核結論（歷史基線）
 
-目前不能判定 14 項性能優化已正確完成。自動測試大致通過，但測試沒有覆蓋多個實際控制流錯誤；性能百分比也沒有可審計的 before/after artifact。
+下表記錄 2026-07-29、commit `5f1ee4d` 的原始審核結果，不代表目前
+working tree 的 runtime 狀態。後續 R0–R9 修復與當前證據以各
+`performance/repair/` 文件、`performance/performance_track.md` 及本文件
+第 6 節為準。即使 runtime 修復已落地，在實機 before/after artifact 完成前，
+01–14 仍維持 `Partial`。
 
 | 任務 | 結論 | 主要原因 |
 |---|---|---|

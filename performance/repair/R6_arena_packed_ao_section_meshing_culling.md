@@ -1,7 +1,7 @@
 # 任務 15-R6：GPU arena lifecycle、packed AO、section meshing 與 culling
 
 > 對應計畫：`15_performance_audit_repair_plan.md` 第 3.4、3.5、3.6 節
-> 狀態：待修復
+> 狀態：runtime 主路徑已接線；實機視覺與 staged compaction artifact 待補
 > 前置：R5（instrumentation 與 sim 修復）
 > 目標：統一維度 teardown `render_regions`、為 allocation handle 加 region identity/slot/generation/owner 防止 stale/double-free、修正 AO decode 與 CPU 一致、落實真正 16³ section meshing，並重做 conservative section/entity culling（含真實 async LOS snapshot 與 identity 驗證）。
 > Commit 訊息：`fix(perf): arena lifecycle, packed AO parity, section meshing and conservative culling`

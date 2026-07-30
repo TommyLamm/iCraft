@@ -1,7 +1,7 @@
 # 任務 15-R5：instrumentation、network budget 與 sim/redstone/entity 修復
 
 > 對應計畫：`15_performance_audit_repair_plan.md` 第 3.1、3.2、3.3 節
-> 狀態：待修復
+> 狀態：runtime 修復完成；實機 GPU/window artifact 待 R9
 > 前置：R1、R2、R3、R4（P0 correctness 已修復）
 > 目標：修復 GPU timestamp readback state machine、補完 lighting/gpu_upload scope 與 queue telemetry、令 network drain 真正跨幀 bounded、以 headless world harness 取代合成 fixed-tick test、修正 redstone sleep occupant 判斷與 entity spatial/type index 增量維護。
 > Commit 訊息：`fix(perf): correct instrumentation, bounded network drain and sim/redstone/entity`

@@ -102,6 +102,26 @@
 - [ ] 01–14 文件狀態依第 6 節完成定義重新驗收，無虛假 Complete。
 - [ ] `performance_track.md`、01–14 plans、總計畫與 `ARCHITECTURE.md` 狀態一致。
 
+## 本輪已產出的可審計 tooling（不等同於量測完成）
+
+- `performance/benchmarks/r9-scenes.json` 固定八個 scene ID、seed、重播步驟與
+  render distance 16。
+- `performance/tools/Validate-R9Jsonl.ps1`、`Measure-R9Runs.ps1`、
+  `Invoke-R9Matrix.ps1`、`New-R9Manifest.ps1` 與 `Compare-R9Pgo.ps1` 已通過
+  `performance/tools/Test-R9Tools.ps1`；測試只驗證 schema、dry-run 與 fail-closed
+  gate，沒有執行 GPU/window workload。
+- `performance/reports/README.md` 與 `r9-report-template.md` 定義 raw JSONL、
+  contemporaneous hardware manifest、重播指令及 PGO admission gate。
+- `performance/baselines/README.md` 明確標註既有 2026-07-28 報告為視距 8
+  歷史資料，不可支持視距 16 claim。
+
+上述 tooling 不會填入或推導性能數字。本機續作已安裝 Rust
+`llvm-tools-preview`，並產出
+`performance/reports/2026-07-30-local-manifest.json`（DX12、1280×720、
+RD16）。因目前尚未取得八場景 before/after、實際 GPU/window 或 PGO A/B raw
+output，本輪所有驗收 checkbox 及 01–14 任務狀態仍維持
+`Partial`/`Pending`，不得宣稱改善百分比。
+
 ## 風險與回退
 
 - 固定場景量測受硬體/驅動變動影響；以同一硬體、同一 commit 量測，並記錄環境。

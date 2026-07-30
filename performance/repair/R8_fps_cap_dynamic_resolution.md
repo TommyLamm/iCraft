@@ -1,7 +1,7 @@
 # 任務 15-R8：FPS cap 與真正的 dynamic resolution（可選）
 
 > 對應計畫：`15_performance_audit_repair_plan.md` 第 3.7 節
-> 狀態：待修復（標為可選）
+> 狀態：完成安全路徑（viewport-only 功能停用，FPS cap 已接線）；offscreen dynamic resolution 保持可選且未啟用
 > 前置：R7（render scratch/instancing 修復）
 > 目標：暫時停用只縮 viewport 的 `dynamic_resolution`（避免世界只畫在左上角）；若保留功能則建立低解析度 offscreen target、terrain/entity/particle 渲染到 scaled target 後 upscale、UI 在 native，並以 GPU-time feedback + 上下界 + hysteresis + cooldown 控制；加入獨立 FPS cap setting 與 `ControlFlow::WaitUntil`/frame deadline，sim accumulator 使用真實 elapsed 不用 cap interval。
 > Commit 訊息：`fix(perf): disable viewport-only dynamic resolution and add real fps cap`
