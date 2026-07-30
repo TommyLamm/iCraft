@@ -321,8 +321,8 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
 
     // Moon
     let moon_dot = dot(view_dir, normalize(-camera.sun_dir.xyz));
+    let moon_factor = smoothstep(0.997, 0.998, moon_dot);
     if (moon_dot > 0.997) {
-        let moon_factor = smoothstep(0.997, 0.998, moon_dot);
         sky_color = mix(sky_color, vec4<f32>(0.9, 0.9, 0.95, 1.0), moon_factor);
     }
 
@@ -335,9 +335,12 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
         view_dir.x * sin_a + view_dir.y * cos_a,
         view_dir.z
     );
-    
-    let star_intensity = smoothstep(0.1, -0.1, camera.sun_dir.y);
-    let star_val = get_star(rotated_dir) * star_intensity;
+
+    // Fade the stars in gradually across the whole sunset instead of snapping
+    // on once the sun is already below the horizon, and keep them behind the
+    // moon so they never sparkle across the moon disc.
+    let star_intensity = smoothstep(0.2, -0.4, camera.sun_dir.y);
+    let star_val = get_star(rotated_dir) * star_intensity * (1.0 - moon_factor);
     sky_color = sky_color + vec4<f32>(star_val, star_val, star_val, 0.0);
 
     return sky_color;

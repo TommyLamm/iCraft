@@ -2302,6 +2302,158 @@ impl TextureAtlas {
             }
         }
 
+        // Row 9 Cols 11..15: Dedicated Player Skin Head Tiles
+        // Col 11 (Row 9): Player head FRONT. Steve-like face: hair fringe on
+        // top, white/indigo eyes, nose shadow and a subtle mouth on warm skin.
+        {
+            let ox = 11 * 16;
+            let oy = 9 * 16;
+            for y in 0..16i32 {
+                for x in 0..16i32 {
+                    let noise = ((x * 5 + y * 9) % 7) as u8;
+                    let skin = Rgba([235 - noise / 2, 215 - noise / 2, 190 - noise / 3, 255]);
+                    let hair = Rgba([58 + noise, 42 + noise / 2, 26, 255]);
+                    let is_hair = y <= 2 || (y <= 4 && (x <= 1 || x >= 14));
+                    let is_eye_white =
+                        (y == 7 || y == 8) && ((x >= 3 && x <= 5) || (x >= 10 && x <= 12));
+                    let is_eye_pupil = (y == 7 || y == 8) && (x == 4 || x == 11);
+                    let is_nose = (y == 9 || y == 10) && (x == 7 || x == 8);
+                    let is_mouth = y == 12 && x >= 6 && x <= 9;
+                    let c = if is_hair {
+                        hair
+                    } else if is_eye_pupil {
+                        Rgba([70, 50, 140, 255]) // Indigo pupil
+                    } else if is_eye_white {
+                        Rgba([245, 245, 245, 255])
+                    } else if is_nose {
+                        Rgba([198, 164, 128, 255]) // Darker skin shadow
+                    } else if is_mouth {
+                        Rgba([168, 116, 88, 255])
+                    } else {
+                        skin
+                    };
+                    img.put_pixel(ox + x as u32, oy + y as u32, c);
+                }
+            }
+        }
+
+        // Col 12 (Row 9): Player head SIDE. Hair cap on top, skin below with
+        // a slightly darker ear.
+        {
+            let ox = 12 * 16;
+            let oy = 9 * 16;
+            for y in 0..16i32 {
+                for x in 0..16i32 {
+                    let noise = ((x * 7 + y * 5) % 7) as u8;
+                    let skin = Rgba([235 - noise / 2, 215 - noise / 2, 190 - noise / 3, 255]);
+                    let hair = Rgba([58 + noise, 42 + noise / 2, 26, 255]);
+                    let is_hair = y <= 4 || (y <= 6 && x >= 12);
+                    let is_ear = (y == 8 || y == 9) && (x == 7 || x == 8);
+                    let c = if is_hair {
+                        hair
+                    } else if is_ear {
+                        Rgba([205, 175, 145, 255])
+                    } else {
+                        skin
+                    };
+                    img.put_pixel(ox + x as u32, oy + y as u32, c);
+                }
+            }
+        }
+
+        // Col 13 (Row 9): Player head BACK. Full hair.
+        {
+            let ox = 13 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let noise = ((x * 9 + y * 7) % 10) as u8;
+                    img.put_pixel(ox + x, oy + y, Rgba([58 + noise, 42 + noise / 2, 26, 255]));
+                }
+            }
+        }
+
+        // Col 14 (Row 9): Player head TOP. Full hair with a subtle center part.
+        {
+            let ox = 14 * 16;
+            let oy = 9 * 16;
+            for y in 0..16i32 {
+                for x in 0..16i32 {
+                    let noise = ((x * 5 + y * 11) % 10) as u8;
+                    let darken = if x == 7 || x == 8 { 12 } else { 0 };
+                    img.put_pixel(
+                        ox + x as u32,
+                        oy + y as u32,
+                        Rgba([58 + noise - darken, 42 + noise / 2 - darken / 2, 26, 255]),
+                    );
+                }
+            }
+        }
+
+        // Col 15 (Row 9): Plain player skin (head bottom).
+        {
+            let ox = 15 * 16;
+            let oy = 9 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let var = ((x * 5 + y * 9) % 8) as u8;
+                    img.put_pixel(
+                        ox + x,
+                        oy + y,
+                        Rgba([235 - var / 2, 215 - var / 2, 190 - var / 3, 255]),
+                    );
+                }
+            }
+        }
+
+        // Row 8 Cols 13..15: Player Arm, Sheep Plain Skin, Pure White Tile
+        // Col 13 (Row 8): Player ARM. Teal shirt sleeve on the shoulder end
+        // (top of the tile), bare skin below.
+        {
+            let ox = 13 * 16;
+            let oy = 8 * 16;
+            for y in 0..16i32 {
+                for x in 0..16i32 {
+                    let noise = ((x * 3 + y * 7) % 8) as u8;
+                    let c = if y <= 4 {
+                        Rgba([50 + noise, 138 + noise, 138 + noise, 255]) // Teal sleeve
+                    } else {
+                        Rgba([235 - noise / 2, 215 - noise / 2, 190 - noise / 3, 255])
+                    };
+                    img.put_pixel(ox + x as u32, oy + y as u32, c);
+                }
+            }
+        }
+
+        // Col 14 (Row 8): Plain sheep skin (no eyes). Used for the sheep
+        // head's non-front faces and its legs.
+        {
+            let ox = 14 * 16;
+            let oy = 8 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let noise = ((x * 7 + y * 13) % 9) as u8;
+                    img.put_pixel(
+                        ox + x,
+                        oy + y,
+                        Rgba([235 - noise / 2, 215 - noise / 2, 190 - noise / 3, 255]),
+                    );
+                }
+            }
+        }
+
+        // Col 15 (Row 8): Pure white opaque tile. Used as a tinted solid quad
+        // by the textured UI pipeline (e.g. the inventory tooltip background).
+        {
+            let ox = 15 * 16;
+            let oy = 8 * 16;
+            for y in 0..16 {
+                for x in 0..16 {
+                    img.put_pixel(ox + x, oy + y, Rgba([255, 255, 255, 255]));
+                }
+            }
+        }
+
         // Row 11: Passive Mob items
         draw_shears_icon(&mut img, 0, 11);
         draw_bucket_icon(&mut img, 1, 11, None); // Empty bucket

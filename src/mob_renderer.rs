@@ -3,6 +3,18 @@ use crate::entity::{Entity, EntityManager, EntityType};
 use crate::state::Vertex;
 use glam::Vec3;
 
+/// Per-face atlas columns for the player head on row 9:
+/// [Front, Back, Left, Right, Top, Bottom]. The front is a drawn face
+/// (eyes/nose/mouth with a hair fringe), back and top are full hair, the
+/// sides are skin with hair and an ear, and the bottom is plain skin.
+pub const PLAYER_HEAD_COLS: [u32; 6] = [11, 13, 12, 12, 14, 15];
+pub const PLAYER_HEAD_ROW: u32 = 9;
+
+/// Atlas column and row for the player arm tile on row 8 col 13: a teal
+/// shirt sleeve at the shoulder end with bare skin below.
+pub const PLAYER_ARM_COL: u32 = 13;
+pub const PLAYER_ARM_ROW: u32 = 8;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MobPrototypeVertex {
@@ -944,7 +956,8 @@ pub fn render_mobs<'a>(
                     entity.pitch
                 };
 
-                // Head (Row 10, Col 4 face, Col 6 sheared skin for other 5 faces) - offset forward
+                // Head (Row 10) - face on the front only, plain sheep skin
+                // (Col 15) on the other five sides.
                 add_cuboid(
                     cuboid_instances,
                     Vec3::new(0.45, 0.45, 0.45) * head_scale,
@@ -952,7 +965,7 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 0.9 * scale, 0.3 * scale)),
                     entity.yaw,
                     final_pitch,
-                    [4, 6, 6, 6, 6, 6],
+                    [4, 15, 15, 15, 15, 15], // Front Col 4, others Col 15
                     10,
                     light_val,
                 );
@@ -971,7 +984,7 @@ pub fn render_mobs<'a>(
                     light_val,
                 );
 
-                // 4 Legs (Col 6 sheared skin)
+                // 4 Legs (plain sheep skin, Col 15 - not the face tile)
                 add_cuboid(
                     cuboid_instances,
                     Vec3::new(0.2, 0.5, 0.2) * scale,
@@ -979,7 +992,7 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(-0.25 * scale, 0.5 * scale, 0.3 * scale)),
                     entity.yaw,
                     swing,
-                    [6; 6],
+                    [15; 6],
                     10,
                     light_val,
                 );
@@ -990,7 +1003,7 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.25 * scale, 0.5 * scale, 0.3 * scale)),
                     entity.yaw,
                     -swing,
-                    [6; 6],
+                    [15; 6],
                     10,
                     light_val,
                 );
@@ -1001,7 +1014,7 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(-0.25 * scale, 0.5 * scale, -0.3 * scale)),
                     entity.yaw,
                     -swing,
-                    [6; 6],
+                    [15; 6],
                     10,
                     light_val,
                 );
@@ -1012,7 +1025,7 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.25 * scale, 0.5 * scale, -0.3 * scale)),
                     entity.yaw,
                     swing,
-                    [6; 6],
+                    [15; 6],
                     10,
                     light_val,
                 );
@@ -1605,9 +1618,10 @@ pub fn render_mobs<'a>(
                 }
             }
             EntityType::RemotePlayer => {
-                // Steve-like player avatar assembled from the existing atlas:
-                // sheep skin supplies a warm face/skin tone, while the zombie
-                // shirt and trousers provide the familiar teal-and-blue outfit.
+                // Steve-like player avatar: dedicated player skin tiles give
+                // the head a front-only face with hair elsewhere, while the
+                // zombie shirt and trousers provide the familiar
+                // teal-and-blue outfit.
                 add_cuboid(
                     cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5),
@@ -1615,8 +1629,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 1.4, 0.0)),
                     entity.yaw,
                     entity.pitch,
-                    [4, 15, 15, 15, 15, 15],
-                    8,
+                    PLAYER_HEAD_COLS,
+                    PLAYER_HEAD_ROW,
                     light_val,
                 );
 
@@ -1640,8 +1654,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(-0.375, 1.3, 0.0)),
                     entity.yaw,
                     -swing,
-                    [4; 6],
-                    10,
+                    [PLAYER_ARM_COL; 6],
+                    PLAYER_ARM_ROW,
                     light_val,
                 );
                 add_cuboid(
@@ -1651,8 +1665,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.375, 1.3, 0.0)),
                     entity.yaw,
                     swing,
-                    [4; 6],
-                    10,
+                    [PLAYER_ARM_COL; 6],
+                    PLAYER_ARM_ROW,
                     light_val,
                 );
 
@@ -1738,7 +1752,8 @@ pub fn render_local_player(
             )
     };
 
-    // Head (sheep skin face on front, plain skin on other 5 faces)
+    // Head: dedicated per-face player skin tiles (front face, hair on the
+    // back and top, skin with ears on the sides).
     add_cuboid(
         cuboid_instances,
         Vec3::new(0.5, 0.5, 0.5),
@@ -1746,8 +1761,8 @@ pub fn render_local_player(
         to_world(Vec3::new(0.0, 1.4, 0.0)),
         yaw,
         pitch,
-        [4, 15, 15, 15, 15, 15],
-        8,
+        PLAYER_HEAD_COLS,
+        PLAYER_HEAD_ROW,
         light_val,
     );
 
@@ -1764,7 +1779,8 @@ pub fn render_local_player(
         light_val,
     );
 
-    // Arms counter-swing against the legs while walking.
+    // Arms counter-swing against the legs while walking. The arm tile shows
+    // a teal sleeve at the shoulder and bare skin below.
     add_cuboid(
         cuboid_instances,
         Vec3::new(0.25, 0.75, 0.25),
@@ -1772,8 +1788,8 @@ pub fn render_local_player(
         to_world(Vec3::new(-0.375, 1.3, 0.0)),
         yaw,
         -swing,
-        [4; 6],
-        10,
+        [PLAYER_ARM_COL; 6],
+        PLAYER_ARM_ROW,
         light_val,
     );
     add_cuboid(
@@ -1783,8 +1799,8 @@ pub fn render_local_player(
         to_world(Vec3::new(0.375, 1.3, 0.0)),
         yaw,
         swing,
-        [4; 6],
-        10,
+        [PLAYER_ARM_COL; 6],
+        PLAYER_ARM_ROW,
         light_val,
     );
 
@@ -2073,3 +2089,4 @@ mod tests {
         assert!(has_y_0_375, "Vertices must exist at Y=0.375 connecting legs and torso");
     }
 }
+

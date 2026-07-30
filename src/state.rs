@@ -14459,29 +14459,42 @@ impl State {
                             let tx = mouse_x + 0.02;
                             let ty = mouse_y + 0.02;
 
+                            // The tooltip background must sit above the slot
+                            // icons but below the text. The colored-UI pass
+                            // now runs before the icons, so this quad goes
+                            // through the textured pass instead, using the
+                            // pure white atlas tile (col 15, row 8) tinted to
+                            // the tooltip color.
                             let tt_bg = [0.05, 0.05, 0.1, 0.95];
-                            ui_vertices.push(UiVertex {
+                            let (w0u, w0v) = (15.0 * 0.0625, 8.0 * 0.0625);
+                            ui_textured_vertices.push(TexturedUiVertex {
                                 position: [tx, ty + th, 0.0],
+                                tex_coords: [w0u, w0v],
                                 color: tt_bg,
                             });
-                            ui_vertices.push(UiVertex {
+                            ui_textured_vertices.push(TexturedUiVertex {
                                 position: [tx, ty, 0.0],
+                                tex_coords: [w0u, w0v + 0.0625],
                                 color: tt_bg,
                             });
-                            ui_vertices.push(UiVertex {
+                            ui_textured_vertices.push(TexturedUiVertex {
                                 position: [tx + tw, ty, 0.0],
+                                tex_coords: [w0u + 0.0625, w0v + 0.0625],
                                 color: tt_bg,
                             });
-                            ui_vertices.push(UiVertex {
+                            ui_textured_vertices.push(TexturedUiVertex {
                                 position: [tx, ty + th, 0.0],
+                                tex_coords: [w0u, w0v],
                                 color: tt_bg,
                             });
-                            ui_vertices.push(UiVertex {
+                            ui_textured_vertices.push(TexturedUiVertex {
                                 position: [tx + tw, ty, 0.0],
+                                tex_coords: [w0u + 0.0625, w0v + 0.0625],
                                 color: tt_bg,
                             });
-                            ui_vertices.push(UiVertex {
+                            ui_textured_vertices.push(TexturedUiVertex {
                                 position: [tx + tw, ty + th, 0.0],
+                                tex_coords: [w0u + 0.0625, w0v],
                                 color: tt_bg,
                             });
 
@@ -15937,14 +15950,17 @@ impl State {
                 );
             }
             if !self.is_paused {
-                // 1. Draw Colored UI (hotbar/slot backgrounds)
+                // 1. Draw Colored UI (slot/panel backgrounds). Backgrounds go
+                // first so the item icons drawn next stay fully visible;
+                // previously the semi-transparent slot quads were drawn over
+                // the icons and washed them out.
                 if self.num_ui_vertices > 0 {
                     render_pass.set_pipeline(&self.ui_pipeline);
                     render_pass.set_vertex_buffer(0, self.ui_vertex_buffer.slice(..));
                     render_pass.draw(0..self.num_ui_vertices, 0..1);
                 }
 
-                // 2. Draw Textured UI (block/item thumbnails on top of backgrounds)
+                // 2. Draw Textured UI (block thumbnails, hearts, dragged item)
                 if self.num_ui_textured_vertices > 0 {
                     render_pass.set_pipeline(&self.ui_textured_pipeline);
                     render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -18012,3 +18028,4 @@ mod reach_tests {
         assert_eq!(remainder, Some(ItemStack::new(Item::Dirt, 64)));
     }
 }
+
