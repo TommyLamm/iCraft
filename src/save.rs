@@ -15,14 +15,61 @@ const PLAYER_SAVE_MAGIC: &[u8; 8] = b"ICRPLR01";
 const PLAYER_SAVE_VERSION: u16 = 1;
 pub const SAVE_QUEUE_CAPACITY: usize = 128;
 pub const NETWORK_SNAPSHOT_QUEUE_CAPACITY: usize = 8;
+/// Hard admission limit for distinct mutated chunk coordinates.
+///
+/// Existing coordinates remain updatable at the limit; new coordinates are
+/// refused explicitly so an unloaded chunk's revision is never evicted.
+pub const MUTATION_REVISION_INDEX_CAPACITY: usize = 65_536;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+fn default_mutation_revision_index_capacity() -> usize {
+    MUTATION_REVISION_INDEX_CAPACITY
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MutationRevisionIndexCapacityError {
+    pub capacity: usize,
+}
+
+impl std::fmt::Display for MutationRevisionIndexCapacityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "mutation revision index capacity {} reached",
+            self.capacity
+        )
+    }
+}
+
+impl std::error::Error for MutationRevisionIndexCapacityError {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MutationRevisionIndex {
     revisions: HashMap<(crate::dimension::Dimension, i32, i32), u64>,
+    #[serde(skip, default = "default_mutation_revision_index_capacity")]
+    capacity: usize,
+}
+
+impl Default for MutationRevisionIndex {
+    fn default() -> Self {
+        Self::with_capacity_limit(MUTATION_REVISION_INDEX_CAPACITY)
+    }
 }
 
 impl MutationRevisionIndex {
-    pub fn bump(&mut self, dimension: crate::dimension::Dimension, cx: i32, cz: i32) -> u64 {
+    pub fn with_capacity_limit(capacity: usize) -> Self {
+        Self {
+            revisions: HashMap::new(),
+            capacity,
+        }
+    }
+
+    pub fn bump(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+    ) -> Result<u64, MutationRevisionIndexCapacityError> {
+        self.require_admission_capacity(dimension, cx, cz)?;
         let revision = self
             .revisions
             .get(&(dimension, cx, cz))
@@ -30,7 +77,7 @@ impl MutationRevisionIndex {
             .unwrap_or(0)
             .saturating_add(1);
         self.revisions.insert((dimension, cx, cz), revision);
-        revision
+        Ok(revision)
     }
 
     pub fn ensure_at_least(
@@ -39,13 +86,14 @@ impl MutationRevisionIndex {
         cx: i32,
         cz: i32,
         revision: u64,
-    ) -> bool {
+    ) -> Result<bool, MutationRevisionIndexCapacityError> {
+        self.require_admission_capacity(dimension, cx, cz)?;
         let entry = self.revisions.entry((dimension, cx, cz)).or_insert(0);
         if *entry >= revision {
-            return false;
+            return Ok(false);
         }
         *entry = revision;
-        true
+        Ok(true)
     }
 
     pub fn latest(&self, dimension: crate::dimension::Dimension, cx: i32, cz: i32) -> u64 {
@@ -71,6 +119,54 @@ impl MutationRevisionIndex {
 
     pub fn is_empty(&self) -> bool {
         self.revisions.is_empty()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity.max(self.revisions.len())
+    }
+
+    pub fn remove(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+    ) -> Option<u64> {
+        self.revisions.remove(&(dimension, cx, cz))
+    }
+
+    pub fn reclaim_through(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+        acknowledged_revision: u64,
+    ) -> bool {
+        // A stale acknowledgement must not reclaim a newer mutation.
+        let key = (dimension, cx, cz);
+        match self.revisions.get(&key).copied() {
+            Some(latest) if latest <= acknowledged_revision => {
+                self.revisions.remove(&key);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn require_admission_capacity(
+        &self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+    ) -> Result<(), MutationRevisionIndexCapacityError> {
+        if self.revisions.contains_key(&(dimension, cx, cz))
+            || self.revisions.len() < self.capacity()
+        {
+            Ok(())
+        } else {
+            Err(MutationRevisionIndexCapacityError {
+                capacity: self.capacity(),
+            })
+        }
     }
 }
 
@@ -2949,6 +3045,69 @@ mod tests {
     }
 
     #[test]
+    fn paused_worker_sustained_latest_wins_stays_bounded_in_items_and_bytes() {
+        let queue = unstarted_save_queue(2);
+        let tracker = DirtyChunkSet::new();
+        let chunk = Chunk::new(1, 2);
+        let base = UncompressedChunkSnapshot::from_chunk_with_redstone(
+            crate::dimension::Dimension::Overworld,
+            &chunk,
+            Vec::new(),
+        );
+        let metadata = crate::redstone::RedstoneComponentMetadata {
+            local_x: 1,
+            local_y: 64,
+            local_z: 1,
+            facing: crate::redstone::SavedDirection::East,
+            repeater_delay: 2,
+            comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
+            note: 7,
+        };
+        let mut larger = base.clone();
+        larger.redstone_metadata = vec![metadata; 32];
+
+        const MUTATIONS: u64 = 64;
+        for _ in 1..=MUTATIONS {
+            let revision = tracker.mark_dirty(1, 2);
+            assert!(tracker.begin_save(1, 2, revision));
+            let snapshot = if revision % 2 == 0 {
+                larger.clone()
+            } else {
+                base.clone()
+            }
+            .with_mutation_revision(revision);
+            let expected_bytes = snapshot.estimated_bytes();
+
+            queue
+                .send(SaveCommand::SaveChunk {
+                    snapshot,
+                    revision,
+                    tracker: tracker.clone(),
+                })
+                .unwrap();
+
+            let stats = queue.stats();
+            assert_eq!(stats.depth(), 1, "latest-wins must retain one queued item");
+            assert_eq!(stats.in_flight(), 0, "the worker remains paused");
+            assert_eq!(stats.in_flight_bytes(), 0);
+            assert_eq!(stats.queued_bytes(), expected_bytes);
+            assert!(stats.queued_bytes() <= larger.estimated_bytes());
+
+            let state = queue
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert_eq!(state.pending_chunks.len(), 1);
+            let pending = state.pending_chunks.values().next().unwrap();
+            assert_eq!(pending.revision, revision);
+            assert_eq!(pending.bytes, expected_bytes);
+        }
+
+        assert_eq!(queue.stats().dropped(), MUTATIONS - 1);
+    }
+
+    #[test]
     fn flush_propagates_io_failure_and_keeps_chunk_dirty_for_retry() {
         let world_dir = unique_test_dir("save_flush_failure");
         let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
@@ -3072,6 +3231,132 @@ mod tests {
         fs::remove_dir_all(world_dir).unwrap();
     }
 
+    fn same_region_snapshot(cx: i32, cz: i32, marker: BlockType) -> UncompressedChunkSnapshot {
+        let mut chunk = Chunk::new(cx, cz);
+        chunk.set_block_local(0, 64, 0, marker);
+        UncompressedChunkSnapshot::from_chunk_with_redstone(
+            crate::dimension::Dimension::Overworld,
+            &chunk,
+            Vec::new(),
+        )
+    }
+
+    fn assert_saved_marker(manager: &mut SaveManager, cx: i32, cz: i32, marker: BlockType) {
+        let saved = manager
+            .load_chunk_in(crate::dimension::Dimension::Overworld, cx, cz)
+            .expect("same-region chunk should load after restart");
+        let mut restored = Chunk::new(cx, cz);
+        saved.restore_to_chunk(&mut restored);
+        assert_eq!(restored.get_block_local(0, 64, 0), marker);
+    }
+
+    fn save_same_region_new_snapshots(world_dir: &Path) {
+        let mut manager = SaveManager::new(world_dir);
+        let snapshots = [
+            same_region_snapshot(0, 0, BlockType::Obsidian),
+            same_region_snapshot(1, 0, BlockType::StoneBrick),
+        ];
+        manager
+            .save_chunks_batch_in(crate::dimension::Dimension::Overworld, &snapshots)
+            .unwrap();
+    }
+
+    #[test]
+    fn same_region_batch_faults_replace_atomically_and_preserve_sibling_on_restart() {
+        let world_dir = unique_test_dir("same_region_batch_faults");
+        let old_snapshots = [
+            same_region_snapshot(0, 0, BlockType::Brick),
+            same_region_snapshot(1, 0, BlockType::Cobblestone),
+        ];
+        let new_snapshots = [
+            same_region_snapshot(0, 0, BlockType::Obsidian),
+            same_region_snapshot(1, 0, BlockType::StoneBrick),
+        ];
+
+        let mut manager = SaveManager::new(&world_dir);
+        manager
+            .save_chunks_batch_in(crate::dimension::Dimension::Overworld, &old_snapshots)
+            .unwrap();
+        drop(manager);
+
+        let mut manager = SaveManager::new(&world_dir);
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(1));
+        assert!(matches!(
+            manager.save_chunks_batch_in(crate::dimension::Dimension::Overworld, &new_snapshots),
+            Err(SaveError::Io { .. })
+        ));
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(0));
+        drop(manager);
+
+        let mut restarted = SaveManager::new(&world_dir);
+        assert_saved_marker(&mut restarted, 0, 0, BlockType::Brick);
+        assert_saved_marker(&mut restarted, 1, 0, BlockType::Cobblestone);
+        drop(restarted);
+
+        let mut manager = SaveManager::new(&world_dir);
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(2));
+        assert!(matches!(
+            manager.save_chunks_batch_in(crate::dimension::Dimension::Overworld, &new_snapshots),
+            Err(SaveError::Io { .. })
+        ));
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(0));
+        drop(manager);
+
+        let mut restarted = SaveManager::new(&world_dir);
+        assert_saved_marker(&mut restarted, 0, 0, BlockType::Obsidian);
+        assert_saved_marker(&mut restarted, 1, 0, BlockType::StoneBrick);
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn same_region_batch_survives_process_crash_before_and_after_replace() {
+        let world_dir = unique_test_dir("same_region_batch_crash");
+        let old_snapshots = [
+            same_region_snapshot(0, 0, BlockType::Brick),
+            same_region_snapshot(1, 0, BlockType::Cobblestone),
+        ];
+        let mut manager = SaveManager::new(&world_dir);
+        manager
+            .save_chunks_batch_in(crate::dimension::Dimension::Overworld, &old_snapshots)
+            .unwrap();
+        drop(manager);
+
+        let test_binary = std::env::current_exe().unwrap();
+        let before = std::process::Command::new(&test_binary)
+            .args([
+                "--ignored",
+                "--exact",
+                "save::tests::same_region_batch_crash_child",
+            ])
+            .env("ICRAFT_TEST_ATOMIC_CRASH_STAGE", "before_replace")
+            .env("ICRAFT_TEST_ATOMIC_CRASH_WORLD", &world_dir)
+            .output()
+            .unwrap();
+        assert!(!before.status.success());
+
+        let mut restarted = SaveManager::new(&world_dir);
+        assert_saved_marker(&mut restarted, 0, 0, BlockType::Brick);
+        assert_saved_marker(&mut restarted, 1, 0, BlockType::Cobblestone);
+        drop(restarted);
+
+        let after = std::process::Command::new(&test_binary)
+            .args([
+                "--ignored",
+                "--exact",
+                "save::tests::same_region_batch_crash_child",
+            ])
+            .env("ICRAFT_TEST_ATOMIC_CRASH_STAGE", "after_replace")
+            .env("ICRAFT_TEST_ATOMIC_CRASH_WORLD", &world_dir)
+            .output()
+            .unwrap();
+        assert!(!after.status.success());
+
+        let mut restarted = SaveManager::new(&world_dir);
+        assert_saved_marker(&mut restarted, 0, 0, BlockType::Obsidian);
+        assert_saved_marker(&mut restarted, 1, 0, BlockType::StoneBrick);
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
     #[test]
     #[ignore = "helper subprocess for atomic_replace_survives_process_crash_before_and_after_replace"]
     fn atomic_replace_crash_child() {
@@ -3079,6 +3364,16 @@ mod tests {
             .map(PathBuf::from)
             .expect("missing crash-test path");
         atomic_write(path, b"new complete value").unwrap();
+        panic!("atomic crash failpoint did not abort");
+    }
+
+    #[test]
+    #[ignore = "helper subprocess for same_region_batch_survives_process_crash_before_and_after_replace"]
+    fn same_region_batch_crash_child() {
+        let world_dir = std::env::var_os("ICRAFT_TEST_ATOMIC_CRASH_WORLD")
+            .map(PathBuf::from)
+            .expect("missing crash-test world path");
+        save_same_region_new_snapshots(&world_dir);
         panic!("atomic crash failpoint did not abort");
     }
 
@@ -3259,8 +3554,18 @@ mod tests {
             .unwrap();
 
         let mut index = MutationRevisionIndex::default();
-        assert_eq!(index.bump(crate::dimension::Dimension::Overworld, 7, -4), 1);
-        assert_eq!(index.bump(crate::dimension::Dimension::Overworld, 7, -4), 2);
+        assert_eq!(
+            index
+                .bump(crate::dimension::Dimension::Overworld, 7, -4)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            index
+                .bump(crate::dimension::Dimension::Overworld, 7, -4)
+                .unwrap(),
+            2
+        );
         manager.save_mutation_revision_index(&index).unwrap();
         drop(manager);
 
@@ -3302,5 +3607,61 @@ mod tests {
         assert_eq!(payload.key, key);
         assert_eq!(payload.result.unwrap().0, expected_blocks);
         fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn mutation_revision_index_refuses_new_coordinate_at_capacity() {
+        let dimension = crate::dimension::Dimension::Overworld;
+        let mut index = MutationRevisionIndex::with_capacity_limit(2);
+
+        assert_eq!(index.bump(dimension, 1, 1).unwrap(), 1);
+        assert!(index.ensure_at_least(dimension, 2, 2, 7).unwrap());
+        assert_eq!(index.bump(dimension, 1, 1).unwrap(), 2);
+        assert!(!index.ensure_at_least(dimension, 2, 2, 3).unwrap());
+
+        assert_eq!(
+            index.bump(dimension, 3, 3),
+            Err(MutationRevisionIndexCapacityError { capacity: 2 })
+        );
+        assert_eq!(
+            index.ensure_at_least(dimension, 4, 4, 9),
+            Err(MutationRevisionIndexCapacityError { capacity: 2 })
+        );
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.latest(dimension, 1, 1), 2);
+        assert_eq!(index.latest(dimension, 2, 2), 7);
+        assert_eq!(index.latest(dimension, 3, 3), 0);
+    }
+
+    #[test]
+    fn mutation_revision_index_reclaim_is_revision_safe_and_frees_capacity() {
+        let dimension = crate::dimension::Dimension::Nether;
+        let mut index = MutationRevisionIndex::with_capacity_limit(1);
+
+        assert!(index.ensure_at_least(dimension, -5, 8, 12).unwrap());
+        assert!(!index.reclaim_through(dimension, -5, 8, 11));
+        assert_eq!(index.latest(dimension, -5, 8), 12);
+        assert!(index.bump(dimension, 9, 9).is_err());
+
+        assert!(index.reclaim_through(dimension, -5, 8, 12));
+        assert!(index.is_empty());
+        assert_eq!(index.bump(dimension, 9, 9).unwrap(), 1);
+        assert_eq!(index.remove(dimension, 9, 9), Some(1));
+        assert!(index.is_empty());
+    }
+
+    #[test]
+    fn mutation_revision_index_roundtrip_preserves_highest_revision() {
+        let dimension = crate::dimension::Dimension::End;
+        let mut index = MutationRevisionIndex::default();
+
+        assert!(index.ensure_at_least(dimension, 6, -3, 41).unwrap());
+        assert!(!index.ensure_at_least(dimension, 6, -3, 17).unwrap());
+        let encoded = bincode::serialize(&index).unwrap();
+        let reloaded: MutationRevisionIndex = bincode::deserialize(&encoded).unwrap();
+
+        assert_eq!(reloaded.latest(dimension, 6, -3), 41);
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.capacity(), MUTATION_REVISION_INDEX_CAPACITY);
     }
 }

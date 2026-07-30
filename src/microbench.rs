@@ -25,69 +25,124 @@ fn report(name: &str, iters: usize, elapsed: u128, checksum: u64) {
     );
 }
 
-fn bench_storage() -> u64 {
-    let mut dense = [BlockType::Air; 4096];
+const BENCH_BLOCKS: [BlockType; 17] = [
+    BlockType::Air,
+    BlockType::Stone,
+    BlockType::Dirt,
+    BlockType::Grass,
+    BlockType::Sand,
+    BlockType::Gravel,
+    BlockType::Bedrock,
+    BlockType::OakLog,
+    BlockType::OakLeaves,
+    BlockType::Glass,
+    BlockType::Water,
+    BlockType::Lava,
+    BlockType::Brick,
+    BlockType::TNT,
+    BlockType::Bookshelf,
+    BlockType::Obsidian,
+    BlockType::CoalOre,
+];
+
+fn storage_fixture(unique: usize) -> BlockStorage {
+    let mut dense = [BENCH_BLOCKS[0]; 4096];
     for (i, block) in dense.iter_mut().enumerate() {
-        *block = if i % 3 == 0 {
-            BlockType::Stone
-        } else {
-            BlockType::Dirt
-        };
+        *block = BENCH_BLOCKS[i % unique];
     }
-    let mut stores = vec![
-        BlockStorage::Uniform(BlockType::Stone),
-        BlockStorage::from_dense(&[BlockType::Air; 4096]),
-        BlockStorage::from_dense(&dense),
-    ];
+    BlockStorage::from_dense(&dense)
+}
+
+fn bench_storage_case(name: &str, mut store: BlockStorage, values: &[BlockType]) -> u64 {
     let mut checksum = 0u64;
-    for store in &mut stores {
-        for i in 0..WARMUP {
-            black_box(store.get(i));
-            store.set(
-                i,
-                if i & 1 == 0 {
-                    BlockType::Dirt
-                } else {
-                    BlockType::Stone
-                },
-            );
-        }
+    for i in 0..WARMUP {
+        let idx = (i * 37) & 4095;
+        black_box(store.get(idx));
+        store.set(idx, values[i % values.len()]);
     }
     let start = Instant::now();
     for n in 0..ITERS {
-        for store in &mut stores {
-            let i = (n * 37) & 4095;
-            checksum = checksum.wrapping_add(store.get(i) as u64);
-            store.set(i, BlockType::Stone);
-        }
+        let idx = (n * 37) & 4095;
+        checksum = checksum.wrapping_add(store.get(idx) as u64);
+        checksum = checksum.wrapping_add(store.set(idx, values[n % values.len()]) as u64);
     }
-    report(
-        "storage_get_set_uniform_paletted_global",
-        ITERS * stores.len(),
-        start.elapsed().as_nanos(),
-        checksum,
-    );
+    report(name, ITERS, start.elapsed().as_nanos(), checksum);
+    checksum
+}
+
+fn bench_storage() -> u64 {
+    let mut checksum = 0u64;
+    for (name, store, values) in [
+        (
+            "storage_get_set_uniform",
+            BlockStorage::Uniform(BlockType::Stone),
+            &BENCH_BLOCKS[1..2],
+        ),
+        (
+            "storage_get_set_paletted1",
+            storage_fixture(2),
+            &BENCH_BLOCKS[..2],
+        ),
+        (
+            "storage_get_set_paletted2",
+            storage_fixture(3),
+            &BENCH_BLOCKS[..3],
+        ),
+        (
+            "storage_get_set_paletted4",
+            storage_fixture(5),
+            &BENCH_BLOCKS[..5],
+        ),
+        (
+            "storage_get_set_paletted8",
+            storage_fixture(17),
+            &BENCH_BLOCKS[..17],
+        ),
+        (
+            "storage_get_set_global",
+            BlockStorage::Global(Box::new([BlockType::Stone; 4096])),
+            &BENCH_BLOCKS[1..3],
+        ),
+    ] {
+        checksum = checksum.wrapping_add(bench_storage_case(name, store, values));
+    }
     checksum
 }
 
 fn bench_lighting() -> u64 {
-    let mut light = LightStorage::Uniform { sky: 15, block: 0 };
-    for i in 0..WARMUP {
-        light.set_sky(i, (i & 15) as u8);
-    }
     let mut checksum = 0u64;
-    let start = Instant::now();
-    for n in 0..ITERS {
-        let i = (n * 29) & 4095;
-        light.set_block(i, (n & 15) as u8);
-        checksum += light.get_block(i) as u64 + light.get_sky(i) as u64;
+    for (name, mut light, mutate) in [
+        (
+            "lighting_get_set_uniform",
+            LightStorage::Uniform { sky: 15, block: 0 },
+            false,
+        ),
+        (
+            "lighting_get_set_packed",
+            LightStorage::Packed(Box::new([0xF0; 4096])),
+            true,
+        ),
+    ] {
+        for i in 0..WARMUP {
+            black_box(light.get_sky(i));
+            black_box(light.get_block(i));
+        }
+        let start = Instant::now();
+        let mut case_checksum = 0u64;
+        for n in 0..ITERS {
+            let idx = (n * 29) & 4095;
+            if mutate {
+                light.set_block(idx, (n & 15) as u8);
+            } else {
+                light.set_block(idx, 0);
+            }
+            case_checksum = case_checksum
+                .wrapping_add(light.get_block(idx) as u64)
+                .wrapping_add(light.get_sky(idx) as u64);
+        }
+        report(name, ITERS, start.elapsed().as_nanos(), case_checksum);
+        checksum = checksum.wrapping_add(case_checksum);
     }
-    report(
-        "lighting_mutation_packed",
-        ITERS,
-        start.elapsed().as_nanos(),
-        checksum,
-    );
     checksum
 }
 
@@ -170,21 +225,38 @@ fn bench_save() -> u64 {
 }
 
 fn bench_network() -> u64 {
-    let packet = Packet::Handshake {
-        protocol_version: 7,
-        username: "bench".to_string(),
-    };
+    let chunk = Chunk::new(0, 0);
     let start = Instant::now();
     let mut checksum = 0u64;
     for _ in 0..ITERS {
+        let flattened = ChunkSaveData::from_chunk(&chunk);
+        let packet = Packet::ChunkData {
+            protocol_version: 7,
+            dimension: 0,
+            cx: chunk.chunk_x,
+            cz: chunk.chunk_z,
+            revision: 1,
+            blocks: flattened.blocks,
+            block_states: flattened.block_states,
+        };
         let bytes = packet.encode();
         let decoded = Packet::decode(&bytes).unwrap();
-        checksum = checksum
-            .wrapping_add(bytes.len() as u64)
-            .wrapping_add(decoded.encode().len() as u64);
+        let Packet::ChunkData {
+            blocks,
+            block_states,
+            revision,
+            ..
+        } = decoded
+        else {
+            unreachable!("encoded chunk data decoded as another packet variant")
+        };
+        checksum = checksum.wrapping_add(bytes.len() as u64);
+        checksum = checksum.wrapping_add(blocks.len() as u64);
+        checksum = checksum.wrapping_add(block_states.len() as u64);
+        checksum = checksum.wrapping_add(revision);
     }
     report(
-        "network_packet_serialize_deserialize",
+        "network_chunk_flatten_serialize_deserialize",
         ITERS,
         start.elapsed().as_nanos(),
         checksum,
@@ -206,6 +278,17 @@ pub fn run() -> [u64; 6] {
 #[test]
 fn smoke_checksums_are_stable() {
     assert_eq!(run(), run());
+}
+
+#[test]
+fn storage_fixtures_cover_every_runtime_representation() {
+    assert!(matches!(storage_fixture(2), BlockStorage::Paletted1 { .. }));
+    assert!(matches!(storage_fixture(3), BlockStorage::Paletted2 { .. }));
+    assert!(matches!(storage_fixture(5), BlockStorage::Paletted4 { .. }));
+    assert!(matches!(
+        storage_fixture(17),
+        BlockStorage::Paletted8 { .. }
+    ));
 }
 
 #[test]

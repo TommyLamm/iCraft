@@ -39,9 +39,33 @@ pub(crate) mod world;
 use app::App;
 use winit::event_loop::EventLoop;
 
+fn wants_microbench<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == "--microbench")
+}
+
 fn main() {
+    if wants_microbench(std::env::args()) {
+        let _ = microbench::run();
+        return;
+    }
+
     let event_loop = EventLoop::new().unwrap();
     let mut app = App::new();
     let _ = event_loop.run_app(&mut app);
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants_microbench;
+
+    #[test]
+    fn microbench_flag_is_selected_without_affecting_other_args() {
+        assert!(wants_microbench(["mc", "--microbench"]));
+        assert!(!wants_microbench(["mc", "--help"]));
+    }
 }
