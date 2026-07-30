@@ -1,7 +1,7 @@
 use crate::chunk_render::{ChunkLodMeshData, ChunkMeshBundle, TerrainVertex};
 use crate::redstone::Direction;
 use noise::{NoiseFn, Perlin};
-use std::mem::size_of;
+use std::mem::{size_of, size_of_val};
 
 pub const CHUNK_WIDTH: usize = 16;
 pub const CHUNK_HEIGHT: usize = 256;
@@ -1983,7 +1983,7 @@ impl SectionIdentity {
             && self.key.cz == candidate.key.cz
             && self.key.section_y == candidate.key.section_y
             && self.lifetime == candidate.lifetime
-            && candidate.revision >= self.revision
+            && candidate.revision == self.revision
     }
 }
 
@@ -2063,7 +2063,7 @@ fn is_random_tick(block: BlockType) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BlockStorage {
+pub(crate) enum BlockStorage {
     Empty,
     Uniform(BlockType),
     Paletted1 {
@@ -2086,6 +2086,26 @@ pub enum BlockStorage {
 }
 
 impl BlockStorage {
+    /// Collapse an allocated representation whose values are all identical.
+    ///
+    /// This deliberately does not perform general palette rebuilding: it is
+    /// the cheap-to-qualify demotion checked at every explicit safe point.
+    fn compact_uniform(&mut self) -> bool {
+        if matches!(self, Self::Empty | Self::Uniform(_)) {
+            return false;
+        }
+        let first = self.get(0);
+        if (1..4096).any(|idx| self.get(idx) != first) {
+            return false;
+        }
+        *self = if first == BlockType::Air {
+            Self::Empty
+        } else {
+            Self::Uniform(first)
+        };
+        true
+    }
+
     /// Rebuild this storage at the smallest representation for its current values.
     /// This is an explicit safe-point operation; ordinary `set` calls remain incremental.
     pub fn compact(&mut self) {
@@ -2381,12 +2401,29 @@ impl BlockStorage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LightStorage {
+pub(crate) enum LightStorage {
     Uniform { sky: u8, block: u8 },
     Packed(Box<[u8; 4096]>),
 }
 
 impl LightStorage {
+    fn compact_uniform(&mut self) -> bool {
+        if matches!(self, Self::Uniform { .. }) {
+            return false;
+        }
+        let first_sky = self.get_sky(0);
+        let first_block = self.get_block(0);
+        if (1..4096).any(|idx| self.get_sky(idx) != first_sky || self.get_block(idx) != first_block)
+        {
+            return false;
+        }
+        *self = Self::Uniform {
+            sky: first_sky,
+            block: first_block,
+        };
+        true
+    }
+
     pub fn compact(&mut self) {
         let mut sky = [0u8; 4096];
         let mut block = [0u8; 4096];
@@ -2734,11 +2771,19 @@ impl ChunkSection {
         self.storage_changes = 0;
     }
 
-    /// Compact at an explicit safe point after enough mutations have accrued.
-    /// The hot `set_*` paths only increment a counter; the linear scan happens
-    /// here, never once per mutation.
+    /// Compact at an explicit runtime safe point.
+    ///
+    /// Empty/uniform demotion is attempted immediately so short-lived edits
+    /// can release their allocation without waiting for the churn interval.
+    /// General palette rebuilding remains amortized behind the interval. The
+    /// hot `set_*` paths only update values and counters.
     pub fn compact_if_worthwhile(&mut self) -> bool {
         const COMPACTION_INTERVAL: u16 = 256;
+        let demoted = self.blocks.compact_uniform() | self.light.compact_uniform();
+        if demoted {
+            self.storage_changes = 0;
+            return true;
+        }
         if self.storage_changes < COMPACTION_INTERVAL {
             return false;
         }
@@ -3349,6 +3394,25 @@ impl Chunk {
     /// Returns the indexed local positions of redstone components.
     pub fn redstone_positions(&self) -> &[u16] {
         &self.redstone_positions
+    }
+
+    /// Bytes owned by this chunk, including representation-specific section
+    /// storage, vector spare capacity, and the boxed heightmap allocation.
+    pub fn memory_usage(&self) -> usize {
+        size_of::<Self>()
+            + self.sections.capacity() * size_of::<ChunkSection>()
+            + self
+                .sections
+                .iter()
+                .map(|section| {
+                    section
+                        .memory_usage()
+                        .saturating_sub(size_of::<ChunkSection>())
+                })
+                .sum::<usize>()
+            + size_of_val(self.heightmap.as_ref())
+            + self.torch_positions.capacity() * size_of::<u16>()
+            + self.redstone_positions.capacity() * size_of::<u16>()
     }
 
     /// Rebuilds the torch index after bulk block mutations (generation/load).
@@ -4065,6 +4129,21 @@ impl Chunk {
                 }
             }
         });
+        Self::generate_section_mesh_bundle_from_halo(
+            SectionIdentity::new(key, revision, lifetime),
+            &halo,
+        )
+    }
+
+    /// Builds a section mesh exclusively from the immutable 18^3 worker
+    /// snapshot. This is the runtime entry point; no live Chunk/ChunkManager
+    /// state is consulted after dispatch.
+    pub fn generate_section_mesh_bundle_from_halo(
+        identity: SectionIdentity,
+        halo: &SectionHaloSnapshot,
+    ) -> crate::chunk_render::SectionMeshBundle {
+        let key = identity.key;
+        debug_assert_eq!(halo.key, key);
         let section_voxel = |wx: i32, wy: i32, wz: i32| {
             let hx = wx - key.cx * CHUNK_WIDTH as i32 + 1;
             let hy = wy - key.min_world_y() + 1;
@@ -4080,9 +4159,6 @@ impl Chunk {
             // section worker. Keep a deterministic sentinel for defensive use.
             MeshVoxel::default()
         };
-        // Temporary section LOD policy: L1/L2 intentionally reuse the same
-        // section-owned geometry as L0 until dedicated decimation lands.
-        // They never consult the global heightmap or a live world lookup.
         let origin = [
             key.cx * CHUNK_WIDTH as i32,
             key.min_world_y(),
@@ -4095,8 +4171,9 @@ impl Chunk {
         );
         let region_coord = crate::chunk_render::chunk_to_region_coord(key.cx, key.cz);
         let l0 = ChunkLodMeshData::from_parts(o, oi, t, ti, region_coord);
-        let levels = [l0.clone(), l0.clone(), l0];
-        let identity = SectionIdentity::new(key, revision, lifetime);
+        let l1 = Self::mesh_section_lod_from_halo(key, halo, 2);
+        let l2 = Self::mesh_section_lod_from_halo(key, halo, 4);
+        let levels = [l0, l1, l2];
         let bounds = levels
             .iter()
             .filter_map(ChunkLodMeshData::bounds)
@@ -4105,8 +4182,87 @@ impl Chunk {
             identity,
             levels,
             bounds,
-            connectivity: crate::culling::SectionConnectivity::FULL,
+            connectivity: crate::culling::compute_section_connectivity_snapshot(halo),
         }
+    }
+
+    fn mesh_section_lod_from_halo(
+        key: SectionKey,
+        halo: &SectionHaloSnapshot,
+        step: usize,
+    ) -> ChunkLodMeshData {
+        debug_assert!(step > 1 && SECTION_SIZE % step == 0);
+        let mut coarse = [MeshVoxel::default(); SECTION_VOLUME];
+
+        for cell_y in (0..SECTION_SIZE).step_by(step) {
+            for cell_z in (0..CHUNK_DEPTH).step_by(step) {
+                for cell_x in (0..CHUNK_WIDTH).step_by(step) {
+                    let mut representative = MeshVoxel::default();
+                    'sample: for dy in 0..step {
+                        for dz in 0..step {
+                            for dx in 0..step {
+                                let voxel =
+                                    halo.get(cell_x + dx + 1, cell_y + dy + 1, cell_z + dz + 1);
+                                if voxel.block != BlockType::Air {
+                                    representative = voxel;
+                                    break 'sample;
+                                }
+                            }
+                        }
+                    }
+                    if representative.block == BlockType::Air {
+                        continue;
+                    }
+                    for dy in 0..step {
+                        for dz in 0..step {
+                            for dx in 0..step {
+                                let x = cell_x + dx;
+                                let y = cell_y + dy;
+                                let z = cell_z + dz;
+                                coarse[(y * CHUNK_DEPTH + z) * CHUNK_WIDTH + x] = representative;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let origin = [
+            key.cx * CHUNK_WIDTH as i32,
+            key.min_world_y(),
+            key.cz * CHUNK_DEPTH as i32,
+        ];
+        let voxel = |wx: i32, wy: i32, wz: i32| {
+            let x = wx - origin[0];
+            let y = wy - origin[1];
+            let z = wz - origin[2];
+            if (0..CHUNK_WIDTH as i32).contains(&x)
+                && (0..SECTION_SIZE as i32).contains(&y)
+                && (0..CHUNK_DEPTH as i32).contains(&z)
+            {
+                return coarse[(y as usize * CHUNK_DEPTH + z as usize) * CHUNK_WIDTH + x as usize];
+            }
+            let hx = x + 1;
+            let hy = y + 1;
+            let hz = z + 1;
+            if (0..SectionHaloSnapshot::SIDE as i32).contains(&hx)
+                && (0..SectionHaloSnapshot::SIDE as i32).contains(&hy)
+                && (0..SectionHaloSnapshot::SIDE as i32).contains(&hz)
+            {
+                halo.get(hx as usize, hy as usize, hz as usize)
+            } else {
+                MeshVoxel::default()
+            }
+        };
+        let (opaque, opaque_indices, transparent, transparent_indices) =
+            Self::mesh_l0_volume(origin, [CHUNK_WIDTH, SECTION_SIZE, CHUNK_DEPTH], voxel);
+        ChunkLodMeshData::from_parts(
+            opaque,
+            opaque_indices,
+            transparent,
+            transparent_indices,
+            crate::chunk_render::chunk_to_region_coord(key.cx, key.cz),
+        )
     }
 
     fn generate_surface_mesh<F>(&self, get_block_at: F, step: usize) -> ChunkLodMeshData
@@ -4477,6 +4633,58 @@ mod tests {
             ..MeshVoxel::default()
         });
         assert!(!ov.is_empty() || !tv.is_empty());
+    }
+
+    #[test]
+    fn section_bundle_builds_distinct_bounded_lods_and_preserves_identity() {
+        let mut chunk = empty_test_chunk();
+        let key = SectionKey::new(0, 1, 0);
+        for cell_y in (0..SECTION_SIZE).step_by(2) {
+            for cell_z in (0..CHUNK_DEPTH).step_by(2) {
+                for cell_x in (0..CHUNK_WIDTH).step_by(2) {
+                    if (cell_x / 2 + cell_y / 2 + cell_z / 2) & 1 == 0 {
+                        chunk.set_block_local(
+                            cell_x,
+                            key.min_world_y() as usize + cell_y,
+                            cell_z,
+                            BlockType::Stone,
+                        );
+                    }
+                }
+            }
+        }
+
+        let identity = SectionIdentity::new(key, 41, 7);
+        let bundle = chunk.generate_section_mesh_bundle(
+            key,
+            identity.revision,
+            identity.lifetime,
+            |x, y, z| test_chunk_lookup(&chunk, x, y, z),
+        );
+
+        assert_eq!(bundle.identity, identity);
+        assert_ne!(bundle.levels[0].opaque, bundle.levels[1].opaque);
+        assert_ne!(bundle.levels[1].opaque, bundle.levels[2].opaque);
+        assert!(
+            bundle.levels[2].opaque.indices.len() < bundle.levels[1].opaque.indices.len(),
+            "L2 must submit genuinely coarser geometry"
+        );
+
+        let section_min = Vec3::new(0.0, key.min_world_y() as f32, 0.0);
+        let section_max = section_min + Vec3::splat(SECTION_SIZE as f32);
+        for level in &bundle.levels {
+            let bounds = level.bounds().expect("fixture produces opaque geometry");
+            assert!(bounds.min.cmpge(section_min).all());
+            assert!(bounds.max.cmple(section_max).all());
+        }
+        assert_eq!(
+            bundle.bounds,
+            bundle
+                .levels
+                .iter()
+                .filter_map(ChunkLodMeshData::bounds)
+                .reduce(|a, b| a.union(b))
+        );
     }
 
     #[test]
@@ -5633,8 +5841,13 @@ mod tests {
         assert_eq!(storage.get(0), BlockType::Stone);
         assert!(storage.memory_usage() <= before);
         storage.set(0, BlockType::Air);
+        let allocated = storage.memory_usage();
         storage.compact();
         assert!(matches!(storage, BlockStorage::Empty));
+        assert!(
+            storage.memory_usage() < allocated,
+            "empty demotion must release the palette and packed indices"
+        );
     }
 
     #[test]
@@ -5690,5 +5903,59 @@ mod tests {
         assert!(section.compact_if_worthwhile());
         assert_eq!(section.get_block(0), BlockType::Stone);
         assert_eq!(section.get_block(1), BlockType::Stone);
+    }
+
+    #[test]
+    fn section_safe_point_immediately_demotes_empty_and_uniform_storage() {
+        let mut empty = ChunkSection::empty_sky();
+        empty.set_block(0, BlockType::Stone);
+        empty.set_block(0, BlockType::Air);
+        let empty_allocated = empty.memory_usage();
+        assert!(empty.compact_if_worthwhile());
+        assert_eq!(empty.get_block(0), BlockType::Air);
+        assert!(empty.memory_usage() < empty_allocated);
+
+        let blocks = [BlockType::Stone; 4096];
+        let light = [0u8; 4096];
+        let mut uniform = ChunkSection::from_dense(&blocks, &light, &light, None, None);
+        uniform.set_block(7, BlockType::Dirt);
+        uniform.set_block(7, BlockType::Stone);
+        let uniform_allocated = uniform.memory_usage();
+        assert!(uniform.compact_if_worthwhile());
+        assert_eq!(uniform.get_block(7), BlockType::Stone);
+        assert!(uniform.memory_usage() < uniform_allocated);
+    }
+
+    #[test]
+    fn section_safe_point_immediately_demotes_uniform_light_storage() {
+        let mut section = ChunkSection::empty_dark();
+        section.light.set_sky(11, 9);
+        section.light.set_sky(11, 0);
+        let allocated = section.memory_usage();
+        assert!(section.compact_if_worthwhile());
+        assert_eq!(section.light.get_sky(11), 0);
+        assert!(section.memory_usage() < allocated);
+    }
+
+    #[test]
+    fn chunk_memory_usage_tracks_section_promotion_and_demotion() {
+        let mut chunk = Chunk {
+            chunk_x: 0,
+            chunk_z: 0,
+            sections: (0..SECTION_COUNT)
+                .map(|_| ChunkSection::empty_dark())
+                .collect(),
+            heightmap: Box::new([[0; CHUNK_DEPTH]; CHUNK_WIDTH]),
+            torch_positions: Vec::new(),
+            redstone_positions: Vec::new(),
+        };
+        let empty_bytes = chunk.memory_usage();
+        chunk.set_block_local(0, 0, 0, BlockType::Stone);
+        let promoted_bytes = chunk.memory_usage();
+        assert!(promoted_bytes > empty_bytes);
+
+        chunk.set_block_local(0, 0, 0, BlockType::Air);
+        assert!(chunk.sections[0].compact_if_worthwhile());
+        assert!(chunk.memory_usage() < promoted_bytes);
     }
 }

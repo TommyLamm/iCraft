@@ -27,6 +27,11 @@ impl SectionMeshScheduler {
     pub fn new() -> Self {
         Self::default()
     }
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.priority.clear();
+        self.in_flight.clear();
+    }
     pub fn enqueue(
         &mut self,
         identity: SectionIdentity,

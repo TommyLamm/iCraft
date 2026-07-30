@@ -383,6 +383,9 @@ pub enum DrawLayer {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct DrawCandidate {
     pub chunk_coord: (i32, i32),
+    /// Vertical section owning this allocation. Legacy/test candidates may
+    /// omit it, but runtime terrain draws always carry an exact section.
+    pub section_y: Option<u16>,
     pub bounds: MeshBounds,
     pub index_count: u32,
     pub layer: DrawLayer,
@@ -401,6 +404,26 @@ impl DrawCandidate {
     ) -> Self {
         Self {
             chunk_coord,
+            section_y: None,
+            bounds,
+            index_count,
+            layer,
+            lod,
+            distance_sq,
+        }
+    }
+
+    pub fn for_section(
+        key: crate::world::SectionKey,
+        bounds: MeshBounds,
+        index_count: u32,
+        layer: DrawLayer,
+        lod: LodLevel,
+        distance_sq: f32,
+    ) -> Self {
+        Self {
+            chunk_coord: (key.cx, key.cz),
+            section_y: Some(key.section_y),
             bounds,
             index_count,
             layer,
@@ -415,12 +438,21 @@ impl DrawCandidate {
 pub struct DrawPlan {
     pub opaque: Vec<DrawCandidate>,
     pub transparent: Vec<DrawCandidate>,
+    /// Reusable storage for tracking the chunks represented by this plan.
+    ///
+    /// The render loop rebuilds one plan every frame. Keeping this set on the
+    /// plan lets it retain its capacity instead of allocating a temporary set
+    /// whenever the visible-chunk statistic is queried.
+    visible_chunks: HashSet<(i32, i32)>,
+    visible_chunk_count_cache: usize,
 }
 
 impl DrawPlan {
     pub fn clear(&mut self) {
         self.opaque.clear();
         self.transparent.clear();
+        self.visible_chunks.clear();
+        self.visible_chunk_count_cache = 0;
     }
 
     pub fn build_into(
@@ -434,6 +466,9 @@ impl DrawPlan {
             if candidate.index_count == 0 || !frustum.intersects_aabb(&candidate.bounds) {
                 continue;
             }
+            if self.visible_chunks.insert(candidate.chunk_coord) {
+                self.visible_chunk_count_cache += 1;
+            }
             match candidate.layer {
                 DrawLayer::Opaque => self.opaque.push(candidate),
                 DrawLayer::Transparent => self.transparent.push(candidate),
@@ -444,12 +479,14 @@ impl DrawPlan {
             left.distance_sq
                 .total_cmp(&right.distance_sq)
                 .then_with(|| left.chunk_coord.cmp(&right.chunk_coord))
+                .then_with(|| left.section_y.cmp(&right.section_y))
         });
         self.transparent.sort_by(|left, right| {
             right
                 .distance_sq
                 .total_cmp(&left.distance_sq)
                 .then_with(|| left.chunk_coord.cmp(&right.chunk_coord))
+                .then_with(|| left.section_y.cmp(&right.section_y))
         });
     }
 
@@ -477,12 +514,7 @@ impl DrawPlan {
     }
 
     pub fn visible_chunk_count(&self) -> usize {
-        self.opaque
-            .iter()
-            .chain(&self.transparent)
-            .map(|candidate| candidate.chunk_coord)
-            .collect::<HashSet<_>>()
-            .len()
+        self.visible_chunk_count_cache
     }
 }
 
@@ -634,6 +666,7 @@ pub enum FreeListError {
     UnknownAllocation,
     StaleGeneration,
     WrongOwner,
+    ArithmeticOverflow,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -665,16 +698,44 @@ impl FreeList {
         self.capacity
     }
 
+    pub fn checked_used_units(&self) -> Result<u32, FreeListError> {
+        self.capacity
+            .checked_sub(self.checked_free_units()?)
+            .ok_or(FreeListError::ArithmeticOverflow)
+    }
+
     pub fn used_units(&self) -> u32 {
-        self.capacity.saturating_sub(self.free_units())
+        self.checked_used_units()
+            .expect("free-list used-unit accounting overflow")
+    }
+
+    pub fn checked_free_units(&self) -> Result<u32, FreeListError> {
+        self.free_blocks.iter().try_fold(0u32, |total, block| {
+            let end = block
+                .offset
+                .checked_add(block.count)
+                .ok_or(FreeListError::ArithmeticOverflow)?;
+            if end > self.capacity {
+                return Err(FreeListError::ArithmeticOverflow);
+            }
+            total
+                .checked_add(block.count)
+                .ok_or(FreeListError::ArithmeticOverflow)
+        })
     }
 
     pub fn free_units(&self) -> u32 {
-        self.free_blocks.iter().map(|b| b.count).sum()
+        self.checked_free_units()
+            .expect("free-list free-unit accounting overflow")
     }
 
     pub fn counters_consistent(&self) -> bool {
-        self.free_units().checked_add(self.used_units()) == Some(self.capacity)
+        self.checked_free_units().and_then(|free| {
+            self.checked_used_units().and_then(|used| {
+                free.checked_add(used)
+                    .ok_or(FreeListError::ArithmeticOverflow)
+            })
+        }) == Ok(self.capacity)
     }
 
     pub fn largest_free_block(&self) -> u32 {
@@ -703,19 +764,33 @@ impl FreeList {
             .position(|b| b.count >= count)
             .ok_or(FreeListError::OutOfBounds)?;
         let offset = self.free_blocks[index].offset;
+        let block_end = offset
+            .checked_add(self.free_blocks[index].count)
+            .ok_or(FreeListError::ArithmeticOverflow)?;
+        if block_end > self.capacity {
+            return Err(FreeListError::ArithmeticOverflow);
+        }
         let new_end = offset
             .checked_add(count)
-            .ok_or(FreeListError::OutOfBounds)?;
+            .ok_or(FreeListError::ArithmeticOverflow)?;
         if new_end > self.capacity {
             return Err(FreeListError::OutOfBounds);
         }
+        let next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or(FreeListError::ArithmeticOverflow)?;
+        let remaining = self.free_blocks[index]
+            .count
+            .checked_sub(count)
+            .ok_or(FreeListError::ArithmeticOverflow)?;
         self.free_blocks[index].offset = new_end;
-        self.free_blocks[index].count -= count;
+        self.free_blocks[index].count = remaining;
         if self.free_blocks[index].count == 0 {
             self.free_blocks.remove(index);
         }
         let generation = self.next_generation;
-        self.next_generation = self.next_generation.checked_add(1).unwrap_or(1);
+        self.next_generation = next_generation;
         self.allocations.insert(
             offset,
             AllocationRecord {
@@ -738,7 +813,7 @@ impl FreeList {
         }
         let end = offset
             .checked_add(count)
-            .ok_or(FreeListError::OutOfBounds)?;
+            .ok_or(FreeListError::ArithmeticOverflow)?;
         if end > self.capacity {
             return Err(FreeListError::OutOfBounds);
         }
@@ -791,7 +866,7 @@ impl FreeList {
     ) -> Result<(), FreeListError> {
         let end = offset
             .checked_add(count)
-            .ok_or(FreeListError::OutOfBounds)?;
+            .ok_or(FreeListError::ArithmeticOverflow)?;
         if end > self.capacity {
             return Err(FreeListError::OutOfBounds);
         }
@@ -802,7 +877,11 @@ impl FreeList {
 
         if insert_idx > 0 {
             let prev = &self.free_blocks[insert_idx - 1];
-            if prev.offset.checked_add(prev.count) > Some(offset) {
+            let prev_end = prev
+                .offset
+                .checked_add(prev.count)
+                .ok_or(FreeListError::ArithmeticOverflow)?;
+            if prev_end > offset {
                 return Err(FreeListError::Overlap);
             }
         }
@@ -811,70 +890,97 @@ impl FreeList {
                 return Err(FreeListError::Overlap);
             }
         }
-        self.free_blocks
-            .insert(insert_idx, FreeListBlock { offset, count });
-        self.allocations.remove(&offset);
-
+        let mut free_blocks = self.free_blocks.clone();
+        free_blocks.insert(insert_idx, FreeListBlock { offset, count });
         let mut i = 0;
-        while i + 1 < self.free_blocks.len() {
-            if self.free_blocks[i]
+        while i + 1 < free_blocks.len() {
+            let block_end = free_blocks[i]
                 .offset
-                .checked_add(self.free_blocks[i].count)
-                == Some(self.free_blocks[i + 1].offset)
-            {
-                self.free_blocks[i].count = self.free_blocks[i]
+                .checked_add(free_blocks[i].count)
+                .ok_or(FreeListError::ArithmeticOverflow)?;
+            if block_end == free_blocks[i + 1].offset {
+                free_blocks[i].count = free_blocks[i]
                     .count
-                    .checked_add(self.free_blocks[i + 1].count)
-                    .expect("free block overflow");
-                self.free_blocks.remove(i + 1);
+                    .checked_add(free_blocks[i + 1].count)
+                    .ok_or(FreeListError::ArithmeticOverflow)?;
+                free_blocks.remove(i + 1);
             } else {
                 i += 1;
             }
         }
+        for block in &free_blocks {
+            let block_end = block
+                .offset
+                .checked_add(block.count)
+                .ok_or(FreeListError::ArithmeticOverflow)?;
+            if block_end > self.capacity {
+                return Err(FreeListError::ArithmeticOverflow);
+            }
+        }
+        self.free_blocks = free_blocks;
+        self.allocations.remove(&offset);
         Ok(())
     }
 
-    pub fn resize(&mut self, new_capacity: u32) {
+    pub fn resize(&mut self, new_capacity: u32) -> Result<(), FreeListError> {
         if new_capacity <= self.capacity {
-            return;
+            return Ok(());
         }
-        let added = new_capacity - self.capacity;
+        let added = new_capacity
+            .checked_sub(self.capacity)
+            .ok_or(FreeListError::ArithmeticOverflow)?;
         let old_capacity = self.capacity;
-        self.capacity = new_capacity;
         // The appended range is unallocated by construction.
-        self.free_blocks.push(FreeListBlock {
+        let mut free_blocks = self.free_blocks.clone();
+        free_blocks.push(FreeListBlock {
             offset: old_capacity,
             count: added,
         });
-        self.free_blocks.sort_by_key(|b| b.offset);
+        free_blocks.sort_by_key(|b| b.offset);
         let mut i = 0;
-        while i + 1 < self.free_blocks.len() {
-            if self.free_blocks[i]
+        while i + 1 < free_blocks.len() {
+            let block_end = free_blocks[i]
                 .offset
-                .checked_add(self.free_blocks[i].count)
-                == Some(self.free_blocks[i + 1].offset)
-            {
-                self.free_blocks[i].count += self.free_blocks[i + 1].count;
-                self.free_blocks.remove(i + 1);
+                .checked_add(free_blocks[i].count)
+                .ok_or(FreeListError::ArithmeticOverflow)?;
+            if block_end == free_blocks[i + 1].offset {
+                free_blocks[i].count = free_blocks[i]
+                    .count
+                    .checked_add(free_blocks[i + 1].count)
+                    .ok_or(FreeListError::ArithmeticOverflow)?;
+                free_blocks.remove(i + 1);
             } else {
                 i += 1;
             }
         }
+        for block in &free_blocks {
+            let block_end = block
+                .offset
+                .checked_add(block.count)
+                .ok_or(FreeListError::ArithmeticOverflow)?;
+            if block_end > new_capacity {
+                return Err(FreeListError::ArithmeticOverflow);
+            }
+        }
+        self.capacity = new_capacity;
+        self.free_blocks = free_blocks;
+        Ok(())
     }
 
     /// Returns a deterministic low-priority compaction plan and applies the
     /// corresponding ranges to allocator metadata. The caller must copy GPU
     /// data according to the returned moves before rendering the next frame.
-    pub fn compact(&mut self) -> Vec<CompactionMove> {
+    pub fn compact(&mut self) -> Result<Vec<CompactionMove>, FreeListError> {
         let mut cursor = 0u32;
         let mut moves = Vec::new();
-        let live: Vec<_> = self
-            .allocations
-            .iter()
-            .map(|(&from, record)| (from, *record))
-            .collect();
-        self.allocations.clear();
-        for (from, record) in live {
+        let mut allocations = BTreeMap::new();
+        for (&from, &record) in &self.allocations {
+            let source_end = from
+                .checked_add(record.count)
+                .ok_or(FreeListError::ArithmeticOverflow)?;
+            if source_end > self.capacity {
+                return Err(FreeListError::ArithmeticOverflow);
+            }
             let to = cursor;
             if from != to {
                 moves.push(CompactionMove {
@@ -884,20 +990,28 @@ impl FreeList {
                     generation: record.generation,
                 });
             }
-            self.allocations.insert(to, record);
+            allocations.insert(to, record);
             cursor = cursor
                 .checked_add(record.count)
-                .expect("allocation sum overflow");
+                .ok_or(FreeListError::ArithmeticOverflow)?;
+            if cursor > self.capacity {
+                return Err(FreeListError::ArithmeticOverflow);
+            }
         }
-        self.free_blocks = if cursor < self.capacity {
+        let free_blocks = if cursor < self.capacity {
             vec![FreeListBlock {
                 offset: cursor,
-                count: self.capacity - cursor,
+                count: self
+                    .capacity
+                    .checked_sub(cursor)
+                    .ok_or(FreeListError::ArithmeticOverflow)?,
             }]
         } else {
             Vec::new()
         };
-        moves
+        self.allocations = allocations;
+        self.free_blocks = free_blocks;
+        Ok(moves)
     }
 
     pub fn fragmentation(&self) -> f32 {
@@ -1120,6 +1234,33 @@ mod tests {
     }
 
     #[test]
+    fn draw_plan_reuses_visible_chunk_storage_without_allocating() {
+        let frustum = wide_frustum();
+        let candidates = [
+            candidate((0, 0), 10.0, 12, DrawLayer::Opaque),
+            candidate((0, 0), 10.0, 6, DrawLayer::Transparent),
+            candidate((1, 0), 20.0, 18, DrawLayer::Opaque),
+        ];
+        let mut plan = DrawPlan::default();
+
+        // The first build warms every vector/set used by the plan. Repeated
+        // builds with the same shape must stay within those capacities.
+        plan.build_into(candidates, &frustum);
+        let opaque_capacity = plan.opaque.capacity();
+        let transparent_capacity = plan.transparent.capacity();
+        let visible_chunk_capacity = plan.visible_chunks.capacity();
+
+        for _ in 0..8 {
+            plan.build_into(candidates, &frustum);
+        }
+
+        assert_eq!(plan.opaque.capacity(), opaque_capacity);
+        assert_eq!(plan.transparent.capacity(), transparent_capacity);
+        assert_eq!(plan.visible_chunks.capacity(), visible_chunk_capacity);
+        assert_eq!(plan.visible_chunk_count(), 2);
+    }
+
+    #[test]
     fn lod_selection_obeys_boundaries_and_safe_fallbacks() {
         let thresholds = LodThresholds::new(96.0, 192.0);
         assert_eq!(select_lod(-1.0, thresholds), LodLevel::L0);
@@ -1270,7 +1411,7 @@ mod tests {
         let a = list.allocate(8).unwrap();
         let b = list.allocate(4).unwrap();
         list.deallocate(a, 8).unwrap();
-        let moves = list.compact();
+        let moves = list.compact().unwrap();
         assert_eq!(list.used_units() + list.free_units(), list.capacity());
         assert!(moves.iter().all(|m| m.from != m.to));
         assert_eq!(
@@ -1287,35 +1428,140 @@ mod tests {
         let mut list = FreeList::new(257);
         let mut live = Vec::new();
         let mut seed = 0x9e37_79b9u32;
-        for _ in 0..200 {
+        for _ in 0..400 {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            if !live.is_empty() && seed & 1 == 0 {
-                let index = (seed as usize) % live.len();
-                let (offset, count) = live.swap_remove(index);
-                list.deallocate(offset, count).unwrap();
-            } else {
-                let count = seed % 9 + 1;
-                if let Some(offset) = list.allocate(count) {
-                    live.push((offset, count));
+            match seed % 5 {
+                0 if !live.is_empty() => {
+                    let index = (seed as usize) % live.len();
+                    let (offset, count) = live.swap_remove(index);
+                    list.deallocate(offset, count).unwrap();
+                }
+                1 => {
+                    let moves = list.compact().unwrap();
+                    for movement in moves {
+                        let allocation = live
+                            .iter_mut()
+                            .find(|(offset, count)| {
+                                *offset == movement.from && *count == movement.count
+                            })
+                            .expect("every compaction move must identify a live allocation");
+                        allocation.0 = movement.to;
+                    }
+                }
+                2 => {
+                    let growth = seed % 17 + 1;
+                    let new_capacity = list.capacity().checked_add(growth).unwrap();
+                    list.resize(new_capacity).unwrap();
+                }
+                _ => {
+                    let count = seed % 9 + 1;
+                    if let Some(offset) = list.allocate(count) {
+                        live.push((offset, count));
+                    }
                 }
             }
-            assert_eq!(list.used_units() + list.free_units(), list.capacity());
-            assert!(
-                list.free_blocks()
-                    .windows(2)
-                    .all(|w| w[0].offset.checked_add(w[0].count) == Some(w[1].offset))
-                    || list
-                        .free_blocks()
-                        .windows(2)
-                        .all(|w| { w[0].offset.checked_add(w[0].count).unwrap() < w[1].offset })
+
+            let used = list.checked_used_units().unwrap();
+            let free = list.checked_free_units().unwrap();
+            assert_eq!(used.checked_add(free), Some(list.capacity()));
+
+            live.sort_unstable_by_key(|&(offset, _)| offset);
+            assert!(live
+                .windows(2)
+                .all(|window| { window[0].0.checked_add(window[0].1).unwrap() <= window[1].0 }));
+            assert!(live
+                .iter()
+                .all(|&(offset, count)| { offset.checked_add(count).unwrap() <= list.capacity() }));
+            assert_eq!(
+                live.iter()
+                    .try_fold(0u32, |total, &(_, count)| total.checked_add(count)),
+                Some(used)
             );
+            assert!(list.free_blocks().windows(2).all(|window| {
+                window[0].offset.checked_add(window[0].count).unwrap() < window[1].offset
+            }));
         }
+    }
+
+    #[test]
+    fn freelist_reports_arithmetic_overflow_without_mutation() {
+        let mut exhausted = FreeList::new(8);
+        exhausted.next_generation = u64::MAX;
+        let before = exhausted.clone();
+        assert_eq!(
+            exhausted.allocate_owned(1, 7),
+            Err(FreeListError::ArithmeticOverflow)
+        );
+        assert_eq!(exhausted, before);
+
+        let mut invalid_accounting = FreeList::new(0);
+        invalid_accounting.free_blocks = vec![
+            FreeListBlock {
+                offset: 0,
+                count: u32::MAX,
+            },
+            FreeListBlock {
+                offset: u32::MAX,
+                count: 1,
+            },
+        ];
+        assert_eq!(
+            invalid_accounting.checked_free_units(),
+            Err(FreeListError::ArithmeticOverflow)
+        );
+        assert_eq!(
+            invalid_accounting.checked_used_units(),
+            Err(FreeListError::ArithmeticOverflow)
+        );
+        assert!(!invalid_accounting.counters_consistent());
+
+        let mut invalid_resize = FreeList::new(1);
+        invalid_resize.free_blocks = vec![FreeListBlock {
+            offset: u32::MAX - 1,
+            count: 2,
+        }];
+        let before = invalid_resize.clone();
+        assert_eq!(
+            invalid_resize.resize(u32::MAX),
+            Err(FreeListError::ArithmeticOverflow)
+        );
+        assert_eq!(invalid_resize, before);
+
+        let mut invalid_compaction = FreeList::new(1);
+        invalid_compaction.free_blocks.clear();
+        invalid_compaction.allocations.insert(
+            0,
+            AllocationRecord {
+                count: 2,
+                generation: 1,
+                owner: 7,
+            },
+        );
+        let before = invalid_compaction.clone();
+        assert_eq!(
+            invalid_compaction.compact(),
+            Err(FreeListError::ArithmeticOverflow)
+        );
+        assert_eq!(invalid_compaction, before);
     }
 
     #[test]
     fn embedded_shader_uses_discrete_ao_mapping() {
         let shader = include_str!("shader.wgsl");
-        assert!(shader.contains("ao_raw == 3u") && shader.contains("ao_raw == 2u"));
-        assert!(shader.contains("ao_raw == 1u") && shader.contains("0.25"));
+        let mapping = [
+            "if (ao_raw == 3u) {\n        out.ao = 1.0;",
+            "} else if (ao_raw == 2u) {\n        out.ao = 0.75;",
+            "} else if (ao_raw == 1u) {\n        out.ao = 0.5;",
+            "} else {\n        out.ao = 0.25;",
+        ];
+        let mut search_from = shader
+            .find("let ao_raw =")
+            .expect("terrain vertex shader must decode the packed AO bits");
+        for branch in mapping {
+            let branch_offset = shader[search_from..]
+                .find(branch)
+                .expect("terrain AO mapping must preserve each discrete level");
+            search_from += branch_offset + branch.len();
+        }
     }
 }

@@ -164,11 +164,15 @@ fn vs_terrain(model: TerrainVertexInput) -> TerrainVertexOutput {
     let ao_raw = (light_ao_raw >> 14u) & 0x03u;
     // CPU packs AO as a four-level discrete code. Keep this mapping exactly
     // in sync with TerrainVertex::ao (3/2/1/0 -> 1/.75/.5/.25).
-    out.ao = select(0.25,
-        select(0.5,
-            select(0.75, 1.0, ao_raw == 3u),
-            ao_raw == 2u),
-        ao_raw == 1u);
+    if (ao_raw == 3u) {
+        out.ao = 1.0;
+    } else if (ao_raw == 2u) {
+        out.ao = 0.75;
+    } else if (ao_raw == 1u) {
+        out.ao = 0.5;
+    } else {
+        out.ao = 0.25;
+    }
 
     out.world_pos = world_pos;
     return out;
