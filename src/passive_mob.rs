@@ -318,7 +318,6 @@ pub fn update_passive_mobs(
         }
     }
 
-    entity_manager.sync_positions();
     block_changes
 }
 

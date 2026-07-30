@@ -5,6 +5,7 @@
 //! and overwrite the oldest sample when the fixed-capacity history is full.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -14,9 +15,19 @@ pub struct AllocTracker;
 
 pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    static THREAD_ALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+#[inline]
+fn increment_thread_alloc_count() {
+    THREAD_ALLOC_COUNT.with(|count| count.set(count.get().wrapping_add(1)));
+}
+
 unsafe impl GlobalAlloc for AllocTracker {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        increment_thread_alloc_count();
         System.alloc(layout)
     }
 
@@ -26,11 +37,13 @@ unsafe impl GlobalAlloc for AllocTracker {
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        increment_thread_alloc_count();
         System.alloc_zeroed(layout)
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        increment_thread_alloc_count();
         System.realloc(ptr, layout, new_size)
     }
 }
@@ -40,6 +53,10 @@ static GLOBAL_ALLOCATOR: AllocTracker = AllocTracker;
 
 pub fn alloc_count() -> u64 {
     ALLOC_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn thread_alloc_count() -> u64 {
+    THREAD_ALLOC_COUNT.with(Cell::get)
 }
 
 pub const SCOPE_COUNT: usize = 17;
@@ -142,7 +159,7 @@ impl<const N: usize> ScopeAccumulator<N> {
             None
         }
     }
-    pub const fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.nanos = [0; N];
     }
     pub fn is_zero(&self) -> bool {
@@ -653,12 +670,14 @@ pub fn tracked_send<T>(
     bytes: u64,
     stats: &SharedQueueStats,
 ) -> Result<(), std::sync::mpsc::SendError<T>> {
+    // std::sync::mpsc has no reservation API. Account before publishing so a
+    // racing consumer can never dequeue an item that telemetry has not seen.
+    // A closed channel returns ownership and rolls the provisional entry back.
+    stats.enqueue(bytes, monotonic_millis());
     match tx.send(value) {
-        Ok(()) => {
-            stats.enqueue(bytes, monotonic_millis());
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(error) => {
+            stats.dequeue(bytes);
             stats.drop_item();
             Err(error)
         }
@@ -725,6 +744,21 @@ mod tests {
         assert_eq!(p.samples, 0);
         assert_eq!(p.average_nanos, 0);
     }
+
+    #[test]
+    fn thread_alloc_count_is_local_to_calling_thread() {
+        let handle = std::thread::spawn(|| {
+            let _allocation = Box::new([0u8; 64]);
+        });
+        let caller_after_spawn = thread_alloc_count();
+        handle.join().unwrap();
+        assert_eq!(thread_alloc_count(), caller_after_spawn);
+
+        let before = thread_alloc_count();
+        let _allocation = Box::new([0u8; 64]);
+        assert!(thread_alloc_count() > before);
+    }
+
     #[test]
     fn percentile_math() {
         let mut p = PerfRecorder::<8>::new();

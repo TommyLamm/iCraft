@@ -272,6 +272,8 @@ pub struct RedstoneSystem {
     previous_plate_occupants: HashSet<BlockPos>,
     #[cfg(test)]
     pressure_plate_scans: u64,
+    #[cfg(test)]
+    component_sync_scans: u64,
 }
 
 #[allow(dead_code)]
@@ -286,6 +288,97 @@ impl RedstoneSystem {
 
     pub fn current_tick(&self) -> u64 {
         self.tick
+    }
+
+    /// Returns a deterministic, versioned byte representation of all runtime
+    /// redstone state. HashMap/HashSet-backed collections are sorted before
+    /// encoding; the scheduled vector retains queue order because entries with
+    /// the same due tick are processed in insertion order.
+    ///
+    /// The snapshot intentionally contains runtime bookkeeping (loaded chunks,
+    /// dirty positions, sleeping state, and the normalized pressure-plate
+    /// occupant set) in addition to component signal/metadata. This keeps
+    /// checksums sensitive to state that affects the next simulation tick.
+    pub fn canonical_snapshot(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"redstone-state-v1\0");
+        bytes.extend_from_slice(&self.tick.to_le_bytes());
+        bytes.push(self.sleeping as u8);
+
+        let mut known_chunks: Vec<_> = self.known_chunks.iter().copied().collect();
+        known_chunks.sort_unstable();
+        append_len(&mut bytes, known_chunks.len());
+        for (cx, cz) in known_chunks {
+            append_i32(&mut bytes, cx);
+            append_i32(&mut bytes, cz);
+        }
+
+        let mut components: Vec<_> = self.components.iter().collect();
+        components.sort_unstable_by_key(|(pos, _)| **pos);
+        append_len(&mut bytes, components.len());
+        for (&pos, state) in components {
+            append_pos(&mut bytes, pos);
+            bytes.push(state.signal.power);
+            bytes.push(encode_charge(state.signal.charge));
+            bytes.push(encode_direction(state.facing));
+            bytes.push(state.repeater_delay);
+            bytes.push(encode_comparator_mode(state.comparator_mode));
+            bytes.push(state.note);
+            bytes.push(state.last_powered as u8);
+        }
+
+        // `scheduled` is a queue, so preserve its order while still encoding
+        // every entry and its complete discriminator/payload.
+        append_len(&mut bytes, self.scheduled.len());
+        for scheduled in &self.scheduled {
+            bytes.extend_from_slice(&scheduled.due.to_le_bytes());
+            append_pos(&mut bytes, scheduled.pos);
+            match scheduled.kind {
+                ScheduledKind::ReleaseButton => {
+                    bytes.push(0);
+                    bytes.push(0);
+                }
+                ScheduledKind::Repeater(powered) => {
+                    bytes.push(1);
+                    bytes.push(powered as u8);
+                }
+                ScheduledKind::Explode => {
+                    bytes.push(2);
+                    bytes.push(0);
+                }
+            }
+        }
+
+        let mut dirty: Vec<_> = self.dirty.iter().copied().collect();
+        dirty.sort_unstable();
+        append_len(&mut bytes, dirty.len());
+        for pos in dirty {
+            append_pos(&mut bytes, pos);
+        }
+
+        let mut occupants: Vec<_> = self.previous_plate_occupants.iter().copied().collect();
+        occupants.sort_unstable();
+        append_len(&mut bytes, occupants.len());
+        for pos in occupants {
+            append_pos(&mut bytes, pos);
+        }
+
+        bytes
+    }
+
+    /// Alias for [`Self::canonical_snapshot`] for generic harness callers.
+    pub fn snapshot(&self) -> Vec<u8> {
+        self.canonical_snapshot()
+    }
+
+    /// Computes the canonical FNV-1a checksum for [`Self::canonical_snapshot`].
+    pub fn canonical_checksum(&self) -> u64 {
+        fnv1a(&self.canonical_snapshot())
+    }
+
+    /// Short alias for callers that only need the canonical redstone checksum.
+    pub fn checksum(&self) -> u64 {
+        self.canonical_checksum()
     }
 
     pub fn power_at(&self, pos: BlockPos) -> u8 {
@@ -564,6 +657,19 @@ impl RedstoneSystem {
     }
 
     fn sync_loaded_chunks(&mut self, manager: &ChunkManager) {
+        let loaded_chunks_unchanged = self.known_chunks.len() == manager.chunks.len()
+            && self
+                .known_chunks
+                .iter()
+                .all(|chunk_pos| manager.chunks.contains_key(chunk_pos));
+        if loaded_chunks_unchanged {
+            return;
+        }
+
+        #[cfg(test)]
+        {
+            self.component_sync_scans += self.components.len() as u64;
+        }
         self.known_chunks
             .retain(|chunk_pos| manager.chunks.contains_key(chunk_pos));
         self.components.retain(|pos, _| {
@@ -1123,6 +1229,50 @@ fn source_power(block: BlockType) -> u8 {
     }
 }
 
+fn append_len(bytes: &mut Vec<u8>, len: usize) {
+    bytes.extend_from_slice(&(len as u64).to_le_bytes());
+}
+
+fn append_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn append_pos(bytes: &mut Vec<u8>, pos: BlockPos) {
+    append_i32(bytes, pos.0);
+    append_i32(bytes, pos.1);
+    append_i32(bytes, pos.2);
+}
+
+fn encode_charge(charge: ChargeKind) -> u8 {
+    match charge {
+        ChargeKind::Unpowered => 0,
+        ChargeKind::Weak => 1,
+        ChargeKind::Strong => 2,
+    }
+}
+
+fn encode_direction(direction: Direction) -> u8 {
+    match direction {
+        Direction::North => 0,
+        Direction::South => 1,
+        Direction::West => 2,
+        Direction::East => 3,
+    }
+}
+
+fn encode_comparator_mode(mode: ComparatorMode) -> u8 {
+    match mode {
+        ComparatorMode::Compare => 0,
+        ComparatorMode::Subtract => 1,
+    }
+}
+
+fn fnv1a(data: &[u8]) -> u64 {
+    data.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
 fn is_strong_source(block: BlockType) -> bool {
     matches!(
         block,
@@ -1273,6 +1423,137 @@ mod tests {
     ) {
         manager.set_block(x, Y, 0, block);
         system.on_block_changed(manager, (x, Y, 0), facing);
+    }
+
+    fn canonical_fixture() -> RedstoneSystem {
+        let mut system = RedstoneSystem::new();
+        system.tick = 37;
+        system.sleeping = true;
+        system.known_chunks.extend([(1, -2), (0, 0)]);
+
+        let mut component = ComponentState::new(BlockType::Repeater, Direction::East);
+        component.signal = RedstoneState {
+            power: 11,
+            charge: ChargeKind::Weak,
+        };
+        component.repeater_delay = 4;
+        component.comparator_mode = ComparatorMode::Subtract;
+        component.note = 19;
+        component.last_powered = true;
+        system.components.insert((3, Y, -4), component);
+
+        system.scheduled.push(ScheduledTick {
+            due: 41,
+            pos: (3, Y, -4),
+            kind: ScheduledKind::Repeater(true),
+        });
+        system.scheduled.push(ScheduledTick {
+            due: 99,
+            pos: (-2, Y, 5),
+            kind: ScheduledKind::Explode,
+        });
+        system.dirty.extend([(3, Y, -4), (-2, Y, 5)]);
+        system.previous_plate_occupants.insert((3, Y - 1, -4));
+        system
+    }
+
+    #[test]
+    fn canonical_snapshot_is_order_independent_for_unordered_state() {
+        let mut first = RedstoneSystem::new();
+        let mut second = RedstoneSystem::new();
+        let entries = [
+            (
+                (3, Y, -4),
+                ComponentState::new(BlockType::Repeater, Direction::East),
+            ),
+            (
+                (-2, Y, 5),
+                ComponentState::new(BlockType::RedstoneWire, Direction::West),
+            ),
+        ];
+        for &(pos, state) in &entries {
+            first.components.insert(pos, state);
+        }
+        for &(pos, state) in entries.iter().rev() {
+            second.components.insert(pos, state);
+        }
+        for chunk in [(1, -2), (0, 0)] {
+            first.known_chunks.insert(chunk);
+        }
+        for chunk in [(0, 0), (1, -2)] {
+            second.known_chunks.insert(chunk);
+        }
+        for pos in [(3, Y, -4), (-2, Y, 5)] {
+            first.dirty.insert(pos);
+        }
+        for pos in [(-2, Y, 5), (3, Y, -4)] {
+            second.dirty.insert(pos);
+        }
+        for pos in [(3, Y - 1, -4), (-2, Y - 1, 5)] {
+            first.previous_plate_occupants.insert(pos);
+        }
+        for pos in [(-2, Y - 1, 5), (3, Y - 1, -4)] {
+            second.previous_plate_occupants.insert(pos);
+        }
+        assert_eq!(first.canonical_snapshot(), second.canonical_snapshot());
+        assert_eq!(first.canonical_checksum(), second.canonical_checksum());
+    }
+
+    #[test]
+    fn canonical_checksum_changes_for_each_redstone_state_domain() {
+        let baseline = canonical_fixture();
+        let expected = baseline.canonical_checksum();
+
+        let mut changed = canonical_fixture();
+        changed.tick += 1;
+        assert_ne!(changed.canonical_checksum(), expected);
+
+        let mut changed = canonical_fixture();
+        changed.sleeping = false;
+        assert_ne!(changed.canonical_checksum(), expected);
+
+        let mut changed = canonical_fixture();
+        changed.known_chunks.insert((9, 9));
+        assert_ne!(changed.canonical_checksum(), expected);
+
+        let mut changed = canonical_fixture();
+        changed.dirty.insert((9, Y, 9));
+        assert_ne!(changed.canonical_checksum(), expected);
+
+        let mut changed = canonical_fixture();
+        changed.previous_plate_occupants.insert((9, Y - 1, 9));
+        assert_ne!(changed.canonical_checksum(), expected);
+
+        fn assert_component_change(expected: u64, change: fn(&mut ComponentState)) {
+            let mut changed = canonical_fixture();
+            change(changed.components.get_mut(&(3, Y, -4)).unwrap());
+            assert_ne!(changed.canonical_checksum(), expected);
+        }
+        assert_component_change(expected, |state| state.signal.power += 1);
+        assert_component_change(expected, |state| state.signal.charge = ChargeKind::Strong);
+        assert_component_change(expected, |state| state.facing = Direction::South);
+        assert_component_change(expected, |state| state.repeater_delay = 2);
+        assert_component_change(expected, |state| {
+            state.comparator_mode = ComparatorMode::Compare
+        });
+        assert_component_change(expected, |state| state.note = 3);
+        assert_component_change(expected, |state| state.last_powered = false);
+
+        let mut changed = canonical_fixture();
+        changed.scheduled[0].due += 1;
+        assert_ne!(changed.canonical_checksum(), expected);
+
+        let mut changed = canonical_fixture();
+        changed.scheduled[0].kind = ScheduledKind::Repeater(false);
+        assert_ne!(changed.canonical_checksum(), expected);
+    }
+
+    #[test]
+    fn canonical_checksum_preserves_scheduled_queue_order() {
+        let first = canonical_fixture();
+        let mut second = canonical_fixture();
+        second.scheduled.swap(0, 1);
+        assert_ne!(first.canonical_checksum(), second.canonical_checksum());
     }
 
     #[test]
@@ -1835,8 +2116,10 @@ mod tests {
         assert!(system.is_sleeping());
 
         // Subsequent tick when idle stays sleeping
+        let component_scans = system.component_sync_scans;
         let idle_update = system.tick(&mut manager, &[]);
         assert!(idle_update.mutations.is_empty());
+        assert_eq!(system.component_sync_scans, component_scans);
         assert!(system.is_sleeping());
 
         // Interaction wakes system up
@@ -1976,12 +2259,13 @@ mod tests {
         manager.set_block(21, Y, 0, BlockType::OakDoor);
         system.on_block_changed(&manager, (21, Y, 0), Direction::East);
 
-        // Action 1: Toggle lever ON and tick
+        // Action 1: Toggle lever ON and tick. Both evaluators start from the
+        // same pre-transition component fixture.
+        let mut ref_components = system.components.clone();
         system.interact(&mut manager, (0, Y, 0));
         system.tick(&mut manager, &[]);
 
         // Check parity against full settle reference
-        let mut ref_components = system.components.clone();
         reference_full_settle(&mut ref_components, &manager);
         for (pos, state) in &system.components {
             let ref_state = ref_components.get(pos).unwrap();
@@ -1999,8 +2283,8 @@ mod tests {
 
         // Action 2: Advance ticks for repeater propagation
         for _ in 0..5 {
-            system.tick(&mut manager, &[]);
             let mut ref_comp = system.components.clone();
+            system.tick(&mut manager, &[]);
             reference_full_settle(&mut ref_comp, &manager);
             for (pos, state) in &system.components {
                 let ref_state = ref_comp.get(pos).unwrap();

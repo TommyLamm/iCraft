@@ -654,7 +654,7 @@ async fn run_client(
                     match crate::perf::tracked_try_recv(
                         &game_to_client,
                         std::mem::size_of::<GameToClient>() as u64,
-                        &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
+                        &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
                     ) {
                         Ok(GameToClient::SendPosition {
                             sequence,
@@ -765,7 +765,15 @@ mod tests {
     use super::*;
     use crate::network::server::{HostToServer, NetworkServer, ServerToHost};
     use std::net::TcpListener as StdTcpListener;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
+
+    fn network_test_guard() -> MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn wait_for_event(rx: &Receiver<ClientToGame>) -> ClientToGame {
         loop {
@@ -780,6 +788,7 @@ mod tests {
 
     #[test]
     fn connects_and_receives_join_for_second_client() {
+        let _guard = network_test_guard();
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
@@ -846,6 +855,7 @@ mod tests {
 
     #[test]
     fn receives_targeted_chunk_catchup_and_time_sync() {
+        let _guard = network_test_guard();
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
@@ -972,6 +982,374 @@ mod tests {
     }
 
     #[test]
+    fn tcp_capacity_one_retries_without_starving_second_client_and_converges() {
+        let _guard = network_test_guard();
+        fn checksum(chunk: &crate::world::Chunk) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for x in 0..16 {
+                for y in 0..256 {
+                    for z in 0..16 {
+                        hash ^= chunk.get_block_local(x, y, z) as u8 as u64;
+                        hash = hash.wrapping_mul(0x100_0000_01b3);
+                    }
+                }
+            }
+            hash
+        }
+
+        fn receive_converged_chunk(
+            rx: &Receiver<ClientToGame>,
+            expected_payload: &crate::save::ChunkSaveData,
+        ) -> crate::world::Chunk {
+            let (blocks, block_states) = loop {
+                match wait_for_event(rx) {
+                    ClientToGame::ChunkData {
+                        dimension: 0,
+                        cx: 0,
+                        cz: 0,
+                        revision: 1,
+                        blocks,
+                        block_states,
+                    } => break (blocks, block_states),
+                    ClientToGame::PlayerJoin { .. } => {}
+                    other => panic!("expected persisted chunk snapshot, got {other:?}"),
+                }
+            };
+            assert_eq!(blocks, expected_payload.blocks);
+            assert_eq!(block_states, expected_payload.block_states);
+
+            let mut chunk = crate::world::Chunk::new(0, 0);
+            crate::save::ChunkSaveData {
+                chunk_x: 0,
+                chunk_z: 0,
+                blocks,
+                sky_light: Vec::new(),
+                block_light: Vec::new(),
+                fluid_levels: Vec::new(),
+                redstone_metadata: Vec::new(),
+                block_states,
+                mutation_revision: 1,
+            }
+            .restore_to_chunk(&mut chunk);
+
+            match wait_for_event(rx) {
+                ClientToGame::BlockChange {
+                    dimension: 0,
+                    revision: 2,
+                    x: 2,
+                    y: 70,
+                    z: 2,
+                    block,
+                    ..
+                } => chunk.set_block_local(
+                    2,
+                    70,
+                    2,
+                    crate::world::BlockType::from_wire(block).unwrap(),
+                ),
+                other => panic!("expected revision-2 block change, got {other:?}"),
+            }
+            chunk
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_network_persisted_catchup_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let mut source_chunk = crate::world::Chunk::new(0, 0);
+        source_chunk.set_block_local(1, 70, 1, crate::world::BlockType::Stone);
+        let mut persisted = crate::save::ChunkSaveData::from_chunk(&source_chunk);
+        persisted.mutation_revision = 1;
+        crate::save::SaveManager::new(&world_dir)
+            .save_chunk(0, 0, persisted)
+            .unwrap();
+        let persisted = crate::save::SaveManager::new(&world_dir)
+            .load_chunk(0, 0)
+            .expect("persisted, currently-unloaded chunk must be reloadable");
+
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = mpsc::channel();
+        let (server_tx, server_rx) = mpsc::channel();
+        let server = NetworkServer::spawn_for_test(
+            addr.clone(),
+            1234,
+            1,
+            host_rx,
+            server_tx,
+            1,
+            Duration::from_millis(200),
+        );
+
+        let (game_tx_a, game_rx_a) = mpsc::channel();
+        let (event_tx_a, event_rx_a) = mpsc::channel();
+        let client_a = NetworkClient::spawn(addr.clone(), "slow".into(), game_rx_a, event_tx_a);
+        let id_a = match wait_for_event(&event_rx_a) {
+            ClientToGame::Connected { player_id, .. } => player_id,
+            other => panic!("expected first Connected, got {other:?}"),
+        };
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            ServerToHost::ClientJoined { id, .. } if id == id_a
+        ));
+
+        let (game_tx_b, game_rx_b) = mpsc::channel();
+        let (event_tx_b, event_rx_b) = mpsc::channel();
+        let client_b = NetworkClient::spawn(addr, "fast".into(), game_rx_b, event_tx_b);
+        let id_b = match wait_for_event(&event_rx_b) {
+            ClientToGame::Connected { player_id, .. } => player_id,
+            other => panic!("expected second Connected, got {other:?}"),
+        };
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            ServerToHost::ClientJoined { id, .. } if id == id_b
+        ));
+
+        host_tx
+            .send(HostToServer::BroadcastBlockChange {
+                dimension: 0,
+                revision: 2,
+                x: 2,
+                y: 70,
+                z: 2,
+                block: crate::world::BlockType::Dirt.to_wire(),
+                state: 0,
+            })
+            .unwrap();
+        let snapshot = |to, cx, blocks, block_states| HostToServer::SendChunk {
+            dimension: 0,
+            cx,
+            cz: 0,
+            revision: 1,
+            blocks,
+            block_states,
+            to,
+        };
+        // The host/state priority selector submits the near chunk first. The
+        // transport must preserve it while reporting, rather than dropping,
+        // the farther chunk when this client's capacity-one mailbox is full.
+        host_tx
+            .send(snapshot(
+                id_a,
+                0,
+                persisted.blocks.clone(),
+                persisted.block_states.clone(),
+            ))
+            .unwrap();
+        host_tx.send(snapshot(id_a, 8, vec![8], vec![0])).unwrap();
+        host_tx
+            .send(snapshot(
+                id_b,
+                0,
+                persisted.blocks.clone(),
+                persisted.block_states.clone(),
+            ))
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut accepted_a = false;
+        let mut backpressured_a = false;
+        let mut accepted_b = false;
+        while std::time::Instant::now() < deadline && !(accepted_a && backpressured_a && accepted_b)
+        {
+            match server_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(ServerToHost::CatchupAccepted {
+                    id,
+                    cx: 0,
+                    revision: 1,
+                    ..
+                }) if id == id_a => accepted_a = true,
+                Ok(ServerToHost::CatchupBackpressured {
+                    id,
+                    cx: 8,
+                    revision: 1,
+                    mailbox_full_count,
+                    ..
+                }) if id == id_a => {
+                    assert_eq!(mailbox_full_count, 1);
+                    backpressured_a = true;
+                }
+                Ok(ServerToHost::CatchupAccepted {
+                    id,
+                    cx: 0,
+                    revision: 1,
+                    ..
+                }) if id == id_b => accepted_b = true,
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => panic!("server event channel failed: {error}"),
+            }
+        }
+        assert!(accepted_a && backpressured_a && accepted_b);
+
+        let converged_a = receive_converged_chunk(&event_rx_a, &persisted);
+        let converged_b = receive_converged_chunk(&event_rx_b, &persisted);
+        let mut expected = source_chunk;
+        expected.set_block_local(2, 70, 2, crate::world::BlockType::Dirt);
+        assert_eq!(checksum(&converged_a), checksum(&expected));
+        assert_eq!(checksum(&converged_b), checksum(&expected));
+
+        let mut ack_a = false;
+        let mut ack_b = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline && !(ack_a && ack_b) {
+            match server_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(ServerToHost::CatchupAck { id, cx: 0, .. }) if id == id_a => ack_a = true,
+                Ok(ServerToHost::CatchupAck { id, cx: 0, .. }) if id == id_b => ack_b = true,
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => panic!("server event channel failed: {error}"),
+            }
+        }
+        assert!(
+            ack_a && ack_b,
+            "both TCP clients must ACK accepted snapshots"
+        );
+
+        host_tx.send(snapshot(id_a, 8, vec![8], vec![0])).unwrap();
+        assert!(matches!(
+            wait_for_event(&event_rx_a),
+            ClientToGame::ChunkData {
+                cx: 8,
+                revision: 1,
+                blocks,
+                ..
+            } if blocks == vec![8]
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut retry_accepted = false;
+        let mut retry_acked = false;
+        while std::time::Instant::now() < deadline && !(retry_accepted && retry_acked) {
+            match server_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(ServerToHost::CatchupAccepted { id, cx: 8, .. }) if id == id_a => {
+                    retry_accepted = true
+                }
+                Ok(ServerToHost::CatchupAck { id, cx: 8, .. }) if id == id_a => retry_acked = true,
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => panic!("server event channel failed: {error}"),
+            }
+        }
+        assert!(retry_accepted && retry_acked);
+
+        game_tx_a.send(GameToClient::Disconnect).unwrap();
+        game_tx_b.send(GameToClient::Disconnect).unwrap();
+        client_a.join().unwrap();
+        client_b.join().unwrap();
+        host_tx.send(HostToServer::Stop).unwrap();
+        server.join().unwrap();
+        std::fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn tcp_cross_channel_revision_gate_and_reliable_control_are_fifo() {
+        let _guard = network_test_guard();
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = mpsc::channel();
+        let (server_tx, server_rx) = mpsc::channel();
+        let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
+        let (game_tx, game_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let client = NetworkClient::spawn(addr, "ordering".into(), game_rx, event_tx);
+        let player_id = match wait_for_event(&event_rx) {
+            ClientToGame::Connected { player_id, .. } => player_id,
+            other => panic!("expected Connected, got {other:?}"),
+        };
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            ServerToHost::ClientJoined { id, .. } if id == player_id
+        ));
+
+        host_tx
+            .send(HostToServer::BroadcastBlockChange {
+                dimension: 0,
+                revision: 2,
+                x: 1,
+                y: 70,
+                z: 1,
+                block: crate::world::BlockType::Dirt.to_wire(),
+                state: 0,
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::BroadcastChat {
+                sender: "host".into(),
+                message: "first".into(),
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::BroadcastTimeSync {
+                ticks: 42,
+                weather: 1,
+                weather_remaining_ticks: 99.0,
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::BroadcastChat {
+                sender: "host".into(),
+                message: "second".into(),
+            })
+            .unwrap();
+        host_tx
+            .send(HostToServer::SendChunk {
+                dimension: 0,
+                cx: 0,
+                cz: 0,
+                revision: 1,
+                blocks: vec![1],
+                block_states: vec![0],
+                to: player_id,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::Chat { message, .. } if message == "first"
+        ));
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::TimeSync { ticks: 42, .. }
+        ));
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::Chat { message, .. } if message == "second"
+        ));
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::ChunkData { revision: 1, .. }
+        ));
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::BlockChange { revision: 2, .. }
+        ));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut accepted = false;
+        let mut acked = false;
+        while std::time::Instant::now() < deadline && !(accepted && acked) {
+            match server_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(ServerToHost::CatchupAccepted { id, cx: 0, .. }) if id == player_id => {
+                    accepted = true
+                }
+                Ok(ServerToHost::CatchupAck { id, cx: 0, .. }) if id == player_id => acked = true,
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => panic!("server event channel failed: {error}"),
+            }
+        }
+        assert!(accepted && acked);
+
+        game_tx.send(GameToClient::Disconnect).unwrap();
+        client.join().unwrap();
+        host_tx.send(HostToServer::Stop).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn authoritative_weather_packets_map_to_pure_client_events() {
         let sync = Packet::TimeSync {
             protocol_version: PROTOCOL_VERSION,
@@ -1005,6 +1383,7 @@ mod tests {
 
     #[test]
     fn sends_and_receives_chat() {
+        let _guard = network_test_guard();
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
@@ -1061,6 +1440,7 @@ mod tests {
     /// the two-window GUI scenario checks manually.
     #[test]
     fn host_stop_notifies_client_and_threads_join_without_hanging() {
+        let _guard = network_test_guard();
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
@@ -1242,6 +1622,7 @@ mod tests {
 
     #[test]
     fn host_client_entity_health_and_effect_replication_converges() {
+        let _guard = network_test_guard();
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
@@ -1402,6 +1783,8 @@ mod tests {
             &stats,
         )
         .is_err());
+        assert_eq!(stats.depth(), 0);
+        assert_eq!(stats.bytes(), 0);
         assert_eq!(stats.drops(), 1);
     }
 

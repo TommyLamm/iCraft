@@ -498,6 +498,8 @@ pub struct EntityManager {
     #[allow(dead_code)]
     pub scratch: EntityScratch,
     next_id: u64,
+    #[cfg(test)]
+    position_sync_visits: u64,
 }
 
 impl EntityManager {
@@ -510,18 +512,16 @@ impl EntityManager {
             entity_chunks: HashMap::new(),
             scratch: EntityScratch::default(),
             next_id: 1,
+            #[cfg(test)]
+            position_sync_visits: 0,
         }
     }
 
     pub fn rebuild_indexes(&mut self) {
         self.id_to_index.clear();
         self.entity_chunks.clear();
-        for vec in self.type_buckets.values_mut() {
-            vec.clear();
-        }
-        for vec in self.spatial_buckets.values_mut() {
-            vec.clear();
-        }
+        self.type_buckets.clear();
+        self.spatial_buckets.clear();
 
         for (idx, entity) in self.entities.iter().enumerate() {
             self.id_to_index.insert(entity.id, idx);
@@ -550,6 +550,10 @@ impl EntityManager {
 
     /// Synchronize one entity after its position has been changed in place.
     pub fn sync_entity_position(&mut self, id: u64) {
+        #[cfg(test)]
+        {
+            self.position_sync_visits += 1;
+        }
         let Some(&idx) = self.id_to_index.get(&id) else {
             return;
         };
@@ -573,8 +577,15 @@ impl EntityManager {
         self.entity_chunks.insert(id, new_chunk);
     }
 
-    /// Synchronize all positions using the tracked bucket map. Unlike the old
-    /// implementation this does not clear/repopulate every bucket.
+    /// Synchronize only entities whose positions may have changed.
+    pub fn sync_entity_positions(&mut self, moved_ids: &[u64]) {
+        for &id in moved_ids {
+            self.sync_entity_position(id);
+        }
+    }
+
+    /// Synchronize all positions using the tracked bucket map. Prefer
+    /// `sync_entity_positions` when the caller already knows which ids moved.
     pub fn sync_positions(&mut self) {
         let mut ids = std::mem::take(&mut self.scratch.id_list);
         ids.clear();
@@ -586,8 +597,8 @@ impl EntityManager {
     }
 
     /// Compatibility shim for callers outside the entity runtime. New code
-    /// should use `sync_positions`; this now performs incremental maintenance.
-    #[deprecated(note = "use sync_positions")]
+    /// should use `sync_entity_positions` when moved ids are available.
+    #[deprecated(note = "use sync_entity_positions when moved ids are available")]
     pub fn update_spatial_indexes(&mut self) {
         self.sync_positions();
     }
@@ -748,15 +759,21 @@ impl EntityManager {
     /// Return entities in a horizontal radius using the spatial buckets. The
     /// squared-distance test keeps callers from doing a full entity scan.
     pub fn query_radius(&self, center: Vec3, radius: f32) -> impl Iterator<Item = &Entity> {
-        let radius_sq = radius.max(0.0) * radius.max(0.0);
+        debug_assert!(!is_global_entity_maintenance(
+            EntityIterationKind::CandidateQuery
+        ));
+        let radius = radius.max(0.0);
+        let radius_sq = radius * radius;
         let min_x = ((center.x - radius) / 16.0).floor() as i32;
         let max_x = ((center.x + radius) / 16.0).floor() as i32;
         let min_z = ((center.z - radius) / 16.0).floor() as i32;
         let max_z = ((center.z + radius) / 16.0).floor() as i32;
-        self.spatial_buckets
-            .iter()
-            .filter(move |((x, z), _)| *x >= min_x && *x <= max_x && *z >= min_z && *z <= max_z)
-            .flat_map(|(_, ids)| ids.iter())
+        (min_x..=max_x)
+            .flat_map(move |x| {
+                (min_z..=max_z)
+                    .filter_map(move |z| self.spatial_buckets.get(&(x, z)))
+                    .flat_map(|ids| ids.iter())
+            })
             .filter_map(|id| self.get_by_id(*id))
             .filter(move |entity| entity.position.distance_squared(center) <= radius_sq)
     }
@@ -848,6 +865,31 @@ mod tests {
 
         assert_eq!(em.count_passive(), 2);
         assert_eq!(em.count_hostile(), 3);
+    }
+
+    #[test]
+    fn moved_position_sync_visits_only_supplied_ids_and_preserves_buckets() {
+        let mut em = EntityManager::new();
+        let moved = em.spawn(EntityType::Pig, Vec3::new(1.0, 64.0, 1.0));
+        for offset in 0..31 {
+            em.spawn(
+                EntityType::Cow,
+                Vec3::new(2.0 + offset as f32 * 0.1, 64.0, 2.0),
+            );
+        }
+
+        em.get_by_id_mut(moved).unwrap().position = Vec3::new(17.0, 64.0, 1.0);
+        let visits = em.position_sync_visits;
+        em.sync_entity_positions(&[moved]);
+
+        assert_eq!(em.position_sync_visits - visits, 1);
+        assert!(!em
+            .get_entities_in_chunk(0, 0)
+            .any(|entity| entity.id == moved));
+        assert!(em
+            .get_entities_in_chunk(1, 0)
+            .any(|entity| entity.id == moved));
+        assert_eq!(em.entities.len(), 32);
     }
 
     #[test]
@@ -1039,5 +1081,40 @@ mod tests {
             ids.sort_unstable();
             ids.windows(2).all(|pair| pair[0] != pair[1])
         }));
+    }
+
+    #[test]
+    fn entity_index_radius_query_handles_sparse_and_boundary_buckets() {
+        let mut em = EntityManager::new();
+        let center = em.spawn(EntityType::Cow, Vec3::new(15.5, 4.0, 0.0));
+        let across_boundary = em.spawn(EntityType::Pig, Vec3::new(16.5, 4.0, 0.0));
+        em.spawn(EntityType::Sheep, Vec3::new(1_000_000.0, 4.0, 1_000_000.0));
+
+        let mut ids: Vec<_> = em
+            .query_radius(Vec3::new(16.0, 4.0, 0.0), 1.0)
+            .map(|entity| entity.id)
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![center, across_boundary]);
+
+        assert_eq!(
+            em.query_radius(Vec3::new(15.5, 4.0, 0.0), -1.0)
+                .map(|entity| entity.id)
+                .collect::<Vec<_>>(),
+            vec![center]
+        );
+    }
+
+    #[test]
+    fn entity_index_rebuild_removes_stale_empty_buckets() {
+        let mut em = EntityManager::new();
+        let cow = em.spawn(EntityType::Cow, Vec3::new(32.0, 0.0, 32.0));
+        em.entities.clear();
+        em.rebuild_indexes();
+
+        assert!(em.id_to_index.is_empty());
+        assert!(em.type_buckets.is_empty());
+        assert!(em.spatial_buckets.is_empty());
+        assert!(em.get_by_id(cow).is_none());
     }
 }

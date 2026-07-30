@@ -35,14 +35,10 @@ fn queue_now_ms() -> u64 {
 async fn reliable_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet) -> bool {
     let bytes = packet_bytes(&packet);
     let stats = crate::perf::queue_stats(crate::perf::QueueCategory::Reliable);
-    match time::timeout(
-        RELIABLE_ENQUEUE_TIMEOUT,
-        tx.send(QueuedPacket::Reliable(packet)),
-    )
-    .await
-    {
-        Ok(Ok(())) => {
+    match time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.reserve()).await {
+        Ok(Ok(permit)) => {
             stats.enqueue(bytes, queue_now_ms());
+            permit.send(QueuedPacket::Reliable(packet));
             true
         }
         Ok(Err(_)) => {
@@ -58,8 +54,11 @@ async fn reliable_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet) -> bool 
 }
 fn best_effort_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet) {
     let bytes = packet_bytes(&packet);
-    match tx.try_send(QueuedPacket::Outbound(packet)) {
-        Ok(()) => queue_stats().enqueue(bytes, queue_now_ms()),
+    match tx.try_reserve() {
+        Ok(permit) => {
+            queue_stats().enqueue(bytes, queue_now_ms());
+            permit.send(QueuedPacket::Outbound(packet));
+        }
         Err(_) => queue_stats().drop_item(),
     }
 }
@@ -69,6 +68,21 @@ const HOST_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
 const RELIABLE_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy)]
+struct ServerConfig {
+    catchup_queue_capacity: usize,
+    catchup_drain_delay: Duration,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            catchup_queue_capacity: MAX_CATCHUP_QUEUE_DEPTH,
+            catchup_drain_delay: Duration::ZERO,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ServerToHost {
@@ -478,8 +492,14 @@ async fn queue_initial_roster(
             username,
         };
         let bytes = packet_bytes(&packet);
-        tx.send(QueuedPacket::Outbound(packet)).await?;
+        let permit = match tx.reserve().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return Err(mpsc::error::SendError(QueuedPacket::Outbound(packet)));
+            }
+        };
         queue_stats().enqueue(bytes, queue_now_ms());
+        permit.send(QueuedPacket::Outbound(packet));
     }
     Ok(())
 }
@@ -490,6 +510,7 @@ pub struct NetworkServer {
     next_player_id: Arc<AtomicU64>,
     sessions: Sessions,
     server_to_host: std_mpsc::Sender<ServerToHost>,
+    config: ServerConfig,
 }
 
 impl NetworkServer {
@@ -499,6 +520,47 @@ impl NetworkServer {
         gamemode: u8,
         host_to_server: std_mpsc::Receiver<HostToServer>,
         server_to_host: std_mpsc::Sender<ServerToHost>,
+    ) -> JoinHandle<()> {
+        Self::spawn_with_config(
+            bind_addr,
+            seed,
+            gamemode,
+            host_to_server,
+            server_to_host,
+            ServerConfig::default(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_for_test(
+        bind_addr: String,
+        seed: u64,
+        gamemode: u8,
+        host_to_server: std_mpsc::Receiver<HostToServer>,
+        server_to_host: std_mpsc::Sender<ServerToHost>,
+        catchup_queue_capacity: usize,
+        catchup_drain_delay: Duration,
+    ) -> JoinHandle<()> {
+        Self::spawn_with_config(
+            bind_addr,
+            seed,
+            gamemode,
+            host_to_server,
+            server_to_host,
+            ServerConfig {
+                catchup_queue_capacity: catchup_queue_capacity.max(1),
+                catchup_drain_delay,
+            },
+        )
+    }
+
+    fn spawn_with_config(
+        bind_addr: String,
+        seed: u64,
+        gamemode: u8,
+        host_to_server: std_mpsc::Receiver<HostToServer>,
+        server_to_host: std_mpsc::Sender<ServerToHost>,
+        config: ServerConfig,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Runtime::new() {
@@ -531,6 +593,7 @@ impl NetworkServer {
                     next_player_id: Arc::new(AtomicU64::new(1)),
                     sessions: Arc::new(Mutex::new(HashMap::new())),
                     server_to_host,
+                    config,
                 };
                 server.run(listener, host_to_server).await;
             });
@@ -553,6 +616,7 @@ impl NetworkServer {
                             let server_to_host = self.server_to_host.clone();
                             let seed = self.seed;
                             let gamemode = self.gamemode;
+                            let config = self.config;
                             tokio::spawn(async move {
                                 Self::run_client(
                                     Connection::new(stream),
@@ -561,6 +625,7 @@ impl NetworkServer {
                                     next_player_id,
                                     sessions,
                                     server_to_host,
+                                    config,
                                 )
                                 .await;
                             });
@@ -607,6 +672,7 @@ impl NetworkServer {
         next_player_id: Arc<AtomicU64>,
         sessions: Sessions,
         server_to_host: std_mpsc::Sender<ServerToHost>,
+        config: ServerConfig,
     ) {
         let handshake = match time::timeout(CLIENT_TIMEOUT, connection.recv()).await {
             Ok(Ok(Packet::Handshake {
@@ -671,7 +737,8 @@ impl NetworkServer {
         let roster_tx = out_tx.clone();
         let pose_mailbox = Arc::new(PoseMailbox::default());
         let state_mailbox = Arc::new(StateMailbox::default());
-        let catchup_mailbox = Arc::new(CatchupMailbox::default());
+        let catchup_mailbox =
+            Arc::new(CatchupMailbox::with_capacity(config.catchup_queue_capacity));
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let (mut reader, mut writer) = connection.into_split();
         let writer_pose_mailbox = Arc::clone(&pose_mailbox);
@@ -720,6 +787,9 @@ impl NetworkServer {
                         }
                     }
                     _ = writer_catchup_mailbox.notify.notified() => {
+                        if !config.catchup_drain_delay.is_zero() {
+                            time::sleep(config.catchup_drain_delay).await;
+                        }
                         if let Some(packet) = writer_catchup_mailbox.pop().await {
                             if writer.send(&packet).await.is_err() {
                                 eprintln!("[NetworkServer] Send task: writer send failed for catchup chunk");
@@ -1785,6 +1855,7 @@ mod tests {
             next_player_id: Arc::new(AtomicU64::new(3)),
             sessions: Arc::clone(&sessions),
             server_to_host: event_tx.clone(),
+            config: ServerConfig::default(),
         };
 
         let observer = tokio::spawn(async move {
@@ -1858,6 +1929,7 @@ mod tests {
             next_player_id: Arc::new(AtomicU64::new(2)),
             sessions: Arc::clone(&sessions),
             server_to_host: event_tx,
+            config: ServerConfig::default(),
         };
 
         time::timeout(
@@ -1900,6 +1972,7 @@ mod tests {
                 next_player_id,
                 task_sessions,
                 task_event_tx,
+                ServerConfig::default(),
             )
             .await;
         });
@@ -2261,6 +2334,7 @@ mod tests {
                 next_player_id,
                 sessions,
                 event_tx,
+                ServerConfig::default(),
             )
             .await;
         });

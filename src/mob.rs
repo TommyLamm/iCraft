@@ -320,6 +320,7 @@ pub fn update_mobs(
     let mut arrows_to_spawn = Vec::new();
     let mut explosions = Vec::new();
     let mut player_hit = None;
+    let mut moved_ids = Vec::new();
 
     // Global simulation maintenance: each locally simulated entity receives
     // one physics/AI tick. Candidate targeting is distance-gated in this pass
@@ -353,7 +354,11 @@ pub fn update_mobs(
         }
 
         // Apply physical update
+        let position_before_physics = entity.position;
         entity.update_physics(dt, chunk_manager);
+        if entity.position != position_before_physics {
+            moved_ids.push(entity.id);
+        }
 
         let is_in_water = {
             let mx = entity.position.x.floor() as i32;
@@ -704,7 +709,7 @@ pub fn update_mobs(
         }
     }
 
-    entity_manager.sync_positions();
+    entity_manager.sync_entity_positions(&moved_ids);
     blocks_removed
 }
 

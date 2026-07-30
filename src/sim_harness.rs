@@ -3,7 +3,7 @@ use crate::{
     chunk_manager::ChunkManager,
     entity::{EntityManager, EntityType},
     fluid, lighting,
-    physics::PlayerPhysics,
+    physics::{PlayerPhysics, PLAYER_PHYSICS_TICK_DT},
     redstone::RedstoneSystem,
     world::{BlockType, Chunk},
 };
@@ -11,7 +11,7 @@ use glam::Vec3;
 use std::collections::HashSet;
 
 pub const TICK_HZ: f64 = 20.0;
-const TICK_DT: f32 = 1.0 / 20.0;
+const TICK_DT: f32 = PLAYER_PHYSICS_TICK_DT;
 const SEED: u32 = 0x1C4F_0007;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -129,6 +129,10 @@ impl SimHarness {
                 }
             }
         }
+        // Redstone keeps mutable runtime state outside chunk storage. Use its
+        // canonical snapshot so component metadata, queued work, dirty sets,
+        // and sleep/occupant bookkeeping all participate in the world digest.
+        bytes.extend_from_slice(&self.redstone.canonical_snapshot());
         let mut entities: Vec<_> = self.entities.entities.iter().collect();
         entities.sort_by_key(|e| e.id);
         for e in entities {
@@ -143,8 +147,6 @@ impl SimHarness {
         bytes.extend_from_slice(&self.player.position.y.to_bits().to_le_bytes());
         bytes.extend_from_slice(&self.player.position.z.to_bits().to_le_bytes());
         bytes.extend_from_slice(&self.player_health.to_bits().to_le_bytes());
-        bytes.extend_from_slice(&self.redstone.current_tick().to_le_bytes());
-        bytes.push(self.redstone.power_at((8, 70, 8)));
         bytes.extend_from_slice(&self.world_time.ticks.to_le_bytes());
         fnv1a(&bytes)
     }
@@ -177,9 +179,10 @@ mod tests {
     use super::*;
     #[test]
     fn fps_is_deterministic() {
-        let a = run_for_fps(30, 3.0);
-        for fps in [60, 144, 240] {
-            assert_eq!(a, run_for_fps(fps, 3.0));
+        let baseline = run_for_fps(30, 3.0);
+        assert_eq!(baseline.0, 60);
+        for fps in [30, 60, 144, 240] {
+            assert_eq!(baseline, run_for_fps(fps, 3.0));
         }
     }
     #[test]
@@ -218,12 +221,34 @@ mod tests {
         let mut b = SimHarness::new();
         let _ = b.redstone.tick(&mut b.chunks, &[]);
         assert_ne!(base, b.checksum());
+
+        let mut b = SimHarness::new();
+        b.chunks.set_block(8, 71, 8, BlockType::Repeater);
+        b.redstone
+            .on_block_changed(&b.chunks, (8, 71, 8), crate::redstone::Direction::North);
+        let component_default = b.checksum();
+        b.redstone.set_repeater_delay((8, 71, 8), 4);
+        assert_ne!(component_default, b.checksum());
     }
     #[test]
     fn high_speed_player_collision_is_bounded() {
         let mut h = SimHarness::new();
-        h.player.velocity = Vec3::new(1000.0, 0.0, 0.0);
-        h.tick();
-        assert!(h.player.position.x < 20.0);
+        h.player.position = Vec3::new(0.5, 200.0, 0.5);
+        h.player.highest_y = h.player.position.y;
+        h.chunks.set_block(3, 200, 0, BlockType::Stone);
+        h.chunks.set_block(3, 201, 0, BlockType::Stone);
+        h.player.set_flying(true);
+        h.player.update(
+            TICK_DT,
+            &h.chunks,
+            Vec3::new(1_000.0, 0.0, 0.0),
+            false,
+            true,
+        );
+        assert!((h.player.position.x - 2.7).abs() < 1.0e-5);
+        assert!(!h
+            .player
+            .get_aabb()
+            .intersects(&crate::physics::unit_block_aabb((3, 200, 0))));
     }
 }

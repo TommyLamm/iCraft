@@ -252,6 +252,7 @@ pub fn update_dimension_entities(
         .collect();
     let mut pending_spawns = Vec::new();
     let mut removed_projectiles = Vec::new();
+    let mut moved_ids = Vec::new();
     let is_creative = game_mode == GameMode::Creative;
 
     // Global simulation maintenance: every live entity receives its timer
@@ -260,6 +261,7 @@ pub fn update_dimension_entities(
         EntityIterationKind::GlobalSimulation
     ));
     for entity in &mut entities.entities {
+        let position_before_update = entity.position;
         entity.action_cooldown = (entity.action_cooldown - dt).max(0.0);
         entity.ai_timer += dt;
 
@@ -346,6 +348,9 @@ pub fn update_dimension_entities(
             }
             _ => {}
         }
+        if entity.position != position_before_update {
+            moved_ids.push(entity.id);
+        }
     }
 
     entities.retain(|entity| !removed_projectiles.contains(&entity.id));
@@ -357,7 +362,7 @@ pub fn update_dimension_entities(
             projectile.ai_timer = 0.0;
         }
     }
-    entities.sync_positions();
+    entities.sync_entity_positions(&moved_ids);
     events
 }
 

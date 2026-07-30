@@ -6,6 +6,18 @@ const CREATIVE_FLY_SPEED: f32 = 10.0;
 const CREATIVE_FLY_SPRINT_MULTIPLIER: f32 = 2.0;
 const CREATIVE_FLY_VERTICAL_SPEED: f32 = 8.0;
 const MAX_COLLISION_STEP: f32 = 0.25;
+/// The simulation advances the player on a fixed 50 ms tick.  A tick is
+/// subdivided into four 12.5 ms integration steps so that a collision query
+/// never has to account for a full frame-sized displacement.  Larger caller
+/// timesteps are subdivided as well (up to the bounded catch-up budget) to
+/// preserve the public API's elapsed-time semantics.
+pub const PLAYER_PHYSICS_TICK_DT: f32 = 1.0 / 20.0;
+pub const PLAYER_PHYSICS_SUBSTEP_DT: f32 = PLAYER_PHYSICS_TICK_DT / 4.0;
+pub const PLAYER_PHYSICS_MAX_SUBSTEPS: usize = 4;
+/// Maximum collision probes per axis in one integration substep.  The
+/// displacement is clamped to this many MAX_COLLISION_STEP-sized probes, so
+/// bounding the loop cannot skip a solid block (tunneling).
+pub const PLAYER_MAX_COLLISION_ITERATIONS: usize = 32;
 pub const PLAYER_WIDTH: f32 = 0.6;
 pub const PLAYER_STANDING_HEIGHT: f32 = 1.8;
 
@@ -210,6 +222,51 @@ impl PlayerPhysics {
         is_sneaking: bool,
         is_sprinting: bool,
     ) -> f32 {
+        // Keep player integration bounded even when a caller hands us a long
+        // render hitch.  A normal 50 ms tick takes four substeps; unusually
+        // large timesteps are capped to the fixed catch-up budget while still
+        // preserving their elapsed duration in the per-substep dt.
+        let integration_dt = dt.max(0.0);
+        let substeps = ((integration_dt / PLAYER_PHYSICS_SUBSTEP_DT).ceil() as usize)
+            .clamp(1, PLAYER_PHYSICS_MAX_SUBSTEPS);
+        let substep_dt = integration_dt / substeps as f32;
+        let edge_guard_origin = if is_sneaking && !self.is_flying && self.on_ground {
+            Some((self.position.x, self.position.z))
+        } else {
+            None
+        };
+        let mut edge_guard_blocked = (false, false);
+        let mut fall_damage = 0.0;
+        for _ in 0..substeps {
+            fall_damage += self.update_substep(
+                substep_dt,
+                chunk_manager,
+                movement_input,
+                is_sneaking,
+                is_sprinting,
+                edge_guard_origin,
+                &mut edge_guard_blocked,
+            );
+        }
+        if edge_guard_blocked.0 {
+            self.velocity.x = 0.0;
+        }
+        if edge_guard_blocked.1 {
+            self.velocity.z = 0.0;
+        }
+        fall_damage
+    }
+
+    fn update_substep(
+        &mut self,
+        dt: f32,
+        chunk_manager: &ChunkManager,
+        movement_input: Vec3,
+        is_sneaking: bool,
+        is_sprinting: bool,
+        edge_guard_origin: Option<(f32, f32)>,
+        edge_guard_blocked: &mut (bool, bool),
+    ) -> f32 {
         // Hitbox size adjustment
         if is_sneaking {
             self.size.y = 1.5;
@@ -282,23 +339,29 @@ impl PlayerPhysics {
 
         // 3. 沿 X 軸位移並處理碰撞
         let old_x = self.position.x;
-        let x_displacement = self.velocity.x * dt;
-        self.move_axis_with_collisions(chunk_manager, 0, x_displacement);
-        if !is_flying && is_sneaking && self.on_ground {
-            if !self.is_block_below(chunk_manager) {
-                self.position.x = old_x;
-                self.velocity.x = 0.0;
+        if !edge_guard_blocked.0 {
+            let x_displacement = self.velocity.x * dt;
+            self.move_axis_with_collisions(chunk_manager, 0, x_displacement);
+            if !is_flying && is_sneaking && self.on_ground {
+                if !self.is_block_below(chunk_manager) {
+                    self.position.x = edge_guard_origin.map_or(old_x, |origin| origin.0);
+                    self.velocity.x = 0.0;
+                    edge_guard_blocked.0 = true;
+                }
             }
         }
 
         // 4. 沿 Z 軸位移並處理碰撞
         let old_z = self.position.z;
-        let z_displacement = self.velocity.z * dt;
-        self.move_axis_with_collisions(chunk_manager, 2, z_displacement);
-        if !is_flying && is_sneaking && self.on_ground {
-            if !self.is_block_below(chunk_manager) {
-                self.position.z = old_z;
-                self.velocity.z = 0.0;
+        if !edge_guard_blocked.1 {
+            let z_displacement = self.velocity.z * dt;
+            self.move_axis_with_collisions(chunk_manager, 2, z_displacement);
+            if !is_flying && is_sneaking && self.on_ground {
+                if !self.is_block_below(chunk_manager) {
+                    self.position.z = edge_guard_origin.map_or(old_z, |origin| origin.1);
+                    self.velocity.z = 0.0;
+                    edge_guard_blocked.1 = true;
+                }
             }
         }
 
@@ -336,8 +399,12 @@ impl PlayerPhysics {
         axis: usize,
         displacement: f32,
     ) {
-        let step_count = (displacement.abs() / MAX_COLLISION_STEP).ceil().max(1.0) as usize;
-        let step = displacement / step_count as f32;
+        let max_displacement = MAX_COLLISION_STEP * PLAYER_MAX_COLLISION_ITERATIONS as f32;
+        let bounded_displacement = displacement.clamp(-max_displacement, max_displacement);
+        let step_count = (bounded_displacement.abs() / MAX_COLLISION_STEP)
+            .ceil()
+            .max(1.0) as usize;
+        let step = bounded_displacement / step_count as f32;
 
         for _ in 0..step_count {
             match axis {
@@ -354,7 +421,7 @@ impl PlayerPhysics {
                 2 => self.velocity.z == 0.0,
                 _ => unreachable!("invalid movement axis"),
             };
-            if displacement != 0.0 && blocked {
+            if bounded_displacement != 0.0 && blocked {
                 break;
             }
         }
@@ -758,6 +825,70 @@ mod tests {
         assert_eq!(falling.velocity.y, 0.0);
         assert!(falling.on_ground);
         assert_eq!(fall_damage, 0.0);
+    }
+
+    #[test]
+    fn extreme_input_is_displacement_capped_without_tunneling() {
+        let mut chunk_manager = empty_chunk_manager();
+        let chunk = chunk_manager.chunks.get_mut(&(0, 0)).unwrap();
+        chunk.set_block_local(3, 80, 8, BlockType::Stone);
+        chunk.set_block_local(3, 81, 8, BlockType::Stone);
+
+        let mut physics = PlayerPhysics::new(Vec3::new(0.5, 80.0, 8.5));
+        physics.set_flying(true);
+        physics.update(
+            PLAYER_PHYSICS_TICK_DT,
+            &chunk_manager,
+            Vec3::new(1_000.0, 0.0, 0.0),
+            false,
+            true,
+        );
+
+        // The wall's near face is x=3; the player must stop at x=2.7 even
+        // though the requested displacement is many orders of magnitude
+        // larger than one block.
+        assert!((physics.position.x - 2.7).abs() < 1.0e-5);
+        assert_eq!(physics.velocity.x, 0.0);
+        assert!(!physics.get_aabb().intersects(&unit_block_aabb((3, 80, 8))));
+
+        let mut open = PlayerPhysics::new(Vec3::new(0.5, 80.0, 8.5));
+        open.set_flying(true);
+        open.update(
+            PLAYER_PHYSICS_TICK_DT,
+            &empty_chunk_manager(),
+            Vec3::new(1_000.0, 0.0, 0.0),
+            false,
+            true,
+        );
+        assert!(
+            open.position.x - 0.5
+                <= MAX_COLLISION_STEP
+                    * PLAYER_MAX_COLLISION_ITERATIONS as f32
+                    * PLAYER_PHYSICS_MAX_SUBSTEPS as f32
+        );
+    }
+
+    #[test]
+    fn a_50ms_tick_matches_four_shared_player_substeps() {
+        let chunk_manager = empty_chunk_manager();
+        let input = Vec3::new(0.2, 0.0, 0.1);
+        let mut tick = PlayerPhysics::new(Vec3::new(8.5, 72.0, 8.5));
+        tick.update(PLAYER_PHYSICS_TICK_DT, &chunk_manager, input, false, false);
+
+        let mut split = PlayerPhysics::new(Vec3::new(8.5, 72.0, 8.5));
+        for _ in 0..4 {
+            split.update(
+                PLAYER_PHYSICS_SUBSTEP_DT,
+                &chunk_manager,
+                input,
+                false,
+                false,
+            );
+        }
+
+        assert_eq!(tick.position.to_array(), split.position.to_array());
+        assert_eq!(tick.velocity.to_array(), split.velocity.to_array());
+        assert_eq!(tick.on_ground, split.on_ground);
     }
 
     #[test]
