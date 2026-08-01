@@ -1219,6 +1219,421 @@ fn draw_melon(img: &mut RgbaImage, tx: u32, ty: u32) {
     }
 }
 
+/// A single 16x16 atlas tile replacement sourced from a Minecraft-style
+/// resource pack (Stay True first, vanilla `assets/vanilla/textures` as the
+/// fallback for everything the pack does not override).
+struct PackTile {
+    col: u32,
+    row: u32,
+    /// Path relative to the pack's `textures` directory, e.g. `block/stone.png`.
+    path: &'static str,
+    /// Optional sub-rectangle (x, y, width, height) cropped from a larger
+    /// entity skin / chest texture before scaling to 16x16.
+    region: Option<[u32; 4]>,
+    /// Optional alpha multiplier applied after scaling; used to keep water and
+    /// ice translucent the way the procedural atlas drew them.
+    alpha: Option<f32>,
+    /// Optional RGB multiplier (tint) applied after scaling. Used where the
+    /// vanilla/pack texture is a grayscale template (grass, leaves, water)
+    /// that Minecraft tints at render time, which this atlas cannot do.
+    tint: Option<[f32; 3]>,
+}
+
+const fn pack_tile(col: u32, row: u32, path: &'static str) -> PackTile {
+    PackTile {
+        col,
+        row,
+        path,
+        region: None,
+        alpha: None,
+        tint: None,
+    }
+}
+
+const fn pack_tile_region(
+    col: u32,
+    row: u32,
+    path: &'static str,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> PackTile {
+    PackTile {
+        col,
+        row,
+        path,
+        region: Some([x, y, w, h]),
+        alpha: None,
+        tint: None,
+    }
+}
+
+const fn pack_tile_alpha(col: u32, row: u32, path: &'static str, alpha: f32) -> PackTile {
+    PackTile {
+        col,
+        row,
+        path,
+        region: None,
+        alpha: Some(alpha),
+        tint: None,
+    }
+}
+
+const fn pack_tile_tint(col: u32, row: u32, path: &'static str, tint: [f32; 3]) -> PackTile {
+    PackTile {
+        col,
+        row,
+        path,
+        region: None,
+        alpha: None,
+        tint: Some(tint),
+    }
+}
+
+const fn pack_tile_region_tint(
+    col: u32,
+    row: u32,
+    path: &'static str,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    tint: [f32; 3],
+) -> PackTile {
+    PackTile {
+        col,
+        row,
+        path,
+        region: Some([x, y, w, h]),
+        alpha: None,
+        tint: Some(tint),
+    }
+}
+
+/// Default Stay True resource pack location on this machine. Override with the
+/// `ICRAFT_RESOURCE_PACK` environment variable (absolute path to the pack's
+/// `assets/minecraft/textures` directory).
+const DEFAULT_RESOURCE_PACK_TEXTURES: &str =
+    "F:/Desktop/Stay True 1.21.5/assets/minecraft/textures";
+
+/// Vanilla 1.21.5 textures extracted next to the game for pack overrides that
+/// Stay True leaves untouched (most items, GUI sprites, entity skins, ...).
+const VANILLA_TEXTURES_DIR: &str = "assets/vanilla/textures";
+
+/// Atlas layout: (col, row) -> resource-pack texture path. Every entry is
+/// resolved from the Stay True pack first and falls back to the extracted
+/// vanilla tree, keeping the procedural drawing as the final fallback so the
+/// game always has a complete atlas.
+const PACK_TILES: &[PackTile] = &[
+    // Row 0: terrain blocks
+    // Grass/leaves/water are grayscale templates in the pack and vanilla jar;
+    // Minecraft tints them per-biome at render time, so bake a green/blue tint.
+    pack_tile_tint(0, 0, "block/grass_block_top.png", [0.62, 1.0, 0.45]),
+    pack_tile(1, 0, "block/grass_block_side.png"),
+    pack_tile(2, 0, "block/dirt.png"),
+    pack_tile(3, 0, "block/stone.png"),
+    pack_tile(4, 0, "block/sand.png"),
+    pack_tile(5, 0, "block/gravel.png"),
+    pack_tile(6, 0, "block/oak_planks.png"),
+    pack_tile_tint(7, 0, "block/oak_leaves.png", [0.55, 1.0, 0.45]),
+    pack_tile(8, 0, "block/cobblestone.png"),
+    pack_tile(9, 0, "block/bedrock.png"),
+    // water_still is an animated 16x512 sheet; crop frame 0 and tint it blue.
+    pack_tile_region_tint(
+        10,
+        0,
+        "block/water_still.png",
+        0,
+        0,
+        16,
+        16,
+        [0.25, 0.45, 1.1],
+    ),
+    pack_tile(11, 0, "block/coal_ore.png"),
+    pack_tile(12, 0, "block/iron_ore.png"),
+    pack_tile(13, 0, "block/gold_ore.png"),
+    pack_tile(14, 0, "block/diamond_ore.png"),
+    pack_tile(15, 0, "block/redstone_ore.png"),
+    // Row 1: more terrain / furniture
+    pack_tile(0, 1, "block/glass.png"),
+    pack_tile(1, 1, "block/bricks.png"),
+    pack_tile(2, 1, "block/stone_bricks.png"),
+    pack_tile(3, 1, "block/snow.png"),
+    pack_tile(4, 1, "block/grass_block_snow.png"),
+    pack_tile_alpha(5, 1, "block/ice.png", 180.0 / 255.0),
+    pack_tile(6, 1, "block/clay.png"),
+    pack_tile(7, 1, "block/sandstone_top.png"),
+    pack_tile(8, 1, "block/sandstone.png"),
+    pack_tile(9, 1, "block/obsidian.png"),
+    pack_tile(10, 1, "block/oak_log_top.png"),
+    pack_tile(11, 1, "block/oak_log.png"),
+    pack_tile(12, 1, "block/crafting_table_top.png"),
+    pack_tile(13, 1, "block/crafting_table_side.png"),
+    pack_tile(14, 1, "block/furnace_front.png"),
+    pack_tile_region(15, 1, "entity/chest/normal.png", 14, 14, 14, 14),
+    // Row 2: mechanisms
+    pack_tile(0, 2, "block/tnt_top.png"),
+    pack_tile(1, 2, "block/tnt_bottom.png"),
+    pack_tile(2, 2, "block/tnt_side.png"),
+    pack_tile(3, 2, "block/bookshelf.png"),
+    pack_tile(4, 2, "block/torch.png"),
+    pack_tile(5, 2, "block/redstone_dust_dot.png"),
+    pack_tile(6, 2, "block/redstone_torch.png"),
+    pack_tile(7, 2, "block/repeater.png"),
+    pack_tile(8, 2, "block/comparator.png"),
+    // 1.21.5 stone buttons/plates reuse the stone texture.
+    pack_tile(9, 2, "block/stone.png"),
+    pack_tile(10, 2, "block/lever.png"),
+    pack_tile(11, 2, "block/stone.png"),
+    pack_tile(12, 2, "block/piston_side.png"),
+    pack_tile(13, 2, "block/piston_top_sticky.png"),
+    pack_tile(14, 2, "block/redstone_lamp.png"),
+    // lava_still is an animated 16x512 sheet; use its first frame.
+    pack_tile_region(15, 2, "block/lava_still.png", 0, 0, 16, 16),
+    // Row 3: resource items
+    pack_tile(0, 3, "item/stick.png"),
+    pack_tile(1, 3, "item/coal.png"),
+    pack_tile(2, 3, "item/iron_ingot.png"),
+    pack_tile(3, 3, "item/gold_ingot.png"),
+    pack_tile(4, 3, "item/diamond.png"),
+    pack_tile(5, 3, "item/redstone.png"),
+    pack_tile(6, 3, "item/apple.png"),
+    pack_tile(7, 3, "item/bread.png"),
+    pack_tile(8, 3, "item/rotten_flesh.png"),
+    pack_tile(9, 3, "item/bone.png"),
+    pack_tile(10, 3, "item/bow.png"),
+    pack_tile(11, 3, "item/gunpowder.png"),
+    pack_tile(12, 3, "item/wheat.png"),
+    pack_tile(13, 3, "item/wheat_seeds.png"),
+    pack_tile(14, 3, "item/carrot.png"),
+    pack_tile(15, 3, "gui/sprites/hud/air.png"),
+    // Row 4: swords and special items
+    pack_tile(0, 4, "item/stone_sword.png"),
+    pack_tile(1, 4, "item/iron_sword.png"),
+    pack_tile(2, 4, "item/diamond_sword.png"),
+    pack_tile(3, 4, "item/nether_star.png"),
+    pack_tile(4, 4, "item/end_crystal.png"),
+    pack_tile(5, 4, "item/blaze_rod.png"),
+    pack_tile(6, 4, "block/end_portal_frame_eye.png"),
+    pack_tile(7, 4, "block/coal_block.png"),
+    pack_tile(8, 4, "block/gold_block.png"),
+    pack_tile(14, 4, "block/diamond_block.png"),
+    // Rows 5-7: tools
+    pack_tile(0, 5, "item/stone_pickaxe.png"),
+    pack_tile(1, 5, "item/iron_pickaxe.png"),
+    pack_tile(2, 5, "item/diamond_pickaxe.png"),
+    pack_tile(0, 6, "item/stone_axe.png"),
+    pack_tile(1, 6, "item/iron_axe.png"),
+    pack_tile(2, 6, "item/diamond_axe.png"),
+    pack_tile(0, 7, "item/stone_shovel.png"),
+    pack_tile(1, 7, "item/iron_shovel.png"),
+    pack_tile(2, 7, "item/diamond_shovel.png"),
+    // Row 8: HUD icons plus dedicated blaze/wither skins
+    pack_tile(0, 8, "gui/sprites/hud/heart/full.png"),
+    pack_tile(1, 8, "gui/sprites/hud/heart/half.png"),
+    pack_tile(2, 8, "gui/sprites/hud/heart/container.png"),
+    pack_tile(3, 8, "gui/sprites/hud/food_full_hunger.png"),
+    pack_tile(4, 8, "gui/sprites/hud/food_half_hunger.png"),
+    pack_tile(5, 8, "gui/sprites/hud/food_empty_hunger.png"),
+    pack_tile_region(6, 8, "entity/blaze.png", 8, 8, 8, 8),
+    pack_tile_region(7, 8, "entity/blaze.png", 12, 0, 8, 12),
+    pack_tile_region(8, 8, "entity/wither/wither.png", 8, 8, 8, 8),
+    pack_tile_region(9, 8, "entity/wither/wither.png", 20, 20, 8, 12),
+    pack_tile_region(15, 8, "entity/player/wide/steve.png", 0, 8, 8, 8),
+    // Row 9: hostile mob skins
+    pack_tile_region(0, 9, "entity/zombie/zombie.png", 8, 8, 8, 8),
+    pack_tile_region(1, 9, "entity/zombie/zombie.png", 0, 8, 8, 8),
+    pack_tile_region(2, 9, "entity/zombie/zombie.png", 20, 20, 8, 12),
+    pack_tile_region(3, 9, "entity/zombie/zombie.png", 4, 20, 4, 12),
+    pack_tile_region(4, 9, "entity/skeleton/skeleton.png", 8, 8, 8, 8),
+    // The vanilla skeleton body front is a see-through ribcage; use the solid
+    // right-arm region instead so the torso cube reads as bone.
+    pack_tile_region(5, 9, "entity/skeleton/skeleton.png", 40, 18, 8, 12),
+    pack_tile_region(6, 9, "entity/creeper/creeper.png", 8, 8, 8, 8),
+    pack_tile_region(7, 9, "entity/creeper/creeper.png", 20, 20, 8, 12),
+    pack_tile(8, 9, "item/arrow.png"),
+    pack_tile(9, 9, "block/oak_planks.png"),
+    pack_tile(10, 9, "item/string.png"),
+    pack_tile_region(11, 9, "entity/piglin/piglin.png", 8, 8, 8, 8),
+    pack_tile_region(12, 9, "entity/piglin/piglin.png", 20, 20, 8, 12),
+    pack_tile_region(13, 9, "entity/zombie/husk.png", 8, 8, 8, 8),
+    pack_tile_region(14, 9, "entity/zombie/husk.png", 20, 20, 8, 12),
+    // Row 10: passive mob skins and dimension blocks
+    pack_tile_region(0, 10, "entity/pig/temperate_pig.png", 8, 8, 8, 8),
+    // 1.21.5 redesigned pig/sheep/chicken skins use a new layout; the body
+    // regions below were located on the actual textures.
+    pack_tile_region(1, 10, "entity/pig/temperate_pig.png", 30, 20, 8, 12),
+    pack_tile_region(2, 10, "entity/cow/cow.png", 8, 8, 8, 8),
+    pack_tile_region(3, 10, "entity/cow/cow.png", 20, 20, 8, 12),
+    pack_tile_region(4, 10, "entity/sheep/sheep.png", 8, 8, 8, 8),
+    pack_tile(5, 10, "block/white_wool.png"),
+    pack_tile_region(6, 10, "entity/sheep/sheep.png", 31, 15, 8, 12),
+    pack_tile_region(7, 10, "entity/chicken/temperate_chicken.png", 8, 8, 8, 8),
+    pack_tile_region(8, 10, "entity/chicken/temperate_chicken.png", 6, 7, 8, 12),
+    pack_tile(9, 10, "block/nether_bricks.png"),
+    pack_tile_region(10, 10, "entity/chest/ender.png", 14, 14, 14, 14),
+    pack_tile(11, 10, "item/flint_and_steel.png"),
+    pack_tile(12, 10, "item/ender_eye.png"),
+    pack_tile(13, 10, "item/elytra.png"),
+    pack_tile(14, 10, "entity/end_portal.png"),
+    pack_tile(15, 10, "block/purpur_block.png"),
+    // Row 11: tools, food and boss items
+    pack_tile(0, 11, "item/shears.png"),
+    pack_tile(1, 11, "item/bucket.png"),
+    pack_tile(2, 11, "item/milk_bucket.png"),
+    pack_tile(3, 11, "item/porkchop.png"),
+    pack_tile(4, 11, "item/beef.png"),
+    pack_tile(5, 11, "item/mutton.png"),
+    pack_tile(6, 11, "item/chicken.png"),
+    pack_tile(7, 11, "item/cooked_porkchop.png"),
+    pack_tile(8, 11, "item/cooked_beef.png"),
+    pack_tile(9, 11, "item/cooked_mutton.png"),
+    pack_tile(10, 11, "item/cooked_chicken.png"),
+    pack_tile(11, 11, "item/leather.png"),
+    pack_tile(12, 11, "item/feather.png"),
+    pack_tile(13, 11, "item/egg.png"),
+    pack_tile(14, 11, "block/dragon_egg.png"),
+    pack_tile_region(15, 11, "entity/skeleton/wither_skeleton.png", 8, 8, 8, 8),
+    // Row 12: tree variants, plants and fire
+    pack_tile(0, 12, "block/birch_log_top.png"),
+    pack_tile(1, 12, "block/birch_log.png"),
+    pack_tile(2, 12, "block/birch_planks.png"),
+    pack_tile(3, 12, "block/birch_leaves.png"),
+    pack_tile(4, 12, "block/spruce_log_top.png"),
+    pack_tile(5, 12, "block/spruce_log.png"),
+    pack_tile(6, 12, "block/spruce_planks.png"),
+    pack_tile(7, 12, "block/spruce_leaves.png"),
+    pack_tile(8, 12, "block/short_grass.png"),
+    pack_tile(9, 12, "block/dandelion.png"),
+    pack_tile(10, 12, "block/poppy.png"),
+    pack_tile(11, 12, "block/cactus_side.png"),
+    pack_tile(12, 12, "block/sugar_cane.png"),
+    pack_tile(13, 12, "block/pumpkin_side.png"),
+    pack_tile(14, 12, "block/melon_side.png"),
+    // fire_0 is an animated 16x512 sheet; use its first frame.
+    pack_tile_region(15, 12, "block/fire_0.png", 0, 0, 16, 16),
+    // Row 13: enchanting / brewing / potion ingredients
+    pack_tile(0, 13, "block/enchanting_table_side.png"),
+    pack_tile(1, 13, "item/brewing_stand.png"),
+    pack_tile(2, 13, "block/anvil.png"),
+    pack_tile(3, 13, "item/lapis_lazuli.png"),
+    pack_tile(4, 13, "item/iron_helmet.png"),
+    pack_tile(5, 13, "item/iron_chestplate.png"),
+    pack_tile(6, 13, "item/iron_leggings.png"),
+    pack_tile(7, 13, "item/iron_boots.png"),
+    pack_tile(8, 13, "item/glass_bottle.png"),
+    pack_tile(9, 13, "item/potion.png"),
+    pack_tile(10, 13, "item/splash_potion.png"),
+    pack_tile(11, 13, "item/nether_wart.png"),
+    pack_tile(12, 13, "item/sugar.png"),
+    pack_tile(13, 13, "item/blaze_powder.png"),
+    pack_tile(14, 13, "item/glistering_melon_slice.png"),
+    pack_tile(15, 13, "item/ghast_tear.png"),
+    // Row 14: brewing results, mechanisms and materials
+    pack_tile(0, 14, "item/golden_carrot.png"),
+    pack_tile(1, 14, "item/fermented_spider_eye.png"),
+    pack_tile(2, 14, "item/magma_cream.png"),
+    pack_tile(3, 14, "item/pufferfish.png"),
+    pack_tile(4, 14, "item/spider_eye.png"),
+    pack_tile(5, 14, "item/glowstone_dust.png"),
+    pack_tile(6, 14, "item/redstone.png"),
+    pack_tile(7, 14, "item/arrow.png"),
+    pack_tile(8, 14, "block/redstone_lamp_on.png"),
+    pack_tile(9, 14, "item/oak_door.png"),
+    pack_tile(10, 14, "block/oak_trapdoor.png"),
+    pack_tile(11, 14, "block/dispenser_front.png"),
+    pack_tile(12, 14, "block/dropper_front.png"),
+    pack_tile(13, 14, "block/note_block.png"),
+    pack_tile(14, 14, "item/shulker_shell.png"),
+    pack_tile(15, 14, "block/iron_block.png"),
+    // Row 15 (cols 10-15): dimension blocks. Destroy stages (cols 0-9) are
+    // handled separately so the existing disk/procedural fallback stays.
+    pack_tile(10, 15, "block/netherrack.png"),
+    pack_tile(11, 15, "block/soul_sand.png"),
+    pack_tile(12, 15, "block/glowstone.png"),
+    pack_tile(13, 15, "block/nether_portal.png"),
+    pack_tile(14, 15, "block/end_stone.png"),
+    pack_tile(15, 15, "block/end_portal_frame_top.png"),
+];
+
+fn resource_pack_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
+    let pack = std::env::var("ICRAFT_RESOURCE_PACK")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_RESOURCE_PACK_TEXTURES));
+    let vanilla = std::path::PathBuf::from(VANILLA_TEXTURES_DIR);
+    (pack, vanilla)
+}
+
+/// Paste one 16x16 tile from a source image, cropping and nearest-neighbor
+/// scaling it first when a region is specified.
+fn paste_pack_tile(img: &mut RgbaImage, tile: &PackTile, src: &image::DynamicImage) {
+    let cropped = match tile.region {
+        Some([x, y, w, h]) => image::imageops::crop_imm(src, x, y, w, h).to_image(),
+        None => src.to_rgba8(),
+    };
+    let scaled = image::imageops::resize(&cropped, 16, 16, image::imageops::FilterType::Nearest);
+    let ox = tile.col * 16;
+    let oy = tile.row * 16;
+    for (dx, dy, pixel) in scaled.enumerate_pixels() {
+        let mut px = *pixel;
+        if let Some(alpha) = tile.alpha {
+            px[3] = (px[3] as f32 * alpha).round() as u8;
+        }
+        if let Some(tint) = tile.tint {
+            px[0] = (px[0] as f32 * tint[0]).round() as u8;
+            px[1] = (px[1] as f32 * tint[1]).round() as u8;
+            px[2] = (px[2] as f32 * tint[2]).round() as u8;
+        }
+        img.put_pixel(ox + dx, oy + dy, px);
+    }
+}
+
+/// Overlay every mapped atlas tile with the Stay True resource pack texture,
+/// falling back to the extracted vanilla 1.21.5 tree. Tiles that resolve
+/// nowhere keep the procedural artwork generated above.
+fn apply_resource_pack(img: &mut RgbaImage) {
+    let (pack_dir, vanilla_dir) = resource_pack_dirs();
+    let mut pack_hits = 0usize;
+    let mut vanilla_hits = 0usize;
+    let mut misses = 0usize;
+    let mut missing = Vec::new();
+    for tile in PACK_TILES {
+        let pack_path = pack_dir.join(tile.path);
+        let loaded = if pack_path.is_file() {
+            pack_hits += 1;
+            image::open(&pack_path)
+        } else {
+            let vanilla_path = vanilla_dir.join(tile.path);
+            if vanilla_path.is_file() {
+                vanilla_hits += 1;
+                image::open(&vanilla_path)
+            } else {
+                misses += 1;
+                missing.push(tile.path);
+                continue;
+            }
+        };
+        match loaded {
+            Ok(src) => paste_pack_tile(img, tile, &src),
+            Err(_) => misses += 1,
+        }
+    }
+    eprintln!(
+        "[texture] resource-pack atlas: {} tiles from Stay True, {} vanilla fallback, {} procedural fallback (pack: {})",
+        pack_hits,
+        vanilla_hits,
+        misses,
+        pack_dir.display()
+    );
+    if !missing.is_empty() {
+        eprintln!(
+            "[texture] missing pack/vanilla tiles: {}",
+            missing.join(", ")
+        );
+    }
+}
+
 impl TextureAtlas {
     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
         let mut img = RgbaImage::new(256, 256);
@@ -1477,15 +1892,23 @@ impl TextureAtlas {
         draw_hunger(&mut img, 5, 8, 0.0); // Empty Hunger
 
         // Row 15: Crack overlays (cols 0..10)
-        // Prefer loading high-quality 10-stage destroy stage PNGs from disk; fall
-        // back to the procedural crack generator when files are missing or fail
-        // to load (e.g. self-contained single-binary mode).
+        // Prefer the resource pack's 10-stage destroy PNGs, then the extracted
+        // vanilla tree, then the legacy assets folder; fall back to the
+        // procedural crack generator when nothing is available.
+        let (pack_dir, vanilla_dir) = resource_pack_dirs();
         for stage in 0..10u32 {
-            let path = format!("assets/textures/destroy_stages/destroy_stage_{}.png", stage);
-            let loaded = std::path::Path::new(&path)
-                .exists()
-                .then(|| image::open(&path).ok())
-                .flatten();
+            let candidates = [
+                pack_dir.join(format!("block/destroy_stage_{}.png", stage)),
+                vanilla_dir.join(format!("block/destroy_stage_{}.png", stage)),
+                std::path::PathBuf::from(format!(
+                    "assets/textures/destroy_stages/destroy_stage_{}.png",
+                    stage
+                )),
+            ];
+            let loaded = candidates
+                .iter()
+                .find(|path| path.is_file())
+                .and_then(|path| image::open(path).ok());
             if let Some(loaded_img) = loaded {
                 let stage_img = loaded_img.to_rgba8();
                 let sw = stage_img.width();
@@ -1862,11 +2285,13 @@ impl TextureAtlas {
             }
         }
 
-        // Col 9 (Row 10): Plain player skin (no face features). Used by the
-        // first-person arm so it does not inherit the sheep head's eye pixels.
+        // Col 15 (Row 8): Plain player skin (no face features). Used by the
+        // player head sides, remote-player heads, and the first-person arm so
+        // they do not inherit the sheep head's eye pixels. Kept away from
+        // row 10 because Nether brick (a block texture) owns col 9 there.
         {
-            let ox = 9 * 16;
-            let oy = 10 * 16;
+            let ox = 15 * 16;
+            let oy = 8 * 16;
             for y in 0..16 {
                 for x in 0..16 {
                     let var = ((x * 5 + y * 9) % 8) as u8;
@@ -2015,6 +2440,10 @@ impl TextureAtlas {
         draw_noise(&mut img, 6, 4, [90, 150, 95], 18, &mut seed); // filled End frame
         draw_noise(&mut img, 14, 14, [118, 72, 150], 14, &mut seed); // Shulker shell
 
+        // Overlay the Stay True resource pack (with a vanilla fallback) over
+        // the procedural base so every atlas tile uses real Minecraft art.
+        apply_resource_pack(&mut img);
+
         // Save to assets folder
         let _ = std::fs::create_dir_all("assets");
         let _ = img.save("assets/texture_atlas.png");
@@ -2097,5 +2526,60 @@ mod tests {
             opaque_pixels.len() < 16 * 4,
             "redstone torch tile must remain mostly transparent"
         );
+    }
+
+    #[test]
+    fn resource_pack_tiles_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for tile in PACK_TILES {
+            assert!(
+                seen.insert((tile.col, tile.row)),
+                "duplicate resource-pack tile ({}, {}) for {}",
+                tile.col,
+                tile.row,
+                tile.path
+            );
+        }
+        assert!(!PACK_TILES.is_empty());
+    }
+
+    #[test]
+    fn resource_pack_atlas_applies_real_textures() {
+        let (pack_dir, vanilla_dir) = resource_pack_dirs();
+        if !pack_dir.is_dir() && !vanilla_dir.is_dir() {
+            eprintln!("resource pack and vanilla textures unavailable; skipping");
+            return;
+        }
+        let mut img = RgbaImage::new(256, 256);
+        apply_resource_pack(&mut img);
+
+        // Stone tile must be fully opaque (opaque block texture).
+        assert_eq!(img.get_pixel(3 * 16 + 8, 8).0[3], 255);
+        // Water stays translucent (vanilla water_still already carries some
+        // per-pixel transparency, multiplied by the 150/255 tile alpha).
+        let water_alpha = img.get_pixel(10 * 16 + 8, 8).0[3];
+        assert!(
+            water_alpha > 0 && water_alpha < 255,
+            "water tile is translucent"
+        );
+        // Item icons keep their transparent backgrounds.
+        let mut stick_tile = Vec::new();
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                stick_tile.push(img.get_pixel(x, 3 * 16 + y).0[3]);
+            }
+        }
+        assert!(
+            stick_tile.iter().any(|&a| a == 0),
+            "stick icon has transparent pixels"
+        );
+        assert!(
+            stick_tile.iter().any(|&a| a > 0),
+            "stick icon has visible pixels"
+        );
+
+        let preview = std::env::temp_dir().join("icraft_atlas_preview.png");
+        let _ = img.save(&preview);
+        eprintln!("atlas preview saved to {}", preview.display());
     }
 }

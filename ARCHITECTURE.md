@@ -18,7 +18,10 @@
 - Dedicated Tokio threads run TCP host/client networking.
 - A background save worker handles autosaves and chunk-unload writes.
 - Terrain, the texture atlas, and missing audio assets can be generated
-  procedurally.
+  procedurally. On startup the atlas is overlaid with the Stay True resource
+  pack (`F:\Desktop\Stay True 1.21.5`, override via `ICRAFT_RESOURCE_PACK`),
+  with vanilla 1.21.5 fallback textures under `assets/vanilla/textures` for
+  everything the pack does not override.
 
 There is no database or separate dedicated-server binary. Multiplayer uses a
 listen-server model: the host runs the authoritative world simulation, while

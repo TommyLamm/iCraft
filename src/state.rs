@@ -5954,7 +5954,12 @@ impl State {
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
+                    // The camera uses a left-handed view/projection, so the
+                    // CCW-outward cuboid faces in world space appear clockwise
+                    // on screen. FrontFace::Cw keeps the outside faces
+                    // visible; Ccw culled every cuboid surface and made mobs
+                    // look hollow/see-through.
+                    front_face: wgpu::FrontFace::Cw,
                     cull_mode: Some(wgpu::Face::Back),
                     polygon_mode: wgpu::PolygonMode::Fill,
                     unclipped_depth: false,
@@ -5999,7 +6004,10 @@ impl State {
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
+                    // Same left-handed-camera convention as the mob pipeline;
+                    // the billboard quads are wound CCW in world space and
+                    // must use Cw to face the camera.
+                    front_face: wgpu::FrontFace::Cw,
                     cull_mode: Some(wgpu::Face::Back),
                     polygon_mode: wgpu::PolygonMode::Fill,
                     unclipped_depth: false,

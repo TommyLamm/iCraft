@@ -1099,10 +1099,12 @@ pub fn render_mobs<'a>(
             }
             EntityType::Piglin | EntityType::Husk => {
                 let is_piglin = entity.entity_type == EntityType::Piglin;
+                // Dedicated resource-pack skins: piglin face/body live at
+                // (11,9)/(12,9), husk face/body at (13,9)/(14,9).
                 let (head_cols, body_col) = if is_piglin {
-                    ([12, 13, 13, 13, 13, 13], 13)
+                    ([11, 12, 12, 12, 12, 12], 12)
                 } else {
-                    ([14, 15, 15, 15, 15, 15], 15)
+                    ([13, 14, 14, 14, 14, 14], 14)
                 };
 
                 // Both mobs use the familiar humanoid silhouette. Husks hold
@@ -1115,7 +1117,7 @@ pub fn render_mobs<'a>(
                     entity.yaw,
                     entity.pitch,
                     head_cols,
-                    15,
+                    9,
                     light_val,
                 );
                 add_cuboid(
@@ -1126,7 +1128,7 @@ pub fn render_mobs<'a>(
                     entity.yaw,
                     0.0,
                     [body_col; 6],
-                    15,
+                    9,
                     light_val,
                 );
 
@@ -1174,8 +1176,8 @@ pub fn render_mobs<'a>(
                             to_world(Vec3::new(x, 1.72, 0.0)),
                             entity.yaw,
                             0.0,
-                            [12; 6],
-                            15,
+                            [11; 6],
+                            9,
                             light_val,
                         );
                     }
@@ -1186,8 +1188,8 @@ pub fn render_mobs<'a>(
                         to_world(Vec3::new(0.0, 1.68, 0.0)),
                         entity.yaw,
                         entity.pitch,
-                        [12; 6],
-                        15,
+                        [11; 6],
+                        9,
                         light_val,
                     );
                 }
@@ -1196,6 +1198,7 @@ pub fn render_mobs<'a>(
                 let hover = (time * 2.2).sin() * 0.08;
                 let blaze_light = light_val.max(255.0);
 
+                // Dedicated resource-pack blaze skin at (6,8) face / (7,8) body.
                 add_cuboid(
                     cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5),
@@ -1203,8 +1206,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 1.5 + hover, 0.0)),
                     entity.yaw,
                     entity.pitch,
-                    [10, 11, 11, 11, 11, 11],
-                    15,
+                    [6, 7, 7, 7, 7, 7],
+                    8,
                     blaze_light,
                 );
                 add_cuboid(
@@ -1214,8 +1217,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 0.92 + hover, 0.0)),
                     entity.yaw,
                     0.0,
-                    [11; 6],
-                    15,
+                    [7; 6],
+                    8,
                     blaze_light,
                 );
 
@@ -1243,8 +1246,8 @@ pub fn render_mobs<'a>(
                             )),
                             angle,
                             0.0,
-                            [10; 6],
-                            15,
+                            [6; 6],
+                            8,
                             blaze_light,
                         );
                     }
@@ -1431,6 +1434,7 @@ pub fn render_mobs<'a>(
                 let hover = (time * 1.8).sin() * 0.1;
                 let wither_light = light_val.max(192.0);
 
+                // Dedicated resource-pack wither skin at (8,8) face / (9,8) body.
                 // Central spine and the signature three-headed shoulder bar.
                 add_cuboid(
                     cuboid_instances,
@@ -1439,8 +1443,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 2.25 + hover, 0.0)),
                     entity.yaw,
                     0.0,
-                    [15; 6],
-                    10,
+                    [9; 6],
+                    8,
                     wither_light,
                 );
                 add_cuboid(
@@ -1450,8 +1454,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 1.4 + hover, 0.0)),
                     entity.yaw,
                     0.0,
-                    [15; 6],
-                    10,
+                    [9; 6],
+                    8,
                     wither_light,
                 );
                 for (x, y, scale) in [(-0.92, 2.52, 0.82), (0.0, 2.7, 1.0), (0.92, 2.52, 0.82)] {
@@ -1462,8 +1466,8 @@ pub fn render_mobs<'a>(
                         to_world(Vec3::new(x, y + hover, 0.12)),
                         entity.yaw,
                         entity.pitch,
-                        [14, 15, 15, 15, 15, 15],
-                        10,
+                        [8, 9, 9, 9, 9, 9],
+                        8,
                         wither_light,
                     );
                 }
@@ -1475,8 +1479,8 @@ pub fn render_mobs<'a>(
                         to_world(Vec3::new(0.0, y + hover, 0.0)),
                         entity.yaw,
                         0.0,
-                        [15; 6],
-                        10,
+                        [9; 6],
+                        8,
                         wither_light,
                     );
                 }
@@ -1530,7 +1534,8 @@ pub fn render_mobs<'a>(
                 } else {
                     0.85 + (time * 10.0).sin().abs() * 0.25
                 };
-                let col = if is_skull { 5 } else { 6 };
+                let col = if is_skull { 8 } else { 6 };
+                let row = if is_skull { 8 } else { 4 };
                 let size = if is_skull { 0.3 } else { 0.22 };
                 add_cuboid(
                     cuboid_instances,
@@ -1540,7 +1545,7 @@ pub fn render_mobs<'a>(
                     entity.yaw,
                     entity.pitch,
                     [col; 6],
-                    4,
+                    row,
                     light_val.max(255.0),
                 );
             }
@@ -1610,8 +1615,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 1.4, 0.0)),
                     entity.yaw,
                     entity.pitch,
-                    [4, 9, 9, 9, 9, 9],
-                    10,
+                    [4, 15, 15, 15, 15, 15],
+                    8,
                     light_val,
                 );
 
@@ -1741,8 +1746,8 @@ pub fn render_local_player(
         to_world(Vec3::new(0.0, 1.4, 0.0)),
         yaw,
         pitch,
-        [4, 9, 9, 9, 9, 9],
-        10,
+        [4, 15, 15, 15, 15, 15],
+        8,
         light_val,
     );
 
@@ -1962,6 +1967,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cuboid_outside_faces_are_clockwise_on_screen_with_left_handed_camera() {
+        // The camera builds its matrix with look_at_lh + perspective_lh.
+        // Under that projection (plus the viewport's y flip), the cuboid's
+        // CCW-outward world faces appear clockwise in window coordinates.
+        // The mob pipeline must therefore use FrontFace::Cw; Ccw culls every
+        // outside face and leaves the model see-through.
+        let camera = crate::camera::Camera::new(Vec3::new(0.0, 64.0, 5.0), 0.0, 0.0, 70.0);
+        let view_proj = camera.build_view_projection_matrix(16.0 / 9.0, 200.0);
+        let (vertices, _) = build_unit_cuboid_prototype();
+
+        // Face 0 is the front (+Z) face of the unit cuboid. Place the cuboid
+        // in front of the camera (which looks toward +Z) at (0, 64.5, 0).
+        let center = Vec3::new(0.0, 64.5, 0.0);
+        let to_window = |p: Vec3| {
+            let clip = view_proj * (p + center).extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            (ndc.x, 1.0 - ndc.y) // viewport y flip, scale omitted (sign-only)
+        };
+        let (x0, y0) = to_window(Vec3::from(vertices[0].position));
+        let (x1, y1) = to_window(Vec3::from(vertices[1].position));
+        let (x2, y2) = to_window(Vec3::from(vertices[2].position));
+        let signed_area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+
+        assert!(
+            signed_area < 0.0,
+            "front face must be clockwise on screen (area {signed_area}); \
+             keep FrontFace::Cw on the mob pipeline or the outside faces are culled"
+        );
     }
 
     #[test]

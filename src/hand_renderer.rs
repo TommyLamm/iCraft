@@ -88,8 +88,8 @@ fn build_first_person_hand_base_mesh_into(
         fist_pos,
         hand_yaw,
         hand_pitch,
-        [9; 6],
-        10,
+        [15; 6],
+        8,
         1.0,
     );
     if held_item != Item::Air {
