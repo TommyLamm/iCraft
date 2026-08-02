@@ -312,6 +312,14 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
         return sky_color;
     }
 
+    // Stars are a fixed world-space background. Their positions must not use
+    // the sun/moon angle, otherwise the whole star field follows the moon.
+    // Fade in through sunset and fade out through sunrise.
+    let star_intensity = 1.0 - smoothstep(-0.4, 0.2, camera.sun_dir.y);
+    let star_val = get_star(view_dir) * star_intensity;
+    sky_color = sky_color + vec4<f32>(star_val, star_val, star_val, 0.0);
+
+    // Celestial discs are drawn over the star background.
     // Sun
     let sun_dot = dot(view_dir, normalize(camera.sun_dir.xyz));
     if (sun_dot > 0.995) {
@@ -325,23 +333,6 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
     if (moon_dot > 0.997) {
         sky_color = mix(sky_color, vec4<f32>(0.9, 0.9, 0.95, 1.0), moon_factor);
     }
-
-    // Stars (with celestial rotation around the Z axis)
-    let sun_angle = atan2(camera.sun_dir.y, camera.sun_dir.x);
-    let cos_a = cos(-sun_angle);
-    let sin_a = sin(-sun_angle);
-    let rotated_dir = vec3<f32>(
-        view_dir.x * cos_a - view_dir.y * sin_a,
-        view_dir.x * sin_a + view_dir.y * cos_a,
-        view_dir.z
-    );
-
-    // Fade the stars in gradually across the whole sunset instead of snapping
-    // on once the sun is already below the horizon, and keep them behind the
-    // moon so they never sparkle across the moon disc.
-    let star_intensity = smoothstep(0.2, -0.4, camera.sun_dir.y);
-    let star_val = get_star(rotated_dir) * star_intensity * (1.0 - moon_factor);
-    sky_color = sky_color + vec4<f32>(star_val, star_val, star_val, 0.0);
 
     return sky_color;
 }

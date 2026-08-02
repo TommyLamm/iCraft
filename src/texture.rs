@@ -1423,10 +1423,10 @@ const PACK_TILES: &[PackTile] = &[
     // cube/item renderers get the same opaque result with their full-tile UVs.
     pack_tile_region(9, 4, "block/end_portal_frame_side.png", 0, 3, 16, 13),
     // Dedicated Ender Dragon material crops: body, neck/tail, head and wing.
-    pack_tile_region(10, 4, "entity/enderdragon/dragon.png", 0, 0, 56, 56),
-    pack_tile_region(11, 4, "entity/enderdragon/dragon.png", 112, 30, 48, 32),
-    pack_tile_region(12, 4, "entity/enderdragon/dragon.png", 176, 44, 32, 24),
-    pack_tile_region(13, 4, "entity/enderdragon/dragon.png", 112, 88, 56, 24),
+    pack_tile_region(10, 4, "entity/enderdragon/dragon.png", 64, 64, 24, 24),
+    pack_tile_region(11, 4, "entity/enderdragon/dragon.png", 122, 40, 10, 10),
+    pack_tile_region(12, 4, "entity/enderdragon/dragon.png", 192, 60, 12, 5),
+    pack_tile_region(13, 4, "entity/enderdragon/dragon.png", 0, 100, 112, 80),
     pack_tile(14, 4, "block/diamond_block.png"),
     // Rows 5-7: tools
     pack_tile(0, 5, "item/stone_pickaxe.png"),
@@ -1671,6 +1671,34 @@ fn compose_end_portal_frame_tiles(img: &mut RgbaImage) {
                 FILLED_TOP.1 * 16 + y,
                 Rgba([blend(0), blend(1), blend(2), 255]),
             );
+        }
+    }
+}
+
+/// Vanilla's dragon skin is a sparse UV sheet with transparent space between
+/// model parts. Compact atlas crops must be composited over an opaque scale
+/// color or those unused UV pixels become holes in our simplified cuboids.
+fn make_dragon_tiles_opaque(img: &mut RgbaImage) {
+    for (col, base) in [
+        (10, [24u8, 20, 30]),
+        (11, [30u8, 24, 38]),
+        (12, [18u8, 14, 24]),
+        (13, [36u8, 28, 44]),
+    ] {
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let pixel = *img.get_pixel(col * 16 + x, 4 * 16 + y);
+                let alpha = pixel[3] as f32 / 255.0;
+                let blend = |channel: usize| {
+                    (pixel[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha))
+                        .round() as u8
+                };
+                img.put_pixel(
+                    col * 16 + x,
+                    4 * 16 + y,
+                    Rgba([blend(0), blend(1), blend(2), 255]),
+                );
+            }
         }
     }
 }
@@ -2640,6 +2668,7 @@ impl TextureAtlas {
         // Overlay the Stay True resource pack (with a vanilla fallback) over
         // the procedural base so every atlas tile uses real Minecraft art.
         apply_resource_pack(&mut img);
+        make_dragon_tiles_opaque(&mut img);
         compose_end_portal_frame_tiles(&mut img);
 
         // Save to assets folder
@@ -2784,6 +2813,7 @@ mod tests {
         }
         let mut img = RgbaImage::new(256, 256);
         apply_resource_pack(&mut img);
+        make_dragon_tiles_opaque(&mut img);
         compose_end_portal_frame_tiles(&mut img);
 
         // Stone tile must be fully opaque (opaque block texture).
@@ -2820,6 +2850,14 @@ mod tests {
                 (0..16u32).all(|y| (0..16u32)
                     .all(|x| img.get_pixel(col * 16 + x, row * 16 + y).0[3] == 255)),
                 "{label} must be fully opaque in the compact atlas"
+            );
+        }
+
+        for col in 10..=13u32 {
+            assert!(
+                (0..16u32).all(|y| (0..16u32)
+                    .all(|x| img.get_pixel(col * 16 + x, 4 * 16 + y).0[3] == 255)),
+                "dragon atlas tile {col} must not contain transparent holes"
             );
         }
 

@@ -2061,6 +2061,32 @@ mod tests {
     }
 
     #[test]
+    fn ender_dragon_uses_only_dedicated_opaque_atlas_tiles() {
+        let mut entities = EntityManager::new();
+        entities.spawn(EntityType::EnderDragon, Vec3::ZERO);
+        let chunks = ChunkManager::new(1);
+        let mut cuboids = Vec::new();
+        let mut quads = Vec::new();
+        render_mobs(
+            entities.entities.iter(),
+            &chunks,
+            &mut cuboids,
+            &mut quads,
+            0.0,
+        );
+
+        assert!(!cuboids.is_empty());
+        assert!(quads.is_empty());
+        assert!(cuboids.iter().all(|instance| instance.tex_row == 4));
+        assert!(cuboids.iter().all(|instance| {
+            (0..6).all(|face| {
+                let col = (instance.tex_cols_packed >> (face * 4)) & 0xF;
+                (10..=13).contains(&col)
+            })
+        }));
+    }
+
+    #[test]
     fn test_creeper_mesh_geometry_no_gap() {
         let mut entity_manager = EntityManager::new();
         entity_manager.spawn(EntityType::Creeper, Vec3::ZERO);
