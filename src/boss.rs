@@ -491,6 +491,18 @@ fn update_dragon(
             }
         }
     }
+
+    // The dragon is moved directly by its AI instead of the generic flying
+    // physics path, so keep its model orientation in sync explicitly. This
+    // gives the body and head the same forward and vertical flight direction.
+    if dragon.velocity.length_squared() > 0.0001 {
+        let direction = dragon.velocity.normalize_or_zero();
+        dragon.yaw = f32::atan2(direction.x, direction.z);
+        // The mob vertex transform rotates +Z toward -Y for positive pitch.
+        // Negate the geometric angle so the dragon's +Z head direction
+        // follows an upward velocity with a matching upward tilt.
+        dragon.pitch = -f32::asin(direction.y.clamp(-1.0, 1.0));
+    }
     dragon.position += dragon.velocity * dt;
 }
 
@@ -880,6 +892,31 @@ mod tests {
             .unwrap();
         assert_eq!(dragon.ai_phase, 1);
         assert!(dragon.health > 100.0);
+    }
+
+    #[test]
+    fn dragon_orientation_follows_flight_velocity() {
+        let mut dragon = crate::entity::Entity::new(
+            1,
+            EntityType::EnderDragon,
+            Vec3::new(0.0, 80.0, 0.0),
+        );
+        let mut pending_spawns = Vec::new();
+        let mut events = BossEvents::default();
+
+        update_dragon(
+            &mut dragon,
+            &[],
+            Vec3::new(0.0, 80.0, 0.0),
+            0.0,
+            GameMode::Survival,
+            &mut pending_spawns,
+            &mut events,
+        );
+
+        let direction = dragon.velocity.normalize();
+        assert!((dragon.yaw - f32::atan2(direction.x, direction.z)).abs() < 1e-6);
+        assert!((dragon.pitch + f32::asin(direction.y)).abs() < 1e-6);
     }
 
     #[test]

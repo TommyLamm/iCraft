@@ -422,11 +422,23 @@ pub fn render_mobs<'a>(
         let sin_yaw = entity.yaw.sin();
         let cos_yaw = entity.yaw.cos();
         let to_world = |local: Vec3| {
+            let model_pitch = if entity.entity_type == EntityType::EnderDragon {
+                entity.pitch
+            } else {
+                0.0
+            };
+            let cos_pitch = model_pitch.cos();
+            let sin_pitch = model_pitch.sin();
+            let pitched = Vec3::new(
+                local.x,
+                local.y * cos_pitch - local.z * sin_pitch,
+                local.y * sin_pitch + local.z * cos_pitch,
+            );
             entity.position
                 + Vec3::new(
-                    local.x * cos_yaw + local.z * sin_yaw,
-                    local.y,
-                    -local.x * sin_yaw + local.z * cos_yaw,
+                    pitched.x * cos_yaw + pitched.z * sin_yaw,
+                    pitched.y,
+                    -pitched.x * sin_yaw + pitched.z * cos_yaw,
                 )
         };
 
@@ -1319,6 +1331,7 @@ pub fn render_mobs<'a>(
             }
             EntityType::EnderDragon => {
                 let flap = (time * 3.0).sin() * 0.22;
+                let dragon_pitch = entity.pitch;
 
                 // Body, neck, head and jaw.
                 add_cuboid(
@@ -1327,7 +1340,7 @@ pub fn render_mobs<'a>(
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 2.05, -0.35)),
                     entity.yaw,
-                    0.0,
+                    dragon_pitch,
                     [10; 6],
                     4,
                     light_val,
@@ -1342,7 +1355,7 @@ pub fn render_mobs<'a>(
                         Vec3::ZERO,
                         to_world(center),
                         entity.yaw,
-                        -0.12,
+                        dragon_pitch - 0.12,
                         [11; 6],
                         4,
                         light_val,
@@ -1354,7 +1367,7 @@ pub fn render_mobs<'a>(
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 2.62, 3.05)),
                     entity.yaw,
-                    entity.pitch,
+                    dragon_pitch,
                     [12; 6],
                     4,
                     light_val,
@@ -1365,7 +1378,7 @@ pub fn render_mobs<'a>(
                     Vec3::ZERO,
                     to_world(Vec3::new(0.0, 2.22, 3.42)),
                     entity.yaw,
-                    entity.pitch,
+                    dragon_pitch,
                     [12; 6],
                     4,
                     light_val,
@@ -1377,7 +1390,7 @@ pub fn render_mobs<'a>(
                         Vec3::ZERO,
                         to_world(Vec3::new(x, 3.12, 2.75)),
                         entity.yaw,
-                        0.35,
+                        dragon_pitch + 0.35,
                         [12; 6],
                         4,
                         light_val,
@@ -1393,7 +1406,7 @@ pub fn render_mobs<'a>(
                         Vec3::ZERO,
                         to_world(Vec3::new(side * 2.05, 2.55 + flap, -0.2)),
                         entity.yaw,
-                        -flap * side,
+                        dragon_pitch - flap * side,
                         [13; 6],
                         4,
                         light_val,
@@ -1404,7 +1417,7 @@ pub fn render_mobs<'a>(
                         Vec3::ZERO,
                         to_world(Vec3::new(side * 4.25, 2.72 + flap * 1.6, -0.55)),
                         entity.yaw,
-                        -flap * side,
+                        dragon_pitch - flap * side,
                         [13; 6],
                         4,
                         light_val,
@@ -1425,7 +1438,7 @@ pub fn render_mobs<'a>(
                             -2.35 - i * 0.95,
                         )),
                         entity.yaw - curve,
-                        0.08 * i,
+                        dragon_pitch + 0.08 * i,
                         [11; 6],
                         4,
                         light_val,
@@ -1439,7 +1452,7 @@ pub fn render_mobs<'a>(
                         Vec3::ZERO,
                         to_world(Vec3::new(x, 0.85, z)),
                         entity.yaw,
-                        0.1,
+                        dragon_pitch + 0.1,
                         [10; 6],
                         4,
                         light_val,
