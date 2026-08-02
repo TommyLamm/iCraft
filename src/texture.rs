@@ -1461,16 +1461,14 @@ const PACK_TILES: &[PackTile] = &[
     pack_tile_region(14, 9, "entity/zombie/husk.png", 20, 20, 8, 12),
     // Row 10: passive mob skins and dimension blocks
     pack_tile_region(0, 10, "entity/pig/temperate_pig.png", 8, 8, 8, 8),
-    // 1.21.5 redesigned pig/sheep/chicken skins use a new layout; the body
-    // regions below were located on the actual textures.
-    pack_tile_region(1, 10, "entity/pig/temperate_pig.png", 30, 20, 8, 12),
-    pack_tile_region(2, 10, "entity/cow/cow.png", 8, 8, 8, 8),
-    pack_tile_region(3, 10, "entity/cow/cow.png", 20, 20, 8, 12),
-    pack_tile_region(4, 10, "entity/sheep/sheep.png", 8, 8, 8, 8),
+    pack_tile_region(1, 10, "entity/pig/temperate_pig.png", 8, 0, 8, 8),
+    pack_tile_region(2, 10, "entity/cow/cow.png", 8, 6, 8, 8),
+    pack_tile_region(3, 10, "entity/cow/cow.png", 18, 18, 12, 10),
+    pack_tile_region(4, 10, "entity/sheep/sheep.png", 8, 6, 8, 8),
     pack_tile(5, 10, "block/white_wool.png"),
-    pack_tile_region(6, 10, "entity/sheep/sheep.png", 31, 15, 8, 12),
-    pack_tile_region(7, 10, "entity/chicken/temperate_chicken.png", 8, 8, 8, 8),
-    pack_tile_region(8, 10, "entity/chicken/temperate_chicken.png", 6, 7, 8, 12),
+    pack_tile_region(6, 10, "entity/sheep/sheep.png", 8, 24, 8, 8),
+    pack_tile_region(7, 10, "entity/chicken/temperate_chicken.png", 0, 4, 8, 4),
+    pack_tile_region(8, 10, "entity/chicken/temperate_chicken.png", 0, 15, 8, 8),
     pack_tile(9, 10, "block/nether_bricks.png"),
     pack_tile_region(10, 10, "entity/chest/ender.png", 14, 14, 14, 14),
     pack_tile(11, 10, "item/flint_and_steel.png"),

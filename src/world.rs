@@ -1691,6 +1691,9 @@ const TORCH_HEIGHT: f32 = 10.0 / 16.0;
 const TORCH_ATLAS_TILE: (u32, u32) = (4, 2);
 const REDSTONE_TORCH_ATLAS_TILE: (u32, u32) = (6, 2);
 
+const CACTUS_MIN: f32 = 1.0 / 16.0;
+const CACTUS_MAX: f32 = 15.0 / 16.0;
+
 // Tile-local UV rectangles with a half-texel inset. Side faces use the full
 // flame/stem artwork, the cap uses the flame, and the base stretches the final
 // stem texel across the otherwise unseen bottom face.
@@ -1748,6 +1751,58 @@ fn append_torch_mesh(
             local_uvs,
             atlas_tile,
             light_level,
+            [1.0; 4],
+            region_coord,
+        );
+    }
+}
+
+fn append_cactus_mesh(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    sky_light: u8,
+    block_light: u8,
+    atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
+) {
+    let light_level = sky_light as f32 + block_light as f32 * 16.0;
+
+    for (face_idx, (_, corner_data)) in BLOCK_FACES.iter().enumerate() {
+        let multiplier_code = match face_idx {
+            4 => 0.0, // Top
+            5 => 2.0, // Bottom
+            _ => 1.0, // Sides
+        };
+        let face_light_level = light_level + multiplier_code * 256.0;
+
+        let mut positions = [[0.0; 3]; 4];
+        let mut local_uvs = [[0.0; 2]; 4];
+
+        for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
+            let vx = origin[0] + if offset[0] == 0.0 { CACTUS_MIN } else { CACTUS_MAX };
+            let vy = origin[1] + offset[1];
+            let vz = origin[2] + if offset[2] == 0.0 { CACTUS_MIN } else { CACTUS_MAX };
+            positions[corner_idx] = [vx, vy, vz];
+
+            let u = if uv[0] == 0.0 { CACTUS_MIN } else { CACTUS_MAX };
+            let v = if face_idx < 4 {
+                uv[1]
+            } else if uv[1] == 0.0 {
+                CACTUS_MIN
+            } else {
+                CACTUS_MAX
+            };
+            local_uvs[corner_idx] = [u, v];
+        }
+
+        push_terrain_quad(
+            vertices,
+            indices,
+            positions,
+            local_uvs,
+            atlas_tile,
+            face_light_level,
             [1.0; 4],
             region_coord,
         );
@@ -1917,6 +1972,7 @@ fn is_greedy_cube(block: BlockType) -> bool {
                 | BlockType::OakDoorOpen
                 | BlockType::OakTrapdoor
                 | BlockType::OakTrapdoorOpen
+                | BlockType::Cactus
         )
 }
 
@@ -3674,6 +3730,19 @@ impl Chunk {
                             voxel.sky,
                             voxel.block_light,
                             (10, 14),
+                            region_coord,
+                        );
+                        continue;
+                    }
+
+                    if block == BlockType::Cactus {
+                        append_cactus_mesh(
+                            &mut opaque_vertices,
+                            &mut opaque_indices,
+                            [world_x as f32, world_y as f32, world_z as f32],
+                            voxel.sky,
+                            voxel.block_light,
+                            (11, 12),
                             region_coord,
                         );
                         continue;
@@ -5957,5 +6026,26 @@ mod tests {
         chunk.set_block_local(0, 0, 0, BlockType::Air);
         assert!(chunk.sections[0].compact_if_worthwhile());
         assert!(chunk.memory_usage() < promoted_bytes);
+    }
+
+    #[test]
+    fn cactus_mesh_generation_bounds_and_quad_count() {
+        let (opaque_v, opaque_i, trans_v, trans_i) = single_torch_mesh(BlockType::Cactus, 15, 0);
+        assert!(trans_v.is_empty() && trans_i.is_empty());
+        // 6 faces * 4 vertices = 24 vertices, 36 indices
+        assert_eq!(opaque_v.len(), 24);
+        assert_eq!(opaque_i.len(), 36);
+
+        let min_x = opaque_v.iter().map(|v| v.pos[0] as f32 / 32.0).fold(f32::INFINITY, f32::min);
+        let max_x = opaque_v.iter().map(|v| v.pos[0] as f32 / 32.0).fold(f32::NEG_INFINITY, f32::max);
+        let min_z = opaque_v.iter().map(|v| v.pos[2] as f32 / 32.0).fold(f32::INFINITY, f32::min);
+        let max_z = opaque_v.iter().map(|v| v.pos[2] as f32 / 32.0).fold(f32::NEG_INFINITY, f32::max);
+
+        // Cactus placed at (8, 1, 8) -> origin = (8.0, 1.0, 8.0)
+        // Inset by 1/16th: min = 8.0625, max = 8.9375
+        assert!((min_x - (8.0 + 1.0 / 16.0)).abs() < 1e-4);
+        assert!((max_x - (8.0 + 15.0 / 16.0)).abs() < 1e-4);
+        assert!((min_z - (8.0 + 1.0 / 16.0)).abs() < 1e-4);
+        assert!((max_z - (8.0 + 15.0 / 16.0)).abs() < 1e-4);
     }
 }

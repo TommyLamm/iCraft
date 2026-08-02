@@ -695,7 +695,7 @@ pub fn render_mobs<'a>(
                     cuboid_instances,
                     Vec3::new(0.5, 0.5, 0.5) * scale,
                     Vec3::new(0.0, 0.25, 0.0) * scale,
-                    to_world(Vec3::new(0.0, 1.2, 0.0)),
+                    to_world(Vec3::new(0.0, 1.125, 0.0)),
                     entity.yaw,
                     entity.pitch,
                     [6, 7, 7, 7, 7, 7],
@@ -708,7 +708,7 @@ pub fn render_mobs<'a>(
                     cuboid_instances,
                     Vec3::new(0.5, 0.75, 0.3) * scale,
                     Vec3::new(0.0, 0.375, 0.0) * scale,
-                    to_world(Vec3::new(0.0, 0.45, 0.0)),
+                    to_world(Vec3::new(0.0, 0.375, 0.0)),
                     entity.yaw,
                     0.0,
                     [7; 6],
@@ -720,9 +720,9 @@ pub fn render_mobs<'a>(
                 // Front Left Leg
                 add_cuboid(
                     cuboid_instances,
-                    Vec3::new(0.2, 0.35, 0.2) * scale,
-                    Vec3::new(0.0, -0.175, 0.0) * scale,
-                    to_world(Vec3::new(-0.15, 0.35, 0.15)),
+                    Vec3::new(0.25, 0.375, 0.25) * scale,
+                    Vec3::new(0.0, -0.1875, 0.0) * scale,
+                    to_world(Vec3::new(-0.125, 0.375, 0.125)),
                     entity.yaw,
                     swing,
                     [7; 6],
@@ -732,9 +732,9 @@ pub fn render_mobs<'a>(
                 // Front Right Leg
                 add_cuboid(
                     cuboid_instances,
-                    Vec3::new(0.2, 0.35, 0.2) * scale,
-                    Vec3::new(0.0, -0.175, 0.0) * scale,
-                    to_world(Vec3::new(0.15, 0.35, 0.15)),
+                    Vec3::new(0.25, 0.375, 0.25) * scale,
+                    Vec3::new(0.0, -0.1875, 0.0) * scale,
+                    to_world(Vec3::new(0.125, 0.375, 0.125)),
                     entity.yaw,
                     -swing,
                     [7; 6],
@@ -744,9 +744,9 @@ pub fn render_mobs<'a>(
                 // Back Left Leg
                 add_cuboid(
                     cuboid_instances,
-                    Vec3::new(0.2, 0.35, 0.2) * scale,
-                    Vec3::new(0.0, -0.175, 0.0) * scale,
-                    to_world(Vec3::new(-0.15, 0.35, -0.15)),
+                    Vec3::new(0.25, 0.375, 0.25) * scale,
+                    Vec3::new(0.0, -0.1875, 0.0) * scale,
+                    to_world(Vec3::new(-0.125, 0.375, -0.125)),
                     entity.yaw,
                     -swing,
                     [7; 6],
@@ -756,9 +756,9 @@ pub fn render_mobs<'a>(
                 // Back Right Leg
                 add_cuboid(
                     cuboid_instances,
-                    Vec3::new(0.2, 0.35, 0.2) * scale,
-                    Vec3::new(0.0, -0.175, 0.0) * scale,
-                    to_world(Vec3::new(0.15, 0.35, -0.15)),
+                    Vec3::new(0.25, 0.375, 0.25) * scale,
+                    Vec3::new(0.0, -0.1875, 0.0) * scale,
+                    to_world(Vec3::new(0.125, 0.375, -0.125)),
                     entity.yaw,
                     swing,
                     [7; 6],
@@ -2039,5 +2039,37 @@ mod tests {
         let last_v = vertices_burning.last().unwrap().tex_coords[1];
         let row = (last_v * 16.0).floor();
         assert_eq!(row, 12.0);
+    }
+
+    #[test]
+    fn test_creeper_mesh_geometry_no_gap() {
+        let mut entity_manager = EntityManager::new();
+        entity_manager.spawn(EntityType::Creeper, Vec3::ZERO);
+
+        let chunk_manager = ChunkManager::new(1);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        render_mobs_legacy(
+            &entity_manager,
+            &chunk_manager,
+            &mut vertices,
+            &mut indices,
+            0.0,
+        );
+
+        // Creeper has 6 cuboids (1 head + 1 torso + 4 legs) = 144 vertices
+        assert_eq!(vertices.len(), 144);
+
+        // Find min and max Y across all vertices
+        let min_y = vertices.iter().map(|v| v.position[1]).fold(f32::INFINITY, f32::min);
+        let max_y = vertices.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
+
+        // Legs start at Y=0.0 and head ends at Y=1.625
+        assert!((min_y - 0.0).abs() < 1e-4, "Min Y should be 0.0, got {}", min_y);
+        assert!((max_y - 1.625).abs() < 1e-4, "Max Y should be 1.625, got {}", max_y);
+
+        // Check vertical continuity: no gap between leg top (0.375) and torso bottom (0.375)
+        let has_y_0_375 = vertices.iter().any(|v| (v.position[1] - 0.375).abs() < 1e-4);
+        assert!(has_y_0_375, "Vertices must exist at Y=0.375 connecting legs and torso");
     }
 }
