@@ -172,18 +172,11 @@ fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, ti
     // dragon from being recreated after its entity has been removed.
     if !dragon_exists && !dragon_completed {
         entities.spawn(EntityType::EnderDragon, Vec3::new(0.5, 92.0, 0.5));
-        const CRYSTALS: [(f32, f32, f32); 8] = [
-            (42.5, 78.0, 0.5),
-            (30.5, 84.0, 30.5),
-            (0.5, 88.0, 42.5),
-            (-29.5, 82.0, 30.5),
-            (-41.5, 80.0, 0.5),
-            (-29.5, 86.0, -29.5),
-            (0.5, 90.0, -41.5),
-            (30.5, 82.0, -29.5),
-        ];
-        for (x, y, z) in CRYSTALS {
-            entities.spawn(EntityType::EndCrystal, Vec3::new(x, y, z));
+        for (x, y, z) in crate::dimension::END_CRYSTAL_TOWERS {
+            entities.spawn(
+                EntityType::EndCrystal,
+                Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5),
+            );
         }
     }
 
@@ -234,7 +227,7 @@ fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, ti
 /// effect for the caller to apply. Entities with non-positive health are
 /// consumed exactly once because they are removed before this function returns.
 pub fn update_dimension_entities(
-    _dimension: Dimension,
+    dimension: Dimension,
     entities: &mut EntityManager,
     chunks: &ChunkManager,
     player_pos: Vec3,
@@ -250,6 +243,9 @@ pub fn update_dimension_entities(
         .filter(|entity| entity.health > 0.0)
         .map(|entity| entity.position)
         .collect();
+    if dimension == Dimension::End {
+        repair_legacy_end_crystal_towers(chunks, &crystal_positions, &mut events);
+    }
     let mut pending_spawns = Vec::new();
     let mut removed_projectiles = Vec::new();
     let mut moved_ids = Vec::new();
@@ -364,6 +360,74 @@ pub fn update_dimension_entities(
     }
     entities.sync_entity_positions(&moved_ids);
     events
+}
+
+/// Old End saves may already contain healing-crystal entities from before
+/// obsidian towers were part of terrain generation. Repair only a completely
+/// absent support column beneath a live crystal; existing or damaged towers
+/// are left untouched.
+fn repair_legacy_end_crystal_towers(
+    chunks: &ChunkManager,
+    live_crystals: &[Vec3],
+    events: &mut BossEvents,
+) {
+    for (center_x, crystal_y, center_z) in crate::dimension::END_CRYSTAL_TOWERS {
+        let crystal_position = Vec3::new(
+            center_x as f32 + 0.5,
+            crystal_y as f32,
+            center_z as f32 + 0.5,
+        );
+        if !live_crystals
+            .iter()
+            .any(|position| position.distance_squared(crystal_position) < 1.0)
+        {
+            continue;
+        }
+
+        let top_y = crystal_y - 1;
+        let Some(((center_chunk_x, center_chunk_z), _)) =
+            chunks.world_to_local(center_x, top_y, center_z)
+        else {
+            continue;
+        };
+        if !chunks.chunks.contains_key(&(center_chunk_x, center_chunk_z)) {
+            continue;
+        }
+        if (1..=top_y)
+            .rev()
+            .any(|y| chunks.get_block(center_x, y, center_z) == BlockType::Obsidian)
+        {
+            continue;
+        }
+
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                if dx * dx + dz * dz > 4 {
+                    continue;
+                }
+                let x = center_x + dx;
+                let z = center_z + dz;
+                let Some(((chunk_x, chunk_z), _)) = chunks.world_to_local(x, top_y, z) else {
+                    continue;
+                };
+                if !chunks.chunks.contains_key(&(chunk_x, chunk_z)) {
+                    continue;
+                }
+                let ground_y = (1..top_y)
+                    .rev()
+                    .find(|y| chunks.get_block(x, *y, z) != BlockType::Air)
+                    .unwrap_or(0);
+                for y in (ground_y + 1)..=top_y {
+                    if chunks.get_block(x, y, z) == BlockType::Air {
+                        events.block_placements.push(BlockPlacementEvent {
+                            position: (x, y, z),
+                            block: BlockType::Obsidian,
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn update_dragon(
@@ -717,6 +781,29 @@ mod tests {
     use super::*;
     use crate::world::Chunk;
     use std::collections::HashMap;
+
+    #[test]
+    fn legacy_live_crystal_without_tower_gets_obsidian_support_events() {
+        let mut chunks = ChunkManager::new(1);
+        let mut chunk = Chunk::new(2, 0);
+        let local_x = 42usize.rem_euclid(CHUNK_WIDTH);
+        for y in 1..78 {
+            chunk.set_block_local(local_x, y, 0, BlockType::Air);
+        }
+        chunk.set_block_local(local_x, 65, 0, BlockType::EndStone);
+        chunks.chunks.insert((2, 0), chunk);
+
+        let mut events = BossEvents::default();
+        repair_legacy_end_crystal_towers(
+            &chunks,
+            &[Vec3::new(42.5, 78.0, 0.5)],
+            &mut events,
+        );
+
+        assert!(events.block_placements.iter().any(|placement| {
+            placement.position == (42, 77, 0) && placement.block == BlockType::Obsidian
+        }));
+    }
 
     fn pattern_blocks(axis: (i32, i32)) -> HashMap<BlockPos, BlockType> {
         let mut blocks = HashMap::new();

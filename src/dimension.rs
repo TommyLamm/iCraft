@@ -11,6 +11,18 @@ const END_CITY_X: i32 = 1_032;
 const END_CITY_Z: i32 = 8;
 const END_CITY_BASE_Y: i32 = 71;
 
+/// Block-center X/Z and entity Y for the eight main-island healing crystals.
+pub const END_CRYSTAL_TOWERS: [(i32, i32, i32); 8] = [
+    (42, 78, 0),
+    (30, 84, 30),
+    (0, 88, 42),
+    (-30, 82, 30),
+    (-42, 80, 0),
+    (-30, 86, -30),
+    (0, 90, -42),
+    (30, 82, -30),
+];
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum Dimension {
@@ -349,9 +361,44 @@ fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
         }
     }
 
+    place_end_crystal_towers(&mut blocks, chunk_x, chunk_z, seed);
     place_end_exit(&mut blocks, chunk_x, chunk_z);
     place_end_city(&mut blocks, chunk_x, chunk_z);
     finish_chunk(chunk_x, chunk_z, blocks, false)
+}
+
+fn place_end_crystal_towers(
+    blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
+    chunk_x: i32,
+    chunk_z: i32,
+    seed: u32,
+) {
+    for (center_x, crystal_y, center_z) in END_CRYSTAL_TOWERS {
+        let top_y = crystal_y - 1;
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                if dx * dx + dz * dz > 4 {
+                    continue;
+                }
+                let world_x = center_x + dx;
+                let world_z = center_z + dz;
+                let Some(surface_y) = end_surface_at(world_x, world_z, seed) else {
+                    continue;
+                };
+                for y in (surface_y + 1)..=top_y {
+                    set_world_block(
+                        blocks,
+                        chunk_x,
+                        chunk_z,
+                        world_x,
+                        y,
+                        world_z,
+                        BlockType::Obsidian,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn set_world_block(
@@ -816,6 +863,29 @@ mod tests {
         assert!(chunk_contains_block(&city, BlockType::EndStone));
         assert!(chunk_contains_block(&city, BlockType::Purpur));
         assert!(chunk_contains_block(&city, BlockType::EndCityChest));
+    }
+
+    #[test]
+    fn end_healing_crystals_have_obsidian_tower_support() {
+        let seed = 7;
+        let (center_x, crystal_y, center_z) = END_CRYSTAL_TOWERS[0];
+        let chunk = generate_chunk(
+            Dimension::End,
+            center_x.div_euclid(CHUNK_WIDTH as i32),
+            center_z.div_euclid(CHUNK_DEPTH as i32),
+            seed,
+        );
+        let local_x = center_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
+        let local_z = center_z.rem_euclid(CHUNK_DEPTH as i32) as usize;
+        assert_eq!(
+            chunk.get_block_local(local_x, (crystal_y - 1) as usize, local_z),
+            BlockType::Obsidian
+        );
+        let surface_y = end_surface_at(center_x, center_z, seed).unwrap();
+        assert_eq!(
+            chunk.get_block_local(local_x, (surface_y + 1) as usize, local_z),
+            BlockType::Obsidian
+        );
     }
 
     #[test]

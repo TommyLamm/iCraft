@@ -1328,8 +1328,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 2.05, -0.35)),
                     entity.yaw,
                     0.0,
-                    [12; 6],
-                    10,
+                    [10; 6],
+                    4,
                     light_val,
                 );
                 for (center, size) in [
@@ -1344,7 +1344,7 @@ pub fn render_mobs<'a>(
                         entity.yaw,
                         -0.12,
                         [11; 6],
-                        10,
+                        4,
                         light_val,
                     );
                 }
@@ -1355,8 +1355,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 2.62, 3.05)),
                     entity.yaw,
                     entity.pitch,
-                    [11, 12, 12, 12, 12, 12],
-                    10,
+                    [12; 6],
+                    4,
                     light_val,
                 );
                 add_cuboid(
@@ -1366,8 +1366,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 2.22, 3.42)),
                     entity.yaw,
                     entity.pitch,
-                    [13; 6],
-                    10,
+                    [12; 6],
+                    4,
                     light_val,
                 );
                 for x in [-0.48, 0.48] {
@@ -1378,8 +1378,8 @@ pub fn render_mobs<'a>(
                         to_world(Vec3::new(x, 3.12, 2.75)),
                         entity.yaw,
                         0.35,
-                        [13; 6],
-                        10,
+                        [12; 6],
+                        4,
                         light_val,
                     );
                 }
@@ -1395,7 +1395,7 @@ pub fn render_mobs<'a>(
                         entity.yaw,
                         -flap * side,
                         [13; 6],
-                        10,
+                        4,
                         light_val,
                     );
                     add_cuboid(
@@ -1406,7 +1406,7 @@ pub fn render_mobs<'a>(
                         entity.yaw,
                         -flap * side,
                         [13; 6],
-                        10,
+                        4,
                         light_val,
                     );
                 }
@@ -1426,8 +1426,8 @@ pub fn render_mobs<'a>(
                         )),
                         entity.yaw - curve,
                         0.08 * i,
-                        [12; 6],
-                        10,
+                        [11; 6],
+                        4,
                         light_val,
                     );
                 }
@@ -1440,8 +1440,8 @@ pub fn render_mobs<'a>(
                         to_world(Vec3::new(x, 0.85, z)),
                         entity.yaw,
                         0.1,
-                        [12; 6],
-                        10,
+                        [10; 6],
+                        4,
                         light_val,
                     );
                 }

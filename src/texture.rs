@@ -1422,6 +1422,11 @@ const PACK_TILES: &[PackTile] = &[
     // 13/16-high sides. Crop those transparent top rows here so compact-atlas
     // cube/item renderers get the same opaque result with their full-tile UVs.
     pack_tile_region(9, 4, "block/end_portal_frame_side.png", 0, 3, 16, 13),
+    // Dedicated Ender Dragon material crops: body, neck/tail, head and wing.
+    pack_tile_region(10, 4, "entity/enderdragon/dragon.png", 0, 0, 56, 56),
+    pack_tile_region(11, 4, "entity/enderdragon/dragon.png", 112, 30, 48, 32),
+    pack_tile_region(12, 4, "entity/enderdragon/dragon.png", 176, 44, 32, 24),
+    pack_tile_region(13, 4, "entity/enderdragon/dragon.png", 112, 88, 56, 24),
     pack_tile(14, 4, "block/diamond_block.png"),
     // Rows 5-7: tools
     pack_tile(0, 5, "item/stone_pickaxe.png"),
@@ -2626,6 +2631,10 @@ impl TextureAtlas {
         draw_noise(&mut img, 4, 4, [220, 80, 220], 25, &mut seed); // End Crystal
         draw_noise(&mut img, 5, 4, [235, 165, 55], 18, &mut seed); // Blaze rod
         draw_noise(&mut img, 6, 4, [90, 150, 95], 18, &mut seed); // filled End frame
+        draw_noise(&mut img, 10, 4, [24, 20, 30], 8, &mut seed); // dragon body
+        draw_noise(&mut img, 11, 4, [30, 24, 38], 8, &mut seed); // dragon neck/tail
+        draw_noise(&mut img, 12, 4, [18, 14, 24], 7, &mut seed); // dragon head
+        draw_noise(&mut img, 13, 4, [36, 28, 44], 9, &mut seed); // dragon wing
         draw_noise(&mut img, 14, 14, [118, 72, 150], 14, &mut seed); // Shulker shell
 
         // Overlay the Stay True resource pack (with a vanilla fallback) over
@@ -2694,6 +2703,7 @@ impl TextureAtlas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImageView;
 
     #[test]
     fn filled_end_portal_frame_composites_eye_over_opaque_frame() {
@@ -2755,6 +2765,14 @@ mod tests {
             .join("block/end_portal_frame_side.png");
         let image = image::open(&path).expect("End Portal Frame side texture must load");
         assert_eq!(image.dimensions(), (16, 16));
+    }
+
+    #[test]
+    fn vanilla_ender_dragon_texture_is_available() {
+        let path = std::path::Path::new(VANILLA_TEXTURES_DIR)
+            .join("entity/enderdragon/dragon.png");
+        let image = image::open(&path).expect("Ender Dragon texture must load");
+        assert_eq!(image.dimensions(), (256, 256));
     }
 
     #[test]
