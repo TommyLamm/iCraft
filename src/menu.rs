@@ -798,13 +798,19 @@ fn discover_worlds() -> Vec<WorldEntry> {
         let metadata = WorldMetadata::load(&directory).or_else(|| legacy_metadata(&directory));
         if let Some(metadata) = metadata {
             worlds.push(WorldEntry {
-                directory,
+                directory: fs::canonicalize(&directory).unwrap_or(directory),
                 metadata,
             });
         }
     }
     worlds.sort_by_key(|world| std::cmp::Reverse(world.metadata.last_played));
     worlds
+}
+
+fn world_index_by_directory(worlds: &[WorldEntry], directory: &Path) -> Option<usize> {
+    worlds
+        .iter()
+        .position(|world| world.directory == directory)
 }
 
 pub fn update_world_metadata(
@@ -1026,7 +1032,10 @@ pub struct Menu {
     mouse_ndc: [f32; 2],
     screen: MenuScreen,
     worlds: Vec<WorldEntry>,
-    selected_world: Option<usize>,
+    /// Store the selected save identity, not its current list index. The list
+    /// is sorted by last-played time, so an index can refer to another world
+    /// after a refresh.
+    selected_world: Option<PathBuf>,
     world_scroll: usize,
     create_name: String,
     create_seed: String,
@@ -1368,7 +1377,7 @@ impl Menu {
                 if hit(x, y, -0.34, 0.34, 0.21, 0.34) {
                     self.selected_role = MultiplayerRole::Singleplayer;
                     self.worlds = discover_worlds();
-                    self.selected_world = (!self.worlds.is_empty()).then_some(0);
+                    self.selected_world = self.worlds.first().map(|world| world.directory.clone());
                     self.world_scroll = 0;
                     self.screen = MenuScreen::Worlds;
                 } else if hit(x, y, -0.34, 0.34, 0.03, 0.16) {
@@ -1439,7 +1448,7 @@ impl Menu {
                         return self.launch_client();
                     }
                     self.worlds = discover_worlds();
-                    self.selected_world = (!self.worlds.is_empty()).then_some(0);
+                    self.selected_world = self.worlds.first().map(|world| world.directory.clone());
                     self.world_scroll = 0;
                     self.screen = MenuScreen::Worlds;
                 } else if hit(x, y, 0.02, 0.52, -0.58, -0.45) {
@@ -1453,13 +1462,13 @@ impl Menu {
                     let index = self.world_scroll + visible_index;
                     let top = 0.58 - visible_index as f32 * 0.19;
                     if hit(x, y, -0.72, 0.72, top - 0.15, top) {
-                        self.selected_world = Some(index);
+                        self.selected_world = Some(self.worlds[index].directory.clone());
                         return MenuAction::None;
                     }
                 }
                 if hit(x, y, -0.72, -0.27, -0.64, -0.51) {
-                    if let Some(index) = self.selected_world {
-                        return self.launch_existing(index);
+                    if let Some(directory) = self.selected_world.clone() {
+                        return self.launch_existing(&directory);
                     }
                 } else if hit(x, y, -0.23, 0.23, -0.64, -0.51) {
                     self.create_name = "NEW WORLD".to_string();
@@ -1533,8 +1542,10 @@ impl Menu {
             }
             MenuScreen::ConfirmDelete => {
                 if hit(x, y, -0.48, -0.02, -0.16, -0.02) {
-                    if let Some(index) = self.selected_world {
-                        if let Some(world) = self.worlds.get(index) {
+                    if let Some(directory) = self.selected_world.as_deref() {
+                        if let Some(world) = world_index_by_directory(&self.worlds, directory)
+                            .and_then(|index| self.worlds.get(index))
+                        {
                             if let Err(error) = fs::remove_dir_all(&world.directory) {
                                 self.message = Some(format!("DELETE FAILED: {error}"));
                                 self.screen = MenuScreen::Worlds;
@@ -1543,7 +1554,7 @@ impl Menu {
                         }
                     }
                     self.worlds = discover_worlds();
-                    self.selected_world = (!self.worlds.is_empty()).then_some(0);
+                    self.selected_world = self.worlds.first().map(|world| world.directory.clone());
                     self.world_scroll = self.world_scroll.min(self.worlds.len().saturating_sub(5));
                     self.screen = MenuScreen::Worlds;
                 } else if hit(x, y, 0.02, 0.48, -0.16, -0.02) {
@@ -1573,15 +1584,18 @@ impl Menu {
         self.rebinding = rebinding;
     }
 
-    fn launch_existing(&mut self, index: usize) -> MenuAction {
-        let Some(world) = self.worlds.get_mut(index) else {
+    fn launch_existing(&mut self, directory: &Path) -> MenuAction {
+        let Some(index) = world_index_by_directory(&self.worlds, directory) else {
             return MenuAction::None;
         };
+        let world = &mut self.worlds[index];
         world.metadata.last_played = unix_now();
         let _ = world.metadata.save(&world.directory);
+        let world_dir = fs::canonicalize(&world.directory)
+            .unwrap_or_else(|_| world.directory.clone());
         MenuAction::Launch(
             WorldLaunch {
-                world_dir: world.directory.clone(),
+                world_dir,
                 seed: world.metadata.seed,
                 game_mode: world.metadata.game_mode,
                 difficulty: world.metadata.difficulty,
@@ -1620,6 +1634,7 @@ impl Menu {
             self.message = Some(format!("CREATE FAILED: {error}"));
             return MenuAction::None;
         }
+        let world_dir = fs::canonicalize(&world_dir).unwrap_or(world_dir);
         MenuAction::Launch(
             WorldLaunch {
                 world_dir,
@@ -1995,9 +2010,8 @@ impl Menu {
             .take(5)
             .enumerate()
         {
-            let index = self.world_scroll + visible_index;
             let top = 0.58 - visible_index as f32 * 0.19;
-            let selected = self.selected_world == Some(index);
+            let selected = self.selected_world.as_deref() == Some(world.directory.as_path());
             let hover = hit(
                 self.mouse_ndc[0],
                 self.mouse_ndc[1],
@@ -2803,6 +2817,34 @@ mod tests {
     fn sanitizes_world_names_and_generates_stable_slugs() {
         assert_eq!(sanitize_name("  My <World>!  "), "My World");
         assert_eq!(slugify("My World"), "my_world");
+    }
+
+    #[test]
+    fn selected_world_directory_survives_list_reordering() {
+        let metadata = |name: &str, last_played| WorldMetadata {
+            name: name.to_string(),
+            seed: 1,
+            game_mode: GameMode::Creative,
+            difficulty: Difficulty::Normal,
+            last_played,
+        };
+        let first_dir = PathBuf::from("C:/saves/first");
+        let second_dir = PathBuf::from("C:/saves/second");
+        let mut worlds = vec![
+            WorldEntry {
+                directory: first_dir,
+                metadata: metadata("SAME NAME", 2),
+            },
+            WorldEntry {
+                directory: second_dir.clone(),
+                metadata: metadata("SAME NAME", 1),
+            },
+        ];
+
+        worlds.reverse();
+
+        let index = world_index_by_directory(&worlds, &second_dir).unwrap();
+        assert_eq!(worlds[index].directory, second_dir);
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub enum EntityType {
     WitherSkull,
     DragonBreath,
     RemotePlayer,
+    Enderman,
 }
 
 impl EntityType {
@@ -51,6 +52,7 @@ impl EntityType {
             Self::WitherSkull => 18,
             Self::DragonBreath => 19,
             Self::RemotePlayer => 20,
+            Self::Enderman => 21,
         }
     }
 
@@ -77,6 +79,7 @@ impl EntityType {
             18 => Some(Self::WitherSkull),
             19 => Some(Self::DragonBreath),
             20 => Some(Self::RemotePlayer),
+            21 => Some(Self::Enderman),
             _ => None,
         }
     }
@@ -95,6 +98,7 @@ impl EntityType {
                 | Self::Piglin
                 | Self::Husk
                 | Self::Shulker
+                | Self::Enderman
                 | Self::EnderDragon
                 | Self::Wither
         )
@@ -203,6 +207,8 @@ pub struct Entity {
     pub pickup_cooldown: f32,
     pub ai_phase: u8,
     pub ai_timer: f32,
+    /// Continuous time the local player has kept this Enderman's head in view.
+    pub enderman_gaze_timer: f32,
 }
 
 impl Entity {
@@ -224,6 +230,7 @@ impl Entity {
             EntityType::HeartParticle => Vec3::new(0.25, 0.25, 0.25),
             EntityType::DroppedItem => Vec3::new(0.25, 0.25, 0.25),
             EntityType::Shulker => Vec3::ONE,
+            EntityType::Enderman => Vec3::new(0.6, 2.9, 0.6),
             EntityType::EnderDragon => Vec3::new(8.0, 4.0, 8.0),
             EntityType::Wither => Vec3::new(1.0, 3.5, 1.0),
             EntityType::EndCrystal => Vec3::new(1.5, 2.0, 1.5),
@@ -235,6 +242,7 @@ impl Entity {
             EntityType::Piglin => 16.0,
             EntityType::Husk => 20.0,
             EntityType::Shulker => 30.0,
+            EntityType::Enderman => 40.0,
             EntityType::EnderDragon => 200.0,
             EntityType::Wither => 300.0,
             EntityType::EndCrystal => 5.0,
@@ -287,6 +295,7 @@ impl Entity {
             pickup_cooldown: 0.0,
             ai_phase: 0,
             ai_timer: 0.0,
+            enderman_gaze_timer: 0.0,
         }
     }
 

@@ -246,7 +246,11 @@ fn apply_melee_impact(
         return MeleeImpact::Invulnerable;
     }
 
-    entity.health -= damage;
+    if entity.entity_type == crate::entity::EntityType::EndCrystal {
+        entity.health = 0.0;
+    } else {
+        entity.health -= damage;
+    }
     entity.invulnerable_time = 0.4;
     entity.velocity += direction.normalize_or_zero() * knockback + Vec3::new(0.0, 3.0, 0.0);
     if fire_level > 0 {
@@ -297,7 +301,11 @@ fn apply_player_projectile_damage(
         return None;
     }
 
-    entity.health -= damage;
+    if entity.entity_type == crate::entity::EntityType::EndCrystal {
+        entity.health = 0.0;
+    } else {
+        entity.health -= damage;
+    }
     claim_standard_player_kill(entity)
 }
 
@@ -2277,7 +2285,14 @@ impl State {
     fn apply_boss_events(&mut self, events: crate::boss::BossEvents) {
         let authoritative = self.is_authoritative();
         for hit in events.player_damage {
+            let can_receive_impact = authoritative
+                && self.game_mode != GameMode::Creative
+                && !self.player_state.is_dead
+                && self.player_state.invulnerable_time <= 0.0;
             self.take_damage(hit.amount, DamageSource::Mob);
+            if can_receive_impact && hit.knockback.length_squared() > 0.0 {
+                self.player_physics.velocity += hit.knockback;
+            }
         }
         for effect in events.apply_wither {
             self.wither_effect_timer = self.wither_effect_timer.max(effect.duration);
@@ -9113,6 +9128,11 @@ impl State {
                     &mut self.entity_manager,
                     &self.chunk_manager,
                     self.player_physics.position,
+                    Vec3::new(
+                        self.camera.yaw.cos() * self.camera.pitch.cos(),
+                        self.camera.pitch.sin(),
+                        self.camera.yaw.sin() * self.camera.pitch.cos(),
+                    ),
                     dt,
                     self.game_mode,
                 );
@@ -17364,6 +17384,18 @@ mod debug_tests {
         assert_eq!(crystal.health, 0.0);
         assert!(!crystal.player_kill_rewarded);
         assert!(!crystal.is_player_projectile_target());
+    }
+
+    #[test]
+    fn one_point_melee_hit_destroys_end_crystal() {
+        let mut crystal =
+            crate::entity::Entity::new(1, crate::entity::EntityType::EndCrystal, Vec3::ZERO);
+
+        assert_eq!(
+            apply_melee_impact(&mut crystal, Vec3::Z, 1.0, 0.0, 0),
+            MeleeImpact::Damaged { killed: true }
+        );
+        assert_eq!(crystal.health, 0.0);
     }
 
     #[test]

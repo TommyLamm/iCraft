@@ -979,8 +979,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.0, 0.9 * scale, 0.3 * scale)),
                     entity.yaw,
                     final_pitch,
-                    [4, 15, 15, 15, 15, 15], // Front Col 4, others Col 15
-                    10,
+                    [3, 4, 4, 4, 4, 4],
+                    7,
                     light_val,
                 );
 
@@ -1006,8 +1006,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(-0.25 * scale, 0.5 * scale, 0.3 * scale)),
                     entity.yaw,
                     swing,
-                    [15; 6],
-                    10,
+                    [5; 6],
+                    7,
                     light_val,
                 );
                 add_cuboid(
@@ -1017,8 +1017,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.25 * scale, 0.5 * scale, 0.3 * scale)),
                     entity.yaw,
                     -swing,
-                    [15; 6],
-                    10,
+                    [5; 6],
+                    7,
                     light_val,
                 );
                 add_cuboid(
@@ -1028,8 +1028,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(-0.25 * scale, 0.5 * scale, -0.3 * scale)),
                     entity.yaw,
                     -swing,
-                    [15; 6],
-                    10,
+                    [5; 6],
+                    7,
                     light_val,
                 );
                 add_cuboid(
@@ -1039,8 +1039,8 @@ pub fn render_mobs<'a>(
                     to_world(Vec3::new(0.25 * scale, 0.5 * scale, -0.3 * scale)),
                     entity.yaw,
                     swing,
-                    [15; 6],
-                    10,
+                    [5; 6],
+                    7,
                     light_val,
                 );
             }
@@ -1328,6 +1328,58 @@ pub fn render_mobs<'a>(
                     10,
                     light_val,
                 );
+            }
+            EntityType::Enderman => {
+                // Tall, narrow vanilla-style silhouette. Row 8 cols 10-12 are
+                // dedicated Enderman head, torso and limb crops.
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.52, 0.52, 0.52),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 2.62, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [10, 14, 14, 14, 14, 14],
+                    8,
+                    light_val.max(255.0),
+                );
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.48, 0.82, 0.24),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 1.92, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [11; 6],
+                    8,
+                    light_val,
+                );
+                for (x, pitch) in [(-0.32, swing), (0.32, -swing)] {
+                    add_cuboid(
+                        cuboid_instances,
+                        Vec3::new(0.14, 1.22, 0.14),
+                        Vec3::new(0.0, -0.55, 0.0),
+                        to_world(Vec3::new(x, 2.18, 0.0)),
+                        entity.yaw,
+                        pitch,
+                        [12; 6],
+                        8,
+                        light_val,
+                    );
+                }
+                for (x, pitch) in [(-0.13, -swing), (0.13, swing)] {
+                    add_cuboid(
+                        cuboid_instances,
+                        Vec3::new(0.16, 1.48, 0.16),
+                        Vec3::new(0.0, -0.74, 0.0),
+                        to_world(Vec3::new(x, 1.48, 0.0)),
+                        entity.yaw,
+                        pitch,
+                        [12; 6],
+                        8,
+                        light_val,
+                    );
+                }
             }
             EntityType::EnderDragon => {
                 let flap = (time * 3.0).sin() * 0.22;
@@ -2097,6 +2149,42 @@ mod tests {
                 (10..=13).contains(&col)
             })
         }));
+    }
+
+    #[test]
+    fn enderman_uses_tall_model_and_dedicated_skin_tiles() {
+        let mut entities = EntityManager::new();
+        entities.spawn(EntityType::Enderman, Vec3::ZERO);
+        let chunks = ChunkManager::new(1);
+        let mut cuboids = Vec::new();
+        let mut quads = Vec::new();
+
+        render_mobs(
+            entities.entities.iter(),
+            &chunks,
+            &mut cuboids,
+            &mut quads,
+            0.0,
+        );
+
+        assert_eq!(cuboids.len(), 6);
+        assert!(quads.is_empty());
+        assert!(cuboids.iter().all(|part| part.tex_row == 8));
+        assert!(cuboids.iter().all(|part| {
+            (0..6).all(|face| {
+                let col = (part.tex_cols_packed >> (face * 4)) & 0xF;
+                matches!(col, 10 | 11 | 12 | 14)
+            })
+        }));
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        expand_mob_instances(&cuboids, &quads, &mut vertices, &mut indices);
+        let max_y = vertices
+            .iter()
+            .map(|vertex| vertex.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(max_y > 2.8, "Enderman model should be nearly three blocks tall");
     }
 
     #[test]

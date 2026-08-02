@@ -19,13 +19,22 @@ pub enum RaycastTargetPolicy {
 impl RaycastTargetPolicy {
     fn targets(self, block: BlockType) -> bool {
         match self {
-            Self::Place => block != BlockType::Air && !block.properties().is_passable,
+            Self::Place => {
+                is_explicit_interaction_target(block)
+                    || (block != BlockType::Air && !block.properties().is_passable)
+            }
             Self::Break => {
                 is_explicit_breakable_decoration(block)
                     || (block != BlockType::Air && !block.properties().is_passable)
             }
         }
     }
+}
+
+fn is_explicit_interaction_target(block: BlockType) -> bool {
+    // Open doors and trapdoors are passable for collision, but right-click
+    // raycasts must still be able to select them so they can be closed again.
+    matches!(block, BlockType::OakDoorOpen | BlockType::OakTrapdoorOpen)
 }
 
 fn is_explicit_breakable_decoration(block: BlockType) -> bool {
@@ -213,6 +222,26 @@ mod tests {
         );
         assert!(hit.is_some());
         assert_eq!(hit.unwrap().block_pos, Vec3::new(8.0, 72.0, 8.0));
+    }
+
+    #[test]
+    fn place_raycast_can_target_open_door_and_trapdoor_for_interaction() {
+        for block in [BlockType::OakDoorOpen, BlockType::OakTrapdoorOpen] {
+            let mut chunk_manager = ChunkManager::new(8);
+            let mut chunk = Chunk::new(0, 0);
+            chunk.set_block_local(8, 72, 8, block);
+            chunk_manager.chunks.insert((0, 0), chunk);
+
+            let hit = raycast(
+                Vec3::new(8.5, 70.5, 8.5),
+                Vec3::new(0.0, 1.0, 0.0),
+                5.0,
+                &chunk_manager,
+                RaycastTargetPolicy::Place,
+            );
+
+            assert_eq!(hit.map(|result| result.block_pos), Some(Vec3::new(8.0, 72.0, 8.0)));
+        }
     }
 
     #[test]

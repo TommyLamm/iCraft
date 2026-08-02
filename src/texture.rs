@@ -1438,6 +1438,9 @@ const PACK_TILES: &[PackTile] = &[
     pack_tile(0, 7, "item/stone_shovel.png"),
     pack_tile(1, 7, "item/iron_shovel.png"),
     pack_tile(2, 7, "item/diamond_shovel.png"),
+    pack_tile_region(3, 7, "entity/sheep/sheep.png", 8, 8, 6, 6),
+    pack_tile_region(4, 7, "entity/sheep/sheep.png", 0, 8, 8, 6),
+    pack_tile_region(5, 7, "entity/sheep/sheep.png", 4, 20, 4, 6),
     // Row 8: HUD icons plus dedicated blaze/wither skins
     pack_tile(0, 8, "gui/sprites/hud/heart/full.png"),
     pack_tile(1, 8, "gui/sprites/hud/heart/half.png"),
@@ -1449,6 +1452,10 @@ const PACK_TILES: &[PackTile] = &[
     pack_tile_region(7, 8, "entity/blaze.png", 12, 0, 8, 12),
     pack_tile_region(8, 8, "entity/wither/wither.png", 8, 8, 8, 8),
     pack_tile_region(9, 8, "entity/wither/wither.png", 20, 20, 8, 12),
+    pack_tile_region(10, 8, "entity/enderman/enderman.png", 8, 8, 8, 8),
+    pack_tile_region(11, 8, "entity/enderman/enderman.png", 20, 20, 8, 12),
+    pack_tile_region(12, 8, "entity/enderman/enderman.png", 44, 20, 4, 12),
+    pack_tile_region(14, 8, "entity/enderman/enderman.png", 0, 8, 8, 8),
     pack_tile_region(15, 8, "entity/player/wide/steve.png", 0, 8, 8, 8),
     // Row 9: hostile mob skins
     pack_tile_region(0, 9, "entity/zombie/zombie.png", 8, 8, 8, 8),
@@ -1638,6 +1645,57 @@ fn apply_resource_pack(img: &mut RgbaImage) {
             "[texture] missing pack/vanilla tiles: {}",
             missing.join(", ")
         );
+    }
+}
+
+/// Enderman eyes are a separate emissive texture in the vanilla resource
+/// pack. Composite that layer over the head crop so the compact atlas keeps
+/// the normal purple eyes instead of rendering a featureless black face.
+fn compose_enderman_eyes(img: &mut RgbaImage) {
+    let path = std::path::Path::new(VANILLA_TEXTURES_DIR)
+        .join("entity/enderman/enderman_eyes.png");
+    let Ok(source) = image::open(path) else {
+        return;
+    };
+    let crop = image::imageops::crop_imm(&source, 8, 8, 8, 8).to_image();
+    let eyes = image::imageops::resize(&crop, 16, 16, image::imageops::FilterType::Nearest);
+    for (x, y, overlay) in eyes.enumerate_pixels() {
+        let base = *img.get_pixel(10 * 16 + x, 8 * 16 + y);
+        let alpha = overlay[3] as f32 / 255.0;
+        let blend = |channel: usize| {
+            (overlay[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha)).round()
+                as u8
+        };
+        img.put_pixel(
+            10 * 16 + x,
+            8 * 16 + y,
+            Rgba([blend(0), blend(1), blend(2), 255]),
+        );
+    }
+}
+
+fn make_enderman_tiles_opaque(img: &mut RgbaImage) {
+    for (col, base) in [
+        (10, [7u8, 5, 9]),
+        (11, [9u8, 7, 11]),
+        (12, [8u8, 6, 10]),
+        (14, [7u8, 5, 9]),
+    ] {
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let pixel = *img.get_pixel(col * 16 + x, 8 * 16 + y);
+                let alpha = pixel[3] as f32 / 255.0;
+                let blend = |channel: usize| {
+                    (pixel[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha))
+                        .round() as u8
+                };
+                img.put_pixel(
+                    col * 16 + x,
+                    8 * 16 + y,
+                    Rgba([blend(0), blend(1), blend(2), 255]),
+                );
+            }
+        }
     }
 }
 
@@ -2668,6 +2726,8 @@ impl TextureAtlas {
         // Overlay the Stay True resource pack (with a vanilla fallback) over
         // the procedural base so every atlas tile uses real Minecraft art.
         apply_resource_pack(&mut img);
+        compose_enderman_eyes(&mut img);
+        make_enderman_tiles_opaque(&mut img);
         make_dragon_tiles_opaque(&mut img);
         compose_end_portal_frame_tiles(&mut img);
 
@@ -2805,6 +2865,17 @@ mod tests {
     }
 
     #[test]
+    fn vanilla_enderman_textures_are_available() {
+        for name in ["enderman.png", "enderman_eyes.png"] {
+            let path = std::path::Path::new(VANILLA_TEXTURES_DIR)
+                .join("entity/enderman")
+                .join(name);
+            let image = image::open(&path).expect("Enderman texture must load");
+            assert_eq!(image.dimensions(), (64, 32));
+        }
+    }
+
+    #[test]
     fn resource_pack_atlas_applies_real_textures() {
         let (pack_dir, vanilla_dir) = resource_pack_dirs();
         if !pack_dir.is_dir() && !vanilla_dir.is_dir() {
@@ -2813,6 +2884,8 @@ mod tests {
         }
         let mut img = RgbaImage::new(256, 256);
         apply_resource_pack(&mut img);
+        compose_enderman_eyes(&mut img);
+        make_enderman_tiles_opaque(&mut img);
         make_dragon_tiles_opaque(&mut img);
         compose_end_portal_frame_tiles(&mut img);
 
@@ -2858,6 +2931,25 @@ mod tests {
                 (0..16u32).all(|y| (0..16u32)
                     .all(|x| img.get_pixel(col * 16 + x, 4 * 16 + y).0[3] == 255)),
                 "dragon atlas tile {col} must not contain transparent holes"
+            );
+        }
+
+        let purple_eye_pixels = (0..16u32)
+            .flat_map(|y| (0..16u32).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let pixel = img.get_pixel(10 * 16 + x, 8 * 16 + y).0;
+                pixel[0] > 40 && pixel[2] > 40 && pixel[2] >= pixel[1]
+            })
+            .count();
+        assert!(
+            purple_eye_pixels > 0,
+            "Enderman head atlas tile must contain the purple eye layer"
+        );
+        for col in [10u32, 11, 12, 14] {
+            assert!(
+                (0..16u32).all(|y| (0..16u32)
+                    .all(|x| img.get_pixel(col * 16 + x, 8 * 16 + y).0[3] == 255)),
+                "Enderman atlas tile {col} must be fully opaque"
             );
         }
 

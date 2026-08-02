@@ -15,6 +15,7 @@ pub type BlockPos = (i32, i32, i32);
 
 const NETHER_MOB_CAP: usize = 10;
 const SHULKER_CAP: usize = 6;
+const ENDERMAN_CAP: usize = 12;
 const PROJECTILE_LIFETIME: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,23 @@ pub struct PlayerDamageEvent {
     pub amount: f32,
     pub source_entity: Option<u64>,
     pub kind: DamageKind,
+    pub knockback: Vec3,
+}
+
+impl PlayerDamageEvent {
+    fn new(amount: f32, source_entity: Option<u64>, kind: DamageKind) -> Self {
+        Self {
+            amount,
+            source_entity,
+            kind,
+            knockback: Vec3::ZERO,
+        }
+    }
+
+    fn with_knockback(mut self, knockback: Vec3) -> Self {
+        self.knockback = knockback;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,7 +119,7 @@ pub fn ensure_dimension_entities(
     match dimension {
         Dimension::Overworld => {}
         Dimension::Nether => ensure_nether_mob(entities, chunks, player_pos, time),
-        Dimension::End => ensure_end_encounters(entities, chunks, time),
+        Dimension::End => ensure_end_encounters(entities, chunks, player_pos, time),
     }
 }
 
@@ -156,7 +174,12 @@ fn ensure_nether_mob(
     entities.spawn(kind, pos);
 }
 
-fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, time: f32) {
+fn ensure_end_encounters(
+    entities: &mut EntityManager,
+    chunks: &ChunkManager,
+    player_pos: Vec3,
+    time: f32,
+) {
     let dragon_exists = entities
         .get_entities_by_type(EntityType::EnderDragon)
         .next()
@@ -179,6 +202,8 @@ fn ensure_end_encounters(entities: &mut EntityManager, chunks: &ChunkManager, ti
             );
         }
     }
+
+    ensure_enderman(entities, chunks, player_pos, time);
 
     let shulker_count = entities
         .get_entities_by_type(EntityType::Shulker)
@@ -231,6 +256,7 @@ pub fn update_dimension_entities(
     entities: &mut EntityManager,
     chunks: &ChunkManager,
     player_pos: Vec3,
+    player_look: Vec3,
     dt: f32,
     game_mode: GameMode,
 ) -> BossEvents {
@@ -271,11 +297,11 @@ pub fn update_dimension_entities(
                         * if delta.length() > 12.0 { 2.5 } else { -1.2 };
                     entity.velocity.y = (desired_y - entity.position.y).clamp(-2.0, 2.0);
                     if delta.length_squared() <= 28.0 * 28.0 && entity.action_cooldown <= 0.0 {
-                        events.player_damage.push(PlayerDamageEvent {
-                            amount: 5.0,
-                            source_entity: Some(entity.id),
-                            kind: DamageKind::BlazeFireball,
-                        });
+                        events.player_damage.push(PlayerDamageEvent::new(
+                            5.0,
+                            Some(entity.id),
+                            DamageKind::BlazeFireball,
+                        ));
                         entity.action_cooldown = 2.5;
                     }
                 } else {
@@ -290,15 +316,15 @@ pub fn update_dimension_entities(
                     entity.velocity.x = horizontal.normalize_or_zero().x * 3.0;
                     entity.velocity.z = horizontal.normalize_or_zero().z * 3.0;
                     if delta.length_squared() <= 2.2 * 2.2 && entity.action_cooldown <= 0.0 {
-                        events.player_damage.push(PlayerDamageEvent {
-                            amount: if entity.entity_type == EntityType::Piglin {
+                        events.player_damage.push(PlayerDamageEvent::new(
+                            if entity.entity_type == EntityType::Piglin {
                                 5.0
                             } else {
                                 4.0
                             },
-                            source_entity: Some(entity.id),
-                            kind: DamageKind::Melee,
-                        });
+                            Some(entity.id),
+                            DamageKind::Melee,
+                        ));
                         entity.action_cooldown = 1.0;
                     }
                 } else {
@@ -311,13 +337,74 @@ pub fn update_dimension_entities(
                     && entity.position.distance_squared(player_pos) <= 24.0 * 24.0
                     && entity.action_cooldown <= 0.0
                 {
-                    events.player_damage.push(PlayerDamageEvent {
-                        amount: 4.0,
-                        source_entity: Some(entity.id),
-                        kind: DamageKind::ShulkerBullet,
-                    });
+                    events.player_damage.push(PlayerDamageEvent::new(
+                        4.0,
+                        Some(entity.id),
+                        DamageKind::ShulkerBullet,
+                    ));
                     entity.action_cooldown = 3.0;
                 }
+            }
+            EntityType::Enderman => {
+                if !is_creative {
+                    let delta = player_pos - entity.position;
+                    let horizontal = Vec3::new(delta.x, 0.0, delta.z);
+                    let player_eye = player_pos + Vec3::Y * 1.62;
+                    let head = entity.position + Vec3::Y * 2.62;
+                    let to_head = (head - player_eye).normalize_or_zero();
+                    let looking_at_head = horizontal.length_squared() <= 32.0 * 32.0
+                        && player_look.normalize_or_zero().dot(to_head) >= 0.995;
+                    if entity.ai_phase == 0 {
+                        if looking_at_head {
+                            entity.enderman_gaze_timer += dt;
+                            if entity.enderman_gaze_timer >= 5.0 {
+                                entity.ai_phase = 1;
+                                entity.target_player = true;
+                            }
+                        } else {
+                            entity.enderman_gaze_timer = 0.0;
+                        }
+                    }
+
+                    if entity.ai_phase == 1 {
+                        let direction = horizontal.normalize_or_zero();
+                        entity.target_player = true;
+                        entity.yaw = f32::atan2(direction.x, direction.z);
+                        entity.velocity.x = direction.x * 4.5;
+                        entity.velocity.z = direction.z * 4.5;
+                        if delta.length_squared() <= 2.2 * 2.2
+                            && entity.action_cooldown <= 0.0
+                        {
+                            events.player_damage.push(PlayerDamageEvent::new(
+                                7.0,
+                                Some(entity.id),
+                                DamageKind::Melee,
+                            ));
+                            entity.action_cooldown = 1.0;
+                        }
+                    } else {
+                        entity.target_player = false;
+                        // Calm Endermen wander instead of freezing in place.
+                        // Each entity gets a stable, changing heading and a
+                        // short pause within a six-second idle cycle.
+                        let cycle = (entity.ai_timer / 6.0).floor() as u64;
+                        let seed = entity
+                            .id
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            .wrapping_add(cycle.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+                        let angle = (seed as u32) as f32 / u32::MAX as f32
+                            * std::f32::consts::TAU;
+                        entity.yaw = angle;
+                        let idle_speed = if entity.ai_timer % 6.0 < 4.5 { 1.25 } else { 0.0 };
+                        entity.velocity.x = angle.sin() * idle_speed;
+                        entity.velocity.z = angle.cos() * idle_speed;
+                    }
+                } else {
+                    entity.target_player = false;
+                    entity.velocity.x = 0.0;
+                    entity.velocity.z = 0.0;
+                }
+                entity.update_physics(dt, chunks);
             }
             EntityType::EnderDragon => update_dragon(
                 entity,
@@ -444,8 +531,11 @@ fn update_dragon(
     } else {
         0.0
     };
+    let attack_cycle = dragon.ai_timer % 18.0;
     dragon.ai_phase = if game_mode == GameMode::Creative {
         0
+    } else if (10.0..14.5).contains(&attack_cycle) {
+        1 // periodic charge, including while the dragon is at full health
     } else if health_ratio > 0.60 {
         0 // high orbit
     } else if health_ratio > 0.30 {
@@ -471,11 +561,11 @@ fn update_dragon(
                 && dragon.position.distance_squared(player_pos) < 5.5 * 5.5
                 && dragon.action_cooldown <= 0.0
             {
-                events.player_damage.push(PlayerDamageEvent {
-                    amount: 10.0,
-                    source_entity: Some(dragon.id),
-                    kind: DamageKind::DragonCharge,
-                });
+                let impact = dragon.velocity.normalize_or_zero() * 14.0 + Vec3::Y * 4.0;
+                events.player_damage.push(
+                    PlayerDamageEvent::new(10.0, Some(dragon.id), DamageKind::DragonCharge)
+                        .with_knockback(impact),
+                );
                 dragon.action_cooldown = 1.25;
             }
         }
@@ -506,6 +596,53 @@ fn update_dragon(
     dragon.position += dragon.velocity * dt;
 }
 
+fn ensure_enderman(
+    entities: &mut EntityManager,
+    chunks: &ChunkManager,
+    player_pos: Vec3,
+    time: f32,
+) {
+    let count = entities
+        .get_entities_by_type(EntityType::Enderman)
+        .filter(|entity| entity.health > 0.0)
+        .count();
+    if count >= ENDERMAN_CAP || chunks.chunks.is_empty() {
+        return;
+    }
+
+    let loaded: Vec<(i32, i32)> = chunks.chunks.keys().copied().collect();
+    let mut seed = mix64(
+        time.to_bits() as u64
+            ^ (player_pos.x.floor() as i64 as u64).rotate_left(13)
+            ^ (player_pos.z.floor() as i64 as u64).rotate_left(37)
+            ^ count as u64,
+    );
+    for _ in 0..8 {
+        let (cx, cz) = loaded[(next_u64(&mut seed) as usize) % loaded.len()];
+        let wx = cx * CHUNK_WIDTH as i32 + (next_u64(&mut seed) % CHUNK_WIDTH as u64) as i32;
+        let wz = cz * CHUNK_DEPTH as i32 + (next_u64(&mut seed) % CHUNK_DEPTH as u64) as i32;
+        let Some(y) = open_surface_y(chunks, wx, wz) else {
+            continue;
+        };
+        if chunks.get_block(wx, y - 1, wz) != BlockType::EndStone
+            || chunks.get_block(wx, y + 2, wz) != BlockType::Air
+        {
+            continue;
+        }
+        let position = Vec3::new(wx as f32 + 0.5, y as f32, wz as f32 + 0.5);
+        if position.distance_squared(player_pos) < 8.0 * 8.0
+            || entities
+                .query_radius_types(position, 3.0, &[EntityType::Enderman])
+                .next()
+                .is_some()
+        {
+            continue;
+        }
+        entities.spawn(EntityType::Enderman, position);
+        break;
+    }
+}
+
 fn update_wither(
     wither: &mut crate::entity::Entity,
     player_pos: Vec3,
@@ -533,11 +670,11 @@ fn update_wither(
             && wither.position.distance_squared(player_pos) < 3.5 * 3.5
             && wither.action_cooldown <= 0.0
         {
-            events.player_damage.push(PlayerDamageEvent {
-                amount: 12.0,
-                source_entity: Some(wither.id),
-                kind: DamageKind::WitherCharge,
-            });
+            events.player_damage.push(PlayerDamageEvent::new(
+                12.0,
+                Some(wither.id),
+                DamageKind::WitherCharge,
+            ));
             events.apply_wither.push(WitherEffectEvent {
                 duration: 10.0,
                 amplifier: 1,
@@ -593,11 +730,11 @@ fn projectile_hit(
         } else {
             DamageKind::DragonBreath
         };
-        events.player_damage.push(PlayerDamageEvent {
-            amount: projectile.projectile_damage.max(1.0),
-            source_entity: Some(projectile.id),
+        events.player_damage.push(PlayerDamageEvent::new(
+            projectile.projectile_damage.max(1.0),
+            Some(projectile.id),
             kind,
-        });
+        ));
         if projectile.entity_type == EntityType::WitherSkull {
             events.apply_wither.push(WitherEffectEvent {
                 duration: 8.0,
@@ -635,6 +772,7 @@ fn collect_deaths(entities: &mut EntityManager, events: &mut BossEvents) {
                     | EntityType::Piglin
                     | EntityType::Husk
                     | EntityType::Shulker
+                    | EntityType::Enderman
                     | EntityType::EndCrystal
                     | EntityType::EnderDragon
                     | EntityType::Wither
@@ -882,6 +1020,7 @@ mod tests {
             &mut entities,
             &chunks,
             Vec3::ZERO,
+            Vec3::ZERO,
             0.2,
             GameMode::Survival,
         );
@@ -920,6 +1059,151 @@ mod tests {
     }
 
     #[test]
+    fn full_health_dragon_periodically_charges_and_knocks_player_back() {
+        let mut entities = EntityManager::new();
+        let dragon_id = entities.spawn(EntityType::EnderDragon, Vec3::new(0.0, 80.0, 4.0));
+        entities.get_by_id_mut(dragon_id).unwrap().ai_timer = 9.9;
+        let chunks = ChunkManager::new(1);
+
+        let events = update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            Vec3::new(0.0, 80.0, 0.0),
+            Vec3::ZERO,
+            0.2,
+            GameMode::Survival,
+        );
+
+        assert_eq!(entities.get_by_id(dragon_id).unwrap().ai_phase, 1);
+        let hit = events
+            .player_damage
+            .iter()
+            .find(|hit| hit.kind == DamageKind::DragonCharge)
+            .expect("charging dragon should collide with a nearby player");
+        assert!(hit.knockback.length() > 10.0);
+        assert!(hit.knockback.y > 0.0);
+    }
+
+    #[test]
+    fn end_dimension_spawns_enderman_on_end_stone() {
+        let mut chunks = ChunkManager::new(1);
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                for y in 1..CHUNK_HEIGHT {
+                    chunk.set_block_local(x, y, z, BlockType::Air);
+                }
+                chunk.set_block_local(x, 64, z, BlockType::EndStone);
+            }
+        }
+        chunks.chunks.insert((0, 0), chunk);
+        let mut entities = EntityManager::new();
+
+        ensure_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            Vec3::new(100.0, 65.0, 100.0),
+            3.0,
+        );
+
+        let enderman = entities
+            .get_entities_by_type(EntityType::Enderman)
+            .next()
+            .expect("End terrain should spawn an Enderman");
+        assert_eq!(
+            chunks.get_block(
+                enderman.position.x.floor() as i32,
+                enderman.position.y.floor() as i32 - 1,
+                enderman.position.z.floor() as i32,
+            ),
+            BlockType::EndStone
+        );
+    }
+
+    #[test]
+    fn enderman_only_attacks_after_five_seconds_of_head_gaze() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 10.0));
+        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 4.7;
+        let chunks = ChunkManager::new(1);
+        let player = Vec3::ZERO;
+        let look = (Vec3::new(0.0, 2.62, 10.0) - Vec3::Y * 1.62).normalize();
+
+        update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            player,
+            look,
+            0.2,
+            GameMode::Survival,
+        );
+        assert_eq!(entities.get_by_id(id).unwrap().ai_phase, 0);
+        assert!(!entities.get_by_id(id).unwrap().target_player);
+
+        let moved_head = entities.get_by_id(id).unwrap().position + Vec3::Y * 2.62;
+        let look = (moved_head - Vec3::Y * 1.62).normalize();
+        update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            player,
+            look,
+            0.2,
+            GameMode::Survival,
+        );
+        assert_eq!(entities.get_by_id(id).unwrap().ai_phase, 1);
+        assert!(entities.get_by_id(id).unwrap().target_player);
+    }
+
+    #[test]
+    fn enderman_gaze_timer_resets_when_player_looks_away() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 10.0));
+        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 4.9;
+        let chunks = ChunkManager::new(1);
+
+        update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            Vec3::ZERO,
+            -Vec3::Z,
+            0.2,
+            GameMode::Survival,
+        );
+
+        let enderman = entities.get_by_id(id).unwrap();
+        assert_eq!(enderman.ai_phase, 0);
+        assert_eq!(enderman.enderman_gaze_timer, 0.0);
+        assert!(!enderman.target_player);
+    }
+
+    #[test]
+    fn calm_enderman_wanders_without_targeting_player() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 64.0, 10.0));
+        let chunks = ChunkManager::new(1);
+
+        update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            Vec3::ZERO,
+            -Vec3::Z,
+            0.1,
+            GameMode::Survival,
+        );
+
+        let enderman = entities.get_by_id(id).unwrap();
+        assert_eq!(enderman.ai_phase, 0);
+        assert!(!enderman.target_player);
+        assert!(Vec3::new(enderman.velocity.x, 0.0, enderman.velocity.z).length() > 1.0);
+    }
+
+    #[test]
     fn wither_enters_low_health_charge_phase() {
         let mut entities = EntityManager::new();
         entities.spawn(EntityType::Wither, Vec3::new(0.0, 8.0, 0.0));
@@ -930,6 +1214,7 @@ mod tests {
             Dimension::Overworld,
             &mut entities,
             &chunks,
+            Vec3::ZERO,
             Vec3::ZERO,
             0.1,
             GameMode::Survival,
@@ -950,6 +1235,7 @@ mod tests {
             Dimension::Nether,
             &mut entities,
             &chunks,
+            Vec3::ZERO,
             Vec3::ZERO,
             0.1,
             GameMode::Creative,

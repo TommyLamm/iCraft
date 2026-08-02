@@ -14,6 +14,7 @@ fn should_retain_after_health_cleanup(entity: &Entity) -> bool {
                 | EntityType::Piglin
                 | EntityType::Husk
                 | EntityType::Shulker
+                | EntityType::Enderman
                 | EntityType::EnderDragon
                 | EntityType::Wither
                 | EntityType::EndCrystal
@@ -344,6 +345,7 @@ pub fn update_mobs(
                 | EntityType::Piglin
                 | EntityType::Husk
                 | EntityType::Shulker
+                | EntityType::Enderman
                 | EntityType::EnderDragon
                 | EntityType::Wither
                 | EntityType::EndCrystal
