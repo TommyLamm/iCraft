@@ -88,8 +88,7 @@ fn build_first_person_hand_base_mesh_into(
         fist_pos,
         hand_yaw,
         hand_pitch,
-        [15; 6],
-        8,
+        [(15, 8); 6],
         1.0,
     );
     if held_item != Item::Air {
@@ -99,17 +98,21 @@ fn build_first_person_hand_base_mesh_into(
             add_sprite_view(
                 vertices, indices, 0.3, item_pos, hand_yaw, hand_pitch, tex_col, tex_row, 1.0,
             );
-        } else if let Some((tex_cols, tex_row)) = held_item_texture(held_item) {
+        } else if let Some(face_tiles) = held_item_face_tiles(held_item) {
+            let held_size = if held_item == Item::EndPortalFrame {
+                Vec3::new(0.18, 0.18 * 13.0 / 16.0, 0.18)
+            } else {
+                Vec3::splat(0.18)
+            };
             add_cuboid_view(
                 vertices,
                 indices,
-                Vec3::splat(0.18),
+                held_size,
                 Vec3::ZERO,
                 item_pos,
                 hand_yaw,
                 hand_pitch,
-                tex_cols,
-                tex_row,
+                face_tiles,
                 1.0,
             );
         }
@@ -125,19 +128,18 @@ pub fn apply_hand_animation(vertices: &mut [Vertex], animation: HandAnimationUni
     }
 }
 
-/// Returns the texture columns and row for the held item in the hand.
-/// Block items use the block's top-face texture; non-block items use their
-/// own inventory icon tile.
-fn held_item_texture(item: Item) -> Option<([u32; 6], u32)> {
+/// Returns an atlas tile for every face of the held item. Block items preserve
+/// their world top/side/bottom mapping instead of repeating the top texture.
+fn held_item_face_tiles(item: Item) -> Option<[(u32, u32); 6]> {
     let props = item.properties();
     if let Some(block) = props.block_type {
-        let (col, row) = block.get_face_tex_index(4); // top face
-        Some(([col; 6], row))
+        Some(std::array::from_fn(|face_idx| {
+            block.get_face_tex_index(face_idx)
+        }))
     } else if item == Item::Air {
         None
     } else {
-        let (col, row) = props.tex_coords;
-        Some(([col; 6], row))
+        Some([props.tex_coords; 6])
     }
 }
 
@@ -257,8 +259,7 @@ fn add_cuboid_view(
     pivot: Vec3,
     rot_yaw: f32,
     rot_pitch: f32,
-    tex_cols: [u32; 6],
-    tex_row: u32,
+    face_tiles: [(u32, u32); 6],
     light_val: f32,
 ) {
     let half = size * 0.5;
@@ -278,22 +279,22 @@ fn add_cuboid_view(
         (Vec3::new(-half.x, -half.y, -half.z), [0.0, 1.0]),
         (Vec3::new(-half.x, -half.y, half.z), [1.0, 1.0]),
         (Vec3::new(-half.x, half.y, half.z), [1.0, 0.0]),
-        (Vec3::new(half.x, half.y, -half.z), [0.0, 0.0]),
+        (Vec3::new(-half.x, half.y, -half.z), [0.0, 0.0]),
         // Face 3: East (+X)
         (Vec3::new(half.x, -half.y, half.z), [0.0, 1.0]),
-        (Vec3::new(-half.x, -half.y, -half.z), [1.0, 1.0]),
+        (Vec3::new(half.x, -half.y, -half.z), [1.0, 1.0]),
         (Vec3::new(half.x, half.y, -half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, half.y, half.z), [0.0, 0.0]),
+        (Vec3::new(half.x, half.y, half.z), [0.0, 0.0]),
         // Face 4: Up (+Y)
         (Vec3::new(-half.x, half.y, half.z), [0.0, 1.0]),
         (Vec3::new(half.x, half.y, half.z), [1.0, 1.0]),
         (Vec3::new(half.x, half.y, -half.z), [1.0, 0.0]),
         (Vec3::new(-half.x, half.y, -half.z), [0.0, 0.0]),
         // Face 5: Down (-Y)
-        (Vec3::new(-half.x, -half.y, half.z), [0.0, 1.0]),
+        (Vec3::new(-half.x, -half.y, -half.z), [0.0, 1.0]),
         (Vec3::new(half.x, -half.y, -half.z), [1.0, 1.0]),
-        (Vec3::new(half.x, half.y, -half.z), [1.0, 0.0]),
-        (Vec3::new(-half.x, half.y, -half.z), [0.0, 0.0]),
+        (Vec3::new(half.x, -half.y, half.z), [1.0, 0.0]),
+        (Vec3::new(-half.x, -half.y, half.z), [0.0, 0.0]),
     ];
 
     let cos_pitch = rot_pitch.cos();
@@ -317,9 +318,9 @@ fn add_cuboid_view(
         );
         let final_pos = v3 + pivot;
 
-        let col = tex_cols[face_idx / 4];
+        let (col, row) = face_tiles[face_idx / 4];
         let u = (uv[0] + col as f32) * 0.0625;
-        let v = (uv[1] + tex_row as f32) * 0.0625;
+        let v = (uv[1] + row as f32) * 0.0625;
 
         vertices.push(Vertex {
             position: [final_pos.x, final_pos.y, final_pos.z],
@@ -344,6 +345,51 @@ fn add_cuboid_view(
 mod tests {
     use super::*;
     use crate::inventory::{Inventory, ItemStack};
+
+    #[test]
+    fn held_end_portal_frame_preserves_world_face_tiles() {
+        let tiles = held_item_face_tiles(Item::EndPortalFrame).unwrap();
+        assert_eq!(tiles[0], (9, 4));
+        assert_eq!(tiles[4], (15, 15));
+        assert_eq!(tiles[5], (9, 4));
+    }
+
+    #[test]
+    fn held_cuboid_faces_are_planar_and_use_independent_tile_rows() {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let tiles = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)];
+        add_cuboid_view(
+            &mut vertices,
+            &mut indices,
+            Vec3::splat(2.0),
+            Vec3::ZERO,
+            Vec3::ZERO,
+            0.0,
+            0.0,
+            tiles,
+            1.0,
+        );
+
+        assert_eq!(vertices.len(), 24);
+        assert_eq!(indices.len(), 36);
+        for (face_idx, face) in vertices.chunks_exact(4).enumerate() {
+            let planar_axes = (0..3)
+                .filter(|axis| {
+                    face.iter()
+                        .all(|vertex| vertex.position[*axis] == face[0].position[*axis])
+                })
+                .count();
+            assert_eq!(planar_axes, 1, "face {face_idx} must lie on one plane");
+
+            let expected_row = tiles[face_idx].1 as f32 * 0.0625;
+            let min_v = face
+                .iter()
+                .map(|vertex| vertex.tex_coords[1])
+                .fold(f32::INFINITY, f32::min);
+            assert!((min_v - expected_row).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn hand_mesh_contains_right_arm_and_held_block() {
