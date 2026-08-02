@@ -1418,6 +1418,10 @@ const PACK_TILES: &[PackTile] = &[
     pack_tile(6, 4, "block/end_portal_frame_eye.png"),
     pack_tile(7, 4, "block/coal_block.png"),
     pack_tile(8, 4, "block/gold_block.png"),
+    // Vanilla's frame model maps only y=3..16 of this texture onto its
+    // 13/16-high sides. Crop those transparent top rows here so compact-atlas
+    // cube/item renderers get the same opaque result with their full-tile UVs.
+    pack_tile_region(9, 4, "block/end_portal_frame_side.png", 0, 3, 16, 13),
     pack_tile(14, 4, "block/diamond_block.png"),
     // Rows 5-7: tools
     pack_tile(0, 5, "item/stone_pickaxe.png"),
@@ -1629,6 +1633,40 @@ fn apply_resource_pack(img: &mut RgbaImage) {
             "[texture] missing pack/vanilla tiles: {}",
             missing.join(", ")
         );
+    }
+}
+
+/// Create the filled top tile. The Eye of Ender artwork has transparent
+/// pixels, so using it directly would make the underlying frame disappear.
+fn compose_end_portal_frame_tiles(img: &mut RgbaImage) {
+    const TOP: (u32, u32) = (15, 15);
+    const FILLED_TOP: (u32, u32) = (6, 4);
+
+    let mut top = [[Rgba([0, 0, 0, 0]); 16]; 16];
+    let mut eye = [[Rgba([0, 0, 0, 0]); 16]; 16];
+    for y in 0..16u32 {
+        for x in 0..16u32 {
+            top[y as usize][x as usize] = *img.get_pixel(TOP.0 * 16 + x, TOP.1 * 16 + y);
+            eye[y as usize][x as usize] =
+                *img.get_pixel(FILLED_TOP.0 * 16 + x, FILLED_TOP.1 * 16 + y);
+        }
+    }
+
+    for y in 0..16u32 {
+        for x in 0..16u32 {
+            let base = top[y as usize][x as usize];
+            let overlay = eye[y as usize][x as usize];
+            let alpha = overlay[3] as f32 / 255.0;
+            let blend = |channel: usize| {
+                (overlay[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha)).round()
+                    as u8
+            };
+            img.put_pixel(
+                FILLED_TOP.0 * 16 + x,
+                FILLED_TOP.1 * 16 + y,
+                Rgba([blend(0), blend(1), blend(2), 255]),
+            );
+        }
     }
 }
 
@@ -2593,6 +2631,7 @@ impl TextureAtlas {
         // Overlay the Stay True resource pack (with a vanilla fallback) over
         // the procedural base so every atlas tile uses real Minecraft art.
         apply_resource_pack(&mut img);
+        compose_end_portal_frame_tiles(&mut img);
 
         // Save to assets folder
         let _ = std::fs::create_dir_all("assets");
@@ -2657,6 +2696,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn filled_end_portal_frame_composites_eye_over_opaque_frame() {
+        let mut image = RgbaImage::new(256, 256);
+        for y in 0..16 {
+            for x in 0..16 {
+                image.put_pixel(15 * 16 + x, 15 * 16 + y, Rgba([80, 120, 90, 255]));
+                image.put_pixel(6 * 16 + x, 4 * 16 + y, Rgba([0, 0, 0, 0]));
+            }
+        }
+        image.put_pixel(6 * 16 + 8, 4 * 16 + 8, Rgba([20, 220, 80, 255]));
+
+        compose_end_portal_frame_tiles(&mut image);
+
+        assert_eq!(image.get_pixel(6 * 16, 4 * 16).0, [80, 120, 90, 255]);
+        assert_eq!(image.get_pixel(6 * 16 + 8, 4 * 16 + 8).0, [20, 220, 80, 255]);
+    }
+
+    #[test]
     fn redstone_torch_sprite_has_transparent_background_and_thin_artwork() {
         let mut image = RgbaImage::new(16, 16);
         draw_redstone_torch(&mut image, 0, 0);
@@ -2694,6 +2750,14 @@ mod tests {
     }
 
     #[test]
+    fn vanilla_end_portal_frame_side_texture_is_available() {
+        let path = std::path::Path::new(VANILLA_TEXTURES_DIR)
+            .join("block/end_portal_frame_side.png");
+        let image = image::open(&path).expect("End Portal Frame side texture must load");
+        assert_eq!(image.dimensions(), (16, 16));
+    }
+
+    #[test]
     fn resource_pack_atlas_applies_real_textures() {
         let (pack_dir, vanilla_dir) = resource_pack_dirs();
         if !pack_dir.is_dir() && !vanilla_dir.is_dir() {
@@ -2702,6 +2766,7 @@ mod tests {
         }
         let mut img = RgbaImage::new(256, 256);
         apply_resource_pack(&mut img);
+        compose_end_portal_frame_tiles(&mut img);
 
         // Stone tile must be fully opaque (opaque block texture).
         assert_eq!(img.get_pixel(3 * 16 + 8, 8).0[3], 255);
@@ -2727,6 +2792,18 @@ mod tests {
             stick_tile.iter().any(|&a| a > 0),
             "stick icon has visible pixels"
         );
+
+        for (col, row, label) in [
+            (15, 15, "frame top"),
+            (9, 4, "frame side"),
+            (6, 4, "filled frame top"),
+        ] {
+            assert!(
+                (0..16u32).all(|y| (0..16u32)
+                    .all(|x| img.get_pixel(col * 16 + x, row * 16 + y).0[3] == 255)),
+                "{label} must be fully opaque in the compact atlas"
+            );
+        }
 
         let preview = std::env::temp_dir().join("icraft_atlas_preview.png");
         let _ = img.save(&preview);

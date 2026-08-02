@@ -182,6 +182,11 @@ fn primary_press_decision(game_mode: GameMode, melee_consumed: bool) -> PrimaryP
     }
 }
 
+fn can_break_block(block: BlockType, game_mode: GameMode) -> bool {
+    block != BlockType::Air
+        && (game_mode == GameMode::Creative || block.properties().hardness >= 0.0)
+}
+
 fn is_legal_melee_target(entity: &crate::entity::Entity) -> bool {
     entity.is_player_melee_target()
 }
@@ -9387,7 +9392,7 @@ impl State {
                     self.chunk_manager
                         .get_block(target.x as i32, target.y as i32, target.z as i32);
 
-                if block != BlockType::Air && block.properties().hardness >= 0.0 {
+                if can_break_block(block, self.game_mode) {
                     if self.mining_target != Some(target) {
                         self.mining_target = Some(target);
                         self.mining_progress = 0.0;
@@ -9901,6 +9906,9 @@ impl State {
     }
 
     pub fn calculate_mining_time(&self, block: BlockType) -> f32 {
+        if self.game_mode == GameMode::Creative {
+            return 0.0;
+        }
         let hardness = block.properties().hardness;
         if hardness < 0.0 {
             return f32::MAX; // Unbreakable (e.g. bedrock)
@@ -11483,7 +11491,7 @@ impl State {
             if is_left_click {
                 let old_block = self.chunk_manager.get_block(wx, wy, wz);
                 if old_block != BlockType::Air {
-                    if old_block.properties().hardness < 0.0 {
+                    if !can_break_block(old_block, self.game_mode) {
                         return;
                     }
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
@@ -17252,6 +17260,16 @@ mod debug_tests {
                 instant_break: true,
             }
         );
+    }
+
+    #[test]
+    fn creative_can_break_end_portal_while_survival_cannot() {
+        assert!(can_break_block(BlockType::EndPortal, GameMode::Creative));
+        assert!(!can_break_block(
+            BlockType::EndPortal,
+            GameMode::Survival
+        ));
+        assert!(!can_break_block(BlockType::Air, GameMode::Creative));
     }
 
     #[test]

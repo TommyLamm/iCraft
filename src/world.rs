@@ -1465,8 +1465,14 @@ impl BlockType {
             BlockType::Glowstone => (12, 15),
             BlockType::NetherPortal => (13, 15),
             BlockType::EndStone => (14, 15),
-            BlockType::EndPortalFrame => (15, 15),
-            BlockType::EndPortalFrameFilled => (6, 4),
+            BlockType::EndPortalFrame => match face_idx {
+                4 => (15, 15), // top
+                _ => (9, 4),   // sides and bottom
+            },
+            BlockType::EndPortalFrameFilled => match face_idx {
+                4 => (6, 4), // frame top composited with the Eye of Ender
+                _ => (9, 4), // sides and bottom retain the frame texture
+            },
             BlockType::EndPortal => (14, 10),
             BlockType::Purpur => (15, 10),
             BlockType::DragonEgg => (14, 11),
@@ -1693,6 +1699,8 @@ const REDSTONE_TORCH_ATLAS_TILE: (u32, u32) = (6, 2);
 
 const CACTUS_MIN: f32 = 1.0 / 16.0;
 const CACTUS_MAX: f32 = 15.0 / 16.0;
+const END_PORTAL_FRAME_HEIGHT: f32 = 13.0 / 16.0;
+const END_PORTAL_SURFACE_HEIGHT: f32 = 12.0 / 16.0;
 
 // Tile-local UV rectangles with a half-texel inset. Side faces use the full
 // flame/stem artwork, the cap uses the flame, and the base stretches the final
@@ -1807,6 +1815,90 @@ fn append_cactus_mesh(
             region_coord,
         );
     }
+}
+
+fn append_end_portal_frame_mesh(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    block: BlockType,
+    sky_light: u8,
+    block_light: u8,
+    region_coord: (i32, i32),
+) {
+    for (face_idx, (_, corner_data)) in BLOCK_FACES.iter().enumerate() {
+        let multiplier_code = match face_idx {
+            4 => 0.0,
+            5 => 2.0,
+            _ => 1.0,
+        };
+        let light_level = sky_light as f32
+            + block_light as f32 * 16.0
+            + multiplier_code * 256.0;
+        let mut positions = [[0.0; 3]; 4];
+        let mut local_uvs = [[0.0; 2]; 4];
+        for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
+            positions[corner_idx] = [
+                origin[0] + offset[0],
+                origin[1]
+                    + if offset[1] == 0.0 {
+                        0.0
+                    } else {
+                        END_PORTAL_FRAME_HEIGHT
+                    },
+                origin[2] + offset[2],
+            ];
+            local_uvs[corner_idx] = *uv;
+        }
+        push_terrain_quad(
+            vertices,
+            indices,
+            positions,
+            local_uvs,
+            block.get_face_tex_index(face_idx),
+            light_level,
+            [1.0; 4],
+            region_coord,
+        );
+    }
+}
+
+fn append_end_portal_surface(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    region_coord: (i32, i32),
+) {
+    let y = origin[1] + END_PORTAL_SURFACE_HEIGHT;
+    let positions = [
+        [origin[0], y, origin[2] + 1.0],
+        [origin[0] + 1.0, y, origin[2] + 1.0],
+        [origin[0] + 1.0, y, origin[2]],
+        [origin[0], y, origin[2]],
+    ];
+    let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let tile = BlockType::EndPortal.get_face_tex_index(4);
+    let light_level = 15.0 * 16.0 + 15.0;
+    push_terrain_quad(
+        vertices,
+        indices,
+        positions,
+        uvs,
+        tile,
+        light_level,
+        [1.0; 4],
+        region_coord,
+    );
+    push_terrain_quad(
+        vertices,
+        indices,
+        [positions[3], positions[2], positions[1], positions[0]],
+        uvs,
+        tile,
+        light_level,
+        [1.0; 4],
+        region_coord,
+    );
 }
 
 fn face_should_render(
@@ -1973,6 +2065,8 @@ fn is_greedy_cube(block: BlockType) -> bool {
                 | BlockType::OakTrapdoor
                 | BlockType::OakTrapdoorOpen
                 | BlockType::Cactus
+                | BlockType::EndPortalFrame
+                | BlockType::EndPortalFrameFilled
         )
 }
 
@@ -3748,6 +3842,32 @@ impl Chunk {
                         continue;
                     }
 
+                    if matches!(
+                        block,
+                        BlockType::EndPortalFrame | BlockType::EndPortalFrameFilled
+                    ) {
+                        append_end_portal_frame_mesh(
+                            &mut opaque_vertices,
+                            &mut opaque_indices,
+                            [world_x as f32, world_y as f32, world_z as f32],
+                            block,
+                            voxel.sky,
+                            voxel.block_light,
+                            region_coord,
+                        );
+                        continue;
+                    }
+
+                    if block == BlockType::EndPortal {
+                        append_end_portal_surface(
+                            &mut trans_vertices,
+                            &mut trans_indices,
+                            [world_x as f32, world_y as f32, world_z as f32],
+                            region_coord,
+                        );
+                        continue;
+                    }
+
                     if block.is_cross_model() {
                         let sky_val = voxel.sky;
                         let block_val = voxel.block_light;
@@ -4671,6 +4791,19 @@ impl BlockType {
 mod tests {
     use super::*;
     use glam::Vec3;
+
+    #[test]
+    fn end_portal_frames_use_distinct_top_side_and_filled_top_tiles() {
+        for block in [BlockType::EndPortalFrame, BlockType::EndPortalFrameFilled] {
+            assert_eq!(block.get_face_tex_index(0), (9, 4));
+            assert_eq!(block.get_face_tex_index(5), (9, 4));
+        }
+        assert_eq!(BlockType::EndPortalFrame.get_face_tex_index(4), (15, 15));
+        assert_eq!(
+            BlockType::EndPortalFrameFilled.get_face_tex_index(4),
+            (6, 4)
+        );
+    }
 
     fn empty_test_chunk() -> Chunk {
         let mut chunk = Chunk::new(0, 0);
@@ -6047,5 +6180,30 @@ mod tests {
         assert!((max_x - (8.0 + 15.0 / 16.0)).abs() < 1e-4);
         assert!((min_z - (8.0 + 1.0 / 16.0)).abs() < 1e-4);
         assert!((max_z - (8.0 + 15.0 / 16.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn end_portal_frame_and_surface_use_lower_minecraft_heights() {
+        for block in [BlockType::EndPortalFrame, BlockType::EndPortalFrameFilled] {
+            let (opaque_v, opaque_i, trans_v, trans_i) = single_torch_mesh(block, 15, 0);
+            assert!(trans_v.is_empty() && trans_i.is_empty());
+            assert_eq!(opaque_v.len(), 24);
+            assert_eq!(opaque_i.len(), 36);
+            let max_y = opaque_v
+                .iter()
+                .map(|vertex| vertex.pos[1] as f32 / 32.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!((max_y - (1.0 + END_PORTAL_FRAME_HEIGHT)).abs() < 1e-4);
+        }
+
+        let (opaque_v, opaque_i, trans_v, trans_i) =
+            single_torch_mesh(BlockType::EndPortal, 15, 15);
+        assert!(opaque_v.is_empty() && opaque_i.is_empty());
+        assert_eq!(trans_v.len(), 8);
+        assert_eq!(trans_i.len(), 12);
+        assert!(trans_v.iter().all(|vertex| {
+            (vertex.pos[1] as f32 / 32.0 - (1.0 + END_PORTAL_SURFACE_HEIGHT)).abs() < 1e-4
+        }));
+        assert!(END_PORTAL_SURFACE_HEIGHT < END_PORTAL_FRAME_HEIGHT);
     }
 }

@@ -51,6 +51,7 @@ fn is_explicit_breakable_decoration(block: BlockType) -> bool {
             | BlockType::PressurePlatePowered
             | BlockType::SnowLayer
             | BlockType::WitherSkeletonSkull
+            | BlockType::EndPortal
     )
 }
 
@@ -240,13 +241,17 @@ mod tests {
             BlockType::Lava,
             BlockType::Fire,
             BlockType::NetherPortal,
-            BlockType::EndPortal,
         ] {
             assert!(
                 !RaycastTargetPolicy::Break.targets(block),
                 "{block:?} is environmental, not a mineable target"
             );
         }
+
+        assert!(
+            RaycastTargetPolicy::Break.targets(BlockType::EndPortal),
+            "End portals must be targetable so Creative mode can remove them"
+        );
     }
 
     #[test]
