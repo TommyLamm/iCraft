@@ -53,6 +53,11 @@ pub struct PlayerState {
     pub drowning_timer: f32,     // in seconds
     pub experience: u32,
     pub experience_level: u32,
+    pub spawn_point: Option<[i32; 3]>,
+    pub spawn_dimension: Option<crate::dimension::Dimension>,
+    pub is_sleeping: bool,
+    pub sleep_timer: f32,
+    pub bed_pos: Option<[i32; 3]>,
 }
 
 impl PlayerState {
@@ -73,6 +78,11 @@ impl PlayerState {
             drowning_timer: 0.0,
             experience: 0,
             experience_level: 0,
+            spawn_point: None,
+            spawn_dimension: None,
+            is_sleeping: false,
+            sleep_timer: 0.0,
+            bed_pos: None,
         }
     }
 
@@ -89,6 +99,15 @@ impl PlayerState {
         self.starve_timer = 0.0;
         self.oxygen = 300.0;
         self.drowning_timer = 0.0;
+        self.experience = 0;
+        self.experience_level = 0;
+        self.is_sleeping = false;
+        self.sleep_timer = 0.0;
+        self.bed_pos = None;
+    }
+
+    pub fn death_experience_drop(&self) -> u32 {
+        (self.experience_level * 7).min(100)
     }
 
     pub fn take_damage(&mut self, amount: f32, source: DamageSource) -> bool {
@@ -348,7 +367,17 @@ mod tests {
         assert_eq!(state.starve_timer, 0.0);
         assert_eq!(state.oxygen, 300.0);
         assert_eq!(state.drowning_timer, 0.0);
-        assert_eq!(state.experience, 17);
-        assert_eq!(state.experience_level, 4);
+        assert_eq!(state.experience, 0);
+        assert_eq!(state.experience_level, 0);
+    }
+
+    #[test]
+    fn test_death_experience_drop_caps_at_100() {
+        let mut state = PlayerState::new();
+        state.experience_level = 5;
+        assert_eq!(state.death_experience_drop(), 35);
+
+        state.experience_level = 20;
+        assert_eq!(state.death_experience_drop(), 100);
     }
 }

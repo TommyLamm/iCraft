@@ -41,6 +41,7 @@ pub enum Item {
     Bookshelf,
     Torch,
     Lava,
+    Bed,
 
     // Tools
     StoneSword,
@@ -202,6 +203,7 @@ pub const ALL_ITEMS: &[Item] = &[
     Item::Bookshelf,
     Item::Torch,
     Item::Lava,
+    Item::Bed,
     Item::StoneSword,
     Item::StonePickaxe,
     Item::StoneAxe,
@@ -845,6 +847,7 @@ impl Item {
             | Item::EyeOfEnder
             | Item::NetherStar
             | Item::BlazeRod
+            | Item::Bed
             | Item::ShulkerShell => Some(CreativeTab::Misc),
         }
     }
@@ -1760,6 +1763,20 @@ impl Item {
                     tex_coords,
                 }
             }
+            Item::Bed => ItemProperties {
+                name: "Bed",
+                max_stack: 1,
+                is_block: true,
+                block_type: Some(BlockType::Bed),
+                tex_coords: (6, 0),
+            },
+            Item::Wool => ItemProperties {
+                name: "Wool",
+                max_stack: 64,
+                is_block: false,
+                block_type: None,
+                tex_coords: (0, 4),
+            },
             item @ (Item::FlintAndSteel
             | Item::EyeOfEnder
             | Item::Elytra
@@ -1822,6 +1839,7 @@ impl Item {
             BlockType::Bookshelf => Item::Bookshelf,
             BlockType::Torch => Item::Torch,
             BlockType::Lava => Item::Lava,
+            BlockType::Bed => Item::Bed,
             // Trees & Biomes Additions
             BlockType::BirchLog => Item::BirchLog,
             BlockType::BirchPlanks => Item::BirchPlanks,

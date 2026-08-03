@@ -378,10 +378,32 @@ impl std::error::Error for SaveError {}
 
 pub type SaveResult<T> = Result<T, SaveError>;
 
+fn default_spawn_x() -> i32 {
+    8
+}
+fn default_spawn_y() -> i32 {
+    80
+}
+fn default_spawn_z() -> i32 {
+    8
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LevelData {
     pub seed: u32,
     pub time: u64,
+    #[serde(default = "default_spawn_x")]
+    pub spawn_x: i32,
+    #[serde(default = "default_spawn_y")]
+    pub spawn_y: i32,
+    #[serde(default = "default_spawn_z")]
+    pub spawn_z: i32,
+    #[serde(default)]
+    pub spawn_dimension: crate::dimension::Dimension,
+    #[serde(default)]
+    pub spawn_yaw: f32,
+    #[serde(default)]
+    pub version: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -448,6 +470,12 @@ pub struct EntitySaveData {
     pub wool_color: [f32; 3],
     pub dropped_item: Option<crate::inventory::Item>,
     pub dropped_count: u32,
+    #[serde(default)]
+    pub dropped_stack: Option<ItemStackData>,
+    #[serde(default)]
+    pub item_age: f32,
+    #[serde(default)]
+    pub xp_value: u32,
 }
 
 impl From<&crate::entity::Entity> for EntitySaveData {
@@ -469,6 +497,9 @@ impl From<&crate::entity::Entity> for EntitySaveData {
             wool_color: entity.wool_color,
             dropped_item: entity.dropped_item,
             dropped_count: entity.dropped_count,
+            dropped_stack: entity.dropped_stack.as_ref().map(ItemStackData::from),
+            item_age: entity.item_age,
+            xp_value: entity.xp_value,
         }
     }
 }
@@ -491,6 +522,16 @@ impl EntitySaveData {
         entity.wool_color = self.wool_color;
         entity.dropped_item = self.dropped_item;
         entity.dropped_count = self.dropped_count;
+        entity.dropped_stack = self.dropped_stack.as_ref().map(|s| s.to_item_stack());
+        if entity.dropped_stack.is_none() && entity.dropped_item.is_some() {
+            let item = entity.dropped_item.unwrap();
+            entity.dropped_stack = Some(crate::inventory::ItemStack::new(
+                item,
+                entity.dropped_count.max(1),
+            ));
+        }
+        entity.item_age = self.item_age;
+        entity.xp_value = self.xp_value;
         entity
     }
 
@@ -498,6 +539,7 @@ impl EntitySaveData {
         self.entity_type.is_living()
             || self.entity_type.is_persistent()
             || self.entity_type == crate::entity::EntityType::DroppedItem
+            || self.entity_type == crate::entity::EntityType::ExperienceOrb
     }
 }
 
@@ -584,6 +626,10 @@ pub struct PlayerData {
     pub inventory: InventoryData,
     #[serde(default)]
     pub advancements: crate::advancements::AdvancementProgressData,
+    #[serde(default)]
+    pub spawn_point: Option<[i32; 3]>,
+    #[serde(default)]
+    pub spawn_dimension: Option<crate::dimension::Dimension>,
 }
 
 impl PlayerData {
@@ -612,6 +658,8 @@ impl PlayerData {
             game_mode,
             inventory: InventoryData::from(inventory),
             advancements,
+            spawn_point: state.spawn_point,
+            spawn_dimension: state.spawn_dimension,
         }
     }
 }
@@ -2404,6 +2452,8 @@ impl From<PreviousPlayerData> for PlayerData {
             game_mode: old.game_mode,
             inventory: old.inventory.into(),
             advancements: old.advancements,
+            spawn_point: None,
+            spawn_dimension: None,
         }
     }
 }
@@ -2487,6 +2537,8 @@ impl From<LegacyPlayerData> for PlayerData {
             game_mode: old.game_mode,
             inventory: old.inventory.into(),
             advancements: crate::advancements::AdvancementProgressData::default(),
+            spawn_point: None,
+            spawn_dimension: None,
         }
     }
 }
@@ -2494,6 +2546,7 @@ impl From<LegacyPlayerData> for PlayerData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dimension::Dimension;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -2501,6 +2554,12 @@ mod tests {
         let level = LevelData {
             seed: 12345,
             time: 6000,
+            spawn_x: 8,
+            spawn_y: 80,
+            spawn_z: 8,
+            spawn_dimension: Dimension::Overworld,
+            spawn_yaw: 0.0,
+            version: 2,
         };
         let encoded_level = bincode::serialize(&level).unwrap();
         let decoded_level: LevelData = bincode::deserialize(&encoded_level).unwrap();
@@ -2520,6 +2579,8 @@ mod tests {
             experience: 120,
             experience_level: 12,
             game_mode: GameMode::Survival,
+            spawn_point: None,
+            spawn_dimension: None,
             inventory: InventoryData {
                 hotbar: vec![Some(ItemStackData {
                     item: Item::Stone,
@@ -2638,6 +2699,8 @@ mod tests {
             game_mode: GameMode::Creative,
             inventory: InventoryData::from(&inventory),
             advancements: Default::default(),
+            spawn_point: None,
+            spawn_dimension: None,
         };
 
         let unique = SystemTime::now()
@@ -2655,6 +2718,12 @@ mod tests {
                 &LevelData {
                     seed: 99,
                     time: 1234,
+                    spawn_x: 8,
+                    spawn_y: 80,
+                    spawn_z: 8,
+                    spawn_dimension: Dimension::Overworld,
+                    spawn_yaw: 0.0,
+                    version: 2,
                 },
                 &player,
             )
@@ -2713,6 +2782,12 @@ mod tests {
             bincode::serialize(&LevelData {
                 seed: 7,
                 time: 9000,
+                spawn_x: 8,
+                spawn_y: 80,
+                spawn_z: 8,
+                spawn_dimension: Dimension::Overworld,
+                spawn_yaw: 0.0,
+                version: 2,
             })
             .unwrap(),
         )
@@ -2996,6 +3071,9 @@ mod tests {
             wool_color: [1.0, 1.0, 1.0],
             dropped_item: None,
             dropped_count: 0,
+            dropped_stack: None,
+            item_age: 0.0,
+            xp_value: 0,
         }];
 
         manager
@@ -3744,5 +3822,70 @@ mod tests {
         loaded_save_data.restore_to_chunk(&mut reloaded);
 
         assert_eq!(reloaded.get_block_entity(1, 2, 3), Some(&chest_stub));
+    }
+
+    #[test]
+    fn test_plan04_save_roundtrip_and_migration() {
+        // 1. LevelData roundtrip
+        let level = LevelData {
+            seed: 12345,
+            time: 6000,
+            spawn_x: 100,
+            spawn_y: 65,
+            spawn_z: -200,
+            spawn_dimension: crate::dimension::Dimension::Overworld,
+            spawn_yaw: 90.0,
+            version: 2,
+        };
+        let bytes = bincode::serialize(&level).unwrap();
+        let restored_level: LevelData = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(restored_level.spawn_x, 100);
+        assert_eq!(restored_level.spawn_y, 65);
+        assert_eq!(restored_level.spawn_z, -200);
+
+        // 2. EntitySaveData dropped_stack migration
+        let mut stack = crate::inventory::ItemStack::new(crate::inventory::Item::DiamondSword, 1);
+        stack.durability = 100;
+
+        let mut entity = crate::entity::Entity::new(
+            1,
+            crate::entity::EntityType::DroppedItem,
+            glam::Vec3::new(10.0, 64.0, 10.0),
+        );
+        entity.dropped_stack = Some(stack.clone());
+        entity.dropped_item = Some(crate::inventory::Item::DiamondSword);
+        entity.dropped_count = 1;
+
+        let save_entity = EntitySaveData::from(&entity);
+        let restored_entity = save_entity.to_entity(1);
+        let restored_stack = restored_entity.dropped_stack.unwrap();
+        assert_eq!(restored_stack.item, crate::inventory::Item::DiamondSword);
+        assert_eq!(restored_stack.durability, 100);
+
+        // 3. PlayerData spawn_point
+        let mut player_state = crate::player::PlayerState::new();
+        player_state.spawn_point = Some([12, 64, -15]);
+        player_state.spawn_dimension = Some(crate::dimension::Dimension::Overworld);
+
+        let inv = crate::inventory::Inventory::new();
+        let adv = crate::advancements::AdvancementProgressData::default();
+        let player_data = PlayerData::from_state(
+            glam::Vec3::ZERO,
+            glam::Vec3::ZERO,
+            0.0,
+            0.0,
+            &player_state,
+            crate::save::GameMode::Survival,
+            &inv,
+            adv,
+        );
+
+        let bytes = bincode::serialize(&player_data).unwrap();
+        let restored_player: PlayerData = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(restored_player.spawn_point, Some([12, 64, -15]));
+        assert_eq!(
+            restored_player.spawn_dimension,
+            Some(crate::dimension::Dimension::Overworld)
+        );
     }
 }

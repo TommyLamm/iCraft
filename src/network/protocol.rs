@@ -376,6 +376,25 @@ pub enum Packet {
         consumed_item: bool,
         drops: Vec<ItemWire>,
     },
+    PlayerRespawnRequest {
+        protocol_version: u32,
+    },
+    PlayerRespawnResult {
+        protocol_version: u32,
+        position: [f32; 3],
+        dimension: u8,
+    },
+    SleepRequest {
+        protocol_version: u32,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    SleepStateSync {
+        protocol_version: u32,
+        player_id: PlayerId,
+        is_sleeping: bool,
+    },
 }
 
 impl Packet {
@@ -443,6 +462,16 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::BlockActionResult {
+                protocol_version, ..
+            }
+            | Packet::PlayerRespawnRequest { protocol_version }
+            | Packet::PlayerRespawnResult {
+                protocol_version, ..
+            }
+            | Packet::SleepRequest {
+                protocol_version, ..
+            }
+            | Packet::SleepStateSync {
                 protocol_version, ..
             } => *protocol_version,
         }

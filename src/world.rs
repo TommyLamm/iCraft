@@ -344,6 +344,7 @@ pub enum BlockType {
     WitherSkeletonSkull = 86,
     NetherBrick = 87,
     EndCityChest = 88,
+    Bed = 89,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1312,6 +1313,14 @@ impl BlockType {
                 is_passable: false,
                 light_emission: 3,
             },
+            BlockType::Bed => BlockProperties {
+                name: "Bed",
+                hardness: 0.2,
+                render_type: RenderType::Cutout,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
         }
     }
 
@@ -1479,6 +1488,7 @@ impl BlockType {
             BlockType::WitherSkeletonSkull => (15, 11),
             BlockType::NetherBrick => (9, 10),
             BlockType::EndCityChest => (10, 10),
+            BlockType::Bed => (6, 0),
         }
     }
 }
@@ -4912,6 +4922,49 @@ impl BlockType {
             _ => None,
         }
     }
+}
+
+/// Search around target_pos for a safe, standable position with 2 air blocks above solid ground.
+pub fn find_safe_spawn_position(
+    chunk_manager: &crate::chunk_manager::ChunkManager,
+    target_pos: (i32, i32, i32),
+) -> (glam::Vec3, bool) {
+    let (tx, ty, tz) = target_pos;
+    for r in 0..=4i32 {
+        for dx in -r..=r {
+            for dz in -r..=r {
+                if dx.abs() != r && dz.abs() != r {
+                    continue;
+                }
+                let x = tx + dx;
+                let z = tz + dz;
+                for y in (ty - 10..=ty + 10).rev() {
+                    let floor_block = chunk_manager.get_block(x, y, z);
+                    let feet_block = chunk_manager.get_block(x, y + 1, z);
+                    let head_block = chunk_manager.get_block(x, y + 2, z);
+                    if floor_block.properties().is_solid
+                        && !matches!(
+                            floor_block,
+                            BlockType::Lava | BlockType::Fire | BlockType::Cactus
+                        )
+                        && feet_block.properties().is_passable
+                        && !matches!(feet_block, BlockType::Lava | BlockType::Fire)
+                        && head_block.properties().is_passable
+                        && !matches!(head_block, BlockType::Lava | BlockType::Fire)
+                    {
+                        return (
+                            glam::Vec3::new(x as f32 + 0.5, (y + 1) as f32, z as f32 + 0.5),
+                            true,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    (
+        glam::Vec3::new(tx as f32 + 0.5, ty as f32, tz as f32 + 0.5),
+        false,
+    )
 }
 
 #[cfg(test)]

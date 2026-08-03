@@ -71,6 +71,14 @@ impl Direction {
         }
     }
 
+    pub fn dx(self) -> i32 {
+        self.delta().0
+    }
+
+    pub fn dz(self) -> i32 {
+        self.delta().2
+    }
+
     fn left(self) -> Self {
         match self {
             Self::North => Self::West,
