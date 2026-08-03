@@ -372,9 +372,7 @@ pub fn update_dimension_entities(
                         entity.yaw = f32::atan2(direction.x, direction.z);
                         entity.velocity.x = direction.x * 4.5;
                         entity.velocity.z = direction.z * 4.5;
-                        if delta.length_squared() <= 2.2 * 2.2
-                            && entity.action_cooldown <= 0.0
-                        {
+                        if delta.length_squared() <= 2.2 * 2.2 && entity.action_cooldown <= 0.0 {
                             events.player_damage.push(PlayerDamageEvent::new(
                                 7.0,
                                 Some(entity.id),
@@ -392,10 +390,13 @@ pub fn update_dimension_entities(
                             .id
                             .wrapping_mul(0x9E37_79B9_7F4A_7C15)
                             .wrapping_add(cycle.wrapping_mul(0xBF58_476D_1CE4_E5B9));
-                        let angle = (seed as u32) as f32 / u32::MAX as f32
-                            * std::f32::consts::TAU;
+                        let angle = (seed as u32) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
                         entity.yaw = angle;
-                        let idle_speed = if entity.ai_timer % 6.0 < 4.5 { 1.25 } else { 0.0 };
+                        let idle_speed = if entity.ai_timer % 6.0 < 4.5 {
+                            1.25
+                        } else {
+                            0.0
+                        };
                         entity.velocity.x = angle.sin() * idle_speed;
                         entity.velocity.z = angle.cos() * idle_speed;
                     }
@@ -477,7 +478,10 @@ fn repair_legacy_end_crystal_towers(
         else {
             continue;
         };
-        if !chunks.chunks.contains_key(&(center_chunk_x, center_chunk_z)) {
+        if !chunks
+            .chunks
+            .contains_key(&(center_chunk_x, center_chunk_z))
+        {
             continue;
         }
         if (1..=top_y)
@@ -944,11 +948,7 @@ mod tests {
         chunks.chunks.insert((2, 0), chunk);
 
         let mut events = BossEvents::default();
-        repair_legacy_end_crystal_towers(
-            &chunks,
-            &[Vec3::new(42.5, 78.0, 0.5)],
-            &mut events,
-        );
+        repair_legacy_end_crystal_towers(&chunks, &[Vec3::new(42.5, 78.0, 0.5)], &mut events);
 
         assert!(events.block_placements.iter().any(|placement| {
             placement.position == (42, 77, 0) && placement.block == BlockType::Obsidian
@@ -1035,11 +1035,8 @@ mod tests {
 
     #[test]
     fn dragon_orientation_follows_flight_velocity() {
-        let mut dragon = crate::entity::Entity::new(
-            1,
-            EntityType::EnderDragon,
-            Vec3::new(0.0, 80.0, 0.0),
-        );
+        let mut dragon =
+            crate::entity::Entity::new(1, EntityType::EnderDragon, Vec3::new(0.0, 80.0, 0.0));
         let mut pending_spawns = Vec::new();
         let mut events = BossEvents::default();
 

@@ -240,7 +240,10 @@ mod tests {
                 RaycastTargetPolicy::Place,
             );
 
-            assert_eq!(hit.map(|result| result.block_pos), Some(Vec3::new(8.0, 72.0, 8.0)));
+            assert_eq!(
+                hit.map(|result| result.block_pos),
+                Some(Vec3::new(8.0, 72.0, 8.0))
+            );
         }
     }
 

@@ -690,6 +690,90 @@ mod remote_sync_tests {
     }
 
     #[test]
+    fn remote_block_entity_delta_applies_and_respects_monotonic_revisions() {
+        use crate::block_entity::{BlockEntity, ChestStub};
+        use crate::world::{BlockType, Chunk};
+
+        let mut chunk = Chunk::new(0, 0);
+        chunk.set_block_local(4, 10, 4, BlockType::Chest);
+
+        let chest_stub = BlockEntity::Chest(ChestStub {
+            custom_name: Some("Host Chest".to_string()),
+        });
+
+        // Insert at revision 5
+        let req1 = crate::network::protocol::Packet::BlockEntityDelta {
+            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
+            dimension: 0,
+            revision: 5,
+            x: 4,
+            y: 10,
+            z: 4,
+            entity: Some(chest_stub.clone()),
+        };
+
+        // Out of order/stale packet at revision 3
+        let req_stale = crate::network::protocol::Packet::BlockEntityDelta {
+            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
+            dimension: 0,
+            revision: 3,
+            x: 4,
+            y: 10,
+            z: 4,
+            entity: None,
+        };
+
+        let mut client_chunk_revisions = std::collections::HashMap::new();
+
+        // Apply revision 5
+        if let crate::network::protocol::Packet::BlockEntityDelta {
+            revision,
+            x,
+            y,
+            z,
+            entity,
+            ..
+        } = req1
+        {
+            let key = (crate::dimension::Dimension::Overworld, 0, 0);
+            if revision > *client_chunk_revisions.get(&key).unwrap_or(&0) {
+                client_chunk_revisions.insert(key, revision);
+                if let Some(ent) = entity {
+                    chunk
+                        .insert_block_entity(x as u8, y as i16, z as u8, ent)
+                        .unwrap();
+                }
+            }
+        }
+        assert_eq!(chunk.get_block_entity(4, 10, 4), Some(&chest_stub));
+
+        // Attempt revision 3 (should be ignored due to monotonic revision)
+        if let crate::network::protocol::Packet::BlockEntityDelta {
+            revision,
+            x,
+            y,
+            z,
+            entity,
+            ..
+        } = req_stale
+        {
+            let key = (crate::dimension::Dimension::Overworld, 0, 0);
+            if revision > *client_chunk_revisions.get(&key).unwrap_or(&0) {
+                client_chunk_revisions.insert(key, revision);
+                if let Some(ent) = entity {
+                    chunk
+                        .insert_block_entity(x as u8, y as i16, z as u8, ent)
+                        .unwrap();
+                } else {
+                    chunk.remove_block_entity(x as u8, y as i16, z as u8);
+                }
+            }
+        }
+        // Chest entity should still remain because revision 3 was rejected!
+        assert_eq!(chunk.get_block_entity(4, 10, 4), Some(&chest_stub));
+    }
+
+    #[test]
     fn batched_pose_arrivals_keep_sender_cadence() {
         let mut remote = RemotePlayerState::new(1, "Alex".into());
         for (sequence, sender_time_millis, x) in [(1, 1_000, 0.0), (2, 1_050, 1.0), (3, 1_100, 2.0)]
@@ -3489,6 +3573,14 @@ enum NetworkInbound {
         block: u32,
         state: u8,
     },
+    BlockEntityDelta {
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
+    },
     ChunkData {
         dimension: u8,
         cx: i32,
@@ -3496,6 +3588,7 @@ enum NetworkInbound {
         revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        block_entities: Vec<u8>,
     },
     EntitySpawn {
         dimension: u8,
@@ -4030,6 +4123,21 @@ impl NetworkHandle {
                             consumed_item,
                             drops,
                         },
+                        crate::network::client::ClientToGame::BlockEntityDelta {
+                            dimension,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            entity,
+                        } => NetworkInbound::BlockEntityDelta {
+                            dimension,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            entity,
+                        },
                         crate::network::client::ClientToGame::ChunkData {
                             dimension,
                             cx,
@@ -4037,6 +4145,7 @@ impl NetworkHandle {
                             revision,
                             blocks,
                             block_states,
+                            block_entities,
                         } => NetworkInbound::ChunkData {
                             dimension,
                             cx,
@@ -4044,6 +4153,7 @@ impl NetworkHandle {
                             revision,
                             blocks,
                             block_states,
+                            block_entities,
                         },
                         crate::network::client::ClientToGame::EntitySpawn {
                             dimension,
@@ -4265,6 +4375,29 @@ impl NetworkHandle {
         }
     }
 
+    fn broadcast_block_entity_delta(
+        &self,
+        dimension: crate::dimension::Dimension,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastBlockEntityDelta {
+                    dimension: dimension as u8,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    entity,
+                },
+            );
+        }
+    }
+
     fn broadcast_entity_spawn(
         &self,
         dimension: crate::dimension::Dimension,
@@ -4366,6 +4499,7 @@ impl NetworkHandle {
         revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        block_entities: Vec<u8>,
         to: crate::network::protocol::PlayerId,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
@@ -4376,6 +4510,7 @@ impl NetworkHandle {
                 revision,
                 blocks,
                 block_states,
+                block_entities,
                 to,
             });
         }
@@ -4717,7 +4852,7 @@ pub struct State {
     network_time: f64,
     /// Client-only: chunk payloads that arrived from the host before the chunk
     /// was streamed in. Applied when `update_chunks` loads the coordinate.
-    pending_chunk_payloads: std::collections::HashMap<(i32, i32), (u64, Vec<u8>, Vec<u8>)>,
+    pending_chunk_payloads: std::collections::HashMap<(i32, i32), (u64, Vec<u8>, Vec<u8>, Vec<u8>)>,
     /// Client-only coalesced mutations for chunks that are not streamed in yet.
     /// The latest authoritative value wins for each world-space block.
     pending_block_changes: std::collections::HashMap<
@@ -6395,6 +6530,68 @@ impl State {
         );
     }
 
+    fn broadcast_block_entity_delta(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
+    ) {
+        if !matches!(self.role, MultiplayerRole::Host { .. }) {
+            return;
+        }
+        let cx = x.div_euclid(CHUNK_WIDTH as i32);
+        let cz = z.div_euclid(CHUNK_DEPTH as i32);
+        let revision = match self.mutation_revisions.bump(self.current_dimension, cx, cz) {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.report_mutation_revision_error(error, "broadcasting a block entity delta");
+                return;
+            }
+        };
+        self.mutation_revision_generation = self.mutation_revision_generation.saturating_add(1);
+        self.mutation_index_dirty = true;
+        self.network.broadcast_block_entity_delta(
+            self.current_dimension,
+            revision,
+            x,
+            y,
+            z,
+            entity,
+        );
+    }
+
+    pub fn apply_mutation_batch(
+        &mut self,
+        requests: Vec<crate::world_mutation::BlockMutationRequest>,
+    ) -> Result<crate::world_mutation::BlockMutationOutcome, crate::world_mutation::MutationError>
+    {
+        let outcome = crate::world_mutation::apply_batch(&mut self.chunk_manager, requests)?;
+
+        for m in &outcome.mutations {
+            self.redstone.on_block_changed(
+                &self.chunk_manager,
+                m.pos,
+                crate::redstone::Direction::North,
+            );
+            if matches!(self.role, MultiplayerRole::Host { .. }) {
+                self.broadcast_block_change(m.pos.0, m.pos.1, m.pos.2, m.new_block);
+                if m.old_entity != m.new_entity {
+                    self.broadcast_block_entity_delta(
+                        m.pos.0,
+                        m.pos.1,
+                        m.pos.2,
+                        m.new_entity.clone(),
+                    );
+                }
+            }
+        }
+
+        self.invalidate_chunk_meshes(outcome.dirty_chunks.clone(), DependencyReason::BreakPlace);
+
+        Ok(outcome)
+    }
+
     fn report_mutation_revision_error(
         &mut self,
         error: crate::save::MutationRevisionIndexCapacityError,
@@ -6451,7 +6648,7 @@ impl State {
                         continue;
                     };
                     match payload.result {
-                        Ok((blocks, block_states)) => {
+                        Ok((blocks, block_states, block_entities)) => {
                             self.network.send_chunk_to(
                                 payload.key.dimension,
                                 payload.key.cx,
@@ -6459,6 +6656,7 @@ impl State {
                                 payload.key.revision,
                                 blocks,
                                 block_states,
+                                block_entities,
                                 payload.key.player_id,
                             );
                             entry.status = CatchupStatus::ServerSubmission {
@@ -7076,6 +7274,16 @@ impl State {
             } => {
                 self.apply_remote_block_change(dimension, revision, x, y, z, block, state);
             }
+            NetworkInbound::BlockEntityDelta {
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                entity,
+            } => {
+                self.apply_remote_block_entity_delta(dimension, revision, x, y, z, entity);
+            }
             NetworkInbound::ChunkData {
                 dimension,
                 cx,
@@ -7083,8 +7291,17 @@ impl State {
                 revision,
                 blocks,
                 block_states,
+                block_entities,
             } => {
-                self.apply_remote_chunk_data(dimension, cx, cz, revision, blocks, block_states);
+                self.apply_remote_chunk_data(
+                    dimension,
+                    cx,
+                    cz,
+                    revision,
+                    blocks,
+                    block_states,
+                    block_entities,
+                );
             }
             NetworkInbound::EntitySpawn {
                 dimension,
@@ -8070,12 +8287,17 @@ impl State {
                     }
 
                     let mut pending_base_revision = 0;
-                    if let Some((revision, blocks, block_states)) =
+                    if let Some((revision, blocks, block_states, block_entities)) =
                         self.pending_chunk_payloads.remove(&result.coord)
                     {
                         pending_base_revision = revision;
                         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&result.coord) {
-                            Self::restore_chunk_payload(chunk, &blocks, &block_states);
+                            Self::restore_chunk_payload(
+                                chunk,
+                                &blocks,
+                                &block_states,
+                                &block_entities,
+                            );
                         }
                         self.invalidate_chunk_mesh(result.coord, DependencyReason::Network);
                     }
@@ -10254,6 +10476,45 @@ impl State {
         self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Network);
     }
 
+    /// Client-side application of an incremental block entity update from host.
+    fn apply_remote_block_entity_delta(
+        &mut self,
+        dimension_wire: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
+    ) {
+        let Some(dimension) = crate::dimension::Dimension::from_wire(dimension_wire) else {
+            return;
+        };
+        if dimension != self.current_dimension {
+            return;
+        }
+        let Some(((cx, cz), (bx, by, bz))) = self.chunk_manager.world_to_local(x, y, z) else {
+            return;
+        };
+        let revision_key = (dimension, cx, cz);
+        if revision
+            <= self
+                .client_chunk_revisions
+                .get(&revision_key)
+                .copied()
+                .unwrap_or(0)
+        {
+            return;
+        }
+        self.client_chunk_revisions.insert(revision_key, revision);
+        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
+            if let Some(ent) = entity {
+                let _ = chunk.insert_block_entity(bx as u8, by as i16, bz as u8, ent);
+            } else {
+                chunk.remove_block_entity(bx as u8, by as i16, bz as u8);
+            }
+        }
+    }
+
     /// Client-side application of a full chunk payload sent by the host during
     /// mid-game join catch-up. The payload uses the same Zlib-compressed layout
     /// as `save.rs::ChunkSaveData`. If the chunk is not loaded yet, the payload
@@ -10266,6 +10527,7 @@ impl State {
         revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        block_entities: Vec<u8>,
     ) {
         let Some(dimension) = crate::dimension::Dimension::from_wire(dimension_wire) else {
             return;
@@ -10285,7 +10547,7 @@ impl State {
         }
         self.client_chunk_revisions.insert(revision_key, revision);
         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-            Self::restore_chunk_payload(chunk, &blocks, &block_states);
+            Self::restore_chunk_payload(chunk, &blocks, &block_states, &block_entities);
             self.invalidate_chunk_mesh((cx, cz), DependencyReason::Network);
             // Re-seed boundary lighting so neighbors pick up the overwritten
             // column heights and light values.
@@ -10317,12 +10579,12 @@ impl State {
             let should_replace = self
                 .pending_chunk_payloads
                 .get(&(cx, cz))
-                .map_or(true, |(existing_revision, _, _)| {
+                .map_or(true, |(existing_revision, _, _, _)| {
                     revision >= *existing_revision
                 });
             if should_replace {
                 self.pending_chunk_payloads
-                    .insert((cx, cz), (revision, blocks, block_states));
+                    .insert((cx, cz), (revision, blocks, block_states, block_entities));
             }
         }
     }
@@ -10330,7 +10592,12 @@ impl State {
     /// Decode a `ChunkSaveData`-style compressed payload into an existing
     /// chunk. Reused by both the save loader and the network catch-up path so
     /// the wire format stays identical to the on-disk format.
-    fn restore_chunk_payload(chunk: &mut crate::world::Chunk, blocks: &[u8], block_states: &[u8]) {
+    fn restore_chunk_payload(
+        chunk: &mut crate::world::Chunk,
+        blocks: &[u8],
+        block_states: &[u8],
+        block_entities: &[u8],
+    ) {
         let save_data = crate::save::ChunkSaveData {
             chunk_x: chunk.chunk_x,
             chunk_z: chunk.chunk_z,
@@ -10341,6 +10608,8 @@ impl State {
             redstone_metadata: Vec::new(),
             block_states: block_states.to_vec(),
             mutation_revision: 0,
+            block_entities: block_entities.to_vec(),
+            data_version: 1,
         };
         save_data.restore_to_chunk(chunk);
     }
@@ -17285,10 +17554,7 @@ mod debug_tests {
     #[test]
     fn creative_can_break_end_portal_while_survival_cannot() {
         assert!(can_break_block(BlockType::EndPortal, GameMode::Creative));
-        assert!(!can_break_block(
-            BlockType::EndPortal,
-            GameMode::Survival
-        ));
+        assert!(!can_break_block(BlockType::EndPortal, GameMode::Survival));
         assert!(!can_break_block(BlockType::Air, GameMode::Creative));
     }
 
@@ -18078,4 +18344,3 @@ mod reach_tests {
         assert_eq!(remainder, Some(ItemStack::new(Item::Dirt, 64)));
     }
 }
-

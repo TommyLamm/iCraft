@@ -1652,8 +1652,7 @@ fn apply_resource_pack(img: &mut RgbaImage) {
 /// pack. Composite that layer over the head crop so the compact atlas keeps
 /// the normal purple eyes instead of rendering a featureless black face.
 fn compose_enderman_eyes(img: &mut RgbaImage) {
-    let path = std::path::Path::new(VANILLA_TEXTURES_DIR)
-        .join("entity/enderman/enderman_eyes.png");
+    let path = std::path::Path::new(VANILLA_TEXTURES_DIR).join("entity/enderman/enderman_eyes.png");
     let Ok(source) = image::open(path) else {
         return;
     };
@@ -1663,8 +1662,7 @@ fn compose_enderman_eyes(img: &mut RgbaImage) {
         let base = *img.get_pixel(10 * 16 + x, 8 * 16 + y);
         let alpha = overlay[3] as f32 / 255.0;
         let blend = |channel: usize| {
-            (overlay[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha)).round()
-                as u8
+            (overlay[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha)).round() as u8
         };
         img.put_pixel(
             10 * 16 + x,
@@ -1686,8 +1684,8 @@ fn make_enderman_tiles_opaque(img: &mut RgbaImage) {
                 let pixel = *img.get_pixel(col * 16 + x, 8 * 16 + y);
                 let alpha = pixel[3] as f32 / 255.0;
                 let blend = |channel: usize| {
-                    (pixel[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha))
-                        .round() as u8
+                    (pixel[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha)).round()
+                        as u8
                 };
                 img.put_pixel(
                     col * 16 + x,
@@ -1748,8 +1746,8 @@ fn make_dragon_tiles_opaque(img: &mut RgbaImage) {
                 let pixel = *img.get_pixel(col * 16 + x, 4 * 16 + y);
                 let alpha = pixel[3] as f32 / 255.0;
                 let blend = |channel: usize| {
-                    (pixel[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha))
-                        .round() as u8
+                    (pixel[channel] as f32 * alpha + base[channel] as f32 * (1.0 - alpha)).round()
+                        as u8
                 };
                 img.put_pixel(
                     col * 16 + x,
@@ -2808,7 +2806,10 @@ mod tests {
         compose_end_portal_frame_tiles(&mut image);
 
         assert_eq!(image.get_pixel(6 * 16, 4 * 16).0, [80, 120, 90, 255]);
-        assert_eq!(image.get_pixel(6 * 16 + 8, 4 * 16 + 8).0, [20, 220, 80, 255]);
+        assert_eq!(
+            image.get_pixel(6 * 16 + 8, 4 * 16 + 8).0,
+            [20, 220, 80, 255]
+        );
     }
 
     #[test]
@@ -2850,16 +2851,15 @@ mod tests {
 
     #[test]
     fn vanilla_end_portal_frame_side_texture_is_available() {
-        let path = std::path::Path::new(VANILLA_TEXTURES_DIR)
-            .join("block/end_portal_frame_side.png");
+        let path =
+            std::path::Path::new(VANILLA_TEXTURES_DIR).join("block/end_portal_frame_side.png");
         let image = image::open(&path).expect("End Portal Frame side texture must load");
         assert_eq!(image.dimensions(), (16, 16));
     }
 
     #[test]
     fn vanilla_ender_dragon_texture_is_available() {
-        let path = std::path::Path::new(VANILLA_TEXTURES_DIR)
-            .join("entity/enderdragon/dragon.png");
+        let path = std::path::Path::new(VANILLA_TEXTURES_DIR).join("entity/enderdragon/dragon.png");
         let image = image::open(&path).expect("Ender Dragon texture must load");
         assert_eq!(image.dimensions(), (256, 256));
     }
@@ -2920,16 +2920,18 @@ mod tests {
             (6, 4, "filled frame top"),
         ] {
             assert!(
-                (0..16u32).all(|y| (0..16u32)
-                    .all(|x| img.get_pixel(col * 16 + x, row * 16 + y).0[3] == 255)),
+                (0..16u32)
+                    .all(|y| (0..16u32)
+                        .all(|x| img.get_pixel(col * 16 + x, row * 16 + y).0[3] == 255)),
                 "{label} must be fully opaque in the compact atlas"
             );
         }
 
         for col in 10..=13u32 {
             assert!(
-                (0..16u32).all(|y| (0..16u32)
-                    .all(|x| img.get_pixel(col * 16 + x, 4 * 16 + y).0[3] == 255)),
+                (0..16u32).all(
+                    |y| (0..16u32).all(|x| img.get_pixel(col * 16 + x, 4 * 16 + y).0[3] == 255)
+                ),
                 "dragon atlas tile {col} must not contain transparent holes"
             );
         }
@@ -2947,8 +2949,9 @@ mod tests {
         );
         for col in [10u32, 11, 12, 14] {
             assert!(
-                (0..16u32).all(|y| (0..16u32)
-                    .all(|x| img.get_pixel(col * 16 + x, 8 * 16 + y).0[3] == 255)),
+                (0..16u32).all(
+                    |y| (0..16u32).all(|x| img.get_pixel(col * 16 + x, 8 * 16 + y).0[3] == 255)
+                ),
                 "Enderman atlas tile {col} must be fully opaque"
             );
         }

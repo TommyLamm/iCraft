@@ -633,6 +633,7 @@ fn finish_chunk(
         heightmap,
         torch_positions: Vec::new(),
         redstone_positions: Vec::new(),
+        block_entities: std::collections::HashMap::new(),
     };
     chunk.rebuild_torch_index();
     chunk.rebuild_redstone_index();

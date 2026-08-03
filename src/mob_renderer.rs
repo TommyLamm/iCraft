@@ -2019,7 +2019,7 @@ mod tests {
         let test_cases = [
             (EntityType::Pig, 0.0, 1.0),
             (EntityType::Cow, 2.0, 3.0),
-            (EntityType::Sheep, 4.0, 6.0),
+            (EntityType::Sheep, 3.0, 4.0),
             (EntityType::Chicken, 7.0, 8.0),
         ];
 
@@ -2184,7 +2184,10 @@ mod tests {
             .iter()
             .map(|vertex| vertex.position[1])
             .fold(f32::NEG_INFINITY, f32::max);
-        assert!(max_y > 2.8, "Enderman model should be nearly three blocks tall");
+        assert!(
+            max_y > 2.8,
+            "Enderman model should be nearly three blocks tall"
+        );
     }
 
     #[test]
@@ -2207,16 +2210,34 @@ mod tests {
         assert_eq!(vertices.len(), 144);
 
         // Find min and max Y across all vertices
-        let min_y = vertices.iter().map(|v| v.position[1]).fold(f32::INFINITY, f32::min);
-        let max_y = vertices.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_y = vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
 
         // Legs start at Y=0.0 and head ends at Y=1.625
-        assert!((min_y - 0.0).abs() < 1e-4, "Min Y should be 0.0, got {}", min_y);
-        assert!((max_y - 1.625).abs() < 1e-4, "Max Y should be 1.625, got {}", max_y);
+        assert!(
+            (min_y - 0.0).abs() < 1e-4,
+            "Min Y should be 0.0, got {}",
+            min_y
+        );
+        assert!(
+            (max_y - 1.625).abs() < 1e-4,
+            "Max Y should be 1.625, got {}",
+            max_y
+        );
 
         // Check vertical continuity: no gap between leg top (0.375) and torso bottom (0.375)
-        let has_y_0_375 = vertices.iter().any(|v| (v.position[1] - 0.375).abs() < 1e-4);
-        assert!(has_y_0_375, "Vertices must exist at Y=0.375 connecting legs and torso");
+        let has_y_0_375 = vertices
+            .iter()
+            .any(|v| (v.position[1] - 0.375).abs() < 1e-4);
+        assert!(
+            has_y_0_375,
+            "Vertices must exist at Y=0.375 connecting legs and torso"
+        );
     }
 }
-

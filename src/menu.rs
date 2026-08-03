@@ -808,9 +808,7 @@ fn discover_worlds() -> Vec<WorldEntry> {
 }
 
 fn world_index_by_directory(worlds: &[WorldEntry], directory: &Path) -> Option<usize> {
-    worlds
-        .iter()
-        .position(|world| world.directory == directory)
+    worlds.iter().position(|world| world.directory == directory)
 }
 
 pub fn update_world_metadata(
@@ -1591,8 +1589,8 @@ impl Menu {
         let world = &mut self.worlds[index];
         world.metadata.last_played = unix_now();
         let _ = world.metadata.save(&world.directory);
-        let world_dir = fs::canonicalize(&world.directory)
-            .unwrap_or_else(|_| world.directory.clone());
+        let world_dir =
+            fs::canonicalize(&world.directory).unwrap_or_else(|_| world.directory.clone());
         MenuAction::Launch(
             WorldLaunch {
                 world_dir,

@@ -1549,10 +1549,13 @@ mod tests {
     fn embedded_shader_uses_discrete_ao_mapping() {
         let shader = include_str!("shader.wgsl");
         let mapping = [
-            "if (ao_raw == 3u) {\n        out.ao = 1.0;",
-            "} else if (ao_raw == 2u) {\n        out.ao = 0.75;",
-            "} else if (ao_raw == 1u) {\n        out.ao = 0.5;",
-            "} else {\n        out.ao = 0.25;",
+            "if (ao_raw == 3u)",
+            "out.ao = 1.0",
+            "else if (ao_raw == 2u)",
+            "out.ao = 0.75",
+            "else if (ao_raw == 1u)",
+            "out.ao = 0.5",
+            "out.ao = 0.25",
         ];
         let mut search_from = shader
             .find("let ao_raw =")

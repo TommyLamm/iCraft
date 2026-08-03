@@ -231,13 +231,14 @@ fn bench_network() -> u64 {
     for _ in 0..ITERS {
         let flattened = ChunkSaveData::from_chunk(&chunk);
         let packet = Packet::ChunkData {
-            protocol_version: 7,
+            protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             dimension: 0,
             cx: chunk.chunk_x,
             cz: chunk.chunk_z,
             revision: 1,
             blocks: flattened.blocks,
             block_states: flattened.block_states,
+            block_entities: flattened.block_entities,
         };
         let bytes = packet.encode();
         let decoded = Packet::decode(&bytes).unwrap();
