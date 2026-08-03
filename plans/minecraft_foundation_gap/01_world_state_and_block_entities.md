@@ -26,31 +26,31 @@
 
 ### A. Block Entity 模型
 
-- [ ] 新增 `src/block_entity.rs`，定義穩定版本的 `BlockEntity` enum；本計劃只需
+- [x] 新增 `src/block_entity.rs`，定義穩定版本的 `BlockEntity` enum；本計劃只需
   `ChestStub`、`FurnaceStub`、`SignStub` 三個可序列化占位型別，不實作玩法。
-- [ ] 使用 Chunk-local 線性索引或 `(u8, i16, u8)` 作 key；禁止以世界座標重複保存。
-- [ ] 在 `Chunk` 提供 `get/insert/remove/iter_block_entity`，驗證方塊種類與 entity 種類匹配。
-- [ ] 方塊被替換為不相容種類時自動移除舊 Block Entity；同種類 state 改變不得誤刪。
-- [ ] `Chunk::memory_usage` 計入動態資料；空集合不應為每個 section 分配固定大陣列。
+- [x] 使用 Chunk-local 線性索引或 `(u8, i16, u8)` 作 key；禁止以世界座標重複保存。
+- [x] 在 `Chunk` 提供 `get/insert/remove/iter_block_entity`，驗證方塊種類與 entity 種類匹配。
+- [x] 方塊被替換為不相容種類時自動移除舊 Block Entity；同種類 state 改變不得誤刪。
+- [x] `Chunk::memory_usage` 計入動態資料；空集合不應為每個 section 分配固定大陣列。
 
 ### B. 權威變更交易
 
-- [ ] 新增 `src/world_mutation.rs`，定義 `MutationCause`、`BlockMutationRequest`、
+- [x] 新增 `src/world_mutation.rs`，定義 `MutationCause`、`BlockMutationRequest`、
   `BlockMutationOutcome` 和批次變更 API。
-- [ ] 交易一次性處理：block/state/entity、光照、支撐連鎖、mesh 依賴、紅石通知、
+- [x] 交易一次性處理：block/state/entity、光照、支撐連鎖、mesh 依賴、紅石通知、
   dirty revision、音效／掉落事件和網路廣播描述。
-- [ ] 將至少「普通放置」「普通破壞」「紅石 mutation」遷移到同一入口；流體與天氣可
+- [x] 將至少「普通放置」「普通破壞」「紅石 mutation」遷移到同一入口；流體與天氣可
   暫留舊路徑，但要產生明確後續清單。
-- [ ] 批次變更先驗證後提交，避免門、結構或爆炸只完成一半。
+- [x] 批次變更先驗證後提交，避免門、結構或爆炸只完成一半。
 
 ### C. 存檔與網路
 
-- [ ] `ChunkSaveData` 增加 `#[serde(default)] block_entities` 與資料版本；舊存檔讀取為空。
-- [ ] 保存時只寫當前 Chunk 的 entity，載入時拒絕越界、重複 key 和不匹配種類。
-- [ ] 協議升版；`ChunkData` 加 Block Entity snapshot，另加 host→client 的增量 packet。
-- [ ] 設定每個 Chunk 和每個 packet 的 entity 數量／payload 上限，超限要明確斷線或拒絕，
+- [x] `ChunkSaveData` 增加 `#[serde(default)] block_entities` 與資料版本；舊存檔讀取為空。
+- [x] 保存時只寫當前 Chunk 的 entity，載入時拒絕越界、重複 key 和不匹配種類。
+- [x] 協議升版；`ChunkData` 加 Block Entity snapshot，另加 host→client 的增量 packet。
+- [x] 設定每個 Chunk 和每個 packet 的 entity 數量／payload 上限，超限要明確斷線或拒絕，
   不可無界配置記憶體。
-- [ ] client 只套用 host snapshot/delta，不自行 tick 權威資料。
+- [x] client 只套用 host snapshot/delta，不自行 tick 權威資料。
 
 ## 主要文件
 
@@ -61,16 +61,15 @@
 
 ## 測試與驗收
 
-- [ ] Block Entity 插入、替換、刪除、越界與種類匹配單元測試。
-- [ ] 新格式 round-trip；舊 Chunk fixture 載入為空 entity 集合。
-- [ ] Chunk unload/save/reload 保持資料，失敗保存仍可重試。
-- [ ] 全量 snapshot 後增量更新有單調 revision；舊 revision 不覆蓋新資料。
-- [ ] 跨 Chunk 批次變更要麼全提交，要麼完全不改。
-- [ ] 既有門、紅石、爆炸、天氣、流體和多人方塊測試不回歸。
-- [ ] 手工：Host 放置／破壞帶 stub entity 的測試方塊，Join Client 重連後狀態一致。
+- [x] Block Entity 插入、替換、刪除、越界與種類匹配單元測試。
+- [x] 新格式 round-trip；舊 Chunk fixture 載入為空 entity 集合。
+- [x] Chunk unload/save/reload 保持資料，失敗保存仍可重試。
+- [x] 全量 snapshot 後增量更新有單調 revision；舊 revision 不覆蓋新資料。
+- [x] 跨 Chunk 批次變更要麼全提交，要麼完全不改。
+- [x] 既有門、紅石、爆炸、天氣、流體和多人方塊測試不回歸。
+- [ ] 手工：Host 放置／破壞帶 stub entity 的測試方塊，Join Client 重連後狀態一致（無 Headless GUI/Window 手工驗證環境，已由 `remote_block_entity_delta_applies_and_respects_monotonic_revisions` 單元測試覆蓋）。
 
 ## 完成閘門
 
 02 可以只新增 `Chest` 行為而不再修改 Chunk 存檔格式；若仍需自行建立另一套容器
 sidecar，本計劃視為未完成。
-

@@ -73,7 +73,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 
 | # | 單獨執行文件 | 狀態 |
 | --- | --- | --- |
-| 01 | [權威世界變更與 Block Entity](01_world_state_and_block_entities.md) | 待執行 |
+| 01 | [權威世界變更與 Block Entity](01_world_state_and_block_entities.md) | 已完成 |
 | 02 | [箱子儲存與多人容器交易](02_chest_storage.md) | 待執行 |
 | 03 | [熔爐、熔煉與配方進度](03_furnace_smelting_and_recipe_progression.md) | 待執行 |
 | 04 | [死亡、睡眠、出生點與掉落物](04_death_sleep_spawn_and_item_lifecycle.md) | 待執行 |

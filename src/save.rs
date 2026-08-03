@@ -186,7 +186,7 @@ pub struct NetworkSnapshotRequest {
 
 pub struct NetworkSnapshotPayload {
     pub key: NetworkSnapshotKey,
-    pub result: Result<(Vec<u8>, Vec<u8>), String>,
+    pub result: Result<(Vec<u8>, Vec<u8>, Vec<u8>), String>,
 }
 
 pub enum NetworkSnapshotWorkerResult {
@@ -279,7 +279,7 @@ pub fn spawn_network_snapshot_worker(
                         };
                         let result = match data {
                             Some(data) if data.mutation_revision >= request.key.revision => {
-                                Ok((data.blocks, data.block_states))
+                                Ok((data.blocks, data.block_states, data.block_entities))
                             }
                             Some(data) => Err(format!(
                                 "persisted snapshot for {:?} chunk ({}, {}) is revision {}, waiting for {}",
@@ -671,6 +671,10 @@ pub struct ChunkSaveData {
     pub block_states: Vec<u8>,
     #[serde(default)]
     pub mutation_revision: u64,
+    #[serde(default)]
+    pub block_entities: Vec<u8>,
+    #[serde(default)]
+    pub data_version: u32,
 }
 
 impl ChunkSaveData {
@@ -712,6 +716,19 @@ impl ChunkSaveData {
                 .unwrap_or_default()
         };
 
+        let block_entities_list: Vec<((u8, i16, u8), crate::block_entity::BlockEntity)> = chunk
+            .iter_block_entities()
+            .map(|(pos, e)| (pos, e.clone()))
+            .collect();
+        let block_entities = if block_entities_list.is_empty() {
+            Vec::new()
+        } else {
+            bincode::serialize(&block_entities_list)
+                .ok()
+                .and_then(|bytes| compress_bytes(&bytes).ok())
+                .unwrap_or_default()
+        };
+
         Self {
             chunk_x: chunk.chunk_x,
             chunk_z: chunk.chunk_z,
@@ -722,6 +739,8 @@ impl ChunkSaveData {
             redstone_metadata,
             block_states: compress_bytes(&block_states_raw).unwrap_or_default(),
             mutation_revision: 0,
+            block_entities,
+            data_version: 1,
         }
     }
 
@@ -736,6 +755,21 @@ impl ChunkSaveData {
             .ok()
             .and_then(|bytes| {
                 bincode::deserialize::<Vec<crate::redstone::RedstoneComponentMetadata>>(&bytes).ok()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn block_entities(&self) -> Vec<((u8, i16, u8), crate::block_entity::BlockEntity)> {
+        if self.block_entities.is_empty() {
+            return Vec::new();
+        }
+        decompress_bytes(&self.block_entities)
+            .ok()
+            .and_then(|bytes| {
+                bincode::deserialize::<Vec<((u8, i16, u8), crate::block_entity::BlockEntity)>>(
+                    &bytes,
+                )
+                .ok()
             })
             .unwrap_or_default()
     }
@@ -811,6 +845,15 @@ impl ChunkSaveData {
             for x in 0..16 {
                 for z in 0..16 {
                     chunk.update_heightmap(x, z);
+                }
+            }
+
+            // Restore block entities with validation: limit check, bounds check, type matching check
+            chunk.block_entities.clear();
+            let entities = self.block_entities();
+            if entities.len() <= 4096 {
+                for ((x, y, z), entity) in entities {
+                    let _ = chunk.insert_block_entity(x, y, z, entity);
                 }
             }
         }
@@ -1092,6 +1135,8 @@ impl UncompressedChunkSnapshot {
                 redstone_metadata: Vec::new(),
                 block_states: Vec::new(),
                 mutation_revision: self.mutation_revision,
+                block_entities: Vec::new(),
+                data_version: 0,
             })
     }
 
@@ -1140,6 +1185,8 @@ impl UncompressedChunkSnapshot {
             block_states: compress_bytes(&block_states_raw)
                 .map_err(|error| SaveError::Serialization(error.to_string()))?,
             mutation_revision: self.mutation_revision,
+            block_entities: Vec::new(),
+            data_version: 1,
         })
     }
 
@@ -1880,6 +1927,8 @@ fn deserialize_chunk_save_data(bytes: &[u8]) -> Option<ChunkSaveData> {
             redstone_metadata: previous.redstone_metadata,
             block_states: previous.block_states,
             mutation_revision: 0,
+            block_entities: Vec::new(),
+            data_version: 0,
         });
     }
     #[derive(serde::Deserialize)]
@@ -1903,6 +1952,8 @@ fn deserialize_chunk_save_data(bytes: &[u8]) -> Option<ChunkSaveData> {
             redstone_metadata: Vec::new(),
             block_states: Vec::new(),
             mutation_revision: 0,
+            block_entities: Vec::new(),
+            data_version: 0,
         })
 }
 
@@ -3663,5 +3714,35 @@ mod tests {
         assert_eq!(reloaded.latest(dimension, 6, -3), 41);
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded.capacity(), MUTATION_REVISION_INDEX_CAPACITY);
+    }
+
+    #[test]
+    fn block_entity_save_and_restore_roundtrip() {
+        use crate::block_entity::{BlockEntity, ChestStub};
+
+        let mut chunk = Chunk::new(0, 0);
+        chunk.set_block_local(1, 2, 3, BlockType::Chest);
+        let chest_stub = BlockEntity::Chest(ChestStub {
+            custom_name: Some("Secret Stash".to_string()),
+        });
+        chunk
+            .insert_block_entity(1, 2, 3, chest_stub.clone())
+            .unwrap();
+
+        // Roundtrip via ChunkSaveData
+        let save_data = ChunkSaveData::from_chunk(&chunk);
+        let mut restored = Chunk::new(0, 0);
+        save_data.restore_to_chunk(&mut restored);
+
+        assert_eq!(restored.get_block_local(1, 2, 3), BlockType::Chest);
+        assert_eq!(restored.get_block_entity(1, 2, 3), Some(&chest_stub));
+
+        // Roundtrip via bincode serialization of ChunkSaveData
+        let bytes = bincode::serialize(&save_data).unwrap();
+        let loaded_save_data = deserialize_chunk_save_data(&bytes).unwrap();
+        let mut reloaded = Chunk::new(0, 0);
+        loaded_save_data.restore_to_chunk(&mut reloaded);
+
+        assert_eq!(reloaded.get_block_entity(1, 2, 3), Some(&chest_stub));
     }
 }

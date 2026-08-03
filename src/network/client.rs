@@ -93,6 +93,15 @@ pub enum ClientToGame {
         revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        block_entities: Vec<u8>,
+    },
+    BlockEntityDelta {
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
     },
     EntitySpawn {
         dimension: u8,
@@ -264,6 +273,7 @@ impl RevisionGate {
         revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        block_entities: Vec<u8>,
     ) -> Vec<ClientToGame> {
         let key = (dimension, cx, cz);
         let current = self.applied.get(&key).copied().unwrap_or(0);
@@ -281,6 +291,7 @@ impl RevisionGate {
             revision,
             blocks,
             block_states,
+            block_entities,
         }];
         events.extend(self.flush_contiguous(key));
         events
@@ -497,6 +508,24 @@ async fn run_client(
                             let _ = client_to_game.send(event);
                         }
                     }
+                    Ok(Packet::BlockEntityDelta {
+                        dimension,
+                        revision,
+                        x,
+                        y,
+                        z,
+                        entity,
+                        ..
+                    }) => {
+                        let _ = client_to_game.send(ClientToGame::BlockEntityDelta {
+                            dimension,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            entity,
+                        });
+                    }
                     Ok(Packet::BlockActionResult { x, y, z, success, consumed_item, drops, .. }) => {
                         let _ = client_to_game.send(ClientToGame::BlockActionResult { x, y, z, success, consumed_item, drops });
                     }
@@ -507,6 +536,7 @@ async fn run_client(
                         revision,
                         blocks,
                         block_states,
+                        block_entities,
                         ..
                     }) => {
                         for event in revision_gate.accept_snapshot(
@@ -516,6 +546,7 @@ async fn run_client(
                             revision,
                             blocks,
                             block_states,
+                            block_entities,
                         ) {
                             let _ = client_to_game.send(event);
                         }
@@ -893,6 +924,7 @@ mod tests {
                 revision: 1,
                 blocks: vec![1, 2, 3, 4],
                 block_states: vec![0, 0, 0, 0],
+                block_entities: vec![],
                 to: player_id,
             })
             .unwrap();
@@ -1010,6 +1042,7 @@ mod tests {
                         revision: 1,
                         blocks,
                         block_states,
+                        block_entities: _,
                     } => break (blocks, block_states),
                     ClientToGame::PlayerJoin { .. } => {}
                     other => panic!("expected persisted chunk snapshot, got {other:?}"),
@@ -1029,6 +1062,8 @@ mod tests {
                 redstone_metadata: Vec::new(),
                 block_states,
                 mutation_revision: 1,
+                block_entities: Vec::new(),
+                data_version: 0,
             }
             .restore_to_chunk(&mut chunk);
 
@@ -1129,6 +1164,7 @@ mod tests {
             revision: 1,
             blocks,
             block_states,
+            block_entities: vec![],
             to,
         };
         // The host/state priority selector submits the near chunk first. The
@@ -1303,6 +1339,7 @@ mod tests {
                 revision: 1,
                 blocks: vec![1],
                 block_states: vec![0],
+                block_entities: vec![],
                 to: player_id,
             })
             .unwrap();
@@ -1483,7 +1520,7 @@ mod tests {
         let mut gate = RevisionGate::default();
         assert!(gate.accept_block_change(0, 2, 1, 70, 1, 4, 0).is_empty());
 
-        let events = gate.accept_snapshot(0, 0, 0, 1, vec![1, 2], vec![0, 0]);
+        let events = gate.accept_snapshot(0, 0, 0, 1, vec![1, 2], vec![0, 0], vec![]);
         assert_eq!(events.len(), 2);
         assert!(matches!(
             &events[0],
@@ -1509,7 +1546,7 @@ mod tests {
         ));
 
         assert!(gate
-            .accept_snapshot(0, 0, 0, 1, vec![9], vec![9])
+            .accept_snapshot(0, 0, 0, 1, vec![9], vec![9], vec![])
             .is_empty());
         assert!(gate.accept_block_change(0, 1, 1, 70, 1, 9, 0).is_empty());
 
@@ -1519,7 +1556,7 @@ mod tests {
             .is_empty());
         assert_eq!(
             same_revision
-                .accept_snapshot(0, 0, 0, 5, vec![1], vec![0])
+                .accept_snapshot(0, 0, 0, 5, vec![1], vec![0], vec![])
                 .len(),
             1
         );
@@ -1566,6 +1603,7 @@ mod tests {
                 1,
                 snapshot.blocks.clone(),
                 snapshot.block_states.clone(),
+                snapshot.block_entities.clone(),
             ));
 
             let mut client = crate::world::Chunk::new(0, 0);
@@ -1586,6 +1624,8 @@ mod tests {
                             redstone_metadata: Vec::new(),
                             block_states,
                             mutation_revision: 1,
+                            block_entities: Vec::new(),
+                            data_version: 0,
                         }
                         .restore_to_chunk(&mut client);
                     }

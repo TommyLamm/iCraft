@@ -166,6 +166,14 @@ pub enum HostToServer {
         block: u32,
         state: u8,
     },
+    BroadcastBlockEntityDelta {
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
+    },
     SendBlockActionResult {
         to: PlayerId,
         x: i32,
@@ -182,6 +190,7 @@ pub enum HostToServer {
         revision: u64,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        block_entities: Vec<u8>,
         to: PlayerId,
     },
     DisconnectCatchupClient {
@@ -1011,6 +1020,7 @@ impl NetworkServer {
             revision,
             blocks,
             block_states,
+            block_entities,
             to,
         } = command
         {
@@ -1022,6 +1032,7 @@ impl NetworkServer {
                 revision,
                 blocks,
                 block_states,
+                block_entities,
             };
             let mailbox = self
                 .sessions
@@ -1145,6 +1156,7 @@ impl NetworkServer {
         let reliable_broadcast = matches!(
             &command,
             HostToServer::BroadcastBlockChange { .. }
+                | HostToServer::BroadcastBlockEntityDelta { .. }
                 | HostToServer::BroadcastEntitySpawn { .. }
                 | HostToServer::BroadcastEntityDespawn { .. }
                 | HostToServer::BroadcastChat { .. }
@@ -1171,6 +1183,25 @@ impl NetworkServer {
                     z,
                     block,
                     state,
+                },
+                None,
+            ),
+            HostToServer::BroadcastBlockEntityDelta {
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                entity,
+            } => (
+                Packet::BlockEntityDelta {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    entity,
                 },
                 None,
             ),
@@ -2444,6 +2475,7 @@ mod tests {
             revision: 1,
             blocks: vec![1],
             block_states: vec![],
+            block_entities: vec![],
         };
         let p2 = Packet::ChunkData {
             protocol_version: PROTOCOL_VERSION,
@@ -2453,6 +2485,7 @@ mod tests {
             revision: 2,
             blocks: vec![2],
             block_states: vec![],
+            block_entities: vec![],
         };
         let p3 = Packet::ChunkData {
             protocol_version: PROTOCOL_VERSION,
@@ -2462,6 +2495,7 @@ mod tests {
             revision: 1,
             blocks: vec![3],
             block_states: vec![],
+            block_entities: vec![],
         };
         assert!(mailbox.replace(p1).await.is_ok());
         assert_eq!(mailbox.len().await, 1);
@@ -2485,6 +2519,7 @@ mod tests {
             revision: 1,
             blocks: vec![1],
             block_states: vec![],
+            block_entities: vec![],
         };
         let farther = Packet::ChunkData {
             protocol_version: PROTOCOL_VERSION,
@@ -2494,6 +2529,7 @@ mod tests {
             revision: 1,
             blocks: vec![2],
             block_states: vec![],
+            block_entities: vec![],
         };
         mailbox.replace(near.clone()).await.unwrap();
         mailbox.replace(farther.clone()).await.unwrap();
@@ -2513,6 +2549,7 @@ mod tests {
             revision: 1,
             blocks: vec![value],
             block_states: vec![],
+            block_entities: vec![],
         };
 
         slow.replace(packet(0, 1)).await.unwrap();

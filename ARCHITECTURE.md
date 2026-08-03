@@ -134,24 +134,22 @@ particles/effects, mining overlay, UI, and present.
 `ChunkManager::chunks` is authoritative world state. Terrain meshes, visibility
 sets, GPU allocations, and particle vertices are derived caches.
 
-For a non-fluid block mutation:
+For authoritative block mutations:
 
 ```text
-ChunkManager::set_block
-  -> update/remove sky and block light
-  -> invalidate every dependent mesh
-  -> notify redstone when applicable
-  -> broadcast authoritative change when hosting
+world_mutation::apply_batch / BlockMutationRequest
+  -> validate positions, loaded chunks, and block entity types
+  -> atomic commit of block, state, and BlockEntity
+  -> update sky/block lighting
+  -> perform support cascade (unsupported block break)
+  -> invalidate dependent meshes (boundary/AO)
+  -> trigger redstone notifications & bump chunk mutation revision
+  -> broadcast authoritative BlockChange & BlockEntityDelta when hosting
 ```
 
-`ChunkManager::set_block` does not perform all follow-up work itself. Boundary
-changes require neighboring mesh invalidation; corner ambient-occlusion samples
-also require diagonal invalidation. Use
-`chunk_manager::mark_block_mesh_dependencies` as the shared dependency rule.
-
-Redstone returns `BlockMutation` records and side-effect actions.
-`State::apply_redstone_update` applies lighting, mesh invalidation, entity/audio
-effects, and host broadcasts.
+`ChunkManager::chunks` is authoritative world state, including per-chunk `block_entities` keyed by `(u8, i16, u8)` local coordinates. Terrain meshes, visibility sets, GPU allocations, and particle vertices are derived caches.
+`chunk_manager::mark_block_mesh_dependencies` is the shared mesh dependency rule.
+Redstone returns `BlockMutation` records and side-effect actions applied via host transaction handlers.
 
 ## Multiplayer authority
 

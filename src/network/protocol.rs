@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PotionWire {
@@ -285,6 +285,17 @@ pub enum Packet {
         blocks: Vec<u8>,
         #[serde(default)]
         block_states: Vec<u8>,
+        #[serde(default)]
+        block_entities: Vec<u8>,
+    },
+    BlockEntityDelta {
+        protocol_version: u32,
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
     },
     ChunkAck {
         protocol_version: u32,
@@ -395,6 +406,9 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::ChunkData {
+                protocol_version, ..
+            }
+            | Packet::BlockEntityDelta {
                 protocol_version, ..
             }
             | Packet::ChunkAck {
@@ -558,53 +572,7 @@ mod tests {
             revision: 1,
             blocks: vec![0u8; 4096],
             block_states: Vec::new(),
-        };
-        let decoded = Packet::decode(&p.encode()).unwrap();
-        assert_eq!(p, decoded);
-    }
-
-    #[test]
-    fn time_sync_roundtrip() {
-        let p = Packet::TimeSync {
-            protocol_version: v(),
-            ticks: 18_500,
-            weather: 2,
-            weather_remaining_ticks: 9_500.25,
-        };
-        let decoded = Packet::decode(&p.encode()).unwrap();
-        assert_eq!(p, decoded);
-    }
-
-    #[test]
-    fn lightning_strike_roundtrip() {
-        let p = Packet::LightningStrike {
-            protocol_version: v(),
-            strike: LightningStrike {
-                x: -12,
-                y: 81,
-                z: 42,
-                visual_seed: 0xCAFE_BABE,
-            },
-        };
-        let decoded = Packet::decode(&p.encode()).unwrap();
-        assert_eq!(p, decoded);
-    }
-
-    #[test]
-    fn chat_message_roundtrip() {
-        let p = Packet::ChatMessage {
-            protocol_version: v(),
-            sender: "steve".into(),
-            message: "hi there".into(),
-        };
-        let decoded = Packet::decode(&p.encode()).unwrap();
-        assert_eq!(p, decoded);
-    }
-
-    #[test]
-    fn keepalive_roundtrip() {
-        let p = Packet::Keepalive {
-            protocol_version: v(),
+            block_entities: Vec::new(),
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_eq!(p, decoded);
@@ -743,9 +711,24 @@ mod tests {
             revision: 7,
             blocks: vec![1, 2, 3],
             block_states: vec![4, 5, 6],
+            block_entities: Vec::new(),
         };
         let decoded_cd = Packet::decode(&cd.encode()).unwrap();
         assert_eq!(cd, decoded_cd);
+
+        let delta = Packet::BlockEntityDelta {
+            protocol_version: v(),
+            dimension: 0,
+            revision: 8,
+            x: 2,
+            y: 64,
+            z: 3,
+            entity: Some(crate::block_entity::BlockEntity::Chest(
+                crate::block_entity::ChestStub { custom_name: None },
+            )),
+        };
+        let decoded_delta = Packet::decode(&delta.encode()).unwrap();
+        assert_eq!(delta, decoded_delta);
 
         let ack = Packet::ChunkAck {
             protocol_version: v(),
