@@ -1788,9 +1788,19 @@ fn append_cactus_mesh(
         let mut local_uvs = [[0.0; 2]; 4];
 
         for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
-            let vx = origin[0] + if offset[0] == 0.0 { CACTUS_MIN } else { CACTUS_MAX };
+            let vx = origin[0]
+                + if offset[0] == 0.0 {
+                    CACTUS_MIN
+                } else {
+                    CACTUS_MAX
+                };
             let vy = origin[1] + offset[1];
-            let vz = origin[2] + if offset[2] == 0.0 { CACTUS_MIN } else { CACTUS_MAX };
+            let vz = origin[2]
+                + if offset[2] == 0.0 {
+                    CACTUS_MIN
+                } else {
+                    CACTUS_MAX
+                };
             positions[corner_idx] = [vx, vy, vz];
 
             let u = if uv[0] == 0.0 { CACTUS_MIN } else { CACTUS_MAX };
@@ -1832,9 +1842,7 @@ fn append_end_portal_frame_mesh(
             5 => 2.0,
             _ => 1.0,
         };
-        let light_level = sky_light as f32
-            + block_light as f32 * 16.0
-            + multiplier_code * 256.0;
+        let light_level = sky_light as f32 + block_light as f32 * 16.0 + multiplier_code * 256.0;
         let mut positions = [[0.0; 3]; 4];
         let mut local_uvs = [[0.0; 2]; 4];
         for (corner_idx, (offset, uv)) in corner_data.iter().enumerate() {
@@ -2962,6 +2970,27 @@ impl ChunkSection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockEntityError {
+    OutOfBounds,
+    TypeMismatch,
+    ExceedsLimit,
+}
+
+impl std::fmt::Display for BlockEntityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlockEntityError::OutOfBounds => write!(f, "block entity position out of bounds"),
+            BlockEntityError::TypeMismatch => {
+                write!(f, "block entity type mismatch with block at position")
+            }
+            BlockEntityError::ExceedsLimit => write!(f, "chunk block entity count exceeds limit"),
+        }
+    }
+}
+
+impl std::error::Error for BlockEntityError {}
+
 #[derive(Clone)]
 pub struct Chunk {
     pub chunk_x: i32,
@@ -2974,6 +3003,9 @@ pub struct Chunk {
     pub(crate) torch_positions: Vec<u16>,
     /// Compact local coordinates of redstone component blocks.
     pub(crate) redstone_positions: Vec<u16>,
+    /// Block entities keyed by Chunk-local coordinates (x: u8, y: i16, z: u8).
+    pub(crate) block_entities:
+        std::collections::HashMap<(u8, i16, u8), crate::block_entity::BlockEntity>,
 }
 
 impl Chunk {
@@ -3476,6 +3508,7 @@ impl Chunk {
             heightmap,
             torch_positions,
             redstone_positions,
+            block_entities: std::collections::HashMap::new(),
         }
     }
 
@@ -3563,6 +3596,94 @@ impl Chunk {
             + size_of_val(self.heightmap.as_ref())
             + self.torch_positions.capacity() * size_of::<u16>()
             + self.redstone_positions.capacity() * size_of::<u16>()
+            + self.block_entities.capacity()
+                * (size_of::<(u8, i16, u8)>() + size_of::<crate::block_entity::BlockEntity>())
+            + self
+                .block_entities
+                .values()
+                .map(|e| e.memory_usage())
+                .sum::<usize>()
+    }
+
+    pub fn get_block_entity(
+        &self,
+        x: u8,
+        y: i16,
+        z: u8,
+    ) -> Option<&crate::block_entity::BlockEntity> {
+        if (x as usize) >= CHUNK_WIDTH
+            || (z as usize) >= CHUNK_DEPTH
+            || y < 0
+            || (y as usize) >= CHUNK_HEIGHT
+        {
+            return None;
+        }
+        self.block_entities.get(&(x, y, z))
+    }
+
+    pub fn get_block_entity_mut(
+        &mut self,
+        x: u8,
+        y: i16,
+        z: u8,
+    ) -> Option<&mut crate::block_entity::BlockEntity> {
+        if (x as usize) >= CHUNK_WIDTH
+            || (z as usize) >= CHUNK_DEPTH
+            || y < 0
+            || (y as usize) >= CHUNK_HEIGHT
+        {
+            return None;
+        }
+        self.block_entities.get_mut(&(x, y, z))
+    }
+
+    pub fn insert_block_entity(
+        &mut self,
+        x: u8,
+        y: i16,
+        z: u8,
+        entity: crate::block_entity::BlockEntity,
+    ) -> Result<(), BlockEntityError> {
+        if (x as usize) >= CHUNK_WIDTH
+            || (z as usize) >= CHUNK_DEPTH
+            || y < 0
+            || (y as usize) >= CHUNK_HEIGHT
+        {
+            return Err(BlockEntityError::OutOfBounds);
+        }
+        let block_type = self.get_block_local(x as usize, y as usize, z as usize);
+        if !entity.matches_block_type(block_type) {
+            return Err(BlockEntityError::TypeMismatch);
+        }
+        if self.block_entities.len() >= 4096 && !self.block_entities.contains_key(&(x, y, z)) {
+            return Err(BlockEntityError::ExceedsLimit);
+        }
+        self.block_entities.insert((x, y, z), entity);
+        Ok(())
+    }
+
+    pub fn remove_block_entity(
+        &mut self,
+        x: u8,
+        y: i16,
+        z: u8,
+    ) -> Option<crate::block_entity::BlockEntity> {
+        if (x as usize) >= CHUNK_WIDTH
+            || (z as usize) >= CHUNK_DEPTH
+            || y < 0
+            || (y as usize) >= CHUNK_HEIGHT
+        {
+            return None;
+        }
+        self.block_entities.remove(&(x, y, z))
+    }
+
+    pub fn iter_block_entities(
+        &self,
+    ) -> impl Iterator<Item = ((u8, i16, u8), &crate::block_entity::BlockEntity)> {
+        self.block_entities
+            .iter()
+            .map(|(&pos, entity)| (pos, entity))
     }
 
     /// Rebuilds the torch index after bulk block mutations (generation/load).
@@ -3583,6 +3704,12 @@ impl Chunk {
         let old = self.sections[sec_y].set_block(idx, block);
         if old == block {
             return;
+        }
+
+        if let Some(entity) = self.block_entities.get(&(x as u8, y as i16, z as u8)) {
+            if !entity.matches_block_type(block) {
+                self.block_entities.remove(&(x as u8, y as i16, z as u8));
+            }
         }
 
         let encoded = Self::encode_torch_position(x, y, z);
@@ -6150,6 +6277,7 @@ mod tests {
             heightmap: Box::new([[0; CHUNK_DEPTH]; CHUNK_WIDTH]),
             torch_positions: Vec::new(),
             redstone_positions: Vec::new(),
+            block_entities: std::collections::HashMap::new(),
         };
         let empty_bytes = chunk.memory_usage();
         chunk.set_block_local(0, 0, 0, BlockType::Stone);
@@ -6169,10 +6297,22 @@ mod tests {
         assert_eq!(opaque_v.len(), 24);
         assert_eq!(opaque_i.len(), 36);
 
-        let min_x = opaque_v.iter().map(|v| v.pos[0] as f32 / 32.0).fold(f32::INFINITY, f32::min);
-        let max_x = opaque_v.iter().map(|v| v.pos[0] as f32 / 32.0).fold(f32::NEG_INFINITY, f32::max);
-        let min_z = opaque_v.iter().map(|v| v.pos[2] as f32 / 32.0).fold(f32::INFINITY, f32::min);
-        let max_z = opaque_v.iter().map(|v| v.pos[2] as f32 / 32.0).fold(f32::NEG_INFINITY, f32::max);
+        let min_x = opaque_v
+            .iter()
+            .map(|v| v.pos[0] as f32 / 32.0)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = opaque_v
+            .iter()
+            .map(|v| v.pos[0] as f32 / 32.0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_z = opaque_v
+            .iter()
+            .map(|v| v.pos[2] as f32 / 32.0)
+            .fold(f32::INFINITY, f32::min);
+        let max_z = opaque_v
+            .iter()
+            .map(|v| v.pos[2] as f32 / 32.0)
+            .fold(f32::NEG_INFINITY, f32::max);
 
         // Cactus placed at (8, 1, 8) -> origin = (8.0, 1.0, 8.0)
         // Inset by 1/16th: min = 8.0625, max = 8.9375
@@ -6205,5 +6345,43 @@ mod tests {
             (vertex.pos[1] as f32 / 32.0 - (1.0 + END_PORTAL_SURFACE_HEIGHT)).abs() < 1e-4
         }));
         assert!(END_PORTAL_SURFACE_HEIGHT < END_PORTAL_FRAME_HEIGHT);
+    }
+
+    #[test]
+    fn chunk_block_entity_operations() {
+        use crate::block_entity::{BlockEntity, ChestStub, FurnaceStub};
+
+        let mut chunk = Chunk::new(0, 0);
+        chunk.set_block_local(4, 10, 4, BlockType::Chest);
+
+        let chest_entity = BlockEntity::Chest(ChestStub { custom_name: None });
+        // Valid insert
+        assert_eq!(
+            chunk.insert_block_entity(4, 10, 4, chest_entity.clone()),
+            Ok(())
+        );
+        assert_eq!(chunk.get_block_entity(4, 10, 4), Some(&chest_entity));
+
+        // Out of bounds insert
+        assert_eq!(
+            chunk.insert_block_entity(16, 10, 4, chest_entity.clone()),
+            Err(BlockEntityError::OutOfBounds)
+        );
+
+        // Type mismatch insert
+        chunk.set_block_local(5, 10, 4, BlockType::Stone);
+        let furnace_entity = BlockEntity::Furnace(FurnaceStub { custom_name: None });
+        assert_eq!(
+            chunk.insert_block_entity(5, 10, 4, furnace_entity),
+            Err(BlockEntityError::TypeMismatch)
+        );
+
+        // Changing state preserves block entity
+        chunk.set_block_state(4, 10, 4, 2);
+        assert_eq!(chunk.get_block_entity(4, 10, 4), Some(&chest_entity));
+
+        // Changing block type auto-removes block entity
+        chunk.set_block_local(4, 10, 4, BlockType::Air);
+        assert_eq!(chunk.get_block_entity(4, 10, 4), None);
     }
 }

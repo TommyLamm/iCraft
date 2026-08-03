@@ -1,6 +1,7 @@
 pub mod advancements;
 mod app;
 pub mod audio;
+pub mod block_entity;
 mod boss;
 mod brewing;
 mod camera;
@@ -35,6 +36,7 @@ mod state;
 mod texture;
 mod weather;
 pub(crate) mod world;
+pub mod world_mutation;
 
 use app::App;
 use winit::event_loop::EventLoop;
