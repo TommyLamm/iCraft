@@ -180,8 +180,8 @@ are deferred and replayed after stream-in.
 | `settings.txt` | Display, audio, difficulty, language, view, and related `GameSettings` values. |
 | `controls.config` | Configurable key bindings; loaded and saved by `GameSettings`. |
 | `saves/<world>/world.meta` | World-list name, seed, game mode, difficulty, and last-played time. |
-| `saves/<world>/level.dat` | Bincode `LevelData`: seed and game time. |
-| `saves/<world>/player.dat` | Bincode player, inventory/item metadata, game mode, XP, and advancement progress. |
+| `saves/<world>/level.dat` | Bincode `LevelData`: seed, game time, world spawn coordinates, dimension, yaw, and version. |
+| `saves/<world>/player.dat` | Bincode player, inventory/item metadata, game mode, XP, spawn point, spawn dimension, and advancement progress. |
 | `saves/<world>/dimension.dat` | Active dimension; missing legacy files default to Overworld. |
 | `saves/<world>/entities.dat` | Persistent Overworld living/persistent/dropped entities. |
 | `saves/<world>/regions/` | Overworld region data. |
@@ -227,8 +227,7 @@ Start with the exact symbol related to the task; avoid reading all of
   stale results rather than uploading them.
 - GPU buffers and wgpu submission stay on the main thread.
 - Host-only systems must not run authoritatively on joining clients.
-- Entity persistence includes living, explicitly persistent, and dropped-item
-  entities; remote players and short-lived projectiles are not saved.
+- Entity persistence includes living, explicitly persistent, dropped-item (with full `ItemStack` metadata and 5-minute loaded-chunk despawn timer), and experience-orb entities; remote players and short-lived projectiles are not saved.
 - Advancement definitions do not subscribe automatically. New event producers
   must call `State::trigger_advancement` at the authoritative mutation point.
 - Dimension switches must keep chunk/entity saving, runtime reset, portal
