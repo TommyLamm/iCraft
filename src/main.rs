@@ -39,6 +39,7 @@ mod texture;
 mod weather;
 pub(crate) mod world;
 pub mod world_mutation;
+pub mod world_tick;
 
 use app::App;
 use winit::event_loop::EventLoop;

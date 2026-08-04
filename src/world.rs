@@ -346,6 +346,10 @@ pub enum BlockType {
     EndCityChest = 88,
     Bed = 89,
     FurnaceLit = 90,
+    Farmland = 91,
+    WheatCrop = 92,
+    CarrotCrop = 93,
+    PotatoCrop = 94,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -500,7 +504,7 @@ impl BlockState {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= BlockType::FurnaceLit as u8 {
+        if val <= BlockType::PotatoCrop as u8 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -521,9 +525,9 @@ impl BlockType {
     /// known variant so unknown (newer) blocks are dropped gracefully instead
     /// of corrupting world state.
     pub fn from_wire(val: u32) -> Option<Self> {
-        if val <= BlockType::FurnaceLit as u32 {
+        if val <= BlockType::PotatoCrop as u32 {
             // SAFETY: `BlockType` is `#[repr(u8)]`, so every value in
-            // `0..=FurnaceLit` is a valid discriminant.
+            // `0..=PotatoCrop` is a valid discriminant.
             Some(unsafe { std::mem::transmute(val as u8) })
         } else {
             None
@@ -533,14 +537,23 @@ impl BlockType {
     pub fn is_cross_model(self) -> bool {
         matches!(
             self,
-            BlockType::Dandelion | BlockType::Poppy | BlockType::TallGrass | BlockType::SugarCane
+            BlockType::Dandelion
+                | BlockType::Poppy
+                | BlockType::TallGrass
+                | BlockType::SugarCane
+                | BlockType::WheatCrop
+                | BlockType::CarrotCrop
+                | BlockType::PotatoCrop
         )
     }
 
     pub fn can_stay_on(self, below: BlockType) -> bool {
         match self {
+            BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop => {
+                below == BlockType::Farmland
+            }
             BlockType::Dandelion | BlockType::Poppy | BlockType::TallGrass => {
-                matches!(below, BlockType::Grass | BlockType::Dirt)
+                matches!(below, BlockType::Grass | BlockType::Dirt | BlockType::Farmland)
             }
             BlockType::SugarCane => {
                 matches!(
@@ -1345,6 +1358,38 @@ impl BlockType {
                 is_passable: false,
                 light_emission: 0,
             },
+            BlockType::Farmland => BlockProperties {
+                name: "Farmland",
+                hardness: 0.6,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::WheatCrop => BlockProperties {
+                name: "Wheat Crop",
+                hardness: 0.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::CarrotCrop => BlockProperties {
+                name: "Carrot Crop",
+                hardness: 0.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::PotatoCrop => BlockProperties {
+                name: "Potato Crop",
+                hardness: 0.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
         }
     }
 
@@ -1513,6 +1558,16 @@ impl BlockType {
             BlockType::NetherBrick => (9, 10),
             BlockType::EndCityChest => (10, 10),
             BlockType::Bed => (6, 0),
+            BlockType::Farmland => {
+                if face_idx == 4 {
+                    (6, 5)
+                } else {
+                    (2, 0)
+                }
+            }
+            BlockType::WheatCrop => (8, 5),
+            BlockType::CarrotCrop => (0, 6),
+            BlockType::PotatoCrop => (4, 6),
         }
     }
 }
@@ -2251,6 +2306,10 @@ fn is_random_tick(block: BlockType) -> bool {
             | BlockType::Snow
             | BlockType::SnowLayer
             | BlockType::Fire
+            | BlockType::Farmland
+            | BlockType::WheatCrop
+            | BlockType::CarrotCrop
+            | BlockType::PotatoCrop
     )
 }
 
@@ -2837,6 +2896,10 @@ impl ChunkSection {
             fluid_level_nonzero_count,
             storage_changes: 0,
         }
+    }
+
+    pub fn random_tick_count(&self) -> u16 {
+        self.random_tick_count
     }
 
     /// Read a block through the section API without exposing its representation.
@@ -5202,7 +5265,7 @@ mod tests {
 
     #[test]
     fn block_type_from_wire_rejects_unknown_values() {
-        assert!(BlockType::from_wire(BlockType::FurnaceLit as u32 + 1).is_none());
+        assert!(BlockType::from_wire(BlockType::PotatoCrop as u32 + 1).is_none());
         assert!(BlockType::from_wire(u32::MAX).is_none());
     }
 

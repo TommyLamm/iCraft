@@ -437,6 +437,49 @@ impl RecipeManager {
             ItemStack::new(Item::Arrow, 4),
         );
 
+        // Farming tools & Bone Meal
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/wooden_hoe",
+            vec!["WW", " S", " S"],
+            &[("W", Item::OakPlanks), ("S", Item::Stick)],
+            ItemStack::new(Item::WoodenHoe, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/stone_hoe",
+            vec!["CC", " S", " S"],
+            &[("C", Item::Cobblestone), ("S", Item::Stick)],
+            ItemStack::new(Item::StoneHoe, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/iron_hoe",
+            vec!["II", " S", " S"],
+            &[("I", Item::IronIngot), ("S", Item::Stick)],
+            ItemStack::new(Item::IronHoe, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/golden_hoe",
+            vec!["GG", " S", " S"],
+            &[("G", Item::GoldIngot), ("S", Item::Stick)],
+            ItemStack::new(Item::GoldenHoe, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/diamond_hoe",
+            vec!["DD", " S", " S"],
+            &[("D", Item::Diamond), ("S", Item::Stick)],
+            ItemStack::new(Item::DiamondHoe, 1),
+        );
+        add_shapeless(
+            &mut crafting_recipes,
+            "crafting/bone_meal",
+            vec![Item::Bone],
+            ItemStack::new(Item::BoneMeal, 3),
+        );
+
         // Dimension progression
         add_shapeless(
             &mut crafting_recipes,
@@ -655,22 +698,6 @@ impl RecipeManager {
         });
 
         smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/charcoal_birch",
-            input: Item::BirchLog,
-            output: ItemStack::new(Item::Coal, 1),
-            cook_time: 200,
-            experience: 0.15,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
-            id: "smelting/charcoal_spruce",
-            input: Item::SpruceLog,
-            output: ItemStack::new(Item::Coal, 1),
-            cook_time: 200,
-            experience: 0.15,
-        });
-
-        smelting_recipes.push(SmeltingRecipe {
             id: "smelting/cooked_porkchop",
             input: Item::RawPorkchop,
             output: ItemStack::new(Item::CookedPorkchop, 1),
@@ -700,6 +727,30 @@ impl RecipeManager {
             output: ItemStack::new(Item::CookedMutton, 1),
             cook_time: 200,
             experience: 0.35,
+        });
+
+        smelting_recipes.push(SmeltingRecipe {
+            id: "smelting/baked_potato",
+            input: Item::Potato,
+            output: ItemStack::new(Item::BakedPotato, 1),
+            cook_time: 200,
+            experience: 0.35,
+        });
+
+        smelting_recipes.push(SmeltingRecipe {
+            id: "smelting/charcoal_birch",
+            input: Item::BirchLog,
+            output: ItemStack::new(Item::Coal, 1),
+            cook_time: 200,
+            experience: 0.15,
+        });
+
+        smelting_recipes.push(SmeltingRecipe {
+            id: "smelting/charcoal_spruce",
+            input: Item::SpruceLog,
+            output: ItemStack::new(Item::Coal, 1),
+            cook_time: 200,
+            experience: 0.15,
         });
 
         smelting_recipes.push(SmeltingRecipe {

@@ -36,7 +36,14 @@ impl DamageSource {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveEatingState {
+    pub item: crate::inventory::Item,
+    pub slot: usize,
+    pub ticks_remaining: u32,
+    pub total_duration: u32,
+}
+
 pub struct PlayerState {
     pub health: f32,     // 0 ~ 20 (10 hearts)
     pub max_health: f32, // 20
@@ -59,6 +66,7 @@ pub struct PlayerState {
     pub sleep_timer: f32,
     pub bed_pos: Option<[i32; 3]>,
     pub unlocked_recipes: std::collections::HashSet<String>,
+    pub eating_state: Option<ActiveEatingState>,
 }
 
 impl PlayerState {
@@ -95,6 +103,7 @@ impl PlayerState {
             sleep_timer: 0.0,
             bed_pos: None,
             unlocked_recipes,
+            eating_state: None,
         }
     }
 

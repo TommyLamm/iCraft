@@ -56,6 +56,11 @@ pub enum Item {
     DiamondPickaxe,
     DiamondAxe,
     DiamondShovel,
+    WoodenHoe,
+    StoneHoe,
+    IronHoe,
+    GoldenHoe,
+    DiamondHoe,
 
     // Resources
     Stick,
@@ -64,10 +69,15 @@ pub enum Item {
     GoldIngot,
     Diamond,
     Redstone,
+    BoneMeal,
 
     // Food
     Apple,
     Bread,
+    Potato,
+    BakedPotato,
+    PoisonousPotato,
+    GoldenApple,
 
     // Mob Drops
     RottenFlesh,
@@ -216,14 +226,24 @@ pub const ALL_ITEMS: &[Item] = &[
     Item::DiamondPickaxe,
     Item::DiamondAxe,
     Item::DiamondShovel,
+    Item::WoodenHoe,
+    Item::StoneHoe,
+    Item::IronHoe,
+    Item::GoldenHoe,
+    Item::DiamondHoe,
     Item::Stick,
     Item::Coal,
     Item::IronIngot,
     Item::GoldIngot,
     Item::Diamond,
     Item::Redstone,
+    Item::BoneMeal,
     Item::Apple,
     Item::Bread,
+    Item::Potato,
+    Item::BakedPotato,
+    Item::PoisonousPotato,
+    Item::GoldenApple,
     Item::RottenFlesh,
     Item::Bone,
     Item::Bow,
@@ -533,6 +553,7 @@ pub enum ToolType {
     Axe,
     Shovel,
     Sword,
+    Hoe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -551,6 +572,15 @@ pub struct ToolProperties {
     pub mining_speed: f32,
     pub durability: u32,
     pub damage: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoodProperties {
+    pub hunger: f32,
+    pub saturation: f32,
+    pub use_duration_ticks: u32,
+    pub always_edible: bool,
+    pub return_item: Option<Item>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -840,6 +870,11 @@ impl Item {
             | Item::DiamondPickaxe
             | Item::DiamondAxe
             | Item::DiamondShovel
+            | Item::WoodenHoe
+            | Item::StoneHoe
+            | Item::IronHoe
+            | Item::GoldenHoe
+            | Item::DiamondHoe
             | Item::Shears
             | Item::Bucket
             | Item::MilkBucket
@@ -857,6 +892,10 @@ impl Item {
             | Item::EndCrystal => Some(CreativeTab::Combat),
             Item::Apple
             | Item::Bread
+            | Item::Potato
+            | Item::BakedPotato
+            | Item::PoisonousPotato
+            | Item::GoldenApple
             | Item::Gunpowder
             | Item::Wheat
             | Item::Carrot
@@ -906,6 +945,7 @@ impl Item {
             | Item::IronIngot
             | Item::GoldIngot
             | Item::Diamond
+            | Item::BoneMeal
             | Item::RottenFlesh
             | Item::Bone
             | Item::Seeds
@@ -1027,6 +1067,167 @@ impl Item {
                 damage: 4.0,
             }),
 
+            Item::WoodenHoe => Some(ToolProperties {
+                tool_type: ToolType::Hoe,
+                material: ToolMaterial::Wood,
+                mining_speed: 2.0,
+                durability: 59,
+                damage: 1.0,
+            }),
+            Item::StoneHoe => Some(ToolProperties {
+                tool_type: ToolType::Hoe,
+                material: ToolMaterial::Stone,
+                mining_speed: 4.0,
+                durability: 131,
+                damage: 1.0,
+            }),
+            Item::IronHoe => Some(ToolProperties {
+                tool_type: ToolType::Hoe,
+                material: ToolMaterial::Iron,
+                mining_speed: 6.0,
+                durability: 250,
+                damage: 1.0,
+            }),
+            Item::GoldenHoe => Some(ToolProperties {
+                tool_type: ToolType::Hoe,
+                material: ToolMaterial::Gold,
+                mining_speed: 12.0,
+                durability: 32,
+                damage: 1.0,
+            }),
+            Item::DiamondHoe => Some(ToolProperties {
+                tool_type: ToolType::Hoe,
+                material: ToolMaterial::Diamond,
+                mining_speed: 8.0,
+                durability: 1561,
+                damage: 1.0,
+            }),
+
+            _ => None,
+        }
+    }
+
+    pub fn food_properties(self) -> Option<FoodProperties> {
+        match self {
+            Item::Apple => Some(FoodProperties {
+                hunger: 4.0,
+                saturation: 2.4,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::Bread => Some(FoodProperties {
+                hunger: 5.0,
+                saturation: 6.0,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::RawPorkchop => Some(FoodProperties {
+                hunger: 3.0,
+                saturation: 1.8,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::CookedPorkchop => Some(FoodProperties {
+                hunger: 8.0,
+                saturation: 12.8,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::RawBeef => Some(FoodProperties {
+                hunger: 3.0,
+                saturation: 1.8,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::CookedBeef => Some(FoodProperties {
+                hunger: 8.0,
+                saturation: 12.8,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::RawChicken => Some(FoodProperties {
+                hunger: 2.0,
+                saturation: 1.2,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::CookedChicken => Some(FoodProperties {
+                hunger: 6.0,
+                saturation: 7.2,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::RawMutton => Some(FoodProperties {
+                hunger: 2.0,
+                saturation: 1.2,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::CookedMutton => Some(FoodProperties {
+                hunger: 6.0,
+                saturation: 9.6,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::Carrot => Some(FoodProperties {
+                hunger: 3.0,
+                saturation: 3.6,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::Potato => Some(FoodProperties {
+                hunger: 1.0,
+                saturation: 0.6,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::BakedPotato => Some(FoodProperties {
+                hunger: 5.0,
+                saturation: 6.0,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::PoisonousPotato => Some(FoodProperties {
+                hunger: 2.0,
+                saturation: 1.2,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::GoldenCarrot => Some(FoodProperties {
+                hunger: 6.0,
+                saturation: 14.4,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
+            Item::GoldenApple => Some(FoodProperties {
+                hunger: 4.0,
+                saturation: 9.6,
+                use_duration_ticks: 32,
+                always_edible: true,
+                return_item: None,
+            }),
+            Item::RottenFlesh => Some(FoodProperties {
+                hunger: 4.0,
+                saturation: 0.8,
+                use_duration_ticks: 32,
+                always_edible: false,
+                return_item: None,
+            }),
             _ => None,
         }
     }
@@ -1454,15 +1655,15 @@ impl Item {
             Item::Seeds => ItemProperties {
                 name: "Seeds",
                 max_stack: 64,
-                is_block: false,
-                block_type: None,
+                is_block: true,
+                block_type: Some(BlockType::WheatCrop),
                 tex_coords: (13, 3),
             },
             Item::Carrot => ItemProperties {
                 name: "Carrot",
                 max_stack: 64,
-                is_block: false,
-                block_type: None,
+                is_block: true,
+                block_type: Some(BlockType::CarrotCrop),
                 tex_coords: (14, 3),
             },
             Item::Shears => ItemProperties {
@@ -1842,28 +2043,48 @@ impl Item {
                 block_type: Some(BlockType::Bed),
                 tex_coords: (6, 0),
             },
-            item @ (Item::FlintAndSteel
+            item @ (Item::WoodenHoe
+            | Item::StoneHoe
+            | Item::IronHoe
+            | Item::GoldenHoe
+            | Item::DiamondHoe
+            | Item::BoneMeal
+            | Item::Potato
+            | Item::BakedPotato
+            | Item::PoisonousPotato
+            | Item::GoldenApple
+            | Item::FlintAndSteel
             | Item::EyeOfEnder
             | Item::Elytra
             | Item::NetherStar
             | Item::EndCrystal
             | Item::BlazeRod
             | Item::ShulkerShell) => {
-                let (name, max_stack, tex_coords) = match item {
-                    Item::FlintAndSteel => ("Flint and Steel", 1, (11, 10)),
-                    Item::EyeOfEnder => ("Eye of Ender", 64, (12, 10)),
-                    Item::Elytra => ("Elytra", 1, (13, 10)),
-                    Item::NetherStar => ("Nether Star", 64, (3, 4)),
-                    Item::EndCrystal => ("End Crystal", 64, (4, 4)),
-                    Item::BlazeRod => ("Blaze Rod", 64, (5, 4)),
-                    Item::ShulkerShell => ("Shulker Shell", 64, (14, 14)),
+                let (name, max_stack, is_block, block_type, tex_coords) = match item {
+                    Item::WoodenHoe => ("Wooden Hoe", 1, false, None, (0, 8)),
+                    Item::StoneHoe => ("Stone Hoe", 1, false, None, (1, 8)),
+                    Item::IronHoe => ("Iron Hoe", 1, false, None, (2, 8)),
+                    Item::GoldenHoe => ("Golden Hoe", 1, false, None, (4, 8)),
+                    Item::DiamondHoe => ("Diamond Hoe", 1, false, None, (3, 8)),
+                    Item::BoneMeal => ("Bone Meal", 64, false, None, (15, 10)),
+                    Item::Potato => ("Potato", 64, true, Some(BlockType::PotatoCrop), (15, 3)),
+                    Item::BakedPotato => ("Baked Potato", 64, false, None, (7, 11)),
+                    Item::PoisonousPotato => ("Poisonous Potato", 64, false, None, (8, 11)),
+                    Item::GoldenApple => ("Golden Apple", 64, false, None, (11, 0)),
+                    Item::FlintAndSteel => ("Flint and Steel", 1, false, None, (11, 10)),
+                    Item::EyeOfEnder => ("Eye of Ender", 64, false, None, (12, 10)),
+                    Item::Elytra => ("Elytra", 1, false, None, (13, 10)),
+                    Item::NetherStar => ("Nether Star", 64, false, None, (3, 4)),
+                    Item::EndCrystal => ("End Crystal", 64, false, None, (4, 4)),
+                    Item::BlazeRod => ("Blaze Rod", 64, false, None, (5, 4)),
+                    Item::ShulkerShell => ("Shulker Shell", 64, false, None, (14, 14)),
                     _ => unreachable!(),
                 };
                 ItemProperties {
                     name,
                     max_stack,
-                    is_block: false,
-                    block_type: None,
+                    is_block,
+                    block_type,
                     tex_coords,
                 }
             }
@@ -1951,6 +2172,10 @@ impl Item {
             BlockType::WitherSkeletonSkull => Item::WitherSkeletonSkull,
             BlockType::NetherBrick => Item::NetherBrick,
             BlockType::EndCityChest => Item::Air,
+            BlockType::Farmland => Item::Dirt,
+            BlockType::WheatCrop => Item::Wheat,
+            BlockType::CarrotCrop => Item::Carrot,
+            BlockType::PotatoCrop => Item::Potato,
         }
     }
 }

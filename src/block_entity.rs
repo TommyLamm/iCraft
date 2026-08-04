@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use crate::inventory::{Item, ItemStack};
 use crate::recipes::{FuelDefinition, RecipeManager};
 use crate::world::BlockType;

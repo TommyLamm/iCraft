@@ -151,7 +151,11 @@ world_mutation::apply_batch / BlockMutationRequest
 `chunk_manager::mark_block_mesh_dependencies` is the shared mesh dependency rule.
 Redstone returns `BlockMutation` records and side-effect actions applied via host transaction handlers.
 
-`BlockState` encodes facing (2 bits), is_top (1), is_right_hinge (1), is_open (1), and chest_type (2 bits: Single/Left/Right) in a single byte. Bit 7 is reserved.
+`BlockState` encodes facing (2 bits), is_top (1), is_right_hinge (1), is_open (1), and chest_type (2 bits: Single/Left/Right) in a single byte. Bit 7 is reserved. For Farmland and Crops (Wheat, Carrot, Potato), state byte `u8` stores moisture level (0..7) and crop growth age (0..7) in bits `0..2`.
+
+`src/world_tick.rs` implements the `RandomTickEngine` and deterministic random tick sampling (`sample_random_ticks`). On each simulation tick, loaded chunk sections with `random_tick_count > 0` are sampled (3 voxels/section/tick standard). Sampling uses a deterministic PRNG seeded by `(world_seed, game_tick, dimension, section_id)` with a maximum section budget (512 sections/tick) to prevent frame drops at large render distances. Random ticks update farmland hydration/degradation and crop age progression.
+
+Food items define `FoodProperties` (hunger, saturation, eating duration ticks, always_edible, return_item). Hold-to-eat right click state machine tracks continuous usage duration, supporting item/slot/death cancellation and triggering `AdvancementTrigger::EatFood` on completion.
 
 ## Multiplayer authority
 

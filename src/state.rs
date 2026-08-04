@@ -10010,6 +10010,28 @@ impl State {
                 crate::perf::ScopeId::PassiveMobs,
                 passive_mobs_started.elapsed(),
             );
+            let (mutations, _stats) = crate::world_tick::sample_random_ticks(
+                &self.chunk_manager,
+                self.world_seed as u64,
+                self.world_time.ticks,
+                self.current_dimension as u8,
+                512,
+            );
+            if !mutations.is_empty() {
+                if let Ok(outcome) =
+                    crate::world_mutation::apply_batch(&mut self.chunk_manager, mutations)
+                {
+                    for res in &outcome.mutations {
+                        self.broadcast_block_change(res.pos.0, res.pos.1, res.pos.2, res.new_block);
+                        self.chunk_manager.set_block_state(
+                            res.pos.0,
+                            res.pos.1,
+                            res.pos.2,
+                            res.new_state,
+                        );
+                    }
+                }
+            }
         }
 
         self.broadcast_authoritative_replication(dt);
@@ -12414,27 +12436,44 @@ impl State {
                 }
                 return;
             }
-            if held_item == crate::inventory::Item::Apple
-                || held_item == crate::inventory::Item::Bread
-            {
-                if self.player_state.hunger < 20.0 || self.game_mode == GameMode::Creative {
-                    let (heal_hunger, heal_saturation) = match held_item {
-                        crate::inventory::Item::Apple => (4.0, 2.4),
-                        crate::inventory::Item::Bread => (5.0, 6.0),
-                        _ => (0.0, 0.0),
-                    };
-                    self.player_state.hunger = (self.player_state.hunger + heal_hunger).min(20.0);
-                    self.player_state.saturation = (self.player_state.saturation + heal_saturation)
-                        .min(self.player_state.hunger);
-
-                    let is_creative = self.game_mode == GameMode::Creative;
-                    self.inventory.use_selected_item(is_creative);
-
-                    println!(
-                        "[Debug] Ate {:?}, hunger={:.1}, saturation={:.1}",
-                        held_item, self.player_state.hunger, self.player_state.saturation
-                    );
-                    return;
+            if let Some(food_props) = held_item.food_properties() {
+                if self.player_state.hunger < 20.0
+                    || food_props.always_edible
+                    || self.game_mode == GameMode::Creative
+                {
+                    if let Some(ref mut eating) = self.player_state.eating_state {
+                        if eating.item == held_item && eating.slot == self.inventory.selected {
+                            eating.ticks_remaining = eating.ticks_remaining.saturating_sub(1);
+                            if eating.ticks_remaining == 0 {
+                                self.player_state.hunger =
+                                    (self.player_state.hunger + food_props.hunger).min(20.0);
+                                self.player_state.saturation = (self.player_state.saturation
+                                    + food_props.saturation)
+                                    .min(self.player_state.hunger);
+                                let is_creative = self.game_mode == GameMode::Creative;
+                                self.inventory.use_selected_item(is_creative);
+                                if let Some(ret) = food_props.return_item {
+                                    let _ = self
+                                        .inventory
+                                        .add_stack(crate::inventory::ItemStack::new(ret, 1));
+                                }
+                                self.trigger_advancement(
+                                    crate::advancements::AdvancementTrigger::EatFood(held_item),
+                                );
+                                self.player_state.eating_state = None;
+                            }
+                            return;
+                        }
+                    } else {
+                        self.player_state.eating_state =
+                            Some(crate::player::ActiveEatingState {
+                                item: held_item,
+                                slot: self.inventory.selected,
+                                ticks_remaining: food_props.use_duration_ticks,
+                                total_duration: food_props.use_duration_ticks,
+                            });
+                        return;
+                    }
                 }
             }
         }
@@ -12584,6 +12623,97 @@ impl State {
                     hit.block_pos.z as i32,
                 );
                 let held_item = held.map(|stack| stack.item).unwrap_or(Item::Air);
+                // Hoe tilling
+                if matches!(clicked_block, BlockType::Grass | BlockType::Dirt)
+                    && held_item
+                        .tool_properties()
+                        .map(|t| t.tool_type)
+                        == Some(crate::inventory::ToolType::Hoe)
+                {
+                    let block_above = self.chunk_manager.get_block(
+                        clicked_pos.0,
+                        clicked_pos.1 + 1,
+                        clicked_pos.2,
+                    );
+                    if !block_above.properties().is_solid {
+                        self.apply_block_changes(&[(clicked_pos, BlockType::Farmland)]);
+                        self.chunk_manager.set_block_state(
+                            clicked_pos.0,
+                            clicked_pos.1,
+                            clicked_pos.2,
+                            0,
+                        );
+                        if let Some(stack) =
+                            &mut self.inventory.hotbar[self.inventory.selected]
+                        {
+                            if stack.durability > 1 {
+                                stack.durability -= 1;
+                            } else {
+                                self.inventory.hotbar[self.inventory.selected] = None;
+                            }
+                        }
+                        return;
+                    }
+                }
+
+                // Bone Meal usage on crops
+                if held_item == Item::BoneMeal
+                    && matches!(
+                        clicked_block,
+                        BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop
+                    )
+                {
+                    let cur_state = self.chunk_manager.get_block_state(
+                        clicked_pos.0,
+                        clicked_pos.1,
+                        clicked_pos.2,
+                    );
+                    let age = cur_state & 0b111;
+                    if age < 7 {
+                        let new_age = (age + 3).min(7);
+                        self.chunk_manager.set_block_state(
+                            clicked_pos.0,
+                            clicked_pos.1,
+                            clicked_pos.2,
+                            new_age,
+                        );
+                        self.broadcast_block_change(
+                            clicked_pos.0,
+                            clicked_pos.1,
+                            clicked_pos.2,
+                            clicked_block,
+                        );
+                        self.inventory
+                            .use_selected_item(self.game_mode == GameMode::Creative);
+                        return;
+                    }
+                }
+
+                // Planting seeds / crops on Farmland
+                if clicked_block == BlockType::Farmland
+                    && matches!(held_item, Item::Seeds | Item::Carrot | Item::Potato)
+                {
+                    let plant_pos = (clicked_pos.0, clicked_pos.1 + 1, clicked_pos.2);
+                    if self.chunk_manager.get_block(plant_pos.0, plant_pos.1, plant_pos.2)
+                        == BlockType::Air
+                    {
+                        let crop_block = match held_item {
+                            Item::Seeds => BlockType::WheatCrop,
+                            Item::Carrot => BlockType::CarrotCrop,
+                            _ => BlockType::PotatoCrop,
+                        };
+                        self.apply_block_changes(&[(plant_pos, crop_block)]);
+                        self.chunk_manager.set_block_state(
+                            plant_pos.0,
+                            plant_pos.1,
+                            plant_pos.2,
+                            0,
+                        );
+                        self.inventory
+                            .use_selected_item(self.game_mode == GameMode::Creative);
+                        return;
+                    }
+                }
                 if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
                     if let Some(interior) =
                         crate::dimension::detect_nether_frame(clicked_pos, |x, y, z| {
@@ -19074,6 +19204,67 @@ pub fn calculate_block_break_rewards(
             };
             if next_rand() % 8 == 0 {
                 drops.push(ItemStack::new(Item::Seeds, 1));
+            }
+        } else if matches!(
+            old_block,
+            BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop
+        ) {
+            let age = 7;
+            let mut rng_seed = (wx as u32)
+                .wrapping_mul(31)
+                .wrapping_add(wy as u32)
+                .wrapping_mul(17)
+                .wrapping_add(wz as u32);
+            let mut next_rand = || {
+                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                (rng_seed / 65536) % 32768
+            };
+
+            match old_block {
+                BlockType::WheatCrop => {
+                    if age == 7 {
+                        drops.push(ItemStack::new(Item::Wheat, 1));
+                        let bonus = if fortune > 0 {
+                            next_rand() as u32 % (fortune + 1)
+                        } else {
+                            0
+                        };
+                        let seeds_count = 1 + (next_rand() as u32 % 3) + bonus;
+                        drops.push(ItemStack::new(Item::Seeds, seeds_count));
+                    } else {
+                        drops.push(ItemStack::new(Item::Seeds, 1));
+                    }
+                }
+                BlockType::CarrotCrop => {
+                    if age == 7 {
+                        let bonus = if fortune > 0 {
+                            next_rand() as u32 % (fortune + 1)
+                        } else {
+                            0
+                        };
+                        let count = 1 + (next_rand() as u32 % 3) + bonus;
+                        drops.push(ItemStack::new(Item::Carrot, count));
+                    } else {
+                        drops.push(ItemStack::new(Item::Carrot, 1));
+                    }
+                }
+                BlockType::PotatoCrop => {
+                    if age == 7 {
+                        let bonus = if fortune > 0 {
+                            next_rand() as u32 % (fortune + 1)
+                        } else {
+                            0
+                        };
+                        let count = 1 + (next_rand() as u32 % 3) + bonus;
+                        drops.push(ItemStack::new(Item::Potato, count));
+                        if (next_rand() % 50) == 0 {
+                            drops.push(ItemStack::new(Item::PoisonousPotato, 1));
+                        }
+                    } else {
+                        drops.push(ItemStack::new(Item::Potato, 1));
+                    }
+                }
+                _ => {}
             }
         } else {
             let base_drop = match old_block {
