@@ -200,7 +200,8 @@ fn is_under_sun(
 }
 
 fn get_highest_solid_y(chunk_manager: &ChunkManager, x: i32, z: i32) -> Option<i32> {
-    for y in (0..crate::world::CHUNK_HEIGHT as i32).rev() {
+    let height = chunk_manager.dimension.height();
+    for y in (height.min_y..height.max_y_exclusive()).rev() {
         if chunk_manager.get_block(x, y, z).properties().is_solid {
             return Some(y);
         }
@@ -245,7 +246,8 @@ pub fn spawn_mobs(
 
     if let Some(solid_y) = get_highest_solid_y(chunk_manager, spawn_x, spawn_z) {
         let spawn_y = solid_y + 1;
-        if spawn_y > 0 && spawn_y < (crate::world::CHUNK_HEIGHT as i32 - 2) {
+        let height = chunk_manager.dimension.height();
+        if spawn_y >= height.min_y && spawn_y < height.max_y_exclusive() - 1 {
             if chunk_manager.get_block(spawn_x, spawn_y, spawn_z) == crate::world::BlockType::Air
                 && chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z)
                     == crate::world::BlockType::Air

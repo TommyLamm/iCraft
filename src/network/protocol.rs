@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PotionWire {
@@ -282,6 +282,8 @@ pub enum Packet {
         cx: i32,
         cz: i32,
         revision: u64,
+        min_section_y: i8,
+        section_count: u16,
         blocks: Vec<u8>,
         #[serde(default)]
         block_states: Vec<u8>,
@@ -666,6 +668,8 @@ mod tests {
             cx: -3,
             cz: 4,
             revision: 1,
+            min_section_y: -4,
+            section_count: 24,
             blocks: vec![0u8; 4096],
             block_states: Vec::new(),
             block_entities: Vec::new(),
@@ -805,6 +809,8 @@ mod tests {
             cx: 2,
             cz: -3,
             revision: 7,
+            min_section_y: -4,
+            section_count: 24,
             blocks: vec![1, 2, 3],
             block_states: vec![4, 5, 6],
             block_entities: Vec::new(),

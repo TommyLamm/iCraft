@@ -186,7 +186,7 @@ pub struct NetworkSnapshotRequest {
 
 pub struct NetworkSnapshotPayload {
     pub key: NetworkSnapshotKey,
-    pub result: Result<(Vec<u8>, Vec<u8>, Vec<u8>), String>,
+    pub result: Result<(Vec<u8>, Vec<u8>, Vec<u8>, i8, u16), String>,
 }
 
 pub enum NetworkSnapshotWorkerResult {
@@ -263,7 +263,7 @@ pub fn spawn_network_snapshot_worker(
             while let Ok(command) = worker_rx.recv() {
                 let result = match command {
                     NetworkSnapshotWorkerCommand::Snapshot(request) => {
-                        let data = if let Some(chunk) = request.chunk {
+                        let data = if let Some(ref chunk) = request.chunk {
                             let mut data = ChunkSaveData::from_chunk(&chunk);
                             data.mutation_revision = request.key.revision;
                             Some(data)
@@ -279,7 +279,23 @@ pub fn spawn_network_snapshot_worker(
                         };
                         let result = match data {
                             Some(data) if data.mutation_revision >= request.key.revision => {
-                                Ok((data.blocks, data.block_states, data.block_entities))
+                                let min_section_y = request
+                                    .chunk
+                                    .as_ref()
+                                    .map(|c| c.min_section_y)
+                                    .unwrap_or(0);
+                                let section_count = request
+                                    .chunk
+                                    .as_ref()
+                                    .map(|c| c.sections.len() as u16)
+                                    .unwrap_or(0);
+                                Ok((
+                                    data.blocks,
+                                    data.block_states,
+                                    data.block_entities,
+                                    min_section_y,
+                                    section_count,
+                                ))
                             }
                             Some(data) => Err(format!(
                                 "persisted snapshot for {:?} chunk ({}, {}) is revision {}, waiting for {}",
@@ -744,20 +760,25 @@ impl ChunkSaveData {
         chunk: &Chunk,
         redstone_metadata: &[crate::redstone::RedstoneComponentMetadata],
     ) -> Self {
-        let mut blocks = Vec::with_capacity(16 * 256 * 16);
-        let mut block_states_raw = Vec::with_capacity(16 * 256 * 16);
-        let mut sky_light = Vec::with_capacity(16 * 256 * 16);
-        let mut block_light = Vec::with_capacity(16 * 256 * 16);
-        let mut fluid_levels = Vec::with_capacity(16 * 256 * 16);
+        let section_count = chunk.sections.len();
+        let total_height = section_count * 16;
+        let min_y = chunk.min_section_y as i32 * 16;
+
+        let mut blocks = Vec::with_capacity(16 * total_height * 16);
+        let mut block_states_raw = Vec::with_capacity(16 * total_height * 16);
+        let mut sky_light = Vec::with_capacity(16 * total_height * 16);
+        let mut block_light = Vec::with_capacity(16 * total_height * 16);
+        let mut fluid_levels = Vec::with_capacity(16 * total_height * 16);
 
         for x in 0..16 {
-            for y in 0..256 {
+            for h in 0..total_height {
+                let wy = min_y + h as i32;
                 for z in 0..16 {
-                    blocks.push(chunk.get_block_local(x, y, z) as u8);
-                    block_states_raw.push(chunk.get_block_state(x as i32, y as i32, z as i32));
-                    sky_light.push(chunk.get_sky_light(x, y, z));
-                    block_light.push(chunk.get_block_light(x, y, z));
-                    fluid_levels.push(chunk.get_fluid_level(x, y, z));
+                    blocks.push(chunk.get_block_local(x, wy, z) as u8);
+                    block_states_raw.push(chunk.get_block_state(x as i32, wy, z as i32));
+                    sky_light.push(chunk.get_sky_light(x, wy, z));
+                    block_light.push(chunk.get_block_light(x, wy, z));
+                    fluid_levels.push(chunk.get_fluid_level(x, wy, z));
                 }
             }
         }
@@ -795,7 +816,7 @@ impl ChunkSaveData {
             block_states: compress_bytes(&block_states_raw).unwrap_or_default(),
             mutation_revision: 0,
             block_entities,
-            data_version: 1,
+            data_version: 2,
         }
     }
 
@@ -855,73 +876,98 @@ impl ChunkSaveData {
         let block_light = decompress_bytes(&self.block_light).unwrap_or_default();
         let fluid_levels = decompress_bytes(&self.fluid_levels).unwrap_or_default();
 
-        if blocks.len() == 16 * 256 * 16 {
-            let mut sections = Vec::with_capacity(crate::world::SECTION_COUNT);
-            for sec_y in 0..crate::world::SECTION_COUNT {
-                let mut sec_b = [BlockType::Air; 4096];
-                let mut sec_st = [0u8; 4096];
-                let mut sec_sk = [0u8; 4096];
-                let mut sec_bl = [0u8; 4096];
-                let mut sec_fl = [0u8; 4096];
+        let total_voxels = blocks.len();
+        if total_voxels == 0 {
+            return;
+        }
 
-                for ly in 0..crate::world::SECTION_SIZE {
-                    let y = sec_y * crate::world::SECTION_SIZE + ly;
-                    for z in 0..16 {
-                        for x in 0..16 {
-                            let flat_idx = (x * 256 + y) * 16 + z;
-                            let sec_idx = (ly << 8) | (z << 4) | x;
+        let is_legacy_256 = total_voxels == 16 * 256 * 16;
+        let total_height = if is_legacy_256 {
+            256
+        } else {
+            total_voxels / (16 * 16)
+        };
+        let source_sec_count = total_height / 16;
 
+        for sec_i in 0..source_sec_count {
+            let target_sec_y = if is_legacy_256 {
+                sec_i as i8
+            } else {
+                chunk.min_section_y + sec_i as i8
+            };
+            let Some(target_sec_idx) = chunk.section_index(target_sec_y) else {
+                continue;
+            };
+
+            let mut sec_b = [BlockType::Air; 4096];
+            let mut sec_st = [0u8; 4096];
+            let mut sec_sk = [0u8; 4096];
+            let mut sec_bl = [0u8; 4096];
+            let mut sec_fl = [0u8; 4096];
+
+            for ly in 0..16 {
+                let h = sec_i * 16 + ly;
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let flat_idx = (x * total_height + h) * 16 + z;
+                        let sec_idx = (ly << 8) | (z << 4) | x;
+
+                        if flat_idx < blocks.len() {
                             sec_b[sec_idx] = BlockType::from_u8(blocks[flat_idx]);
-                            if !block_states.is_empty() {
-                                sec_st[sec_idx] = block_states[flat_idx];
-                            }
-                            if !sky_light.is_empty() {
-                                sec_sk[sec_idx] = sky_light[flat_idx];
-                            }
-                            if !block_light.is_empty() {
-                                sec_bl[sec_idx] = block_light[flat_idx];
-                            }
-                            if !fluid_levels.is_empty() {
-                                sec_fl[sec_idx] = fluid_levels[flat_idx];
-                            }
+                        }
+                        if flat_idx < block_states.len() {
+                            sec_st[sec_idx] = block_states[flat_idx];
+                        }
+                        if flat_idx < sky_light.len() {
+                            sec_sk[sec_idx] = sky_light[flat_idx];
+                        }
+                        if flat_idx < block_light.len() {
+                            sec_bl[sec_idx] = block_light[flat_idx];
+                        }
+                        if flat_idx < fluid_levels.len() {
+                            sec_fl[sec_idx] = fluid_levels[flat_idx];
                         }
                     }
                 }
-
-                let sec = crate::world::ChunkSection::from_dense(
-                    &sec_b,
-                    &sec_sk,
-                    &sec_bl,
-                    if block_states.is_empty() {
-                        None
-                    } else {
-                        Some(&sec_st)
-                    },
-                    if fluid_levels.is_empty() {
-                        None
-                    } else {
-                        Some(&sec_fl)
-                    },
-                );
-                sections.push(sec);
-            }
-            chunk.sections = sections;
-            chunk.rebuild_torch_index();
-            chunk.rebuild_redstone_index();
-
-            for x in 0..16 {
-                for z in 0..16 {
-                    chunk.update_heightmap(x, z);
-                }
             }
 
-            // Restore block entities with validation: limit check, bounds check, type matching check
-            chunk.block_entities.clear();
-            let entities = self.block_entities();
-            if entities.len() <= 4096 {
-                for ((x, y, z), entity) in entities {
-                    let _ = chunk.insert_block_entity(x, y, z, entity);
-                }
+            let sec = crate::world::ChunkSection::from_dense(
+                &sec_b,
+                &sec_sk,
+                &sec_bl,
+                if block_states.is_empty() {
+                    None
+                } else {
+                    Some(&sec_st)
+                },
+                if fluid_levels.is_empty() {
+                    None
+                } else {
+                    Some(&sec_fl)
+                },
+            );
+            if sec.is_empty() && sec_sk.iter().all(|&l| l == 0) && sec_bl.iter().all(|&l| l == 0) {
+                chunk.sections[target_sec_idx] = None;
+            } else {
+                chunk.sections[target_sec_idx] = Some(sec);
+            }
+        }
+
+        chunk.rebuild_torch_index();
+        chunk.rebuild_redstone_index();
+
+        for x in 0..16 {
+            for z in 0..16 {
+                chunk.update_heightmap(x, z);
+            }
+        }
+
+        // Restore block entities with validation: limit check, bounds check, type matching check
+        chunk.block_entities.clear();
+        let entities = self.block_entities();
+        if entities.len() <= 4096 {
+            for ((x, y, z), entity) in entities {
+                let _ = chunk.insert_block_entity(x, y, z, entity);
             }
         }
     }
@@ -1159,14 +1205,14 @@ impl UncompressedChunkSnapshot {
         .try_into()
         .unwrap();
 
-        for x in 0..16 {
-            for y in 0..256 {
-                for z in 0..16 {
-                    blocks[x][y][z] = chunk.get_block_local(x, y, z);
+        for x in 0..crate::world::CHUNK_WIDTH {
+            for y in 0..crate::world::CHUNK_HEIGHT {
+                for z in 0..crate::world::CHUNK_DEPTH {
+                    blocks[x][y][z] = chunk.get_block_local(x, y as i32, z);
                     block_states[x][y][z] = chunk.get_block_state(x as i32, y as i32, z as i32);
-                    sky_light[x][y][z] = chunk.get_sky_light(x, y, z);
-                    block_light[x][y][z] = chunk.get_block_light(x, y, z);
-                    fluid_levels[x][y][z] = chunk.get_fluid_level(x, y, z);
+                    sky_light[x][y][z] = chunk.get_sky_light(x, y as i32, z);
+                    block_light[x][y][z] = chunk.get_block_light(x, y as i32, z);
+                    fluid_levels[x][y][z] = chunk.get_fluid_level(x, y as i32, z);
                 }
             }
         }

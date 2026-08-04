@@ -119,7 +119,10 @@ impl SimHarness {
                         bytes.extend_from_slice(&p.1.to_le_bytes());
                         bytes.extend_from_slice(&p.2.to_le_bytes());
                         bytes.extend_from_slice(
-                            &chunk.get_block_local(x, y, z).to_wire().to_le_bytes(),
+                            &chunk
+                                .get_block_local(x, y as i32, z)
+                                .to_wire()
+                                .to_le_bytes(),
                         );
                         bytes.push(self.chunks.get_block_state(p.0, p.1, p.2));
                         bytes.push(self.chunks.get_sky_light(p.0, p.1, p.2));

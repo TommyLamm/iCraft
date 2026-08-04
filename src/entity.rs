@@ -975,7 +975,7 @@ mod tests {
             for x in 0..crate::world::CHUNK_WIDTH {
                 for y in 0..crate::world::CHUNK_HEIGHT {
                     for z in 0..crate::world::CHUNK_DEPTH {
-                        c.set_block_local(x, y, z, crate::world::BlockType::Air);
+                        c.set_block_local(x, y as i32, z, crate::world::BlockType::Air);
                     }
                 }
             }

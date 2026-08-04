@@ -36,7 +36,8 @@ pub fn tick_fluids(
             break;
         };
 
-        if wy < 0 || wy >= CHUNK_HEIGHT as i32 {
+        let height = chunk_manager.dimension.height();
+        if !height.contains_y(wy) {
             continue;
         }
         let cx = wx.div_euclid(CHUNK_WIDTH as i32);

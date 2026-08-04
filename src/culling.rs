@@ -122,12 +122,11 @@ pub fn is_section_occluder(block: crate::world::BlockType) -> bool {
 }
 
 /// Compute pairwise face connectivity for a 16x16x16 section inside a Chunk.
-pub fn compute_section_connectivity(
-    chunk: &crate::world::Chunk,
-    sec_y: usize,
-) -> SectionConnectivity {
-    let base_y = sec_y * crate::world::SECTION_SIZE;
-    compute_section_connectivity_with(|x, ly, z| chunk.get_block_local(x, base_y + ly, z))
+pub fn compute_section_connectivity(chunk: &crate::world::Chunk, sec_y: i8) -> SectionConnectivity {
+    compute_section_connectivity_with(|x, ly, z| {
+        let wy = crate::world::section_and_local_y_to_world_y(sec_y, ly as u8);
+        chunk.get_block_local(x, wy, z)
+    })
 }
 
 /// Computes connectivity from the exact immutable halo used by a section
@@ -246,7 +245,7 @@ fn compute_section_connectivity_with(
 #[derive(Debug)]
 struct SectionNode {
     x: i32,
-    sec_y: usize,
+    sec_y: i8,
     z: i32,
     entry_face: Option<u8>,
 }
@@ -258,7 +257,7 @@ struct SectionNode {
 /// visitation masks that used to be allocated afresh for every frame.
 #[derive(Debug, Default)]
 pub struct SectionVisibilityScratch {
-    visited_entry: HashMap<(i32, usize, i32), u8>,
+    visited_entry: HashMap<(i32, i8, i32), u8>,
     queue: VecDeque<SectionNode>,
 }
 
@@ -286,14 +285,14 @@ impl SectionVisibilityScratch {
 /// Returns a set of visible section coordinates `(x, sec_y, z)`.
 pub fn traverse_section_visibility<F>(
     cam_sec_x: i32,
-    cam_sec_y: usize,
+    cam_sec_y: i8,
     cam_sec_z: i32,
     render_distance: i32,
     frustum: &Frustum,
     get_connectivity: F,
-    visible_sections: &mut HashSet<(i32, usize, i32)>,
+    visible_sections: &mut HashSet<(i32, i8, i32)>,
 ) where
-    F: Fn(i32, usize, i32) -> Option<SectionConnectivity>,
+    F: Fn(i32, i8, i32) -> Option<SectionConnectivity>,
 {
     let mut scratch = SectionVisibilityScratch::default();
     traverse_section_visibility_with_scratch(
@@ -316,15 +315,15 @@ pub fn traverse_section_visibility<F>(
 /// traversal does not allocate.
 pub fn traverse_section_visibility_with_scratch<F>(
     cam_sec_x: i32,
-    cam_sec_y: usize,
+    cam_sec_y: i8,
     cam_sec_z: i32,
     render_distance: i32,
     frustum: &Frustum,
     get_connectivity: F,
-    visible_sections: &mut HashSet<(i32, usize, i32)>,
+    visible_sections: &mut HashSet<(i32, i8, i32)>,
     scratch: &mut SectionVisibilityScratch,
 ) where
-    F: Fn(i32, usize, i32) -> Option<SectionConnectivity>,
+    F: Fn(i32, i8, i32) -> Option<SectionConnectivity>,
 {
     visible_sections.clear();
     scratch.visited_entry.clear();
@@ -360,10 +359,13 @@ pub fn traverse_section_visibility_with_scratch<F>(
                     _ => continue,
                 };
 
-                if target_y_raw < 0 || target_y_raw >= 16 {
+                let min_sec = crate::dimension::WorldHeight::OVERWORLD.min_section_y() as i32;
+                let max_sec =
+                    crate::dimension::WorldHeight::OVERWORLD.max_section_y_exclusive() as i32;
+                if target_y_raw < min_sec || target_y_raw >= max_sec {
                     continue;
                 }
-                let target_sec_y = target_y_raw as usize;
+                let target_sec_y = target_y_raw as i8;
 
                 if (target_x - cam_sec_x).abs() > render_distance
                     || (target_z - cam_sec_z).abs() > render_distance

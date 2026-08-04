@@ -34,7 +34,82 @@ pub enum Dimension {
     End,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorldHeight {
+    pub min_y: i32,
+    pub height: u32,
+}
+
+impl WorldHeight {
+    pub const OVERWORLD: Self = Self {
+        min_y: -64,
+        height: 384,
+    };
+    pub const NETHER: Self = Self {
+        min_y: 0,
+        height: 128,
+    };
+    pub const END: Self = Self {
+        min_y: 0,
+        height: 256,
+    };
+
+    pub const fn new(min_y: i32, height: u32) -> Self {
+        Self { min_y, height }
+    }
+
+    pub const fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub const fn max_y_exclusive(&self) -> i32 {
+        self.min_y + self.height as i32
+    }
+
+    pub const fn min_section_y(&self) -> i8 {
+        (self.min_y >> 4) as i8
+    }
+
+    pub const fn max_section_y_exclusive(&self) -> i8 {
+        (self.max_y_exclusive() >> 4) as i8
+    }
+
+    pub const fn section_count(&self) -> usize {
+        (self.height / 16) as usize
+    }
+
+    pub const fn contains_y(&self, y: i32) -> bool {
+        y >= self.min_y && y < self.max_y_exclusive()
+    }
+
+    pub fn section_index(&self, section_y: i8) -> Option<usize> {
+        let min_sec = self.min_section_y();
+        let max_sec = self.max_section_y_exclusive();
+        if section_y >= min_sec && section_y < max_sec {
+            Some((section_y - min_sec) as usize)
+        } else {
+            None
+        }
+    }
+
+    pub fn section_y_at_index(&self, index: usize) -> i8 {
+        self.min_section_y() + index as i8
+    }
+}
+
 impl Dimension {
+    pub const fn height(self) -> WorldHeight {
+        match self {
+            Self::Overworld => WorldHeight::OVERWORLD,
+            Self::Nether => WorldHeight::NETHER,
+            Self::End => WorldHeight::END,
+        }
+    }
+
     pub const fn from_wire(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::Overworld),
@@ -533,9 +608,10 @@ fn finish_chunk(
     let mut sky_light = empty_light();
     let mut block_light = empty_light();
     let mut fluid_levels = empty_light();
-    let mut heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]> = vec![[0; CHUNK_DEPTH]; CHUNK_WIDTH]
-        .try_into()
-        .expect("chunk heightmap dimensions are fixed");
+    let mut heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
+        vec![[crate::world::NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
+            .try_into()
+            .expect("chunk heightmap dimensions are fixed");
     let mut light_queue = VecDeque::new();
 
     for x in 0..CHUNK_WIDTH {
@@ -545,7 +621,7 @@ fn finish_chunk(
             for y in (0..CHUNK_HEIGHT).rev() {
                 let block = blocks[x][y][z];
                 if !found_height && block != BlockType::Air {
-                    heightmap[x][z] = y as u16;
+                    heightmap[x][z] = y as i16;
                     found_height = true;
                 }
                 if block.properties().render_type == RenderType::Opaque {
@@ -575,10 +651,11 @@ fn finish_chunk(
         (0, 0, -1),
     ];
     while let Some((x, y, z)) = light_queue.pop_front() {
-        let next_light = block_light[x][y][z].saturating_sub(1);
-        if next_light == 0 {
+        let current_light = block_light[x][y][z];
+        if current_light <= 1 {
             continue;
         }
+        let next_light = current_light - 1;
         for (dx, dy, dz) in NEIGHBORS {
             let nx = x as isize + dx;
             let ny = y as isize + dy;
@@ -620,18 +697,19 @@ fn finish_chunk(
                 }
             }
         }
-        sections.push(crate::world::ChunkSection::from_dense(
-            &sec_b,
-            &sec_sk,
-            &sec_bl,
-            None,
-            Some(&sec_fl),
-        ));
+        let sec =
+            crate::world::ChunkSection::from_dense(&sec_b, &sec_sk, &sec_bl, None, Some(&sec_fl));
+        if sec.is_empty() {
+            sections.push(None);
+        } else {
+            sections.push(Some(sec));
+        }
     }
 
     let mut chunk = Chunk {
         chunk_x,
         chunk_z,
+        min_section_y: 0,
         sections,
         heightmap,
         torch_positions: Vec::new(),
@@ -797,8 +875,9 @@ mod tests {
     fn chunk_contains_block(chunk: &Chunk, target: BlockType) -> bool {
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
+                let wy = y as i32 + (chunk.min_section_y as i32 * 16);
                 for z in 0..CHUNK_DEPTH {
-                    if chunk.get_block_local(x, y, z) == target {
+                    if chunk.get_block_local(x, wy, z) == target {
                         return true;
                     }
                 }
@@ -814,7 +893,7 @@ mod tests {
             for z in 0..CHUNK_DEPTH {
                 assert_eq!(chunk.get_block_local(x, 0, z), BlockType::Bedrock);
                 assert_eq!(
-                    chunk.get_block_local(x, NETHER_HEIGHT - 1, z),
+                    chunk.get_block_local(x, (NETHER_HEIGHT - 1) as i32, z),
                     BlockType::Bedrock
                 );
             }
@@ -826,8 +905,9 @@ mod tests {
         let mut all_sky_zero = true;
         'outer_sky: for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
+                let wy = y as i32 + (chunk.min_section_y as i32 * 16);
                 for z in 0..CHUNK_DEPTH {
-                    if chunk.get_sky_light(x, y, z) != 0 {
+                    if chunk.get_sky_light(x, wy, z) != 0 {
                         all_sky_zero = false;
                         break 'outer_sky;
                     }
@@ -839,8 +919,9 @@ mod tests {
         let mut has_max_block_light = false;
         'outer_bl: for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
+                let wy = y as i32 + (chunk.min_section_y as i32 * 16);
                 for z in 0..CHUNK_DEPTH {
-                    if chunk.get_block_light(x, y, z) == 15 {
+                    if chunk.get_block_light(x, wy, z) == 15 {
                         has_max_block_light = true;
                         break 'outer_bl;
                     }
@@ -882,12 +963,12 @@ mod tests {
         let local_x = center_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
         let local_z = center_z.rem_euclid(CHUNK_DEPTH as i32) as usize;
         assert_eq!(
-            chunk.get_block_local(local_x, (crystal_y - 1) as usize, local_z),
+            chunk.get_block_local(local_x, crystal_y - 1, local_z),
             BlockType::Obsidian
         );
         let surface_y = end_surface_at(center_x, center_z, seed).unwrap();
         assert_eq!(
-            chunk.get_block_local(local_x, (surface_y + 1) as usize, local_z),
+            chunk.get_block_local(local_x, surface_y + 1, local_z),
             BlockType::Obsidian
         );
     }
@@ -898,8 +979,9 @@ mod tests {
         let mut frames = 0;
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
+                let wy = y as i32 + (chunk.min_section_y as i32 * 16);
                 for z in 0..CHUNK_DEPTH {
-                    if chunk.get_block_local(x, y, z) == BlockType::EndPortalFrame {
+                    if chunk.get_block_local(x, wy, z) == BlockType::EndPortalFrame {
                         frames += 1;
                     }
                 }
@@ -916,10 +998,11 @@ mod tests {
         assert_eq!(a.sections.len(), b.sections.len());
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
+                let wy = y as i32 + (a.min_section_y as i32 * 16);
                 for z in 0..CHUNK_DEPTH {
-                    assert_eq!(a.get_block_local(x, y, z), b.get_block_local(x, y, z));
-                    assert_eq!(a.get_sky_light(x, y, z), b.get_sky_light(x, y, z));
-                    assert_eq!(a.get_block_light(x, y, z), b.get_block_light(x, y, z));
+                    assert_eq!(a.get_block_local(x, wy, z), b.get_block_local(x, wy, z));
+                    assert_eq!(a.get_sky_light(x, wy, z), b.get_sky_light(x, wy, z));
+                    assert_eq!(a.get_block_light(x, wy, z), b.get_block_light(x, wy, z));
                 }
             }
         }
@@ -929,10 +1012,11 @@ mod tests {
         let end_b = generate_chunk(Dimension::End, 15, -8, 123);
         for x in 0..CHUNK_WIDTH {
             for y in 0..CHUNK_HEIGHT {
+                let wy = y as i32 + (end_a.min_section_y as i32 * 16);
                 for z in 0..CHUNK_DEPTH {
                     assert_eq!(
-                        end_a.get_block_local(x, y, z),
-                        end_b.get_block_local(x, y, z)
+                        end_a.get_block_local(x, wy, z),
+                        end_b.get_block_local(x, wy, z)
                     );
                 }
             }

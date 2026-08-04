@@ -91,6 +91,8 @@ pub enum ClientToGame {
         cx: i32,
         cz: i32,
         revision: u64,
+        min_section_y: i8,
+        section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
         block_entities: Vec<u8>,
@@ -314,6 +316,8 @@ impl RevisionGate {
         cx: i32,
         cz: i32,
         revision: u64,
+        min_section_y: i8,
+        section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
         block_entities: Vec<u8>,
@@ -332,6 +336,8 @@ impl RevisionGate {
             cx,
             cz,
             revision,
+            min_section_y,
+            section_count,
             blocks,
             block_states,
             block_entities,
@@ -586,6 +592,8 @@ async fn run_client(
                         cx,
                         cz,
                         revision,
+                        min_section_y,
+                        section_count,
                         blocks,
                         block_states,
                         block_entities,
@@ -596,6 +604,8 @@ async fn run_client(
                             cx,
                             cz,
                             revision,
+                            min_section_y,
+                            section_count,
                             blocks,
                             block_states,
                             block_entities,
@@ -995,6 +1005,8 @@ mod tests {
                 cx: -2,
                 cz: 5,
                 revision: 1,
+                min_section_y: 0,
+                section_count: 16,
                 blocks: vec![1, 2, 3, 4],
                 block_states: vec![0, 0, 0, 0],
                 block_entities: vec![],
@@ -1116,6 +1128,7 @@ mod tests {
                         blocks,
                         block_states,
                         block_entities: _,
+                        ..
                     } => break (blocks, block_states),
                     ClientToGame::PlayerJoin { .. } => {}
                     other => panic!("expected persisted chunk snapshot, got {other:?}"),
@@ -1235,6 +1248,8 @@ mod tests {
             cx,
             cz: 0,
             revision: 1,
+            min_section_y: 0,
+            section_count: 16,
             blocks,
             block_states,
             block_entities: vec![],
@@ -1410,6 +1425,8 @@ mod tests {
                 cx: 0,
                 cz: 0,
                 revision: 1,
+                min_section_y: 0,
+                section_count: 16,
                 blocks: vec![1],
                 block_states: vec![0],
                 block_entities: vec![],
@@ -1593,7 +1610,7 @@ mod tests {
         let mut gate = RevisionGate::default();
         assert!(gate.accept_block_change(0, 2, 1, 70, 1, 4, 0).is_empty());
 
-        let events = gate.accept_snapshot(0, 0, 0, 1, vec![1, 2], vec![0, 0], vec![]);
+        let events = gate.accept_snapshot(0, 0, 0, 1, 0, 16, vec![1, 2], vec![0, 0], vec![]);
         assert_eq!(events.len(), 2);
         assert!(matches!(
             &events[0],
@@ -1619,7 +1636,7 @@ mod tests {
         ));
 
         assert!(gate
-            .accept_snapshot(0, 0, 0, 1, vec![9], vec![9], vec![])
+            .accept_snapshot(0, 0, 0, 1, 0, 16, vec![9], vec![9], vec![])
             .is_empty());
         assert!(gate.accept_block_change(0, 1, 1, 70, 1, 9, 0).is_empty());
 
@@ -1629,7 +1646,7 @@ mod tests {
             .is_empty());
         assert_eq!(
             same_revision
-                .accept_snapshot(0, 0, 0, 5, vec![1], vec![0], vec![])
+                .accept_snapshot(0, 0, 0, 5, 0, 16, vec![1], vec![0], vec![])
                 .len(),
             1
         );
@@ -1674,6 +1691,8 @@ mod tests {
                 0,
                 0,
                 1,
+                -4,
+                24,
                 snapshot.blocks.clone(),
                 snapshot.block_states.clone(),
                 snapshot.block_entities.clone(),
@@ -1705,7 +1724,7 @@ mod tests {
                     ClientToGame::BlockChange { x, y, z, block, .. } => {
                         client.set_block_local(
                             x.rem_euclid(16) as usize,
-                            y as usize,
+                            y,
                             z.rem_euclid(16) as usize,
                             crate::world::BlockType::from_wire(block).unwrap(),
                         );

@@ -400,14 +400,15 @@ impl PlayerPhysics {
 
     fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
         let player_aabb = self.get_aabb();
+        let height = chunk_manager.dimension.height();
 
         // 檢測玩家周圍可能相交的方塊
         let min_x = player_aabb.min.x.floor() as i32;
         let max_x = player_aabb.max.x.floor() as i32;
         let min_y =
-            (player_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+            (player_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let max_y =
-            (player_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+            (player_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let min_z = player_aabb.min.z.floor() as i32;
         let max_z = player_aabb.max.z.floor() as i32;
 
@@ -467,10 +468,11 @@ impl PlayerPhysics {
 
         let min_x = check_aabb.min.x.floor() as i32;
         let max_x = check_aabb.max.x.floor() as i32;
+        let height = chunk_manager.dimension.height();
         let min_y =
-            (check_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+            (check_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let max_y =
-            (check_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+            (check_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let min_z = check_aabb.min.z.floor() as i32;
         let max_z = check_aabb.max.z.floor() as i32;
 

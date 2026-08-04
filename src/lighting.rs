@@ -28,6 +28,7 @@ pub fn propagate_sky_light(
         (0, 0, 1),
         (0, 0, -1),
     ];
+    let height = chunk_manager.dimension.height();
 
     while let Some(node) = queue.pop_front() {
         let current_light = chunk_manager.get_sky_light(node.x, node.y, node.z);
@@ -40,7 +41,7 @@ pub fn propagate_sky_light(
             let ny = node.y + dy;
             let nz = node.z + dz;
 
-            if ny < 0 || ny >= CHUNK_HEIGHT as i32 {
+            if !height.contains_y(ny) {
                 continue;
             }
 
@@ -99,6 +100,7 @@ pub fn remove_sky_light(
         (0, 0, 1),
         (0, 0, -1),
     ];
+    let height = chunk_manager.dimension.height();
 
     while let Some(node) = removal_queue.pop_front() {
         for &(dx, dy, dz) in &dirs {
@@ -106,7 +108,7 @@ pub fn remove_sky_light(
             let ny = node.y + dy;
             let nz = node.z + dz;
 
-            if ny < 0 || ny >= CHUNK_HEIGHT as i32 {
+            if !height.contains_y(ny) {
                 continue;
             }
 
@@ -162,6 +164,7 @@ pub fn propagate_block_light(
         (0, 0, 1),
         (0, 0, -1),
     ];
+    let height = chunk_manager.dimension.height();
 
     while let Some(node) = queue.pop_front() {
         let current_light = chunk_manager.get_block_light(node.x, node.y, node.z);
@@ -174,7 +177,7 @@ pub fn propagate_block_light(
             let ny = node.y + dy;
             let nz = node.z + dz;
 
-            if ny < 0 || ny >= CHUNK_HEIGHT as i32 {
+            if !height.contains_y(ny) {
                 continue;
             }
 
@@ -231,6 +234,7 @@ pub fn remove_block_light(
         (0, 0, 1),
         (0, 0, -1),
     ];
+    let height = chunk_manager.dimension.height();
 
     while let Some(node) = removal_queue.pop_front() {
         for &(dx, dy, dz) in &dirs {
@@ -238,7 +242,7 @@ pub fn remove_block_light(
             let ny = node.y + dy;
             let nz = node.z + dz;
 
-            if ny < 0 || ny >= CHUNK_HEIGHT as i32 {
+            if !height.contains_y(ny) {
                 continue;
             }
 
@@ -529,20 +533,21 @@ pub fn propagate_chunk_lighting(
                 let wz = start_z + z as i32;
 
                 for y in 0..CHUNK_HEIGHT {
-                    let wy = y as i32;
+                    let wy = y as i32 + (chunk.min_section_y as i32 * 16);
 
                     // 1. Seed sky light only where a loaded, transparent
                     // neighbor actually needs light. Treating every chunk
                     // boundary as dirty creates thousands of useless nodes.
-                    let sky_val = chunk.get_sky_light(x, y, z);
+                    let sky_val = chunk.get_sky_light(x, wy, z);
                     if sky_val > 1 {
                         let mut has_darker_neighbor = false;
 
                         for &(dx, dy, dz) in &dirs {
                             let local_nx = x as i32 + dx;
-                            let local_ny = y as i32 + dy;
+                            let local_ny = wy + dy;
                             let local_nz = z as i32 + dz;
-                            if local_ny < 0 || local_ny >= CHUNK_HEIGHT as i32 {
+                            let min_y = chunk.min_section_y as i32 * 16;
+                            if local_ny < min_y || local_ny >= min_y + CHUNK_HEIGHT as i32 {
                                 continue;
                             }
 
@@ -554,12 +559,12 @@ pub fn propagate_chunk_lighting(
                                 (
                                     chunk.get_block_local(
                                         local_nx as usize,
-                                        local_ny as usize,
+                                        local_ny,
                                         local_nz as usize,
                                     ),
                                     chunk.get_sky_light(
                                         local_nx as usize,
-                                        local_ny as usize,
+                                        local_ny,
                                         local_nz as usize,
                                     ),
                                 )
@@ -598,15 +603,16 @@ pub fn propagate_chunk_lighting(
                     }
 
                     // 2. Apply the same loaded-neighbor check to block light.
-                    let block_val = chunk.get_block_light(x, y, z);
+                    let block_val = chunk.get_block_light(x, wy, z);
                     if block_val > 1 {
                         let mut has_darker_neighbor = false;
 
                         for &(dx, dy, dz) in &dirs {
                             let local_nx = x as i32 + dx;
-                            let local_ny = y as i32 + dy;
+                            let local_ny = wy + dy;
                             let local_nz = z as i32 + dz;
-                            if local_ny < 0 || local_ny >= CHUNK_HEIGHT as i32 {
+                            let min_y = chunk.min_section_y as i32 * 16;
+                            if local_ny < min_y || local_ny >= min_y + CHUNK_HEIGHT as i32 {
                                 continue;
                             }
 
@@ -618,12 +624,12 @@ pub fn propagate_chunk_lighting(
                                 (
                                     chunk.get_block_local(
                                         local_nx as usize,
-                                        local_ny as usize,
+                                        local_ny,
                                         local_nz as usize,
                                     ),
                                     chunk.get_block_light(
                                         local_nx as usize,
-                                        local_ny as usize,
+                                        local_ny,
                                         local_nz as usize,
                                     ),
                                 )
@@ -685,13 +691,13 @@ mod tests {
             for z in 0..CHUNK_DEPTH {
                 for y in 0..CHUNK_HEIGHT {
                     if y >= 64 {
-                        chunk.set_block_local(x, y, z, BlockType::Air);
-                        chunk.set_sky_light(x, y, z, 15);
+                        chunk.set_block_local(x, y as i32, z, BlockType::Air);
+                        chunk.set_sky_light(x, y as i32, z, 15);
                     } else {
-                        chunk.set_block_local(x, y, z, BlockType::Stone);
-                        chunk.set_sky_light(x, y, z, 0);
+                        chunk.set_block_local(x, y as i32, z, BlockType::Stone);
+                        chunk.set_sky_light(x, y as i32, z, 0);
                     }
-                    chunk.set_block_light(x, y, z, 0);
+                    chunk.set_block_light(x, y as i32, z, 0);
                 }
             }
         }
@@ -719,9 +725,9 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 for y in 0..CHUNK_HEIGHT {
-                    chunk.set_block_local(x, y, z, BlockType::Stone);
-                    chunk.set_sky_light(x, y, z, 0);
-                    chunk.set_block_light(x, y, z, 0);
+                    chunk.set_block_local(x, y as i32, z, BlockType::Stone);
+                    chunk.set_sky_light(x, y as i32, z, 0);
+                    chunk.set_block_light(x, y as i32, z, 0);
                 }
             }
         }

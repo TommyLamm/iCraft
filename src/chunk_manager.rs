@@ -51,12 +51,9 @@ pub(crate) fn mark_section_mesh_dependencies(
     wy: i32,
     wz: i32,
 ) {
-    if !(0..CHUNK_HEIGHT as i32).contains(&wy) {
-        return;
-    }
+    let sy = crate::world::world_y_to_section_y(wy) as i32;
     let cx = wx.div_euclid(CHUNK_WIDTH as i32);
     let cz = wz.div_euclid(CHUNK_DEPTH as i32);
-    let sy = (wy as usize / SECTION_SIZE) as i32;
     let lx = wx.rem_euclid(CHUNK_WIDTH as i32);
     let lz = wz.rem_euclid(CHUNK_DEPTH as i32);
     let ly = wy.rem_euclid(SECTION_SIZE as i32);
@@ -85,9 +82,7 @@ pub(crate) fn mark_section_mesh_dependencies(
         for dz in zs {
             for dy in ys {
                 let target = sy + dy;
-                if (0..SECTION_COUNT as i32).contains(&target) {
-                    dirty.insert(SectionKey::new(cx + dx, target as u16, cz + dz));
-                }
+                dirty.insert(SectionKey::new(cx + dx, target as i8, cz + dz));
             }
         }
     }
@@ -197,10 +192,11 @@ impl ChunkManager {
             (0, 0, 1),
             (0, 0, -1),
         ];
+        let height = self.dimension.height();
 
         for (dx, dy, dz) in OFFSETS {
             let pos = (wx + dx, wy + dy, wz + dz);
-            if pos.1 >= 0 && pos.1 < CHUNK_HEIGHT as i32 {
+            if height.contains_y(pos.1) {
                 self.water_updates.push(pos);
                 self.lava_updates.push(pos);
             }
@@ -229,16 +225,16 @@ impl ChunkManager {
         wx: i32,
         wy: i32,
         wz: i32,
-    ) -> Option<((i32, i32), (usize, usize, usize))> {
-        if wy < 0 || wy >= CHUNK_HEIGHT as i32 {
+    ) -> Option<((i32, i32), (usize, i32, usize))> {
+        let height = self.dimension.height();
+        if !height.contains_y(wy) {
             return None;
         }
         let cx = wx.div_euclid(CHUNK_WIDTH as i32);
         let cz = wz.div_euclid(CHUNK_DEPTH as i32);
         let bx = wx.rem_euclid(CHUNK_WIDTH as i32) as usize;
         let bz = wz.rem_euclid(CHUNK_DEPTH as i32) as usize;
-        let by = wy as usize;
-        Some(((cx, cz), (bx, by, bz)))
+        Some(((cx, cz), (bx, wy, bz)))
     }
 
     pub fn get_block(&self, wx: i32, wy: i32, wz: i32) -> BlockType {
@@ -249,10 +245,11 @@ impl ChunkManager {
     /// and out-of-range Y use an explicit air/zero-light sentinel; sky above
     /// the dimension retains full skylight only when the dimension has sky.
     pub fn capture_section_halo(&self, key: SectionKey) -> SectionHaloSnapshot {
+        let height = self.dimension.height();
         SectionHaloSnapshot::from_chunk(key, |wx, wy, wz| {
-            if !(0..CHUNK_HEIGHT as i32).contains(&wy) {
+            if !height.contains_y(wy) {
                 return MeshVoxel {
-                    sky: if wy >= CHUNK_HEIGHT as i32 && self.dimension.has_sky_light() {
+                    sky: if wy >= height.max_y_exclusive() && self.dimension.has_sky_light() {
                         15
                     } else {
                         0
@@ -267,8 +264,8 @@ impl ChunkManager {
                 return MeshVoxel::default();
             };
             MeshVoxel {
-                block: chunk.get_block_local(bx, by, bz),
-                state: chunk.get_block_state(bx as i32, by as i32, bz as i32),
+                block: chunk.get_block(bx as i32, by, bz as i32),
+                state: chunk.get_block_state(bx as i32, by, bz as i32),
                 sky: chunk.get_sky_light(bx, by, bz),
                 block_light: chunk.get_block_light(bx, by, bz),
                 raw_fluid: chunk.get_fluid_level(bx, by, bz),
@@ -352,12 +349,9 @@ impl ChunkManager {
                 return chunk.get_sky_light(bx, by, bz);
             }
         }
-        if wy >= CHUNK_HEIGHT as i32 {
-            return if self.dimension.has_sky_light() {
-                15
-            } else {
-                0
-            };
+        let height = self.dimension.height();
+        if wy >= height.max_y_exclusive() && self.dimension.has_sky_light() {
+            return 15;
         }
         0
     }

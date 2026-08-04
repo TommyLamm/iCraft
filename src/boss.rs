@@ -188,6 +188,7 @@ fn ensure_end_encounters(
         chunk
             .sections
             .iter()
+            .flatten()
             .any(|section| section.contains_block(BlockType::DragonEgg))
     });
 
@@ -220,12 +221,13 @@ fn ensure_end_encounters(
         for lx in 0..CHUNK_WIDTH {
             for lz in 0..CHUNK_DEPTH {
                 for y in (1..CHUNK_HEIGHT - 1).rev() {
-                    if chunk.get_block_local(lx, y, lz) == BlockType::Purpur
-                        && chunk.get_block_local(lx, y + 1, lz) == BlockType::Air
+                    let wy = y as i32 + (chunk.min_section_y as i32 * 16);
+                    if chunk.get_block_local(lx, wy, lz) == BlockType::Purpur
+                        && chunk.get_block_local(lx, wy + 1, lz) == BlockType::Air
                     {
                         candidates.push((
                             cx * CHUNK_WIDTH as i32 + lx as i32,
-                            y as i32 + 1,
+                            wy + 1,
                             cz * CHUNK_DEPTH as i32 + lz as i32,
                         ));
                         break;
@@ -1089,7 +1091,7 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 for y in 1..CHUNK_HEIGHT {
-                    chunk.set_block_local(x, y, z, BlockType::Air);
+                    chunk.set_block_local(x, y as i32, z, BlockType::Air);
                 }
                 chunk.set_block_local(x, 64, z, BlockType::EndStone);
             }
@@ -1256,7 +1258,7 @@ mod tests {
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 for y in 1..CHUNK_HEIGHT {
-                    chunk.set_block_local(x, y, z, BlockType::Air);
+                    chunk.set_block_local(x, y as i32, z, BlockType::Air);
                 }
                 chunk.set_block_local(x, 40, z, BlockType::Netherrack);
             }

@@ -77,7 +77,8 @@ pub fn validate_batch(
 
     for req in requests {
         let (x, y, z) = req.pos;
-        if y < 0 || y >= crate::world::CHUNK_HEIGHT as i32 {
+        let height = chunk_manager.dimension.height();
+        if !height.contains_y(y) {
             return Err(MutationError::OutOfBounds { pos: req.pos });
         }
 

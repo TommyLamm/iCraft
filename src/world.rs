@@ -2346,16 +2346,32 @@ pub const SECTION_SIZE: usize = 16;
 pub const SECTION_COUNT: usize = CHUNK_HEIGHT / SECTION_SIZE;
 pub const SECTION_VOLUME: usize = SECTION_SIZE * SECTION_SIZE * SECTION_SIZE;
 
+pub const fn world_y_to_section_y(y: i32) -> i8 {
+    (y >> 4) as i8
+}
+
+pub const fn world_y_to_local_y(y: i32) -> u8 {
+    (y.rem_euclid(16)) as u8
+}
+
+pub const fn section_and_local_y_to_world_y(section_y: i8, local_y: u8) -> i32 {
+    (section_y as i32 * 16) + local_y as i32
+}
+
+pub const NO_HEIGHT: i16 = -9999;
+
 /// Stable identity for one vertical 16^3 mesh section.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct SectionKey {
     pub cx: i32,
-    pub section_y: u16,
+    pub section_y: i8,
     pub cz: i32,
 }
 
 impl SectionKey {
-    pub const fn new(cx: i32, section_y: u16, cz: i32) -> Self {
+    pub const fn new(cx: i32, section_y: i8, cz: i32) -> Self {
         Self { cx, section_y, cz }
     }
     pub const fn min_world_y(self) -> i32 {
@@ -2943,6 +2959,14 @@ pub struct ChunkSection {
 }
 
 impl ChunkSection {
+    pub fn new(section_y: i8) -> Self {
+        if section_y >= 0 {
+            Self::empty_sky()
+        } else {
+            Self::empty_dark()
+        }
+    }
+
     pub fn empty_sky() -> Self {
         Self {
             blocks: BlockStorage::Empty,
@@ -2959,6 +2983,14 @@ impl ChunkSection {
             fluid_level_nonzero_count: 0,
             storage_changes: 0,
         }
+    }
+
+    pub fn non_air_count(&self) -> u16 {
+        self.non_air_count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.non_air_count == 0
     }
 
     pub fn empty_dark() -> Self {
@@ -3249,14 +3281,14 @@ impl std::error::Error for BlockEntityError {}
 pub struct Chunk {
     pub chunk_x: i32,
     pub chunk_z: i32,
-    pub sections: Vec<ChunkSection>,
+    pub min_section_y: i8,
+    pub sections: Vec<Option<ChunkSection>>,
     /// Per-column max Y of non-air blocks (indexed as [x][z])
-    pub heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]>,
-    /// Compact local coordinates of ordinary torch blocks. Each entry packs
-    /// x (4 bits), z (4 bits), and y (8 bits) into a u16.
-    pub(crate) torch_positions: Vec<u16>,
+    pub heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]>,
+    /// Compact local coordinates of ordinary torch blocks.
+    pub(crate) torch_positions: Vec<u32>,
     /// Compact local coordinates of redstone component blocks.
-    pub(crate) redstone_positions: Vec<u16>,
+    pub(crate) redstone_positions: Vec<u32>,
     /// Block entities keyed by Chunk-local coordinates (x: u8, y: i16, z: u8).
     pub(crate) block_entities:
         std::collections::HashMap<(u8, i16, u8), crate::block_entity::BlockEntity>,
@@ -3705,8 +3737,10 @@ impl Chunk {
             vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
                 .try_into()
                 .unwrap();
-        let mut heightmap: Box<[[u16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
-            vec![[0u16; CHUNK_DEPTH]; CHUNK_WIDTH].try_into().unwrap();
+        let mut heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
+            vec![[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
+                .try_into()
+                .unwrap();
 
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
@@ -3715,7 +3749,7 @@ impl Chunk {
                 for y in (0..CHUNK_HEIGHT).rev() {
                     let block = blocks[x][y][z];
                     if !found_h && block != BlockType::Air {
-                        heightmap[x][z] = y as u16;
+                        heightmap[x][z] = y as i16;
                         found_h = true;
                     }
                     if block.properties().render_type == RenderType::Opaque {
@@ -3727,37 +3761,45 @@ impl Chunk {
             }
         }
 
-        let mut sections = Vec::with_capacity(SECTION_COUNT);
-        for sec_y in 0..SECTION_COUNT {
-            let mut sec_blocks = [BlockType::Air; 4096];
-            let mut sec_sky = [0u8; 4096];
-            let mut sec_block_light = [0u8; 4096];
+        let mut sections =
+            Vec::with_capacity(crate::dimension::WorldHeight::OVERWORLD.section_count());
+        for sec_idx in 0..crate::dimension::WorldHeight::OVERWORLD.section_count() {
+            let sec_y = crate::dimension::WorldHeight::OVERWORLD.section_y_at_index(sec_idx);
+            let mut sec_b = [BlockType::Air; 4096];
+            let mut sec_sk = [0u8; 4096];
+            let mut sec_bl = [0u8; 4096];
             for ly in 0..SECTION_SIZE {
-                let y = sec_y * SECTION_SIZE + ly;
-                for z in 0..CHUNK_DEPTH {
-                    for x in 0..CHUNK_WIDTH {
-                        let idx = (ly << 8) | (z << 4) | x;
-                        sec_blocks[idx] = blocks[x][y][z];
-                        sec_sky[idx] = sky_light[x][y][z];
-                        sec_block_light[idx] = block_light[x][y][z];
+                let wy = (sec_y as i32 * 16) + ly as i32;
+                if wy >= 0 && (wy as usize) < CHUNK_HEIGHT {
+                    let y = wy as usize;
+                    for z in 0..CHUNK_DEPTH {
+                        for x in 0..CHUNK_WIDTH {
+                            let idx = (ly << 8) | (z << 4) | x;
+                            sec_b[idx] = blocks[x][y][z];
+                            sec_sk[idx] = sky_light[x][y][z];
+                            sec_bl[idx] = block_light[x][y][z];
+                        }
                     }
                 }
             }
-            sections.push(ChunkSection::from_dense(
-                &sec_blocks,
-                &sec_sky,
-                &sec_block_light,
-                None,
-                None,
-            ));
+            let sec = ChunkSection::from_dense(&sec_b, &sec_sk, &sec_bl, None, None);
+            if sec.non_air_count == 0
+                && sec_sk.iter().all(|&l| l == 0)
+                && sec_bl.iter().all(|&l| l == 0)
+            {
+                sections.push(None);
+            } else {
+                sections.push(Some(sec));
+            }
         }
 
-        let torch_positions = Self::build_torch_index_from_sections(&sections);
-        let redstone_positions = Self::build_redstone_index_from_sections(&sections);
+        let torch_positions = Self::build_torch_index_from_sections(-4, &sections);
+        let redstone_positions = Self::build_redstone_index_from_sections(-4, &sections);
 
         Self {
             chunk_x,
             chunk_z,
+            min_section_y: -4,
             sections,
             heightmap,
             torch_positions,
@@ -3766,33 +3808,39 @@ impl Chunk {
         }
     }
 
-    fn encode_torch_position(x: usize, y: usize, z: usize) -> u16 {
-        (x as u16) | ((z as u16) << 4) | ((y as u16) << 8)
+    fn encode_torch_position(x: usize, y: i32, z: usize) -> u32 {
+        (x as u32) | ((z as u32) << 4) | (((y as u32) & 0xFFFF) << 8)
     }
 
     /// Decodes a compact local torch/component index into `(x, y, z)` coordinates.
-    pub fn decode_torch_position(index: u16) -> (usize, usize, usize) {
+    pub fn decode_torch_position(index: u32) -> (usize, i32, usize) {
         (
             (index & 0x0f) as usize,
-            (index >> 8) as usize,
+            ((index >> 8) as u16) as i16 as i32,
             ((index >> 4) & 0x0f) as usize,
         )
     }
 
-    fn build_torch_index_from_sections(sections: &[ChunkSection]) -> Vec<u16> {
+    fn build_torch_index_from_sections(
+        min_sec_y: i8,
+        sections: &[Option<ChunkSection>],
+    ) -> Vec<u32> {
         let mut positions = Vec::new();
-        for sec_y in 0..SECTION_COUNT {
-            let sec = &sections[sec_y];
+        for (sec_idx, sec_opt) in sections.iter().enumerate() {
+            let Some(sec) = sec_opt else {
+                continue;
+            };
             if sec.non_air_count == 0 {
                 continue;
             }
+            let sec_y = min_sec_y + sec_idx as i8;
             for ly in 0..SECTION_SIZE {
-                let y = sec_y * SECTION_SIZE + ly;
+                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
                 for z in 0..CHUNK_DEPTH {
                     for x in 0..CHUNK_WIDTH {
                         let idx = (ly << 8) | (z << 4) | x;
                         if sec.blocks.get(idx) == BlockType::Torch {
-                            positions.push(Self::encode_torch_position(x, y, z));
+                            positions.push(Self::encode_torch_position(x, wy, z));
                         }
                     }
                 }
@@ -3801,20 +3849,26 @@ impl Chunk {
         positions
     }
 
-    fn build_redstone_index_from_sections(sections: &[ChunkSection]) -> Vec<u16> {
+    fn build_redstone_index_from_sections(
+        min_sec_y: i8,
+        sections: &[Option<ChunkSection>],
+    ) -> Vec<u32> {
         let mut positions = Vec::new();
-        for sec_y in 0..SECTION_COUNT {
-            let sec = &sections[sec_y];
+        for (sec_idx, sec_opt) in sections.iter().enumerate() {
+            let Some(sec) = sec_opt else {
+                continue;
+            };
             if sec.redstone_count == 0 {
                 continue;
             }
+            let sec_y = min_sec_y + sec_idx as i8;
             for ly in 0..SECTION_SIZE {
-                let y = sec_y * SECTION_SIZE + ly;
+                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
                 for z in 0..CHUNK_DEPTH {
                     for x in 0..CHUNK_WIDTH {
                         let idx = (ly << 8) | (z << 4) | x;
                         if crate::redstone::is_component(sec.blocks.get(idx)) {
-                            positions.push(Self::encode_torch_position(x, y, z));
+                            positions.push(Self::encode_torch_position(x, wy, z));
                         }
                     }
                 }
@@ -3824,12 +3878,12 @@ impl Chunk {
     }
 
     /// Returns the indexed local positions of ordinary torches.
-    pub fn torch_positions(&self) -> &[u16] {
+    pub fn torch_positions(&self) -> &[u32] {
         &self.torch_positions
     }
 
     /// Returns the indexed local positions of redstone components.
-    pub fn redstone_positions(&self) -> &[u16] {
+    pub fn redstone_positions(&self) -> &[u32] {
         &self.redstone_positions
     }
 
@@ -3837,10 +3891,11 @@ impl Chunk {
     /// storage, vector spare capacity, and the boxed heightmap allocation.
     pub fn memory_usage(&self) -> usize {
         size_of::<Self>()
-            + self.sections.capacity() * size_of::<ChunkSection>()
+            + self.sections.capacity() * size_of::<Option<ChunkSection>>()
             + self
                 .sections
                 .iter()
+                .filter_map(|s| s.as_ref())
                 .map(|section| {
                     section
                         .memory_usage()
@@ -3848,8 +3903,8 @@ impl Chunk {
                 })
                 .sum::<usize>()
             + size_of_val(self.heightmap.as_ref())
-            + self.torch_positions.capacity() * size_of::<u16>()
-            + self.redstone_positions.capacity() * size_of::<u16>()
+            + self.torch_positions.capacity() * size_of::<u32>()
+            + self.redstone_positions.capacity() * size_of::<u32>()
             + self.block_entities.capacity()
                 * (size_of::<(u8, i16, u8)>() + size_of::<crate::block_entity::BlockEntity>())
             + self
@@ -3859,17 +3914,26 @@ impl Chunk {
                 .sum::<usize>()
     }
 
+    pub fn section_index(&self, section_y: i8) -> Option<usize> {
+        let idx = (section_y as i32) - (self.min_section_y as i32);
+        if idx >= 0 && (idx as usize) < self.sections.len() {
+            Some(idx as usize)
+        } else {
+            None
+        }
+    }
+
+    pub fn section_y_at_index(&self, index: usize) -> i8 {
+        self.min_section_y + index as i8
+    }
+
     pub fn get_block_entity(
         &self,
         x: u8,
         y: i16,
         z: u8,
     ) -> Option<&crate::block_entity::BlockEntity> {
-        if (x as usize) >= CHUNK_WIDTH
-            || (z as usize) >= CHUNK_DEPTH
-            || y < 0
-            || (y as usize) >= CHUNK_HEIGHT
-        {
+        if (x as usize) >= CHUNK_WIDTH || (z as usize) >= CHUNK_DEPTH {
             return None;
         }
         self.block_entities.get(&(x, y, z))
@@ -3881,11 +3945,7 @@ impl Chunk {
         y: i16,
         z: u8,
     ) -> Option<&mut crate::block_entity::BlockEntity> {
-        if (x as usize) >= CHUNK_WIDTH
-            || (z as usize) >= CHUNK_DEPTH
-            || y < 0
-            || (y as usize) >= CHUNK_HEIGHT
-        {
+        if (x as usize) >= CHUNK_WIDTH || (z as usize) >= CHUNK_DEPTH {
             return None;
         }
         self.block_entities.get_mut(&(x, y, z))
@@ -3898,14 +3958,10 @@ impl Chunk {
         z: u8,
         entity: crate::block_entity::BlockEntity,
     ) -> Result<(), BlockEntityError> {
-        if (x as usize) >= CHUNK_WIDTH
-            || (z as usize) >= CHUNK_DEPTH
-            || y < 0
-            || (y as usize) >= CHUNK_HEIGHT
-        {
+        if (x as usize) >= CHUNK_WIDTH || (z as usize) >= CHUNK_DEPTH {
             return Err(BlockEntityError::OutOfBounds);
         }
-        let block_type = self.get_block_local(x as usize, y as usize, z as usize);
+        let block_type = self.get_block_local(x as usize, y as i32, z as usize);
         if !entity.matches_block_type(block_type) {
             return Err(BlockEntityError::TypeMismatch);
         }
@@ -3922,11 +3978,7 @@ impl Chunk {
         y: i16,
         z: u8,
     ) -> Option<crate::block_entity::BlockEntity> {
-        if (x as usize) >= CHUNK_WIDTH
-            || (z as usize) >= CHUNK_DEPTH
-            || y < 0
-            || (y as usize) >= CHUNK_HEIGHT
-        {
+        if (x as usize) >= CHUNK_WIDTH || (z as usize) >= CHUNK_DEPTH {
             return None;
         }
         self.block_entities.remove(&(x, y, z))
@@ -3942,31 +3994,39 @@ impl Chunk {
 
     /// Rebuilds the torch index after bulk block mutations (generation/load).
     pub fn rebuild_torch_index(&mut self) {
-        self.torch_positions = Self::build_torch_index_from_sections(&self.sections);
+        self.torch_positions =
+            Self::build_torch_index_from_sections(self.min_section_y, &self.sections);
     }
 
     /// Rebuilds the redstone index after bulk block mutations (generation/load).
     pub fn rebuild_redstone_index(&mut self) {
-        self.redstone_positions = Self::build_redstone_index_from_sections(&self.sections);
+        self.redstone_positions =
+            Self::build_redstone_index_from_sections(self.min_section_y, &self.sections);
     }
 
     /// Sets a local block and keeps the torch and redstone indices synchronized.
-    pub fn set_block_local(&mut self, x: usize, y: usize, z: usize, block: BlockType) {
-        let sec_y = y / SECTION_SIZE;
-        let ly = y % SECTION_SIZE;
+    pub fn set_block_local(&mut self, x: usize, wy: i32, z: usize, block: BlockType) {
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return;
+        };
+        let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
-        let old = self.sections[sec_y].set_block(idx, block);
+
+        let sec_y_val = self.section_y_at_index(sec_idx);
+        let sec = self.sections[sec_idx].get_or_insert_with(|| ChunkSection::new(sec_y_val));
+        let old = sec.set_block(idx, block);
         if old == block {
             return;
         }
 
-        if let Some(entity) = self.block_entities.get(&(x as u8, y as i16, z as u8)) {
+        if let Some(entity) = self.block_entities.get(&(x as u8, wy as i16, z as u8)) {
             if !entity.matches_block_type(block) {
-                self.block_entities.remove(&(x as u8, y as i16, z as u8));
+                self.block_entities.remove(&(x as u8, wy as i16, z as u8));
             }
         }
 
-        let encoded = Self::encode_torch_position(x, y, z);
+        let encoded = Self::encode_torch_position(x, wy, z);
         if old == BlockType::Torch {
             if let Some(index) = self.torch_positions.iter().position(|&p| p == encoded) {
                 self.torch_positions.swap_remove(index);
@@ -3990,124 +4050,151 @@ impl Chunk {
 
     /// Update heightmap for a single column after block placement/removal
     pub fn update_heightmap(&mut self, x: usize, z: usize) {
-        for sec_y in (0..SECTION_COUNT).rev() {
-            if self.sections[sec_y].non_air_count == 0 {
-                continue;
-            }
-            for ly in (0..SECTION_SIZE).rev() {
-                let y = sec_y * SECTION_SIZE + ly;
-                let idx = (ly << 8) | (z << 4) | x;
-                if self.sections[sec_y].blocks.get(idx) != BlockType::Air {
-                    self.heightmap[x][z] = y as u16;
-                    return;
+        for sec_idx in (0..self.sections.len()).rev() {
+            if let Some(ref sec) = self.sections[sec_idx] {
+                if sec.non_air_count == 0 {
+                    continue;
+                }
+                let sec_y = self.section_y_at_index(sec_idx);
+                for ly in (0..SECTION_SIZE).rev() {
+                    let idx = (ly << 8) | (z << 4) | x;
+                    if sec.blocks.get(idx) != BlockType::Air {
+                        let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
+                        self.heightmap[x][z] = wy as i16;
+                        return;
+                    }
                 }
             }
         }
-        self.heightmap[x][z] = 0;
+        self.heightmap[x][z] = NO_HEIGHT;
     }
 
-    pub fn get_block_local(&self, x: usize, y: usize, z: usize) -> BlockType {
-        let sec_y = y / SECTION_SIZE;
-        let ly = y % SECTION_SIZE;
+    pub fn get_block_local(&self, x: usize, wy: i32, z: usize) -> BlockType {
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return BlockType::Air;
+        };
+        let Some(ref sec) = self.sections[sec_idx] else {
+            return BlockType::Air;
+        };
+        let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
-        self.sections[sec_y].blocks.get(idx)
+        sec.blocks.get(idx)
     }
 
-    pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
-        if x < 0
-            || x >= CHUNK_WIDTH as i32
-            || y < 0
-            || y >= CHUNK_HEIGHT as i32
-            || z < 0
-            || z >= CHUNK_DEPTH as i32
-        {
+    pub fn get_block(&self, x: i32, wy: i32, z: i32) -> BlockType {
+        if x < 0 || x >= CHUNK_WIDTH as i32 || z < 0 || z >= CHUNK_DEPTH as i32 {
             return BlockType::Air;
         }
-        self.get_block_local(x as usize, y as usize, z as usize)
+        self.get_block_local(x as usize, wy, z as usize)
     }
 
-    pub fn get_sky_light(&self, x: usize, y: usize, z: usize) -> u8 {
-        let sec_y = y / SECTION_SIZE;
-        let ly = y % SECTION_SIZE;
+    pub fn get_sky_light(&self, x: usize, wy: i32, z: usize) -> u8 {
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return 0;
+        };
+        let Some(ref sec) = self.sections[sec_idx] else {
+            return 0;
+        };
+        let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
-        self.sections[sec_y].light.get_sky(idx)
+        sec.light.get_sky(idx)
     }
 
-    pub fn set_sky_light(&mut self, x: usize, y: usize, z: usize, val: u8) {
-        let sec_y = y / SECTION_SIZE;
-        let ly = y % SECTION_SIZE;
+    pub fn set_sky_light(&mut self, x: usize, wy: i32, z: usize, val: u8) {
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return;
+        };
+        let sec_y_val = self.section_y_at_index(sec_idx);
+        let sec = self.sections[sec_idx].get_or_insert_with(|| ChunkSection::new(sec_y_val));
+        let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
-        self.sections[sec_y].light.set_sky(idx, val);
-        self.sections[sec_y].storage_changes =
-            self.sections[sec_y].storage_changes.saturating_add(1);
+        sec.light.set_sky(idx, val);
+        sec.storage_changes = sec.storage_changes.saturating_add(1);
     }
 
-    pub fn get_block_light(&self, x: usize, y: usize, z: usize) -> u8 {
-        let sec_y = y / SECTION_SIZE;
-        let ly = y % SECTION_SIZE;
+    pub fn get_block_light(&self, x: usize, wy: i32, z: usize) -> u8 {
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return 0;
+        };
+        let Some(ref sec) = self.sections[sec_idx] else {
+            return 0;
+        };
+        let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
-        self.sections[sec_y].light.get_block(idx)
+        sec.light.get_block(idx)
     }
 
-    pub fn set_block_light(&mut self, x: usize, y: usize, z: usize, val: u8) {
-        let sec_y = y / SECTION_SIZE;
-        let ly = y % SECTION_SIZE;
+    pub fn set_block_light(&mut self, x: usize, wy: i32, z: usize, val: u8) {
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return;
+        };
+        let sec_y_val = self.section_y_at_index(sec_idx);
+        let sec = self.sections[sec_idx].get_or_insert_with(|| ChunkSection::new(sec_y_val));
+        let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
-        self.sections[sec_y].light.set_block(idx, val);
-        self.sections[sec_y].storage_changes =
-            self.sections[sec_y].storage_changes.saturating_add(1);
+        sec.light.set_block(idx, val);
+        sec.storage_changes = sec.storage_changes.saturating_add(1);
     }
 
-    pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> u8 {
-        if x < 0
-            || x >= CHUNK_WIDTH as i32
-            || y < 0
-            || y >= CHUNK_HEIGHT as i32
-            || z < 0
-            || z >= CHUNK_DEPTH as i32
-        {
-            0
-        } else {
-            let ux = x as usize;
-            let uy = y as usize;
-            let uz = z as usize;
-            let sec_y = uy / SECTION_SIZE;
-            let ly = uy % SECTION_SIZE;
-            let idx = (ly << 8) | (uz << 4) | ux;
-            self.sections[sec_y].get_block_state(idx)
+    pub fn get_block_state(&self, x: i32, wy: i32, z: i32) -> u8 {
+        if x < 0 || x >= CHUNK_WIDTH as i32 || z < 0 || z >= CHUNK_DEPTH as i32 {
+            return 0;
         }
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return 0;
+        };
+        let Some(ref sec) = self.sections[sec_idx] else {
+            return 0;
+        };
+        let ly = world_y_to_local_y(wy) as usize;
+        let idx = (ly << 8) | ((z as usize) << 4) | (x as usize);
+        sec.get_block_state(idx)
     }
 
-    pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: u8) {
-        if x >= 0
-            && x < CHUNK_WIDTH as i32
-            && y >= 0
-            && y < CHUNK_HEIGHT as i32
-            && z >= 0
-            && z < CHUNK_DEPTH as i32
-        {
-            let ux = x as usize;
-            let uy = y as usize;
-            let uz = z as usize;
-            let sec_y = uy / SECTION_SIZE;
-            let ly = uy % SECTION_SIZE;
-            let idx = (ly << 8) | (uz << 4) | ux;
-            self.sections[sec_y].set_block_state(idx, state);
+    pub fn set_block_state(&mut self, x: i32, wy: i32, z: i32, state: u8) {
+        if x < 0 || x >= CHUNK_WIDTH as i32 || z < 0 || z >= CHUNK_DEPTH as i32 {
+            return;
         }
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return;
+        };
+        let sec_y_val = self.section_y_at_index(sec_idx);
+        let sec = self.sections[sec_idx].get_or_insert_with(|| ChunkSection::new(sec_y_val));
+        let ly = world_y_to_local_y(wy) as usize;
+        let idx = (ly << 8) | ((z as usize) << 4) | (x as usize);
+        sec.set_block_state(idx, state);
     }
 
-    pub fn get_fluid_level(&self, x: usize, y: usize, z: usize) -> u8 {
-        let sec_y = y / SECTION_SIZE;
-        let ly = y % SECTION_SIZE;
+    pub fn get_fluid_level(&self, x: usize, wy: i32, z: usize) -> u8 {
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return 0;
+        };
+        let Some(ref sec) = self.sections[sec_idx] else {
+            return 0;
+        };
+        let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
-        self.sections[sec_y].get_fluid_level(idx)
+        sec.get_fluid_level(idx)
     }
 
-    pub fn set_fluid_level(&mut self, x: usize, y: usize, z: usize, level: u8) {
-        let sec_y = y / SECTION_SIZE;
-        let ly = y % SECTION_SIZE;
+    pub fn set_fluid_level(&mut self, x: usize, wy: i32, z: usize, level: u8) {
+        let sec_y = world_y_to_section_y(wy);
+        let Some(sec_idx) = self.section_index(sec_y) else {
+            return;
+        };
+        let sec_y_val = self.section_y_at_index(sec_idx);
+        let sec = self.sections[sec_idx].get_or_insert_with(|| ChunkSection::new(sec_y_val));
+        let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
-        self.sections[sec_y].set_fluid_level(idx, level);
+        sec.set_fluid_level(idx, level);
     }
 
     // Generate opaque/cutout and translucent terrain meshes. Full cube faces
@@ -4612,23 +4699,27 @@ impl Chunk {
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
     {
+        let min_y = self.min_section_y as i32 * 16;
+        let total_height = self.sections.len() * 16;
         let origin = [
             self.chunk_x * CHUNK_WIDTH as i32,
-            0,
+            min_y,
             self.chunk_z * CHUNK_DEPTH as i32,
         ];
+        let max_y = min_y + total_height as i32;
         Self::mesh_l0_volume(
             origin,
-            [CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH],
+            [CHUNK_WIDTH, total_height, CHUNK_DEPTH],
             |x, y, z| {
                 let (lookup_block, sky, block_light, level, falling) = get_block_at(x, y, z);
                 let in_chunk = x.div_euclid(CHUNK_WIDTH as i32) == self.chunk_x
                     && z.div_euclid(CHUNK_DEPTH as i32) == self.chunk_z
-                    && (0..CHUNK_HEIGHT as i32).contains(&y);
+                    && y >= min_y
+                    && y < max_y;
                 let block = if in_chunk {
                     self.get_block_local(
                         x.rem_euclid(CHUNK_WIDTH as i32) as usize,
-                        y as usize,
+                        y,
                         z.rem_euclid(CHUNK_DEPTH as i32) as usize,
                     )
                 } else {
@@ -4653,9 +4744,12 @@ impl Chunk {
         let (o0, oi0, t0, ti0) = self.generate_mesh(get_block_at);
         let l1 = self.generate_surface_mesh(get_block_at, 1);
         let l2 = self.generate_surface_mesh(get_block_at, 4);
-        let mut section_connectivity = [crate::culling::SectionConnectivity::FULL; SECTION_COUNT];
-        for sec_y in 0..SECTION_COUNT {
-            section_connectivity[sec_y] = crate::culling::compute_section_connectivity(self, sec_y);
+        let mut section_connectivity =
+            vec![crate::culling::SectionConnectivity::FULL; self.sections.len()];
+        for sec_idx in 0..self.sections.len() {
+            let sec_y = self.section_y_at_index(sec_idx);
+            section_connectivity[sec_idx] =
+                crate::culling::compute_section_connectivity(self, sec_y);
         }
         ChunkMeshBundle {
             levels: [
@@ -4681,28 +4775,27 @@ impl Chunk {
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
     {
         assert_eq!((self.chunk_x, self.chunk_z), (key.cx, key.cz));
-        assert!((key.section_y as usize) < SECTION_COUNT);
+        assert!(self.section_index(key.section_y).is_some());
         // Materialize the immutable 18^3 halo up front. The worker lookup
         // below consults this snapshot for all block-occlusion decisions,
         // ensuring boundary/AO results are independent of later mutations.
         let halo = SectionHaloSnapshot::from_chunk(key, |wx, wy, wz| {
             if wx.div_euclid(CHUNK_WIDTH as i32) == key.cx
                 && wz.div_euclid(CHUNK_DEPTH as i32) == key.cz
-                && (0..CHUNK_HEIGHT as i32).contains(&wy)
+                && self.section_index(world_y_to_section_y(wy)).is_some()
             {
                 let x = wx.rem_euclid(CHUNK_WIDTH as i32) as usize;
-                let y = wy as usize;
                 let z = wz.rem_euclid(CHUNK_DEPTH as i32) as usize;
                 MeshVoxel {
-                    block: self.get_block_local(x, y, z),
+                    block: self.get_block_local(x, wy, z),
                     state: self.get_block_state(
                         wx - key.cx * CHUNK_WIDTH as i32,
                         wy,
                         wz - key.cz * CHUNK_DEPTH as i32,
                     ),
-                    sky: self.get_sky_light(x, y, z),
-                    block_light: self.get_block_light(x, y, z),
-                    raw_fluid: self.get_fluid_level(x, y, z),
+                    sky: self.get_sky_light(x, wy, z),
+                    block_light: self.get_block_light(x, wy, z),
+                    raw_fluid: self.get_fluid_level(x, wy, z),
                 }
             } else {
                 let (block, sky, block_light, level, falling) = get_block_at(wx, wy, wz);
@@ -4863,12 +4956,17 @@ impl Chunk {
 
         for gz in 0..grid_depth {
             for gx in 0..grid_width {
-                let mut best: Option<(usize, usize, usize, BlockType)> = None;
+                let mut best: Option<(usize, i32, usize, BlockType)> = None;
                 for dz in 0..step {
                     for dx in 0..step {
                         let x = gx * step + dx;
                         let z = gz * step + dz;
-                        let mut y = self.heightmap[x][z] as usize;
+                        let h = self.heightmap[x][z];
+                        if h == NO_HEIGHT {
+                            continue;
+                        }
+                        let mut y = h as i32;
+                        let min_y = self.min_section_y as i32 * 16;
                         loop {
                             let block = self.get_block_local(x, y, z);
                             if is_lod_surface(block) {
@@ -4877,7 +4975,7 @@ impl Chunk {
                                 }
                                 break;
                             }
-                            if y == 0 {
+                            if y <= min_y {
                                 break;
                             }
                             y -= 1;
@@ -4890,9 +4988,9 @@ impl Chunk {
                 };
                 let world_x = self.chunk_x * CHUNK_WIDTH as i32 + x as i32;
                 let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
-                let (_, sky, block_light, _, _) = get_block_at(world_x, y as i32 + 1, world_z);
+                let (_, sky, block_light, _, _) = get_block_at(world_x, y + 1, world_z);
                 cells[gz * grid_width + gx] = Some(SurfaceCell {
-                    height: y as i32,
+                    height: y,
                     block,
                     top_tile: block.get_face_tex_index(4),
                     light_level: sky as u16 + block_light as u16 * 16,
@@ -5247,8 +5345,10 @@ mod tests {
 
     fn empty_test_chunk() -> Chunk {
         let mut chunk = Chunk::new(0, 0);
+        let min_y = chunk.min_section_y as i32 * 16;
+        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
+            for y in min_y..max_y {
                 for z in 0..CHUNK_DEPTH {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                     chunk.set_sky_light(x, y, z, 15);
@@ -5257,7 +5357,7 @@ mod tests {
                 }
             }
             for z in 0..CHUNK_DEPTH {
-                chunk.heightmap[x][z] = 0;
+                chunk.heightmap[x][z] = NO_HEIGHT;
             }
         }
         chunk
@@ -5287,7 +5387,7 @@ mod tests {
                     if (cell_x / 2 + cell_y / 2 + cell_z / 2) & 1 == 0 {
                         chunk.set_block_local(
                             cell_x,
-                            key.min_world_y() as usize + cell_y,
+                            key.min_world_y() + cell_y as i32,
                             cell_z,
                             BlockType::Stone,
                         );
@@ -5366,10 +5466,12 @@ mod tests {
         let chunk = empty_test_chunk();
         let lookup = |x, y, z| test_chunk_lookup(&chunk, x, y, z);
         let legacy = chunk.generate_mesh(lookup);
-        let origin = [0, 0, 0];
+        let min_y = chunk.min_section_y as i32 * 16;
+        let total_height = chunk.sections.len() * 16;
+        let origin = [0, min_y, 0];
         let core = Chunk::mesh_l0_volume(
             origin,
-            [CHUNK_WIDTH, CHUNK_HEIGHT, CHUNK_DEPTH],
+            [CHUNK_WIDTH, total_height, CHUNK_DEPTH],
             |x, y, z| {
                 let (block, sky, bl, level, falling) = lookup(x, y, z);
                 MeshVoxel {
@@ -5392,21 +5494,18 @@ mod tests {
     ) -> (BlockType, u8, u8, u8, bool) {
         if world_x < 0
             || world_x >= CHUNK_WIDTH as i32
-            || world_y < 0
-            || world_y >= CHUNK_HEIGHT as i32
             || world_z < 0
             || world_z >= CHUNK_DEPTH as i32
         {
             return (BlockType::Air, 15, 0, 0, false);
         }
         let x = world_x as usize;
-        let y = world_y as usize;
         let z = world_z as usize;
-        let fluid = chunk.get_fluid_level(x, y, z);
+        let fluid = chunk.get_fluid_level(x, world_y, z);
         (
-            chunk.get_block_local(x, y, z),
-            chunk.get_sky_light(x, y, z),
-            chunk.get_block_light(x, y, z),
+            chunk.get_block_local(x, world_y, z),
+            chunk.get_sky_light(x, world_y, z),
+            chunk.get_block_light(x, world_y, z),
             fluid & 0x07,
             fluid & 0x08 != 0,
         )
@@ -5567,14 +5666,16 @@ mod tests {
     #[test]
     fn generated_mesh_writes_ao_for_isolated_and_occluded_vertices() {
         let mut chunk = Chunk::new(0, 0);
+        let min_y = chunk.min_section_y as i32 * 16;
+        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
+            for y in min_y..max_y {
                 for z in 0..CHUNK_DEPTH {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
             for z in 0..CHUNK_DEPTH {
-                chunk.heightmap[x][z] = 0;
+                chunk.heightmap[x][z] = NO_HEIGHT;
             }
         }
         chunk.set_block_local(8, 1, 8, BlockType::Stone);
@@ -5673,9 +5774,9 @@ mod tests {
             for z in 0..CHUNK_DEPTH {
                 let height = 1 + (x + z) % 2;
                 for y in 1..=height {
-                    varied.set_block_local(x, y, z, BlockType::Stone);
+                    varied.set_block_local(x, y as i32, z, BlockType::Stone);
                 }
-                varied.heightmap[x][z] = height as u16;
+                varied.heightmap[x][z] = height as i16;
             }
         }
         let varied_l1 =
@@ -5691,14 +5792,16 @@ mod tests {
     #[test]
     fn snow_layer_mesh_is_one_eighth_of_a_block_high() {
         let mut chunk = Chunk::new(0, 0);
+        let min_y = chunk.min_section_y as i32 * 16;
+        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
+            for y in min_y..max_y {
                 for z in 0..CHUNK_DEPTH {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
             for z in 0..CHUNK_DEPTH {
-                chunk.heightmap[x][z] = 0;
+                chunk.heightmap[x][z] = NO_HEIGHT;
             }
         }
         chunk.set_block_local(8, 1, 8, BlockType::SnowLayer);
@@ -5715,14 +5818,16 @@ mod tests {
     #[test]
     fn cross_model_blocks_generate_x_mesh() {
         let mut chunk = Chunk::new(0, 0);
+        let min_y = chunk.min_section_y as i32 * 16;
+        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
+            for y in min_y..max_y {
                 for z in 0..CHUNK_DEPTH {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
             for z in 0..CHUNK_DEPTH {
-                chunk.heightmap[x][z] = 0;
+                chunk.heightmap[x][z] = NO_HEIGHT;
             }
         }
         chunk.set_block_local(8, 1, 8, BlockType::Poppy);
@@ -5779,12 +5884,17 @@ mod tests {
     #[test]
     fn door_mesh_generation_bounds_and_quad_count() {
         let mut chunk = Chunk::new(0, 0);
+        let min_y = chunk.min_section_y as i32 * 16;
+        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..16 {
-            for y in 0..256 {
+            for y in min_y..max_y {
                 for z in 0..16 {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
+        }
+        for z in 0..16 {
+            chunk.heightmap[0][z] = NO_HEIGHT;
         }
         chunk.heightmap[0][0] = 64;
         chunk.set_block_local(0, 64, 0, BlockType::OakDoor);
@@ -5825,12 +5935,17 @@ mod tests {
     #[test]
     fn trapdoor_mesh_generation_open_and_closed_bounds() {
         let mut chunk = Chunk::new(0, 0);
+        let min_y = chunk.min_section_y as i32 * 16;
+        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..16 {
-            for y in 0..256 {
+            for y in min_y..max_y {
                 for z in 0..16 {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
+        }
+        for z in 0..16 {
+            chunk.heightmap[0][z] = NO_HEIGHT;
         }
         chunk.heightmap[0][0] = 64;
         chunk.set_block_local(0, 64, 0, BlockType::OakTrapdoor);
@@ -6091,28 +6206,30 @@ mod tests {
         let chunk = Chunk::new(0, 0);
         let mut clustered = false;
         let mut coal_count = 0;
+        let min_y = chunk.min_section_y as i32 * 16;
+        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in 0..CHUNK_HEIGHT {
+                for y in min_y..max_y {
                     if chunk.get_block_local(x, y, z) == BlockType::CoalOre {
                         coal_count += 1;
                         let neighbors = [
-                            (x as i32 + 1, y as i32, z as i32),
-                            (x as i32 - 1, y as i32, z as i32),
-                            (x as i32, y as i32 + 1, z as i32),
-                            (x as i32, y as i32 - 1, z as i32),
-                            (x as i32, y as i32, z as i32 + 1),
-                            (x as i32, y as i32, z as i32 - 1),
+                            (x as i32 + 1, y, z as i32),
+                            (x as i32 - 1, y, z as i32),
+                            (x as i32, y + 1, z as i32),
+                            (x as i32, y - 1, z as i32),
+                            (x as i32, y, z as i32 + 1),
+                            (x as i32, y, z as i32 - 1),
                         ];
                         for &(nx, ny, nz) in &neighbors {
                             if nx >= 0
                                 && nx < CHUNK_WIDTH as i32
                                 && nz >= 0
                                 && nz < CHUNK_DEPTH as i32
-                                && ny >= 0
-                                && ny < CHUNK_HEIGHT as i32
+                                && ny >= min_y
+                                && ny < max_y
                             {
-                                if chunk.get_block_local(nx as usize, ny as usize, nz as usize)
+                                if chunk.get_block_local(nx as usize, ny, nz as usize)
                                     == BlockType::CoalOre
                                 {
                                     clustered = true;
@@ -6178,7 +6295,7 @@ mod tests {
                 let base_height = (64.0 + noise_val * 12.0) as usize;
                 let entrance_noise = perlin.get([world_x as f64 * 0.015, world_z as f64 * 0.015]);
                 if entrance_noise > 0.55 && base_height > 63 {
-                    if chunk.get_block_local(x, base_height, z) == BlockType::Air {
+                    if chunk.get_block_local(x, base_height as i32, z) == BlockType::Air {
                         found_surface_air = true;
                         break;
                     }
@@ -6599,10 +6716,9 @@ mod tests {
         let mut chunk = Chunk {
             chunk_x: 0,
             chunk_z: 0,
-            sections: (0..SECTION_COUNT)
-                .map(|_| ChunkSection::empty_dark())
-                .collect(),
-            heightmap: Box::new([[0; CHUNK_DEPTH]; CHUNK_WIDTH]),
+            min_section_y: -4,
+            sections: (0..24).map(|_| Some(ChunkSection::empty_dark())).collect(),
+            heightmap: Box::new([[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]),
             torch_positions: Vec::new(),
             redstone_positions: Vec::new(),
             block_entities: std::collections::HashMap::new(),
@@ -6613,7 +6729,9 @@ mod tests {
         assert!(promoted_bytes > empty_bytes);
 
         chunk.set_block_local(0, 0, 0, BlockType::Air);
-        assert!(chunk.sections[0].compact_if_worthwhile());
+        if let Some(ref mut sec) = chunk.sections[4] {
+            assert!(sec.compact_if_worthwhile());
+        }
         assert!(chunk.memory_usage() < promoted_bytes);
     }
 

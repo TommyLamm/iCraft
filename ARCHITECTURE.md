@@ -223,13 +223,44 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Player, recipes, gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `recipes.rs`, `crafting.rs` |
 | Equipment and effects | `enchantment.rs`, `brewing.rs`, `hand_renderer.rs` |
 | Entities and AI | `entity.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
-| Container & workstation system | `block_entity.rs` (ChestBlockEntity, FurnaceBlockEntity), `inventory.rs` (ContainerInventory), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `container_sessions.rs` (ContainerSessionManager), `state.rs` (SlotType::ContainerSlot, container_target, open_chest, recipe_book_open, update_furnaces) |
+| Container & workstation system | `block_entity.rs` (ChestBlockEntity, FurnaceBlockEntity), `inventory.rs` (ContainerInventory), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (SlotType::ContainerSlot, container_target, open_chest, recipe_book_open, update_furnaces) |
 | Networking | `network/{protocol,transport,server,client}.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
 | Performance instrumentation | `perf.rs`, `performance/` |
 
 Start with the exact symbol related to the task; avoid reading all of
 `state.rs`.
+
+## Signed vertical world (Plan 08)
+
+The world now uses a signed `min_y=-64, height=384` scheme for the Overworld
+(`dimension.rs:38-101`). `WorldHeight` provides `contains_y`, `section_index`,
+`section_y_at_index`, `min_section_y`, `max_section_y_exclusive` helpers.
+
+`Chunk` (`world.rs:3279`) stores sparse `Vec<Option<ChunkSection>>` indexed by
+`min_section_y` rather than a dense `[ChunkSection; 16]`. Empty sections are
+`None` and consume no storage. The `SectionKey.section_y` field is `i8`.
+
+`Chunk` methods (`get_block_local`, `set_block_local`, `get_sky_light`, etc.)
+accept `wy: i32` world-Y and use `world_y_to_section_y`/`world_y_to_local_y`
+checked helpers. The chunk `heightmap` uses `i16` with `NO_HEIGHT = -9999`
+sentinel.
+
+All dimension-bound systems (physics collision, void damage, mob spawn, portal
+placement, fluid tick, light propagation, world mutation validation) now use
+`dimension.height()` / `WorldHeight::contains_y` instead of hardcoded
+`0..CHUNK_HEIGHT`.
+
+Network protocol v10: `ChunkData` packet carries explicit `min_section_y: i8`
+and `section_count: u16`. Save format v2: `ChunkSaveData::data_version = 2`
+with height-aware flat array serialization.
+
+```rust
+// Safe checked helpers in world.rs:
+world_y_to_section_y(y: i32) -> i8;        // y >> 4
+world_y_to_local_y(y: i32) -> u8;          // y.rem_euclid(16)
+section_and_local_y_to_world_y(sy: i8, ly: u8) -> i32;
+```
 
 ## Architectural invariants and hotspots
 

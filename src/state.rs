@@ -1041,16 +1041,11 @@ mod remote_sync_tests {
         let section = meshes
             .get_mut(&coord)
             .unwrap()
-            .section_mut(key.section_y as usize)
+            .section_mut(key.section_y)
             .unwrap();
-        section.connectivity = crate::culling::SectionConnectivityState::Valid(
-            crate::culling::SectionConnectivity::NONE,
-        );
-        section.meshed_revision = section.revision;
-        let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
-
         section.invalidate();
         let first_revision = section.revision;
+        let mut scheduler = crate::chunk_schedule::SectionMeshScheduler::new();
         scheduler.enqueue(
             SectionIdentity::new(key, first_revision, 7),
             DependencyReason::Block,
@@ -1145,7 +1140,7 @@ mod remote_sync_tests {
             let section = meshes
                 .get_mut(&(key.cx, key.cz))
                 .unwrap()
-                .section_mut(key.section_y as usize)
+                .section_mut(key.section_y)
                 .unwrap();
             section.invalidate();
             scheduler.enqueue(
@@ -1688,22 +1683,50 @@ impl GpuSectionMesh {
 }
 
 pub struct ChunkMesh {
-    sections: [GpuSectionMesh; SECTION_COUNT],
+    pub min_section_y: i8,
+    sections: Vec<GpuSectionMesh>,
 }
 
 impl ChunkMesh {
     fn pending() -> Self {
+        Self::pending_for_dimension(crate::dimension::Dimension::Overworld)
+    }
+
+    fn pending_for_dimension(dimension: crate::dimension::Dimension) -> Self {
+        let height = dimension.height();
+        Self::pending_for_height(height.min_section_y(), height.section_count())
+    }
+
+    fn pending_for_height(min_section_y: i8, section_count: usize) -> Self {
         Self {
-            sections: std::array::from_fn(|_| GpuSectionMesh::pending()),
+            min_section_y,
+            sections: (0..section_count)
+                .map(|_| GpuSectionMesh::pending())
+                .collect(),
         }
     }
 
-    fn section(&self, section_y: usize) -> Option<&GpuSectionMesh> {
-        self.sections.get(section_y)
+    fn section_index(&self, section_y: i8) -> Option<usize> {
+        let idx = (section_y as i32) - (self.min_section_y as i32);
+        if idx >= 0 && (idx as usize) < self.sections.len() {
+            Some(idx as usize)
+        } else {
+            None
+        }
     }
 
-    fn section_mut(&mut self, section_y: usize) -> Option<&mut GpuSectionMesh> {
-        self.sections.get_mut(section_y)
+    fn section_y_at_index(&self, index: usize) -> i8 {
+        self.min_section_y + index as i8
+    }
+
+    fn section(&self, section_y: i8) -> Option<&GpuSectionMesh> {
+        let idx = self.section_index(section_y)?;
+        self.sections.get(idx)
+    }
+
+    fn section_mut(&mut self, section_y: i8) -> Option<&mut GpuSectionMesh> {
+        let idx = self.section_index(section_y)?;
+        self.sections.get_mut(idx)
     }
 
     fn finest_bounds(&self) -> Option<MeshBounds> {
@@ -1791,10 +1814,10 @@ impl MeshSnapshot {
                     let voxel = chunks
                         .get(&(chunk_x, chunk_z))
                         .map(|neighbor| MeshVoxel {
-                            block: neighbor.get_block_local(local_x, y, local_z),
-                            sky_light: neighbor.get_sky_light(local_x, y, local_z),
-                            block_light: neighbor.get_block_light(local_x, y, local_z),
-                            fluid: neighbor.get_fluid_level(local_x, y, local_z),
+                            block: neighbor.get_block_local(local_x, y as i32, local_z),
+                            sky_light: neighbor.get_sky_light(local_x, y as i32, local_z),
+                            block_light: neighbor.get_block_light(local_x, y as i32, local_z),
+                            fluid: neighbor.get_fluid_level(local_x, y as i32, local_z),
                         })
                         .unwrap_or(MeshVoxel {
                             block: BlockType::Air,
@@ -2010,15 +2033,15 @@ impl State {
                 break;
             };
             self.section_storage_compaction_queued.remove(&key);
-            let Some(section) = self
-                .chunk_manager
-                .chunks
-                .get_mut(&(key.cx, key.cz))
-                .and_then(|chunk| chunk.sections.get_mut(key.section_y as usize))
-            else {
+            let Some(chunk) = self.chunk_manager.chunks.get_mut(&(key.cx, key.cz)) else {
                 continue;
             };
-            section.compact_if_worthwhile();
+            let Some(sec_idx) = chunk.section_index(key.section_y) else {
+                continue;
+            };
+            if let Some(ref mut section) = chunk.sections[sec_idx] {
+                section.compact_if_worthwhile();
+            }
         }
     }
     fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
@@ -2208,7 +2231,10 @@ impl State {
     fn build_linked_nether_portal(&mut self, chunk_x: i32, chunk_z: i32, spawn_y: i32) -> Vec3 {
         let base_x = chunk_x * CHUNK_WIDTH as i32 + 6;
         let base_z = chunk_z * CHUNK_DEPTH as i32 + 8;
-        let base_y = (spawn_y - 1).clamp(5, 116);
+        let height = self.chunk_manager.dimension.height();
+        let clamp_min = height.min_y + 1;
+        let clamp_max = height.max_y_exclusive() - 5;
+        let base_y = (spawn_y - 1).clamp(clamp_min, clamp_max);
         let mut changes = Vec::new();
         for x in base_x..=base_x + 3 {
             changes.push(((x, base_y, base_z), BlockType::Obsidian));
@@ -3610,6 +3636,8 @@ enum NetworkInbound {
         cx: i32,
         cz: i32,
         revision: u64,
+        min_section_y: i8,
+        section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
         block_entities: Vec<u8>,
@@ -4290,6 +4318,8 @@ impl NetworkHandle {
                             cx,
                             cz,
                             revision,
+                            min_section_y,
+                            section_count,
                             blocks,
                             block_states,
                             block_entities,
@@ -4298,6 +4328,8 @@ impl NetworkHandle {
                             cx,
                             cz,
                             revision,
+                            min_section_y,
+                            section_count,
                             blocks,
                             block_states,
                             block_entities,
@@ -4716,6 +4748,8 @@ impl NetworkHandle {
         cx: i32,
         cz: i32,
         revision: u64,
+        min_section_y: i8,
+        section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
         block_entities: Vec<u8>,
@@ -4727,6 +4761,8 @@ impl NetworkHandle {
                 cx,
                 cz,
                 revision,
+                min_section_y,
+                section_count,
                 blocks,
                 block_states,
                 block_entities,
@@ -5008,7 +5044,7 @@ pub struct State {
     terrain_candidates_scratch: Vec<crate::chunk_render::DrawCandidate>,
     terrain_draw_plan_scratch: crate::chunk_render::DrawPlan,
     pub entity_los_manager: crate::culling::EntityLosManager,
-    visible_sections_scratch: std::collections::HashSet<(i32, usize, i32)>,
+    visible_sections_scratch: std::collections::HashSet<(i32, i8, i32)>,
     section_visibility_scratch: crate::culling::SectionVisibilityScratch,
     mob_vertices_scratch: Vec<Vertex>,
     mob_indices_scratch: Vec<u32>,
@@ -6887,12 +6923,20 @@ impl State {
                         continue;
                     };
                     match payload.result {
-                        Ok((blocks, block_states, block_entities)) => {
+                        Ok((
+                            blocks,
+                            block_states,
+                            block_entities,
+                            min_section_y,
+                            section_count,
+                        )) => {
                             self.network.send_chunk_to(
                                 payload.key.dimension,
                                 payload.key.cx,
                                 payload.key.cz,
                                 payload.key.revision,
+                                min_section_y,
+                                section_count,
                                 blocks,
                                 block_states,
                                 block_entities,
@@ -7530,6 +7574,8 @@ impl State {
                 cx,
                 cz,
                 revision,
+                min_section_y,
+                section_count,
                 blocks,
                 block_states,
                 block_entities,
@@ -7539,6 +7585,8 @@ impl State {
                     cx,
                     cz,
                     revision,
+                    min_section_y,
+                    section_count,
                     blocks,
                     block_states,
                     block_entities,
@@ -8658,7 +8706,7 @@ impl State {
         let revision = self
             .chunk_meshes
             .get(&(key.cx, key.cz))?
-            .section(key.section_y as usize)?
+            .section(key.section_y)?
             .revision;
         Some(SectionIdentity::new(key, revision, lifetime))
     }
@@ -8672,7 +8720,7 @@ impl State {
         let Some(section) = self
             .chunk_meshes
             .get_mut(&(key.cx, key.cz))
-            .and_then(|mesh| mesh.section_mut(key.section_y as usize))
+            .and_then(|mesh| mesh.section_mut(key.section_y))
         else {
             return false;
         };
@@ -8694,11 +8742,10 @@ impl State {
     fn invalidate_chunk_mesh(&mut self, coord: (i32, i32), reason: DependencyReason) -> bool {
         self.chunk_manager.acknowledge_mesh_invalidation(&coord);
         let mut invalidated = false;
-        for section_y in 0..SECTION_COUNT {
-            invalidated |= self.invalidate_section_mesh(
-                SectionKey::new(coord.0, section_y as u16, coord.1),
-                reason,
-            );
+        let height = self.chunk_manager.dimension.height();
+        for section_y in height.min_section_y()..height.max_section_y_exclusive() {
+            invalidated |=
+                self.invalidate_section_mesh(SectionKey::new(coord.0, section_y, coord.1), reason);
         }
         invalidated
     }
@@ -8724,7 +8771,7 @@ impl State {
     ) {
         let owner = SectionKey::new(
             wx.div_euclid(CHUNK_WIDTH as i32),
-            (wy as usize / crate::world::SECTION_SIZE) as u16,
+            crate::world::world_y_to_section_y(wy),
             wz.div_euclid(CHUNK_DEPTH as i32),
         );
         let mut dependencies = std::collections::HashSet::new();
@@ -8929,7 +8976,7 @@ impl State {
                     let Some(mesh) = self.chunk_meshes.get_mut(&coord) else {
                         continue;
                     };
-                    let Some(section) = mesh.section_mut(identity.key.section_y as usize) else {
+                    let Some(section) = mesh.section_mut(identity.key.section_y) else {
                         continue;
                     };
                     let (levels, upload_metrics) = Self::upload_section_mesh_bundle(
@@ -9025,7 +9072,7 @@ impl State {
         let Some(section) = self
             .chunk_meshes
             .get(&(key.cx, key.cz))
-            .and_then(|mesh| mesh.section(key.section_y as usize))
+            .and_then(|mesh| mesh.section(key.section_y))
         else {
             return false;
         };
@@ -9190,7 +9237,7 @@ impl State {
                 let Some(section) = self
                     .chunk_meshes
                     .get(&(key.cx, key.cz))
-                    .and_then(|mesh| mesh.section(key.section_y as usize))
+                    .and_then(|mesh| mesh.section(key.section_y))
                 else {
                     continue;
                 };
@@ -9798,8 +9845,9 @@ impl State {
             }
         }
 
-        // Void damage check
-        if self.player_physics.position.y < -64.0 {
+        // Void damage check: player below dimension floor
+        let void_y = self.chunk_manager.dimension.height().min_y as f32;
+        if self.player_physics.position.y < void_y {
             self.void_damage_timer += dt;
             if self.void_damage_timer >= 0.5 {
                 self.void_damage_timer = 0.0;
@@ -11316,6 +11364,8 @@ impl State {
         cx: i32,
         cz: i32,
         revision: u64,
+        _min_section_y: i8,
+        _section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
         block_entities: Vec<u8>,
@@ -15004,14 +15054,15 @@ impl State {
         let cam_sec_y_raw = (cam_pos.y / 16.0).floor() as i32;
         let cam_sec_z = (cam_pos.z / 16.0).floor() as i32;
 
-        let fail_open_section_vis = cam_sec_y_raw < 0
-            || cam_sec_y_raw >= 16
+        let height = self.chunk_manager.dimension.height();
+        let fail_open_section_vis = cam_sec_y_raw < height.min_section_y() as i32
+            || cam_sec_y_raw >= height.max_section_y_exclusive() as i32
             || !self.chunk_meshes.contains_key(&(cam_sec_x, cam_sec_z));
 
         if !fail_open_section_vis {
             crate::culling::traverse_section_visibility_with_scratch(
                 cam_sec_x,
-                cam_sec_y_raw as usize,
+                cam_sec_y_raw as i8,
                 cam_sec_z,
                 r_i32,
                 &frustum,
@@ -15040,7 +15091,8 @@ impl State {
         let mut occluded_sections = 0u64;
 
         for (&coord, mesh) in &self.chunk_meshes {
-            for (section_y, section) in mesh.sections.iter().enumerate() {
+            for (sec_idx, section) in mesh.sections.iter().enumerate() {
+                let section_y = mesh.section_y_at_index(sec_idx);
                 let Some(bounds) = section.finest_bounds() else {
                     continue;
                 };
@@ -15063,7 +15115,7 @@ impl State {
                 let Some(level) = section.level(lod) else {
                     continue;
                 };
-                let key = SectionKey::new(coord.0, section_y as u16, coord.1);
+                let key = SectionKey::new(coord.0, section_y, coord.1);
 
                 if let Some(bounds) = level.opaque.bounds {
                     self.terrain_candidates_scratch
@@ -15199,7 +15251,10 @@ impl State {
             let sec_z = (entity.position.z / 16.0).floor() as i32;
 
             if !fail_open_section_vis {
-                let valid_y = sec_y.clamp(0, 15) as usize;
+                let valid_y = sec_y.clamp(
+                    height.min_section_y() as i32,
+                    height.max_section_y_exclusive() as i32 - 1,
+                ) as i8;
                 if !self
                     .visible_sections_scratch
                     .contains(&(sec_x, valid_y, sec_z))
@@ -18359,7 +18414,7 @@ impl State {
                     .and_then(|mesh| {
                         candidate
                             .section_y
-                            .and_then(|section_y| mesh.section(section_y as usize))
+                            .and_then(|section_y| mesh.section(section_y))
                     })
                     .and_then(|section| section.level(lod))
                     .map(|level| &level.opaque)
@@ -18456,7 +18511,7 @@ impl State {
                     .and_then(|mesh| {
                         candidate
                             .section_y
-                            .and_then(|section_y| mesh.section(section_y as usize))
+                            .and_then(|section_y| mesh.section(section_y))
                     })
                     .and_then(|section| section.level(lod))
                     .map(|level| &level.transparent)

@@ -19,7 +19,7 @@ pub struct DirtySectionWork {
 #[derive(Default)]
 pub struct SectionMeshScheduler {
     pending: HashMap<SectionKey, DirtySectionWork>,
-    priority: BTreeSet<(u64, i32, u16, i32)>,
+    priority: BTreeSet<(u64, i32, i8, i32)>,
     pub in_flight: HashMap<SectionKey, SectionIdentity>,
 }
 

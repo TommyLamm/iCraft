@@ -184,8 +184,8 @@ fn bench_mesh() -> u64 {
                 (
                     chunk.get_block(x, y, z),
                     chunk.get_block_state(x, y, z),
-                    chunk.get_sky_light(x as usize, y as usize, z as usize),
-                    chunk.get_block_light(x as usize, y as usize, z as usize),
+                    chunk.get_sky_light(x as usize, y, z as usize),
+                    chunk.get_block_light(x as usize, y, z as usize),
                     false,
                 )
             } else {
@@ -236,6 +236,8 @@ fn bench_network() -> u64 {
             cx: chunk.chunk_x,
             cz: chunk.chunk_z,
             revision: 1,
+            min_section_y: chunk.min_section_y,
+            section_count: chunk.sections.len() as u16,
             blocks: flattened.blocks,
             block_states: flattened.block_states,
             block_entities: flattened.block_entities,

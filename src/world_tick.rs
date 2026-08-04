@@ -152,9 +152,13 @@ pub fn sample_random_ticks(
 
     let mut eligible_sections = Vec::new();
     for (&(cx, cz), chunk) in &chunk_manager.chunks {
-        for (sec_idx, section) in chunk.sections.iter().enumerate() {
+        for (sec_idx, section_opt) in chunk.sections.iter().enumerate() {
+            let Some(section) = section_opt else {
+                continue;
+            };
             if section.random_tick_count() > 0 {
-                eligible_sections.push((cx, cz, sec_idx as i16));
+                let sec_y = chunk.section_y_at_index(sec_idx);
+                eligible_sections.push((cx, cz, sec_y));
             }
         }
     }

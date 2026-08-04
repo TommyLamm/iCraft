@@ -259,7 +259,7 @@ impl ChunkLodMeshData {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChunkMeshBundle {
     pub levels: [ChunkLodMeshData; 3],
-    pub section_connectivity: [crate::culling::SectionConnectivity; crate::world::SECTION_COUNT],
+    pub section_connectivity: Vec<crate::culling::SectionConnectivity>,
 }
 
 /// CPU result for exactly one 16^3 section. `identity` is checked when a
@@ -385,7 +385,7 @@ pub struct DrawCandidate {
     pub chunk_coord: (i32, i32),
     /// Vertical section owning this allocation. Legacy/test candidates may
     /// omit it, but runtime terrain draws always carry an exact section.
-    pub section_y: Option<u16>,
+    pub section_y: Option<i8>,
     pub bounds: MeshBounds,
     pub index_count: u32,
     pub layer: DrawLayer,
@@ -613,14 +613,14 @@ pub struct RegionAllocationHandle {
 pub fn allocation_owner(
     terrain_generation: u64,
     chunk_lifetime: u64,
-    section_y: u16,
+    section_y: i8,
     lod: u8,
     layer: u8,
 ) -> u64 {
     terrain_generation
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(chunk_lifetime.rotate_left(17))
-        .wrapping_add((section_y as u64) << 32)
+        .wrapping_add(((section_y as u8) as u64) << 32)
         .wrapping_add((lod as u64) << 8)
         .wrapping_add(layer as u64)
 }
