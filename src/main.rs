@@ -8,6 +8,7 @@ mod camera;
 pub(crate) mod chunk_manager;
 mod chunk_render;
 mod chunk_schedule;
+mod container_sessions;
 mod crafting;
 mod culling;
 mod dimension;

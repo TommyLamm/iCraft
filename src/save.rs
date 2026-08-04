@@ -3718,11 +3718,12 @@ mod tests {
 
     #[test]
     fn block_entity_save_and_restore_roundtrip() {
-        use crate::block_entity::{BlockEntity, ChestStub};
+        use crate::block_entity::{BlockEntity, ChestBlockEntity};
 
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(1, 2, 3, BlockType::Chest);
-        let chest_stub = BlockEntity::Chest(ChestStub {
+        let chest_stub = BlockEntity::Chest(ChestBlockEntity {
+            inventory: crate::inventory::ContainerInventory::new(),
             custom_name: Some("Secret Stash".to_string()),
         });
         chunk

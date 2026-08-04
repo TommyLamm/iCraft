@@ -2,8 +2,9 @@ use crate::world::BlockType;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChestStub {
+pub struct ChestBlockEntity {
     pub custom_name: Option<String>,
+    pub inventory: crate::inventory::ContainerInventory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,7 +19,7 @@ pub struct SignStub {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockEntity {
-    Chest(ChestStub),
+    Chest(ChestBlockEntity),
     Furnace(FurnaceStub),
     Sign(SignStub),
 }
@@ -47,9 +48,10 @@ impl BlockEntity {
 
 pub fn default_stub_for_block(block_type: BlockType) -> Option<BlockEntity> {
     match block_type {
-        BlockType::Chest | BlockType::EndCityChest => {
-            Some(BlockEntity::Chest(ChestStub { custom_name: None }))
-        }
+        BlockType::Chest | BlockType::EndCityChest => Some(BlockEntity::Chest(ChestBlockEntity {
+            custom_name: None,
+            inventory: crate::inventory::ContainerInventory::new(),
+        })),
         BlockType::Furnace => Some(BlockEntity::Furnace(FurnaceStub { custom_name: None })),
         _ => None,
     }
@@ -61,7 +63,10 @@ mod tests {
 
     #[test]
     fn test_block_entity_matching() {
-        let chest = BlockEntity::Chest(ChestStub { custom_name: None });
+        let chest = BlockEntity::Chest(ChestBlockEntity {
+            custom_name: None,
+            inventory: crate::inventory::ContainerInventory::new(),
+        });
         assert!(chest.matches_block_type(BlockType::Chest));
         assert!(chest.matches_block_type(BlockType::EndCityChest));
         assert!(!chest.matches_block_type(BlockType::Furnace));

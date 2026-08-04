@@ -1672,7 +1672,7 @@ mod tests {
 
     #[test]
     fn door_and_trapdoor_redstone_toggle_preserves_facing_and_updates_open_bit() {
-        use crate::world::BlockState;
+        use crate::world::{BlockState, ChestType};
 
         let mut system = RedstoneSystem::new();
         let mut manager = ChunkManager::new(2);
@@ -1683,6 +1683,7 @@ mod tests {
             is_top: false,
             is_right_hinge: true,
             is_open: false,
+            chest_type: ChestType::Single,
         };
 
         place(

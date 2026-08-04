@@ -251,7 +251,7 @@ pub fn apply_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_entity::ChestStub;
+    use crate::block_entity::ChestBlockEntity;
     use crate::world::Chunk;
 
     #[test]
@@ -294,7 +294,10 @@ mod tests {
         let mut manager = ChunkManager::new(8);
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
 
-        let chest_stub = BlockEntity::Chest(ChestStub { custom_name: None });
+        let chest_stub = BlockEntity::Chest(ChestBlockEntity {
+            inventory: crate::inventory::ContainerInventory::new(),
+            custom_name: None,
+        });
         let req = BlockMutationRequest {
             pos: (2, 64, 2),
             new_block: BlockType::Chest,

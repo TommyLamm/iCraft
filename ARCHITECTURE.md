@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-07-30
+> Last verified: 2026-08-03
 > Git baseline: checkpoint
 > `b13bbbb74325397d4a9334ba6158d895f222fbe7` (`b13bbbb`) plus the
 > uncommitted repair continuation documented under `performance/repair/`.
@@ -151,6 +151,8 @@ world_mutation::apply_batch / BlockMutationRequest
 `chunk_manager::mark_block_mesh_dependencies` is the shared mesh dependency rule.
 Redstone returns `BlockMutation` records and side-effect actions applied via host transaction handlers.
 
+`BlockState` encodes facing (2 bits), is_top (1), is_right_hinge (1), is_open (1), and chest_type (2 bits: Single/Left/Right) in a single byte. Bit 7 is reserved.
+
 ## Multiplayer authority
 
 `src/network/` contains a versioned bincode protocol over length-prefixed TCP:
@@ -185,6 +187,7 @@ are deferred and replayed after stream-in.
 | `saves/<world>/dimension.dat` | Active dimension; missing legacy files default to Overworld. |
 | `saves/<world>/entities.dat` | Persistent Overworld living/persistent/dropped entities. |
 | `saves/<world>/regions/` | Overworld region data. |
+| `saves/<world>/regions/` (block_entities) | Per-chunk `BlockEntity` data (chest inventories, furnace stubs, sign text) serialized via `ChunkSaveData`; chest `ContainerInventory` is 27 `Option<ItemStack>` slots. |
 | `saves/<world>/dimensions/{nether,end}/` | Dimension-specific entities and regions. |
 
 `SaveManager` owns serialization, legacy-player upgrades, atomic sidecar writes,
@@ -209,7 +212,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Player and gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `crafting.rs` |
 | Equipment and effects | `enchantment.rs`, `brewing.rs`, `hand_renderer.rs` |
 | Entities and AI | `entity.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
-| World systems | `redstone.rs`, `weather.rs`, `particles.rs`, `advancements.rs` |
+| Container system | `block_entity.rs` (ChestBlockEntity), `inventory.rs` (ContainerInventory), `state.rs` (SlotType::ContainerSlot, container_target, open_chest) |
 | Networking | `network/{protocol,transport,server,client}.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
 | Performance instrumentation | `perf.rs`, `performance/` |
@@ -263,4 +266,5 @@ cargo run
 
 `cargo run` requires a window/GPU and optionally an audio device; audio can
 degrade to silent operation.
+
 

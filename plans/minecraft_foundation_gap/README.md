@@ -74,7 +74,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | # | 單獨執行文件 | 狀態 |
 | --- | --- | --- |
 | 01 | [權威世界變更與 Block Entity](01_world_state_and_block_entities.md) | 已完成 |
-| 02 | [箱子儲存與多人容器交易](02_chest_storage.md) | 待執行 |
+| 02 | [箱子儲存與多人容器交易](02_chest_storage.md) | 已完成 |
 | 03 | [熔爐、熔煉與配方進度](03_furnace_smelting_and_recipe_progression.md) | 待執行 |
 | 04 | [死亡、睡眠、出生點與掉落物](04_death_sleep_spawn_and_item_lifecycle.md) | 待執行 |
 | 05 | [耕作、食物與 Random Tick](05_farming_food_and_random_ticks.md) | 待執行 |
@@ -148,3 +148,4 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 5. 村民交易、代表性怪物、寵物與交通形成可持續探索循環。
 6. 建築形狀、碰撞、光照、流體和紅石自動化能跨 Chunk 正確工作。
 7. 伺服器權威、存檔重載和版本遷移不產生複製、丟失或客戶端分歧。
+

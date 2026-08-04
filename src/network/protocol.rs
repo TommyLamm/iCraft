@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PotionWire {
@@ -376,6 +376,55 @@ pub enum Packet {
         consumed_item: bool,
         drops: Vec<ItemWire>,
     },
+    ContainerOpenRequest {
+        protocol_version: u32,
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    ContainerOpenResult {
+        protocol_version: u32,
+        dimension: u8,
+        success: bool,
+        x: i32,
+        y: i32,
+        z: i32,
+        slots: Vec<Option<ItemWire>>,
+        revision: u64,
+    },
+    ContainerClickRequest {
+        protocol_version: u32,
+        dimension: u8,
+        slot_index: u16,
+        is_left: bool,
+        dragged: Option<ItemWire>,
+    },
+    ContainerClickResult {
+        protocol_version: u32,
+        dimension: u8,
+        success: bool,
+        slot_index: u16,
+        slot: Option<ItemWire>,
+        dragged: Option<ItemWire>,
+    },
+    ContainerClose {
+        protocol_version: u32,
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    ContainerSlotUpdate {
+        protocol_version: u32,
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot_index: u16,
+        slot: Option<ItemWire>,
+    },
 }
 
 impl Packet {
@@ -443,6 +492,24 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::BlockActionResult {
+                protocol_version, ..
+            } => *protocol_version,
+            Packet::ContainerOpenRequest {
+                protocol_version, ..
+            }
+            | Packet::ContainerOpenResult {
+                protocol_version, ..
+            }
+            | Packet::ContainerClickRequest {
+                protocol_version, ..
+            }
+            | Packet::ContainerClickResult {
+                protocol_version, ..
+            }
+            | Packet::ContainerClose {
+                protocol_version, ..
+            }
+            | Packet::ContainerSlotUpdate {
                 protocol_version, ..
             } => *protocol_version,
         }
@@ -724,7 +791,10 @@ mod tests {
             y: 64,
             z: 3,
             entity: Some(crate::block_entity::BlockEntity::Chest(
-                crate::block_entity::ChestStub { custom_name: None },
+                crate::block_entity::ChestBlockEntity {
+                    inventory: crate::inventory::ContainerInventory::new(),
+                    custom_name: None,
+                },
             )),
         };
         let decoded_delta = Packet::decode(&delta.encode()).unwrap();

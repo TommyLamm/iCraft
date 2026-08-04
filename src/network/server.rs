@@ -264,6 +264,33 @@ pub enum HostToServer {
         id: PlayerId,
         username: String,
     },
+    SendContainerOpenResult {
+        to: PlayerId,
+        dimension: u8,
+        success: bool,
+        x: i32,
+        y: i32,
+        z: i32,
+        slots: Vec<Option<crate::network::protocol::ItemWire>>,
+        revision: u64,
+    },
+    SendContainerClickResult {
+        to: PlayerId,
+        dimension: u8,
+        success: bool,
+        slot_index: u16,
+        slot: Option<crate::network::protocol::ItemWire>,
+        dragged: Option<crate::network::protocol::ItemWire>,
+    },
+    BroadcastContainerSlotUpdate {
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot_index: u16,
+        slot: Option<crate::network::protocol::ItemWire>,
+    },
     Stop,
 }
 
@@ -1324,6 +1351,67 @@ impl NetworkServer {
                 unreachable!("catch-up disconnects are handled before packet mapping")
             }
             HostToServer::Stop => return,
+            HostToServer::SendContainerOpenResult {
+                to,
+                dimension,
+                success,
+                x,
+                y,
+                z,
+                slots,
+                revision,
+            } => {
+                let packet = Packet::ContainerOpenResult {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    success,
+                    x,
+                    y,
+                    z,
+                    slots,
+                    revision,
+                };
+                (packet, Some(to))
+            }
+            HostToServer::SendContainerClickResult {
+                to,
+                dimension,
+                success,
+                slot_index,
+                slot,
+                dragged,
+            } => {
+                let packet = Packet::ContainerClickResult {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    success,
+                    slot_index,
+                    slot,
+                    dragged,
+                };
+                (packet, Some(to))
+            }
+            HostToServer::BroadcastContainerSlotUpdate {
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                slot_index,
+                slot,
+            } => {
+                let packet = Packet::ContainerSlotUpdate {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    slot_index,
+                    slot,
+                };
+                (packet, None)
+            }
         };
 
         let failed = if let Some(id) = recipient {

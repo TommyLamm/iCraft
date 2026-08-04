@@ -517,6 +517,7 @@ impl PlayerPhysics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::ChestType;
     use crate::world::{BlockType, Chunk};
 
     fn empty_chunk_manager() -> ChunkManager {
@@ -614,6 +615,7 @@ mod tests {
             is_top: false,
             is_right_hinge: false,
             is_open: false,
+            chest_type: ChestType::Single,
         };
         let aabb = block_aabb(BlockType::OakDoor, closed_door_state.encode(), (2, 10, 2));
         assert_eq!(aabb.min, Vec3::new(2.0, 10.0, 2.0));
@@ -624,6 +626,7 @@ mod tests {
             is_top: false,
             is_right_hinge: false,
             is_open: true,
+            chest_type: ChestType::Single,
         };
         let open_aabb = block_aabb(BlockType::OakDoor, open_door_state.encode(), (2, 10, 2));
         assert_eq!(open_aabb.min, Vec3::new(2.0, 10.0, 2.0));
@@ -634,6 +637,7 @@ mod tests {
             is_top: false,
             is_right_hinge: false,
             is_open: false,
+            chest_type: ChestType::Single,
         };
         let trap_aabb = block_aabb(BlockType::OakTrapdoor, closed_trapdoor.encode(), (0, 64, 0));
         assert_eq!(trap_aabb.min, Vec3::new(0.0, 64.0, 0.0));

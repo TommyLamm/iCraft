@@ -370,11 +370,18 @@ pub struct BlockProperties {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChestType {
+    Single,
+    Left,
+    Right,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockState {
     pub facing: Direction,
     pub is_top: bool,
     pub is_right_hinge: bool,
     pub is_open: bool,
+    pub chest_type: ChestType,
 }
 
 impl Default for BlockState {
@@ -384,6 +391,7 @@ impl Default for BlockState {
             is_top: false,
             is_right_hinge: false,
             is_open: false,
+            chest_type: ChestType::Single,
         }
     }
 }
@@ -399,7 +407,12 @@ impl BlockState {
         let half_bit = if self.is_top { 1 << 2 } else { 0 };
         let hinge_bit = if self.is_right_hinge { 1 << 3 } else { 0 };
         let open_bit = if self.is_open { 1 << 4 } else { 0 };
-        facing_bits | half_bit | hinge_bit | open_bit
+        let chest_type_bits = match self.chest_type {
+            ChestType::Single => 0b00,
+            ChestType::Left => 0b01,
+            ChestType::Right => 0b10,
+        } << 5;
+        facing_bits | half_bit | hinge_bit | open_bit | chest_type_bits
     }
 
     pub fn decode(val: u8) -> Self {
@@ -413,11 +426,18 @@ impl BlockState {
         let is_top = (val & (1 << 2)) != 0;
         let is_right_hinge = (val & (1 << 3)) != 0;
         let is_open = (val & (1 << 4)) != 0;
+        let chest_type = match (val >> 5) & 0b11 {
+            0 => ChestType::Single,
+            1 => ChestType::Left,
+            2 => ChestType::Right,
+            _ => ChestType::Single,
+        };
         Self {
             facing,
             is_top,
             is_right_hinge,
             is_open,
+            chest_type,
         }
     }
 
@@ -452,12 +472,14 @@ impl BlockState {
             is_top: false,
             is_right_hinge,
             is_open: false,
+            chest_type: ChestType::Single,
         };
         let top = Self {
             facing,
             is_top: true,
             is_right_hinge,
             is_open: false,
+            chest_type: ChestType::Single,
         };
         (bottom, top)
     }
@@ -469,6 +491,7 @@ impl BlockState {
             is_top: false,
             is_right_hinge: false,
             is_open: false,
+            chest_type: ChestType::Single,
         }
     }
 }
@@ -5480,6 +5503,7 @@ mod tests {
             is_top: false,
             is_right_hinge: false,
             is_open: false,
+            chest_type: ChestType::Single,
         };
         chunk.set_block_state(0, 64, 0, state.encode());
 
@@ -5525,6 +5549,7 @@ mod tests {
             is_top: false,
             is_right_hinge: false,
             is_open: false,
+            chest_type: ChestType::Single,
         };
         chunk.set_block_state(0, 64, 0, closed_state.encode());
 
@@ -5546,6 +5571,7 @@ mod tests {
             is_top: false,
             is_right_hinge: false,
             is_open: true,
+            chest_type: ChestType::Single,
         };
         chunk.set_block_state(0, 64, 0, open_state.encode());
         let (opaque_v2, _, _, _) = chunk.generate_mesh(|_, _, _| (BlockType::Air, 0, 0, 0, false));
@@ -6027,22 +6053,34 @@ mod tests {
             for is_top in [false, true] {
                 for is_right_hinge in [false, true] {
                     for is_open in [false, true] {
-                        let state = BlockState {
-                            facing,
-                            is_top,
-                            is_right_hinge,
-                            is_open,
-                        };
-                        let encoded = state.encode();
-                        let decoded = BlockState::decode(encoded);
-                        assert_eq!(decoded, state);
-
-                        // Verify reserved bits (bits 5, 6, 7) are ignored
-                        let decoded_with_reserved = BlockState::decode(encoded | 0b1110_0000);
-                        assert_eq!(decoded_with_reserved, state);
+                        for chest_type in [ChestType::Single, ChestType::Left, ChestType::Right] {
+                            let state = BlockState {
+                                facing,
+                                is_top,
+                                is_right_hinge,
+                                is_open,
+                                chest_type,
+                            };
+                            let encoded = state.encode();
+                            let decoded = BlockState::decode(encoded);
+                            assert_eq!(decoded, state);
+                        }
                     }
                 }
             }
+        }
+        // Verify reserved bit (bit 7) is ignored
+        for chest_type in [ChestType::Single, ChestType::Left, ChestType::Right] {
+            let state = BlockState {
+                facing: Direction::North,
+                is_top: false,
+                is_right_hinge: false,
+                is_open: false,
+                chest_type,
+            };
+            let encoded = state.encode() | 0b1000_0000;
+            let decoded = BlockState::decode(encoded);
+            assert_eq!(decoded, state);
         }
     }
 
@@ -6349,12 +6387,15 @@ mod tests {
 
     #[test]
     fn chunk_block_entity_operations() {
-        use crate::block_entity::{BlockEntity, ChestStub, FurnaceStub};
+        use crate::block_entity::{BlockEntity, ChestBlockEntity, FurnaceStub};
 
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(4, 10, 4, BlockType::Chest);
 
-        let chest_entity = BlockEntity::Chest(ChestStub { custom_name: None });
+        let chest_entity = BlockEntity::Chest(ChestBlockEntity {
+            inventory: crate::inventory::ContainerInventory::new(),
+            custom_name: None,
+        });
         // Valid insert
         assert_eq!(
             chunk.insert_block_entity(4, 10, 4, chest_entity.clone()),

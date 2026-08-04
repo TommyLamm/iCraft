@@ -551,7 +551,7 @@ pub struct ToolProperties {
     pub damage: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ItemStack {
     pub item: Item,
     pub count: u32,
@@ -592,7 +592,79 @@ impl ItemStack {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Inventory for a container block entity (e.g. chest).
+/// Single chest = 27 slots; double chest uses two halves of 27 slots each.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContainerInventory {
+    pub slots: [Option<ItemStack>; 27],
+}
+
+impl ContainerInventory {
+    pub fn new() -> Self {
+        Self { slots: [None; 27] }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.iter().all(|s| s.is_none())
+    }
+
+    pub fn total_items(&self) -> u32 {
+        self.slots.iter().flatten().map(|s| s.count).sum()
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.fill(None);
+    }
+
+    /// Returns the remainder if the stack couldn't be fully added.
+    pub fn add_stack(&mut self, mut incoming: ItemStack) -> Option<ItemStack> {
+        if incoming.count == 0 || incoming.item == Item::Air {
+            return None;
+        }
+        let max_stack = incoming.item.properties().max_stack;
+        for slot in self.slots.iter_mut() {
+            if let Some(existing) = slot {
+                if existing.can_merge_with(&incoming) && existing.count < max_stack {
+                    let moved = (max_stack - existing.count).min(incoming.count);
+                    existing.count += moved;
+                    incoming.count -= moved;
+                    if incoming.count == 0 {
+                        return None;
+                    }
+                }
+            }
+        }
+        for slot in self.slots.iter_mut() {
+            if slot.is_none() {
+                let moved = incoming.count.min(max_stack);
+                *slot = Some(ItemStack {
+                    count: moved,
+                    ..incoming
+                });
+                incoming.count -= moved;
+                if incoming.count == 0 {
+                    return None;
+                }
+            }
+        }
+        Some(incoming)
+    }
+
+    /// Return the number of slots that can accept incoming.
+    pub fn storage_capacity_for(&self, incoming: ItemStack) -> u32 {
+        let max_stack = incoming.item.properties().max_stack;
+        self.slots
+            .iter()
+            .map(|slot| match slot {
+                Some(existing) if existing.can_merge_with(&incoming) => {
+                    max_stack.saturating_sub(existing.count)
+                }
+                None => max_stack,
+                _ => 0,
+            })
+            .sum()
+    }
+}
 pub(crate) struct StackClickResult {
     pub slot: Option<ItemStack>,
     pub dragged: Option<ItemStack>,
