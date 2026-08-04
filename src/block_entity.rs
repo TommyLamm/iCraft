@@ -192,15 +192,46 @@ impl PartialEq for FurnaceBlockEntity {
 impl Eq for FurnaceBlockEntity {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignStub {
-    pub text: String,
+pub struct SignBlockEntity {
+    pub lines: [String; 4],
 }
+
+impl SignBlockEntity {
+    pub fn new() -> Self {
+        Self {
+            lines: [String::new(), String::new(), String::new(), String::new()],
+        }
+    }
+
+    pub fn from_text(text: &str) -> Self {
+        let mut sign = Self::new();
+        for (i, line) in text.lines().take(4).enumerate() {
+            sign.set_line(i, line);
+        }
+        sign
+    }
+
+    pub fn set_line(&mut self, line_idx: usize, text: &str) {
+        if line_idx < 4 {
+            let sanitized: String = text.chars().take(15).collect();
+            self.lines[line_idx] = sanitized;
+        }
+    }
+}
+
+impl Default for SignBlockEntity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub type SignStub = SignBlockEntity;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockEntity {
     Chest(ChestBlockEntity),
     Furnace(FurnaceBlockEntity),
-    Sign(SignStub),
+    Sign(SignBlockEntity),
 }
 
 impl BlockEntity {
@@ -212,7 +243,7 @@ impl BlockEntity {
             BlockEntity::Furnace(_) => {
                 matches!(block_type, BlockType::Furnace | BlockType::FurnaceLit)
             }
-            BlockEntity::Sign(_) => false,
+            BlockEntity::Sign(_) => matches!(block_type, BlockType::OakSign),
         }
     }
 
@@ -221,7 +252,7 @@ impl BlockEntity {
         let extra = match self {
             BlockEntity::Chest(c) => c.custom_name.as_ref().map_or(0, |s| s.capacity()),
             BlockEntity::Furnace(f) => f.custom_name.as_ref().map_or(0, |s| s.capacity()),
-            BlockEntity::Sign(s) => s.text.capacity(),
+            BlockEntity::Sign(s) => s.lines.iter().map(|l| l.capacity()).sum(),
         };
         base + extra
     }
@@ -236,6 +267,7 @@ pub fn default_stub_for_block(block_type: BlockType) -> Option<BlockEntity> {
         BlockType::Furnace | BlockType::FurnaceLit => {
             Some(BlockEntity::Furnace(FurnaceBlockEntity::new()))
         }
+        BlockType::OakSign => Some(BlockEntity::Sign(SignBlockEntity::new())),
         _ => None,
     }
 }
@@ -260,10 +292,16 @@ mod tests {
         assert!(furnace.matches_block_type(BlockType::FurnaceLit));
         assert!(!furnace.matches_block_type(BlockType::Chest));
 
-        let sign = BlockEntity::Sign(SignStub {
-            text: "Hello".to_string(),
-        });
+        let sign = BlockEntity::Sign(SignBlockEntity::from_text("Hello"));
+        assert!(sign.matches_block_type(BlockType::OakSign));
         assert!(!sign.matches_block_type(BlockType::Dirt));
+    }
+
+    #[test]
+    fn test_sign_line_truncation() {
+        let mut sign = SignBlockEntity::new();
+        sign.set_line(0, "12345678901234567890"); // 20 chars
+        assert_eq!(sign.lines[0], "123456789012345"); // Max 15 chars
     }
 
     #[test]

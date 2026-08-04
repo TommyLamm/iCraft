@@ -178,6 +178,16 @@ pub enum Item {
     EndCrystal,
     BlazeRod,
     ShulkerShell,
+    OakSlab,
+    CobblestoneSlab,
+    OakStair,
+    CobblestoneStair,
+    OakFence,
+    OakFenceGate,
+    CobblestoneWall,
+    GlassPane,
+    OakLadder,
+    OakSign,
 }
 
 pub const ALL_ITEMS: &[Item] = &[
@@ -337,6 +347,16 @@ pub const ALL_ITEMS: &[Item] = &[
     Item::EndCrystal,
     Item::BlazeRod,
     Item::ShulkerShell,
+    Item::OakSlab,
+    Item::CobblestoneSlab,
+    Item::OakStair,
+    Item::CobblestoneStair,
+    Item::OakFence,
+    Item::OakFenceGate,
+    Item::CobblestoneWall,
+    Item::GlassPane,
+    Item::OakLadder,
+    Item::OakSign,
 ];
 
 impl Item {
@@ -358,7 +378,7 @@ pub const CREATIVE_COLUMNS: usize = 9;
 pub const CREATIVE_ROWS: usize = 5;
 pub const CREATIVE_VISIBLE_SLOTS: usize = CREATIVE_COLUMNS * CREATIVE_ROWS;
 
-pub const CREATIVE_ITEMS: [Item; 144] = [
+pub const CREATIVE_ITEMS: [Item; 154] = [
     Item::Grass,
     Item::Dirt,
     Item::Stone,
@@ -503,6 +523,16 @@ pub const CREATIVE_ITEMS: [Item; 144] = [
     Item::EndCrystal,
     Item::BlazeRod,
     Item::ShulkerShell,
+    Item::OakSlab,
+    Item::CobblestoneSlab,
+    Item::OakStair,
+    Item::CobblestoneStair,
+    Item::OakFence,
+    Item::OakFenceGate,
+    Item::CobblestoneWall,
+    Item::GlassPane,
+    Item::OakLadder,
+    Item::OakSign,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -961,6 +991,16 @@ impl Item {
             | Item::BlazeRod
             | Item::Bed
             | Item::ShulkerShell => Some(CreativeTab::Misc),
+            Item::OakSlab => Some(CreativeTab::Blocks),
+            Item::CobblestoneSlab => Some(CreativeTab::Blocks),
+            Item::OakStair => Some(CreativeTab::Blocks),
+            Item::CobblestoneStair => Some(CreativeTab::Blocks),
+            Item::OakFence => Some(CreativeTab::Blocks),
+            Item::OakFenceGate => Some(CreativeTab::Blocks),
+            Item::CobblestoneWall => Some(CreativeTab::Blocks),
+            Item::GlassPane => Some(CreativeTab::Blocks),
+            Item::OakLadder => Some(CreativeTab::Blocks),
+            Item::OakSign => Some(CreativeTab::Blocks),
         }
     }
 
@@ -2059,7 +2099,17 @@ impl Item {
             | Item::NetherStar
             | Item::EndCrystal
             | Item::BlazeRod
-            | Item::ShulkerShell) => {
+            | Item::ShulkerShell
+            | Item::OakSlab
+            | Item::CobblestoneSlab
+            | Item::OakStair
+            | Item::CobblestoneStair
+            | Item::OakFence
+            | Item::OakFenceGate
+            | Item::CobblestoneWall
+            | Item::GlassPane
+            | Item::OakLadder
+            | Item::OakSign) => {
                 let (name, max_stack, is_block, block_type, tex_coords) = match item {
                     Item::WoodenHoe => ("Wooden Hoe", 1, false, None, (0, 8)),
                     Item::StoneHoe => ("Stone Hoe", 1, false, None, (1, 8)),
@@ -2078,6 +2128,40 @@ impl Item {
                     Item::EndCrystal => ("End Crystal", 64, false, None, (4, 4)),
                     Item::BlazeRod => ("Blaze Rod", 64, false, None, (5, 4)),
                     Item::ShulkerShell => ("Shulker Shell", 64, false, None, (14, 14)),
+                    Item::OakSlab => ("Oak Slab", 64, true, Some(BlockType::OakSlab), (6, 0)),
+                    Item::CobblestoneSlab => (
+                        "Cobblestone Slab",
+                        64,
+                        true,
+                        Some(BlockType::CobblestoneSlab),
+                        (8, 0),
+                    ),
+                    Item::OakStair => ("Oak Stairs", 64, true, Some(BlockType::OakStair), (6, 0)),
+                    Item::CobblestoneStair => (
+                        "Cobblestone Stairs",
+                        64,
+                        true,
+                        Some(BlockType::CobblestoneStair),
+                        (8, 0),
+                    ),
+                    Item::OakFence => ("Oak Fence", 64, true, Some(BlockType::OakFence), (6, 0)),
+                    Item::OakFenceGate => (
+                        "Oak Fence Gate",
+                        64,
+                        true,
+                        Some(BlockType::OakFenceGate),
+                        (6, 0),
+                    ),
+                    Item::CobblestoneWall => (
+                        "Cobblestone Wall",
+                        64,
+                        true,
+                        Some(BlockType::CobblestoneWall),
+                        (8, 0),
+                    ),
+                    Item::GlassPane => ("Glass Pane", 64, true, Some(BlockType::GlassPane), (0, 1)),
+                    Item::OakLadder => ("Ladder", 64, true, Some(BlockType::OakLadder), (3, 5)),
+                    Item::OakSign => ("Oak Sign", 16, true, Some(BlockType::OakSign), (6, 0)),
                     _ => unreachable!(),
                 };
                 ItemProperties {
@@ -2176,6 +2260,16 @@ impl Item {
             BlockType::WheatCrop => Item::Wheat,
             BlockType::CarrotCrop => Item::Carrot,
             BlockType::PotatoCrop => Item::Potato,
+            BlockType::OakSlab => Item::OakSlab,
+            BlockType::CobblestoneSlab => Item::CobblestoneSlab,
+            BlockType::OakStair => Item::OakStair,
+            BlockType::CobblestoneStair => Item::CobblestoneStair,
+            BlockType::OakFence => Item::OakFence,
+            BlockType::OakFenceGate => Item::OakFenceGate,
+            BlockType::CobblestoneWall => Item::CobblestoneWall,
+            BlockType::GlassPane => Item::GlassPane,
+            BlockType::OakLadder => Item::OakLadder,
+            BlockType::OakSign => Item::OakSign,
         }
     }
 }
@@ -2727,7 +2821,7 @@ mod tests {
 
     #[test]
     fn creative_catalog_contains_every_non_air_item_once() {
-        assert_eq!(CREATIVE_ITEMS.len(), 144);
+        assert_eq!(CREATIVE_ITEMS.len(), 154);
         assert!(!CREATIVE_ITEMS.contains(&Item::Air));
         let unique: HashSet<_> = CREATIVE_ITEMS.iter().copied().collect();
         assert_eq!(unique.len(), CREATIVE_ITEMS.len());
@@ -2773,7 +2867,8 @@ mod tests {
         let mut inventory = Inventory::new();
         inventory.selected = 4;
         assert_eq!(inventory.creative_visible_items().len(), 45);
-        assert_eq!(inventory.creative_max_scroll(), 11);
+        let expected_max_scroll = (CREATIVE_ITEMS.len().saturating_sub(45) + 8) / 9;
+        assert_eq!(inventory.creative_max_scroll(), expected_max_scroll);
 
         inventory.scroll_creative(1);
         assert_eq!(inventory.creative_scroll_row, 1);
@@ -2787,8 +2882,11 @@ mod tests {
         assert_eq!(inventory.creative_scroll_row, 0);
         inventory.creative_scroll_row = usize::MAX;
         inventory.clamp_creative_scroll();
-        assert_eq!(inventory.creative_scroll_row, 11);
-        assert_eq!(inventory.creative_visible_items().len(), 45);
+        assert_eq!(inventory.creative_scroll_row, expected_max_scroll);
+        assert_eq!(
+            inventory.creative_visible_items().len(),
+            CREATIVE_ITEMS.len() - expected_max_scroll * 9
+        );
 
         inventory.select_creative_tab(CreativeTab::Tools);
         assert_eq!(inventory.creative_scroll_row, 0);

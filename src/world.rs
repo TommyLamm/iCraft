@@ -350,6 +350,17 @@ pub enum BlockType {
     WheatCrop = 92,
     CarrotCrop = 93,
     PotatoCrop = 94,
+    // Voxel Shapes & Building Blocks (Plan 06)
+    OakSlab = 95,
+    CobblestoneSlab = 96,
+    OakStair = 97,
+    CobblestoneStair = 98,
+    OakFence = 99,
+    OakFenceGate = 100,
+    CobblestoneWall = 101,
+    GlassPane = 102,
+    OakLadder = 103,
+    OakSign = 104,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -504,7 +515,7 @@ impl BlockState {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= BlockType::PotatoCrop as u8 {
+        if val <= BlockType::OakSign as u8 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -525,7 +536,7 @@ impl BlockType {
     /// known variant so unknown (newer) blocks are dropped gracefully instead
     /// of corrupting world state.
     pub fn from_wire(val: u32) -> Option<Self> {
-        if val <= BlockType::PotatoCrop as u32 {
+        if val <= BlockType::OakSign as u32 {
             // SAFETY: `BlockType` is `#[repr(u8)]`, so every value in
             // `0..=PotatoCrop` is a valid discriminant.
             Some(unsafe { std::mem::transmute(val as u8) })
@@ -553,7 +564,10 @@ impl BlockType {
                 below == BlockType::Farmland
             }
             BlockType::Dandelion | BlockType::Poppy | BlockType::TallGrass => {
-                matches!(below, BlockType::Grass | BlockType::Dirt | BlockType::Farmland)
+                matches!(
+                    below,
+                    BlockType::Grass | BlockType::Dirt | BlockType::Farmland
+                )
             }
             BlockType::SugarCane => {
                 matches!(
@@ -662,6 +676,49 @@ impl BlockType {
                         }
                         Some(_) => BlockSupportStatus::Unsupported,
                         None => BlockSupportStatus::Unknown,
+                    }
+                }
+            }
+            BlockType::OakLadder => {
+                let mut has_unknown = false;
+                for (dx, dz) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                    match get_loaded_block(x + dx, y, z + dz) {
+                        Some(b) if b.properties().is_solid => return BlockSupportStatus::Supported,
+                        Some(_) => {}
+                        None => has_unknown = true,
+                    }
+                }
+                if has_unknown {
+                    BlockSupportStatus::Unknown
+                } else {
+                    BlockSupportStatus::Unsupported
+                }
+            }
+            BlockType::OakSign => {
+                if y <= 0 {
+                    BlockSupportStatus::Unsupported
+                } else {
+                    let mut has_unknown = false;
+                    if let Some(below) = get_loaded_block(x, y - 1, z) {
+                        if below.properties().is_solid {
+                            return BlockSupportStatus::Supported;
+                        }
+                    } else {
+                        has_unknown = true;
+                    }
+                    for (dx, dz) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                        match get_loaded_block(x + dx, y, z + dz) {
+                            Some(b) if b.properties().is_solid => {
+                                return BlockSupportStatus::Supported
+                            }
+                            Some(_) => {}
+                            None => has_unknown = true,
+                        }
+                    }
+                    if has_unknown {
+                        BlockSupportStatus::Unknown
+                    } else {
+                        BlockSupportStatus::Unsupported
                     }
                 }
             }
@@ -1390,6 +1447,86 @@ impl BlockType {
                 is_passable: true,
                 light_emission: 0,
             },
+            BlockType::OakSlab => BlockProperties {
+                name: "Oak Slab",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::CobblestoneSlab => BlockProperties {
+                name: "Cobblestone Slab",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::OakStair => BlockProperties {
+                name: "Oak Stairs",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::CobblestoneStair => BlockProperties {
+                name: "Cobblestone Stairs",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::OakFence => BlockProperties {
+                name: "Oak Fence",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::OakFenceGate => BlockProperties {
+                name: "Oak Fence Gate",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::CobblestoneWall => BlockProperties {
+                name: "Cobblestone Wall",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::GlassPane => BlockProperties {
+                name: "Glass Pane",
+                hardness: 0.3,
+                render_type: RenderType::Cutout,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::OakLadder => BlockProperties {
+                name: "Ladder",
+                hardness: 0.4,
+                render_type: RenderType::Cutout,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::OakSign => BlockProperties {
+                name: "Oak Sign",
+                hardness: 1.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
         }
     }
 
@@ -1568,6 +1705,16 @@ impl BlockType {
             BlockType::WheatCrop => (8, 5),
             BlockType::CarrotCrop => (0, 6),
             BlockType::PotatoCrop => (4, 6),
+            BlockType::OakSlab => (6, 0),
+            BlockType::CobblestoneSlab => (8, 0),
+            BlockType::OakStair => (6, 0),
+            BlockType::CobblestoneStair => (8, 0),
+            BlockType::OakFence => (6, 0),
+            BlockType::OakFenceGate => (6, 0),
+            BlockType::CobblestoneWall => (8, 0),
+            BlockType::GlassPane => (0, 1),
+            BlockType::OakLadder => (3, 5),
+            BlockType::OakSign => (6, 0),
         }
     }
 }
@@ -2164,6 +2311,16 @@ fn is_greedy_cube(block: BlockType) -> bool {
                 | BlockType::Cactus
                 | BlockType::EndPortalFrame
                 | BlockType::EndPortalFrameFilled
+                | BlockType::OakSlab
+                | BlockType::CobblestoneSlab
+                | BlockType::OakStair
+                | BlockType::CobblestoneStair
+                | BlockType::OakFence
+                | BlockType::OakFenceGate
+                | BlockType::CobblestoneWall
+                | BlockType::GlassPane
+                | BlockType::OakLadder
+                | BlockType::OakSign
         )
 }
 
@@ -4003,6 +4160,22 @@ impl Chunk {
                     let world_y = origin[1] + y as i32;
                     let world_z = origin[2] + z as i32;
 
+                    if crate::block_model::append_custom_block_mesh(
+                        block,
+                        voxel.state,
+                        [world_x as f32, world_y as f32, world_z as f32],
+                        voxel.sky,
+                        voxel.block_light,
+                        region_coord,
+                        &mut opaque_vertices,
+                        &mut opaque_indices,
+                        &mut trans_vertices,
+                        &mut trans_indices,
+                        |nx, ny, nz| get_block_at(nx, ny, nz).0,
+                    ) {
+                        continue;
+                    }
+
                     let torch_atlas_tile = match block {
                         BlockType::Torch => Some(TORCH_ATLAS_TILE),
                         BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
@@ -5265,7 +5438,7 @@ mod tests {
 
     #[test]
     fn block_type_from_wire_rejects_unknown_values() {
-        assert!(BlockType::from_wire(BlockType::PotatoCrop as u32 + 1).is_none());
+        assert!(BlockType::from_wire(BlockType::OakSign as u32 + 1).is_none());
         assert!(BlockType::from_wire(u32::MAX).is_none());
     }
 

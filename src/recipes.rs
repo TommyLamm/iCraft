@@ -647,6 +647,78 @@ impl RecipeManager {
             ItemStack::new(Item::NoteBlock, 1),
         );
 
+        // Building blocks (Plan 06)
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/oak_slab",
+            vec!["PPP"],
+            &[("P", Item::OakPlanks)],
+            ItemStack::new(Item::OakSlab, 6),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/cobblestone_slab",
+            vec!["CCC"],
+            &[("C", Item::Cobblestone)],
+            ItemStack::new(Item::CobblestoneSlab, 6),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/oak_stair",
+            vec!["P  ", "PP ", "PPP"],
+            &[("P", Item::OakPlanks)],
+            ItemStack::new(Item::OakStair, 4),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/cobblestone_stair",
+            vec!["C  ", "CC ", "CCC"],
+            &[("C", Item::Cobblestone)],
+            ItemStack::new(Item::CobblestoneStair, 4),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/oak_fence",
+            vec!["PSP", "PSP"],
+            &[("P", Item::OakPlanks), ("S", Item::Stick)],
+            ItemStack::new(Item::OakFence, 3),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/oak_fence_gate",
+            vec!["SPS", "SPS"],
+            &[("P", Item::OakPlanks), ("S", Item::Stick)],
+            ItemStack::new(Item::OakFenceGate, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/cobblestone_wall",
+            vec!["CCC", "CCC"],
+            &[("C", Item::Cobblestone)],
+            ItemStack::new(Item::CobblestoneWall, 6),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/glass_pane",
+            vec!["GGG", "GGG"],
+            &[("G", Item::Glass)],
+            ItemStack::new(Item::GlassPane, 16),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/oak_ladder",
+            vec!["S S", "SSS", "S S"],
+            &[("S", Item::Stick)],
+            ItemStack::new(Item::OakLadder, 3),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/oak_sign",
+            vec!["PPP", "PPP", " S "],
+            &[("P", Item::OakPlanks), ("S", Item::Stick)],
+            ItemStack::new(Item::OakSign, 3),
+        );
+
         // --- Smelting Recipes ---
 
         smelting_recipes.push(SmeltingRecipe {

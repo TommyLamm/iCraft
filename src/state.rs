@@ -12465,13 +12465,12 @@ impl State {
                             return;
                         }
                     } else {
-                        self.player_state.eating_state =
-                            Some(crate::player::ActiveEatingState {
-                                item: held_item,
-                                slot: self.inventory.selected,
-                                ticks_remaining: food_props.use_duration_ticks,
-                                total_duration: food_props.use_duration_ticks,
-                            });
+                        self.player_state.eating_state = Some(crate::player::ActiveEatingState {
+                            item: held_item,
+                            slot: self.inventory.selected,
+                            ticks_remaining: food_props.use_duration_ticks,
+                            total_duration: food_props.use_duration_ticks,
+                        });
                         return;
                     }
                 }
@@ -12625,9 +12624,7 @@ impl State {
                 let held_item = held.map(|stack| stack.item).unwrap_or(Item::Air);
                 // Hoe tilling
                 if matches!(clicked_block, BlockType::Grass | BlockType::Dirt)
-                    && held_item
-                        .tool_properties()
-                        .map(|t| t.tool_type)
+                    && held_item.tool_properties().map(|t| t.tool_type)
                         == Some(crate::inventory::ToolType::Hoe)
                 {
                     let block_above = self.chunk_manager.get_block(
@@ -12643,9 +12640,7 @@ impl State {
                             clicked_pos.2,
                             0,
                         );
-                        if let Some(stack) =
-                            &mut self.inventory.hotbar[self.inventory.selected]
-                        {
+                        if let Some(stack) = &mut self.inventory.hotbar[self.inventory.selected] {
                             if stack.durability > 1 {
                                 stack.durability -= 1;
                             } else {
@@ -12694,7 +12689,9 @@ impl State {
                     && matches!(held_item, Item::Seeds | Item::Carrot | Item::Potato)
                 {
                     let plant_pos = (clicked_pos.0, clicked_pos.1 + 1, clicked_pos.2);
-                    if self.chunk_manager.get_block(plant_pos.0, plant_pos.1, plant_pos.2)
+                    if self
+                        .chunk_manager
+                        .get_block(plant_pos.0, plant_pos.1, plant_pos.2)
                         == BlockType::Air
                     {
                         let crop_block = match held_item {

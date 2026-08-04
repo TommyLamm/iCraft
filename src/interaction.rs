@@ -124,14 +124,31 @@ pub fn raycast(
 
     let mut t = 0.0;
     let mut last_face = Vec3::ZERO;
+    let ray_dir = Vec3::new(dx, dy, dz).normalize_or_zero();
 
     while t < max_dist {
         let block = chunk_manager.get_block(x, y, z);
         if target_policy.targets(block) {
-            return Some(RaycastResult {
-                block_pos: Vec3::new(x as f32, y as f32, z as f32),
-                normal: last_face,
-            });
+            let state = chunk_manager.get_block_state(x, y, z);
+            let sel_shape = crate::voxel_shape::block_selection_shape(
+                block,
+                state,
+                (x, y, z),
+                Some(chunk_manager),
+            );
+            if let Some((hit_t, hit_norm)) = sel_shape.ray_intersects(origin, ray_dir, max_dist) {
+                if hit_t <= max_dist {
+                    let norm = if hit_norm != Vec3::ZERO {
+                        hit_norm
+                    } else {
+                        last_face
+                    };
+                    return Some(RaycastResult {
+                        block_pos: Vec3::new(x as f32, y as f32, z as f32),
+                        normal: norm,
+                    });
+                }
+            }
         }
 
         if t_max_x < t_max_y {

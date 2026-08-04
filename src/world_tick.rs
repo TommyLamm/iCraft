@@ -246,13 +246,9 @@ mod tests {
         map.insert((0, 64, 0), BlockType::Farmland);
         map.insert((2, 64, 0), BlockType::Water);
 
-        let req = evaluate_random_tick_at(
-            (0, 64, 0),
-            BlockType::Farmland,
-            0,
-            123,
-            |x, y, z| map.get(&(x, y, z)).copied(),
-        );
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 0, 123, |x, y, z| {
+            map.get(&(x, y, z)).copied()
+        });
 
         assert!(req.is_some());
         let r = req.unwrap();
@@ -266,13 +262,9 @@ mod tests {
         map.insert((0, 64, 0), BlockType::Farmland);
         map.insert((0, 65, 0), BlockType::Stone);
 
-        let req = evaluate_random_tick_at(
-            (0, 64, 0),
-            BlockType::Farmland,
-            7,
-            123,
-            |x, y, z| map.get(&(x, y, z)).copied(),
-        );
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 7, 123, |x, y, z| {
+            map.get(&(x, y, z)).copied()
+        });
 
         assert!(req.is_some());
         let r = req.unwrap();

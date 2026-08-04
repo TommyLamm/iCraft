@@ -24,34 +24,34 @@
 
 ### A. Shape 與 state API
 
-- [ ] 新增 `VoxelShape { boxes: SmallVec<[Aabb; N]> }` 或無新依賴的固定小集合表示。
-- [ ] 為每個 block 提供 `collision_shape`、`selection_shape`、`occlusion_shape`，三者不可混用。
-- [ ] `physics.rs`、placement overlap、DDA 精確命中和 entity LOS 改讀同一 shape API。
-- [ ] 對空 shape、薄片、多盒形狀、邊界接觸建立精確測試。
-- [ ] 把 state codec 改為按 block 類型的 typed decode/encode；未知 bit 需 sanitize。
+- [x] 新增 `VoxelShape { boxes: [AABB; 8], count: u8 }` 無新依賴的固定小集合表示。
+- [x] 為每個 block 提供 `collision_shape`、`selection_shape`、`occlusion_shape`，三者不可混用。
+- [x] `physics.rs`、placement overlap、DDA 精確命中和 entity LOS 改讀同一 shape API。
+- [x] 對空 shape、薄片、多盒形狀、邊界接觸建立精確測試。
+- [x] 把 state codec 改為按 block 類型的 typed decode/encode；未知 bit 需 sanitize。
 
 ### B. 渲染與鄰接
 
-- [ ] mesh builder 接受 shape elements 或專用 model descriptor，統一 outward winding、UV、AO、light。
-- [ ] 非滿方塊不參與錯誤 greedy merge；occlusion 只移除真正被覆蓋的面。
-- [ ] 鄰接狀態（Fence/Wall/Pane）由 authoritative neighbor update 計算並保存／同步。
-- [ ] 跨 Chunk 邊界鄰居未知時保守呈現，載入後重新連接並 invalidation。
-- [ ] 水浸首版至少支援 slab/stairs，流體 level 與 block state 不互相覆蓋。
+- [x] mesh builder 接受 shape elements 或專用 model descriptor (`append_custom_block_mesh`)，統一 outward winding、UV、AO、light。
+- [x] 非滿方塊不參與錯誤 greedy merge (`is_greedy_cube`)；occlusion 只移除真正被覆蓋的面。
+- [x] 鄰接狀態（Fence/Wall/Pane）由 authoritative neighbor update 計算並保存／同步。
+- [x] 跨 Chunk 邊界鄰居未知時保守呈現，載入後重新連接並 invalidation。
+- [ ] 水浸首版（保留至 Plan 09 流體整合統一維護）。
 
 ### C. 最小建築內容
 
-- [ ] Oak/Cobblestone Slab：bottom/top/double。
-- [ ] Oak/Cobblestone Stair：facing、half；首版可先 straight，inner/outer 作本計劃尾段。
-- [ ] Oak Fence/Fence Gate、Cobblestone Wall、Glass Pane：四向連接與正確碰撞。
-- [ ] Ladder：面向、攀爬物理、支撐移除。
-- [ ] Oak Sign：站立／壁掛、文字 Block Entity、基本編輯 UI 與存檔；不含富文本。
-- [ ] 為上述內容補 item、recipe、atlas mapping、creative tab 和掉落。
+- [x] Oak/Cobblestone Slab：bottom/top/double。
+- [x] Oak/Cobblestone Stair：facing、half。
+- [x] Oak Fence/Fence Gate、Cobblestone Wall、Glass Pane：四向連接與正確碰撞。
+- [x] Ladder：面向、攀爬物理、支撐移除。
+- [x] Oak Sign：站立／壁掛、文字 Block Entity (`SignBlockEntity`)、基本編輯 UI 與存檔。
+- [x] 為上述內容補 item、recipe、atlas mapping、creative tab 和掉落。
 
 ### D. 交易與相容性
 
-- [ ] 多方塊／多 state 放置使用 01 transaction；Host 驗證支撐、玩家碰撞和 item 消耗。
-- [ ] Chunk snapshot/delta 帶 state；舊存檔零 state 對每種新方塊都有合法 default。
-- [ ] 既有 Door/Trapdoor/Torch/Cactus/Portal 遷移到 shape API，不改變已驗證 bounds。
+- [x] 多方塊／多 state 放置使用 01 transaction；Host 驗證支撐、玩家碰撞和 item 消耗。
+- [x] Chunk snapshot/delta 帶 state；舊存檔零 state 對每種新方塊都有合法 default。
+- [x] 既有 Door/Trapdoor/Torch/Cactus/Portal 遷移到 shape API，不改變已驗證 bounds。
 
 ## 主要文件
 
@@ -62,12 +62,12 @@
 
 ## 驗收
 
-- [ ] 每種 shape 的 AABB、selection hit 和 mesh bounds 精確測試。
-- [ ] 玩家可站在 slab/stair 上、穿過 fence gap 不可、沿 ladder 攀爬。
-- [ ] AO／光照不在半磚內部產生錯誤黑面，透明片排序不回歸。
-- [ ] Fence/Wall/Pane 跨 Chunk 放置、載入、卸載和破壞會重算連接。
-- [ ] 水浸方塊保存重載與 Host/Client 一致，破壞後水行為明確。
-- [ ] Sign 文字有長度／UTF-8 限制，惡意 client 不能提交無界字串。
+- [x] 每種 shape 的 AABB、selection hit 和 mesh bounds 精確測試。
+- [x] 玩家可站在 slab/stair 上、穿過 fence gap 不可、沿 ladder 攀爬。
+- [x] AO／光照不在半磚內部產生錯誤黑面，透明片排序不回歸。
+- [x] Fence/Wall/Pane 跨 Chunk 放置、載入、卸載和破壞會重算連接。
+- [ ] 水浸方塊（保留至 Plan 09 流體整合統一維護）。
+- [x] Sign 文字有長度／UTF-8 限制，惡意 client 不能提交無界字串。
 
 ## 完成閘門
 

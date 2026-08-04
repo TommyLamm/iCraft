@@ -1,4 +1,5 @@
 use crate::chunk_manager::ChunkManager;
+use crate::voxel_shape::VoxelShape;
 use crate::world::BlockType;
 use glam::Vec3;
 
@@ -80,65 +81,23 @@ pub fn unit_block_aabb((x, y, z): (i32, i32, i32)) -> AABB {
 /// legal through `AABB::intersects`' strict comparisons. Non-solid blocks do
 /// not displace players and are therefore always allowed by this policy.
 /// Build the collision box for a block, taking into account block states (e.g. doors, trapdoors).
-pub fn block_aabb(block: BlockType, state_raw: u8, (x, y, z): (i32, i32, i32)) -> AABB {
-    use crate::redstone::Direction;
-    use crate::world::BlockState;
+/// Build the VoxelShape for a block, taking into account block states and shape.
+/// Returns a VoxelShape that can contain multiple AABBs for complex blocks.
+pub fn block_shape(block: BlockType, state_raw: u8, pos: (i32, i32, i32)) -> VoxelShape {
+    crate::voxel_shape::block_collision_shape(block, state_raw, pos, None)
+}
 
-    let fx = x as f32;
-    let fy = y as f32;
-    let fz = z as f32;
-
-    const THICKNESS: f32 = 3.0 / 16.0;
-
-    if matches!(block, BlockType::OakDoor | BlockType::OakDoorOpen) {
-        let state = BlockState::decode(state_raw);
-        let (min_x, max_x, min_z, max_z) = if !state.is_open {
-            match state.facing {
-                Direction::North => (0.0, 1.0, 0.0, THICKNESS),
-                Direction::South => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
-                Direction::West => (0.0, THICKNESS, 0.0, 1.0),
-                Direction::East => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
-            }
-        } else if !state.is_right_hinge {
-            match state.facing {
-                Direction::North => (0.0, THICKNESS, 0.0, 1.0),
-                Direction::South => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
-                Direction::West => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
-                Direction::East => (0.0, 1.0, 0.0, THICKNESS),
-            }
-        } else {
-            match state.facing {
-                Direction::North => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
-                Direction::South => (0.0, THICKNESS, 0.0, 1.0),
-                Direction::West => (0.0, 1.0, 0.0, THICKNESS),
-                Direction::East => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
-            }
-        };
-        return AABB {
-            min: Vec3::new(fx + min_x, fy, fz + min_z),
-            max: Vec3::new(fx + max_x, fy + 1.0, fz + max_z),
-        };
+/// Backward-compatible wrapper that returns the first AABB of a block shape.
+pub fn block_aabb(block: BlockType, state_raw: u8, pos: (i32, i32, i32)) -> AABB {
+    let shape = block_shape(block, state_raw, pos);
+    if shape.count > 0 {
+        shape.boxes[0]
+    } else {
+        AABB {
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+        }
     }
-
-    if matches!(block, BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen) {
-        let state = BlockState::decode(state_raw);
-        let (min_x, max_x, min_y, max_y, min_z, max_z) = if !state.is_open {
-            (0.0, 1.0, 0.0, THICKNESS, 0.0, 1.0)
-        } else {
-            match state.facing {
-                Direction::North => (0.0, 1.0, 0.0, 1.0, 0.0, THICKNESS),
-                Direction::South => (0.0, 1.0, 0.0, 1.0, 1.0 - THICKNESS, 1.0),
-                Direction::West => (0.0, THICKNESS, 0.0, 1.0, 0.0, 1.0),
-                Direction::East => (1.0 - THICKNESS, 1.0, 0.0, 1.0, 0.0, 1.0),
-            }
-        };
-        return AABB {
-            min: Vec3::new(fx + min_x, fy + min_y, fz + min_z),
-            max: Vec3::new(fx + max_x, fy + max_y, fz + max_z),
-        };
-    }
-
-    unit_block_aabb((x, y, z))
 }
 
 pub fn block_placement_decision(
@@ -151,10 +110,10 @@ pub fn block_placement_decision(
         return BlockPlacementDecision::Allowed;
     }
 
-    let block_aabb = block_aabb(block, block_state, block_pos);
+    let shape = block_shape(block, block_state, block_pos);
     if player_aabbs
         .into_iter()
-        .any(|player_aabb| player_aabb.intersects(&block_aabb))
+        .any(|player_aabb| shape.intersects(&player_aabb))
     {
         BlockPlacementDecision::BlockedByPlayer
     } else {
@@ -311,8 +270,20 @@ impl PlayerPhysics {
         self.velocity.z = movement_input.z * speed;
 
         // 2. 套用重力與跳躍
+        let is_on_ladder = block_at_feet == crate::world::BlockType::OakLadder
+            || block_at_eyes == crate::world::BlockType::OakLadder;
+
         if is_flying {
             self.velocity.y = movement_input.y.clamp(-1.0, 1.0) * CREATIVE_FLY_VERTICAL_SPEED;
+        } else if is_on_ladder {
+            self.highest_y = self.position.y;
+            if is_sneaking {
+                self.velocity.y = 0.0;
+            } else if movement_input.y > 0.0 || movement_input.x != 0.0 || movement_input.z != 0.0 {
+                self.velocity.y = 3.5;
+            } else {
+                self.velocity.y = self.velocity.y.max(-2.5);
+            }
         } else if is_in_water {
             if movement_input.y > 0.0 {
                 self.velocity.y = 2.5; // Swim up buoyancy
@@ -384,7 +355,7 @@ impl PlayerPhysics {
             }
         }
 
-        if self.on_ground || is_in_water || is_in_lava {
+        if self.on_ground || is_in_water || is_in_lava || is_on_ladder {
             self.highest_y = self.position.y;
         } else {
             self.highest_y = self.highest_y.max(self.position.y);
@@ -446,34 +417,41 @@ impl PlayerPhysics {
                     let block = chunk_manager.get_block(x, y, z);
                     if block.properties().is_solid {
                         let state = chunk_manager.get_block_state(x, y, z);
-                        let block_aabb = block_aabb(block, state, (x, y, z));
+                        let shape = crate::voxel_shape::block_collision_shape(
+                            block,
+                            state,
+                            (x, y, z),
+                            Some(chunk_manager),
+                        );
 
-                        if self.get_aabb().intersects(&block_aabb) {
-                            if axis == 0 {
-                                // X 軸
-                                if self.velocity.x > 0.0 {
-                                    self.position.x = block_aabb.min.x - self.size.x * 0.5;
-                                } else {
-                                    self.position.x = block_aabb.max.x + self.size.x * 0.5;
+                        for block_aabb in shape.iter() {
+                            if self.get_aabb().intersects(block_aabb) {
+                                if axis == 0 {
+                                    // X 軸
+                                    if self.velocity.x > 0.0 {
+                                        self.position.x = block_aabb.min.x - self.size.x * 0.5;
+                                    } else {
+                                        self.position.x = block_aabb.max.x + self.size.x * 0.5;
+                                    }
+                                    self.velocity.x = 0.0;
+                                } else if axis == 2 {
+                                    // Z 軸
+                                    if self.velocity.z > 0.0 {
+                                        self.position.z = block_aabb.min.z - self.size.z * 0.5;
+                                    } else {
+                                        self.position.z = block_aabb.max.z + self.size.z * 0.5;
+                                    }
+                                    self.velocity.z = 0.0;
+                                } else if axis == 1 {
+                                    // Y 軸
+                                    if self.velocity.y > 0.0 {
+                                        self.position.y = block_aabb.min.y - self.size.y;
+                                    } else {
+                                        self.position.y = block_aabb.max.y;
+                                        self.on_ground = true;
+                                    }
+                                    self.velocity.y = 0.0;
                                 }
-                                self.velocity.x = 0.0;
-                            } else if axis == 2 {
-                                // Z 軸
-                                if self.velocity.z > 0.0 {
-                                    self.position.z = block_aabb.min.z - self.size.z * 0.5;
-                                } else {
-                                    self.position.z = block_aabb.max.z + self.size.z * 0.5;
-                                }
-                                self.velocity.z = 0.0;
-                            } else if axis == 1 {
-                                // Y 軸
-                                if self.velocity.y > 0.0 {
-                                    self.position.y = block_aabb.min.y - self.size.y;
-                                } else {
-                                    self.position.y = block_aabb.max.y;
-                                    self.on_ground = true;
-                                }
-                                self.velocity.y = 0.0;
                             }
                         }
                     }
@@ -502,8 +480,13 @@ impl PlayerPhysics {
                     let block = chunk_manager.get_block(x, y, z);
                     if block.properties().is_solid {
                         let state = chunk_manager.get_block_state(x, y, z);
-                        let block_aabb = block_aabb(block, state, (x, y, z));
-                        if check_aabb.intersects(&block_aabb) {
+                        let shape = crate::voxel_shape::block_collision_shape(
+                            block,
+                            state,
+                            (x, y, z),
+                            Some(chunk_manager),
+                        );
+                        if shape.intersects(&check_aabb) {
                             return true;
                         }
                     }
