@@ -224,6 +224,3 @@ mod tests {
         assert!(manager.find_by_player(2).is_none());
     }
 }
-
-
-

@@ -70,6 +70,12 @@ impl RecipeManager {
         );
         add_shaped(
             &mut recipes,
+            vec!["WWW", "PPP"],
+            &[("W", Item::Wool), ("P", Item::OakPlanks)],
+            ItemStack::new(Item::Bed, 1),
+        );
+        add_shaped(
+            &mut recipes,
             vec!["L"],
             &[("L", Item::BirchLog)],
             ItemStack::new(Item::BirchPlanks, 4),

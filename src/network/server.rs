@@ -153,6 +153,15 @@ pub enum ServerToHost {
         cz: i32,
         revision: u64,
     },
+    ClientRespawnRequest {
+        id: PlayerId,
+    },
+    ClientSleepRequest {
+        id: PlayerId,
+        bed_x: i32,
+        bed_y: i32,
+        bed_z: i32,
+    },
 }
 
 #[derive(Debug)]
@@ -963,6 +972,18 @@ impl NetworkServer {
                                 revision,
                             }).is_err() {
                                 disconnect_reason = "host channel closed (CatchupAck)".into();
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::PlayerRespawnRequest { .. })) => {
+                            if server_to_host.send(ServerToHost::ClientRespawnRequest { id }).is_err() {
+                                disconnect_reason = "host channel closed (ClientRespawnRequest)".into();
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::SleepRequest { x, y, z, .. })) => {
+                            if server_to_host.send(ServerToHost::ClientSleepRequest { id, bed_x: x, bed_y: y, bed_z: z }).is_err() {
+                                disconnect_reason = "host channel closed (ClientSleepRequest)".into();
                                 break;
                             }
                         }

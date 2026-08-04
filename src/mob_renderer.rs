@@ -1761,6 +1761,7 @@ pub fn render_mobs<'a>(
                     light_val,
                 );
             }
+            EntityType::ExperienceOrb => {}
         }
 
         if (entity.fire_aspect_timer > 0.0 || entity.burn_timer > 0.0)

@@ -3654,6 +3654,15 @@ enum NetworkInbound {
         cz: i32,
         revision: u64,
     },
+    ClientRespawnRequest {
+        id: crate::network::protocol::PlayerId,
+    },
+    ClientSleepRequest {
+        id: crate::network::protocol::PlayerId,
+        bed_x: i32,
+        bed_y: i32,
+        bed_z: i32,
+    },
     Chat {
         sender: String,
         message: String,
@@ -4095,6 +4104,20 @@ impl NetworkHandle {
                             cx,
                             cz,
                             revision,
+                        },
+                        crate::network::server::ServerToHost::ClientRespawnRequest { id } => {
+                            NetworkInbound::ClientRespawnRequest { id }
+                        }
+                        crate::network::server::ServerToHost::ClientSleepRequest {
+                            id,
+                            bed_x,
+                            bed_y,
+                            bed_z,
+                        } => NetworkInbound::ClientSleepRequest {
+                            id,
+                            bed_x,
+                            bed_y,
+                            bed_z,
                         },
                     })
                     .collect()
@@ -4876,6 +4899,7 @@ pub struct State {
     pub weather: crate::weather::WeatherSystem,
     pub settings: GameSettings,
     pub world_seed: u32,
+    pub world_spawn: (i32, i32, i32),
     pub difficulty: Difficulty,
     pub current_dimension: crate::dimension::Dimension,
     portal_contact_time: f32,
@@ -5250,6 +5274,7 @@ impl State {
         let mut camera_pitch = f32::to_radians(-20.0);
         let mut world_time = crate::camera::WorldTime::new();
         let mut world_seed = launch.seed;
+        let mut world_spawn = (8, 80, 8);
 
         let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
         let has_save = !is_client && {
@@ -5264,6 +5289,7 @@ impl State {
             };
             world_seed = level.seed;
             world_time.ticks = level.time;
+            world_spawn = (level.spawn_x, level.spawn_y, level.spawn_z);
             player_physics.position = Vec3::from_slice(&player.position);
             player_physics.velocity = Vec3::from_slice(&player.velocity);
             camera_yaw = player.yaw;
@@ -5275,6 +5301,8 @@ impl State {
             player_state.oxygen = player.oxygen;
             player_state.experience = player.experience;
             player_state.experience_level = player.experience_level;
+            player_state.spawn_point = player.spawn_point;
+            player_state.spawn_dimension = player.spawn_dimension;
             game_mode = player.game_mode;
             inventory = player.inventory.to_inventory();
             advancement_progress = player.advancements;
@@ -6476,6 +6504,7 @@ impl State {
             weather,
             difficulty: launch.difficulty,
             world_seed,
+            world_spawn,
             settings,
             current_dimension,
             portal_contact_time: 0.0,
@@ -7766,6 +7795,8 @@ impl State {
                     }
                 }
             }
+            NetworkInbound::ClientRespawnRequest { .. }
+            | NetworkInbound::ClientSleepRequest { .. } => {}
         }
     }
 
@@ -8094,6 +8125,12 @@ impl State {
         let level = crate::save::LevelData {
             seed: self.world_seed,
             time: self.world_time.ticks,
+            spawn_x: self.world_spawn.0,
+            spawn_y: self.world_spawn.1,
+            spawn_z: self.world_spawn.2,
+            spawn_dimension: crate::dimension::Dimension::Overworld,
+            spawn_yaw: 0.0,
+            version: 2,
         };
         let player = crate::save::PlayerData::from_state(
             self.player_physics.position,
@@ -9379,35 +9416,75 @@ impl State {
 
         self.was_on_ground = self.player_physics.on_ground;
 
-        // Dropped item collection
+        self.update_dropped_items_and_orbs(dt);
+
+        if self.player_state.is_sleeping {
+            self.player_state.sleep_timer += dt;
+            if self.player_state.sleep_timer >= 5.0 {
+                let current_day = self.world_time.ticks / 24000;
+                self.world_time.ticks = (current_day + 1) * 24000 + 1000;
+                self.weather.clear_weather();
+
+                let bed_pos = self.player_state.bed_pos.unwrap_or([
+                    self.player_physics.position.x as i32,
+                    self.player_physics.position.y as i32,
+                    self.player_physics.position.z as i32,
+                ]);
+                let (safe_p, _) = crate::world::find_safe_spawn_position(
+                    &self.chunk_manager,
+                    (bed_pos[0], bed_pos[1], bed_pos[2]),
+                );
+                self.player_physics.position = safe_p;
+                self.player_state.is_sleeping = false;
+                self.player_state.sleep_timer = 0.0;
+                self.player_state.bed_pos = None;
+                println!("[Game] Woke up. Good morning!");
+            }
+        }
+
+        // Dropped item & XP collection
         {
             let player_pos = self.player_physics.position;
             let to_collect: Vec<u64> = self
                 .entity_manager
                 .query_radius_types(player_pos, 1.5, &[crate::entity::EntityType::DroppedItem])
-                .filter(|entity| entity.pickup_cooldown <= 0.0 && entity.dropped_item.is_some())
+                .filter(|entity| {
+                    entity.pickup_cooldown <= 0.0
+                        && (entity.dropped_stack.is_some() || entity.dropped_item.is_some())
+                })
                 .map(|entity| entity.id)
                 .collect();
             for id in to_collect {
-                let Some((item, mut remaining)) = self
-                    .entity_manager
-                    .get_by_id(id)
-                    .map(|entity| (entity.dropped_item, entity.dropped_count.max(1)))
-                else {
-                    continue;
-                };
-                if let Some(item) = item {
-                    while remaining > 0 && self.inventory.add_item(item) {
-                        remaining -= 1;
-                    }
-                    if remaining == 0 {
-                        self.entity_manager.remove_by_id(id);
-                    } else {
+                let stack = self.entity_manager.get_by_id(id).and_then(|entity| {
+                    entity.dropped_stack.or_else(|| {
+                        entity
+                            .dropped_item
+                            .map(|item| ItemStack::new(item, entity.dropped_count.max(1)))
+                    })
+                });
+                if let Some(incoming) = stack {
+                    let remainder = self.inventory.add_stack(incoming);
+                    if let Some(rem) = remainder {
                         if let Some(index) = self.entity_manager.id_to_index.get(&id).copied() {
-                            self.entity_manager.entities[index].dropped_count = remaining;
+                            self.entity_manager.entities[index].dropped_item = Some(rem.item);
+                            self.entity_manager.entities[index].dropped_count = rem.count;
+                            self.entity_manager.entities[index].dropped_stack = Some(rem);
                         }
+                    } else {
+                        self.entity_manager.remove_by_id(id);
                     }
                 }
+            }
+
+            let xp_orbs: Vec<(u64, u32)> = self
+                .entity_manager
+                .query_radius_types(player_pos, 1.5, &[crate::entity::EntityType::ExperienceOrb])
+                .filter(|entity| entity.pickup_cooldown <= 0.0 && entity.xp_value > 0)
+                .map(|entity| (entity.id, entity.xp_value))
+                .collect();
+            for (id, xp_val) in xp_orbs {
+                self.player_state.add_experience(xp_val);
+                self.entity_manager.remove_by_id(id);
             }
         }
 
@@ -11233,12 +11310,172 @@ impl State {
     /// The item is launched with a small random upward velocity and given a
     /// brief pickup cooldown so it can't be instantly re-collected.
     pub fn spawn_dropped_item(&mut self, item: crate::inventory::Item, pos: glam::Vec3) {
-        let _ = spawn_dropped_item_entity(
-            &mut self.entity_manager,
-            item,
-            pos,
-            self.total_time.to_bits(),
-        );
+        self.spawn_dropped_stack(crate::inventory::ItemStack::new(item, 1), pos);
+    }
+
+    pub fn spawn_dropped_stack(&mut self, stack: crate::inventory::ItemStack, pos: glam::Vec3) {
+        if stack.item == Item::Air || stack.count == 0 {
+            return;
+        }
+        let id = self
+            .entity_manager
+            .spawn(crate::entity::EntityType::DroppedItem, pos);
+        if let Some(entity) = self.entity_manager.entities.last_mut() {
+            entity.dropped_item = Some(stack.item);
+            entity.dropped_count = stack.count;
+            entity.dropped_stack = Some(stack);
+            let mut rng = self
+                .total_time
+                .to_bits()
+                .wrapping_add(id.wrapping_mul(2_654_435_761) as u32);
+            rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let vx = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
+            rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let vz = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
+            let vy = 2.0 + ((rng / 65_536) as f32 / 32_768.0);
+            entity.velocity = Vec3::new(vx, vy, vz);
+            entity.pickup_cooldown = 0.5;
+        }
+    }
+
+    pub fn throw_dropped_stack(&mut self, stack: crate::inventory::ItemStack) {
+        if stack.item == Item::Air || stack.count == 0 {
+            return;
+        }
+        let dir = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        )
+        .normalize_or_zero();
+        let spawn_pos = self.player_physics.position + Vec3::new(0.0, 1.5, 0.0) + dir * 0.5;
+        self.entity_manager
+            .spawn(crate::entity::EntityType::DroppedItem, spawn_pos);
+        if let Some(entity) = self.entity_manager.entities.last_mut() {
+            entity.dropped_item = Some(stack.item);
+            entity.dropped_count = stack.count;
+            entity.dropped_stack = Some(stack);
+            entity.velocity = dir * 4.0 + Vec3::new(0.0, 1.5, 0.0);
+            entity.pickup_cooldown = 1.0;
+        }
+    }
+
+    pub fn spawn_xp_orb(&mut self, xp_value: u32, pos: glam::Vec3) {
+        if xp_value == 0 {
+            return;
+        }
+        let id = self
+            .entity_manager
+            .spawn(crate::entity::EntityType::ExperienceOrb, pos);
+        if let Some(entity) = self.entity_manager.entities.last_mut() {
+            entity.xp_value = xp_value;
+            let rng = self
+                .total_time
+                .to_bits()
+                .wrapping_add(id.wrapping_mul(2_654_435_761) as u32);
+            let vx = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
+            let vy = 2.0;
+            let vz = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
+            entity.velocity = Vec3::new(vx, vy, vz);
+            entity.pickup_cooldown = 0.5;
+        }
+    }
+
+    fn update_dropped_items_and_orbs(&mut self, dt: f32) {
+        let mut remove_ids = Vec::new();
+        let mut merges = Vec::new();
+
+        for entity in &mut self.entity_manager.entities {
+            if matches!(
+                entity.entity_type,
+                crate::entity::EntityType::DroppedItem | crate::entity::EntityType::ExperienceOrb
+            ) {
+                entity.item_age += dt;
+                entity.update_physics(dt, &self.chunk_manager);
+
+                let pos = entity.position;
+                let block = self.chunk_manager.get_block(
+                    pos.x.floor() as i32,
+                    pos.y.floor() as i32,
+                    pos.z.floor() as i32,
+                );
+                if matches!(
+                    block,
+                    crate::world::BlockType::Lava
+                        | crate::world::BlockType::Fire
+                        | crate::world::BlockType::Cactus
+                ) || entity.item_age >= 300.0
+                {
+                    remove_ids.push(entity.id);
+                }
+            }
+        }
+
+        let dropped_ids: Vec<u64> = self
+            .entity_manager
+            .get_entities_by_type(crate::entity::EntityType::DroppedItem)
+            .map(|e| e.id)
+            .collect();
+        for i in 0..dropped_ids.len() {
+            let id_a = dropped_ids[i];
+            if remove_ids.contains(&id_a) {
+                continue;
+            }
+            for j in (i + 1)..dropped_ids.len() {
+                let id_b = dropped_ids[j];
+                if remove_ids.contains(&id_b) {
+                    continue;
+                }
+                let (Some(ent_a), Some(ent_b)) = (
+                    self.entity_manager.get_by_id(id_a),
+                    self.entity_manager.get_by_id(id_b),
+                ) else {
+                    continue;
+                };
+                if ent_a.position.distance(ent_b.position) <= 1.25 {
+                    if let (Some(stack_a), Some(stack_b)) =
+                        (ent_a.dropped_stack, ent_b.dropped_stack)
+                    {
+                        if stack_a.can_merge_with(&stack_b) {
+                            let max_stack = stack_a.item.properties().max_stack;
+                            if stack_a.count < max_stack {
+                                merges.push((id_a, id_b, max_stack));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (id_a, id_b, max_stack) in merges {
+            if remove_ids.contains(&id_a) || remove_ids.contains(&id_b) {
+                continue;
+            }
+            let count_b = self
+                .entity_manager
+                .get_by_id(id_b)
+                .map(|e| e.dropped_count)
+                .unwrap_or(0);
+            if let Some(ent_a) = self.entity_manager.get_by_id_mut(id_a) {
+                let transfer = max_stack.saturating_sub(ent_a.dropped_count).min(count_b);
+                ent_a.dropped_count += transfer;
+                if let Some(ref mut stack_a) = ent_a.dropped_stack {
+                    stack_a.count = ent_a.dropped_count;
+                }
+                if transfer >= count_b {
+                    remove_ids.push(id_b);
+                } else if let Some(ent_b) = self.entity_manager.get_by_id_mut(id_b) {
+                    ent_b.dropped_count -= transfer;
+                    if let Some(ref mut stack_b) = ent_b.dropped_stack {
+                        stack_b.count = ent_b.dropped_count;
+                    }
+                }
+            }
+        }
+
+        for id in remove_ids {
+            self.entity_manager.remove_by_id(id);
+        }
     }
 
     fn store_or_drop_generated_item(&mut self, item: Item, position: Vec3) {
@@ -11263,28 +11500,8 @@ impl State {
         self.player_state.add_experience(rewards.experience);
     }
 
-    /// Throw `count` of `item` out from the player's eye in the camera look
-    /// direction as a single `DroppedItem` entity. The thrower cannot
-    /// instantly re-collect it thanks to a longer pickup cooldown.
     fn throw_dropped_item(&mut self, item: Item, count: u32) {
-        if item == Item::Air || count == 0 {
-            return;
-        }
-        let dir = Vec3::new(
-            self.camera.yaw.cos() * self.camera.pitch.cos(),
-            self.camera.pitch.sin(),
-            self.camera.yaw.sin() * self.camera.pitch.cos(),
-        )
-        .normalize_or_zero();
-        let spawn_pos = self.player_physics.position + Vec3::new(0.0, 1.5, 0.0) + dir * 0.5;
-        self.entity_manager
-            .spawn(crate::entity::EntityType::DroppedItem, spawn_pos);
-        if let Some(entity) = self.entity_manager.entities.last_mut() {
-            entity.dropped_item = Some(item);
-            entity.dropped_count = count;
-            entity.velocity = dir * 4.0 + Vec3::new(0.0, 1.5, 0.0);
-            entity.pickup_cooldown = 1.0;
-        }
+        self.throw_dropped_stack(crate::inventory::ItemStack::new(item, count));
     }
 
     /// Q pressed in the world: throw the selected hotbar item. One item is
@@ -11496,7 +11713,40 @@ impl State {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::PlayerDeath);
                 println!("[Debug] Player died due to: {:?}", source);
+
+                let pos = self.player_physics.position + Vec3::new(0.0, 1.0, 0.0);
+                let mut to_drop = Vec::new();
+                for slot in self
+                    .inventory
+                    .hotbar
+                    .iter()
+                    .chain(self.inventory.main.iter())
+                    .chain(self.inventory.armor.iter())
+                {
+                    if let Some(stack) = slot {
+                        to_drop.push(*stack);
+                    }
+                }
+                if let Some(dragged) = self.inventory.dragged {
+                    to_drop.push(dragged);
+                }
+                for craft_slot in &self.inventory.craft_input {
+                    if let Some(stack) = craft_slot {
+                        to_drop.push(*stack);
+                    }
+                }
+
+                for stack in to_drop {
+                    self.spawn_dropped_stack(stack, pos);
+                }
+
+                let xp_drop = self.player_state.death_experience_drop();
+                if xp_drop > 0 {
+                    self.spawn_xp_orb(xp_drop, pos);
+                }
+
                 self.inventory.clear();
+                self.active_station = None;
 
                 self.clear_movement_input();
                 self.sync_cursor_mode();
@@ -11510,14 +11760,77 @@ impl State {
     pub fn respawn(&mut self) {
         self.player_physics.set_flying(false);
         self.jump_taps.reset();
-        if self.current_dimension != crate::dimension::Dimension::Overworld {
-            self.switch_dimension(crate::dimension::Dimension::Overworld);
+
+        let mut spawn_pos = None;
+        let mut spawn_dim = crate::dimension::Dimension::Overworld;
+
+        if let (Some(bed_p), Some(dim)) = (
+            self.player_state.spawn_point,
+            self.player_state.spawn_dimension,
+        ) {
+            let chunk_pos = (bed_p[0], bed_p[1], bed_p[2]);
+            if self
+                .chunk_manager
+                .get_block(chunk_pos.0, chunk_pos.1, chunk_pos.2)
+                == crate::world::BlockType::Bed
+            {
+                let (safe_p, safe) =
+                    crate::world::find_safe_spawn_position(&self.chunk_manager, chunk_pos);
+                if safe {
+                    spawn_pos = Some(safe_p);
+                    spawn_dim = dim;
+                }
+            }
+            if spawn_pos.is_none() {
+                self.player_state.spawn_point = None;
+                self.player_state.spawn_dimension = None;
+                println!("[Debug] Your home bed was missing or obstructed");
+            }
         }
-        // Reset player physics position to spawn point: (8.0, 80.0, 8.0)
-        self.player_physics.position = glam::Vec3::new(8.0, 80.0, 8.0);
+
+        if spawn_pos.is_none() {
+            spawn_dim = crate::dimension::Dimension::Overworld;
+            let target_p = (self.world_spawn.0, self.world_spawn.1, self.world_spawn.2);
+            let (safe_p, safe) =
+                crate::world::find_safe_spawn_position(&self.chunk_manager, target_p);
+            if safe {
+                spawn_pos = Some(safe_p);
+            } else {
+                self.chunk_manager.set_block(
+                    target_p.0,
+                    target_p.1 - 1,
+                    target_p.2,
+                    crate::world::BlockType::Cobblestone,
+                );
+                self.chunk_manager.set_block(
+                    target_p.0,
+                    target_p.1,
+                    target_p.2,
+                    crate::world::BlockType::Air,
+                );
+                self.chunk_manager.set_block(
+                    target_p.0,
+                    target_p.1 + 1,
+                    target_p.2,
+                    crate::world::BlockType::Air,
+                );
+                spawn_pos = Some(Vec3::new(
+                    target_p.0 as f32 + 0.5,
+                    target_p.1 as f32,
+                    target_p.2 as f32 + 0.5,
+                ));
+            }
+        }
+
+        if self.current_dimension != spawn_dim {
+            self.switch_dimension(spawn_dim);
+        }
+
+        let target_vec = spawn_pos.unwrap_or_else(|| Vec3::new(8.0, 80.0, 8.0));
+        self.player_physics.position = target_vec;
         self.player_physics.velocity = glam::Vec3::ZERO;
         self.player_physics.on_ground = false;
-        self.player_physics.highest_y = 80.0;
+        self.player_physics.highest_y = target_vec.y;
 
         self.player_state.reset_for_respawn();
         self.void_damage_timer = 0.0;
@@ -11963,6 +12276,60 @@ impl State {
                     self.apply_block_changes(&[(clicked_pos, BlockType::Air)]);
                     return;
                 }
+                if clicked_block == BlockType::Bed {
+                    let bed_pos = clicked_pos;
+                    if self.current_dimension != crate::dimension::Dimension::Overworld {
+                        self.apply_block_changes(&[(bed_pos, BlockType::Air)]);
+                        self.take_damage(50.0, DamageSource::Mob);
+                        println!("[Debug] Bed exploded in non-Overworld dimension!");
+                    } else {
+                        let bstate = crate::world::BlockState::decode(
+                            self.chunk_manager
+                                .get_block_state(bed_pos.0, bed_pos.1, bed_pos.2),
+                        );
+                        let head_pos = if bstate.is_top {
+                            bed_pos
+                        } else {
+                            (
+                                bed_pos.0 + bstate.facing.dx(),
+                                bed_pos.1,
+                                bed_pos.2 + bstate.facing.dz(),
+                            )
+                        };
+                        self.player_state.spawn_point = Some([head_pos.0, head_pos.1, head_pos.2]);
+                        self.player_state.spawn_dimension =
+                            Some(crate::dimension::Dimension::Overworld);
+
+                        let time_of_day = self.world_time.ticks % 24000;
+                        let is_night = time_of_day >= 12541 && time_of_day <= 23458;
+                        let is_storm = self.weather.is_thundering();
+
+                        if !is_night && !is_storm {
+                            println!(
+                                "[Game] Respawn point set. You can only sleep at night or during thunderstorms."
+                            );
+                        } else {
+                            let pos_vec = Vec3::new(
+                                bed_pos.0 as f32 + 0.5,
+                                bed_pos.1 as f32 + 0.5,
+                                bed_pos.2 as f32 + 0.5,
+                            );
+                            let nearby_hostiles = self
+                                .entity_manager
+                                .query_radius(pos_vec, 8.0)
+                                .any(|e| e.entity_type.is_hostile() && e.health > 0.0);
+                            if nearby_hostiles {
+                                println!("[Game] You may not rest now, there are monsters nearby.");
+                            } else {
+                                self.player_state.is_sleeping = true;
+                                self.player_state.sleep_timer = 0.0;
+                                self.player_state.bed_pos = Some([bed_pos.0, bed_pos.1, bed_pos.2]);
+                                println!("[Game] Sleeping...");
+                            }
+                        }
+                    }
+                    return;
+                }
                 if clicked_block == BlockType::Water
                     && held.is_some_and(|stack| stack.item == Item::GlassBottle)
                 {
@@ -12182,6 +12549,20 @@ impl State {
                                 self.store_or_drop_generated_item(drop, sound_pos);
                             }
                         }
+                        if old_block == BlockType::Bed {
+                            let bstate = crate::world::BlockState::decode(
+                                self.chunk_manager.get_block_state(wx, wy, wz),
+                            );
+                            let (ox, oz) = if bstate.is_top {
+                                (wx - bstate.facing.dx(), wz - bstate.facing.dz())
+                            } else {
+                                (wx + bstate.facing.dx(), wz + bstate.facing.dz())
+                            };
+                            if self.chunk_manager.get_block(ox, wy, oz) == BlockType::Bed {
+                                self.chunk_manager.set_block(ox, wy, oz, BlockType::Air);
+                                self.broadcast_block_change(ox, wy, oz, BlockType::Air);
+                            }
+                        }
                     }
 
                     // Update lighting for removal
@@ -12205,6 +12586,68 @@ impl State {
                 }
             } else {
                 if let Some(placed_block) = self.inventory.get_selected_block() {
+                    if placed_block == BlockType::Bed {
+                        let facing = crate::redstone::Direction::from_yaw(self.camera.yaw);
+                        let hx = wx + facing.dx();
+                        let hz = wz + facing.dz();
+                        if !self.can_place_block_at(wx, wy, wz, BlockType::Bed)
+                            || !self.can_place_block_at(hx, wy, hz, BlockType::Bed)
+                        {
+                            return;
+                        }
+                        if !self.chunk_manager.can_place_block_with_support(
+                            BlockType::Bed,
+                            wx,
+                            wy,
+                            wz,
+                        ) || !self.chunk_manager.can_place_block_with_support(
+                            BlockType::Bed,
+                            hx,
+                            wy,
+                            hz,
+                        ) {
+                            return;
+                        }
+                        let foot_state = crate::world::BlockState {
+                            facing,
+                            is_top: false,
+                            is_right_hinge: false,
+                            is_open: false,
+                            chest_type: crate::world::ChestType::Single,
+                        };
+                        let head_state = crate::world::BlockState {
+                            facing,
+                            is_top: true,
+                            is_right_hinge: false,
+                            is_open: false,
+                            chest_type: crate::world::ChestType::Single,
+                        };
+                        self.chunk_manager.set_block(wx, wy, wz, BlockType::Bed);
+                        self.chunk_manager
+                            .set_block_state(wx, wy, wz, foot_state.encode());
+                        self.chunk_manager.set_block(hx, wy, hz, BlockType::Bed);
+                        self.chunk_manager
+                            .set_block_state(hx, wy, hz, head_state.encode());
+                        self.broadcast_block_change(wx, wy, wz, BlockType::Bed);
+                        self.broadcast_block_change(hx, wy, hz, BlockType::Bed);
+
+                        let sound_pos =
+                            Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+                        let listener_right =
+                            Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos())
+                                .normalize_or_zero();
+                        if let Some(mat) = BlockType::Bed.sound_material() {
+                            self.audio_manager.play_sound_3d(
+                                crate::audio::SoundId::BlockPlace(mat),
+                                sound_pos,
+                                self.camera.position,
+                                listener_right,
+                            );
+                        }
+                        let is_creative = self.game_mode == GameMode::Creative;
+                        self.inventory.use_selected_item(is_creative);
+                        return;
+                    }
                     if placed_block == BlockType::OakDoor {
                         if wy + 1 >= crate::world::CHUNK_HEIGHT as i32 {
                             return;

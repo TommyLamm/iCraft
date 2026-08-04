@@ -26,6 +26,7 @@ pub enum EntityType {
     DragonBreath,
     RemotePlayer,
     Enderman,
+    ExperienceOrb,
 }
 
 impl EntityType {
@@ -53,6 +54,7 @@ impl EntityType {
             Self::DragonBreath => 19,
             Self::RemotePlayer => 20,
             Self::Enderman => 21,
+            Self::ExperienceOrb => 22,
         }
     }
 
@@ -80,6 +82,7 @@ impl EntityType {
             19 => Some(Self::DragonBreath),
             20 => Some(Self::RemotePlayer),
             21 => Some(Self::Enderman),
+            22 => Some(Self::ExperienceOrb),
             _ => None,
         }
     }
@@ -204,6 +207,11 @@ pub struct Entity {
     /// mob drops stay at 1; player throws of a whole stack use a single
     /// entity with a larger count.
     pub dropped_count: u32,
+    pub dropped_stack: Option<crate::inventory::ItemStack>,
+    /// Cumulative loaded time (seconds) since spawned. Used for 5 min (300s) despawn.
+    pub item_age: f32,
+    /// Experience value for ExperienceOrb entities.
+    pub xp_value: u32,
     pub pickup_cooldown: f32,
     pub ai_phase: u8,
     pub ai_timer: f32,
@@ -228,7 +236,7 @@ impl Entity {
             EntityType::Sheep => Vec3::new(0.9, 1.3, 0.9),
             EntityType::Chicken => Vec3::new(0.4, 0.7, 0.4),
             EntityType::HeartParticle => Vec3::new(0.25, 0.25, 0.25),
-            EntityType::DroppedItem => Vec3::new(0.25, 0.25, 0.25),
+            EntityType::DroppedItem | EntityType::ExperienceOrb => Vec3::new(0.25, 0.25, 0.25),
             EntityType::Shulker => Vec3::ONE,
             EntityType::Enderman => Vec3::new(0.6, 2.9, 0.6),
             EntityType::EnderDragon => Vec3::new(8.0, 4.0, 8.0),
@@ -255,7 +263,8 @@ impl Entity {
             | EntityType::WitherSkull
             | EntityType::DragonBreath
             | EntityType::HeartParticle
-            | EntityType::DroppedItem => 0.0,
+            | EntityType::DroppedItem
+            | EntityType::ExperienceOrb => 0.0,
             EntityType::RemotePlayer => 20.0,
         };
         Self {
@@ -292,6 +301,9 @@ impl Entity {
             life_time: 1.5,
             dropped_item: None,
             dropped_count: 1,
+            dropped_stack: None,
+            item_age: 0.0,
+            xp_value: 0,
             pickup_cooldown: 0.0,
             ai_phase: 0,
             ai_timer: 0.0,

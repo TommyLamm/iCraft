@@ -23,9 +23,12 @@ pub const END_CRYSTAL_TOWERS: [(i32, i32, i32); 8] = [
     (30, 82, -30),
 ];
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 #[repr(u8)]
 pub enum Dimension {
+    #[default]
     Overworld,
     Nether,
     End,

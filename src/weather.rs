@@ -86,6 +86,16 @@ impl WeatherSystem {
         system
     }
 
+    pub fn clear_weather(&mut self) {
+        self.current = Weather::Clear;
+        self.remaining_ticks = self.random_duration_ticks();
+        self.lightning_timer = f32::INFINITY;
+    }
+
+    pub fn is_thundering(&self) -> bool {
+        self.current == Weather::Thunder
+    }
+
     pub fn snapshot(&self) -> WeatherSnapshot {
         WeatherSnapshot {
             current: self.current,

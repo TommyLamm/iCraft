@@ -76,7 +76,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 01 | [權威世界變更與 Block Entity](01_world_state_and_block_entities.md) | 已完成 |
 | 02 | [箱子儲存與多人容器交易](02_chest_storage.md) | 已完成 |
 | 03 | [熔爐、熔煉與配方進度](03_furnace_smelting_and_recipe_progression.md) | 待執行 |
-| 04 | [死亡、睡眠、出生點與掉落物](04_death_sleep_spawn_and_item_lifecycle.md) | 待執行 |
+| 04 | [死亡、睡眠、出生點與掉落物](04_death_sleep_spawn_and_item_lifecycle.md) | 已完成 |
 | 05 | [耕作、食物與 Random Tick](05_farming_food_and_random_ticks.md) | 待執行 |
 | 06 | [VoxelShape 與基礎建築件](06_voxel_shapes_and_building_blocks.md) | 待執行 |
 | 07 | [戰鬥、裝備、副手與蓄力使用](07_combat_equipment_offhand_and_item_use.md) | 待執行 |
