@@ -2211,6 +2211,7 @@ impl State {
         if target == self.current_dimension {
             return;
         }
+        self.close_inventory();
         self.player_physics.set_flying(false);
         self.jump_taps.reset();
         let source = self.current_dimension;
@@ -4119,6 +4120,45 @@ impl NetworkHandle {
                             bed_y,
                             bed_z,
                         },
+                        crate::network::server::ServerToHost::ContainerOpenRequest {
+                            id,
+                            dimension,
+                            x,
+                            y,
+                            z,
+                        } => NetworkInbound::ContainerOpenRequest {
+                            id,
+                            dimension,
+                            x,
+                            y,
+                            z,
+                        },
+                        crate::network::server::ServerToHost::ContainerClickRequest {
+                            id,
+                            dimension,
+                            slot_index,
+                            is_left,
+                            dragged,
+                        } => NetworkInbound::ContainerClickRequest {
+                            id,
+                            dimension,
+                            slot_index,
+                            is_left,
+                            dragged,
+                        },
+                        crate::network::server::ServerToHost::ContainerClose {
+                            id,
+                            dimension,
+                            x,
+                            y,
+                            z,
+                        } => NetworkInbound::ContainerClose {
+                            id,
+                            dimension,
+                            x,
+                            y,
+                            z,
+                        },
                     })
                     .collect()
             }
@@ -4315,6 +4355,53 @@ impl NetworkHandle {
                         crate::network::client::ClientToGame::StatusUpdate { message } => {
                             NetworkInbound::StatusUpdate(message)
                         }
+                        crate::network::client::ClientToGame::ContainerOpenResult {
+                            dimension,
+                            success,
+                            x,
+                            y,
+                            z,
+                            slots,
+                            revision,
+                        } => NetworkInbound::ContainerOpenResult {
+                            dimension,
+                            success,
+                            x,
+                            y,
+                            z,
+                            slots,
+                            revision,
+                        },
+                        crate::network::client::ClientToGame::ContainerClickResult {
+                            dimension,
+                            success,
+                            slot_index,
+                            slot,
+                            dragged,
+                        } => NetworkInbound::ContainerClickResult {
+                            dimension,
+                            success,
+                            slot_index,
+                            slot,
+                            dragged,
+                        },
+                        crate::network::client::ClientToGame::ContainerSlotUpdate {
+                            dimension,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            slot_index,
+                            slot,
+                        } => NetworkInbound::ContainerSlotUpdate {
+                            dimension,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            slot_index,
+                            slot,
+                        },
                     })
                     .collect()
             }
@@ -7133,6 +7220,7 @@ impl State {
                 self.is_chat_open = false;
                 self.chat_input.clear();
                 clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
+                self.container_sessions.sessions.clear();
                 self.clear_replicated_entities();
                 self.set_paused(true);
                 push_chat_history(
@@ -7180,6 +7268,7 @@ impl State {
                 self.pending_player_catchups.remove(&id);
                 self.remote_player_health.remove(&id);
                 self.remote_player_effects.remove(&id);
+                self.container_sessions.close_by_player(id);
                 if let Some(remote) = self.remote_players.remove(&id) {
                     push_chat_history(
                         &mut self.chat_messages,
@@ -7598,47 +7687,86 @@ impl State {
                 z,
             } => {
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    self.container_sessions.open(id, dimension, x, y, z);
-                    if let Some(inv) =
-                        crate::container_sessions::ContainerSessionManager::get_chest_inventory(
-                            &self.chunk_manager,
-                            x,
-                            y,
-                            z,
-                        )
-                    {
-                        let slots: Vec<Option<crate::network::protocol::ItemWire>> = inv
-                            .slots
-                            .iter()
-                            .map(|s| {
-                                s.as_ref()
-                                    .map(crate::network::protocol::ItemWire::from_stack)
-                            })
-                            .collect();
-                        let slot_count =
-                            crate::container_sessions::ContainerSessionManager::get_slot_count(
+                    let mut valid = dimension == self.current_dimension as u8
+                        && self.chunk_manager.get_block(x, y, z) == BlockType::Chest;
+                    if valid {
+                        if self
+                            .chunk_manager
+                            .get_block(x, y + 1, z)
+                            .properties()
+                            .is_solid
+                        {
+                            valid = false;
+                        }
+                        if let Some(partner_pos) = crate::container_sessions::ContainerSessionManager::get_double_chest_partner(&self.chunk_manager, x, y, z) {
+                            if self.chunk_manager.get_block(partner_pos.0, partner_pos.1 + 1, partner_pos.2).properties().is_solid {
+                                valid = false;
+                            }
+                        }
+                    }
+                    if valid {
+                        if let Some(remote) = self.remote_players.get(&id) {
+                            if let Some(snap) = remote.snapshots.back() {
+                                let chest_center =
+                                    glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                                if (snap.position - chest_center).length_squared() > 64.0 {
+                                    valid = false;
+                                }
+                            }
+                        }
+                    }
+
+                    if valid {
+                        self.container_sessions.open(id, dimension, x, y, z);
+                        if let Some(slots_vec) =
+                            crate::container_sessions::ContainerSessionManager::get_chest_slots(
                                 &self.chunk_manager,
                                 x,
                                 y,
                                 z,
-                            );
-                        self.container_is_double = slot_count > 27;
+                            )
+                        {
+                            let slots: Vec<Option<crate::network::protocol::ItemWire>> = slots_vec
+                                .iter()
+                                .map(|s| {
+                                    s.as_ref()
+                                        .map(crate::network::protocol::ItemWire::from_stack)
+                                })
+                                .collect();
+                            let slot_count = slots_vec.len();
+                            self.container_is_double = slot_count > 27;
+                            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
+                                let _ = host_to_server.tracked_send(
+                                    crate::network::server::HostToServer::SendContainerOpenResult {
+                                        to: id,
+                                        dimension,
+                                        success: true,
+                                        x,
+                                        y,
+                                        z,
+                                        slots,
+                                        revision: 0,
+                                    },
+                                );
+                            }
+                        }
+                        self.container_target = Some((x, y, z));
+                    } else {
                         if let NetworkHandle::Host { host_to_server, .. } = &self.network {
                             let _ = host_to_server.tracked_send(
                                 crate::network::server::HostToServer::SendContainerOpenResult {
                                     to: id,
                                     dimension,
-                                    success: true,
+                                    success: false,
                                     x,
                                     y,
                                     z,
-                                    slots,
+                                    slots: vec![],
                                     revision: 0,
                                 },
                             );
                         }
                     }
-                    self.container_target = Some((x, y, z));
                 }
             }
             NetworkInbound::ContainerClickRequest {
@@ -7650,45 +7778,66 @@ impl State {
             } => {
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
                     if let Some(session) = self.container_sessions.find_by_player(id) {
-                        if let Some(inv) =
-                            crate::container_sessions::ContainerSessionManager::get_chest_inventory(
-                                &self.chunk_manager,
-                                session.x,
-                                session.y,
-                                session.z,
-                            )
-                        {
-                            let slot_item = inv.slots.get(slot_index as usize).copied().flatten();
-                            let dragged_stack = dragged.and_then(|w| w.to_stack());
-                            let (new_slot, new_dragged) =
-                                crate::container_sessions::simulate_container_click(
-                                    slot_item,
-                                    dragged_stack,
-                                    is_left,
+                        let session = session.clone();
+                        let mut valid = session.dimension == self.current_dimension as u8;
+                        if let Some(remote) = self.remote_players.get(&id) {
+                            if let Some(snap) = remote.snapshots.back() {
+                                let chest_center = glam::Vec3::new(
+                                    session.x as f32 + 0.5,
+                                    session.y as f32 + 0.5,
+                                    session.z as f32 + 0.5,
                                 );
-                            let mut new_inv = inv.clone();
-                            new_inv.slots[slot_index as usize] = new_slot;
-                            let slot_wire = new_inv.slots[slot_index as usize]
-                                .as_ref()
-                                .map(crate::network::protocol::ItemWire::from_stack);
-                            crate::container_sessions::ContainerSessionManager::set_chest_inventory(
-                                &mut self.chunk_manager,
-                                session.x,
-                                session.y,
-                                session.z,
-                                new_inv,
-                            );
-                            let dragged_wire = new_dragged
-                                .as_ref()
-                                .map(crate::network::protocol::ItemWire::from_stack);
-                            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                                let _ = host_to_server.tracked_send(crate::network::server::HostToServer::SendContainerClickResult {
-                                    to: id, dimension: session.dimension, success: true, slot_index, slot: slot_wire, dragged: dragged_wire,
-                                });
-                                let _ = host_to_server.tracked_send(crate::network::server::HostToServer::BroadcastContainerSlotUpdate {
-                                    dimension: session.dimension, revision: session.revision + 1, x: session.x, y: session.y, z: session.z, slot_index, slot: slot_wire,
-                                });
+                                if (snap.position - chest_center).length_squared() > 64.0 {
+                                    valid = false;
+                                }
                             }
+                        }
+                        if valid {
+                            if let Some(mut slots_vec) =
+                                crate::container_sessions::ContainerSessionManager::get_chest_slots(
+                                    &self.chunk_manager,
+                                    session.x,
+                                    session.y,
+                                    session.z,
+                                )
+                            {
+                                if (slot_index as usize) < slots_vec.len() {
+                                    let slot_item = slots_vec[slot_index as usize];
+                                    let dragged_stack = dragged.and_then(|w| w.to_stack());
+                                    let (new_slot, new_dragged) =
+                                        crate::container_sessions::simulate_container_click(
+                                            slot_item,
+                                            dragged_stack,
+                                            is_left,
+                                        );
+                                    slots_vec[slot_index as usize] = new_slot;
+                                    let slot_wire = new_slot
+                                        .as_ref()
+                                        .map(crate::network::protocol::ItemWire::from_stack);
+                                    crate::container_sessions::ContainerSessionManager::set_chest_slots(
+                                        &mut self.chunk_manager,
+                                        session.x,
+                                        session.y,
+                                        session.z,
+                                        &slots_vec,
+                                    );
+                                    let dragged_wire = new_dragged
+                                        .as_ref()
+                                        .map(crate::network::protocol::ItemWire::from_stack);
+                                    if let NetworkHandle::Host { host_to_server, .. } =
+                                        &self.network
+                                    {
+                                        let _ = host_to_server.tracked_send(crate::network::server::HostToServer::SendContainerClickResult {
+                                            to: id, dimension: session.dimension, success: true, slot_index, slot: slot_wire, dragged: dragged_wire,
+                                        });
+                                        let _ = host_to_server.tracked_send(crate::network::server::HostToServer::BroadcastContainerSlotUpdate {
+                                            dimension: session.dimension, revision: session.revision + 1, x: session.x, y: session.y, z: session.z, slot_index, slot: slot_wire,
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            self.container_sessions.close_by_player(id);
                         }
                     }
                 }
@@ -7708,14 +7857,44 @@ impl State {
             NetworkInbound::ContainerOpenResult {
                 dimension: _,
                 success,
-                x: _,
-                y: _,
-                z: _,
-                slots: _,
+                x,
+                y,
+                z,
+                slots,
                 revision: _,
             } => {
                 if success {
-                    self.container_target = Some((0, 0, 0)); // placeholder, actual position from request
+                    if !slots.is_empty() {
+                        let (cx, cz) = (
+                            x.div_euclid(crate::world::CHUNK_WIDTH as i32),
+                            z.div_euclid(crate::world::CHUNK_DEPTH as i32),
+                        );
+                        let (bx, by, bz) = (
+                            x.rem_euclid(crate::world::CHUNK_WIDTH as i32) as u8,
+                            y as i16,
+                            z.rem_euclid(crate::world::CHUNK_DEPTH as i32) as u8,
+                        );
+                        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
+                            if let Some(entry) = chunk.get_block_entity(bx, by, bz).cloned() {
+                                if let crate::block_entity::BlockEntity::Chest(mut chest_be) = entry
+                                {
+                                    for (i, slot) in slots.iter().enumerate() {
+                                        if i < chest_be.inventory.slots.len() {
+                                            chest_be.inventory.slots[i] =
+                                                slot.as_ref().and_then(|w| w.to_stack());
+                                        }
+                                    }
+                                    let _ = chunk.insert_block_entity(
+                                        bx,
+                                        by,
+                                        bz,
+                                        crate::block_entity::BlockEntity::Chest(chest_be),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    self.container_target = Some((x, y, z));
                     self.open_inventory();
                 }
             }
@@ -10988,6 +11167,26 @@ impl State {
         let _chest_inventory_dropped = false;
         if old_block == crate::world::BlockType::Chest {
             let _ = self.drop_chest_inventory((wx, wy, wz));
+            let affected = self.container_sessions.close_by_block(wx, wy, wz);
+            for pid in affected {
+                if let NetworkHandle::Host { host_to_server, .. } = &self.network {
+                    let _ = host_to_server.tracked_send(
+                        crate::network::server::HostToServer::SendContainerOpenResult {
+                            to: pid,
+                            dimension: self.current_dimension as u8,
+                            success: false,
+                            x: wx,
+                            y: wy,
+                            z: wz,
+                            slots: vec![],
+                            revision: 0,
+                        },
+                    );
+                }
+            }
+            if self.container_target == Some((wx, wy, wz)) {
+                self.close_inventory();
+            }
             // If this was part of a double chest, revert the partner to single.
             if old_state.chest_type != crate::world::ChestType::Single {
                 if let Some(partner) = self.double_chest_partner((wx, wy, wz), old_state.chest_type)
@@ -12486,6 +12685,26 @@ impl State {
                         let old_state_raw = self.chunk_manager.get_block_state(wx, wy, wz);
                         let old_state = crate::world::BlockState::decode(old_state_raw);
                         self.drop_chest_inventory((wx, wy, wz));
+                        let affected = self.container_sessions.close_by_block(wx, wy, wz);
+                        for pid in affected {
+                            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
+                                let _ = host_to_server.tracked_send(
+                                    crate::network::server::HostToServer::SendContainerOpenResult {
+                                        to: pid,
+                                        dimension: self.current_dimension as u8,
+                                        success: false,
+                                        x: wx,
+                                        y: wy,
+                                        z: wz,
+                                        slots: vec![],
+                                        revision: 0,
+                                    },
+                                );
+                            }
+                        }
+                        if self.container_target == Some((wx, wy, wz)) {
+                            self.close_inventory();
+                        }
                         // If part of a double chest, revert partner to single.
                         if old_state.chest_type != crate::world::ChestType::Single {
                             if let Some(partner) =
@@ -13079,24 +13298,13 @@ impl State {
             SlotType::AnvilRight => self.anvil.right,
             SlotType::AnvilOutput => self.anvil.output,
             SlotType::ContainerSlot(i) => self.container_target.and_then(|pos| {
-                let (cx, cz) = (
-                    pos.0.div_euclid(crate::world::CHUNK_WIDTH as i32),
-                    pos.2.div_euclid(crate::world::CHUNK_DEPTH as i32),
-                );
-                let (bx, by, bz) = (
-                    pos.0.rem_euclid(crate::world::CHUNK_WIDTH as i32) as u8,
-                    pos.1 as i16,
-                    pos.2.rem_euclid(crate::world::CHUNK_DEPTH as i32) as u8,
-                );
-                self.chunk_manager.chunks.get(&(cx, cz)).and_then(|chunk| {
-                    chunk.get_block_entity(bx, by, bz).and_then(|entity| {
-                        if let crate::block_entity::BlockEntity::Chest(chest_be) = entity {
-                            chest_be.inventory.slots.get(i).copied().flatten()
-                        } else {
-                            None
-                        }
-                    })
-                })
+                crate::container_sessions::ContainerSessionManager::get_chest_slots(
+                    &self.chunk_manager,
+                    pos.0,
+                    pos.1,
+                    pos.2,
+                )
+                .and_then(|slots| slots.get(i).copied().flatten())
             }),
         }
     }
@@ -13122,31 +13330,23 @@ impl State {
             SlotType::AnvilOutput => {}
             SlotType::ContainerSlot(i) => {
                 if let Some(pos) = self.container_target {
-                    let (cx, cz) = (
-                        pos.0.div_euclid(crate::world::CHUNK_WIDTH as i32),
-                        pos.2.div_euclid(crate::world::CHUNK_DEPTH as i32),
-                    );
-                    let (bx, by, bz) = (
-                        pos.0.rem_euclid(crate::world::CHUNK_WIDTH as i32) as u8,
-                        pos.1 as i16,
-                        pos.2.rem_euclid(crate::world::CHUNK_DEPTH as i32) as u8,
-                    );
-                    if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                        let mut updated = false;
-                        if let Some(entry) = chunk.get_block_entity(bx, by, bz).cloned() {
-                            if let crate::block_entity::BlockEntity::Chest(mut chest_be) = entry {
-                                chest_be.inventory.slots[i] = stack;
-                                let _ = chunk.insert_block_entity(
-                                    bx,
-                                    by,
-                                    bz,
-                                    crate::block_entity::BlockEntity::Chest(chest_be),
-                                );
-                                updated = true;
-                            }
-                        }
-                        if updated {
-                            self.chunk_manager.dirty_chunks.mark_dirty(cx, cz);
+                    if let Some(mut slots) =
+                        crate::container_sessions::ContainerSessionManager::get_chest_slots(
+                            &self.chunk_manager,
+                            pos.0,
+                            pos.1,
+                            pos.2,
+                        )
+                    {
+                        if i < slots.len() {
+                            slots[i] = stack;
+                            crate::container_sessions::ContainerSessionManager::set_chest_slots(
+                                &mut self.chunk_manager,
+                                pos.0,
+                                pos.1,
+                                pos.2,
+                                &slots,
+                            );
                         }
                     }
                 }
@@ -13288,8 +13488,30 @@ impl State {
                         }
                     }
                 }
+                SlotType::ContainerSlot(slot_index)
+                    if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) =>
+                {
+                    if let crate::state::NetworkHandle::Client { game_to_client, .. } =
+                        &self.network
+                    {
+                        let dragged = self
+                            .inventory
+                            .dragged
+                            .as_ref()
+                            .map(crate::network::protocol::ItemWire::from_stack);
+                        let _ = game_to_client.tracked_send(
+                            crate::network::client::GameToClient::ContainerClickRequest {
+                                dimension: self.current_dimension as u8,
+                                slot_index: slot_index as u16,
+                                is_left,
+                                dragged,
+                            },
+                        );
+                    }
+                    return;
+                }
                 _ => {
-                    // Normal slots (Backpack, Hotbar, Armor, CraftInput)
+                    // Normal slots (Backpack, Hotbar, Armor, CraftInput, ContainerSlot for host)
                     let max_stack = slot_item
                         .map(|s| s.item.properties().max_stack)
                         .unwrap_or(64);
@@ -13583,8 +13805,27 @@ impl State {
         let crate::block_entity::BlockEntity::Chest(_chest_be) = entity else {
             return;
         };
+        if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
+            if let crate::state::NetworkHandle::Client { game_to_client, .. } = &self.network {
+                let _ = game_to_client.tracked_send(
+                    crate::network::client::GameToClient::ContainerOpenRequest {
+                        dimension: self.current_dimension as u8,
+                        x: pos.0,
+                        y: pos.1,
+                        z: pos.2,
+                    },
+                );
+            }
+            return;
+        }
         self.container_target = Some(pos);
-        self.container_is_double = false;
+        let slot_count = crate::container_sessions::ContainerSessionManager::get_slot_count(
+            &self.chunk_manager,
+            pos.0,
+            pos.1,
+            pos.2,
+        );
+        self.container_is_double = slot_count > 27;
         self.open_inventory();
     }
 
@@ -13618,6 +13859,20 @@ impl State {
     }
 
     pub fn close_inventory(&mut self) -> bool {
+        if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
+            if let Some(pos) = self.container_target {
+                if let crate::state::NetworkHandle::Client { game_to_client, .. } = &self.network {
+                    let _ = game_to_client.tracked_send(
+                        crate::network::client::GameToClient::ContainerClose {
+                            dimension: self.current_dimension as u8,
+                            x: pos.0,
+                            y: pos.1,
+                            z: pos.2,
+                        },
+                    );
+                }
+            }
+        }
         let mut returning_items: Vec<ItemStack> = self
             .inventory
             .craft_input

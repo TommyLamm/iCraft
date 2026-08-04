@@ -69,11 +69,11 @@ impl ContainerSessionManager {
         let affected: Vec<PlayerId> = self
             .sessions
             .iter()
-            .filter(|s| s.x == x && s.y == y && s.z == z)
+            .filter(|s| (s.x - x).abs() <= 1 && s.y == y && (s.z - z).abs() <= 1)
             .map(|s| s.player_id)
             .collect();
         self.sessions
-            .retain(|s| !(s.x == x && s.y == y && s.z == z));
+            .retain(|s| !((s.x - x).abs() <= 1 && s.y == y && (s.z - z).abs() <= 1));
         affected
     }
 
@@ -81,7 +81,38 @@ impl ContainerSessionManager {
         self.close_by_player(player_id);
     }
 
-    pub fn get_chest_inventory(
+    pub fn get_double_chest_partner(
+        chunk_manager: &ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<(i32, i32, i32)> {
+        let state_raw = chunk_manager.get_block_state(x, y, z);
+        let state = crate::world::BlockState::decode(state_raw);
+        if state.chest_type == crate::world::ChestType::Single {
+            return None;
+        }
+        let (dx, dz) = match (state.facing, state.chest_type) {
+            (crate::redstone::Direction::North, crate::world::ChestType::Left) => (-1, 0),
+            (crate::redstone::Direction::North, crate::world::ChestType::Right) => (1, 0),
+            (crate::redstone::Direction::East, crate::world::ChestType::Left) => (0, -1),
+            (crate::redstone::Direction::East, crate::world::ChestType::Right) => (0, 1),
+            (crate::redstone::Direction::South, crate::world::ChestType::Left) => (1, 0),
+            (crate::redstone::Direction::South, crate::world::ChestType::Right) => (-1, 0),
+            (crate::redstone::Direction::West, crate::world::ChestType::Left) => (0, 1),
+            (crate::redstone::Direction::West, crate::world::ChestType::Right) => (0, -1),
+            _ => return None,
+        };
+        let partner_pos = (x + dx, y, z + dz);
+        if chunk_manager.get_block(partner_pos.0, partner_pos.1, partner_pos.2) == BlockType::Chest
+        {
+            Some(partner_pos)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_single_chest_inventory(
         chunk_manager: &ChunkManager,
         x: i32,
         y: i32,
@@ -107,7 +138,46 @@ impl ContainerSessionManager {
         })
     }
 
-    pub fn set_chest_inventory(
+    pub fn get_chest_slots(
+        chunk_manager: &ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<Vec<Option<ItemStack>>> {
+        let primary_inv = Self::get_single_chest_inventory(chunk_manager, x, y, z)?;
+        let state_raw = chunk_manager.get_block_state(x, y, z);
+        let state = crate::world::BlockState::decode(state_raw);
+        if let Some(partner_pos) = Self::get_double_chest_partner(chunk_manager, x, y, z) {
+            if let Some(partner_inv) = Self::get_single_chest_inventory(
+                chunk_manager,
+                partner_pos.0,
+                partner_pos.1,
+                partner_pos.2,
+            ) {
+                let mut combined_slots = vec![None; 54];
+                if state.chest_type == crate::world::ChestType::Left {
+                    combined_slots[..27].clone_from_slice(&primary_inv.slots);
+                    combined_slots[27..54].clone_from_slice(&partner_inv.slots);
+                } else {
+                    combined_slots[..27].clone_from_slice(&partner_inv.slots);
+                    combined_slots[27..54].clone_from_slice(&primary_inv.slots);
+                }
+                return Some(combined_slots);
+            }
+        }
+        Some(primary_inv.slots.to_vec())
+    }
+
+    pub fn get_chest_inventory(
+        chunk_manager: &ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<ContainerInventory> {
+        Self::get_single_chest_inventory(chunk_manager, x, y, z)
+    }
+
+    pub fn set_single_chest_inventory(
         chunk_manager: &mut ChunkManager,
         x: i32,
         y: i32,
@@ -139,29 +209,75 @@ impl ContainerSessionManager {
         false
     }
 
-    pub fn get_slot_count(chunk_manager: &ChunkManager, x: i32, y: i32, z: i32) -> usize {
-        let state_raw = chunk_manager.get_block_state(x, y, z);
-        let state = crate::world::BlockState::decode(state_raw);
-        if state.chest_type != crate::world::ChestType::Single {
-            let (dx, dz) = match (state.facing, state.chest_type) {
-                (crate::redstone::Direction::North, crate::world::ChestType::Left) => (-1, 0),
-                (crate::redstone::Direction::North, crate::world::ChestType::Right) => (1, 0),
-                (crate::redstone::Direction::East, crate::world::ChestType::Left) => (0, -1),
-                (crate::redstone::Direction::East, crate::world::ChestType::Right) => (0, 1),
-                (crate::redstone::Direction::South, crate::world::ChestType::Left) => (1, 0),
-                (crate::redstone::Direction::South, crate::world::ChestType::Right) => (-1, 0),
-                (crate::redstone::Direction::West, crate::world::ChestType::Left) => (0, 1),
-                (crate::redstone::Direction::West, crate::world::ChestType::Right) => (0, -1),
-                _ => (0, 0),
-            };
-            if dx != 0 || dz != 0 {
-                let partner = chunk_manager.get_block(x + dx, y, z + dz);
-                if partner == BlockType::Chest {
-                    return 54;
-                }
+    pub fn set_chest_slots(
+        chunk_manager: &mut ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+        slots: &[Option<ItemStack>],
+    ) -> bool {
+        if slots.len() == 54 {
+            let state_raw = chunk_manager.get_block_state(x, y, z);
+            let state = crate::world::BlockState::decode(state_raw);
+            if let Some(partner_pos) = Self::get_double_chest_partner(chunk_manager, x, y, z) {
+                let (primary_slice, partner_slice) =
+                    if state.chest_type == crate::world::ChestType::Left {
+                        (&slots[..27], &slots[27..54])
+                    } else {
+                        (&slots[27..54], &slots[..27])
+                    };
+                let mut p_arr = [None; 27];
+                p_arr.copy_from_slice(primary_slice);
+                let mut pt_arr = [None; 27];
+                pt_arr.copy_from_slice(partner_slice);
+
+                let r1 = Self::set_single_chest_inventory(
+                    chunk_manager,
+                    x,
+                    y,
+                    z,
+                    ContainerInventory { slots: p_arr },
+                );
+                let r2 = Self::set_single_chest_inventory(
+                    chunk_manager,
+                    partner_pos.0,
+                    partner_pos.1,
+                    partner_pos.2,
+                    ContainerInventory { slots: pt_arr },
+                );
+                return r1 && r2;
             }
         }
-        27
+        if slots.len() == 27 {
+            let mut arr = [None; 27];
+            arr.copy_from_slice(slots);
+            return Self::set_single_chest_inventory(
+                chunk_manager,
+                x,
+                y,
+                z,
+                ContainerInventory { slots: arr },
+            );
+        }
+        false
+    }
+
+    pub fn set_chest_inventory(
+        chunk_manager: &mut ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+        inventory: ContainerInventory,
+    ) -> bool {
+        Self::set_single_chest_inventory(chunk_manager, x, y, z, inventory)
+    }
+
+    pub fn get_slot_count(chunk_manager: &ChunkManager, x: i32, y: i32, z: i32) -> usize {
+        if Self::get_double_chest_partner(chunk_manager, x, y, z).is_some() {
+            54
+        } else {
+            27
+        }
     }
 }
 

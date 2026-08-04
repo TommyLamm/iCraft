@@ -147,6 +147,31 @@ pub enum ClientToGame {
     StatusUpdate {
         message: String,
     },
+    ContainerOpenResult {
+        dimension: u8,
+        success: bool,
+        x: i32,
+        y: i32,
+        z: i32,
+        slots: Vec<Option<crate::network::protocol::ItemWire>>,
+        revision: u64,
+    },
+    ContainerClickResult {
+        dimension: u8,
+        success: bool,
+        slot_index: u16,
+        slot: Option<crate::network::protocol::ItemWire>,
+        dragged: Option<crate::network::protocol::ItemWire>,
+    },
+    ContainerSlotUpdate {
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot_index: u16,
+        slot: Option<crate::network::protocol::ItemWire>,
+    },
 }
 
 #[derive(Debug)]
@@ -181,6 +206,24 @@ pub enum GameToClient {
         message: String,
     },
     Disconnect,
+    ContainerOpenRequest {
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    ContainerClickRequest {
+        dimension: u8,
+        slot_index: u16,
+        is_left: bool,
+        dragged: Option<crate::network::protocol::ItemWire>,
+    },
+    ContainerClose {
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
 }
 
 pub struct NetworkClient;
@@ -529,6 +572,15 @@ async fn run_client(
                     Ok(Packet::BlockActionResult { x, y, z, success, consumed_item, drops, .. }) => {
                         let _ = client_to_game.send(ClientToGame::BlockActionResult { x, y, z, success, consumed_item, drops });
                     }
+                    Ok(Packet::ContainerOpenResult { dimension, success, x, y, z, slots, revision, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::ContainerOpenResult { dimension, success, x, y, z, slots, revision });
+                    }
+                    Ok(Packet::ContainerClickResult { dimension, success, slot_index, slot, dragged, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::ContainerClickResult { dimension, success, slot_index, slot, dragged });
+                    }
+                    Ok(Packet::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot });
+                    }
                     Ok(Packet::ChunkData {
                         dimension,
                         cx,
@@ -737,6 +789,27 @@ async fn run_client(
                         Ok(GameToClient::SendChat { message }) => {
                             if writer.send(&Packet::ChatMessage { protocol_version: PROTOCOL_VERSION, sender: username.clone(), message }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send ChatMessage");
+                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                                return;
+                            }
+                        }
+                        Ok(GameToClient::ContainerOpenRequest { dimension, x, y, z }) => {
+                            if writer.send(&Packet::ContainerOpenRequest { protocol_version: PROTOCOL_VERSION, dimension, x, y, z }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send ContainerOpenRequest");
+                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                                return;
+                            }
+                        }
+                        Ok(GameToClient::ContainerClickRequest { dimension, slot_index, is_left, dragged }) => {
+                            if writer.send(&Packet::ContainerClickRequest { protocol_version: PROTOCOL_VERSION, dimension, slot_index, is_left, dragged }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send ContainerClickRequest");
+                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                                return;
+                            }
+                        }
+                        Ok(GameToClient::ContainerClose { dimension, x, y, z }) => {
+                            if writer.send(&Packet::ContainerClose { protocol_version: PROTOCOL_VERSION, dimension, x, y, z }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send ContainerClose");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }

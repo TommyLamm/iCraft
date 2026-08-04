@@ -161,7 +161,12 @@ Redstone returns `BlockMutation` records and side-effect actions applied via hos
 - Main-thread `State` communicates with them through synchronous channels.
 - Player poses are sequenced, timestamped, coalesced, and rendered from a
   bounded interpolation buffer.
-- Reliable queues carry login, chat, chunk, block, and time/weather state.
+- Reliable queues carry login, chat, chunk, block, container transactions (open/click/close/slot update), and time/weather state.
+
+Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v7.
+`ContainerSessionManager` tracks player ID, dimension, block position, and combined single (27)/double (54) chest slot mapping.
+The host validates reach distance (<= 8.0 blocks), dimension, top-block solid obstruction, and container block presence before committing slot mutations.
+Rejected requests return `success: false` without partial side effects. When a chest is broken, destroyed, or a player disconnects/switches dimensions, all associated sessions close automatically.
 
 The host is the sole authority for world mutations. Remote break/place requests
 are validated against authenticated player state, reach, loaded chunks,
@@ -212,7 +217,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Player and gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `crafting.rs` |
 | Equipment and effects | `enchantment.rs`, `brewing.rs`, `hand_renderer.rs` |
 | Entities and AI | `entity.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
-| Container system | `block_entity.rs` (ChestBlockEntity), `inventory.rs` (ContainerInventory), `state.rs` (SlotType::ContainerSlot, container_target, open_chest) |
+| Container system | `block_entity.rs` (ChestBlockEntity), `inventory.rs` (ContainerInventory), `container_sessions.rs` (ContainerSessionManager), `state.rs` (SlotType::ContainerSlot, container_target, open_chest) |
 | Networking | `network/{protocol,transport,server,client}.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
 | Performance instrumentation | `perf.rs`, `performance/` |

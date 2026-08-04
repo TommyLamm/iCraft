@@ -162,6 +162,27 @@ pub enum ServerToHost {
         bed_y: i32,
         bed_z: i32,
     },
+    ContainerOpenRequest {
+        id: PlayerId,
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    ContainerClickRequest {
+        id: PlayerId,
+        dimension: u8,
+        slot_index: u16,
+        is_left: bool,
+        dragged: Option<crate::network::protocol::ItemWire>,
+    },
+    ContainerClose {
+        id: PlayerId,
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
 }
 
 #[derive(Debug)]
@@ -984,6 +1005,24 @@ impl NetworkServer {
                         Ok(Ok(Packet::SleepRequest { x, y, z, .. })) => {
                             if server_to_host.send(ServerToHost::ClientSleepRequest { id, bed_x: x, bed_y: y, bed_z: z }).is_err() {
                                 disconnect_reason = "host channel closed (ClientSleepRequest)".into();
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::ContainerOpenRequest { dimension, x, y, z, .. })) => {
+                            if server_to_host.send(ServerToHost::ContainerOpenRequest { id, dimension, x, y, z }).is_err() {
+                                disconnect_reason = "host channel closed (ContainerOpenRequest)".into();
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::ContainerClickRequest { dimension, slot_index, is_left, dragged, .. })) => {
+                            if server_to_host.send(ServerToHost::ContainerClickRequest { id, dimension, slot_index, is_left, dragged }).is_err() {
+                                disconnect_reason = "host channel closed (ContainerClickRequest)".into();
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::ContainerClose { dimension, x, y, z, .. })) => {
+                            if server_to_host.send(ServerToHost::ContainerClose { id, dimension, x, y, z }).is_err() {
+                                disconnect_reason = "host channel closed (ContainerClose)".into();
                                 break;
                             }
                         }
