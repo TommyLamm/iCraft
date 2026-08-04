@@ -33,6 +33,8 @@ pub enum SoundId {
     Rain,
     Thunder,
     Note(u8),
+    FurnaceSmelt,
+    FurnaceLit,
 }
 
 impl SoundId {
@@ -52,6 +54,8 @@ impl SoundId {
             SoundId::Rain => "rain.wav".to_string(),
             SoundId::Thunder => "thunder.wav".to_string(),
             SoundId::Note(note) => format!("note_{note}.wav"),
+            SoundId::FurnaceSmelt => "furnace_smelt.wav".to_string(),
+            SoundId::FurnaceLit => "furnace_lit.wav".to_string(),
         }
     }
 }
@@ -222,6 +226,32 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
                     };
                     let rumble = low * (1.0 - t / duration).powi(2);
                     (crack * 0.85 + rumble * 2.4).clamp(-1.0, 1.0)
+                })
+                .collect()
+        }
+        SoundId::FurnaceSmelt => {
+            let duration = 0.20;
+            let len = (duration * sample_rate as f32) as usize;
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - t / duration).max(0.0).powi(2);
+                    let tone = (2.0 * std::f32::consts::PI * 520.0 * t).sin() * 0.4;
+                    let harmonics = (2.0 * std::f32::consts::PI * 1040.0 * t).sin() * 0.2;
+                    (tone + harmonics) * env
+                })
+                .collect()
+        }
+        SoundId::FurnaceLit => {
+            let duration = 0.30;
+            let noise = synth_noise(duration, sample_rate, seed ^ 0x4655_524E);
+            noise
+                .into_iter()
+                .enumerate()
+                .map(|(i, val)| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - t / duration).max(0.0);
+                    val * env * 0.25
                 })
                 .collect()
         }

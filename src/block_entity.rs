@@ -1,3 +1,5 @@
+use crate::inventory::{Item, ItemStack};
+use crate::recipes::{FuelDefinition, RecipeManager};
 use crate::world::BlockType;
 use serde::{Deserialize, Serialize};
 
@@ -7,10 +9,186 @@ pub struct ChestBlockEntity {
     pub inventory: crate::inventory::ContainerInventory,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FurnaceBlockEntity {
+    pub custom_name: Option<String>,
+    pub slots: [Option<ItemStack>; 3],
+    pub burn_time: u16,
+    pub burn_total: u16,
+    pub cook_progress: u16,
+    pub cook_total: u16,
+    pub accumulated_xp: f32,
+    pub is_lit: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FurnaceStub {
     pub custom_name: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LegacyBlockEntity {
+    Chest(ChestBlockEntity),
+    Furnace(FurnaceStub),
+    Sign(SignStub),
+}
+
+impl From<LegacyBlockEntity> for BlockEntity {
+    fn from(legacy: LegacyBlockEntity) -> Self {
+        match legacy {
+            LegacyBlockEntity::Chest(c) => BlockEntity::Chest(c),
+            LegacyBlockEntity::Furnace(f) => {
+                BlockEntity::Furnace(FurnaceBlockEntity::new_with_name(f.custom_name))
+            }
+            LegacyBlockEntity::Sign(s) => BlockEntity::Sign(s),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FurnaceTickResult {
+    pub item_smelted: bool,
+    pub lit_changed: bool,
+    pub slot_changed: bool,
+}
+
+impl FurnaceBlockEntity {
+    pub fn new() -> Self {
+        Self::new_with_name(None)
+    }
+
+    pub fn new_with_name(custom_name: Option<String>) -> Self {
+        Self {
+            custom_name,
+            slots: [None, None, None],
+            burn_time: 0,
+            burn_total: 0,
+            cook_progress: 0,
+            cook_total: 200,
+            accumulated_xp: 0.0,
+            is_lit: false,
+        }
+    }
+
+    pub fn claim_xp(&mut self) -> f32 {
+        let xp = self.accumulated_xp;
+        self.accumulated_xp = 0.0;
+        xp
+    }
+
+    pub fn tick(&mut self, recipes: &RecipeManager) -> FurnaceTickResult {
+        let mut result = FurnaceTickResult {
+            item_smelted: false,
+            lit_changed: false,
+            slot_changed: false,
+        };
+
+        // Input slot: 0, Fuel slot: 1, Output slot: 2
+        let input_stack = self.slots[0].as_ref();
+        let smelting_recipe = input_stack.and_then(|st| recipes.find_smelting_recipe(st.item));
+
+        let can_smelt = if let Some(recipe) = smelting_recipe {
+            let output_slot = self.slots[2].as_ref();
+            match output_slot {
+                None => true,
+                Some(out_st) => {
+                    let max_st = out_st.item.properties().max_stack;
+                    out_st.item == recipe.output.item
+                        && out_st.count + recipe.output.count <= max_st
+                }
+            }
+        } else {
+            false
+        };
+
+        // 1. Consume fuel if unlit (burn_time == 0) and smelting is available
+        if self.burn_time == 0 && can_smelt {
+            if let Some(fuel_st) = self.slots[1].as_mut() {
+                let burn_dur = FuelDefinition::burn_time(fuel_st.item);
+                if burn_dur > 0 && fuel_st.count > 0 {
+                    self.burn_time = burn_dur;
+                    self.burn_total = burn_dur;
+                    fuel_st.count -= 1;
+                    if fuel_st.count == 0 {
+                        self.slots[1] = None;
+                    }
+                    result.slot_changed = true;
+                }
+            }
+        }
+
+        // 2. Decay active burn time
+        if self.burn_time > 0 {
+            self.burn_time -= 1;
+            result.slot_changed = true;
+        }
+
+        // 3. Cook progress
+        if self.burn_time > 0 && can_smelt {
+            let recipe = smelting_recipe.unwrap();
+            self.cook_total = recipe.cook_time;
+            self.cook_progress += 1;
+            result.slot_changed = true;
+
+            if self.cook_progress >= self.cook_total {
+                self.cook_progress = 0;
+
+                // Consume 1 input item
+                if let Some(input_st) = self.slots[0].as_mut() {
+                    input_st.count -= 1;
+                    if input_st.count == 0 {
+                        self.slots[0] = None;
+                    }
+                }
+
+                // Add output item
+                if let Some(out_st) = self.slots[2].as_mut() {
+                    out_st.count += recipe.output.count;
+                } else {
+                    self.slots[2] = Some(recipe.output.clone());
+                }
+
+                self.accumulated_xp += recipe.experience;
+                result.item_smelted = true;
+            }
+        } else {
+            if self.cook_progress > 0 {
+                self.cook_progress = self.cook_progress.saturating_sub(2);
+                result.slot_changed = true;
+            }
+        }
+
+        // 4. Update lit status
+        let new_is_lit = self.burn_time > 0;
+        if new_is_lit != self.is_lit {
+            self.is_lit = new_is_lit;
+            result.lit_changed = true;
+        }
+
+        result
+    }
+}
+
+impl Default for FurnaceBlockEntity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartialEq for FurnaceBlockEntity {
+    fn eq(&self, other: &Self) -> bool {
+        self.custom_name == other.custom_name
+            && self.slots == other.slots
+            && self.burn_time == other.burn_time
+            && self.burn_total == other.burn_total
+            && self.cook_progress == other.cook_progress
+            && self.cook_total == other.cook_total
+            && self.accumulated_xp.to_bits() == other.accumulated_xp.to_bits()
+            && self.is_lit == other.is_lit
+    }
+}
+
+impl Eq for FurnaceBlockEntity {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignStub {
@@ -20,7 +198,7 @@ pub struct SignStub {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockEntity {
     Chest(ChestBlockEntity),
-    Furnace(FurnaceStub),
+    Furnace(FurnaceBlockEntity),
     Sign(SignStub),
 }
 
@@ -30,7 +208,9 @@ impl BlockEntity {
             BlockEntity::Chest(_) => {
                 matches!(block_type, BlockType::Chest | BlockType::EndCityChest)
             }
-            BlockEntity::Furnace(_) => matches!(block_type, BlockType::Furnace),
+            BlockEntity::Furnace(_) => {
+                matches!(block_type, BlockType::Furnace | BlockType::FurnaceLit)
+            }
             BlockEntity::Sign(_) => false,
         }
     }
@@ -52,7 +232,9 @@ pub fn default_stub_for_block(block_type: BlockType) -> Option<BlockEntity> {
             custom_name: None,
             inventory: crate::inventory::ContainerInventory::new(),
         })),
-        BlockType::Furnace => Some(BlockEntity::Furnace(FurnaceStub { custom_name: None })),
+        BlockType::Furnace | BlockType::FurnaceLit => {
+            Some(BlockEntity::Furnace(FurnaceBlockEntity::new()))
+        }
         _ => None,
     }
 }
@@ -72,13 +254,84 @@ mod tests {
         assert!(!chest.matches_block_type(BlockType::Furnace));
         assert!(!chest.matches_block_type(BlockType::Dirt));
 
-        let furnace = BlockEntity::Furnace(FurnaceStub { custom_name: None });
+        let furnace = BlockEntity::Furnace(FurnaceBlockEntity::new());
         assert!(furnace.matches_block_type(BlockType::Furnace));
+        assert!(furnace.matches_block_type(BlockType::FurnaceLit));
         assert!(!furnace.matches_block_type(BlockType::Chest));
 
         let sign = BlockEntity::Sign(SignStub {
             text: "Hello".to_string(),
         });
         assert!(!sign.matches_block_type(BlockType::Dirt));
+    }
+
+    #[test]
+    fn test_furnace_smelting_flow() {
+        let recipes = RecipeManager::new();
+        let mut furnace = FurnaceBlockEntity::new();
+
+        // Put 1 IronOre in input (0) and 1 Coal in fuel (1)
+        furnace.slots[0] = Some(ItemStack::new(Item::IronOre, 1));
+        furnace.slots[1] = Some(ItemStack::new(Item::Coal, 1));
+
+        // Tick 1: consumes coal (1600), then decays by 1 -> 1599, cook_progress = 1
+        let res = furnace.tick(&recipes);
+        assert!(res.lit_changed);
+        assert!(furnace.is_lit);
+        assert_eq!(furnace.burn_time, 1599);
+        assert_eq!(furnace.burn_total, 1600);
+        assert_eq!(furnace.cook_progress, 1);
+        assert!(furnace.slots[1].is_none()); // Coal consumed
+
+        // Tick 199 more times -> cook_progress reaches 200, item smelted!
+        for _ in 0..199 {
+            furnace.tick(&recipes);
+        }
+
+        assert_eq!(furnace.slots[0], None); // IronOre consumed
+        assert_eq!(furnace.slots[2], Some(ItemStack::new(Item::IronIngot, 1)));
+        assert_eq!(furnace.accumulated_xp, 0.7);
+
+        // Claim XP
+        assert_eq!(furnace.claim_xp(), 0.7);
+        assert_eq!(furnace.accumulated_xp, 0.0);
+    }
+
+    #[test]
+    fn test_furnace_output_full_stops_fuel_consumption() {
+        let recipes = RecipeManager::new();
+        let mut furnace = FurnaceBlockEntity::new();
+
+        furnace.slots[0] = Some(ItemStack::new(Item::IronOre, 1));
+        furnace.slots[1] = Some(ItemStack::new(Item::Coal, 1));
+        furnace.slots[2] = Some(ItemStack::new(Item::IronIngot, 64)); // Full output slot
+
+        // Tick: should NOT consume fuel or cook
+        let res = furnace.tick(&recipes);
+        assert!(!res.lit_changed);
+        assert!(!furnace.is_lit);
+        assert_eq!(furnace.burn_time, 0);
+        assert_eq!(furnace.slots[1], Some(ItemStack::new(Item::Coal, 1)));
+    }
+
+    #[test]
+    fn test_legacy_furnace_stub_migration() {
+        let legacy_stub = LegacyBlockEntity::Furnace(FurnaceStub {
+            custom_name: Some("Old Furnace".to_string()),
+        });
+        let bytes = bincode::serialize(&legacy_stub).unwrap();
+
+        let legacy_de: LegacyBlockEntity = bincode::deserialize(&bytes).unwrap();
+        let migrated: BlockEntity = legacy_de.into();
+
+        if let BlockEntity::Furnace(f) = migrated {
+            assert_eq!(f.custom_name, Some("Old Furnace".to_string()));
+            assert_eq!(f.burn_time, 0);
+            assert_eq!(f.cook_progress, 0);
+            assert_eq!(f.cook_total, 200);
+            assert_eq!(f.slots, [None, None, None]);
+        } else {
+            panic!("Expected BlockEntity::Furnace");
+        }
     }
 }

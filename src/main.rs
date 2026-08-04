@@ -30,6 +30,7 @@ mod passive_mob;
 mod perf;
 pub(crate) mod physics;
 mod player;
+pub mod recipes;
 mod redstone;
 pub mod save;
 pub mod sim_harness;

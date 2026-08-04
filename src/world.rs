@@ -345,6 +345,7 @@ pub enum BlockType {
     NetherBrick = 87,
     EndCityChest = 88,
     Bed = 89,
+    FurnaceLit = 90,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -499,7 +500,7 @@ impl BlockState {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= BlockType::EndCityChest as u8 {
+        if val <= BlockType::FurnaceLit as u8 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -520,9 +521,9 @@ impl BlockType {
     /// known variant so unknown (newer) blocks are dropped gracefully instead
     /// of corrupting world state.
     pub fn from_wire(val: u32) -> Option<Self> {
-        if val <= BlockType::EndCityChest as u32 {
+        if val <= BlockType::FurnaceLit as u32 {
             // SAFETY: `BlockType` is `#[repr(u8)]`, so every value in
-            // `0..=EndCityChest` is a valid discriminant.
+            // `0..=FurnaceLit` is a valid discriminant.
             Some(unsafe { std::mem::transmute(val as u8) })
         } else {
             None
@@ -935,13 +936,13 @@ impl BlockType {
                 is_passable: false,
                 light_emission: 0,
             },
-            BlockType::Furnace => BlockProperties {
+            BlockType::Furnace | BlockType::FurnaceLit => BlockProperties {
                 name: "Furnace",
                 hardness: 3.5,
                 render_type: RenderType::Opaque,
                 is_solid: true,
                 is_passable: false,
-                light_emission: 0,
+                light_emission: if self == BlockType::FurnaceLit { 13 } else { 0 },
             },
             BlockType::Chest => BlockProperties {
                 name: "Chest",
@@ -1417,7 +1418,7 @@ impl BlockType {
                     (13, 1)
                 }
             }
-            BlockType::Furnace => {
+            BlockType::Furnace | BlockType::FurnaceLit => {
                 if face_idx == 0 {
                     (14, 1)
                 } else {
@@ -5193,7 +5194,7 @@ mod tests {
         // Walk every discriminant in `0..=EndCityChest` and confirm the
         // wire helpers are exact inverses. This also guards against future
         // reordering of the enum: any renumbering would surface here.
-        for raw in 0..=BlockType::EndCityChest as u32 {
+        for raw in 0..=BlockType::FurnaceLit as u32 {
             let block = BlockType::from_wire(raw).expect("valid discriminant");
             assert_eq!(block.to_wire(), raw, "to_wire/from_wire mismatch");
         }
@@ -5201,7 +5202,7 @@ mod tests {
 
     #[test]
     fn block_type_from_wire_rejects_unknown_values() {
-        assert!(BlockType::from_wire(BlockType::EndCityChest as u32 + 1).is_none());
+        assert!(BlockType::from_wire(BlockType::FurnaceLit as u32 + 1).is_none());
         assert!(BlockType::from_wire(u32::MAX).is_none());
     }
 
@@ -6440,7 +6441,7 @@ mod tests {
 
     #[test]
     fn chunk_block_entity_operations() {
-        use crate::block_entity::{BlockEntity, ChestBlockEntity, FurnaceStub};
+        use crate::block_entity::{BlockEntity, ChestBlockEntity, FurnaceBlockEntity};
 
         let mut chunk = Chunk::new(0, 0);
         chunk.set_block_local(4, 10, 4, BlockType::Chest);
@@ -6464,7 +6465,7 @@ mod tests {
 
         // Type mismatch insert
         chunk.set_block_local(5, 10, 4, BlockType::Stone);
-        let furnace_entity = BlockEntity::Furnace(FurnaceStub { custom_name: None });
+        let furnace_entity = BlockEntity::Furnace(FurnaceBlockEntity::new());
         assert_eq!(
             chunk.insert_block_entity(5, 10, 4, furnace_entity),
             Err(BlockEntityError::TypeMismatch)

@@ -272,8 +272,69 @@ impl ContainerSessionManager {
         Self::set_single_chest_inventory(chunk_manager, x, y, z, inventory)
     }
 
+    pub fn get_furnace_slots(
+        chunk_manager: &ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<[Option<ItemStack>; 3]> {
+        let (cx, cz) = (
+            x.div_euclid(CHUNK_WIDTH as i32),
+            z.div_euclid(CHUNK_DEPTH as i32),
+        );
+        let (bx, by, bz) = (
+            x.rem_euclid(CHUNK_WIDTH as i32) as u8,
+            y as i16,
+            z.rem_euclid(CHUNK_DEPTH as i32) as u8,
+        );
+        chunk_manager.chunks.get(&(cx, cz)).and_then(|chunk| {
+            chunk.get_block_entity(bx, by, bz).and_then(|entity| {
+                if let BlockEntity::Furnace(furnace_be) = entity {
+                    Some(furnace_be.slots)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    pub fn set_furnace_slots(
+        chunk_manager: &mut ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+        slots: &[Option<ItemStack>; 3],
+    ) -> bool {
+        let (cx, cz) = (
+            x.div_euclid(CHUNK_WIDTH as i32),
+            z.div_euclid(CHUNK_DEPTH as i32),
+        );
+        let (bx, by, bz) = (
+            x.rem_euclid(CHUNK_WIDTH as i32) as u8,
+            y as i16,
+            z.rem_euclid(CHUNK_DEPTH as i32) as u8,
+        );
+        if let Some(chunk) = chunk_manager.chunks.get_mut(&(cx, cz)) {
+            if let Some(entry) = chunk.get_block_entity(bx, by, bz).cloned() {
+                if let BlockEntity::Furnace(mut furnace_be) = entry {
+                    furnace_be.slots = *slots;
+                    let _ = chunk.insert_block_entity(bx, by, bz, BlockEntity::Furnace(furnace_be));
+                    chunk_manager.dirty_chunks.mark_dirty(cx, cz);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn get_slot_count(chunk_manager: &ChunkManager, x: i32, y: i32, z: i32) -> usize {
-        if Self::get_double_chest_partner(chunk_manager, x, y, z).is_some() {
+        let block = chunk_manager.get_block(x, y, z);
+        if matches!(
+            block,
+            crate::world::BlockType::Furnace | crate::world::BlockType::FurnaceLit
+        ) {
+            3
+        } else if Self::get_double_chest_partner(chunk_manager, x, y, z).is_some() {
             54
         } else {
             27

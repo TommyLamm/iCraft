@@ -188,11 +188,11 @@ are deferred and replayed after stream-in.
 | `controls.config` | Configurable key bindings; loaded and saved by `GameSettings`. |
 | `saves/<world>/world.meta` | World-list name, seed, game mode, difficulty, and last-played time. |
 | `saves/<world>/level.dat` | Bincode `LevelData`: seed, game time, world spawn coordinates, dimension, yaw, and version. |
-| `saves/<world>/player.dat` | Bincode player, inventory/item metadata, game mode, XP, spawn point, spawn dimension, and advancement progress. |
+| `saves/<world>/player.dat` | Bincode player, inventory/item metadata, game mode, XP, spawn point, spawn dimension, unlocked_recipes, and advancement progress. |
 | `saves/<world>/dimension.dat` | Active dimension; missing legacy files default to Overworld. |
 | `saves/<world>/entities.dat` | Persistent Overworld living/persistent/dropped entities. |
 | `saves/<world>/regions/` | Overworld region data. |
-| `saves/<world>/regions/` (block_entities) | Per-chunk `BlockEntity` data (chest inventories, furnace stubs, sign text) serialized via `ChunkSaveData`; chest `ContainerInventory` is 27 `Option<ItemStack>` slots. |
+| `saves/<world>/regions/` (block_entities) | Per-chunk `BlockEntity` data (chest inventories, furnace block entities with 3 slots/burn/cook progress/accumulated XP, sign text) serialized via `ChunkSaveData`; `LegacyBlockEntity` fallback guarantees backward compatibility. |
 | `saves/<world>/dimensions/{nether,end}/` | Dimension-specific entities and regions. |
 
 `SaveManager` owns serialization, legacy-player upgrades, atomic sidecar writes,
@@ -214,10 +214,10 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | World/chunks/generation | `world.rs`, `chunk_manager.rs`, `dimension.rs` |
 | Lighting, fluids, block targeting | `lighting.rs`, `fluid.rs`, `interaction.rs` |
 | Terrain scheduling/rendering | `chunk_schedule.rs`, `chunk_render.rs`, `culling.rs`, `shader.wgsl` |
-| Player and gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `crafting.rs` |
+| Player, recipes, gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `recipes.rs`, `crafting.rs` |
 | Equipment and effects | `enchantment.rs`, `brewing.rs`, `hand_renderer.rs` |
 | Entities and AI | `entity.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
-| Container system | `block_entity.rs` (ChestBlockEntity), `inventory.rs` (ContainerInventory), `container_sessions.rs` (ContainerSessionManager), `state.rs` (SlotType::ContainerSlot, container_target, open_chest) |
+| Container & workstation system | `block_entity.rs` (ChestBlockEntity, FurnaceBlockEntity), `inventory.rs` (ContainerInventory), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `container_sessions.rs` (ContainerSessionManager), `state.rs` (SlotType::ContainerSlot, container_target, open_chest, recipe_book_open, update_furnaces) |
 | Networking | `network/{protocol,transport,server,client}.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
 | Performance instrumentation | `perf.rs`, `performance/` |

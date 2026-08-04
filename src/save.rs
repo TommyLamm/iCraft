@@ -630,6 +630,8 @@ pub struct PlayerData {
     pub spawn_point: Option<[i32; 3]>,
     #[serde(default)]
     pub spawn_dimension: Option<crate::dimension::Dimension>,
+    #[serde(default)]
+    pub unlocked_recipes: std::collections::HashSet<String>,
 }
 
 impl PlayerData {
@@ -660,6 +662,7 @@ impl PlayerData {
             advancements,
             spawn_point: state.spawn_point,
             spawn_dimension: state.spawn_dimension,
+            unlocked_recipes: state.unlocked_recipes.clone(),
         }
     }
 }
@@ -818,6 +821,18 @@ impl ChunkSaveData {
                     &bytes,
                 )
                 .ok()
+                .or_else(|| {
+                    bincode::deserialize::<
+                        Vec<((u8, i16, u8), crate::block_entity::LegacyBlockEntity)>,
+                    >(&bytes)
+                    .ok()
+                    .map(|legacy_list| {
+                        legacy_list
+                            .into_iter()
+                            .map(|(pos, le)| (pos, le.into()))
+                            .collect()
+                    })
+                })
             })
             .unwrap_or_default()
     }
@@ -2454,6 +2469,7 @@ impl From<PreviousPlayerData> for PlayerData {
             advancements: old.advancements,
             spawn_point: None,
             spawn_dimension: None,
+            unlocked_recipes: Default::default(),
         }
     }
 }
@@ -2539,6 +2555,7 @@ impl From<LegacyPlayerData> for PlayerData {
             advancements: crate::advancements::AdvancementProgressData::default(),
             spawn_point: None,
             spawn_dimension: None,
+            unlocked_recipes: Default::default(),
         }
     }
 }
@@ -2597,6 +2614,7 @@ mod tests {
                 creative_drag_origin: None,
             },
             advancements: Default::default(),
+            unlocked_recipes: Default::default(),
         };
         let encoded_player = bincode::serialize(&player).unwrap();
         let decoded_player: PlayerData = bincode::deserialize(&encoded_player).unwrap();
@@ -2701,6 +2719,7 @@ mod tests {
             advancements: Default::default(),
             spawn_point: None,
             spawn_dimension: None,
+            unlocked_recipes: Default::default(),
         };
 
         let unique = SystemTime::now()

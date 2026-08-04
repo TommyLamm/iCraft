@@ -1898,7 +1898,7 @@ impl Item {
             BlockType::Sandstone => Item::Sandstone,
             BlockType::Obsidian => Item::Obsidian,
             BlockType::CraftingTable => Item::CraftingTable,
-            BlockType::Furnace => Item::Furnace,
+            BlockType::Furnace | BlockType::FurnaceLit => Item::Furnace,
             BlockType::Chest => Item::Chest,
             BlockType::TNT => Item::TNT,
             BlockType::Bookshelf => Item::Bookshelf,
@@ -2160,6 +2160,32 @@ impl Inventory {
                 self.creative_drag_origin = origin;
                 false
             }
+        }
+    }
+
+    pub fn find_item(&self, item: Item) -> Option<(usize, ItemStack)> {
+        for (i, slot) in self.hotbar.iter().enumerate() {
+            if let Some(stack) = slot {
+                if stack.item == item {
+                    return Some((i, *stack));
+                }
+            }
+        }
+        for (i, slot) in self.main.iter().enumerate() {
+            if let Some(stack) = slot {
+                if stack.item == item {
+                    return Some((i + 9, *stack));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn remove_at_slot(&mut self, slot_idx: usize) {
+        if slot_idx < 9 {
+            self.hotbar[slot_idx] = None;
+        } else if slot_idx < 36 {
+            self.main[slot_idx - 9] = None;
         }
     }
 

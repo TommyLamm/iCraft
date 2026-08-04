@@ -58,10 +58,21 @@ pub struct PlayerState {
     pub is_sleeping: bool,
     pub sleep_timer: f32,
     pub bed_pos: Option<[i32; 3]>,
+    pub unlocked_recipes: std::collections::HashSet<String>,
 }
 
 impl PlayerState {
     pub fn new() -> Self {
+        let mut unlocked_recipes = std::collections::HashSet::new();
+        unlocked_recipes.insert("crafting/oak_planks".to_string());
+        unlocked_recipes.insert("crafting/stick_oak".to_string());
+        unlocked_recipes.insert("crafting/crafting_table_oak".to_string());
+        unlocked_recipes.insert("crafting/furnace".to_string());
+        unlocked_recipes.insert("crafting/torch".to_string());
+        unlocked_recipes.insert("smelting/iron_ingot".to_string());
+        unlocked_recipes.insert("smelting/stone".to_string());
+        unlocked_recipes.insert("smelting/cooked_porkchop".to_string());
+
         Self {
             health: 20.0,
             max_health: 20.0,
@@ -83,6 +94,7 @@ impl PlayerState {
             is_sleeping: false,
             sleep_timer: 0.0,
             bed_pos: None,
+            unlocked_recipes,
         }
     }
 

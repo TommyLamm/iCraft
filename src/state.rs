@@ -2030,6 +2030,27 @@ impl State {
                 continue;
             }
             if old_block != BlockType::Air {
+                if matches!(old_block, BlockType::Furnace | BlockType::FurnaceLit)
+                    && new_block == BlockType::Air
+                {
+                    let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+                    let (bx, by, bz) = (x.rem_euclid(16) as u8, y as i16, z.rem_euclid(16) as u8);
+                    let mut items_to_drop = Vec::new();
+                    if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
+                        if let Some(crate::block_entity::BlockEntity::Furnace(furnace)) =
+                            chunk.get_block_entity(bx, by, bz)
+                        {
+                            for slot in furnace.slots.iter().flatten() {
+                                items_to_drop.push(slot.item);
+                            }
+                        }
+                        chunk.remove_block_entity(bx, by, bz);
+                    }
+                    let sound_pos = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                    for item in items_to_drop {
+                        self.spawn_dropped_item(item, sound_pos);
+                    }
+                }
                 self.chunk_manager.set_block(x, y, z, BlockType::Air);
                 crate::lighting::update_sky_light_after_removed(
                     &mut self.chunk_manager,
@@ -2853,6 +2874,7 @@ pub enum StationKind {
     Enchanting,
     Brewing,
     Anvil,
+    Furnace,
 }
 
 pub enum NetworkHandle {
@@ -4621,6 +4643,31 @@ impl NetworkHandle {
         }
     }
 
+    fn broadcast_container_slot_update(
+        &self,
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot_index: u16,
+        slot: Option<crate::network::protocol::ItemWire>,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastContainerSlotUpdate {
+                    dimension,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    slot_index,
+                    slot,
+                },
+            );
+        }
+    }
+
     fn broadcast_player_health(
         &self,
         sequence: u64,
@@ -4983,6 +5030,9 @@ pub struct State {
     pub potion_effects: crate::brewing::EffectManager,
     pub redstone: crate::redstone::RedstoneSystem,
     redstone_tick_timer: f32,
+    furnace_tick_timer: f32,
+    pub recipe_book_open: bool,
+    pub recipe_book_search: String,
     pub weather: crate::weather::WeatherSystem,
     pub settings: GameSettings,
     pub world_seed: u32,
@@ -6588,6 +6638,9 @@ impl State {
             potion_effects: crate::brewing::EffectManager::default(),
             redstone: crate::redstone::RedstoneSystem::new(),
             redstone_tick_timer: 0.0,
+            furnace_tick_timer: 0.0,
+            recipe_book_open: false,
+            recipe_book_search: String::new(),
             weather,
             difficulty: launch.difficulty,
             world_seed,
@@ -9378,6 +9431,7 @@ impl State {
         );
 
         self.brewing.update(dt);
+        self.update_furnaces(dt);
         let effect_health = self.potion_effects.update(dt);
         if self.is_authoritative() && effect_health > 0.0 {
             self.player_state.health =
@@ -9964,6 +10018,114 @@ impl State {
             crate::perf::ScopeId::WorldTick,
             world_tick_started.elapsed(),
         );
+    }
+
+    pub fn check_claim_furnace_xp(&mut self, slot: SlotType) {
+        if let SlotType::ContainerSlot(2) = slot {
+            if let Some(pos) = self.container_target {
+                let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                    let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
+                    let (bx, by, bz) = (
+                        pos.0.rem_euclid(16) as u8,
+                        pos.1 as i16,
+                        pos.2.rem_euclid(16) as u8,
+                    );
+                    if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
+                        if let Some(crate::block_entity::BlockEntity::Furnace(ref mut furnace)) =
+                            chunk.get_block_entity_mut(bx, by, bz)
+                        {
+                            let xp = furnace.claim_xp();
+                            if xp > 0.0 {
+                                self.player_state.experience += xp as u32;
+                                self.audio_manager
+                                    .play_sound(crate::audio::SoundId::FurnaceSmelt);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn update_furnaces(&mut self, dt: f32) {
+        if !self.is_authoritative() {
+            return;
+        }
+        self.furnace_tick_timer += dt;
+        while self.furnace_tick_timer >= 0.05 {
+            self.furnace_tick_timer -= 0.05;
+
+            let mut block_changes = Vec::new();
+            for ((cx, cz), chunk) in self.chunk_manager.chunks.iter_mut() {
+                let chunk_x = *cx;
+                let chunk_z = *cz;
+                let local_entities: Vec<((u8, i16, u8), crate::block_entity::BlockEntity)> = chunk
+                    .iter_block_entities()
+                    .map(|(pos, e)| (pos, e.clone()))
+                    .collect();
+
+                for ((bx, by, bz), entity) in local_entities {
+                    if let crate::block_entity::BlockEntity::Furnace(mut furnace) = entity {
+                        let tick_res = furnace.tick(&self.recipe_manager);
+                        if tick_res.slot_changed || tick_res.lit_changed {
+                            let is_lit = furnace.is_lit;
+                            let slots_wire: Vec<_> = furnace
+                                .slots
+                                .iter()
+                                .map(|s| {
+                                    s.as_ref()
+                                        .map(crate::network::protocol::ItemWire::from_stack)
+                                })
+                                .collect();
+
+                            let _ = chunk.insert_block_entity(
+                                bx,
+                                by,
+                                bz,
+                                crate::block_entity::BlockEntity::Furnace(furnace),
+                            );
+                            let world_x = chunk_x * 16 + bx as i32;
+                            let world_y = by as i32;
+                            let world_z = chunk_z * 16 + bz as i32;
+
+                            if tick_res.lit_changed {
+                                let new_block = if is_lit {
+                                    BlockType::FurnaceLit
+                                } else {
+                                    BlockType::Furnace
+                                };
+                                block_changes.push(((world_x, world_y, world_z), new_block));
+                            }
+
+                            if let Some(session) = self
+                                .container_sessions
+                                .sessions
+                                .iter()
+                                .find(|s| s.x == world_x && s.y == world_y && s.z == world_z)
+                                .cloned()
+                            {
+                                for slot_idx in 0..3 {
+                                    self.network.broadcast_container_slot_update(
+                                        session.dimension,
+                                        session.revision,
+                                        world_x,
+                                        world_y,
+                                        world_z,
+                                        slot_idx as u16,
+                                        slots_wire.get(slot_idx).cloned().flatten(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !block_changes.is_empty() {
+                self.apply_block_changes(&block_changes);
+            }
+        }
     }
 
     pub fn update_frame(&mut self, dt: f32) {
@@ -12543,7 +12705,10 @@ impl State {
                     }
                     return;
                 }
-                if clicked_block == BlockType::Chest {
+                if matches!(
+                    clicked_block,
+                    BlockType::Chest | BlockType::Furnace | BlockType::FurnaceLit
+                ) {
                     let pos = (
                         hit.block_pos.x as i32,
                         hit.block_pos.y as i32,
@@ -13165,18 +13330,51 @@ impl State {
             slots.push((SlotType::Armor(i), x0, x0 + slot_w, y0, y0 + slot_h));
         }
 
-        // 4. Container slots (if chest is open)
-        if self.container_target.is_some() {
-            let container_slots = if self.container_is_double { 54 } else { 27 };
-            let container_rows = container_slots / 9;
-            let x_start = -0.40;
-            let y_start = -0.70 - (container_rows as f32) * (slot_h + gap) - gap;
-            for r in 0..container_rows {
-                for c in 0..9 {
-                    let i = r * 9 + c;
-                    let x0 = x_start + c as f32 * (slot_w + gap);
-                    let y0 = y_start + r as f32 * (slot_h + gap);
-                    slots.push((SlotType::ContainerSlot(i), x0, x0 + slot_w, y0, y0 + slot_h));
+        // 4. Container slots (if chest or furnace is open)
+        if let Some(pos) = self.container_target {
+            let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+            if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                let in_x0 = -0.15;
+                let in_y0 = 0.10;
+                slots.push((
+                    SlotType::ContainerSlot(0),
+                    in_x0,
+                    in_x0 + slot_w,
+                    in_y0,
+                    in_y0 + slot_h,
+                ));
+
+                let fuel_x0 = -0.15;
+                let fuel_y0 = -0.10;
+                slots.push((
+                    SlotType::ContainerSlot(1),
+                    fuel_x0,
+                    fuel_x0 + slot_w,
+                    fuel_y0,
+                    fuel_y0 + slot_h,
+                ));
+
+                let out_x0 = 0.15;
+                let out_y0 = 0.0;
+                slots.push((
+                    SlotType::ContainerSlot(2),
+                    out_x0,
+                    out_x0 + slot_w,
+                    out_y0,
+                    out_y0 + slot_h,
+                ));
+            } else {
+                let container_slots = if self.container_is_double { 54 } else { 27 };
+                let container_rows = container_slots / 9;
+                let x_start = -0.40;
+                let y_start = -0.70 - (container_rows as f32) * (slot_h + gap) - gap;
+                for r in 0..container_rows {
+                    for c in 0..9 {
+                        let i = r * 9 + c;
+                        let x0 = x_start + c as f32 * (slot_w + gap);
+                        let y0 = y_start + r as f32 * (slot_h + gap);
+                        slots.push((SlotType::ContainerSlot(i), x0, x0 + slot_w, y0, y0 + slot_h));
+                    }
                 }
             }
         }
@@ -13276,7 +13474,7 @@ impl State {
                     0.10 + slot_h,
                 ));
             }
-            None => {}
+            None | Some(StationKind::Furnace) => {}
         }
 
         slots
@@ -13298,13 +13496,24 @@ impl State {
             SlotType::AnvilRight => self.anvil.right,
             SlotType::AnvilOutput => self.anvil.output,
             SlotType::ContainerSlot(i) => self.container_target.and_then(|pos| {
-                crate::container_sessions::ContainerSessionManager::get_chest_slots(
-                    &self.chunk_manager,
-                    pos.0,
-                    pos.1,
-                    pos.2,
-                )
-                .and_then(|slots| slots.get(i).copied().flatten())
+                let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                    crate::container_sessions::ContainerSessionManager::get_furnace_slots(
+                        &self.chunk_manager,
+                        pos.0,
+                        pos.1,
+                        pos.2,
+                    )
+                    .and_then(|slots| slots.get(i).copied().flatten())
+                } else {
+                    crate::container_sessions::ContainerSessionManager::get_chest_slots(
+                        &self.chunk_manager,
+                        pos.0,
+                        pos.1,
+                        pos.2,
+                    )
+                    .and_then(|slots| slots.get(i).copied().flatten())
+                }
             }),
         }
     }
@@ -13330,23 +13539,46 @@ impl State {
             SlotType::AnvilOutput => {}
             SlotType::ContainerSlot(i) => {
                 if let Some(pos) = self.container_target {
-                    if let Some(mut slots) =
-                        crate::container_sessions::ContainerSessionManager::get_chest_slots(
-                            &self.chunk_manager,
-                            pos.0,
-                            pos.1,
-                            pos.2,
-                        )
-                    {
-                        if i < slots.len() {
-                            slots[i] = stack;
-                            crate::container_sessions::ContainerSessionManager::set_chest_slots(
-                                &mut self.chunk_manager,
+                    let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                    if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                        if let Some(mut slots) =
+                            crate::container_sessions::ContainerSessionManager::get_furnace_slots(
+                                &self.chunk_manager,
                                 pos.0,
                                 pos.1,
                                 pos.2,
-                                &slots,
-                            );
+                            )
+                        {
+                            if i < 3 {
+                                slots[i] = stack;
+                                crate::container_sessions::ContainerSessionManager::set_furnace_slots(
+                                    &mut self.chunk_manager,
+                                    pos.0,
+                                    pos.1,
+                                    pos.2,
+                                    &slots,
+                                );
+                            }
+                        }
+                    } else {
+                        if let Some(mut slots) =
+                            crate::container_sessions::ContainerSessionManager::get_chest_slots(
+                                &self.chunk_manager,
+                                pos.0,
+                                pos.1,
+                                pos.2,
+                            )
+                        {
+                            if i < slots.len() {
+                                slots[i] = stack;
+                                crate::container_sessions::ContainerSessionManager::set_chest_slots(
+                                    &mut self.chunk_manager,
+                                    pos.0,
+                                    pos.1,
+                                    pos.2,
+                                    &slots,
+                                );
+                            }
                         }
                     }
                 }
@@ -13361,7 +13593,15 @@ impl State {
             SlotType::EnchantLapis => stack.item == Item::LapisLazuli,
             SlotType::BrewBottle(_) => stack.potion.is_some(),
             SlotType::AnvilOutput | SlotType::CraftOutput => false,
-            SlotType::ContainerSlot(_) => true,
+            SlotType::ContainerSlot(i) => {
+                if let Some(pos) = self.container_target {
+                    let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                    if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) && i == 2 {
+                        return false;
+                    }
+                }
+                true
+            }
             _ => true,
         }
     }
@@ -13386,6 +13626,60 @@ impl State {
             }
         }
         let slots = self.get_inventory_slots();
+
+        if is_left && mouse_x >= -0.45 && mouse_x <= -0.37 && mouse_y >= 0.35 && mouse_y <= 0.43 {
+            self.recipe_book_open = !self.recipe_book_open;
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::UiClick);
+            return;
+        }
+
+        if self.recipe_book_open
+            && is_left
+            && mouse_x >= -0.85
+            && mouse_x <= -0.48
+            && mouse_y >= -0.45
+            && mouse_y <= 0.45
+        {
+            let smelting_recipes = self.recipe_manager.get_smelting_recipes();
+            let mut line_y = 0.34;
+            for r in smelting_recipes {
+                if mouse_y >= line_y - 0.05 && mouse_y <= line_y + 0.02 {
+                    if let Some(pos) = self.container_target {
+                        let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                        if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                            if let Some((inv_slot_idx, stack)) = self.inventory.find_item(r.input) {
+                                let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
+                                let (bx, by, bz) = (
+                                    pos.0.rem_euclid(16) as u8,
+                                    pos.1 as i16,
+                                    pos.2.rem_euclid(16) as u8,
+                                );
+                                if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
+                                    if let Some(crate::block_entity::BlockEntity::Furnace(
+                                        ref mut f,
+                                    )) = chunk.get_block_entity_mut(bx, by, bz)
+                                    {
+                                        if f.slots[0].is_none() {
+                                            f.slots[0] = Some(stack);
+                                            self.inventory.remove_at_slot(inv_slot_idx);
+                                            self.audio_manager
+                                                .play_sound(crate::audio::SoundId::UiClick);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                line_y -= 0.07;
+                if line_y < -0.40 {
+                    break;
+                }
+            }
+            return;
+        }
 
         if self.active_station == Some(StationKind::Enchanting) && is_left {
             for index in 0..3 {
@@ -13512,6 +13806,90 @@ impl State {
                 }
                 _ => {
                     // Normal slots (Backpack, Hotbar, Armor, CraftInput, ContainerSlot for host)
+                    if self.keys.shift && is_left && self.inventory.dragged.is_none() {
+                        if let Some(stack) = slot_item {
+                            match slot_type {
+                                SlotType::ContainerSlot(_) => {
+                                    self.check_claim_furnace_xp(slot_type);
+                                    if let Some(remainder) = self.inventory.add_stack(stack) {
+                                        self.set_item_at_slot(slot_type, Some(remainder));
+                                    } else {
+                                        self.set_item_at_slot(slot_type, None);
+                                    }
+                                    return;
+                                }
+                                SlotType::Hotbar(_) | SlotType::Backpack(_) => {
+                                    if let Some(pos) = self.container_target {
+                                        let block =
+                                            self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                                        if matches!(
+                                            block,
+                                            BlockType::Furnace | BlockType::FurnaceLit
+                                        ) {
+                                            let is_fuel = self.recipe_manager.is_fuel(stack.item);
+                                            let is_smeltable = self
+                                                .recipe_manager
+                                                .match_smelting(stack.item)
+                                                .is_some();
+                                            let target_slot_idx = if is_smeltable {
+                                                Some(0)
+                                            } else if is_fuel {
+                                                Some(1)
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(target_slot) = target_slot_idx {
+                                                let target_type =
+                                                    SlotType::ContainerSlot(target_slot);
+                                                let target_item =
+                                                    self.get_item_at_slot(target_type);
+                                                let max_s = stack.item.properties().max_stack;
+                                                match target_item {
+                                                    None => {
+                                                        self.set_item_at_slot(
+                                                            target_type,
+                                                            Some(stack),
+                                                        );
+                                                        self.set_item_at_slot(slot_type, None);
+                                                        return;
+                                                    }
+                                                    Some(t_stack)
+                                                        if t_stack.can_merge_with(&stack)
+                                                            && t_stack.count < max_s =>
+                                                    {
+                                                        let space = max_s - t_stack.count;
+                                                        let transfer = space.min(stack.count);
+                                                        self.set_item_at_slot(
+                                                            target_type,
+                                                            Some(ItemStack {
+                                                                count: t_stack.count + transfer,
+                                                                ..t_stack
+                                                            }),
+                                                        );
+                                                        if stack.count > transfer {
+                                                            self.set_item_at_slot(
+                                                                slot_type,
+                                                                Some(ItemStack {
+                                                                    count: stack.count - transfer,
+                                                                    ..stack
+                                                                }),
+                                                            );
+                                                        } else {
+                                                            self.set_item_at_slot(slot_type, None);
+                                                        }
+                                                        return;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
                     let max_stack = slot_item
                         .map(|s| s.item.properties().max_stack)
                         .unwrap_or(64);
@@ -13555,6 +13933,7 @@ impl State {
                         } else {
                             // Pickup entire slot
                             if let Some(slot) = slot_item {
+                                self.check_claim_furnace_xp(slot_type);
                                 self.inventory.dragged = Some(slot);
                                 self.set_item_at_slot(slot_type, None);
                             }
@@ -13802,9 +14181,13 @@ impl State {
         let Some(entity) = chunk.get_block_entity(bx, by, bz) else {
             return;
         };
-        let crate::block_entity::BlockEntity::Chest(_chest_be) = entity else {
+        if !matches!(
+            entity,
+            crate::block_entity::BlockEntity::Chest(_)
+                | crate::block_entity::BlockEntity::Furnace(_)
+        ) {
             return;
-        };
+        }
         if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
             if let crate::state::NetworkHandle::Client { game_to_client, .. } = &self.network {
                 let _ = game_to_client.tracked_send(
@@ -13897,7 +14280,7 @@ impl State {
                 .into_iter()
                 .flatten()
                 .collect(),
-            None => Vec::new(),
+            None | Some(StationKind::Furnace) => Vec::new(),
         });
 
         for stack in returning_items {
@@ -13933,7 +14316,7 @@ impl State {
                 self.anvil.left = None;
                 self.anvil.right = None;
             }
-            None => {}
+            None | Some(StationKind::Furnace) => {}
         }
 
         self.inventory.is_open = false;
@@ -15722,6 +16105,176 @@ impl State {
                             &mut ui_line_vertices,
                         );
                     }
+                    if let Some(pos) = self.container_target {
+                        let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                        if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                            add_string_lines(
+                                "FURNACE",
+                                -0.15,
+                                0.26,
+                                0.010,
+                                0.020,
+                                0.003,
+                                [1.0, 1.0, 1.0, 1.0],
+                                &mut ui_line_vertices,
+                            );
+
+                            let (burn_time, burn_total, cook_progress, cook_total) = {
+                                let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
+                                let (bx, by, bz) = (
+                                    pos.0.rem_euclid(16) as u8,
+                                    pos.1 as i16,
+                                    pos.2.rem_euclid(16) as u8,
+                                );
+                                self.chunk_manager
+                                    .chunks
+                                    .get(&(cx, cz))
+                                    .and_then(|c| {
+                                        if let Some(crate::block_entity::BlockEntity::Furnace(f)) =
+                                            c.get_block_entity(bx, by, bz)
+                                        {
+                                            Some((
+                                                f.burn_time,
+                                                f.burn_total,
+                                                f.cook_progress,
+                                                f.cook_total,
+                                            ))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or((0, 0, 0, 200))
+                            };
+
+                            // Flame Fuel Progress Bar (vertical)
+                            add_ui_quad(
+                                &mut ui_vertices,
+                                -0.14,
+                                -0.09,
+                                -0.01,
+                                0.08,
+                                [0.1, 0.1, 0.1, 0.8],
+                            );
+                            if burn_time > 0 && burn_total > 0 {
+                                let fuel_ratio =
+                                    (burn_time as f32 / burn_total as f32).clamp(0.0, 1.0);
+                                let fill_h = 0.09 * fuel_ratio;
+                                add_ui_quad(
+                                    &mut ui_vertices,
+                                    -0.14,
+                                    -0.09,
+                                    -0.01,
+                                    -0.01 + fill_h,
+                                    [1.0, 0.45, 0.0, 1.0],
+                                );
+                            }
+
+                            // Cook Progress Bar (horizontal arrow)
+                            add_ui_quad(
+                                &mut ui_vertices,
+                                -0.04,
+                                0.12,
+                                0.02,
+                                0.06,
+                                [0.1, 0.1, 0.1, 0.8],
+                            );
+                            if cook_progress > 0 && cook_total > 0 {
+                                let cook_ratio =
+                                    (cook_progress as f32 / cook_total as f32).clamp(0.0, 1.0);
+                                let fill_w = 0.16 * cook_ratio;
+                                add_ui_quad(
+                                    &mut ui_vertices,
+                                    -0.04,
+                                    -0.04 + fill_w,
+                                    0.02,
+                                    0.06,
+                                    [0.9, 0.75, 0.2, 1.0],
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Draw Recipe Book Toggle Button
+                let book_btn_hover =
+                    mouse_x >= -0.45 && mouse_x <= -0.37 && mouse_y >= 0.35 && mouse_y <= 0.43;
+                add_ui_quad(
+                    &mut ui_vertices,
+                    -0.45,
+                    -0.37,
+                    0.35,
+                    0.43,
+                    if book_btn_hover {
+                        [0.2, 0.6, 0.3, 1.0]
+                    } else {
+                        [0.15, 0.45, 0.2, 0.9]
+                    },
+                );
+                add_string_lines(
+                    "BOOK",
+                    -0.44,
+                    0.40,
+                    0.007,
+                    0.014,
+                    0.002,
+                    [1.0, 1.0, 1.0, 1.0],
+                    &mut ui_line_vertices,
+                );
+
+                // Draw Recipe Book Side Panel if open
+                if self.recipe_book_open {
+                    add_ui_quad(
+                        &mut ui_vertices,
+                        -0.85,
+                        -0.48,
+                        -0.45,
+                        0.45,
+                        [0.12, 0.12, 0.12, 0.95],
+                    );
+                    add_string_lines(
+                        "RECIPES",
+                        -0.82,
+                        0.40,
+                        0.008,
+                        0.016,
+                        0.003,
+                        [0.4, 0.9, 0.4, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    let smelting_recipes = self.recipe_manager.get_smelting_recipes();
+                    let mut line_y = 0.34;
+                    for r in smelting_recipes {
+                        let entry_hover = mouse_x >= -0.83
+                            && mouse_x <= -0.50
+                            && mouse_y >= line_y - 0.05
+                            && mouse_y <= line_y + 0.02;
+                        if entry_hover {
+                            add_ui_quad(
+                                &mut ui_vertices,
+                                -0.83,
+                                -0.50,
+                                line_y - 0.05,
+                                line_y + 0.02,
+                                [0.25, 0.35, 0.25, 0.8],
+                            );
+                        }
+                        let text = format!("{:?} -> {:?}", r.input, r.output.item);
+                        add_string_lines(
+                            &text,
+                            -0.82,
+                            line_y,
+                            0.006,
+                            0.012,
+                            0.002,
+                            [0.9, 0.9, 0.9, 1.0],
+                            &mut ui_line_vertices,
+                        );
+                        line_y -= 0.07;
+                        if line_y < -0.40 {
+                            break;
+                        }
+                    }
                 }
 
                 match self.active_station {
@@ -15884,7 +16437,7 @@ impl State {
                             &mut ui_line_vertices,
                         );
                     }
-                    None => {}
+                    None | Some(StationKind::Furnace) => {}
                 }
 
                 // 5. Draw dragged item at cursor position
