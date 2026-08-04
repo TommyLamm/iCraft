@@ -425,6 +425,105 @@ impl RecipeManager {
             &[("I", Item::IronIngot)],
             ItemStack::new(Item::IronBoots, 1),
         );
+
+        // Leather Armor
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/leather_helmet",
+            vec!["LLL", "L L"],
+            &[("L", Item::Leather)],
+            ItemStack::new(Item::LeatherHelmet, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/leather_chestplate",
+            vec!["L L", "LLL", "LLL"],
+            &[("L", Item::Leather)],
+            ItemStack::new(Item::LeatherChestplate, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/leather_leggings",
+            vec!["LLL", "L L", "L L"],
+            &[("L", Item::Leather)],
+            ItemStack::new(Item::LeatherLeggings, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/leather_boots",
+            vec!["L L", "L L"],
+            &[("L", Item::Leather)],
+            ItemStack::new(Item::LeatherBoots, 1),
+        );
+
+        // Diamond Armor
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/diamond_helmet",
+            vec!["DDD", "D D"],
+            &[("D", Item::Diamond)],
+            ItemStack::new(Item::DiamondHelmet, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/diamond_chestplate",
+            vec!["D D", "DDD", "DDD"],
+            &[("D", Item::Diamond)],
+            ItemStack::new(Item::DiamondChestplate, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/diamond_leggings",
+            vec!["DDD", "D D", "D D"],
+            &[("D", Item::Diamond)],
+            ItemStack::new(Item::DiamondLeggings, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/diamond_boots",
+            vec!["D D", "D D"],
+            &[("D", Item::Diamond)],
+            ItemStack::new(Item::DiamondBoots, 1),
+        );
+
+        // Shield
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/shield",
+            vec!["PIP", "PPP", " P "],
+            &[("P", Item::OakPlanks), ("I", Item::IronIngot)],
+            ItemStack::new(Item::Shield, 1),
+        );
+
+        // Wooden Tools
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/wooden_sword",
+            vec!["W", "W", "S"],
+            &[("W", Item::OakPlanks), ("S", Item::Stick)],
+            ItemStack::new(Item::WoodenSword, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/wooden_pickaxe",
+            vec!["WWW", " S ", " S "],
+            &[("W", Item::OakPlanks), ("S", Item::Stick)],
+            ItemStack::new(Item::WoodenPickaxe, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/wooden_axe",
+            vec!["WW", "WS", " S"],
+            &[("W", Item::OakPlanks), ("S", Item::Stick)],
+            ItemStack::new(Item::WoodenAxe, 1),
+        );
+        add_shaped(
+            &mut crafting_recipes,
+            "crafting/wooden_shovel",
+            vec!["W", "S", "S"],
+            &[("W", Item::OakPlanks), ("S", Item::Stick)],
+            ItemStack::new(Item::WoodenShovel, 1),
+        );
         add_shaped(
             &mut crafting_recipes,
             "crafting/arrow",

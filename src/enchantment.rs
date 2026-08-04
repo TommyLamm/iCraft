@@ -325,19 +325,23 @@ pub fn attack_damage_bonus(set: &EnchantmentSet) -> f32 {
 }
 
 pub fn protection_multiplier(armor: &[Option<ItemStack>; 4], is_fall: bool) -> f32 {
-    let points: u8 = armor
+    let points = epf_sum(armor, is_fall);
+    (1.0 - points.min(20) as f32 * 0.04).max(0.2)
+}
+
+pub fn epf_sum(armor: &[Option<ItemStack>; 4], is_fall: bool) -> u32 {
+    armor
         .iter()
         .flatten()
         .map(|stack| {
-            stack.enchantments.level_of(Enchantment::Protection(1))
+            stack.enchantments.level_of(Enchantment::Protection(1)) as u32
                 + if is_fall {
-                    stack.enchantments.level_of(Enchantment::FeatherFalling(1)) * 2
+                    stack.enchantments.level_of(Enchantment::FeatherFalling(1)) as u32 * 2
                 } else {
                     0
                 }
         })
-        .sum();
-    (1.0 - points.min(20) as f32 * 0.04).max(0.2)
+        .sum()
 }
 
 pub fn should_consume_durability(set: &EnchantmentSet, seed: u32) -> bool {

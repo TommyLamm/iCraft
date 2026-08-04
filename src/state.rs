@@ -5105,6 +5105,7 @@ pub enum SlotType {
     Hotbar(usize),
     Backpack(usize),
     Armor(usize),
+    Offhand,
     CraftInput(usize),
     CraftOutput,
     EnchantInput,
@@ -9344,6 +9345,82 @@ impl State {
         let world_tick_started = Instant::now();
         let authoritative = self.is_authoritative();
 
+        // Tick attack cooldown & shield disable ticks
+        if self.player_state.attack_cooldown_ticks < self.player_state.attack_cooldown_max_ticks {
+            self.player_state.attack_cooldown_ticks += 1;
+        }
+        if self.player_state.shield_disable_ticks > 0 {
+            self.player_state.shield_disable_ticks -= 1;
+        }
+
+        // Tick item usage state machine
+        if self.inventory.is_open
+            || self.is_paused
+            || self.is_chat_open
+            || self.player_state.is_dead
+        {
+            self.player_state.using_item = None;
+        } else if let Some(ref mut using) = self.player_state.using_item {
+            using.ticks_held += 1;
+
+            if using.action == crate::player::ItemUseAction::Eat
+                || using.action == crate::player::ItemUseAction::Drink
+            {
+                if let Some(max_ticks) = using.max_ticks {
+                    if using.ticks_held >= max_ticks {
+                        let item = using.item;
+                        let slot = using.slot;
+                        if using.action == crate::player::ItemUseAction::Eat {
+                            if let Some(food_props) = item.food_properties() {
+                                self.player_state.hunger =
+                                    (self.player_state.hunger + food_props.hunger).min(20.0);
+                                self.player_state.saturation = (self.player_state.saturation
+                                    + food_props.saturation)
+                                    .min(self.player_state.hunger);
+                                self.trigger_advancement(
+                                    crate::advancements::AdvancementTrigger::EatFood(item),
+                                );
+                                if let Some(ret) = food_props.return_item {
+                                    let _ = self.inventory.add_stack(ItemStack::new(ret, 1));
+                                }
+                            }
+                        } else if using.action == crate::player::ItemUseAction::Drink {
+                            if item == Item::MilkBucket {
+                                self.potion_effects.active.clear();
+                                if self.game_mode == GameMode::Survival {
+                                    let _ =
+                                        self.inventory.add_stack(ItemStack::new(Item::Bucket, 1));
+                                }
+                            }
+                        }
+
+                        // Consume 1 item from designated slot
+                        match slot {
+                            crate::player::HandSlot::MainHand(_i) => {
+                                self.inventory
+                                    .use_selected_item(self.game_mode == GameMode::Creative);
+                            }
+                            crate::player::HandSlot::OffHand => {
+                                if self.game_mode != GameMode::Creative {
+                                    if let Some(ref mut offhand) = self.inventory.offhand {
+                                        if offhand.count > 1 {
+                                            offhand.count -= 1;
+                                        } else {
+                                            self.inventory.offhand = None;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        self.audio_manager
+                            .play_sound(crate::audio::SoundId::UiClick);
+                        self.player_state.using_item = None;
+                    }
+                }
+            }
+        }
+
         self.autosave_timer += dt;
         if self.is_authoritative() && self.autosave_timer >= 300.0 {
             self.autosave_timer = 0.0;
@@ -12077,66 +12154,164 @@ impl State {
     }
 
     pub fn take_damage(&mut self, amount: f32, source: DamageSource) {
+        self.take_damage_with_attacker(amount, source, None, None);
+    }
+
+    pub fn take_damage_with_attacker(
+        &mut self,
+        amount: f32,
+        source: DamageSource,
+        attacker_pos: Option<[f32; 3]>,
+        attacker_item: Option<Item>,
+    ) {
         if !self.is_authoritative() || self.game_mode == GameMode::Creative {
             return;
         }
 
         let can_damage = !self.player_state.is_dead && self.player_state.invulnerable_time <= 0.0;
-        let reduced = amount
-            * crate::enchantment::protection_multiplier(
-                &self.inventory.armor,
-                source == DamageSource::Fall,
-            );
-        let died = self.player_state.take_damage(reduced, source);
+        if !can_damage {
+            return;
+        }
 
-        if can_damage {
-            if died {
-                self.player_physics.set_flying(false);
-                self.jump_taps.reset();
-                self.audio_manager
-                    .play_sound(crate::audio::SoundId::PlayerDeath);
-                println!("[Debug] Player died due to: {:?}", source);
+        // Check shield blocking
+        let is_blocking = self
+            .player_state
+            .using_item
+            .as_ref()
+            .map_or(false, |u| u.action == crate::player::ItemUseAction::Block);
+        let yaw = self.camera.yaw;
+        let pos = [
+            self.player_physics.position.x,
+            self.player_physics.position.y,
+            self.player_physics.position.z,
+        ];
+        if is_blocking && crate::player::can_shield_block(yaw, pos, attacker_pos, source) {
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::ShieldBlock);
 
-                let pos = self.player_physics.position + Vec3::new(0.0, 1.0, 0.0);
-                let mut to_drop = Vec::new();
-                for slot in self
-                    .inventory
-                    .hotbar
-                    .iter()
-                    .chain(self.inventory.main.iter())
-                    .chain(self.inventory.armor.iter())
-                {
-                    if let Some(stack) = slot {
-                        to_drop.push(*stack);
+            // Reduce shield durability in holding slot
+            if let Some(ref using) = self.player_state.using_item {
+                let slot = using.slot;
+                let mut shield_stack = match slot {
+                    crate::player::HandSlot::MainHand(i) => {
+                        self.inventory.hotbar.get(i).copied().flatten()
+                    }
+                    crate::player::HandSlot::OffHand => self.inventory.offhand,
+                };
+                if let Some(ref mut stack) = shield_stack {
+                    if stack.durability > 0 {
+                        let dur_loss = if amount > 3.0 {
+                            (amount.floor() as u32) + 1
+                        } else {
+                            1
+                        };
+                        if stack.durability <= dur_loss {
+                            match slot {
+                                crate::player::HandSlot::MainHand(i) => {
+                                    self.inventory.hotbar[i] = None
+                                }
+                                crate::player::HandSlot::OffHand => self.inventory.offhand = None,
+                            }
+                            self.audio_manager
+                                .play_sound(crate::audio::SoundId::ShieldBreak);
+                            self.player_state.using_item = None;
+                        } else {
+                            stack.durability -= dur_loss;
+                            match slot {
+                                crate::player::HandSlot::MainHand(i) => {
+                                    self.inventory.hotbar[i] = Some(*stack)
+                                }
+                                crate::player::HandSlot::OffHand => {
+                                    self.inventory.offhand = Some(*stack)
+                                }
+                            }
+                        }
                     }
                 }
-                if let Some(dragged) = self.inventory.dragged {
-                    to_drop.push(dragged);
-                }
-                for craft_slot in &self.inventory.craft_input {
-                    if let Some(stack) = craft_slot {
-                        to_drop.push(*stack);
-                    }
-                }
-
-                for stack in to_drop {
-                    self.spawn_dropped_stack(stack, pos);
-                }
-
-                let xp_drop = self.player_state.death_experience_drop();
-                if xp_drop > 0 {
-                    self.spawn_xp_orb(xp_drop, pos);
-                }
-
-                self.inventory.clear();
-                self.active_station = None;
-
-                self.clear_movement_input();
-                self.sync_cursor_mode();
-            } else {
-                self.audio_manager
-                    .play_sound(crate::audio::SoundId::PlayerHurt);
             }
+
+            // Check if attacker used an Axe -> disable shield!
+            if let Some(att_item) = attacker_item {
+                if att_item
+                    .tool_properties()
+                    .map_or(false, |t| t.tool_type == ToolType::Axe)
+                {
+                    self.player_state.shield_disable_ticks = 100;
+                    self.player_state.using_item = None;
+                    self.audio_manager
+                        .play_sound(crate::audio::SoundId::ShieldBreak);
+                }
+            }
+
+            return; // No damage taken when shield blocked!
+        }
+
+        let mut total_armor = 0.0f32;
+        let mut total_toughness = 0.0f32;
+        for armor_slot in self.inventory.armor.iter().flatten() {
+            if let Some(props) = armor_slot.item.armor_properties() {
+                total_armor += props.armor_points;
+                total_toughness += props.toughness;
+            }
+        }
+        let total_epf =
+            crate::enchantment::epf_sum(&self.inventory.armor, source == DamageSource::Fall);
+
+        let final_damage = crate::player::calculate_damage_reduction(
+            amount,
+            source,
+            total_armor,
+            total_toughness,
+            total_epf,
+        );
+
+        let died = self.player_state.take_damage(final_damage, source);
+
+        if died {
+            self.player_physics.set_flying(false);
+            self.jump_taps.reset();
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::PlayerDeath);
+            println!("[Debug] Player died due to: {:?}", source);
+
+            let pos = self.player_physics.position + Vec3::new(0.0, 1.0, 0.0);
+            let mut to_drop = Vec::new();
+            for slot in self
+                .inventory
+                .hotbar
+                .iter()
+                .chain(self.inventory.main.iter())
+                .chain(self.inventory.armor.iter())
+            {
+                if let Some(stack) = slot {
+                    to_drop.push(*stack);
+                }
+            }
+            if let Some(offhand) = self.inventory.offhand {
+                to_drop.push(offhand);
+            }
+            if let Some(dragged) = self.inventory.dragged {
+                to_drop.push(dragged);
+            }
+            for craft_slot in &self.inventory.craft_input {
+                if let Some(stack) = craft_slot {
+                    to_drop.push(*stack);
+                }
+            }
+
+            for stack in to_drop {
+                self.spawn_dropped_stack(stack, pos);
+            }
+
+            let xp_drop = self.player_state.death_experience_drop();
+            if xp_drop > 0 {
+                self.spawn_xp_orb(xp_drop, pos);
+            }
+
+            self.inventory.clear();
+        } else {
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::PlayerHurt);
         }
     }
 
@@ -12269,14 +12444,25 @@ impl State {
         let enchantments = held_stack
             .map(|stack| stack.enchantments)
             .unwrap_or_default();
-        let damage = held_item
+        let base_damage = held_item
             .tool_properties()
             .map(|tool| tool.damage)
             .unwrap_or(1.0)
             + crate::enchantment::attack_damage_bonus(&enchantments)
             + self.potion_effects.strength_bonus();
-        let knockback =
-            8.0 + enchantments.level_of(crate::enchantment::Enchantment::Knockback(1)) as f32 * 3.0;
+
+        let (damage, knockback_mult, is_full_charge) = crate::player::calculate_attack_damage(
+            base_damage,
+            self.player_state.attack_cooldown_ticks,
+            self.player_state.attack_cooldown_max_ticks,
+        );
+
+        self.player_state.attack_cooldown_ticks = 0;
+        self.player_state.attack_cooldown_max_ticks = held_item.attack_cooldown_ticks();
+
+        let knockback = (8.0
+            + enchantments.level_of(crate::enchantment::Enchantment::Knockback(1)) as f32 * 3.0)
+            * knockback_mult;
         let fire_level = enchantments.level_of(crate::enchantment::Enchantment::FireAspect(1));
 
         let (entity_type, remaining_health, killed, kill) = {
@@ -12309,8 +12495,231 @@ impl State {
             }
         }
 
+        // Sweep attack if full charge and holding a sword
+        let is_sword = held_item
+            .tool_properties()
+            .map_or(false, |t| t.tool_type == ToolType::Sword);
+        if is_full_charge && is_sword {
+            if let Some(target_entity) = self.entity_manager.get_by_id(entity_id) {
+                let target_pos = target_entity.position;
+                let sweep_damage = 1.0 + crate::enchantment::attack_damage_bonus(&enchantments);
+                let nearby_ids: Vec<_> = self
+                    .entity_manager
+                    .query_radius(target_pos, 1.0)
+                    .filter(|e| e.id != entity_id && e.entity_type.is_hostile() && e.health > 0.0)
+                    .map(|e| e.id)
+                    .collect();
+                for nearby_id in nearby_ids {
+                    if let Some(nearby) = self.entity_manager.get_by_id_mut(nearby_id) {
+                        nearby.health = (nearby.health - sweep_damage).max(0.0);
+                    }
+                }
+            }
+        }
+
         self.damage_selected_tool(entity_id as u32 ^ self.total_time.to_bits());
         true
+    }
+
+    pub fn handle_secondary_press(&mut self) {
+        if self.is_paused
+            || self.inventory.is_open
+            || self.is_chat_open
+            || self.player_state.is_dead
+        {
+            return;
+        }
+
+        let main_stack = self.inventory.hotbar[self.inventory.selected];
+        let main_item = main_stack.map(|s| s.item).unwrap_or(Item::Air);
+        let offhand_stack = self.inventory.offhand;
+        let offhand_item = offhand_stack.map(|s| s.item).unwrap_or(Item::Air);
+
+        // Mainhand Shield
+        if main_item == Item::Shield && self.player_state.shield_disable_ticks == 0 {
+            self.player_state.using_item = Some(crate::player::UsingItemState {
+                hand: crate::player::Hand::MainHand,
+                action: crate::player::ItemUseAction::Block,
+                item: Item::Shield,
+                slot: crate::player::HandSlot::MainHand(self.inventory.selected),
+                ticks_held: 0,
+                max_ticks: None,
+            });
+            return;
+        }
+        // Mainhand Bow
+        if main_item == Item::Bow {
+            self.player_state.using_item = Some(crate::player::UsingItemState {
+                hand: crate::player::Hand::MainHand,
+                action: crate::player::ItemUseAction::Bow,
+                item: Item::Bow,
+                slot: crate::player::HandSlot::MainHand(self.inventory.selected),
+                ticks_held: 0,
+                max_ticks: None,
+            });
+            return;
+        }
+        // Mainhand Food / Drink
+        if let Some(food_props) = main_item.food_properties() {
+            if self.player_state.hunger < 20.0
+                || food_props.always_edible
+                || self.game_mode == GameMode::Creative
+            {
+                self.player_state.using_item = Some(crate::player::UsingItemState {
+                    hand: crate::player::Hand::MainHand,
+                    action: crate::player::ItemUseAction::Eat,
+                    item: main_item,
+                    slot: crate::player::HandSlot::MainHand(self.inventory.selected),
+                    ticks_held: 0,
+                    max_ticks: Some(food_props.use_duration_ticks),
+                });
+                return;
+            }
+        }
+        if main_item == Item::MilkBucket || main_stack.and_then(|s| s.potion).is_some() {
+            self.player_state.using_item = Some(crate::player::UsingItemState {
+                hand: crate::player::Hand::MainHand,
+                action: crate::player::ItemUseAction::Drink,
+                item: main_item,
+                slot: crate::player::HandSlot::MainHand(self.inventory.selected),
+                ticks_held: 0,
+                max_ticks: Some(32),
+            });
+            return;
+        }
+
+        // Try standard click (block interaction/placement) with mainhand
+        self.handle_click(false);
+
+        // If mainhand didn't start an item use action, check Offhand item
+        if self.player_state.using_item.is_none() {
+            if offhand_item == Item::Shield && self.player_state.shield_disable_ticks == 0 {
+                self.player_state.using_item = Some(crate::player::UsingItemState {
+                    hand: crate::player::Hand::OffHand,
+                    action: crate::player::ItemUseAction::Block,
+                    item: Item::Shield,
+                    slot: crate::player::HandSlot::OffHand,
+                    ticks_held: 0,
+                    max_ticks: None,
+                });
+                return;
+            }
+            if offhand_item == Item::Bow {
+                self.player_state.using_item = Some(crate::player::UsingItemState {
+                    hand: crate::player::Hand::OffHand,
+                    action: crate::player::ItemUseAction::Bow,
+                    item: Item::Bow,
+                    slot: crate::player::HandSlot::OffHand,
+                    ticks_held: 0,
+                    max_ticks: None,
+                });
+                return;
+            }
+            if let Some(food_props) = offhand_item.food_properties() {
+                if self.player_state.hunger < 20.0
+                    || food_props.always_edible
+                    || self.game_mode == GameMode::Creative
+                {
+                    self.player_state.using_item = Some(crate::player::UsingItemState {
+                        hand: crate::player::Hand::OffHand,
+                        action: crate::player::ItemUseAction::Eat,
+                        item: offhand_item,
+                        slot: crate::player::HandSlot::OffHand,
+                        ticks_held: 0,
+                        max_ticks: Some(food_props.use_duration_ticks),
+                    });
+                    return;
+                }
+            }
+            if offhand_item == Item::MilkBucket || offhand_stack.and_then(|s| s.potion).is_some() {
+                self.player_state.using_item = Some(crate::player::UsingItemState {
+                    hand: crate::player::Hand::OffHand,
+                    action: crate::player::ItemUseAction::Drink,
+                    item: offhand_item,
+                    slot: crate::player::HandSlot::OffHand,
+                    ticks_held: 0,
+                    max_ticks: Some(32),
+                });
+                return;
+            }
+        }
+    }
+
+    pub fn handle_secondary_release(&mut self) {
+        let Some(using) = self.player_state.using_item.take() else {
+            return;
+        };
+
+        if using.action == crate::player::ItemUseAction::Bow {
+            if let Some((speed, damage, is_critical)) =
+                crate::player::calculate_bow_shot(using.ticks_held)
+            {
+                let held_stack = match using.slot {
+                    crate::player::HandSlot::MainHand(i) => {
+                        self.inventory.hotbar.get(i).copied().flatten()
+                    }
+                    crate::player::HandSlot::OffHand => self.inventory.offhand,
+                };
+                let infinity = held_stack
+                    .map(|s| {
+                        s.enchantments
+                            .level_of(crate::enchantment::Enchantment::Infinity)
+                            > 0
+                    })
+                    .unwrap_or(false);
+
+                let has_arrow = self
+                    .inventory
+                    .offhand
+                    .map(|s| s.item == Item::Arrow)
+                    .unwrap_or(false)
+                    || self.inventory.find_item(Item::Arrow).is_some();
+
+                if self.game_mode == GameMode::Creative || has_arrow {
+                    if self.game_mode != GameMode::Creative && !infinity {
+                        if self
+                            .inventory
+                            .offhand
+                            .map(|s| s.item == Item::Arrow)
+                            .unwrap_or(false)
+                        {
+                            if let Some(ref mut offhand) = self.inventory.offhand {
+                                if offhand.count > 1 {
+                                    offhand.count -= 1;
+                                } else {
+                                    self.inventory.offhand = None;
+                                }
+                            }
+                        } else {
+                            self.inventory.remove_one(Item::Arrow);
+                        }
+                    }
+
+                    if self.is_authoritative() {
+                        let dir = Vec3::new(
+                            self.camera.yaw.cos() * self.camera.pitch.cos(),
+                            self.camera.pitch.sin(),
+                            self.camera.yaw.sin() * self.camera.pitch.cos(),
+                        )
+                        .normalize_or_zero();
+                        let id = self.entity_manager.spawn(
+                            crate::entity::EntityType::Arrow,
+                            self.camera.position + dir * 0.6,
+                        );
+                        if let Some(arrow) = self.entity_manager.get_by_id_mut(id) {
+                            arrow.velocity = dir * speed;
+                            arrow.friendly_projectile = true;
+                            arrow.projectile_damage = damage;
+                            if is_critical {
+                                arrow.projectile_damage += 1.0;
+                            }
+                        }
+                    }
+                    self.audio_manager
+                        .play_sound(crate::audio::SoundId::ArrowShoot);
+                }
+            }
+        }
     }
 
     pub fn handle_click(&mut self, is_left_click: bool) {
@@ -13457,6 +13866,17 @@ impl State {
             slots.push((SlotType::Armor(i), x0, x0 + slot_w, y0, y0 + slot_h));
         }
 
+        // 3b. Offhand
+        let offhand_x0 = -0.40 + 1.2 * (slot_w + gap);
+        let offhand_y0 = -0.15;
+        slots.push((
+            SlotType::Offhand,
+            offhand_x0,
+            offhand_x0 + slot_w,
+            offhand_y0,
+            offhand_y0 + slot_h,
+        ));
+
         // 4. Container slots (if chest or furnace is open)
         if let Some(pos) = self.container_target {
             let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
@@ -13613,6 +14033,7 @@ impl State {
             SlotType::Hotbar(i) => self.inventory.hotbar[i],
             SlotType::Backpack(i) => self.inventory.main[i],
             SlotType::Armor(i) => self.inventory.armor[i],
+            SlotType::Offhand => self.inventory.offhand,
             SlotType::CraftInput(i) => self.inventory.craft_input.get(i).copied().flatten(),
             SlotType::CraftOutput => self.inventory.craft_output,
             SlotType::EnchantInput => self.enchanting.input,
@@ -13651,6 +14072,7 @@ impl State {
             SlotType::Hotbar(i) => self.inventory.hotbar[i] = stack,
             SlotType::Backpack(i) => self.inventory.main[i] = stack,
             SlotType::Armor(i) => self.inventory.armor[i] = stack,
+            SlotType::Offhand => self.inventory.offhand = stack,
             SlotType::CraftInput(i) => {
                 if i < self.inventory.craft_input.len() {
                     self.inventory.craft_input[i] = stack;
@@ -13730,6 +14152,14 @@ impl State {
                 true
             }
             _ => true,
+        }
+    }
+
+    pub fn handle_swap_offhand_pressed(&mut self) {
+        if !self.is_chat_open && !self.is_paused && !self.player_state.is_dead {
+            self.inventory.swap_offhand();
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::UiClick);
         }
     }
 

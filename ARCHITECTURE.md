@@ -1,9 +1,7 @@
 # Architecture
 
-> Last verified: 2026-08-03
-> Git baseline: checkpoint
-> `b13bbbb74325397d4a9334ba6158d895f222fbe7` (`b13bbbb`) plus the
-> uncommitted repair continuation documented under `performance/repair/`.
+> Last verified: 2026-08-04
+> Git baseline: tommy-dev
 >
 > This document is a concise navigation map. Source code remains authoritative.
 
@@ -250,6 +248,9 @@ Start with the exact symbol related to the task; avoid reading all of
   placement, and `dimension.dat` updates together.
 - Redstone component metadata is stored with chunk data; legacy saves may not
   contain it.
+- `Inventory` and `InventoryData` feature `offhand: Option<ItemStack>`, with `#[serde(default)]` backward compatibility for legacy save formats. F key swaps selected hotbar item with offhand item.
+- Combat calculation (`calculate_damage_reduction`, `can_shield_block`, `calculate_attack_damage`, `calculate_bow_shot`) is host-authoritative and uses pure functions in `player.rs`.
+- Shield blocking (180° facing arc) reduces damage by 100% for blockable sources and degrades shield durability; Axe attacks trigger a 5-second (100 ticks) shield disable.
 - `settings.txt` and `controls.config` are working-directory-relative. Keep
   parsing defaults and sanitization backward compatible.
 

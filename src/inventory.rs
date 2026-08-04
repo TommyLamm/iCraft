@@ -188,6 +188,29 @@ pub enum Item {
     GlassPane,
     OakLadder,
     OakSign,
+
+    // Equipment & Weapons Additions (Plan 07)
+    WoodenSword,
+    WoodenPickaxe,
+    WoodenAxe,
+    WoodenShovel,
+    GoldenSword,
+    GoldenPickaxe,
+    GoldenAxe,
+    GoldenShovel,
+    LeatherHelmet,
+    LeatherChestplate,
+    LeatherLeggings,
+    LeatherBoots,
+    GoldenHelmet,
+    GoldenChestplate,
+    GoldenLeggings,
+    GoldenBoots,
+    DiamondHelmet,
+    DiamondChestplate,
+    DiamondLeggings,
+    DiamondBoots,
+    Shield,
 }
 
 pub const ALL_ITEMS: &[Item] = &[
@@ -357,6 +380,27 @@ pub const ALL_ITEMS: &[Item] = &[
     Item::GlassPane,
     Item::OakLadder,
     Item::OakSign,
+    Item::WoodenSword,
+    Item::WoodenPickaxe,
+    Item::WoodenAxe,
+    Item::WoodenShovel,
+    Item::GoldenSword,
+    Item::GoldenPickaxe,
+    Item::GoldenAxe,
+    Item::GoldenShovel,
+    Item::LeatherHelmet,
+    Item::LeatherChestplate,
+    Item::LeatherLeggings,
+    Item::LeatherBoots,
+    Item::GoldenHelmet,
+    Item::GoldenChestplate,
+    Item::GoldenLeggings,
+    Item::GoldenBoots,
+    Item::DiamondHelmet,
+    Item::DiamondChestplate,
+    Item::DiamondLeggings,
+    Item::DiamondBoots,
+    Item::Shield,
 ];
 
 impl Item {
@@ -604,6 +648,23 @@ pub struct ToolProperties {
     pub damage: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ArmorSlot {
+    Helmet,
+    Chestplate,
+    Leggings,
+    Boots,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArmorProperties {
+    pub slot: ArmorSlot,
+    pub armor_points: f32,
+    pub toughness: f32,
+    pub knockback_resistance: f32,
+    pub durability: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FoodProperties {
     pub hunger: f32,
@@ -625,7 +686,18 @@ pub struct ItemStack {
 
 impl ItemStack {
     pub fn new(item: Item, count: u32) -> Self {
-        let durability = item.tool_properties().map(|t| t.durability).unwrap_or(0);
+        let durability = item
+            .tool_properties()
+            .map(|t| t.durability)
+            .or_else(|| item.armor_properties().map(|a| a.durability))
+            .or_else(|| {
+                if item == Item::Shield {
+                    Some(336)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
         let potion = match item {
             Item::Potion => Some(crate::brewing::PotionData::water()),
             Item::SplashPotion => {
@@ -913,12 +985,33 @@ impl Item {
             Item::StoneSword
             | Item::IronSword
             | Item::DiamondSword
+            | Item::WoodenSword
+            | Item::WoodenPickaxe
+            | Item::WoodenAxe
+            | Item::WoodenShovel
+            | Item::GoldenSword
+            | Item::GoldenPickaxe
+            | Item::GoldenAxe
+            | Item::GoldenShovel
             | Item::Bow
             | Item::Arrow
+            | Item::Shield
+            | Item::LeatherHelmet
+            | Item::LeatherChestplate
+            | Item::LeatherLeggings
+            | Item::LeatherBoots
+            | Item::GoldenHelmet
+            | Item::GoldenChestplate
+            | Item::GoldenLeggings
+            | Item::GoldenBoots
             | Item::IronHelmet
             | Item::IronChestplate
             | Item::IronLeggings
             | Item::IronBoots
+            | Item::DiamondHelmet
+            | Item::DiamondChestplate
+            | Item::DiamondLeggings
+            | Item::DiamondBoots
             | Item::EndCrystal => Some(CreativeTab::Combat),
             Item::Apple
             | Item::Bread
@@ -1002,13 +1095,6 @@ impl Item {
             Item::OakLadder => Some(CreativeTab::Blocks),
             Item::OakSign => Some(CreativeTab::Blocks),
         }
-    }
-
-    pub fn is_armor(self) -> bool {
-        matches!(
-            self,
-            Item::IronHelmet | Item::IronChestplate | Item::IronLeggings | Item::IronBoots
-        )
     }
 
     pub fn tool_properties(self) -> Option<ToolProperties> {
@@ -1143,7 +1229,201 @@ impl Item {
                 damage: 1.0,
             }),
 
+            Item::WoodenSword => Some(ToolProperties {
+                tool_type: ToolType::Sword,
+                material: ToolMaterial::Wood,
+                mining_speed: 2.0,
+                durability: 59,
+                damage: 4.0,
+            }),
+            Item::WoodenPickaxe => Some(ToolProperties {
+                tool_type: ToolType::Pickaxe,
+                material: ToolMaterial::Wood,
+                mining_speed: 2.0,
+                durability: 59,
+                damage: 2.0,
+            }),
+            Item::WoodenAxe => Some(ToolProperties {
+                tool_type: ToolType::Axe,
+                material: ToolMaterial::Wood,
+                mining_speed: 2.0,
+                durability: 59,
+                damage: 7.0,
+            }),
+            Item::WoodenShovel => Some(ToolProperties {
+                tool_type: ToolType::Shovel,
+                material: ToolMaterial::Wood,
+                mining_speed: 2.0,
+                durability: 59,
+                damage: 2.5,
+            }),
+
+            Item::GoldenSword => Some(ToolProperties {
+                tool_type: ToolType::Sword,
+                material: ToolMaterial::Gold,
+                mining_speed: 12.0,
+                durability: 32,
+                damage: 4.0,
+            }),
+            Item::GoldenPickaxe => Some(ToolProperties {
+                tool_type: ToolType::Pickaxe,
+                material: ToolMaterial::Gold,
+                mining_speed: 12.0,
+                durability: 32,
+                damage: 2.0,
+            }),
+            Item::GoldenAxe => Some(ToolProperties {
+                tool_type: ToolType::Axe,
+                material: ToolMaterial::Gold,
+                mining_speed: 12.0,
+                durability: 32,
+                damage: 7.0,
+            }),
+            Item::GoldenShovel => Some(ToolProperties {
+                tool_type: ToolType::Shovel,
+                material: ToolMaterial::Gold,
+                mining_speed: 12.0,
+                durability: 32,
+                damage: 2.5,
+            }),
             _ => None,
+        }
+    }
+
+    pub fn is_armor(self) -> bool {
+        self.armor_properties().is_some()
+    }
+
+    pub fn armor_properties(self) -> Option<ArmorProperties> {
+        match self {
+            Item::LeatherHelmet => Some(ArmorProperties {
+                slot: ArmorSlot::Helmet,
+                armor_points: 1.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 55,
+            }),
+            Item::LeatherChestplate => Some(ArmorProperties {
+                slot: ArmorSlot::Chestplate,
+                armor_points: 3.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 80,
+            }),
+            Item::LeatherLeggings => Some(ArmorProperties {
+                slot: ArmorSlot::Leggings,
+                armor_points: 2.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 75,
+            }),
+            Item::LeatherBoots => Some(ArmorProperties {
+                slot: ArmorSlot::Boots,
+                armor_points: 1.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 65,
+            }),
+            Item::GoldenHelmet => Some(ArmorProperties {
+                slot: ArmorSlot::Helmet,
+                armor_points: 2.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 77,
+            }),
+            Item::GoldenChestplate => Some(ArmorProperties {
+                slot: ArmorSlot::Chestplate,
+                armor_points: 5.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 112,
+            }),
+            Item::GoldenLeggings => Some(ArmorProperties {
+                slot: ArmorSlot::Leggings,
+                armor_points: 3.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 105,
+            }),
+            Item::GoldenBoots => Some(ArmorProperties {
+                slot: ArmorSlot::Boots,
+                armor_points: 1.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 91,
+            }),
+            Item::IronHelmet => Some(ArmorProperties {
+                slot: ArmorSlot::Helmet,
+                armor_points: 2.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 165,
+            }),
+            Item::IronChestplate => Some(ArmorProperties {
+                slot: ArmorSlot::Chestplate,
+                armor_points: 6.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 240,
+            }),
+            Item::IronLeggings => Some(ArmorProperties {
+                slot: ArmorSlot::Leggings,
+                armor_points: 5.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 225,
+            }),
+            Item::IronBoots => Some(ArmorProperties {
+                slot: ArmorSlot::Boots,
+                armor_points: 2.0,
+                toughness: 0.0,
+                knockback_resistance: 0.0,
+                durability: 195,
+            }),
+            Item::DiamondHelmet => Some(ArmorProperties {
+                slot: ArmorSlot::Helmet,
+                armor_points: 3.0,
+                toughness: 2.0,
+                knockback_resistance: 0.0,
+                durability: 363,
+            }),
+            Item::DiamondChestplate => Some(ArmorProperties {
+                slot: ArmorSlot::Chestplate,
+                armor_points: 8.0,
+                toughness: 2.0,
+                knockback_resistance: 0.0,
+                durability: 528,
+            }),
+            Item::DiamondLeggings => Some(ArmorProperties {
+                slot: ArmorSlot::Leggings,
+                armor_points: 6.0,
+                toughness: 2.0,
+                knockback_resistance: 0.0,
+                durability: 495,
+            }),
+            Item::DiamondBoots => Some(ArmorProperties {
+                slot: ArmorSlot::Boots,
+                armor_points: 3.0,
+                toughness: 2.0,
+                knockback_resistance: 0.0,
+                durability: 429,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn attack_cooldown_ticks(self) -> u32 {
+        if let Some(tool) = self.tool_properties() {
+            match tool.tool_type {
+                ToolType::Sword => 12,
+                ToolType::Pickaxe => 17,
+                ToolType::Shovel => 20,
+                ToolType::Axe => 25,
+                ToolType::Hoe => 5,
+                ToolType::None => 5,
+            }
+        } else {
+            5
         }
     }
 
@@ -2088,6 +2368,27 @@ impl Item {
             | Item::IronHoe
             | Item::GoldenHoe
             | Item::DiamondHoe
+            | Item::WoodenSword
+            | Item::WoodenPickaxe
+            | Item::WoodenAxe
+            | Item::WoodenShovel
+            | Item::GoldenSword
+            | Item::GoldenPickaxe
+            | Item::GoldenAxe
+            | Item::GoldenShovel
+            | Item::LeatherHelmet
+            | Item::LeatherChestplate
+            | Item::LeatherLeggings
+            | Item::LeatherBoots
+            | Item::GoldenHelmet
+            | Item::GoldenChestplate
+            | Item::GoldenLeggings
+            | Item::GoldenBoots
+            | Item::DiamondHelmet
+            | Item::DiamondChestplate
+            | Item::DiamondLeggings
+            | Item::DiamondBoots
+            | Item::Shield
             | Item::BoneMeal
             | Item::Potato
             | Item::BakedPotato
@@ -2162,7 +2463,28 @@ impl Item {
                     Item::GlassPane => ("Glass Pane", 64, true, Some(BlockType::GlassPane), (0, 1)),
                     Item::OakLadder => ("Ladder", 64, true, Some(BlockType::OakLadder), (3, 5)),
                     Item::OakSign => ("Oak Sign", 16, true, Some(BlockType::OakSign), (6, 0)),
-                    _ => unreachable!(),
+                    Item::WoodenSword => ("Wooden Sword", 1, false, None, (0, 7)),
+                    Item::WoodenPickaxe => ("Wooden Pickaxe", 1, false, None, (0, 6)),
+                    Item::WoodenAxe => ("Wooden Axe", 1, false, None, (0, 5)),
+                    Item::WoodenShovel => ("Wooden Shovel", 1, false, None, (0, 4)),
+                    Item::GoldenSword => ("Golden Sword", 1, false, None, (4, 7)),
+                    Item::GoldenPickaxe => ("Golden Pickaxe", 1, false, None, (4, 6)),
+                    Item::GoldenAxe => ("Golden Axe", 1, false, None, (4, 5)),
+                    Item::GoldenShovel => ("Golden Shovel", 1, false, None, (4, 4)),
+                    Item::LeatherHelmet => ("Leather Cap", 1, false, None, (0, 13)),
+                    Item::LeatherChestplate => ("Leather Tunic", 1, false, None, (0, 14)),
+                    Item::LeatherLeggings => ("Leather Pants", 1, false, None, (0, 15)),
+                    Item::LeatherBoots => ("Leather Boots", 1, false, None, (0, 12)),
+                    Item::GoldenHelmet => ("Golden Helmet", 1, false, None, (3, 13)),
+                    Item::GoldenChestplate => ("Golden Chestplate", 1, false, None, (3, 14)),
+                    Item::GoldenLeggings => ("Golden Leggings", 1, false, None, (3, 15)),
+                    Item::GoldenBoots => ("Golden Boots", 1, false, None, (3, 12)),
+                    Item::DiamondHelmet => ("Diamond Helmet", 1, false, None, (2, 13)),
+                    Item::DiamondChestplate => ("Diamond Chestplate", 1, false, None, (2, 14)),
+                    Item::DiamondLeggings => ("Diamond Leggings", 1, false, None, (2, 15)),
+                    Item::DiamondBoots => ("Diamond Boots", 1, false, None, (2, 12)),
+                    Item::Shield => ("Shield", 1, false, None, (15, 12)),
+                    _ => ("Unknown", 64, false, None, (0, 0)),
                 };
                 ItemProperties {
                     name,
@@ -2278,6 +2600,7 @@ pub struct Inventory {
     pub hotbar: [Option<ItemStack>; 9],
     pub main: [Option<ItemStack>; 27],
     pub armor: [Option<ItemStack>; 4],
+    pub offhand: Option<ItemStack>,
     pub craft_input: Vec<Option<ItemStack>>, // 4 slots for 2x2, 9 slots for 3x3
     pub craft_output: Option<ItemStack>,
     pub dragged: Option<ItemStack>,
@@ -2295,6 +2618,7 @@ impl Inventory {
             hotbar: [None; 9],
             main: [None; 27],
             armor: [None; 4],
+            offhand: None,
             craft_input: vec![None; 4],
             craft_output: None,
             dragged: None,
@@ -2497,6 +2821,11 @@ impl Inventory {
                 }
             }
         }
+        if let Some(stack) = &self.offhand {
+            if stack.item == item {
+                return Some((99, *stack));
+            }
+        }
         None
     }
 
@@ -2505,7 +2834,16 @@ impl Inventory {
             self.hotbar[slot_idx] = None;
         } else if slot_idx < 36 {
             self.main[slot_idx - 9] = None;
+        } else if slot_idx == 99 {
+            self.offhand = None;
         }
+    }
+
+    pub fn swap_offhand(&mut self) {
+        let sel = self.selected;
+        let main = self.hotbar[sel];
+        self.hotbar[sel] = self.offhand;
+        self.offhand = main;
     }
 
     fn storage_capacity_for(&self, incoming: ItemStack) -> u32 {
@@ -2555,6 +2893,7 @@ impl Inventory {
         self.hotbar = [None; 9];
         self.main = [None; 27];
         self.armor = [None; 4];
+        self.offhand = None;
         self.craft_input.fill(None);
         self.craft_output = None;
         self.dragged = None;

@@ -36,12 +36,139 @@ impl DamageSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Hand {
+    MainHand,
+    OffHand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemUseAction {
+    Eat,
+    Drink,
+    Block,
+    Bow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandSlot {
+    MainHand(usize),
+    OffHand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsingItemState {
+    pub hand: Hand,
+    pub action: ItemUseAction,
+    pub item: crate::inventory::Item,
+    pub slot: HandSlot,
+    pub ticks_held: u32,
+    pub max_ticks: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveEatingState {
     pub item: crate::inventory::Item,
     pub slot: usize,
     pub ticks_remaining: u32,
     pub total_duration: u32,
+}
+
+pub fn calculate_damage_reduction(
+    raw_damage: f32,
+    source: DamageSource,
+    armor_points: f32,
+    toughness: f32,
+    epf: u32,
+) -> f32 {
+    let (bypasses_armor, bypasses_enchantments) = match source {
+        DamageSource::Void | DamageSource::Hunger | DamageSource::Drowning => (true, true),
+        DamageSource::Fall => (true, false),
+        _ => (false, false),
+    };
+
+    let damage_after_armor = if bypasses_armor || armor_points <= 0.0 {
+        raw_damage
+    } else {
+        let defense =
+            (armor_points - raw_damage / (2.0 + toughness / 4.0)).clamp(armor_points * 0.2, 20.0);
+        raw_damage * (1.0 - defense / 25.0)
+    };
+
+    let final_damage = if bypasses_enchantments || epf == 0 {
+        damage_after_armor
+    } else {
+        let epf_clamped = epf.min(20) as f32;
+        damage_after_armor * (1.0 - epf_clamped / 25.0)
+    };
+
+    final_damage.max(0.0)
+}
+
+pub fn can_shield_block(
+    player_facing_yaw: f32,
+    player_pos: [f32; 3],
+    damage_source_pos: Option<[f32; 3]>,
+    source: DamageSource,
+) -> bool {
+    match source {
+        DamageSource::Void | DamageSource::Hunger | DamageSource::Drowning | DamageSource::Fall => {
+            return false
+        }
+        _ => {}
+    }
+    let Some(src_pos) = damage_source_pos else {
+        return false;
+    };
+
+    let dx = src_pos[0] - player_pos[0];
+    let dz = src_pos[2] - player_pos[2];
+    if dx * dx + dz * dz < 1e-6 {
+        return true;
+    }
+
+    let look_x = player_facing_yaw.cos();
+    let look_z = player_facing_yaw.sin();
+
+    let dist = (dx * dx + dz * dz).sqrt();
+    let src_x = dx / dist;
+    let src_z = dz / dist;
+
+    let dot = look_x * src_x + look_z * src_z;
+    dot > 0.0
+}
+
+pub fn calculate_attack_damage(
+    base_damage: f32,
+    charge_ticks: u32,
+    cooldown_max_ticks: u32,
+) -> (f32, f32, bool) {
+    let charge_ratio = if cooldown_max_ticks == 0 {
+        1.0
+    } else {
+        (charge_ticks as f32 / cooldown_max_ticks as f32).clamp(0.0, 1.0)
+    };
+    let damage_mult = 0.2 + 0.8 * charge_ratio * charge_ratio;
+    let damage = base_damage * damage_mult;
+    let knockback_mult = charge_ratio;
+    let is_full_charge = charge_ratio >= 0.9;
+    (damage, knockback_mult, is_full_charge)
+}
+
+pub fn calculate_bow_shot(held_ticks: u32) -> Option<(f32, f32, bool)> {
+    if held_ticks < 3 {
+        return None;
+    }
+    let t = (held_ticks as f32 / 20.0).clamp(0.0, 1.0);
+    let speed = t * 3.0;
+    let is_critical = t >= 1.0;
+    let base_damage = 2.0 * speed;
+    let damage = if is_critical {
+        base_damage + 2.0
+    } else {
+        base_damage
+    };
+    Some((speed, damage, is_critical))
 }
 
 pub struct PlayerState {
@@ -67,6 +194,10 @@ pub struct PlayerState {
     pub bed_pos: Option<[i32; 3]>,
     pub unlocked_recipes: std::collections::HashSet<String>,
     pub eating_state: Option<ActiveEatingState>,
+    pub using_item: Option<UsingItemState>,
+    pub attack_cooldown_ticks: u32,
+    pub attack_cooldown_max_ticks: u32,
+    pub shield_disable_ticks: u32,
 }
 
 impl PlayerState {
@@ -104,6 +235,10 @@ impl PlayerState {
             bed_pos: None,
             unlocked_recipes,
             eating_state: None,
+            using_item: None,
+            attack_cooldown_ticks: 5,
+            attack_cooldown_max_ticks: 5,
+            shield_disable_ticks: 0,
         }
     }
 
@@ -400,5 +535,81 @@ mod tests {
 
         state.experience_level = 20;
         assert_eq!(state.death_experience_drop(), 100);
+    }
+
+    #[test]
+    fn test_damage_reduction_calculation() {
+        // Full diamond armor (20 armor, 8 toughness) vs 10 mob damage
+        let dmg = calculate_damage_reduction(10.0, DamageSource::Mob, 20.0, 8.0, 0);
+        assert!((dmg - 3.0).abs() < 1e-4);
+
+        // Armor bypass (Void/Hunger)
+        let void_dmg = calculate_damage_reduction(10.0, DamageSource::Void, 20.0, 8.0, 10);
+        assert_eq!(void_dmg, 10.0);
+
+        // Fall damage bypasses armor but affected by EPF (Feather Falling)
+        let fall_dmg = calculate_damage_reduction(10.0, DamageSource::Fall, 20.0, 8.0, 10);
+        assert!((fall_dmg - 6.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_shield_blocking_direction() {
+        // Player facing +X (yaw = 0.0)
+        let pos = [0.0, 64.0, 0.0];
+        // Source in front at +X
+        assert!(can_shield_block(
+            0.0,
+            pos,
+            Some([5.0, 64.0, 0.0]),
+            DamageSource::Mob
+        ));
+        // Source behind at -X
+        assert!(!can_shield_block(
+            0.0,
+            pos,
+            Some([-5.0, 64.0, 0.0]),
+            DamageSource::Mob
+        ));
+
+        // Void damage cannot be blocked
+        assert!(!can_shield_block(
+            0.0,
+            pos,
+            Some([5.0, 64.0, 0.0]),
+            DamageSource::Void
+        ));
+    }
+
+    #[test]
+    fn test_attack_cooldown_scaling() {
+        let (dmg_0, kb_0, full_0) = calculate_attack_damage(10.0, 0, 10);
+        assert_eq!(dmg_0, 2.0); // 20%
+        assert_eq!(kb_0, 0.0);
+        assert!(!full_0);
+
+        let (dmg_50, kb_50, full_50) = calculate_attack_damage(10.0, 5, 10);
+        assert!((dmg_50 - 4.0).abs() < 1e-4); // 0.2 + 0.8*0.25 = 0.4 -> 4.0
+        assert_eq!(kb_50, 0.5);
+        assert!(!full_50);
+
+        let (dmg_100, kb_100, full_100) = calculate_attack_damage(10.0, 10, 10);
+        assert_eq!(dmg_100, 10.0);
+        assert_eq!(kb_100, 1.0);
+        assert!(full_100);
+    }
+
+    #[test]
+    fn test_bow_shot_charging() {
+        assert!(calculate_bow_shot(2).is_none());
+
+        let (spd_half, dmg_half, crit_half) = calculate_bow_shot(10).unwrap();
+        assert!((spd_half - 1.5).abs() < 1e-4);
+        assert!((dmg_half - 3.0).abs() < 1e-4);
+        assert!(!crit_half);
+
+        let (spd_full, dmg_full, crit_full) = calculate_bow_shot(20).unwrap();
+        assert_eq!(spd_full, 3.0);
+        assert_eq!(dmg_full, 8.0);
+        assert!(crit_full);
     }
 }

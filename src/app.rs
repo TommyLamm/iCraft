@@ -339,7 +339,8 @@ impl ApplicationHandler for App {
                                 MouseButton::Left if pressed => {
                                     state.left_mouse_pressed = state.handle_primary_press();
                                 }
-                                MouseButton::Right if pressed => state.handle_click(false),
+                                MouseButton::Right if pressed => state.handle_secondary_press(),
+                                MouseButton::Right if !pressed => state.handle_secondary_release(),
                                 _ => {}
                             }
                         }
@@ -652,6 +653,9 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
     } else if code == controls.sneak {
         state.keys.shift = pressed;
     } else if code == controls.time_speed {
+        if pressed && !event.repeat {
+            state.handle_swap_offhand_pressed();
+        }
         state.keys.f = pressed;
     } else if pressed {
         if code == controls.hotbar_1 {

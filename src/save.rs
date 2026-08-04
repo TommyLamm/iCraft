@@ -447,6 +447,8 @@ pub struct InventoryData {
     pub hotbar: Vec<Option<ItemStackData>>,
     pub main: Vec<Option<ItemStackData>>,
     pub armor: Vec<Option<ItemStackData>>,
+    #[serde(default)]
+    pub offhand: Option<ItemStackData>,
     pub selected: usize,
     pub dragged: Option<ItemStackData>,
     pub creative_drag_origin: Option<CreativeDragOrigin>,
@@ -569,6 +571,7 @@ impl From<&Inventory> for InventoryData {
                 .iter()
                 .map(|o| o.as_ref().map(|s| ItemStackData::from(s)))
                 .collect(),
+            offhand: inv.offhand.as_ref().map(ItemStackData::from),
             selected: inv.selected,
             dragged,
             creative_drag_origin,
@@ -594,6 +597,7 @@ impl InventoryData {
                 inv.armor[i] = opt.as_ref().map(|s| s.to_item_stack());
             }
         }
+        inv.offhand = self.offhand.as_ref().map(|s| s.to_item_stack());
         inv.selected = self.selected;
         match self.creative_drag_origin {
             Some(CreativeDragOrigin::Catalog) => {}
@@ -2443,6 +2447,7 @@ impl From<PreviousInventoryData> for InventoryData {
             hotbar: old.hotbar,
             main: old.main,
             armor: old.armor,
+            offhand: None,
             selected: old.selected,
             dragged: None,
             creative_drag_origin: None,
@@ -2529,6 +2534,7 @@ impl From<LegacyInventoryData> for InventoryData {
             hotbar: upgrade(old.hotbar),
             main: upgrade(old.main),
             armor: upgrade(old.armor),
+            offhand: None,
             selected: old.selected,
             dragged: None,
             creative_drag_origin: None,
@@ -2609,6 +2615,7 @@ mod tests {
                 })],
                 main: vec![None],
                 armor: vec![None],
+                offhand: None,
                 selected: 0,
                 dragged: None,
                 creative_drag_origin: None,
@@ -3907,5 +3914,34 @@ mod tests {
             restored_player.spawn_dimension,
             Some(crate::dimension::Dimension::Overworld)
         );
+    }
+
+    #[test]
+    fn offhand_save_roundtrip_and_legacy_migration() {
+        let mut inv = crate::inventory::Inventory::new();
+        let shield = crate::inventory::ItemStack::new(crate::inventory::Item::Shield, 1);
+        inv.offhand = Some(shield);
+
+        let data = InventoryData::from(&inv);
+        assert_eq!(
+            data.offhand.as_ref().unwrap().item,
+            crate::inventory::Item::Shield
+        );
+
+        let restored = data.to_inventory();
+        assert_eq!(
+            restored.offhand.unwrap().item,
+            crate::inventory::Item::Shield
+        );
+
+        // Test LegacyInventoryData conversion backward compatibility (where legacy data has no offhand field)
+        let legacy = LegacyInventoryData {
+            hotbar: vec![],
+            main: vec![],
+            armor: vec![],
+            selected: 0,
+        };
+        let migrated = InventoryData::from(legacy);
+        assert!(migrated.offhand.is_none());
     }
 }

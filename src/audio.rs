@@ -35,6 +35,8 @@ pub enum SoundId {
     Note(u8),
     FurnaceSmelt,
     FurnaceLit,
+    ShieldBlock,
+    ShieldBreak,
 }
 
 impl SoundId {
@@ -56,6 +58,8 @@ impl SoundId {
             SoundId::Note(note) => format!("note_{note}.wav"),
             SoundId::FurnaceSmelt => "furnace_smelt.wav".to_string(),
             SoundId::FurnaceLit => "furnace_lit.wav".to_string(),
+            SoundId::ShieldBlock => "shield_block.wav".to_string(),
+            SoundId::ShieldBreak => "shield_break.wav".to_string(),
         }
     }
 }
@@ -252,6 +256,34 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
                     let t = i as f32 / sample_rate as f32;
                     let env = (1.0 - t / duration).max(0.0);
                     val * env * 0.25
+                })
+                .collect()
+        }
+        SoundId::ShieldBlock => {
+            let duration = 0.15;
+            let noise = synth_noise(duration, sample_rate, seed ^ 0x5348_4C44);
+            noise
+                .into_iter()
+                .enumerate()
+                .map(|(i, val)| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - t / duration).max(0.0).powi(2);
+                    let thud = (2.0 * std::f32::consts::PI * 180.0 * t).sin() * 0.5;
+                    (thud + val * 0.4) * env
+                })
+                .collect()
+        }
+        SoundId::ShieldBreak => {
+            let duration = 0.35;
+            let noise = synth_noise(duration, sample_rate, seed ^ 0x5348_4252);
+            noise
+                .into_iter()
+                .enumerate()
+                .map(|(i, val)| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - t / duration).max(0.0).powi(3);
+                    let crunch = (2.0 * std::f32::consts::PI * 120.0 * t).sin() * 0.6;
+                    (crunch + val * 0.6) * env
                 })
                 .collect()
         }
