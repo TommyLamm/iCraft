@@ -47,7 +47,7 @@ section identity 錯誤。本計劃只做座標／儲存遷移，不混入新內
 - [x] 新 Chunk 格式寫 height descriptor 與有符號 section key。
 - [x] 舊 0..255 存檔映射到新世界 Y=0..255，-64..-1 與 256..319 為未生成／Air；
   不靜默重新生成玩家已修改區域。
-- [ ] 建 migration fixture、原檔備份與失敗不覆寫策略。
+- [x] 建 migration fixture、原檔備份與失敗不覆寫策略。
 - [x] 協議升版，ChunkData 明確攜帶 min section/count；限制解壓大小。
 
 ## 主要文件

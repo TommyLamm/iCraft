@@ -2311,6 +2311,7 @@ impl SaveManager {
             let serialized_region = bincode::serialize(region)
                 .map_err(|error| SaveError::Serialization(error.to_string()))?;
 
+            backup_region_file_if_needed(&region_file);
             atomic_write(&region_file, &serialized_region)
                 .map_err(|error| SaveError::io("atomic region replacement", &region_file, error))?;
             self.touch_region((dimension, rx, rz));
@@ -2352,6 +2353,7 @@ impl SaveManager {
         let serialized_region = bincode::serialize(region)
             .map_err(|error| SaveError::Serialization(error.to_string()))?;
 
+        backup_region_file_if_needed(&region_file);
         atomic_write(&region_file, &serialized_region)
             .map_err(|error| SaveError::io("atomic region replacement", &region_file, error))?;
         self.touch_region((dimension, rx, rz));
@@ -2470,6 +2472,15 @@ impl SaveManager {
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
 
         Ok((level, player))
+    }
+}
+
+fn backup_region_file_if_needed(region_file: &Path) {
+    if region_file.exists() {
+        let backup_file = region_file.with_extension("bin.bak");
+        if !backup_file.exists() {
+            let _ = fs::copy(region_file, backup_file);
+        }
     }
 }
 
@@ -4001,5 +4012,158 @@ mod tests {
         };
         let migrated = InventoryData::from(legacy);
         assert!(migrated.offhand.is_none());
+    }
+
+    #[test]
+    fn migration_fixture_legacy_0_to_255_preserves_data_and_creates_backup() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_migration_test_{}_{}",
+            std::process::id(),
+            unique
+        ));
+
+        // 1. Create a legacy 256-height format ChunkSaveData fixture (data_version = 0)
+        // representing a historical save at chunk (0, 0).
+        let total_voxels_256 = 16 * 256 * 16;
+        let mut legacy_blocks = vec![0u8; total_voxels_256];
+        let mut legacy_states = vec![0u8; total_voxels_256];
+        let mut legacy_sky = vec![15u8; total_voxels_256];
+        let mut legacy_block_light = vec![0u8; total_voxels_256];
+        let mut legacy_fluid = vec![0u8; total_voxels_256];
+
+        // Place custom blocks at y = 10, y = 100, y = 255
+        // Index formula in legacy flat array: (x * 256 + y) * 16 + z
+        let idx_y10 = (8 * 256 + 10) * 16 + 8;
+        let idx_y100 = (4 * 256 + 100) * 16 + 4;
+        let idx_y255 = (2 * 256 + 255) * 16 + 2;
+
+        legacy_blocks[idx_y10] = BlockType::DiamondBlock as u8;
+        legacy_blocks[idx_y100] = BlockType::Obsidian as u8;
+        legacy_blocks[idx_y255] = BlockType::GoldBlock as u8;
+        legacy_states[idx_y100] = 0b00000001; // custom block state bit
+
+        let legacy_save_data = ChunkSaveData {
+            chunk_x: 0,
+            chunk_z: 0,
+            blocks: compress_bytes(&legacy_blocks).unwrap(),
+            sky_light: compress_bytes(&legacy_sky).unwrap(),
+            block_light: compress_bytes(&legacy_block_light).unwrap(),
+            fluid_levels: compress_bytes(&legacy_fluid).unwrap(),
+            redstone_metadata: Vec::new(),
+            block_states: compress_bytes(&legacy_states).unwrap(),
+            mutation_revision: 5,
+            block_entities: Vec::new(),
+            data_version: 0,
+        };
+
+        // 2. Write the legacy save data into region r.0.0.bin manually using SaveManager
+        let mut manager = SaveManager::new(&world_dir);
+        let region_path = world_dir.join("regions").join("r.0.0.bin");
+        let backup_path = world_dir.join("regions").join("r.0.0.bin.bak");
+
+        // Write initial legacy region file
+        let legacy_bytes = bincode::serialize(&legacy_save_data).unwrap();
+        let mut initial_region = RegionData {
+            chunks: std::collections::HashMap::new(),
+        };
+        initial_region.chunks.insert((0, 0), legacy_bytes);
+        let serialized_initial = bincode::serialize(&initial_region).unwrap();
+        atomic_write(&region_path, &serialized_initial).unwrap();
+
+        assert!(region_path.exists());
+        assert!(!backup_path.exists());
+
+        // 3. Load the chunk via SaveManager in modern Overworld (min_y = -64, height = 384)
+        let loaded = manager.load_chunk(0, 0).expect("legacy chunk should load");
+        assert_eq!(loaded.data_version, 0);
+
+        let mut modern_chunk = Chunk::new(0, 0);
+        loaded.restore_to_chunk(&mut modern_chunk);
+
+        // Verify Y=0..255 block mapping and states
+        assert_eq!(
+            modern_chunk.get_block_local(8, 10, 8),
+            BlockType::DiamondBlock
+        );
+        assert_eq!(modern_chunk.get_block_local(4, 100, 4), BlockType::Obsidian);
+        assert_eq!(modern_chunk.get_block_state(4, 100, 4), 0b00000001);
+        assert_eq!(
+            modern_chunk.get_block_local(2, 255, 2),
+            BlockType::GoldBlock
+        );
+
+        // Verify sections Y < 0 (-64..-1) and Y >= 256 (256..319) remain unconfigured/empty Air
+        for wy in -64..0 {
+            assert_eq!(modern_chunk.get_block_local(8, wy, 8), BlockType::Air);
+        }
+        for wy in 256..384 {
+            assert_eq!(modern_chunk.get_block_local(8, wy, 8), BlockType::Air);
+        }
+
+        // 4. Modify and re-save chunk to trigger region update and original file backup
+        modern_chunk.set_block_local(8, -10, 8, BlockType::Bedrock);
+        let updated_save_data = ChunkSaveData::from_chunk(&modern_chunk);
+        assert_eq!(updated_save_data.data_version, 2);
+
+        manager.save_chunk(0, 0, updated_save_data).unwrap();
+
+        // Verify original file backup r.0.0.bin.bak was created during migration/save
+        assert!(
+            backup_path.exists(),
+            "original region file backup should exist after migration save"
+        );
+
+        let backup_bytes = fs::read(&backup_path).unwrap();
+        let backup_region: RegionData = bincode::deserialize(&backup_bytes).unwrap();
+        assert!(backup_region.chunks.contains_key(&(0, 0)));
+
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn test_corrupt_region_file_is_not_overwritten_on_save_failure() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "icraft_corrupt_save_test_{}_{}",
+            std::process::id(),
+            unique
+        ));
+
+        let mut manager = SaveManager::new(&world_dir);
+        let region_path = world_dir.join("regions").join("r.0.0.bin");
+        fs::create_dir_all(region_path.parent().unwrap()).unwrap();
+
+        // Write corrupt bytes to region file
+        let corrupt_content = b"INVALID_BINCODE_REGION_CORRUPT_BYTES_123456789";
+        fs::write(&region_path, corrupt_content).unwrap();
+
+        // Attempt to save a chunk into the corrupt region
+        let chunk = Chunk::new(0, 0);
+        let save_data = ChunkSaveData::from_chunk(&chunk);
+        let result = manager.save_chunk(0, 0, save_data);
+
+        // Verify save_chunk fails with RegionCorruption error
+        assert!(result.is_err());
+        if let Err(SaveError::RegionCorruption { path, .. }) = result {
+            assert_eq!(path, region_path);
+        } else {
+            panic!("expected SaveError::RegionCorruption");
+        }
+
+        // Verify the corrupt file on disk was NOT overwritten or wiped
+        let on_disk_bytes = fs::read(&region_path).unwrap();
+        assert_eq!(
+            on_disk_bytes, corrupt_content,
+            "corrupt region file must be preserved on disk without overwrite"
+        );
+
+        fs::remove_dir_all(world_dir).unwrap();
     }
 }

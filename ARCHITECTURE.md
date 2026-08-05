@@ -253,7 +253,9 @@ placement, fluid tick, light propagation, world mutation validation) now use
 
 Network protocol v10: `ChunkData` packet carries explicit `min_section_y: i8`
 and `section_count: u16`. Save format v2: `ChunkSaveData::data_version = 2`
-with height-aware flat array serialization.
+with height-aware flat array serialization. Legacy 0..255 format (data_version 0/1)
+maps into Y=0..255 with Y<0 and Y>=256 remaining empty/Air. SaveManager creates `.bin.bak`
+backups before modifying existing region files and aborts on deserialization corruption without overwriting.
 
 ```rust
 // Safe checked helpers in world.rs:
