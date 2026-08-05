@@ -1648,6 +1648,32 @@ fn apply_resource_pack(img: &mut RgbaImage) {
     }
 }
 
+/// Restore the local/remote player skin tiles after the general resource-pack
+/// pass. Player rendering uses atlas slots that do not overlap Piglin/Husk,
+/// preventing the F5 avatar from inheriting a hostile-mob head.
+fn compose_player_head_tiles(img: &mut RgbaImage) {
+    const SKIN_PATH: &str = "entity/player/wide/steve.png";
+    let (pack_dir, vanilla_dir) = resource_pack_dirs();
+    let pack_path = pack_dir.join(SKIN_PATH);
+    let vanilla_path = vanilla_dir.join(SKIN_PATH);
+    let source = if pack_path.is_file() {
+        image::open(pack_path)
+    } else {
+        image::open(vanilla_path)
+    };
+    let Ok(source) = source else {
+        return;
+    };
+
+    for tile in [
+        pack_tile_region(15, 8, SKIN_PATH, 8, 8, 8, 8),   // head front
+        pack_tile_region(13, 8, SKIN_PATH, 24, 8, 8, 8),  // head hair/back
+        pack_tile_region(15, 9, SKIN_PATH, 44, 20, 4, 12), // right arm front
+    ] {
+        paste_pack_tile(img, &tile, &source);
+    }
+}
+
 /// Enderman eyes are a separate emissive texture in the vanilla resource
 /// pack. Composite that layer over the head crop so the compact atlas keeps
 /// the normal purple eyes instead of rendering a featureless black face.
@@ -2726,6 +2752,7 @@ impl TextureAtlas {
         // Overlay the Stay True resource pack (with a vanilla fallback) over
         // the procedural base so every atlas tile uses real Minecraft art.
         apply_resource_pack(&mut img);
+        compose_player_head_tiles(&mut img);
         compose_enderman_eyes(&mut img);
         make_enderman_tiles_opaque(&mut img);
         make_dragon_tiles_opaque(&mut img);
@@ -2884,6 +2911,7 @@ mod tests {
         }
         let mut img = RgbaImage::new(256, 256);
         apply_resource_pack(&mut img);
+        compose_player_head_tiles(&mut img);
         compose_enderman_eyes(&mut img);
         make_enderman_tiles_opaque(&mut img);
         make_dragon_tiles_opaque(&mut img);

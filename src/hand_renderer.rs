@@ -1,4 +1,4 @@
-use crate::inventory::{Inventory, Item};
+use crate::inventory::{Inventory, Item, ToolType};
 use crate::state::Vertex;
 use glam::Vec3;
 
@@ -95,8 +95,31 @@ fn build_first_person_hand_base_mesh_into(
         let item_pos = fist_pos + Vec3::new(-0.08, 0.06, 0.25);
         if held_item.renders_flat() {
             let (tex_col, tex_row) = held_item.properties().tex_coords;
+            let tool_type = held_item.tool_properties().map(|tool| tool.tool_type);
+            let is_tool = tool_type.is_some();
+            let sprite_size = match tool_type {
+                Some(ToolType::Sword) => 0.68,
+                Some(ToolType::Pickaxe | ToolType::Axe | ToolType::Shovel) => 0.62,
+                _ if is_tool => 0.56,
+                _ => 0.3,
+            };
+            let sprite_pos = if is_tool {
+                fist_pos + Vec3::new(-0.16, 0.22, 0.2)
+            } else {
+                item_pos
+            };
+            let sprite_roll = if is_tool { -0.72 } else { 0.0 };
             add_sprite_view(
-                vertices, indices, 0.3, item_pos, hand_yaw, hand_pitch, tex_col, tex_row, 1.0,
+                vertices,
+                indices,
+                sprite_size,
+                sprite_pos,
+                hand_yaw,
+                hand_pitch,
+                sprite_roll,
+                tex_col,
+                tex_row,
+                1.0,
             );
         } else if let Some(face_tiles) = held_item_face_tiles(held_item) {
             let held_size = if held_item == Item::EndPortalFrame {
@@ -191,6 +214,7 @@ fn add_sprite_view(
     pivot: Vec3,
     rot_yaw: f32,
     rot_pitch: f32,
+    rot_roll: f32,
     tex_col: u32,
     tex_row: u32,
     light_val: f32,
@@ -207,14 +231,21 @@ fn add_sprite_view(
     let sin_pitch = rot_pitch.sin();
     let cos_yaw = rot_yaw.cos();
     let sin_yaw = rot_yaw.sin();
+    let cos_roll = rot_roll.cos();
+    let sin_roll = rot_roll.sin();
 
     let start_idx = vertices.len() as u32;
 
     for (local_pos, uv) in local_corners.iter() {
+        let v1 = Vec3::new(
+            local_pos.x * cos_roll - local_pos.y * sin_roll,
+            local_pos.x * sin_roll + local_pos.y * cos_roll,
+            local_pos.z,
+        );
         let v2 = Vec3::new(
-            local_pos.x,
-            local_pos.y * cos_pitch - local_pos.z * sin_pitch,
-            local_pos.y * sin_pitch + local_pos.z * cos_pitch,
+            v1.x,
+            v1.y * cos_pitch - v1.z * sin_pitch,
+            v1.y * sin_pitch + v1.z * cos_pitch,
         );
         let v3 = Vec3::new(
             v2.x * cos_yaw + v2.z * sin_yaw,
@@ -442,6 +473,53 @@ mod tests {
         let (block_vertices, block_indices) = build_first_person_hand_mesh(&block_inv, 0.0, 0.0);
         assert_eq!(block_vertices.len(), empty_vertices.len() + 24);
         assert_eq!(block_indices.len(), empty_indices.len() + 36);
+    }
+
+    #[test]
+    fn minecraft_tools_render_as_large_angled_handheld_sprites() {
+        let tools = [
+            Item::StoneSword,
+            Item::StonePickaxe,
+            Item::StoneAxe,
+            Item::StoneShovel,
+            Item::IronSword,
+            Item::IronPickaxe,
+            Item::IronAxe,
+            Item::IronShovel,
+            Item::DiamondSword,
+            Item::DiamondPickaxe,
+            Item::DiamondAxe,
+            Item::DiamondShovel,
+            Item::Shears,
+        ];
+
+        for tool in tools {
+            let mut inv = Inventory::new();
+            inv.hotbar[0] = Some(ItemStack::new(tool, 1));
+            let (vertices, indices) = build_first_person_hand_mesh(&inv, 0.0, 0.0);
+            assert_eq!(vertices.len(), 28, "{tool:?} should use one sprite quad");
+            assert_eq!(indices.len(), 48, "{tool:?} should be double-sided");
+
+            let sprite = &vertices[24..28];
+            let min_x = sprite
+                .iter()
+                .map(|vertex| vertex.position[0])
+                .fold(f32::INFINITY, f32::min);
+            let max_x = sprite
+                .iter()
+                .map(|vertex| vertex.position[0])
+                .fold(f32::NEG_INFINITY, f32::max);
+            let min_y = sprite
+                .iter()
+                .map(|vertex| vertex.position[1])
+                .fold(f32::INFINITY, f32::min);
+            let max_y = sprite
+                .iter()
+                .map(|vertex| vertex.position[1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(max_x - min_x > 0.45, "{tool:?} should be visibly wide");
+            assert!(max_y - min_y > 0.45, "{tool:?} should be visibly tall");
+        }
     }
 
     #[test]

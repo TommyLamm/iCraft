@@ -43,6 +43,80 @@ const ENTITY_SNAPSHOT_CAPACITY: usize = 8;
 const ENTITY_INTERPOLATION_DELAY: f64 = 0.1;
 const ENTITY_SNAP_DISTANCE: f32 = 6.0;
 const PLAYER_CORRECTION_SNAP_DISTANCE: f32 = 4.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CameraPerspective {
+    #[default]
+    FirstPerson,
+    ThirdPersonBack,
+    ThirdPersonFront,
+}
+
+impl CameraPerspective {
+    pub fn next(self) -> Self {
+        match self {
+            Self::FirstPerson => Self::ThirdPersonBack,
+            Self::ThirdPersonBack => Self::ThirdPersonFront,
+            Self::ThirdPersonFront => Self::FirstPerson,
+        }
+    }
+
+    pub fn is_third_person(self) -> bool {
+        self != Self::FirstPerson
+    }
+}
+
+fn perspective_camera_transform(
+    perspective: CameraPerspective,
+    yaw: f32,
+    pitch: f32,
+) -> (Vec3, f32, f32) {
+    let forward = Vec3::new(
+        yaw.cos() * pitch.cos(),
+        pitch.sin(),
+        yaw.sin() * pitch.cos(),
+    )
+    .normalize_or_zero();
+    match perspective {
+        CameraPerspective::FirstPerson => (Vec3::ZERO, yaw, pitch),
+        CameraPerspective::ThirdPersonBack => (-forward * 4.0, yaw, pitch),
+        CameraPerspective::ThirdPersonFront => {
+            (forward * 4.0, yaw + std::f32::consts::PI, -pitch)
+        }
+    }
+}
+
+#[cfg(test)]
+mod camera_perspective_tests {
+    use super::*;
+
+    #[test]
+    fn f5_cycles_like_minecraft() {
+        let first = CameraPerspective::FirstPerson;
+        let back = first.next();
+        let front = back.next();
+        assert_eq!(back, CameraPerspective::ThirdPersonBack);
+        assert_eq!(front, CameraPerspective::ThirdPersonFront);
+        assert_eq!(front.next(), CameraPerspective::FirstPerson);
+    }
+
+    #[test]
+    fn front_camera_sits_ahead_and_looks_back_at_player() {
+        let (offset, view_yaw, view_pitch) = perspective_camera_transform(
+            CameraPerspective::ThirdPersonFront,
+            0.35,
+            -0.2,
+        );
+        let view_forward = Vec3::new(
+            view_yaw.cos() * view_pitch.cos(),
+            view_pitch.sin(),
+            view_yaw.sin() * view_pitch.cos(),
+        )
+        .normalize();
+        assert!((offset.length() - 4.0).abs() < 1e-5);
+        assert!(offset.normalize().dot(view_forward) < -0.999);
+    }
+}
 const REMOTE_MAX_EXTRAPOLATION: f64 = 0.1;
 const REMOTE_MAX_EXTRAPOLATION_SPEED: f32 = 40.0;
 const REMOTE_AUTHORITY_MAX_SPEED: f32 = 12.0;
@@ -4567,9 +4641,8 @@ pub struct State {
     pub void_damage_timer: f32,
     pub world_time: crate::camera::WorldTime,
     pub show_debug: bool,
-    /// F5 toggles third-person camera. When true the local player model is
-    /// rendered and the camera sits behind the player.
-    pub third_person: bool,
+    /// F5 cycles first person, third-person back, and third-person front.
+    pub camera_perspective: CameraPerspective,
     pub entity_manager: crate::entity::EntityManager,
     mob_instanced_pipeline: wgpu::RenderPipeline,
     particle_instanced_pipeline: wgpu::RenderPipeline,
@@ -6164,7 +6237,7 @@ impl State {
             void_damage_timer: 0.0,
             world_time,
             show_debug,
-            third_person: false,
+            camera_perspective: CameraPerspective::FirstPerson,
             entity_manager: crate::entity::EntityManager::new(),
             mob_instanced_pipeline,
             particle_instanced_pipeline,
@@ -9326,18 +9399,19 @@ impl State {
             .lerp(self.player_physics.position, alpha);
 
         let eye_height = if self.keys.shift { 1.4 } else { 1.6 };
-        if self.third_person {
-            let forward = Vec3::new(
-                self.camera.yaw.cos() * self.camera.pitch.cos(),
-                self.camera.pitch.sin(),
-                self.camera.yaw.sin() * self.camera.pitch.cos(),
-            )
-            .normalize_or_zero();
-            self.camera.position =
-                interp_player_pos + Vec3::new(0.0, eye_height, 0.0) - forward * 4.0;
-        } else {
-            self.camera.position = interp_player_pos + Vec3::new(0.0, eye_height, 0.0);
-        }
+        let player_eye = interp_player_pos + Vec3::new(0.0, eye_height, 0.0);
+        let (camera_offset, view_yaw, view_pitch) = perspective_camera_transform(
+            self.camera_perspective,
+            self.camera.yaw,
+            self.camera.pitch,
+        );
+        self.camera.position = player_eye + camera_offset;
+        let view_camera = Camera::new(
+            self.camera.position,
+            view_yaw,
+            view_pitch,
+            self.camera.fov,
+        );
         let is_underwater = self.chunk_manager.get_block(
             self.camera.position.x.floor() as i32,
             self.camera.position.y.floor() as i32,
@@ -9345,7 +9419,7 @@ impl State {
         ) == BlockType::Water;
 
         self.camera_uniform.update_view_proj(
-            &self.camera,
+            &view_camera,
             self.config.width as f32 / self.config.height as f32,
             self.chunk_manager.render_distance as u32,
             &self.world_time,
@@ -12802,7 +12876,7 @@ impl State {
         self.perf_counters.frustum_culled_entities = entities_frustum_culled;
         self.perf_counters.occlusion_culled_entities = entities_occlusion_culled;
 
-        if self.third_person {
+        if self.camera_perspective.is_third_person() {
             crate::mob_renderer::render_local_player(
                 self.player_physics.position,
                 std::f32::consts::FRAC_PI_2 - self.camera.yaw,
@@ -12888,7 +12962,7 @@ impl State {
 
         // Compile first-person hand mesh in view space. Hidden in third-person.
         let hand_prepare_started = Instant::now();
-        if !self.third_person {
+        if !self.camera_perspective.is_third_person() {
             let speed_2d = Vec3::new(
                 self.player_physics.velocity.x,
                 0.0,
@@ -15661,7 +15735,11 @@ impl State {
         total_draw_calls += u64::from(!self.particle_instances_scratch.is_empty());
         total_draw_calls += u64::from(self.mining_target.is_some() && self.mining_progress > 0.0);
         total_draw_calls +=
-            u64::from(self.hand_num_indices > 0 && !self.third_person && !self.is_paused);
+            u64::from(
+                self.hand_num_indices > 0
+                    && !self.camera_perspective.is_third_person()
+                    && !self.is_paused,
+            );
         if self.is_paused {
             total_draw_calls += 2;
         } else {
@@ -15953,7 +16031,10 @@ impl State {
             // camera with a very near plane so the view-space model never
             // clips into world geometry. Hidden in third-person mode and when
             // the game is paused.
-            if self.hand_num_indices > 0 && !self.third_person && !self.is_paused {
+            if self.hand_num_indices > 0
+                && !self.camera_perspective.is_third_person()
+                && !self.is_paused
+            {
                 render_pass.set_pipeline(&self.hand_pipeline);
                 render_pass.set_bind_group(0, &self.hand_camera_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.hand_vertex_buffer.slice(..));

@@ -596,7 +596,7 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
         return false;
     }
     if code == state.settings.controls.perspective && pressed && !event.repeat {
-        state.third_person = !state.third_person;
+        state.camera_perspective = state.camera_perspective.next();
         return false;
     }
     // Q throws items onto the ground: the held hotbar stack while playing, or
