@@ -3898,6 +3898,8 @@ mod tests {
         let chest_stub = BlockEntity::Chest(ChestBlockEntity {
             inventory: crate::inventory::ContainerInventory::new(),
             custom_name: Some("Secret Stash".to_string()),
+            loot_table: None,
+            loot_seed: None,
         });
         chunk
             .insert_block_entity(1, 2, 3, chest_stub.clone())

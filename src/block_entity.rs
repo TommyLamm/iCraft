@@ -8,6 +8,35 @@ use serde::{Deserialize, Serialize};
 pub struct ChestBlockEntity {
     pub custom_name: Option<String>,
     pub inventory: crate::inventory::ContainerInventory,
+    #[serde(default)]
+    pub loot_table: Option<String>,
+    #[serde(default)]
+    pub loot_seed: Option<u64>,
+}
+
+impl ChestBlockEntity {
+    pub fn ensure_loot_generated(&mut self, world_seed: u32, pos: (i32, i32, i32)) {
+        if let Some(table_str) = self.loot_table.take() {
+            let seed = self.loot_seed.take().unwrap_or_else(|| {
+                let mut state = (world_seed as u64)
+                    .wrapping_add((pos.0 as u64).wrapping_mul(0x9E37_79B9))
+                    .wrapping_add((pos.1 as u64).wrapping_mul(0x85EB_CA6B))
+                    .wrapping_add((pos.2 as u64).wrapping_mul(0xC2B2_AE35));
+                if state == 0 {
+                    state = 1;
+                }
+                state
+            });
+            if let Some(id) = crate::loot::LootTableId::from_str(&table_str) {
+                let rolled = crate::loot::roll_loot_table(id, seed);
+                for (slot_idx, item_stack) in rolled.into_iter().enumerate() {
+                    if slot_idx < self.inventory.slots.len() {
+                        self.inventory.slots[slot_idx] = Some(item_stack);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,10 +257,18 @@ impl Default for SignBlockEntity {
 pub type SignStub = SignBlockEntity;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnerBlockEntity {
+    pub entity_type: crate::entity::EntityType,
+    #[serde(default)]
+    pub spawn_delay: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockEntity {
     Chest(ChestBlockEntity),
     Furnace(FurnaceBlockEntity),
     Sign(SignBlockEntity),
+    Spawner(SpawnerBlockEntity),
 }
 
 impl BlockEntity {
@@ -244,6 +281,7 @@ impl BlockEntity {
                 matches!(block_type, BlockType::Furnace | BlockType::FurnaceLit)
             }
             BlockEntity::Sign(_) => matches!(block_type, BlockType::OakSign),
+            BlockEntity::Spawner(_) => matches!(block_type, BlockType::Spawner),
         }
     }
 
@@ -253,6 +291,7 @@ impl BlockEntity {
             BlockEntity::Chest(c) => c.custom_name.as_ref().map_or(0, |s| s.capacity()),
             BlockEntity::Furnace(f) => f.custom_name.as_ref().map_or(0, |s| s.capacity()),
             BlockEntity::Sign(s) => s.lines.iter().map(|l| l.capacity()).sum(),
+            BlockEntity::Spawner(_) => 0,
         };
         base + extra
     }
@@ -263,6 +302,8 @@ pub fn default_stub_for_block(block_type: BlockType) -> Option<BlockEntity> {
         BlockType::Chest | BlockType::EndCityChest => Some(BlockEntity::Chest(ChestBlockEntity {
             custom_name: None,
             inventory: crate::inventory::ContainerInventory::new(),
+            loot_table: None,
+            loot_seed: None,
         })),
         BlockType::Furnace | BlockType::FurnaceLit => {
             Some(BlockEntity::Furnace(FurnaceBlockEntity::new()))
@@ -281,6 +322,8 @@ mod tests {
         let chest = BlockEntity::Chest(ChestBlockEntity {
             custom_name: None,
             inventory: crate::inventory::ContainerInventory::new(),
+            loot_table: None,
+            loot_seed: None,
         });
         assert!(chest.matches_block_type(BlockType::Chest));
         assert!(chest.matches_block_type(BlockType::EndCityChest));

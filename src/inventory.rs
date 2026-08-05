@@ -211,6 +211,12 @@ pub enum Item {
     DiamondLeggings,
     DiamondBoots,
     Shield,
+    Saddle,
+    Emerald,
+    Book,
+    Paper,
+    EnchantedBook,
+    Compass,
 }
 
 pub const ALL_ITEMS: &[Item] = &[
@@ -1083,7 +1089,13 @@ impl Item {
             | Item::NetherStar
             | Item::BlazeRod
             | Item::Bed
-            | Item::ShulkerShell => Some(CreativeTab::Misc),
+            | Item::ShulkerShell
+            | Item::Saddle
+            | Item::Emerald
+            | Item::Book
+            | Item::Paper
+            | Item::EnchantedBook
+            | Item::Compass => Some(CreativeTab::Misc),
             Item::OakSlab => Some(CreativeTab::Blocks),
             Item::CobblestoneSlab => Some(CreativeTab::Blocks),
             Item::OakStair => Some(CreativeTab::Blocks),
@@ -2401,6 +2413,12 @@ impl Item {
             | Item::EndCrystal
             | Item::BlazeRod
             | Item::ShulkerShell
+            | Item::Saddle
+            | Item::Emerald
+            | Item::Book
+            | Item::Paper
+            | Item::EnchantedBook
+            | Item::Compass
             | Item::OakSlab
             | Item::CobblestoneSlab
             | Item::OakStair
@@ -2429,6 +2447,12 @@ impl Item {
                     Item::EndCrystal => ("End Crystal", 64, false, None, (4, 4)),
                     Item::BlazeRod => ("Blaze Rod", 64, false, None, (5, 4)),
                     Item::ShulkerShell => ("Shulker Shell", 64, false, None, (14, 14)),
+                    Item::Saddle => ("Saddle", 1, false, None, (8, 6)),
+                    Item::Emerald => ("Emerald", 64, false, None, (11, 1)),
+                    Item::Book => ("Book", 64, false, None, (11, 3)),
+                    Item::Paper => ("Paper", 64, false, None, (10, 3)),
+                    Item::EnchantedBook => ("Enchanted Book", 1, false, None, (11, 3)),
+                    Item::Compass => ("Compass", 64, false, None, (6, 3)),
                     Item::OakSlab => ("Oak Slab", 64, true, Some(BlockType::OakSlab), (6, 0)),
                     Item::CobblestoneSlab => (
                         "Cobblestone Slab",
@@ -2593,6 +2617,13 @@ impl Item {
             BlockType::OakLadder => Item::OakLadder,
             BlockType::OakSign => Item::OakSign,
             BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => Item::Air,
+            BlockType::Spawner => Item::Air,
+            BlockType::MossyCobblestone => Item::Cobblestone,
+            BlockType::DirtPath => Item::Dirt,
+            BlockType::NetherWartCrop => Item::NetherWart,
+            BlockType::EndStoneBrick => Item::EndStone,
+            BlockType::RespawnAnchor => Item::Obsidian,
+            BlockType::EndGateway => Item::Air,
         }
     }
 }

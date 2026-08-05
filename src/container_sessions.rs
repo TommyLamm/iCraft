@@ -112,6 +112,29 @@ impl ContainerSessionManager {
         }
     }
 
+    pub fn ensure_chest_loot_generated(
+        chunk_manager: &mut ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+        world_seed: u32,
+    ) {
+        let (cx, cz) = (
+            x.div_euclid(CHUNK_WIDTH as i32),
+            z.div_euclid(CHUNK_DEPTH as i32),
+        );
+        let (bx, by, bz) = (
+            x.rem_euclid(CHUNK_WIDTH as i32) as u8,
+            y as i16,
+            z.rem_euclid(CHUNK_DEPTH as i32) as u8,
+        );
+        if let Some(chunk) = chunk_manager.chunks.get_mut(&(cx, cz)) {
+            if let Some(BlockEntity::Chest(chest_be)) = chunk.get_block_entity_mut(bx, by, bz) {
+                chest_be.ensure_loot_generated(world_seed, (x, y, z));
+            }
+        }
+    }
+
     pub fn get_single_chest_inventory(
         chunk_manager: &ChunkManager,
         x: i32,
@@ -199,6 +222,8 @@ impl ContainerSessionManager {
                     let updated = BlockEntity::Chest(ChestBlockEntity {
                         inventory,
                         custom_name: None,
+                        loot_table: None,
+                        loot_seed: None,
                     });
                     let _ = chunk.insert_block_entity(bx, by, bz, updated);
                     chunk_manager.dirty_chunks.mark_dirty(cx, cz);

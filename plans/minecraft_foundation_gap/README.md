@@ -82,7 +82,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 07 | [戰鬥、裝備、副手與蓄力使用](07_combat_equipment_offhand_and_item_use.md) | 已完成 |
 | 08 | [有符號垂直世界遷移](08_signed_vertical_world_migration.md) | 已完成 |
 | 09 | [Overworld 地形、生態與自然模擬](09_overworld_terrain_biomes_and_block_simulation.md) | 已完成 |
-| 10 | [程序化結構、戰利品與維度進度](10_structures_loot_and_dimension_progression.md) | 待執行 |
+| 10 | [程序化結構、戰利品與維度進度](10_structures_loot_and_dimension_progression.md) | 已完成 |
 | 11 | [生物生態、生成與寵物](11_mob_ecology_spawning_and_pets.md) | 待執行 |
 | 12 | [村莊、交易、POI 與襲擊](12_villages_trading_poi_and_raids.md) | 待執行 |
 | 13 | [載具、騎乘、導航與釣魚](13_transport_mounts_navigation_and_fishing.md) | 待執行 |

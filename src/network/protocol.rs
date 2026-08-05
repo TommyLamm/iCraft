@@ -829,6 +829,8 @@ mod tests {
                 crate::block_entity::ChestBlockEntity {
                     inventory: crate::inventory::ContainerInventory::new(),
                     custom_name: None,
+                    loot_table: None,
+                    loot_seed: None,
                 },
             )),
         };

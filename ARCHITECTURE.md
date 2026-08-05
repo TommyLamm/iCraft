@@ -217,7 +217,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | --- | --- |
 | App lifecycle and menu | `main.rs`, `app.rs`, `menu.rs` |
 | Composition, simulation, UI, GPU submission | `state.rs` |
-| World/chunks/generation | `world.rs`, `chunk_manager.rs`, `dimension.rs`, `worldgen/{mod, climate, density, surface, carver, ore, feature}.rs` |
+| World/chunks/generation & structures | `world.rs`, `chunk_manager.rs`, `dimension.rs`, `worldgen/{mod, climate, density, surface, carver, ore, feature}.rs`, `structure/{types, placement, gen/*, manager, locate}.rs`, `loot.rs` |
 | Lighting, fluids, block targeting | `lighting.rs`, `fluid.rs`, `interaction.rs` |
 | Terrain scheduling/rendering | `chunk_schedule.rs`, `chunk_render.rs`, `culling.rs`, `shader.wgsl` |
 | Player, recipes, gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `recipes.rs`, `crafting.rs` |

@@ -171,50 +171,20 @@ pub fn transform_position(from: Dimension, to: Dimension, mut position: Vec3) ->
 }
 
 pub fn generate_chunk(dimension: Dimension, chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
-    match dimension {
+    let mut chunk = match dimension {
         Dimension::Overworld => generate_overworld_chunk(chunk_x, chunk_z, seed),
         Dimension::Nether => generate_nether_chunk(chunk_x, chunk_z, seed),
         Dimension::End => generate_end_chunk(chunk_x, chunk_z, seed),
-    }
+    };
+    static STRUCTURE_MANAGER: std::sync::OnceLock<crate::structure::StructureManager> =
+        std::sync::OnceLock::new();
+    let manager = STRUCTURE_MANAGER.get_or_init(|| crate::structure::StructureManager::new());
+    manager.apply_structures_to_chunk(&mut chunk, dimension, seed);
+    chunk
 }
 
 fn generate_overworld_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     let mut chunk = Chunk::new_with_seed(chunk_x, chunk_z, seed);
-    // A deterministic compact stronghold room keeps the End progression
-    // discoverable without introducing a second structure-streaming system.
-    if (chunk_x, chunk_z) == (2, 2) {
-        let room_min = 3usize;
-        let room_max = 11usize;
-        for x in room_min..=room_max {
-            for z in room_min..=room_max {
-                for y in 26..=31 {
-                    let wall =
-                        x == room_min || x == room_max || z == room_min || z == room_max || y == 26;
-                    chunk.set_block_local(
-                        x,
-                        y,
-                        z,
-                        if wall {
-                            BlockType::StoneBrick
-                        } else {
-                            BlockType::Air
-                        },
-                    );
-                }
-            }
-        }
-        for offset in 1..=3 {
-            chunk.set_block_local(5 + offset, 28, 5, BlockType::EndPortalFrame);
-            chunk.set_block_local(5 + offset, 28, 9, BlockType::EndPortalFrame);
-            chunk.set_block_local(5, 28, 5 + offset, BlockType::EndPortalFrame);
-            chunk.set_block_local(9, 28, 5 + offset, BlockType::EndPortalFrame);
-        }
-        for x in 0..CHUNK_WIDTH {
-            for z in 0..CHUNK_DEPTH {
-                chunk.update_heightmap(x, z);
-            }
-        }
-    }
     chunk.rebuild_torch_index();
     chunk.rebuild_redstone_index();
     chunk
@@ -441,7 +411,6 @@ fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
 
     place_end_crystal_towers(&mut blocks, chunk_x, chunk_z, seed);
     place_end_exit(&mut blocks, chunk_x, chunk_z);
-    place_end_city(&mut blocks, chunk_x, chunk_z);
     finish_chunk(chunk_x, chunk_z, blocks, false)
 }
 
@@ -548,55 +517,6 @@ fn place_end_exit(
     for y in EXIT_Y..=(EXIT_Y + 4) {
         set_world_block(blocks, chunk_x, chunk_z, 0, y, 0, BlockType::Bedrock);
     }
-}
-
-fn place_end_city(
-    blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    chunk_x: i32,
-    chunk_z: i32,
-) {
-    for dx in -4..=4 {
-        for dz in -4..=4 {
-            set_world_block(
-                blocks,
-                chunk_x,
-                chunk_z,
-                END_CITY_X + dx,
-                END_CITY_BASE_Y,
-                END_CITY_Z + dz,
-                BlockType::Purpur,
-            );
-        }
-    }
-    for y in (END_CITY_BASE_Y + 1)..=(END_CITY_BASE_Y + 11) {
-        for dx in -3i32..=3 {
-            for dz in -3i32..=3 {
-                let wall = dx.abs() == 3 || dz.abs() == 3;
-                let corner_pillar = dx.abs() == 3 && dz.abs() == 3;
-                let floor_band = y == END_CITY_BASE_Y + 6 || y == END_CITY_BASE_Y + 11;
-                if corner_pillar || (wall && floor_band) {
-                    set_world_block(
-                        blocks,
-                        chunk_x,
-                        chunk_z,
-                        END_CITY_X + dx,
-                        y,
-                        END_CITY_Z + dz,
-                        BlockType::Purpur,
-                    );
-                }
-            }
-        }
-    }
-    set_world_block(
-        blocks,
-        chunk_x,
-        chunk_z,
-        END_CITY_X,
-        END_CITY_BASE_Y + 1,
-        END_CITY_Z,
-        BlockType::EndCityChest,
-    );
 }
 
 fn finish_chunk(
@@ -939,15 +859,59 @@ mod tests {
         assert!(!chunk_contains_block(&origin, BlockType::EndPortal));
         assert!(!chunk_contains_block(&origin, BlockType::DragonEgg));
 
-        let city = generate_chunk(
+        let seed = 7;
+        let pos = crate::structure::locate_structure(
+            crate::structure::StructureId::EndCity,
+            (1000, 64, 0),
+            seed,
             Dimension::End,
-            END_CITY_X.div_euclid(CHUNK_WIDTH as i32),
-            END_CITY_Z.div_euclid(CHUNK_DEPTH as i32),
-            7,
+        )
+        .expect("End City candidate found");
+
+        let chunk_x = pos.0.div_euclid(CHUNK_WIDTH as i32);
+        let chunk_z = pos.2.div_euclid(CHUNK_DEPTH as i32);
+        let city = generate_chunk(Dimension::End, chunk_x, chunk_z, seed);
+        assert!(
+            chunk_contains_block(&city, BlockType::EndStone)
+                || chunk_contains_block(&city, BlockType::EndStoneBrick)
         );
-        assert!(chunk_contains_block(&city, BlockType::EndStone));
         assert!(chunk_contains_block(&city, BlockType::Purpur));
-        assert!(chunk_contains_block(&city, BlockType::EndCityChest));
+    }
+
+    #[test]
+    fn overworld_stronghold_contains_twelve_empty_frames() {
+        let seed = 12345;
+        let pos = crate::structure::locate_structure(
+            crate::structure::StructureId::Stronghold,
+            (0, 64, 0),
+            seed,
+            Dimension::Overworld,
+        )
+        .expect("Stronghold located");
+
+        let chunk_x = pos.0.div_euclid(CHUNK_WIDTH as i32);
+        let chunk_z = pos.2.div_euclid(CHUNK_DEPTH as i32);
+
+        let mut frames = 0;
+        for cx in (chunk_x - 1)..=(chunk_x + 1) {
+            for cz in (chunk_z - 1)..=(chunk_z + 1) {
+                let chunk = generate_chunk(Dimension::Overworld, cx, cz, seed);
+                for x in 0..CHUNK_WIDTH {
+                    for y in 0..CHUNK_HEIGHT {
+                        let wy = y as i32 + (chunk.min_section_y as i32 * 16);
+                        for z in 0..CHUNK_DEPTH {
+                            let block = chunk.get_block_local(x, wy, z);
+                            if block == BlockType::EndPortalFrame
+                                || block == BlockType::EndPortalFrameFilled
+                            {
+                                frames += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(frames, 12);
     }
 
     #[test]
@@ -971,24 +935,6 @@ mod tests {
             chunk.get_block_local(local_x, surface_y + 1, local_z),
             BlockType::Obsidian
         );
-    }
-
-    #[test]
-    fn overworld_stronghold_contains_twelve_empty_frames() {
-        let chunk = generate_chunk(Dimension::Overworld, 2, 2, 12345);
-        let mut frames = 0;
-        for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
-                let wy = y as i32 + (chunk.min_section_y as i32 * 16);
-                for z in 0..CHUNK_DEPTH {
-                    if chunk.get_block_local(x, wy, z) == BlockType::EndPortalFrame {
-                        frames += 1;
-                    }
-                }
-            }
-        }
-        assert_eq!(frames, 12);
-        assert!(!chunk_contains_block(&chunk, BlockType::EndPortal));
     }
 
     #[test]

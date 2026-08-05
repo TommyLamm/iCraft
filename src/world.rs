@@ -430,6 +430,13 @@ pub enum BlockType {
     OakSapling = 105,
     BirchSapling = 106,
     SpruceSapling = 107,
+    Spawner = 108,
+    MossyCobblestone = 109,
+    DirtPath = 110,
+    NetherWartCrop = 111,
+    EndStoneBrick = 112,
+    RespawnAnchor = 113,
+    EndGateway = 114,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1612,6 +1619,62 @@ impl BlockType {
                     light_emission: 0,
                 }
             }
+            BlockType::Spawner => BlockProperties {
+                name: "Mob Spawner",
+                hardness: 5.0,
+                render_type: RenderType::Cutout,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::MossyCobblestone => BlockProperties {
+                name: "Mossy Cobblestone",
+                hardness: 2.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::DirtPath => BlockProperties {
+                name: "Dirt Path",
+                hardness: 0.6,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::NetherWartCrop => BlockProperties {
+                name: "Nether Wart",
+                hardness: 0.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::EndStoneBrick => BlockProperties {
+                name: "End Stone Bricks",
+                hardness: 3.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::RespawnAnchor => BlockProperties {
+                name: "Respawn Anchor",
+                hardness: 5.0,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 3,
+            },
+            BlockType::EndGateway => BlockProperties {
+                name: "End Gateway",
+                hardness: -1.0,
+                render_type: RenderType::Translucent,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 15,
+            },
         }
     }
 
@@ -1801,6 +1864,19 @@ impl BlockType {
             BlockType::OakLadder => (3, 5),
             BlockType::OakSign => (6, 0),
             BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => (4, 0),
+            BlockType::Spawner => (1, 4),
+            BlockType::MossyCobblestone => (4, 2),
+            BlockType::DirtPath => {
+                if face_idx == 4 {
+                    (6, 5)
+                } else {
+                    (2, 0)
+                }
+            }
+            BlockType::NetherWartCrop => (2, 6),
+            BlockType::EndStoneBrick => (15, 10),
+            BlockType::RespawnAnchor => (14, 11),
+            BlockType::EndGateway => (14, 10),
         }
     }
 }
@@ -6552,6 +6628,8 @@ mod tests {
         let chest_entity = BlockEntity::Chest(ChestBlockEntity {
             inventory: crate::inventory::ContainerInventory::new(),
             custom_name: None,
+            loot_table: None,
+            loot_seed: None,
         });
         // Valid insert
         assert_eq!(

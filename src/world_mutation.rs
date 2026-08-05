@@ -298,6 +298,8 @@ mod tests {
         let chest_stub = BlockEntity::Chest(ChestBlockEntity {
             inventory: crate::inventory::ContainerInventory::new(),
             custom_name: None,
+            loot_table: None,
+            loot_seed: None,
         });
         let req = BlockMutationRequest {
             pos: (2, 64, 2),

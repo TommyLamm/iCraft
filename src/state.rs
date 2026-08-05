@@ -700,6 +700,8 @@ mod remote_sync_tests {
         let chest_stub = BlockEntity::Chest(ChestBlockEntity {
             inventory: crate::inventory::ContainerInventory::new(),
             custom_name: Some("Host Chest".to_string()),
+            loot_table: None,
+            loot_seed: None,
         });
 
         // Insert at revision 5
@@ -2391,6 +2393,19 @@ impl State {
         let z = pos.z.floor() as i32;
         let feet = self.chunk_manager.get_block(x, y, z);
         let body = self.chunk_manager.get_block(x, y + 1, z);
+        if feet == BlockType::EndGateway || body == BlockType::EndGateway {
+            if self.current_dimension == crate::dimension::Dimension::End {
+                let dist = pos.length();
+                let target_pos = if dist < 300.0 {
+                    glam::Vec3::new(1000.0, 65.0, 0.0)
+                } else {
+                    glam::Vec3::new(0.0, 65.0, 0.0)
+                };
+                self.player_physics.position = target_pos;
+                self.portal_cooldown = 2.0;
+                return;
+            }
+        }
         if feet == BlockType::EndPortal || body == BlockType::EndPortal {
             let target = if self.current_dimension == crate::dimension::Dimension::End {
                 crate::dimension::Dimension::Overworld
@@ -2485,6 +2500,12 @@ impl State {
         }
         if events.dragon_completion.is_some() {
             self.player_state.add_experience(120);
+            if authoritative {
+                self.apply_block_changes(&[
+                    ((96, 75, 0), BlockType::EndGateway),
+                    ((1000, 65, 0), BlockType::EndGateway),
+                ]);
+            }
         }
     }
 }
@@ -7912,6 +7933,13 @@ impl State {
                     }
 
                     if valid {
+                        crate::container_sessions::ContainerSessionManager::ensure_chest_loot_generated(
+                            &mut self.chunk_manager,
+                            x,
+                            y,
+                            z,
+                            self.world_seed,
+                        );
                         self.container_sessions.open(id, dimension, x, y, z);
                         if let Some(slots_vec) =
                             crate::container_sessions::ContainerSessionManager::get_chest_slots(
@@ -13538,9 +13566,47 @@ impl State {
                         .use_selected_item(self.game_mode == GameMode::Creative);
                     return;
                 }
-                if clicked_block == BlockType::EndCityChest {
-                    self.spawn_dropped_item(Item::Elytra, hit.block_pos + Vec3::Y);
-                    self.apply_block_changes(&[(clicked_pos, BlockType::Air)]);
+                if clicked_block == BlockType::RespawnAnchor {
+                    if held_item == Item::Glowstone || held_item == Item::GlowstoneDust {
+                        self.inventory
+                            .use_selected_item(self.game_mode == GameMode::Creative);
+                        println!("[Respawn Anchor] Charged with Glowstone!");
+                        return;
+                    }
+                    if self.current_dimension == crate::dimension::Dimension::Nether {
+                        self.player_state.spawn_point =
+                            Some([clicked_pos.0, clicked_pos.1 + 1, clicked_pos.2]);
+                        self.player_state.spawn_dimension =
+                            Some(crate::dimension::Dimension::Nether);
+                        println!(
+                            "[Respawn Anchor] Nether spawn point set to ({}, {}, {})",
+                            clicked_pos.0,
+                            clicked_pos.1 + 1,
+                            clicked_pos.2
+                        );
+                    } else {
+                        self.apply_block_changes(&[(clicked_pos, BlockType::Air)]);
+                        self.take_damage(50.0, DamageSource::Mob);
+                        println!("[Respawn Anchor] Exploded in non-Nether dimension!");
+                    }
+                    return;
+                }
+                if held_item == Item::EyeOfEnder && clicked_block != BlockType::EndPortalFrame {
+                    if let Some((sx, sy, sz)) = crate::structure::locate_structure(
+                        crate::structure::StructureId::Stronghold,
+                        (
+                            self.camera.position.x as i32,
+                            self.camera.position.y as i32,
+                            self.camera.position.z as i32,
+                        ),
+                        self.world_seed,
+                        self.current_dimension,
+                    ) {
+                        println!(
+                            "[Eye of Ender] Stronghold located at ({}, {}, {})",
+                            sx, sy, sz
+                        );
+                    }
                     return;
                 }
                 if clicked_block == BlockType::Bed {
