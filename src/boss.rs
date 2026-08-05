@@ -16,7 +16,26 @@ pub type BlockPos = (i32, i32, i32);
 const NETHER_MOB_CAP: usize = 10;
 const SHULKER_CAP: usize = 6;
 const ENDERMAN_CAP: usize = 12;
+const ENDERMAN_GAZE_RANGE: f32 = 32.0;
+const ENDERMAN_GAZE_DURATION: f32 = 3.0;
+// A forgiving cone keeps normal camera jitter and the Enderman's idle walk
+// from breaking the gaze. It is centered on the head and therefore
+// works from every side of the model, independent of the Enderman's yaw.
+const ENDERMAN_GAZE_DOT: f32 = 0.95;
 const PROJECTILE_LIFETIME: f32 = 12.0;
+
+fn player_is_gazing_at_enderman_head(player_eye: Vec3, player_look: Vec3, head: Vec3) -> bool {
+    let to_head = head - player_eye;
+    let distance_squared = to_head.length_squared();
+    if distance_squared <= f32::EPSILON
+        || distance_squared > ENDERMAN_GAZE_RANGE * ENDERMAN_GAZE_RANGE
+    {
+        return false;
+    }
+
+    let look = player_look.normalize_or_zero();
+    look.length_squared() > 0.0 && look.dot(to_head.normalize()) >= ENDERMAN_GAZE_DOT
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DamageKind {
@@ -346,18 +365,24 @@ pub fn update_dimension_entities(
                 }
             }
             EntityType::Enderman => {
+                // Creative players cannot provoke an Enderman, but changing
+                // game mode must not freeze its normal idle movement.
+                if is_creative {
+                    entity.ai_phase = 0;
+                    entity.enderman_gaze_timer = 0.0;
+                }
+
                 if !is_creative {
                     let delta = player_pos - entity.position;
                     let horizontal = Vec3::new(delta.x, 0.0, delta.z);
                     let player_eye = player_pos + Vec3::Y * 1.62;
                     let head = entity.position + Vec3::Y * 2.62;
-                    let to_head = (head - player_eye).normalize_or_zero();
-                    let looking_at_head = horizontal.length_squared() <= 32.0 * 32.0
-                        && player_look.normalize_or_zero().dot(to_head) >= 0.995;
+                    let looking_at_head =
+                        player_is_gazing_at_enderman_head(player_eye, player_look, head);
                     if entity.ai_phase == 0 {
                         if looking_at_head {
                             entity.enderman_gaze_timer += dt;
-                            if entity.enderman_gaze_timer >= 5.0 {
+                            if entity.enderman_gaze_timer >= ENDERMAN_GAZE_DURATION {
                                 entity.ai_phase = 1;
                                 entity.target_player = true;
                             }
@@ -372,9 +397,7 @@ pub fn update_dimension_entities(
                         entity.yaw = f32::atan2(direction.x, direction.z);
                         entity.velocity.x = direction.x * 4.5;
                         entity.velocity.z = direction.z * 4.5;
-                        if delta.length_squared() <= 2.2 * 2.2
-                            && entity.action_cooldown <= 0.0
-                        {
+                        if delta.length_squared() <= 2.2 * 2.2 && entity.action_cooldown <= 0.0 {
                             events.player_damage.push(PlayerDamageEvent::new(
                                 7.0,
                                 Some(entity.id),
@@ -382,27 +405,28 @@ pub fn update_dimension_entities(
                             ));
                             entity.action_cooldown = 1.0;
                         }
-                    } else {
-                        entity.target_player = false;
-                        // Calm Endermen wander instead of freezing in place.
-                        // Each entity gets a stable, changing heading and a
-                        // short pause within a six-second idle cycle.
-                        let cycle = (entity.ai_timer / 6.0).floor() as u64;
-                        let seed = entity
-                            .id
-                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                            .wrapping_add(cycle.wrapping_mul(0xBF58_476D_1CE4_E5B9));
-                        let angle = (seed as u32) as f32 / u32::MAX as f32
-                            * std::f32::consts::TAU;
-                        entity.yaw = angle;
-                        let idle_speed = if entity.ai_timer % 6.0 < 4.5 { 1.25 } else { 0.0 };
-                        entity.velocity.x = angle.sin() * idle_speed;
-                        entity.velocity.z = angle.cos() * idle_speed;
                     }
-                } else {
+                }
+
+                if is_creative || entity.ai_phase == 0 {
                     entity.target_player = false;
-                    entity.velocity.x = 0.0;
-                    entity.velocity.z = 0.0;
+                    // Calm Endermen wander in every game mode. Each entity
+                    // gets a stable, changing heading and a short pause within
+                    // a six-second idle cycle.
+                    let cycle = (entity.ai_timer / 6.0).floor() as u64;
+                    let seed = entity
+                        .id
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .wrapping_add(cycle.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+                    let angle = (seed as u32) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
+                    entity.yaw = angle;
+                    let idle_speed = if entity.ai_timer % 6.0 < 4.5 {
+                        1.25
+                    } else {
+                        0.0
+                    };
+                    entity.velocity.x = angle.sin() * idle_speed;
+                    entity.velocity.z = angle.cos() * idle_speed;
                 }
                 entity.update_physics(dt, chunks);
             }
@@ -1123,10 +1147,40 @@ mod tests {
     }
 
     #[test]
-    fn enderman_only_attacks_after_five_seconds_of_head_gaze() {
+    fn enderman_head_gaze_is_detected_from_every_direction() {
+        let head = Vec3::new(4.0, 70.0, -3.0);
+        for offset in [
+            Vec3::X * 10.0,
+            -Vec3::X * 10.0,
+            Vec3::Y * 10.0,
+            -Vec3::Y * 10.0,
+            Vec3::Z * 10.0,
+            -Vec3::Z * 10.0,
+        ] {
+            let player_eye = head + offset;
+            assert!(player_is_gazing_at_enderman_head(
+                player_eye,
+                head - player_eye,
+                head
+            ));
+        }
+
+        // The crosshair may sit a few blocks beside the exact head center at
+        // this distance and still count as deliberately watching it.
+        let player_eye = head - Vec3::Z * 10.0;
+        let approximate_look = head + Vec3::X * 3.0 - player_eye;
+        assert!(player_is_gazing_at_enderman_head(
+            player_eye,
+            approximate_look,
+            head
+        ));
+    }
+
+    #[test]
+    fn enderman_only_attacks_after_three_seconds_of_head_gaze() {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 10.0));
-        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 4.7;
+        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.7;
         let chunks = ChunkManager::new(1);
         let player = Vec3::ZERO;
         let look = (Vec3::new(0.0, 2.62, 10.0) - Vec3::Y * 1.62).normalize();
@@ -1159,10 +1213,73 @@ mod tests {
     }
 
     #[test]
+    fn provoked_enderman_chases_and_damages_player() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 2.0));
+        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.95;
+        let chunks = ChunkManager::new(1);
+        let player = Vec3::ZERO;
+        let head = entities.get_by_id(id).unwrap().position + Vec3::Y * 2.62;
+        let look = head - (player + Vec3::Y * 1.62);
+
+        let events = update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            player,
+            look,
+            0.1,
+            GameMode::Survival,
+        );
+
+        let enderman = entities.get_by_id(id).unwrap();
+        assert_eq!(enderman.ai_phase, 1);
+        assert!(enderman.target_player);
+        assert!(Vec3::new(enderman.velocity.x, 0.0, enderman.velocity.z).length() > 3.0);
+        assert!(events
+            .player_damage
+            .iter()
+            .any(|damage| damage.source_entity == Some(id) && damage.amount == 7.0));
+    }
+
+    #[test]
+    fn enderman_enters_attack_mode_after_continuous_three_second_head_gaze() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(8.0, 64.0, 8.0));
+        let mut chunks = ChunkManager::new(1);
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                chunk.set_block_local(x, 63, z, BlockType::EndStone);
+            }
+        }
+        chunks.chunks.insert((0, 0), chunk);
+        let player = Vec3::new(8.0, 64.0, 0.0);
+
+        for _ in 0..12 {
+            let head = entities.get_by_id(id).unwrap().position + Vec3::Y * 2.62;
+            let look = (head - (player + Vec3::Y * 1.62)).normalize();
+            update_dimension_entities(
+                Dimension::End,
+                &mut entities,
+                &chunks,
+                player,
+                look,
+                0.25,
+                GameMode::Survival,
+            );
+        }
+
+        let enderman = entities.get_by_id(id).unwrap();
+        assert_eq!(enderman.ai_phase, 1);
+        assert!(enderman.target_player);
+    }
+
+    #[test]
     fn enderman_gaze_timer_resets_when_player_looks_away() {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 10.0));
-        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 4.9;
+        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.9;
         let chunks = ChunkManager::new(1);
 
         update_dimension_entities(
@@ -1199,6 +1316,33 @@ mod tests {
 
         let enderman = entities.get_by_id(id).unwrap();
         assert_eq!(enderman.ai_phase, 0);
+        assert!(!enderman.target_player);
+        assert!(Vec3::new(enderman.velocity.x, 0.0, enderman.velocity.z).length() > 1.0);
+    }
+
+    #[test]
+    fn creative_mode_enderman_wanders_without_attacking() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 64.0, 10.0));
+        let enderman = entities.get_by_id_mut(id).unwrap();
+        enderman.ai_phase = 1;
+        enderman.target_player = true;
+        enderman.enderman_gaze_timer = 3.0;
+        let chunks = ChunkManager::new(1);
+
+        update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            Vec3::ZERO,
+            Vec3::Z,
+            0.1,
+            GameMode::Creative,
+        );
+
+        let enderman = entities.get_by_id(id).unwrap();
+        assert_eq!(enderman.ai_phase, 0);
+        assert_eq!(enderman.enderman_gaze_timer, 0.0);
         assert!(!enderman.target_player);
         assert!(Vec3::new(enderman.velocity.x, 0.0, enderman.velocity.z).length() > 1.0);
     }
