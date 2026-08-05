@@ -2431,6 +2431,24 @@ impl State {
             self.wither_effect_timer = self.wither_effect_timer.max(effect.duration);
         }
         for explosion in events.explosions {
+            if authoritative {
+                let remove_entity_ids: Vec<u64> = self
+                    .entity_manager
+                    .entities
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e.entity_type,
+                            crate::entity::EntityType::DroppedItem
+                                | crate::entity::EntityType::ExperienceOrb
+                        ) && e.position.distance(explosion.position) <= explosion.radius
+                    })
+                    .map(|e| e.id)
+                    .collect();
+                for id in remove_entity_ids {
+                    self.entity_manager.remove_by_id(id);
+                }
+            }
             if explosion.break_blocks && authoritative {
                 let mut dirty_meshes = std::collections::HashSet::new();
                 let removed = crate::mob::explode(
@@ -3111,6 +3129,14 @@ struct RemotePlayerState {
     entity_id: u64,
     snapshots: std::collections::VecDeque<PlayerSnapshot>,
     username: String,
+    health: f32,
+    hunger: f32,
+    is_dead: bool,
+    spawn_point: Option<[i32; 3]>,
+    spawn_dimension: Option<crate::dimension::Dimension>,
+    is_sleeping: bool,
+    bed_pos: Option<[i32; 3]>,
+    dimension: crate::dimension::Dimension,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3322,6 +3348,14 @@ impl RemotePlayerState {
             entity_id,
             snapshots: std::collections::VecDeque::with_capacity(REMOTE_SNAPSHOT_CAPACITY),
             username,
+            health: 20.0,
+            hunger: 20.0,
+            is_dead: false,
+            spawn_point: None,
+            spawn_dimension: None,
+            is_sleeping: false,
+            bed_pos: None,
+            dimension: crate::dimension::Dimension::Overworld,
         }
     }
 
@@ -3764,6 +3798,14 @@ enum NetworkInbound {
         z: i32,
         slot_index: u16,
         slot: Option<crate::network::protocol::ItemWire>,
+    },
+    PlayerRespawnResult {
+        position: [f32; 3],
+        dimension: u8,
+    },
+    SleepStateSync {
+        player_id: crate::network::protocol::PlayerId,
+        is_sleeping: bool,
     },
 }
 
@@ -4456,6 +4498,20 @@ impl NetworkHandle {
                             slot_index,
                             slot,
                         },
+                        crate::network::client::ClientToGame::PlayerRespawnResult {
+                            position,
+                            dimension,
+                        } => NetworkInbound::PlayerRespawnResult {
+                            position,
+                            dimension,
+                        },
+                        crate::network::client::ClientToGame::SleepStateSync {
+                            player_id,
+                            is_sleeping,
+                        } => NetworkInbound::SleepStateSync {
+                            player_id,
+                            is_sleeping,
+                        },
                     })
                     .collect()
             }
@@ -4816,6 +4872,43 @@ impl NetworkHandle {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server
                 .send(crate::network::server::HostToServer::BroadcastLightningStrike { strike });
+        }
+    }
+
+    fn send_respawn_request(&self) {
+        if let NetworkHandle::Client { game_to_client, .. } = self {
+            let _ = game_to_client
+                .tracked_send(crate::network::client::GameToClient::PlayerRespawnRequest);
+        }
+    }
+
+    fn send_sleep_request(&self, x: i32, y: i32, z: i32) {
+        if let NetworkHandle::Client { game_to_client, .. } = self {
+            let _ = game_to_client
+                .tracked_send(crate::network::client::GameToClient::SleepRequest { x, y, z });
+        }
+    }
+
+    fn send_respawn_result(&self, player_id: u64, position: [f32; 3], dimension: u8) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::SendPlayerRespawnResult {
+                    to: player_id,
+                    position,
+                    dimension,
+                },
+            );
+        }
+    }
+
+    fn broadcast_sleep_state_sync(&self, player_id: u64, is_sleeping: bool) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::BroadcastSleepStateSync {
+                    player_id,
+                    is_sleeping,
+                },
+            );
         }
     }
 
@@ -8076,8 +8169,176 @@ impl State {
                     }
                 }
             }
-            NetworkInbound::ClientRespawnRequest { .. }
-            | NetworkInbound::ClientSleepRequest { .. } => {}
+            NetworkInbound::ClientRespawnRequest { id } => {
+                if matches!(&self.network, NetworkHandle::Host { .. }) {
+                    if let Some(remote) = self.remote_players.get_mut(&id) {
+                        if remote.is_dead || remote.health <= 0.0 {
+                            let mut spawn_pos = None;
+                            let mut spawn_dim = crate::dimension::Dimension::Overworld;
+
+                            if let (Some(bed_p), Some(dim)) =
+                                (remote.spawn_point, remote.spawn_dimension)
+                            {
+                                let chunk_pos = (bed_p[0], bed_p[1], bed_p[2]);
+                                if self.chunk_manager.get_block(
+                                    chunk_pos.0,
+                                    chunk_pos.1,
+                                    chunk_pos.2,
+                                ) == crate::world::BlockType::Bed
+                                {
+                                    let (safe_p, safe) = crate::world::find_safe_spawn_position(
+                                        &self.chunk_manager,
+                                        chunk_pos,
+                                    );
+                                    if safe {
+                                        spawn_pos = Some(safe_p);
+                                        spawn_dim = dim;
+                                    }
+                                }
+                                if spawn_pos.is_none() {
+                                    remote.spawn_point = None;
+                                    remote.spawn_dimension = None;
+                                }
+                            }
+
+                            if spawn_pos.is_none() {
+                                spawn_dim = crate::dimension::Dimension::Overworld;
+                                let target_p =
+                                    (self.world_spawn.0, self.world_spawn.1, self.world_spawn.2);
+                                let (safe_p, safe) = crate::world::find_safe_spawn_position(
+                                    &self.chunk_manager,
+                                    target_p,
+                                );
+                                if safe {
+                                    spawn_pos = Some(safe_p);
+                                } else {
+                                    spawn_pos = Some(Vec3::new(
+                                        target_p.0 as f32 + 0.5,
+                                        target_p.1 as f32,
+                                        target_p.2 as f32 + 0.5,
+                                    ));
+                                }
+                            }
+
+                            let respawn_p = spawn_pos.unwrap_or_else(|| Vec3::new(8.0, 80.0, 8.0));
+                            remote.health = 20.0;
+                            remote.hunger = 20.0;
+                            remote.is_dead = false;
+                            remote.is_sleeping = false;
+
+                            if let Some(entity) =
+                                self.entity_manager.get_by_id_mut(remote.entity_id)
+                            {
+                                entity.position = respawn_p;
+                                entity.health = 20.0;
+                            }
+
+                            self.container_sessions.close_by_player(id);
+                            self.network.send_respawn_result(
+                                id,
+                                respawn_p.to_array(),
+                                spawn_dim as u8,
+                            );
+                            let mut respawn_state = PlayerState::new();
+                            respawn_state.health = 20.0;
+                            respawn_state.hunger = 20.0;
+                            respawn_state.is_dead = false;
+                            self.network.broadcast_player_health(0, id, &respawn_state);
+                        }
+                    }
+                }
+            }
+            NetworkInbound::ClientSleepRequest {
+                id,
+                bed_x,
+                bed_y,
+                bed_z,
+            } => {
+                if matches!(&self.network, NetworkHandle::Host { .. }) {
+                    if let Some(remote) = self.remote_players.get_mut(&id) {
+                        let bed_pos =
+                            Vec3::new(bed_x as f32 + 0.5, bed_y as f32 + 0.5, bed_z as f32 + 0.5);
+                        let ent_pos = self
+                            .entity_manager
+                            .get_by_id(remote.entity_id)
+                            .map(|e| e.position)
+                            .unwrap_or(bed_pos);
+
+                        let clicked_block = self.chunk_manager.get_block(bed_x, bed_y, bed_z);
+                        if clicked_block == crate::world::BlockType::Bed
+                            && ent_pos.distance(bed_pos) <= 8.0
+                            && remote.dimension == crate::dimension::Dimension::Overworld
+                        {
+                            let bstate = crate::world::BlockState::decode(
+                                self.chunk_manager.get_block_state(bed_x, bed_y, bed_z),
+                            );
+                            let head_pos = if bstate.is_top {
+                                (bed_x, bed_y, bed_z)
+                            } else {
+                                (
+                                    bed_x + bstate.facing.dx(),
+                                    bed_y,
+                                    bed_z + bstate.facing.dz(),
+                                )
+                            };
+
+                            remote.spawn_point = Some([head_pos.0, head_pos.1, head_pos.2]);
+                            remote.spawn_dimension = Some(crate::dimension::Dimension::Overworld);
+
+                            let time_of_day = self.world_time.ticks % 24000;
+                            let is_night = time_of_day >= 12541 && time_of_day <= 23458;
+                            let is_storm = self.weather.is_thundering();
+
+                            if is_night || is_storm {
+                                let nearby_hostiles = self
+                                    .entity_manager
+                                    .query_radius(bed_pos, 8.0)
+                                    .any(|e| e.entity_type.is_hostile() && e.health > 0.0);
+                                if !nearby_hostiles {
+                                    remote.is_sleeping = true;
+                                    remote.bed_pos = Some([bed_x, bed_y, bed_z]);
+                                    self.network.broadcast_sleep_state_sync(id, true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            NetworkInbound::PlayerRespawnResult {
+                position,
+                dimension,
+            } => {
+                let target_vec = Vec3::from_array(position);
+                self.player_physics.position = target_vec;
+                self.player_physics.velocity = Vec3::ZERO;
+                self.player_physics.on_ground = false;
+                self.player_physics.highest_y = target_vec.y;
+
+                let target_dim = crate::dimension::Dimension::from_wire(dimension)
+                    .unwrap_or(crate::dimension::Dimension::Overworld);
+                if self.current_dimension != target_dim {
+                    self.switch_dimension(target_dim);
+                }
+
+                self.player_state.reset_for_respawn();
+                self.void_damage_timer = 0.0;
+                self.sync_cursor_mode();
+            }
+            NetworkInbound::SleepStateSync {
+                player_id,
+                is_sleeping,
+            } => {
+                if matches!(&self.network, NetworkHandle::Client { .. }) {
+                    if self.local_player_id == Some(player_id) {
+                        self.player_state.is_sleeping = is_sleeping;
+                        if !is_sleeping {
+                            self.player_state.sleep_timer = 0.0;
+                        }
+                    } else if let Some(remote) = self.remote_players.get_mut(&player_id) {
+                        remote.is_sleeping = is_sleeping;
+                    }
+                }
+            }
         }
     }
 
@@ -9777,25 +10038,72 @@ impl State {
 
         if self.player_state.is_sleeping {
             self.player_state.sleep_timer += dt;
-            if self.player_state.sleep_timer >= 5.0 {
-                let current_day = self.world_time.ticks / 24000;
-                self.world_time.ticks = (current_day + 1) * 24000 + 1000;
-                self.weather.clear_weather();
+        }
 
-                let bed_pos = self.player_state.bed_pos.unwrap_or([
-                    self.player_physics.position.x as i32,
-                    self.player_physics.position.y as i32,
-                    self.player_physics.position.z as i32,
-                ]);
-                let (safe_p, _) = crate::world::find_safe_spawn_position(
-                    &self.chunk_manager,
-                    (bed_pos[0], bed_pos[1], bed_pos[2]),
-                );
-                self.player_physics.position = safe_p;
-                self.player_state.is_sleeping = false;
-                self.player_state.sleep_timer = 0.0;
-                self.player_state.bed_pos = None;
-                println!("[Game] Woke up. Good morning!");
+        if authoritative {
+            let mut total_overworld_players = 0;
+            let mut sleeping_overworld_players = 0;
+
+            if self.current_dimension == crate::dimension::Dimension::Overworld
+                && !self.player_state.is_dead
+            {
+                total_overworld_players += 1;
+                if self.player_state.is_sleeping {
+                    sleeping_overworld_players += 1;
+                }
+            }
+
+            for (_id, remote) in &self.remote_players {
+                if remote.dimension == crate::dimension::Dimension::Overworld && !remote.is_dead {
+                    total_overworld_players += 1;
+                    if remote.is_sleeping {
+                        sleeping_overworld_players += 1;
+                    }
+                }
+            }
+
+            if total_overworld_players > 0 && total_overworld_players == sleeping_overworld_players
+            {
+                let ready_to_skip = if self.player_state.is_sleeping {
+                    self.player_state.sleep_timer >= 5.0
+                } else {
+                    true
+                };
+                if ready_to_skip {
+                    let current_day = self.world_time.ticks / 24000;
+                    self.world_time.ticks = (current_day + 1) * 24000 + 1000;
+                    self.weather.clear_weather();
+
+                    if self.player_state.is_sleeping {
+                        let bed_pos = self.player_state.bed_pos.unwrap_or([
+                            self.player_physics.position.x as i32,
+                            self.player_physics.position.y as i32,
+                            self.player_physics.position.z as i32,
+                        ]);
+                        let (safe_p, _) = crate::world::find_safe_spawn_position(
+                            &self.chunk_manager,
+                            (bed_pos[0], bed_pos[1], bed_pos[2]),
+                        );
+                        self.player_physics.position = safe_p;
+                        self.player_state.is_sleeping = false;
+                        self.player_state.sleep_timer = 0.0;
+                        self.player_state.bed_pos = None;
+                    }
+
+                    let remote_ids: Vec<u64> = self.remote_players.keys().copied().collect();
+                    for id in remote_ids {
+                        if let Some(remote) = self.remote_players.get_mut(&id) {
+                            if remote.is_sleeping {
+                                remote.is_sleeping = false;
+                                remote.bed_pos = None;
+                                self.network.broadcast_sleep_state_sync(id, false);
+                            }
+                        }
+                    }
+
+                    self.broadcast_time_sync();
+                    println!("[Game] Night skipped! Woke up. Good morning!");
+                }
             }
         }
 
@@ -12454,7 +12762,11 @@ impl State {
 
         // Respawn button: bounds X: [-0.3, 0.3], Y: [-0.1, 0.0]
         if mouse_x >= -0.3 && mouse_x <= 0.3 && mouse_y >= -0.1 && mouse_y <= 0.0 {
-            self.respawn();
+            if matches!(&self.network, NetworkHandle::Client { .. }) {
+                self.network.send_respawn_request();
+            } else {
+                self.respawn();
+            }
         }
     }
 
@@ -13224,6 +13536,14 @@ impl State {
                     return;
                 }
                 if clicked_block == BlockType::Bed {
+                    if matches!(&self.network, NetworkHandle::Client { .. }) {
+                        self.network.send_sleep_request(
+                            clicked_pos.0,
+                            clicked_pos.1,
+                            clicked_pos.2,
+                        );
+                        return;
+                    }
                     let bed_pos = clicked_pos;
                     if self.current_dimension != crate::dimension::Dimension::Overworld {
                         self.apply_block_changes(&[(bed_pos, BlockType::Air)]);

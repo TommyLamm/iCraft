@@ -174,6 +174,14 @@ pub enum ClientToGame {
         slot_index: u16,
         slot: Option<crate::network::protocol::ItemWire>,
     },
+    PlayerRespawnResult {
+        position: [f32; 3],
+        dimension: u8,
+    },
+    SleepStateSync {
+        player_id: PlayerId,
+        is_sleeping: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -222,6 +230,12 @@ pub enum GameToClient {
     },
     ContainerClose {
         dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    PlayerRespawnRequest,
+    SleepRequest {
         x: i32,
         y: i32,
         z: i32,
@@ -584,6 +598,12 @@ async fn run_client(
                     Ok(Packet::ContainerClickResult { dimension, success, slot_index, slot, dragged, .. }) => {
                         let _ = client_to_game.send(ClientToGame::ContainerClickResult { dimension, success, slot_index, slot, dragged });
                     }
+                    Ok(Packet::PlayerRespawnResult { position, dimension, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::PlayerRespawnResult { position, dimension });
+                    }
+                    Ok(Packet::SleepStateSync { player_id, is_sleeping, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::SleepStateSync { player_id, is_sleeping });
+                    }
                     Ok(Packet::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot, .. }) => {
                         let _ = client_to_game.send(ClientToGame::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot });
                     }
@@ -820,6 +840,20 @@ async fn run_client(
                         Ok(GameToClient::ContainerClose { dimension, x, y, z }) => {
                             if writer.send(&Packet::ContainerClose { protocol_version: PROTOCOL_VERSION, dimension, x, y, z }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send ContainerClose");
+                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                                return;
+                            }
+                        }
+                        Ok(GameToClient::PlayerRespawnRequest) => {
+                            if writer.send(&Packet::PlayerRespawnRequest { protocol_version: PROTOCOL_VERSION }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send PlayerRespawnRequest");
+                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                                return;
+                            }
+                        }
+                        Ok(GameToClient::SleepRequest { x, y, z }) => {
+                            if writer.send(&Packet::SleepRequest { protocol_version: PROTOCOL_VERSION, x, y, z }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send SleepRequest");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }

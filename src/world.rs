@@ -6165,6 +6165,20 @@ mod tests {
     }
 
     #[test]
+    fn test_find_safe_spawn_position_fallback() {
+        let mut cm = crate::chunk_manager::ChunkManager::new(8);
+        cm.chunks.insert((0, 0), Chunk::new(0, 0));
+        // Create ground block at (0, 63, 0) with Air above
+        cm.set_block(0, 63, 0, BlockType::Cobblestone);
+        cm.set_block(0, 64, 0, BlockType::Air);
+        cm.set_block(0, 65, 0, BlockType::Air);
+
+        let (pos, safe) = find_safe_spawn_position(&cm, (0, 64, 0));
+        assert!(safe);
+        assert_eq!(pos, Vec3::new(0.5, 64.0, 0.5));
+    }
+
+    #[test]
     fn block_state_encoding_roundtrip() {
         assert_eq!(BlockState::default().encode(), 0);
 

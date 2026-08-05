@@ -323,6 +323,15 @@ pub enum HostToServer {
         slot_index: u16,
         slot: Option<crate::network::protocol::ItemWire>,
     },
+    SendPlayerRespawnResult {
+        to: PlayerId,
+        position: [f32; 3],
+        dimension: u8,
+    },
+    BroadcastSleepStateSync {
+        player_id: PlayerId,
+        is_sleeping: bool,
+    },
     Stop,
 }
 
@@ -1256,6 +1265,7 @@ impl NetworkServer {
                 | HostToServer::NotifyPlayerJoin { .. }
                 | HostToServer::BroadcastTimeSync { .. }
                 | HostToServer::BroadcastLightningStrike { .. }
+                | HostToServer::BroadcastSleepStateSync { .. }
         );
         let (packet, recipient) = match command {
             HostToServer::BroadcastBlockChange {
@@ -1475,6 +1485,29 @@ impl NetworkServer {
                     z,
                     slot_index,
                     slot,
+                };
+                (packet, None)
+            }
+            HostToServer::SendPlayerRespawnResult {
+                to,
+                position,
+                dimension,
+            } => {
+                let packet = Packet::PlayerRespawnResult {
+                    protocol_version: PROTOCOL_VERSION,
+                    position,
+                    dimension,
+                };
+                (packet, Some(to))
+            }
+            HostToServer::BroadcastSleepStateSync {
+                player_id,
+                is_sleeping,
+            } => {
+                let packet = Packet::SleepStateSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    player_id,
+                    is_sleeping,
                 };
                 (packet, None)
             }

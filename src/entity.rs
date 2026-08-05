@@ -1138,4 +1138,22 @@ mod tests {
         assert!(em.spatial_buckets.is_empty());
         assert!(em.get_by_id(cow).is_none());
     }
+
+    #[test]
+    fn test_dropped_item_and_xp_orb_entity_properties() {
+        let mut em = EntityManager::new();
+        let item_id = em.spawn(EntityType::DroppedItem, Vec3::new(1.0, 2.0, 3.0));
+        let xp_id = em.spawn(EntityType::ExperienceOrb, Vec3::new(1.0, 2.0, 3.0));
+
+        let item_ent = em.get_by_id_mut(item_id).unwrap();
+        item_ent.item_age = 299.9;
+        assert!(item_ent.item_age < 300.0);
+        item_ent.item_age = 300.0;
+        assert!(item_ent.item_age >= 300.0);
+
+        let xp_ent = em.get_by_id_mut(xp_id).unwrap();
+        xp_ent.xp_value = 55;
+        assert_eq!(xp_ent.xp_value, 55);
+        assert_eq!(xp_ent.entity_type, EntityType::ExperienceOrb);
+    }
 }
