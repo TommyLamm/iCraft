@@ -4081,7 +4081,7 @@ mod tests {
         let loaded = manager.load_chunk(0, 0).expect("legacy chunk should load");
         assert_eq!(loaded.data_version, 0);
 
-        let mut modern_chunk = Chunk::new(0, 0);
+        let mut modern_chunk = Chunk::empty(0, 0);
         loaded.restore_to_chunk(&mut modern_chunk);
 
         // Verify Y=0..255 block mapping and states

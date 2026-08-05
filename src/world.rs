@@ -3381,6 +3381,23 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    pub fn empty(chunk_x: i32, chunk_z: i32) -> Self {
+        let height = crate::dimension::WorldHeight::OVERWORLD;
+        let section_count = height.section_count();
+        Self {
+            chunk_x,
+            chunk_z,
+            min_section_y: height.min_section_y(),
+            sections: vec![None; section_count],
+            heightmap: vec![[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
+                .try_into()
+                .unwrap(),
+            torch_positions: Vec::new(),
+            redstone_positions: Vec::new(),
+            block_entities: std::collections::HashMap::new(),
+        }
+    }
+
     pub fn new(chunk_x: i32, chunk_z: i32) -> Self {
         Self::new_with_seed(chunk_x, chunk_z, 12345)
     }
