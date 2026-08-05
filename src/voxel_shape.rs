@@ -157,12 +157,14 @@ pub fn ray_intersects_aabb(
             let inv_d = 1.0 / dir_comp;
             let mut t0 = (box_aabb.min[i] - origin[i]) * inv_d;
             let mut t1 = (box_aabb.max[i] - origin[i]) * inv_d;
+            // `-dir_comp.signum()` points toward the ray origin, so it is the
+            // outward normal of the entry face for either ray direction.
+            // Keep it unchanged when swapping the intersection distances.
             let mut n0 = Vec3::ZERO;
             n0[i] = -dir_comp.signum();
 
             if inv_d < 0.0 {
                 std::mem::swap(&mut t0, &mut t1);
-                n0 = -n0;
             }
 
             if t0 > t_min {
@@ -745,6 +747,18 @@ mod tests {
         let (t, norm) = res.unwrap();
         assert!((t - 5.0).abs() < 1e-4);
         assert_eq!(norm, Vec3::new(0.0, 0.0, -1.0));
+    }
+
+    #[test]
+    fn ray_intersects_full_cube_from_negative_direction_returns_facing_normal() {
+        let shape = VoxelShape::FULL_CUBE.translate(Vec3::new(10.0, 10.0, 10.0));
+        let origin = Vec3::new(10.5, 10.5, 15.0);
+        let dir = Vec3::new(0.0, 0.0, -1.0);
+        let res = shape.ray_intersects(origin, dir, 10.0);
+        assert!(res.is_some());
+        let (t, norm) = res.unwrap();
+        assert!((t - 4.0).abs() < 1e-4);
+        assert_eq!(norm, Vec3::new(0.0, 0.0, 1.0));
     }
 
     #[test]

@@ -224,6 +224,26 @@ mod tests {
     }
 
     #[test]
+    fn test_raycast_hit_from_negative_direction_returns_front_face() {
+        let mut chunk_manager = ChunkManager::new(8);
+        let mut chunk = Chunk::new(0, 0);
+        chunk.set_block_local(8, 72, 8, BlockType::Stone);
+        chunk_manager.chunks.insert((0, 0), chunk);
+
+        let hit = raycast(
+            Vec3::new(8.5, 72.5, 10.5),
+            Vec3::NEG_Z,
+            5.0,
+            &chunk_manager,
+            RaycastTargetPolicy::Place,
+        )
+        .expect("stone block should be selected from the positive Z side");
+
+        assert_eq!(hit.block_pos, Vec3::new(8.0, 72.0, 8.0));
+        assert_eq!(hit.normal, Vec3::Z);
+    }
+
+    #[test]
     fn test_raycast_hits_passable_plants_when_breaking() {
         let mut chunk_manager = ChunkManager::new(8);
         let mut chunk = Chunk::new(0, 0);
