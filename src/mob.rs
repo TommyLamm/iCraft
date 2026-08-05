@@ -964,6 +964,10 @@ mod tests {
             .unwrap_or(64);
 
         let zombie_pos = Vec3::new(8.0, (highest_y + 1) as f32, 8.0);
+        for y in (highest_y + 1)..320 {
+            chunk_manager.set_block(8, y, 8, crate::world::BlockType::Air);
+            chunk_manager.set_sky_light(8, y, 8, 15);
+        }
         // Exposed to sky (15), sky_light_level = 15, not raining, not in water
         assert!(is_under_sun(&chunk_manager, zombie_pos, 15, false));
         // Raining -> should not be exposed to sun
