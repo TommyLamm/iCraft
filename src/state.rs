@@ -9971,6 +9971,11 @@ impl State {
         let under_block = self.chunk_manager.get_block(px, py, pz);
 
         if self.player_physics.on_ground && !self.was_on_ground {
+            if under_block == BlockType::Farmland {
+                if self.is_sprinting || old_pos.y - self.player_physics.position.y > 0.5 {
+                    self.apply_block_changes(&[((px, py, pz), BlockType::Dirt)]);
+                }
+            }
             if let Some(mat) = under_block.sound_material() {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::Land(mat));
@@ -11867,6 +11872,7 @@ impl State {
         let held_stack = self.inventory.hotbar[self.inventory.selected];
         let rewards = calculate_block_break_rewards(
             old_block,
+            old_state_raw,
             (wx, wy, wz),
             held_stack.as_ref(),
             self.game_mode,
@@ -11965,6 +11971,7 @@ impl State {
         match action {
             crate::network::protocol::Action::Break => {
                 let old_block = self.chunk_manager.get_block(x, y, z);
+                let old_state_raw = self.chunk_manager.get_block_state(x, y, z);
                 if old_block == BlockType::Air || old_block == BlockType::Bedrock {
                     self.send_block_action_result(requester_id, x, y, z, false, false, vec![]);
                     return;
@@ -12025,6 +12032,7 @@ impl State {
                 let held_stack = held_item_wire.and_then(|w| w.to_stack());
                 let rewards = calculate_block_break_rewards(
                     old_block,
+                    old_state_raw,
                     (x, y, z),
                     held_stack.as_ref(),
                     self.game_mode,
@@ -19940,6 +19948,7 @@ pub struct BlockBreakRewards {
 
 pub fn calculate_block_break_rewards(
     old_block: BlockType,
+    old_state: u8,
     pos: (i32, i32, i32),
     held_stack: Option<&ItemStack>,
     game_mode: GameMode,
@@ -20011,7 +20020,7 @@ pub fn calculate_block_break_rewards(
             old_block,
             BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop
         ) {
-            let age = 7;
+            let age = old_state & 0b111;
             let mut rng_seed = (wx as u32)
                 .wrapping_mul(31)
                 .wrapping_add(wy as u32)
@@ -21063,14 +21072,19 @@ mod reach_tests {
 
         // Stone with bare hand in Survival -> not eligible to harvest (no drops)
         let rewards =
-            calculate_block_break_rewards(BlockType::Stone, pos, None, GameMode::Survival);
+            calculate_block_break_rewards(BlockType::Stone, 0, pos, None, GameMode::Survival);
         assert!(rewards.drops.is_empty());
         assert_eq!(rewards.xp, 0);
 
         // Stone with Pickaxe -> eligible, drops Stone
         let pick = ItemStack::new(Item::StonePickaxe, 1);
-        let rewards =
-            calculate_block_break_rewards(BlockType::Stone, pos, Some(&pick), GameMode::Survival);
+        let rewards = calculate_block_break_rewards(
+            BlockType::Stone,
+            0,
+            pos,
+            Some(&pick),
+            GameMode::Survival,
+        );
         assert_eq!(rewards.drops.len(), 1);
         assert_eq!(rewards.drops[0].item, Item::Stone);
 
@@ -21078,6 +21092,7 @@ mod reach_tests {
         let iron_pick = ItemStack::new(Item::IronPickaxe, 1);
         let rewards = calculate_block_break_rewards(
             BlockType::DiamondOre,
+            0,
             pos,
             Some(&iron_pick),
             GameMode::Survival,
@@ -21092,6 +21107,7 @@ mod reach_tests {
             .add_or_upgrade(crate::enchantment::Enchantment::SilkTouch);
         let rewards = calculate_block_break_rewards(
             BlockType::DiamondOre,
+            0,
             pos,
             Some(&silk_pick),
             GameMode::Survival,
@@ -21099,9 +21115,40 @@ mod reach_tests {
         assert_eq!(rewards.drops[0].item, Item::DiamondOre);
 
         // Creative mode -> zero drops
-        let rewards =
-            calculate_block_break_rewards(BlockType::Stone, pos, Some(&pick), GameMode::Creative);
+        let rewards = calculate_block_break_rewards(
+            BlockType::Stone,
+            0,
+            pos,
+            Some(&pick),
+            GameMode::Creative,
+        );
         assert!(rewards.drops.is_empty());
+    }
+
+    #[test]
+    fn calculate_block_break_rewards_mature_and_immature_crops() {
+        let pos = (10, 60, 10);
+
+        // Mature Wheat (age 7) -> drops Wheat + Seeds
+        let mature_wheat =
+            calculate_block_break_rewards(BlockType::WheatCrop, 7, pos, None, GameMode::Survival);
+        assert_eq!(mature_wheat.drops.len(), 2);
+        assert_eq!(mature_wheat.drops[0].item, Item::Wheat);
+        assert_eq!(mature_wheat.drops[1].item, Item::Seeds);
+
+        // Immature Wheat (age 3) -> drops 1 Seeds only
+        let immature_wheat =
+            calculate_block_break_rewards(BlockType::WheatCrop, 3, pos, None, GameMode::Survival);
+        assert_eq!(immature_wheat.drops.len(), 1);
+        assert_eq!(immature_wheat.drops[0].item, Item::Seeds);
+        assert_eq!(immature_wheat.drops[0].count, 1);
+
+        // Immature Carrot (age 2) -> drops 1 Carrot
+        let immature_carrot =
+            calculate_block_break_rewards(BlockType::CarrotCrop, 2, pos, None, GameMode::Survival);
+        assert_eq!(immature_carrot.drops.len(), 1);
+        assert_eq!(immature_carrot.drops[0].item, Item::Carrot);
+        assert_eq!(immature_carrot.drops[0].count, 1);
     }
 
     #[test]
