@@ -1761,6 +1761,258 @@ pub fn render_mobs<'a>(
                     light_val,
                 );
             }
+            EntityType::Spider => {
+                // Spider Head
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.6, 0.5, 0.6),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.45, 0.4)),
+                    entity.yaw,
+                    entity.pitch,
+                    [0, 1, 1, 1, 1, 1],
+                    11,
+                    light_val,
+                );
+                // Spider Body
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.9, 0.7, 0.9),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.5, -0.3)),
+                    entity.yaw,
+                    0.0,
+                    [1; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::Slime => {
+                let size = entity.slime_size as f32;
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.5, 0.5) * size,
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.25 * size, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [2; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::Witch => {
+                // Head
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.5, 0.5),
+                    Vec3::new(0.0, 0.25, 0.0),
+                    to_world(Vec3::new(0.0, 1.4, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [3; 6],
+                    11,
+                    light_val,
+                );
+                // Torso
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.6, 0.9, 0.35),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.65, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [4; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::Drowned => {
+                // Head
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.5, 0.5),
+                    Vec3::new(0.0, 0.25, 0.0),
+                    to_world(Vec3::new(0.0, 1.4, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [5; 6],
+                    11,
+                    light_val,
+                );
+                // Body
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.75, 0.25),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.65, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [6; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::Ghast => {
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(3.5, 3.5, 3.5),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 2.0, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [7; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::MagmaCube => {
+                let size = entity.slime_size as f32;
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.5, 0.5) * size,
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.25 * size, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [8; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::WitherSkeleton => {
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.5, 0.5),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 1.9, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [4, 5, 5, 5, 5, 5],
+                    9,
+                    light_val,
+                );
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.45, 0.95, 0.22),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 1.1, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [5; 6],
+                    9,
+                    light_val,
+                );
+            }
+            EntityType::Wolf => {
+                let is_sit = entity.is_sitting;
+                let body_pos = if is_sit {
+                    Vec3::new(0.0, 0.4, 0.0)
+                } else {
+                    Vec3::new(0.0, 0.55, 0.0)
+                };
+                // Head
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.4, 0.4, 0.4),
+                    Vec3::ZERO,
+                    to_world(body_pos + Vec3::new(0.0, 0.25, 0.35)),
+                    entity.yaw,
+                    entity.pitch,
+                    [9; 6],
+                    11,
+                    light_val,
+                );
+                // Body
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.45, 0.45, 0.7),
+                    Vec3::ZERO,
+                    to_world(body_pos),
+                    entity.yaw,
+                    0.0,
+                    [10; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::Cat => {
+                let body_pos = Vec3::new(0.0, 0.4, 0.0);
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.35, 0.35, 0.35),
+                    Vec3::ZERO,
+                    to_world(body_pos + Vec3::new(0.0, 0.2, 0.3)),
+                    entity.yaw,
+                    entity.pitch,
+                    [11; 6],
+                    11,
+                    light_val,
+                );
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.4, 0.35, 0.6),
+                    Vec3::ZERO,
+                    to_world(body_pos),
+                    entity.yaw,
+                    0.0,
+                    [12; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::Horse => {
+                // Horse Head/Neck
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.9, 0.5),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 1.3, 0.5)),
+                    entity.yaw,
+                    entity.pitch,
+                    [13; 6],
+                    11,
+                    light_val,
+                );
+                // Body
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.9, 0.9, 1.4),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.8, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [14; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::Bat => {
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.3, 0.3, 0.3),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.3, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [15; 6],
+                    11,
+                    light_val,
+                );
+            }
+            EntityType::Squid => {
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.7, 0.7, 0.7),
+                    Vec3::ZERO,
+                    to_world(Vec3::new(0.0, 0.5, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [0; 6],
+                    12,
+                    light_val,
+                );
+            }
             EntityType::ExperienceOrb => {}
         }
 

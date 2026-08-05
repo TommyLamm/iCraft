@@ -222,7 +222,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Terrain scheduling/rendering | `chunk_schedule.rs`, `chunk_render.rs`, `culling.rs`, `shader.wgsl` |
 | Player, recipes, gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `recipes.rs`, `crafting.rs` |
 | Equipment and effects | `enchantment.rs`, `brewing.rs`, `hand_renderer.rs` |
-| Entities and AI | `entity.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
+| Entities and AI | `entity.rs`, `spawning.rs`, `ai/{mod, goal, brain, navigation}.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
 | Container & workstation system | `block_entity.rs` (ChestBlockEntity, FurnaceBlockEntity), `inventory.rs` (ContainerInventory), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (SlotType::ContainerSlot, container_target, open_chest, recipe_book_open, update_furnaces) |
 | Networking | `network/{protocol,transport,server,client}.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
@@ -296,6 +296,13 @@ The terrain generator uses continuous 2D climate noise and 3D density sampling e
 - `surface.rs` & `ore.rs`: Surface layers (top, filler, underwater) are data-driven per biome. Ores (`Coal`, `Iron`, `Gold`, `Redstone`, `Diamond`) distribute across negative Y Y-ranges using deterministic per-chunk vein algorithms.
 - `feature.rs`: Tree and plant feature placer handles multi-chunk tree boundary placement and column flora.
 - `world_tick.rs`: Evaluates natural block simulation (grass spread/decay, leaf decay based on log proximity, sapling growth, cactus/sugar cane growth, ice/snow melt, fire spread, falling sand/gravel step movement).
+
+## Mob ecology, spawning & pets (Plan 11)
+
+- `spawning.rs`: `MobCategory` caps (`Monster`: 70, `Creature`: 10, `Ambient`: 15, `WaterCreature`: 5 per player), natural spawn checks (biome, light <= 7 for monsters, surface, fluid, distance 24..128 blocks from player), difficulty rules (Peaceful despawns/prevents hostile), and despawn evaluation (>128 blocks instant despawn unless persistent; >32 blocks soft despawn after 30s).
+- `ai/`: Priority-sorted `Brain` scheduler managing modular goals (`SwimGoal`, `SitGoal`, `FollowOwnerGoal`, `MeleeAttackGoal`, `WanderGoal`) and `BoundedPathfinder` with node evaluation caps to prevent A* frame spikes.
+- Representative Mobs & Pets: `Spider` (climbing/leaping), `Slime` / `MagmaCube` (size-based splitting on death), `Witch` (potion drinking & splash potion throwing), `Drowned` (water/land toggle), `Ghast` (flying & fireball), `WitherSkeleton` (Wither effect), `Wolf` (tameable with bone, standing follow/sit toggle, attacks targets, dye collar), `Cat` (tameable with fish, Creeper repulsion within 8 blocks), `Horse` (tameable/rideable attributes), `Bat` (ambient cavern flight), `Squid` (water swimming).
+- Persistence: `EntitySaveData` serialized with `#[serde(default)]` backward compatibility for `owner_id`, `owner_uuid`, `is_tamed`, `is_sitting`, `collar_color`, `slime_size`, and `is_persistent`.
 
 
 ## Verification

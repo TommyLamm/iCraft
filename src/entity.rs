@@ -27,6 +27,18 @@ pub enum EntityType {
     RemotePlayer,
     Enderman,
     ExperienceOrb,
+    Spider,
+    Slime,
+    Witch,
+    Drowned,
+    Ghast,
+    MagmaCube,
+    WitherSkeleton,
+    Wolf,
+    Cat,
+    Horse,
+    Bat,
+    Squid,
 }
 
 impl EntityType {
@@ -55,6 +67,18 @@ impl EntityType {
             Self::RemotePlayer => 20,
             Self::Enderman => 21,
             Self::ExperienceOrb => 22,
+            Self::Spider => 23,
+            Self::Slime => 24,
+            Self::Witch => 25,
+            Self::Drowned => 26,
+            Self::Ghast => 27,
+            Self::MagmaCube => 28,
+            Self::WitherSkeleton => 29,
+            Self::Wolf => 30,
+            Self::Cat => 31,
+            Self::Horse => 32,
+            Self::Bat => 33,
+            Self::Squid => 34,
         }
     }
 
@@ -83,12 +107,35 @@ impl EntityType {
             20 => Some(Self::RemotePlayer),
             21 => Some(Self::Enderman),
             22 => Some(Self::ExperienceOrb),
+            23 => Some(Self::Spider),
+            24 => Some(Self::Slime),
+            25 => Some(Self::Witch),
+            26 => Some(Self::Drowned),
+            27 => Some(Self::Ghast),
+            28 => Some(Self::MagmaCube),
+            29 => Some(Self::WitherSkeleton),
+            30 => Some(Self::Wolf),
+            31 => Some(Self::Cat),
+            32 => Some(Self::Horse),
+            33 => Some(Self::Bat),
+            34 => Some(Self::Squid),
             _ => None,
         }
     }
 
     pub fn is_passive(self) -> bool {
-        matches!(self, Self::Pig | Self::Cow | Self::Sheep | Self::Chicken)
+        matches!(
+            self,
+            Self::Pig
+                | Self::Cow
+                | Self::Sheep
+                | Self::Chicken
+                | Self::Wolf
+                | Self::Cat
+                | Self::Horse
+                | Self::Bat
+                | Self::Squid
+        )
     }
 
     pub fn is_hostile(self) -> bool {
@@ -104,6 +151,13 @@ impl EntityType {
                 | Self::Enderman
                 | Self::EnderDragon
                 | Self::Wither
+                | Self::Spider
+                | Self::Slime
+                | Self::Witch
+                | Self::Drowned
+                | Self::Ghast
+                | Self::MagmaCube
+                | Self::WitherSkeleton
         )
     }
 
@@ -128,6 +182,10 @@ impl EntityType {
                 | Self::Cow
                 | Self::Sheep
                 | Self::Chicken
+                | Self::Spider
+                | Self::Slime
+                | Self::Witch
+                | Self::Drowned
         )
     }
 
@@ -142,7 +200,13 @@ impl EntityType {
     pub fn uses_flying_physics(self) -> bool {
         matches!(
             self,
-            Self::Blaze | Self::EnderDragon | Self::Wither | Self::WitherSkull | Self::DragonBreath
+            Self::Blaze
+                | Self::EnderDragon
+                | Self::Wither
+                | Self::WitherSkull
+                | Self::DragonBreath
+                | Self::Ghast
+                | Self::Bat
         )
     }
 
@@ -191,6 +255,17 @@ pub struct Entity {
     pub projectile_damage: f32,
     pub potion: Option<crate::brewing::PotionData>,
 
+    // Pet & metadata fields
+    pub owner_id: Option<u64>,
+    pub owner_uuid: Option<String>,
+    pub is_tamed: bool,
+    pub is_sitting: bool,
+    pub collar_color: [f32; 3],
+    pub slime_size: u8,
+    pub is_persistent: bool,
+    pub horse_speed: f32,
+    pub horse_jump: f32,
+
     // Passive mob fields
     pub age: f32,
     pub breeding_timer: f32,
@@ -220,6 +295,14 @@ pub struct Entity {
 }
 
 impl Entity {
+    pub fn is_tamed(&self) -> bool {
+        self.is_tamed
+    }
+
+    pub fn is_sitting(&self) -> bool {
+        self.is_sitting
+    }
+
     pub fn new(id: u64, entity_type: EntityType, position: Vec3) -> Self {
         let size = match entity_type {
             EntityType::Zombie | EntityType::Skeleton | EntityType::Blaze => {
@@ -243,6 +326,16 @@ impl Entity {
             EntityType::Wither => Vec3::new(1.0, 3.5, 1.0),
             EntityType::EndCrystal => Vec3::new(1.5, 2.0, 1.5),
             EntityType::RemotePlayer => Vec3::new(0.6, 1.8, 0.6),
+            EntityType::Spider => Vec3::new(1.4, 0.9, 1.4),
+            EntityType::Slime | EntityType::MagmaCube => Vec3::new(1.0, 1.0, 1.0),
+            EntityType::Witch | EntityType::Drowned => Vec3::new(0.6, 1.95, 0.6),
+            EntityType::Ghast => Vec3::new(4.0, 4.0, 4.0),
+            EntityType::WitherSkeleton => Vec3::new(0.7, 2.4, 0.7),
+            EntityType::Wolf => Vec3::new(0.6, 0.85, 0.6),
+            EntityType::Cat => Vec3::new(0.6, 0.7, 0.6),
+            EntityType::Horse => Vec3::new(1.4, 1.6, 1.4),
+            EntityType::Bat => Vec3::new(0.5, 0.9, 0.5),
+            EntityType::Squid => Vec3::new(0.85, 0.95, 0.85),
         };
         let max_health = match entity_type {
             EntityType::Zombie | EntityType::Skeleton | EntityType::Creeper => 20.0,
@@ -266,6 +359,14 @@ impl Entity {
             | EntityType::DroppedItem
             | EntityType::ExperienceOrb => 0.0,
             EntityType::RemotePlayer => 20.0,
+            EntityType::Spider | EntityType::Slime | EntityType::MagmaCube => 16.0,
+            EntityType::Witch => 26.0,
+            EntityType::Drowned | EntityType::WitherSkeleton => 20.0,
+            EntityType::Ghast => 10.0,
+            EntityType::Wolf => 8.0,
+            EntityType::Cat | EntityType::Squid => 10.0,
+            EntityType::Horse => 24.0,
+            EntityType::Bat => 6.0,
         };
         Self {
             id,
@@ -291,6 +392,15 @@ impl Entity {
             friendly_projectile: false,
             projectile_damage: 4.0,
             potion: None,
+            owner_id: None,
+            owner_uuid: None,
+            is_tamed: false,
+            is_sitting: false,
+            collar_color: [0.8, 0.2, 0.2], // default red collar
+            slime_size: 1,
+            is_persistent: false,
+            horse_speed: 0.225,
+            horse_jump: 0.7,
             age: 0.0,
             breeding_timer: 0.0,
             breed_cooldown: 0.0,

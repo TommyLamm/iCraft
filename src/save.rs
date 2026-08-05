@@ -470,6 +470,14 @@ pub struct InventoryData {
     pub creative_drag_origin: Option<CreativeDragOrigin>,
 }
 
+fn default_collar_color() -> [f32; 3] {
+    [0.8, 0.2, 0.2]
+}
+
+fn default_slime_size() -> u8 {
+    1
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EntitySaveData {
     pub entity_type: crate::entity::EntityType,
@@ -494,6 +502,20 @@ pub struct EntitySaveData {
     pub item_age: f32,
     #[serde(default)]
     pub xp_value: u32,
+    #[serde(default)]
+    pub owner_id: Option<u64>,
+    #[serde(default)]
+    pub owner_uuid: Option<String>,
+    #[serde(default)]
+    pub is_tamed: bool,
+    #[serde(default)]
+    pub is_sitting: bool,
+    #[serde(default = "default_collar_color")]
+    pub collar_color: [f32; 3],
+    #[serde(default = "default_slime_size")]
+    pub slime_size: u8,
+    #[serde(default)]
+    pub is_persistent: bool,
 }
 
 impl From<&crate::entity::Entity> for EntitySaveData {
@@ -518,6 +540,13 @@ impl From<&crate::entity::Entity> for EntitySaveData {
             dropped_stack: entity.dropped_stack.as_ref().map(ItemStackData::from),
             item_age: entity.item_age,
             xp_value: entity.xp_value,
+            owner_id: entity.owner_id,
+            owner_uuid: entity.owner_uuid.clone(),
+            is_tamed: entity.is_tamed,
+            is_sitting: entity.is_sitting,
+            collar_color: entity.collar_color,
+            slime_size: entity.slime_size,
+            is_persistent: entity.is_persistent,
         }
     }
 }
@@ -550,6 +579,13 @@ impl EntitySaveData {
         }
         entity.item_age = self.item_age;
         entity.xp_value = self.xp_value;
+        entity.owner_id = self.owner_id;
+        entity.owner_uuid = self.owner_uuid.clone();
+        entity.is_tamed = self.is_tamed;
+        entity.is_sitting = self.is_sitting;
+        entity.collar_color = self.collar_color;
+        entity.slime_size = self.slime_size;
+        entity.is_persistent = self.is_persistent;
         entity
     }
 
@@ -3169,6 +3205,13 @@ mod tests {
             dropped_stack: None,
             item_age: 0.0,
             xp_value: 0,
+            owner_id: None,
+            owner_uuid: None,
+            is_tamed: false,
+            is_sitting: false,
+            collar_color: [0.8, 0.2, 0.2],
+            slime_size: 1,
+            is_persistent: false,
         }];
 
         manager
@@ -3959,6 +4002,27 @@ mod tests {
         let restored_stack = restored_entity.dropped_stack.unwrap();
         assert_eq!(restored_stack.item, crate::inventory::Item::DiamondSword);
         assert_eq!(restored_stack.durability, 100);
+
+        // Pet and entity save data test (Plan 11)
+        let mut wolf = crate::entity::Entity::new(
+            2,
+            crate::entity::EntityType::Wolf,
+            glam::Vec3::new(5.0, 64.0, 5.0),
+        );
+        wolf.is_tamed = true;
+        wolf.is_sitting = true;
+        wolf.owner_id = Some(42);
+        wolf.collar_color = [0.0, 0.0, 1.0]; // Blue collar
+
+        let wolf_save = EntitySaveData::from(&wolf);
+        let wolf_bytes = bincode::serialize(&wolf_save).unwrap();
+        let restored_wolf_save: EntitySaveData = bincode::deserialize(&wolf_bytes).unwrap();
+        let restored_wolf = restored_wolf_save.to_entity(2);
+
+        assert!(restored_wolf.is_tamed);
+        assert!(restored_wolf.is_sitting);
+        assert_eq!(restored_wolf.owner_id, Some(42));
+        assert_eq!(restored_wolf.collar_color, [0.0, 0.0, 1.0]);
 
         // 3. PlayerData spawn_point
         let mut player_state = crate::player::PlayerState::new();

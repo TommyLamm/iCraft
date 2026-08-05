@@ -217,6 +217,11 @@ pub enum Item {
     Paper,
     EnchantedBook,
     Compass,
+    String,
+    Slimeball,
+    RawCod,
+    RawSalmon,
+    InkSac,
 }
 
 pub const ALL_ITEMS: &[Item] = &[
@@ -1106,6 +1111,9 @@ impl Item {
             Item::GlassPane => Some(CreativeTab::Blocks),
             Item::OakLadder => Some(CreativeTab::Blocks),
             Item::OakSign => Some(CreativeTab::Blocks),
+            Item::String | Item::Slimeball | Item::RawCod | Item::RawSalmon | Item::InkSac => {
+                Some(CreativeTab::Misc)
+            }
         }
     }
 
@@ -2428,7 +2436,12 @@ impl Item {
             | Item::CobblestoneWall
             | Item::GlassPane
             | Item::OakLadder
-            | Item::OakSign) => {
+            | Item::OakSign
+            | Item::String
+            | Item::Slimeball
+            | Item::RawCod
+            | Item::RawSalmon
+            | Item::InkSac) => {
                 let (name, max_stack, is_block, block_type, tex_coords) = match item {
                     Item::WoodenHoe => ("Wooden Hoe", 1, false, None, (0, 8)),
                     Item::StoneHoe => ("Stone Hoe", 1, false, None, (1, 8)),
@@ -2508,6 +2521,11 @@ impl Item {
                     Item::DiamondLeggings => ("Diamond Leggings", 1, false, None, (2, 15)),
                     Item::DiamondBoots => ("Diamond Boots", 1, false, None, (2, 12)),
                     Item::Shield => ("Shield", 1, false, None, (15, 12)),
+                    Item::String => ("String", 64, false, None, (8, 3)),
+                    Item::Slimeball => ("Slimeball", 64, false, None, (14, 1)),
+                    Item::RawCod => ("Raw Cod", 64, false, None, (1, 10)),
+                    Item::RawSalmon => ("Raw Salmon", 64, false, None, (2, 10)),
+                    Item::InkSac => ("Ink Sac", 64, false, None, (15, 1)),
                     _ => ("Unknown", 64, false, None, (0, 0)),
                 };
                 ItemProperties {

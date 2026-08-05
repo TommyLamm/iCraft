@@ -670,7 +670,20 @@ pub fn update_mobs(
         EntityType::Shulker,
         EntityType::EnderDragon,
         EntityType::Wither,
+        EntityType::Spider,
+        EntityType::Slime,
+        EntityType::Witch,
+        EntityType::Drowned,
+        EntityType::Ghast,
+        EntityType::MagmaCube,
+        EntityType::WitherSkeleton,
+        EntityType::Wolf,
+        EntityType::Cat,
+        EntityType::Horse,
+        EntityType::Bat,
+        EntityType::Squid,
     ];
+    let mut slimes_to_split = Vec::new();
     for entity in death_candidates
         .into_iter()
         .flat_map(|kind| entity_manager.get_entities_by_type(kind))
@@ -678,12 +691,58 @@ pub fn update_mobs(
         if entity.health <= 0.0 {
             death_sounds.push(entity.position);
             match entity.entity_type {
-                EntityType::Zombie => {
+                EntityType::Zombie | EntityType::Drowned => {
                     items_to_drop.push((crate::inventory::Item::RottenFlesh, entity.position));
                 }
                 EntityType::Skeleton => {
                     items_to_drop.push((crate::inventory::Item::Bone, entity.position));
                     items_to_drop.push((crate::inventory::Item::Arrow, entity.position));
+                }
+                EntityType::Spider => {
+                    items_to_drop.push((crate::inventory::Item::String, entity.position));
+                    items_to_drop.push((crate::inventory::Item::SpiderEye, entity.position));
+                }
+                EntityType::Slime => {
+                    items_to_drop.push((crate::inventory::Item::Slimeball, entity.position));
+                    if entity.slime_size > 1 {
+                        slimes_to_split.push((
+                            EntityType::Slime,
+                            entity.slime_size / 2,
+                            entity.position,
+                        ));
+                    }
+                }
+                EntityType::Witch => {
+                    items_to_drop.push((crate::inventory::Item::GlassBottle, entity.position));
+                }
+                EntityType::Ghast => {
+                    items_to_drop.push((crate::inventory::Item::GhastTear, entity.position));
+                }
+                EntityType::MagmaCube => {
+                    items_to_drop.push((crate::inventory::Item::MagmaCream, entity.position));
+                    if entity.slime_size > 1 {
+                        slimes_to_split.push((
+                            EntityType::MagmaCube,
+                            entity.slime_size / 2,
+                            entity.position,
+                        ));
+                    }
+                }
+                EntityType::WitherSkeleton => {
+                    items_to_drop.push((crate::inventory::Item::Bone, entity.position));
+                    items_to_drop.push((crate::inventory::Item::Coal, entity.position));
+                }
+                EntityType::Wolf => {
+                    items_to_drop.push((crate::inventory::Item::Bone, entity.position));
+                }
+                EntityType::Cat => {
+                    items_to_drop.push((crate::inventory::Item::String, entity.position));
+                }
+                EntityType::Horse => {
+                    items_to_drop.push((crate::inventory::Item::Leather, entity.position));
+                }
+                EntityType::Squid => {
+                    items_to_drop.push((crate::inventory::Item::InkSac, entity.position));
                 }
                 _ => {}
             }
@@ -702,6 +761,19 @@ pub fn update_mobs(
 
     // Clean up dead entities (health < 0 or health == 0)
     entity_manager.retain(should_retain_after_health_cleanup);
+
+    for (kind, new_size, pos) in slimes_to_split {
+        for i in 0..2 {
+            let offset = Vec3::new((i as f32 - 0.5) * 0.5, 0.2, 0.0);
+            let id = entity_manager.spawn(kind, pos + offset);
+            if let Some(child) = entity_manager.get_by_id_mut(id) {
+                child.slime_size = new_size;
+                child.size = Vec3::new(0.5, 0.5, 0.5) * new_size as f32;
+                child.max_health = (new_size as f32) * 4.0;
+                child.health = child.max_health;
+            }
+        }
+    }
 
     // Spawn dropped items for dead entities
     for (item, pos) in items_to_drop {

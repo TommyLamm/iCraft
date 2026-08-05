@@ -1,4 +1,5 @@
 pub mod advancements;
+pub mod ai;
 mod app;
 pub mod audio;
 pub mod block_entity;
@@ -36,6 +37,7 @@ pub mod recipes;
 mod redstone;
 pub mod save;
 pub mod sim_harness;
+pub mod spawning;
 mod state;
 pub mod structure;
 mod texture;
