@@ -4041,9 +4041,9 @@ mod tests {
         let idx_y100 = (4 * 256 + 100) * 16 + 4;
         let idx_y255 = (2 * 256 + 255) * 16 + 2;
 
-        legacy_blocks[idx_y10] = BlockType::DiamondBlock as u8;
+        legacy_blocks[idx_y10] = BlockType::DiamondOre as u8;
         legacy_blocks[idx_y100] = BlockType::Obsidian as u8;
-        legacy_blocks[idx_y255] = BlockType::GoldBlock as u8;
+        legacy_blocks[idx_y255] = BlockType::GoldOre as u8;
         legacy_states[idx_y100] = 0b00000001; // custom block state bit
 
         let legacy_save_data = ChunkSaveData {
@@ -4087,14 +4087,11 @@ mod tests {
         // Verify Y=0..255 block mapping and states
         assert_eq!(
             modern_chunk.get_block_local(8, 10, 8),
-            BlockType::DiamondBlock
+            BlockType::DiamondOre
         );
         assert_eq!(modern_chunk.get_block_local(4, 100, 4), BlockType::Obsidian);
         assert_eq!(modern_chunk.get_block_state(4, 100, 4), 0b00000001);
-        assert_eq!(
-            modern_chunk.get_block_local(2, 255, 2),
-            BlockType::GoldBlock
-        );
+        assert_eq!(modern_chunk.get_block_local(2, 255, 2), BlockType::GoldOre);
 
         // Verify sections Y < 0 (-64..-1) and Y >= 256 (256..319) remain unconfigured/empty Air
         for wy in -64..0 {
