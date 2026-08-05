@@ -1579,7 +1579,11 @@ impl SaveQueue {
                 state.pending_level_player = Some((level, player));
             }
             SaveCommand::Flush(waiter) => {
-                if state.flush_waiters.is_empty() {
+                if state.pending_chunks.is_empty()
+                    && state.failed_chunks.is_empty()
+                    && state.pending_level_player.is_none()
+                    && state.failed_level_player.is_none()
+                {
                     state.flush_error = None;
                 }
                 if state.pending_chunks.is_empty() {
@@ -1771,7 +1775,10 @@ fn run_save_worker(inner: Arc<SaveQueueInner>, manager: Arc<Mutex<SaveManager>>)
         }
 
         if state.pending_chunks.is_empty() && state.pending_level_player.is_none() {
-            let flush_result = state.flush_error.take().map_or(Ok(()), Err);
+            let flush_result = match &state.flush_error {
+                Some(err) => Err(err.clone()),
+                None => Ok(()),
+            };
             if flush_result.is_ok()
                 && state.failed_chunks.is_empty()
                 && state.failed_level_player.is_none()
@@ -1781,8 +1788,13 @@ fn run_save_worker(inner: Arc<SaveQueueInner>, manager: Arc<Mutex<SaveManager>>)
                     .lock()
                     .unwrap_or_else(|lock_error| lock_error.into_inner()) = None;
             }
-            for waiter in state.flush_waiters.drain(..) {
-                let _ = waiter.send(flush_result.clone());
+            if !state.flush_waiters.is_empty() {
+                if flush_result.is_err() {
+                    state.flush_error = None;
+                }
+                for waiter in state.flush_waiters.drain(..) {
+                    let _ = waiter.send(flush_result.clone());
+                }
             }
         }
     }
