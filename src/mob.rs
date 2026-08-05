@@ -191,7 +191,7 @@ fn is_under_sun(
     }
 
     // Check if there is any solid block above
-    for y in (my + 1)..(crate::world::CHUNK_HEIGHT as i32) {
+    for y in (my + 1)..320 {
         if chunk_manager.get_block(mx, y, mz).properties().is_solid {
             return false;
         }
@@ -958,7 +958,7 @@ mod tests {
         let chunk = crate::world::Chunk::new(0, 0);
         chunk_manager.chunks.insert((0, 0), chunk);
 
-        let highest_y = (0..crate::world::CHUNK_HEIGHT as i32)
+        let highest_y = (-64..320)
             .rev()
             .find(|&y| chunk_manager.get_block(8, y, 8).properties().is_solid)
             .unwrap_or(64);

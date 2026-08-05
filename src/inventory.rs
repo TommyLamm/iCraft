@@ -2592,6 +2592,7 @@ impl Item {
             BlockType::GlassPane => Item::GlassPane,
             BlockType::OakLadder => Item::OakLadder,
             BlockType::OakSign => Item::OakSign,
+            BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => Item::Air,
         }
     }
 }

@@ -217,7 +217,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | --- | --- |
 | App lifecycle and menu | `main.rs`, `app.rs`, `menu.rs` |
 | Composition, simulation, UI, GPU submission | `state.rs` |
-| World/chunks/generation | `world.rs`, `chunk_manager.rs`, `dimension.rs` |
+| World/chunks/generation | `world.rs`, `chunk_manager.rs`, `dimension.rs`, `worldgen/{mod, climate, density, surface, carver, ore, feature}.rs` |
 | Lighting, fluids, block targeting | `lighting.rs`, `fluid.rs`, `interaction.rs` |
 | Terrain scheduling/rendering | `chunk_schedule.rs`, `chunk_render.rs`, `culling.rs`, `shader.wgsl` |
 | Player, recipes, gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `recipes.rs`, `crafting.rs` |
@@ -284,6 +284,17 @@ section_and_local_y_to_world_y(sy: i8, ly: u8) -> i32;
 - Shield blocking (180° facing arc) reduces damage by 100% for blockable sources and degrades shield durability; Axe attacks trigger a 5-second (100 ticks) shield disable.
 - `settings.txt` and `controls.config` are working-directory-relative. Keep
   parsing defaults and sanitization backward compatible.
+
+## Overworld terrain & biomes (Plan 09)
+
+The terrain generator uses continuous 2D climate noise and 3D density sampling encapsulated in `src/worldgen/`:
+
+- `climate.rs`: `ClimateSystem` samples `temperature`, `humidity`, `continentalness`, `erosion`, and `weirdness` to continuously select 16 Overworld biomes (`Plains`, `Forest`, `BirchForest`, `Taiga`, `SnowyPlains`, `Desert`, `Savanna`, `Swamp`, `Jungle`, `Badlands`, `Meadow`, `WindsweptHills`, `River`, `Beach`, `Ocean`, `DeepOcean`). `WeatherSystem` shares this `ClimateSystem` for unified rain/snow precipitation queries.
+- `density.rs` & `carver.rs`: 3D density fields combine continental landmass, erosion, ridges, and cave carvers (`cheese/cavern`, `tunnel`, `ravine`) with deep lava lake thresholds (`y <= 0`).
+- `surface.rs` & `ore.rs`: Surface layers (top, filler, underwater) are data-driven per biome. Ores (`Coal`, `Iron`, `Gold`, `Redstone`, `Diamond`) distribute across negative Y Y-ranges using deterministic per-chunk vein algorithms.
+- `feature.rs`: Tree and plant feature placer handles multi-chunk tree boundary placement and column flora.
+- `world_tick.rs`: Evaluates natural block simulation (grass spread/decay, leaf decay based on log proximity, sapling growth, cactus/sugar cane growth, ice/snow melt, fire spread, falling sand/gravel step movement).
+
 
 ## Verification
 

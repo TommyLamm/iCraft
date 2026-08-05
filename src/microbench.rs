@@ -267,7 +267,26 @@ fn bench_network() -> u64 {
     checksum
 }
 
-pub fn run() -> [u64; 6] {
+fn bench_worldgen() -> u64 {
+    let seed = 12345u32;
+    let mut checksum = 0u64;
+    let start = Instant::now();
+    for cx in -4..=4 {
+        for cz in -4..=4 {
+            let chunk = Chunk::new_with_seed(cx, cz, seed);
+            checksum = checksum.wrapping_add(chunk.sections.len() as u64);
+        }
+    }
+    report(
+        "worldgen_9x9_chunks",
+        81,
+        start.elapsed().as_nanos(),
+        checksum,
+    );
+    checksum
+}
+
+pub fn run() -> [u64; 7] {
     [
         bench_storage(),
         bench_lighting(),
@@ -275,6 +294,7 @@ pub fn run() -> [u64; 6] {
         bench_mesh(),
         bench_save(),
         bench_network(),
+        bench_worldgen(),
     ]
 }
 

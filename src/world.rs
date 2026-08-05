@@ -7,18 +7,47 @@ pub const CHUNK_WIDTH: usize = 16;
 pub const CHUNK_HEIGHT: usize = 256;
 pub const CHUNK_DEPTH: usize = 16;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Biome {
     Plains,
     Forest,
-    Desert,
+    BirchForest,
     Taiga,
+    SnowyPlains,
+    Desert,
+    Savanna,
     Swamp,
-    Mountains,
+    Jungle,
+    Badlands,
+    Meadow,
+    WindsweptHills,
+    River,
+    Beach,
     Ocean,
+    DeepOcean,
 }
 
 impl Biome {
+    /// All 16 reachable overworld biomes.
+    pub const ALL: [Biome; 16] = [
+        Biome::Plains,
+        Biome::Forest,
+        Biome::BirchForest,
+        Biome::Taiga,
+        Biome::SnowyPlains,
+        Biome::Desert,
+        Biome::Savanna,
+        Biome::Swamp,
+        Biome::Jungle,
+        Biome::Badlands,
+        Biome::Meadow,
+        Biome::WindsweptHills,
+        Biome::River,
+        Biome::Beach,
+        Biome::Ocean,
+        Biome::DeepOcean,
+    ];
+
     pub fn get_biome(
         world_x: i32,
         world_z: i32,
@@ -26,7 +55,14 @@ impl Biome {
         moist_perlin: &Perlin,
         ocean_perlin: &Perlin,
     ) -> Self {
+        // Legacy compatibility shim: the new climate/biome selection lives in
+        // worldgen::climate. This shim reproduces a subset of the new logic
+        // so callers that only have raw Perlin fields can still resolve a
+        // biome deterministically.
         let ocean_val = ocean_perlin.get([world_x as f64 * 0.001, world_z as f64 * 0.001]);
+        if ocean_val < -0.55 {
+            return Biome::DeepOcean;
+        }
         if ocean_val < -0.35 {
             return Biome::Ocean;
         }
@@ -34,35 +70,65 @@ impl Biome {
         let temp = temp_perlin.get([world_x as f64 * 0.002, world_z as f64 * 0.002]);
         let moist = moist_perlin.get([world_x as f64 * 0.002, world_z as f64 * 0.002]);
 
-        if temp < -0.3 {
-            if moist < -0.2 {
-                Biome::Mountains
+        if temp < -0.35 {
+            if moist > -0.2 {
+                Biome::SnowyPlains
             } else {
-                Biome::Taiga
+                Biome::WindsweptHills
             }
+        } else if temp < -0.2 {
+            Biome::Taiga
+        } else if temp > 0.5 && moist < -0.45 {
+            Biome::Badlands
+        } else if temp > 0.45 && moist < 0.15 {
+            Biome::Savanna
         } else if temp > 0.4 && moist < -0.3 {
             Biome::Desert
+        } else if temp > 0.35 && moist > 0.55 {
+            Biome::Jungle
         } else if temp > 0.2 && moist > 0.4 {
             Biome::Swamp
+        } else if temp > 0.1 && temp < 0.4 && moist > 0.2 {
+            Biome::BirchForest
+        } else if temp > 0.1 && moist > 0.0 {
+            Biome::Forest
         } else {
-            if moist > 0.0 {
-                Biome::Forest
-            } else {
-                Biome::Plains
-            }
+            Biome::Plains
         }
     }
 
     pub fn terrain_params(self) -> (f64, f64) {
         match self {
-            Biome::Plains => (65.0, 4.0),
-            Biome::Forest => (66.0, 6.0),
-            Biome::Desert => (65.0, 5.0),
-            Biome::Taiga => (68.0, 8.0),
-            Biome::Swamp => (62.0, 1.5),
-            Biome::Mountains => (82.0, 22.0),
-            Biome::Ocean => (50.0, 6.0),
+            Biome::Plains => (70.0, 4.0),
+            Biome::Forest => (71.0, 6.0),
+            Biome::BirchForest => (71.0, 6.0),
+            Biome::Taiga => (72.0, 8.0),
+            Biome::SnowyPlains => (68.0, 3.0),
+            Biome::Desert => (70.0, 5.0),
+            Biome::Savanna => (72.0, 6.0),
+            Biome::Swamp => (66.0, 1.5),
+            Biome::Jungle => (74.0, 10.0),
+            Biome::Badlands => (78.0, 12.0),
+            Biome::Meadow => (72.0, 4.0),
+            Biome::WindsweptHills => (85.0, 22.0),
+            Biome::River => (63.0, 1.0),
+            Biome::Beach => (64.0, 1.0),
+            Biome::Ocean => (40.0, 6.0),
+            Biome::DeepOcean => (25.0, 4.0),
         }
+    }
+
+    /// Whether precipitation in this biome falls as snow.
+    pub fn is_snowy(self) -> bool {
+        matches!(
+            self,
+            Biome::SnowyPlains | Biome::Taiga | Biome::WindsweptHills
+        )
+    }
+
+    /// Whether this biome is dry (no rain).
+    pub fn is_dry(self) -> bool {
+        matches!(self, Biome::Desert | Biome::Badlands | Biome::Savanna)
     }
 }
 
@@ -361,6 +427,9 @@ pub enum BlockType {
     GlassPane = 102,
     OakLadder = 103,
     OakSign = 104,
+    OakSapling = 105,
+    BirchSapling = 106,
+    SpruceSapling = 107,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -384,6 +453,12 @@ pub struct BlockProperties {
     pub is_solid: bool,
     pub is_passable: bool,
     pub light_emission: u8,
+}
+
+impl BlockProperties {
+    pub fn is_opaque(&self) -> bool {
+        self.render_type == RenderType::Opaque
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1527,6 +1602,16 @@ impl BlockType {
                 is_passable: true,
                 light_emission: 0,
             },
+            BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => {
+                BlockProperties {
+                    name: "Sapling",
+                    hardness: 0.0,
+                    render_type: RenderType::Cutout,
+                    is_solid: false,
+                    is_passable: true,
+                    light_emission: 0,
+                }
+            }
         }
     }
 
@@ -1715,6 +1800,7 @@ impl BlockType {
             BlockType::GlassPane => (0, 1),
             BlockType::OakLadder => (3, 5),
             BlockType::OakSign => (6, 0),
+            BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => (4, 0),
         }
     }
 }
@@ -3300,443 +3386,72 @@ impl Chunk {
     }
 
     pub fn new_with_seed(chunk_x: i32, chunk_z: i32, world_seed: u32) -> Self {
-        // Allocate on the heap to avoid stack overflow (~192 KB per chunk)
-        let mut blocks: Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
-            vec![[[BlockType::Air; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
-                .try_into()
-                .unwrap();
-        let perlin = Perlin::new(world_seed);
-        let caves_perlin = Perlin::new(world_seed ^ 0xA341_316C);
-        let caverns_perlin = Perlin::new(world_seed ^ 0xC801_3EA4);
-        let temp_perlin = Perlin::new(world_seed ^ 0xAD90_777D);
-        let moist_perlin = Perlin::new(world_seed ^ 0x7E95_761E);
-        let ocean_perlin = Perlin::new(world_seed ^ 0x4CF5_AD43);
+        // Dense full-height block array for the signed overworld range.
+        // Indexed [x][local_y][z] where local_y = world_y - min_y.
+        let height = crate::dimension::WorldHeight::OVERWORLD;
+        let min_y = height.min_y();
+        let total_height = height.height() as usize;
+        let mut blocks: Vec<Vec<[BlockType; CHUNK_DEPTH]>> =
+            vec![vec![[BlockType::Air; CHUNK_DEPTH]; total_height]; CHUNK_WIDTH];
 
-        // Simple custom PRNG for ore distribution and bedrock blending
-        let mut rng_seed =
-            (chunk_x as u32).wrapping_mul(31) ^ (chunk_z as u32) ^ world_seed.rotate_left(13);
-        let mut next_rand = |min: u8, max: u8| -> u8 {
-            rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-            let val = (rng_seed / 65536) % 32768;
-            let diff = max - min;
-            if diff == 0 {
-                return min;
-            }
-            min + (val % diff as u32) as u8
-        };
+        let ctx = crate::worldgen::WorldGenContext::new(world_seed);
 
+        // Fill terrain density.
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                let world_x = chunk_x * (CHUNK_WIDTH as i32) + x as i32;
-                let world_z = chunk_z * (CHUNK_DEPTH as i32) + z as i32;
+                let wx = chunk_x * CHUNK_WIDTH as i32 + x as i32;
+                let wz = chunk_z * CHUNK_DEPTH as i32 + z as i32;
+                let surface_y = ctx.surface_height_at(wx, wz);
+                let _biome = ctx.biome_at(wx, wz);
 
-                let base_height = get_interpolated_height(
-                    world_x,
-                    world_z,
-                    &perlin,
-                    &temp_perlin,
-                    &moist_perlin,
-                    &ocean_perlin,
-                );
-                let biome =
-                    Biome::get_biome(world_x, world_z, &temp_perlin, &moist_perlin, &ocean_perlin);
+                for wy in min_y..height.max_y_exclusive() {
+                    let ly = (wy - min_y) as usize;
+                    let block = ctx.block_at(wx, wy, wz).unwrap_or(BlockType::Air);
+                    blocks[x][ly][z] = block;
+                }
 
-                let entrance_noise = perlin.get([world_x as f64 * 0.015, world_z as f64 * 0.015]);
-                let is_entrance_zone = entrance_noise > 0.55 && base_height > 63;
-
-                for y in 0..CHUNK_HEIGHT {
-                    let world_y = y as i32;
-                    let mut block;
-
-                    if y <= 4 {
-                        if y == 0 {
-                            block = BlockType::Bedrock;
+                // Carve caves after surface generation.
+                for wy in min_y..height.max_y_exclusive() {
+                    let ly = (wy - min_y) as usize;
+                    let current = blocks[x][ly][z];
+                    if current == BlockType::Air || current == BlockType::Water {
+                        continue;
+                    }
+                    if ctx.carver.is_carved(wx, wy, wz, surface_y) {
+                        if ctx.carver.is_lava_lake(wx, wy, wz) {
+                            blocks[x][ly][z] = BlockType::Lava;
+                        } else if wy > 8 {
+                            blocks[x][ly][z] = BlockType::Air;
                         } else {
-                            // Blended bedrock
-                            let threshold = (5 - y) as u8 * 50; // Chance of bedrock
-                            if next_rand(0, 255) < threshold {
-                                block = BlockType::Bedrock;
-                            } else {
-                                block = BlockType::Stone;
-                            }
-                        }
-                    } else if y < base_height.saturating_sub(4) {
-                        block = BlockType::Stone;
-                    } else if y < base_height {
-                        block = match biome {
-                            Biome::Desert => BlockType::Sandstone,
-                            Biome::Ocean => BlockType::Sand,
-                            _ => BlockType::Dirt,
-                        };
-                    } else if y == base_height {
-                        block = match biome {
-                            Biome::Desert => BlockType::Sand,
-                            Biome::Ocean => BlockType::Sand,
-                            Biome::Taiga => BlockType::Snow,
-                            Biome::Mountains => {
-                                if y > 90 {
-                                    BlockType::Snow
-                                } else {
-                                    BlockType::Stone
-                                }
-                            }
-                            _ => BlockType::Grass,
-                        };
-                    } else {
-                        if y <= 62 {
-                            block = BlockType::Water;
-                        } else {
-                            block = BlockType::Air;
-                        }
-                    }
-
-                    // Carve caves
-                    if y > 4 && block != BlockType::Water && block != BlockType::Bedrock {
-                        let in_cave_zone = (y < base_height.saturating_sub(6) && y < 62)
-                            || (is_entrance_zone && y <= base_height);
-
-                        if in_cave_zone {
-                            let cave_val = caves_perlin.get([
-                                world_x as f64 * 0.05,
-                                world_y as f64 * 0.08,
-                                world_z as f64 * 0.05,
-                            ]);
-                            let cavern_val = caverns_perlin.get([
-                                world_x as f64 * 0.01,
-                                world_y as f64 * 0.01,
-                                world_z as f64 * 0.01,
-                            ]);
-                            let threshold = if cavern_val > 0.6 { 0.20 } else { 0.08 };
-
-                            if cave_val.abs() < threshold {
-                                block = BlockType::Air;
-                            }
-                        }
-                    }
-
-                    blocks[x][y][z] = block;
-                }
-            }
-        }
-
-        // --- Pass 2: Ore Vein Distribution ---
-        struct OreConfig {
-            block_type: BlockType,
-            min_y: i32,
-            max_y: i32,
-            vein_size: usize,
-            frequency: usize,
-        }
-
-        let ore_configs = [
-            OreConfig {
-                block_type: BlockType::CoalOre,
-                min_y: 0,
-                max_y: 128,
-                vein_size: 17,
-                frequency: 15,
-            },
-            OreConfig {
-                block_type: BlockType::IronOre,
-                min_y: 0,
-                max_y: 64,
-                vein_size: 9,
-                frequency: 10,
-            },
-            OreConfig {
-                block_type: BlockType::GoldOre,
-                min_y: 0,
-                max_y: 32,
-                vein_size: 9,
-                frequency: 3,
-            },
-            OreConfig {
-                block_type: BlockType::RedstoneOre,
-                min_y: 0,
-                max_y: 16,
-                vein_size: 8,
-                frequency: 4,
-            },
-            OreConfig {
-                block_type: BlockType::DiamondOre,
-                min_y: 0,
-                max_y: 16,
-                vein_size: 8,
-                frequency: 1,
-            },
-        ];
-
-        let mut next_rand_range = |min: i32, max: i32| -> i32 {
-            if min >= max {
-                return min;
-            }
-            let diff = (max - min) as u32;
-            rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-            let val = (rng_seed / 65536) % 32768;
-            min + (val % diff) as i32
-        };
-
-        for config in &ore_configs {
-            for _ in 0..config.frequency {
-                let start_x = next_rand_range(0, CHUNK_WIDTH as i32) as usize;
-                let start_z = next_rand_range(0, CHUNK_DEPTH as i32) as usize;
-                let start_y = next_rand_range(config.min_y, config.max_y + 1) as usize;
-
-                if start_y >= CHUNK_HEIGHT {
-                    continue;
-                }
-
-                if blocks[start_x][start_y][start_z] == BlockType::Stone {
-                    let mut queue = Vec::new();
-                    queue.push((start_x, start_y, start_z));
-                    blocks[start_x][start_y][start_z] = config.block_type;
-
-                    let mut placed = 1;
-                    let mut head = 0;
-
-                    while head < queue.len() && placed < config.vein_size {
-                        let (cx, cy, cz) = queue[head];
-                        head += 1;
-
-                        // Randomly select one of the 6 neighbor directions
-                        let dir = next_rand_range(0, 6);
-                        let neighbors = [
-                            (cx as i32 + 1, cy as i32, cz as i32),
-                            (cx as i32 - 1, cy as i32, cz as i32),
-                            (cx as i32, cy as i32 + 1, cz as i32),
-                            (cx as i32, cy as i32 - 1, cz as i32),
-                            (cx as i32, cy as i32, cz as i32 + 1),
-                            (cx as i32, cy as i32, cz as i32 - 1),
-                        ];
-
-                        let (nx, ny, nz) = neighbors[dir as usize];
-                        if nx >= 0
-                            && nx < CHUNK_WIDTH as i32
-                            && nz >= 0
-                            && nz < CHUNK_DEPTH as i32
-                            && ny > 4
-                            && ny < CHUNK_HEIGHT as i32
-                        {
-                            let ux = nx as usize;
-                            let uy = ny as usize;
-                            let uz = nz as usize;
-
-                            if blocks[ux][uy][uz] == BlockType::Stone {
-                                blocks[ux][uy][uz] = config.block_type;
-                                queue.push((ux, uy, uz));
-                                placed += 1;
-                            }
+                            blocks[x][ly][z] = BlockType::Air;
                         }
                     }
                 }
             }
         }
 
-        // Trees Pass:
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let nx = chunk_x + dx;
-                let nz = chunk_z + dz;
+        // Place ore veins.
+        ctx.ore.place_ores(
+            &mut blocks,
+            chunk_x,
+            chunk_z,
+            (min_y as i32).unsigned_abs() as usize,
+        );
 
-                // Seed PRNG deterministically for the neighbor chunk
-                let mut n_seed = (nx as u32).wrapping_mul(31) ^ (nz as u32);
-                let mut n_rand = |min: u8, max: u8| -> u8 {
-                    n_seed = n_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                    let val = (n_seed / 65536) % 32768;
-                    let diff = max - min;
-                    if diff == 0 {
-                        return min;
-                    }
-                    min + (val % diff as u32) as u8
-                };
+        // Place trees and plants.
+        crate::worldgen::feature::FeaturePlacer::new(world_seed).place_features(
+            &ctx,
+            &mut blocks,
+            chunk_x,
+            chunk_z,
+            (min_y as i32).unsigned_abs() as usize,
+        );
 
-                // Try 4 tree candidate spots per chunk
-                for _ in 0..4 {
-                    let tx = n_rand(0, 15) as i32;
-                    let tz = n_rand(0, 15) as i32;
-                    let n_world_x = nx * 16 + tx;
-                    let n_world_z = nz * 16 + tz;
-
-                    let n_biome = Biome::get_biome(
-                        n_world_x,
-                        n_world_z,
-                        &temp_perlin,
-                        &moist_perlin,
-                        &ocean_perlin,
-                    );
-                    let tree_prob = match n_biome {
-                        Biome::Plains => 5,
-                        Biome::Forest => 60,
-                        Biome::Taiga => 40,
-                        Biome::Swamp => 20,
-                        Biome::Mountains => 2,
-                        _ => 0,
-                    };
-
-                    if n_rand(0, 100) < tree_prob {
-                        let n_height = get_interpolated_height(
-                            n_world_x,
-                            n_world_z,
-                            &perlin,
-                            &temp_perlin,
-                            &moist_perlin,
-                            &ocean_perlin,
-                        ) as i32;
-                        if n_height > 5 && n_height < CHUNK_HEIGHT as i32 - 12 {
-                            // Project to current chunk local coordinates
-                            let local_x = n_world_x - (chunk_x * 16);
-                            let local_z = n_world_z - (chunk_z * 16);
-
-                            let tree_height = n_rand(4, 7) as i32;
-                            match n_biome {
-                                Biome::Taiga => place_spruce_tree(
-                                    &mut blocks,
-                                    local_x,
-                                    local_z,
-                                    n_height + 1,
-                                    tree_height + 2,
-                                ),
-                                Biome::Forest => {
-                                    if n_rand(0, 10) < 4 {
-                                        place_birch_tree(
-                                            &mut blocks,
-                                            local_x,
-                                            local_z,
-                                            n_height + 1,
-                                            tree_height + 1,
-                                        );
-                                    } else {
-                                        place_oak_tree(
-                                            &mut blocks,
-                                            local_x,
-                                            local_z,
-                                            n_height + 1,
-                                            tree_height,
-                                        );
-                                    }
-                                }
-                                _ => place_oak_tree(
-                                    &mut blocks,
-                                    local_x,
-                                    local_z,
-                                    n_height + 1,
-                                    tree_height,
-                                ),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Plant & Decoration Pass (only for columns inside current chunk):
-        for x in 0..CHUNK_WIDTH {
-            for z in 0..CHUNK_DEPTH {
-                let world_x = chunk_x * 16 + x as i32;
-                let world_z = chunk_z * 16 + z as i32;
-                let biome =
-                    Biome::get_biome(world_x, world_z, &temp_perlin, &moist_perlin, &ocean_perlin);
-
-                // Seed PRNG deterministically for columns
-                let mut c_seed = (world_x as u32).wrapping_mul(17) ^ (world_z as u32);
-                let mut c_rand = |min: u32, max: u32| -> u32 {
-                    c_seed = c_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                    let diff = max - min;
-                    if diff == 0 {
-                        return min;
-                    }
-                    min + ((c_seed / 65536) % 32768) % diff
-                };
-
-                // Find surface block
-                let mut surface_y = 0;
-                for y in (0..CHUNK_HEIGHT).rev() {
-                    if blocks[x][y][z] != BlockType::Air && blocks[x][y][z] != BlockType::Water {
-                        surface_y = y;
-                        break;
-                    }
-                }
-
-                let surface_block = blocks[x][surface_y][z];
-                if surface_block == BlockType::Grass {
-                    let r = c_rand(0, 100);
-                    if r < 10 {
-                        // Tall grass
-                        if surface_y + 1 < CHUNK_HEIGHT {
-                            blocks[x][surface_y + 1][z] = BlockType::TallGrass;
-                        }
-                    } else if r < 12 {
-                        // Dandelion
-                        if surface_y + 1 < CHUNK_HEIGHT {
-                            blocks[x][surface_y + 1][z] = BlockType::Dandelion;
-                        }
-                    } else if r < 13 {
-                        // Poppy
-                        if surface_y + 1 < CHUNK_HEIGHT {
-                            blocks[x][surface_y + 1][z] = BlockType::Poppy;
-                        }
-                    } else if r < 14 && (biome == Biome::Plains || biome == Biome::Forest) {
-                        // Pumpkin / Melon
-                        if surface_y + 1 < CHUNK_HEIGHT {
-                            blocks[x][surface_y + 1][z] = if c_rand(0, 2) == 0 {
-                                BlockType::Pumpkin
-                            } else {
-                                BlockType::Melon
-                            };
-                        }
-                    }
-                } else if surface_block == BlockType::Sand && biome == Biome::Desert {
-                    if c_rand(0, 100) < 2 {
-                        // Cactus
-                        let cactus_height = c_rand(1, 4) as usize;
-                        for dy in 1..=cactus_height {
-                            if surface_y + dy < CHUNK_HEIGHT {
-                                blocks[x][surface_y + dy][z] = BlockType::Cactus;
-                            }
-                        }
-                    }
-                }
-
-                // Sugar Cane (must be next to water)
-                if (surface_block == BlockType::Grass
-                    || surface_block == BlockType::Dirt
-                    || surface_block == BlockType::Sand)
-                    && surface_y > 0
-                {
-                    let mut near_water = false;
-                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let nx = x as i32 + dx;
-                        let nz = z as i32 + dz;
-                        if nx >= 0
-                            && nx < CHUNK_WIDTH as i32
-                            && nz >= 0
-                            && nz < CHUNK_DEPTH as i32
-                            && blocks[nx as usize][surface_y][nz as usize] == BlockType::Water
-                        {
-                            near_water = true;
-                            break;
-                        }
-                    }
-                    if near_water && c_rand(0, 100) < 10 {
-                        let cane_height = c_rand(2, 5) as usize;
-                        for dy in 1..=cane_height {
-                            if surface_y + dy < CHUNK_HEIGHT {
-                                blocks[x][surface_y + dy][z] = BlockType::SugarCane;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut sky_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
-            vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
-                .try_into()
-                .unwrap();
-        let mut block_light: Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> =
-            vec![[[0u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
-                .try_into()
-                .unwrap();
+        // Compute sky/block light and heightmap.
+        let mut sky_light: Vec<Vec<[u8; CHUNK_DEPTH]>> =
+            vec![vec![[0u8; CHUNK_DEPTH]; total_height]; CHUNK_WIDTH];
+        let mut block_light: Vec<Vec<[u8; CHUNK_DEPTH]>> =
+            vec![vec![[0u8; CHUNK_DEPTH]; total_height]; CHUNK_WIDTH];
         let mut heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
             vec![[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
                 .try_into()
@@ -3744,40 +3459,41 @@ impl Chunk {
 
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                let mut direct_sky = 15;
+                let mut direct_sky = 15u8;
                 let mut found_h = false;
-                for y in (0..CHUNK_HEIGHT).rev() {
-                    let block = blocks[x][y][z];
+                for wy in (min_y..height.max_y_exclusive()).rev() {
+                    let ly = (wy - min_y) as usize;
+                    let block = blocks[x][ly][z];
                     if !found_h && block != BlockType::Air {
-                        heightmap[x][z] = y as i16;
+                        heightmap[x][z] = wy.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                         found_h = true;
                     }
-                    if block.properties().render_type == RenderType::Opaque {
+                    if block.properties().render_type == crate::world::RenderType::Opaque {
                         direct_sky = 0;
                     }
-                    sky_light[x][y][z] = direct_sky;
-                    block_light[x][y][z] = block.properties().light_emission;
+                    sky_light[x][ly][z] = direct_sky;
+                    block_light[x][ly][z] = block.properties().light_emission;
                 }
             }
         }
 
-        let mut sections =
-            Vec::with_capacity(crate::dimension::WorldHeight::OVERWORLD.section_count());
-        for sec_idx in 0..crate::dimension::WorldHeight::OVERWORLD.section_count() {
-            let sec_y = crate::dimension::WorldHeight::OVERWORLD.section_y_at_index(sec_idx);
+        // Convert dense array to signed sections.
+        let mut sections = Vec::with_capacity(height.section_count());
+        for sec_idx in 0..height.section_count() {
+            let sec_y = height.section_y_at_index(sec_idx);
             let mut sec_b = [BlockType::Air; 4096];
             let mut sec_sk = [0u8; 4096];
             let mut sec_bl = [0u8; 4096];
             for ly in 0..SECTION_SIZE {
                 let wy = (sec_y as i32 * 16) + ly as i32;
-                if wy >= 0 && (wy as usize) < CHUNK_HEIGHT {
-                    let y = wy as usize;
+                if height.contains_y(wy) {
+                    let arr_ly = (wy - min_y) as usize;
                     for z in 0..CHUNK_DEPTH {
                         for x in 0..CHUNK_WIDTH {
                             let idx = (ly << 8) | (z << 4) | x;
-                            sec_b[idx] = blocks[x][y][z];
-                            sec_sk[idx] = sky_light[x][y][z];
-                            sec_bl[idx] = block_light[x][y][z];
+                            sec_b[idx] = blocks[x][arr_ly][z];
+                            sec_sk[idx] = sky_light[x][arr_ly][z];
+                            sec_bl[idx] = block_light[x][arr_ly][z];
                         }
                     }
                 }
@@ -3793,13 +3509,15 @@ impl Chunk {
             }
         }
 
-        let torch_positions = Self::build_torch_index_from_sections(-4, &sections);
-        let redstone_positions = Self::build_redstone_index_from_sections(-4, &sections);
+        let torch_positions =
+            Self::build_torch_index_from_sections(height.min_section_y(), &sections);
+        let redstone_positions =
+            Self::build_redstone_index_from_sections(height.min_section_y(), &sections);
 
         Self {
             chunk_x,
             chunk_z,
-            min_section_y: -4,
+            min_section_y: height.min_section_y(),
             sections,
             heightmap,
             torch_positions,

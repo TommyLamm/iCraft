@@ -1,5 +1,3 @@
-use noise::Perlin;
-
 use crate::world::Biome;
 
 pub const TICKS_PER_DAY: f32 = 24_000.0;
@@ -62,9 +60,7 @@ pub struct WeatherSystem {
     snow_accumulation_timer: f32,
     authority_rng: u32,
     presentation_rng: u32,
-    temp_perlin: Perlin,
-    moist_perlin: Perlin,
-    ocean_perlin: Perlin,
+    pub climate: crate::worldgen::climate::ClimateSystem,
 }
 
 impl WeatherSystem {
@@ -78,9 +74,7 @@ impl WeatherSystem {
             snow_accumulation_timer: 0.0,
             authority_rng: seed ^ 0xA5A5_1F3D,
             presentation_rng: seed ^ 0x5A5A_E1C2,
-            temp_perlin: Perlin::new(99_999),
-            moist_perlin: Perlin::new(88_888),
-            ocean_perlin: Perlin::new(77_777),
+            climate: crate::worldgen::climate::ClimateSystem::new(seed),
         };
         system.remaining_ticks = system.random_duration_ticks();
         system
@@ -176,13 +170,7 @@ impl WeatherSystem {
     }
 
     pub fn biome_at(&self, world_x: i32, world_z: i32) -> Biome {
-        Biome::get_biome(
-            world_x,
-            world_z,
-            &self.temp_perlin,
-            &self.moist_perlin,
-            &self.ocean_perlin,
-        )
+        self.climate.biome_at(world_x, world_z)
     }
 
     pub fn precipitation_at(&self, world_x: i32, world_z: i32) -> Precipitation {
@@ -260,10 +248,12 @@ fn random_offset(state: &mut u32, radius: i32) -> i32 {
 }
 
 fn precipitation_for_biome(biome: Biome) -> Precipitation {
+    use Biome::*;
     match biome {
-        Biome::Desert => Precipitation::None,
-        Biome::Taiga | Biome::Mountains => Precipitation::Snow,
-        Biome::Plains | Biome::Forest | Biome::Swamp | Biome::Ocean => Precipitation::Rain,
+        Desert | Badlands | Savanna => Precipitation::None,
+        SnowyPlains | Taiga | WindsweptHills => Precipitation::Snow,
+        Plains | Forest | BirchForest | Swamp | Jungle | Meadow | River | Beach | Ocean
+        | DeepOcean => Precipitation::Rain,
     }
 }
 
@@ -299,7 +289,7 @@ mod tests {
         assert_eq!(precipitation_for_biome(Biome::Desert), Precipitation::None);
         assert_eq!(precipitation_for_biome(Biome::Taiga), Precipitation::Snow);
         assert_eq!(
-            precipitation_for_biome(Biome::Mountains),
+            precipitation_for_biome(Biome::WindsweptHills),
             Precipitation::Snow
         );
         assert_eq!(precipitation_for_biome(Biome::Forest), Precipitation::Rain);

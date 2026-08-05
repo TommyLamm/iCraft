@@ -135,6 +135,183 @@ where
             }
             None
         }
+        BlockType::Grass => {
+            let block_above = get_block(x, y + 1, z).unwrap_or(BlockType::Air);
+            if block_above.properties().is_opaque() {
+                return Some(BlockMutationRequest {
+                    pos,
+                    new_block: BlockType::Dirt,
+                    new_state: 0,
+                    new_entity: None,
+                    cause: MutationCause::System,
+                });
+            }
+            // Grass spread to adjacent dirt block
+            if rng_val % 4 == 0 {
+                let dx = ((rng_val >> 12) % 3) as i32 - 1;
+                let dz = ((rng_val >> 14) % 3) as i32 - 1;
+                let dy = ((rng_val >> 16) % 5) as i32 - 3;
+                let target_pos = (x + dx, y + dy, z + dz);
+                if get_block(target_pos.0, target_pos.1, target_pos.2) == Some(BlockType::Dirt) {
+                    let target_above = get_block(target_pos.0, target_pos.1 + 1, target_pos.2)
+                        .unwrap_or(BlockType::Air);
+                    if !target_above.properties().is_opaque() {
+                        return Some(BlockMutationRequest {
+                            pos: target_pos,
+                            new_block: BlockType::Grass,
+                            new_state: 0,
+                            new_entity: None,
+                            cause: MutationCause::System,
+                        });
+                    }
+                }
+            }
+            None
+        }
+        BlockType::OakLeaves | BlockType::BirchLeaves | BlockType::SpruceLeaves => {
+            // Leaf decay check: search within Manhattan distance 4 for log
+            let mut connected = false;
+            'search: for dx in -4..=4i32 {
+                for dy in -4..=4i32 {
+                    for dz in -4..=4i32 {
+                        if dx.abs() + dy.abs() + dz.abs() <= 4 {
+                            if let Some(b) = get_block(x + dx, y + dy, z + dz) {
+                                if matches!(
+                                    b,
+                                    BlockType::OakLog | BlockType::BirchLog | BlockType::SpruceLog
+                                ) {
+                                    connected = true;
+                                    break 'search;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !connected {
+                Some(BlockMutationRequest {
+                    pos,
+                    new_block: BlockType::Air,
+                    new_state: 0,
+                    new_entity: None,
+                    cause: MutationCause::System,
+                })
+            } else {
+                None
+            }
+        }
+        BlockType::OakSapling | BlockType::BirchSapling | BlockType::SpruceSapling => {
+            if rng_val % 7 == 0 {
+                let block_above = get_block(x, y + 1, z).unwrap_or(BlockType::Air);
+                if block_above == BlockType::Air {
+                    let log_type = match block {
+                        BlockType::BirchSapling => BlockType::BirchLog,
+                        BlockType::SpruceSapling => BlockType::SpruceLog,
+                        _ => BlockType::OakLog,
+                    };
+                    return Some(BlockMutationRequest {
+                        pos,
+                        new_block: log_type,
+                        new_state: 0,
+                        new_entity: None,
+                        cause: MutationCause::System,
+                    });
+                }
+            }
+            None
+        }
+        BlockType::Cactus => {
+            let mut height = 1;
+            let mut check_y = y - 1;
+            while get_block(x, check_y, z) == Some(BlockType::Cactus) {
+                height += 1;
+                check_y -= 1;
+            }
+            if height < 3 && get_block(x, y + 1, z) == Some(BlockType::Air) && rng_val % 3 == 0 {
+                Some(BlockMutationRequest {
+                    pos: (x, y + 1, z),
+                    new_block: BlockType::Cactus,
+                    new_state: 0,
+                    new_entity: None,
+                    cause: MutationCause::System,
+                })
+            } else {
+                None
+            }
+        }
+        BlockType::SugarCane => {
+            let mut height = 1;
+            let mut check_y = y - 1;
+            while get_block(x, check_y, z) == Some(BlockType::SugarCane) {
+                height += 1;
+                check_y -= 1;
+            }
+            if height < 3 && get_block(x, y + 1, z) == Some(BlockType::Air) && rng_val % 3 == 0 {
+                Some(BlockMutationRequest {
+                    pos: (x, y + 1, z),
+                    new_block: BlockType::SugarCane,
+                    new_state: 0,
+                    new_entity: None,
+                    cause: MutationCause::System,
+                })
+            } else {
+                None
+            }
+        }
+        BlockType::Ice => {
+            if rng_val % 4 == 0 {
+                Some(BlockMutationRequest {
+                    pos,
+                    new_block: BlockType::Water,
+                    new_state: 0,
+                    new_entity: None,
+                    cause: MutationCause::System,
+                })
+            } else {
+                None
+            }
+        }
+        BlockType::Snow => {
+            let block_above = get_block(x, y + 1, z).unwrap_or(BlockType::Air);
+            if block_above.properties().is_opaque() {
+                Some(BlockMutationRequest {
+                    pos,
+                    new_block: BlockType::Air,
+                    new_state: 0,
+                    new_entity: None,
+                    cause: MutationCause::System,
+                })
+            } else {
+                None
+            }
+        }
+        BlockType::Fire => {
+            if rng_val % 3 == 0 {
+                Some(BlockMutationRequest {
+                    pos,
+                    new_block: BlockType::Air,
+                    new_state: 0,
+                    new_entity: None,
+                    cause: MutationCause::System,
+                })
+            } else {
+                None
+            }
+        }
+        BlockType::Sand | BlockType::Gravel => {
+            let below = get_block(x, y - 1, z).unwrap_or(BlockType::Air);
+            if below == BlockType::Air {
+                Some(BlockMutationRequest {
+                    pos,
+                    new_block: BlockType::Air,
+                    new_state: 0,
+                    new_entity: None,
+                    cause: MutationCause::System,
+                })
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -274,5 +451,67 @@ mod tests {
         let r = req.unwrap();
         assert_eq!(r.new_block, BlockType::Dirt);
         assert_eq!(r.new_state, 0);
+    }
+
+    #[test]
+    fn test_leaf_decay_without_log() {
+        let map: std::collections::HashMap<(i32, i32, i32), BlockType> =
+            std::collections::HashMap::new();
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, |x, y, z| {
+            map.get(&(x, y, z)).copied()
+        });
+        assert!(req.is_some());
+        let r = req.unwrap();
+        assert_eq!(r.new_block, BlockType::Air);
+    }
+
+    #[test]
+    fn test_leaf_preservation_with_log() {
+        let mut map = std::collections::HashMap::new();
+        map.insert((0, 63, 0), BlockType::OakLog);
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, |x, y, z| {
+            map.get(&(x, y, z)).copied()
+        });
+        assert!(req.is_none());
+    }
+
+    #[test]
+    fn test_grass_decay_when_covered() {
+        let mut map = std::collections::HashMap::new();
+        map.insert((0, 64, 0), BlockType::Grass);
+        map.insert((0, 65, 0), BlockType::Stone);
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Grass, 0, 123, |x, y, z| {
+            map.get(&(x, y, z)).copied()
+        });
+        assert!(req.is_some());
+        let r = req.unwrap();
+        assert_eq!(r.new_block, BlockType::Dirt);
+    }
+
+    #[test]
+    fn test_cactus_growth() {
+        let mut map = std::collections::HashMap::new();
+        map.insert((0, 64, 0), BlockType::Cactus);
+        map.insert((0, 65, 0), BlockType::Air);
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Cactus, 0, 3, |x, y, z| {
+            map.get(&(x, y, z)).copied()
+        });
+        assert!(req.is_some());
+        let r = req.unwrap();
+        assert_eq!(r.pos, (0, 65, 0));
+        assert_eq!(r.new_block, BlockType::Cactus);
+    }
+
+    #[test]
+    fn test_falling_sand() {
+        let map: std::collections::HashMap<(i32, i32, i32), BlockType> =
+            std::collections::HashMap::new();
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Sand, 0, 123, |x, y, z| {
+            map.get(&(x, y, z)).copied()
+        });
+        assert!(req.is_some());
+        let r = req.unwrap();
+        assert_eq!(r.pos, (0, 64, 0));
+        assert_eq!(r.new_block, BlockType::Air);
     }
 }

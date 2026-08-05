@@ -19816,11 +19816,20 @@ fn biome_debug_name(biome: Biome) -> &'static str {
     match biome {
         Biome::Plains => "PLAINS",
         Biome::Forest => "FOREST",
-        Biome::Desert => "DESERT",
+        Biome::BirchForest => "BIRCH_FOREST",
         Biome::Taiga => "TAIGA",
+        Biome::SnowyPlains => "SNOWY_PLAINS",
+        Biome::Desert => "DESERT",
+        Biome::Savanna => "SAVANNA",
         Biome::Swamp => "SWAMP",
-        Biome::Mountains => "MOUNTAINS",
+        Biome::Jungle => "JUNGLE",
+        Biome::Badlands => "BADLANDS",
+        Biome::Meadow => "MEADOW",
+        Biome::WindsweptHills => "WINDSWEPT_HILLS",
+        Biome::River => "RIVER",
+        Biome::Beach => "BEACH",
         Biome::Ocean => "OCEAN",
+        Biome::DeepOcean => "DEEP_OCEAN",
     }
 }
 
@@ -20469,7 +20478,7 @@ mod debug_tests {
             Biome::Desert,
             Biome::Taiga,
             Biome::Swamp,
-            Biome::Mountains,
+            Biome::WindsweptHills,
             Biome::Ocean,
         ];
         assert!(biomes
