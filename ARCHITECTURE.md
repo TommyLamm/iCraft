@@ -170,7 +170,11 @@ Food items define `FoodProperties` (hunger, saturation, eating duration ticks, a
 - Reliable queues carry login, chat, chunk, block, container transactions (open/click/close/slot update), and time/weather state.
 
 Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v7.
-`ContainerSessionManager` tracks player ID, dimension, block position, and combined single (27)/double (54) chest slot mapping.
+Trading and Raid operations use `OpenTradeWindow`, `ExecuteTradeRequest`, `ExecuteTradeResult`, `CloseTradeWindow`, and `RaidStatusSync` packets over protocol v7.
+`ContainerSessionManager` and `MerchantSessionManager` track player ID, dimension, villager ID, and active trade offers.
+`PoiManager` (`src/village/poi.rs`) indexes Bed and JobSite POIs by chunk with max-distance spatial hashing, maintaining spatial village clusters for villager assignment and bed count tracking.
+`RaidManager` (`src/village/raid.rs`) tracks active village raids, wave progression (Pillager/Ravager counts), Bad Omen triggers, and raid victory/defeat states.
+`Villager` entities execute profession claiming, food harvest, restocking, bed sleeping, breeding, and level progression based on trade XP.
 The host validates reach distance (<= 8.0 blocks), dimension, top-block solid obstruction, and container block presence before committing slot mutations.
 Rejected requests return `success: false` without partial side effects. When a chest is broken, destroyed, or a player disconnects/switches dimensions, all associated sessions close automatically.
 

@@ -41,6 +41,7 @@ pub mod spawning;
 mod state;
 pub mod structure;
 mod texture;
+pub mod village;
 pub mod voxel_shape;
 mod weather;
 pub(crate) mod world;

@@ -198,6 +198,8 @@ pub struct PlayerState {
     pub attack_cooldown_ticks: u32,
     pub attack_cooldown_max_ticks: u32,
     pub shield_disable_ticks: u32,
+    pub bad_omen_level: u8,
+    pub hero_of_the_village_timer: f32,
 }
 
 impl PlayerState {
@@ -239,6 +241,8 @@ impl PlayerState {
             attack_cooldown_ticks: 5,
             attack_cooldown_max_ticks: 5,
             shield_disable_ticks: 0,
+            bad_omen_level: 0,
+            hero_of_the_village_timer: 0.0,
         }
     }
 

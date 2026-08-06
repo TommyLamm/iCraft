@@ -32,6 +32,9 @@ pub enum AdvancementTrigger {
     EnchantItem,
     EatFood(Item),
     BreedAnimals,
+    VoluntaryExile,
+    HeroOfTheVillage,
+    VillagerTrade,
     Root,
 }
 

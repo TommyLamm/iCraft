@@ -516,6 +516,28 @@ pub struct EntitySaveData {
     pub slime_size: u8,
     #[serde(default)]
     pub is_persistent: bool,
+    #[serde(default)]
+    pub profession: Option<crate::village::poi::VillagerProfession>,
+    #[serde(default)]
+    pub villager_level: Option<crate::village::trade::VillagerLevel>,
+    #[serde(default)]
+    pub villager_xp: u32,
+    #[serde(default)]
+    pub offers: Vec<crate::village::trade::TradeOffer>,
+    #[serde(default)]
+    pub home_poi: Option<(i32, i32, i32)>,
+    #[serde(default)]
+    pub job_poi: Option<(i32, i32, i32)>,
+    #[serde(default)]
+    pub meeting_poi: Option<(i32, i32, i32)>,
+    #[serde(default)]
+    pub restock_count_today: u8,
+    #[serde(default)]
+    pub last_restock_tick: u64,
+    #[serde(default)]
+    pub food_count: u32,
+    #[serde(default)]
+    pub is_raid_captain: bool,
 }
 
 impl From<&crate::entity::Entity> for EntitySaveData {
@@ -547,6 +569,17 @@ impl From<&crate::entity::Entity> for EntitySaveData {
             collar_color: entity.collar_color,
             slime_size: entity.slime_size,
             is_persistent: entity.is_persistent,
+            profession: Some(entity.profession),
+            villager_level: Some(entity.villager_level),
+            villager_xp: entity.villager_xp,
+            offers: entity.offers.clone(),
+            home_poi: entity.home_poi,
+            job_poi: entity.job_poi,
+            meeting_poi: entity.meeting_poi,
+            restock_count_today: entity.restock_count_today,
+            last_restock_tick: entity.last_restock_tick,
+            food_count: entity.food_count,
+            is_raid_captain: entity.is_raid_captain,
         }
     }
 }
@@ -586,6 +619,21 @@ impl EntitySaveData {
         entity.collar_color = self.collar_color;
         entity.slime_size = self.slime_size;
         entity.is_persistent = self.is_persistent;
+        if let Some(prof) = self.profession {
+            entity.profession = prof;
+        }
+        if let Some(lvl) = self.villager_level {
+            entity.villager_level = lvl;
+        }
+        entity.villager_xp = self.villager_xp;
+        entity.offers = self.offers.clone();
+        entity.home_poi = self.home_poi;
+        entity.job_poi = self.job_poi;
+        entity.meeting_poi = self.meeting_poi;
+        entity.restock_count_today = self.restock_count_today;
+        entity.last_restock_tick = self.last_restock_tick;
+        entity.food_count = self.food_count;
+        entity.is_raid_captain = self.is_raid_captain;
         entity
     }
 
@@ -688,6 +736,10 @@ pub struct PlayerData {
     pub spawn_dimension: Option<crate::dimension::Dimension>,
     #[serde(default)]
     pub unlocked_recipes: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub bad_omen_level: u8,
+    #[serde(default)]
+    pub hero_of_the_village_timer: f32,
 }
 
 impl PlayerData {
@@ -719,6 +771,8 @@ impl PlayerData {
             spawn_point: state.spawn_point,
             spawn_dimension: state.spawn_dimension,
             unlocked_recipes: state.unlocked_recipes.clone(),
+            bad_omen_level: state.bad_omen_level,
+            hero_of_the_village_timer: state.hero_of_the_village_timer,
         }
     }
 }
@@ -2580,6 +2634,8 @@ impl From<PreviousPlayerData> for PlayerData {
             spawn_point: None,
             spawn_dimension: None,
             unlocked_recipes: Default::default(),
+            bad_omen_level: 0,
+            hero_of_the_village_timer: 0.0,
         }
     }
 }
@@ -2667,6 +2723,8 @@ impl From<LegacyPlayerData> for PlayerData {
             spawn_point: None,
             spawn_dimension: None,
             unlocked_recipes: Default::default(),
+            bad_omen_level: 0,
+            hero_of_the_village_timer: 0.0,
         }
     }
 }
@@ -2832,6 +2890,8 @@ mod tests {
             spawn_point: None,
             spawn_dimension: None,
             unlocked_recipes: Default::default(),
+            bad_omen_level: 0,
+            hero_of_the_village_timer: 0.0,
         };
 
         let unique = SystemTime::now()
@@ -3185,34 +3245,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         let manager = SaveManager::new(&temp_dir);
 
-        let test_data = vec![EntitySaveData {
-            entity_type: crate::entity::EntityType::Zombie,
-            position: [1.0, 65.0, 2.0],
-            velocity: [0.0, 0.0, 0.0],
-            yaw: 0.0,
-            pitch: 0.0,
-            health: 20.0,
-            max_health: 20.0,
-            is_ignited: false,
-            burn_timer: 0.0,
-            age: 0.0,
-            breeding_timer: 0.0,
-            breed_cooldown: 0.0,
-            has_wool: false,
-            wool_color: [1.0, 1.0, 1.0],
-            dropped_item: None,
-            dropped_count: 0,
-            dropped_stack: None,
-            item_age: 0.0,
-            xp_value: 0,
-            owner_id: None,
-            owner_uuid: None,
-            is_tamed: false,
-            is_sitting: false,
-            collar_color: [0.8, 0.2, 0.2],
-            slime_size: 1,
-            is_persistent: false,
-        }];
+        let test_entity = crate::entity::Entity::new(
+            1,
+            crate::entity::EntityType::Zombie,
+            glam::Vec3::new(1.0, 65.0, 2.0),
+        );
+        let test_data = vec![EntitySaveData::from(&test_entity)];
 
         manager
             .save_entities_in(crate::dimension::Dimension::Overworld, &test_data)

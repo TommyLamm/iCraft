@@ -2013,6 +2013,226 @@ pub fn render_mobs<'a>(
                     light_val,
                 );
             }
+            EntityType::Villager => {
+                let scale = if entity.age < 0.0 { 0.5 } else { 1.0 };
+                // Head
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.5, 0.5) * scale,
+                    Vec3::new(0.0, 0.25, 0.0) * scale,
+                    to_world(Vec3::new(0.0, 1.4 * scale, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [0, 1, 1, 1, 1, 1],
+                    8,
+                    light_val,
+                );
+                // Body/Robe
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.9, 0.35) * scale,
+                    Vec3::new(0.0, 0.45, 0.0) * scale,
+                    to_world(Vec3::new(0.0, 0.5 * scale, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [3; 6],
+                    8,
+                    light_val,
+                );
+                // Legs
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.2, 0.5, 0.2) * scale,
+                    Vec3::new(0.0, -0.25, 0.0) * scale,
+                    to_world(Vec3::new(-0.125 * scale, 0.5 * scale, 0.0)),
+                    entity.yaw,
+                    swing,
+                    [4; 6],
+                    8,
+                    light_val,
+                );
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.2, 0.5, 0.2) * scale,
+                    Vec3::new(0.0, -0.25, 0.0) * scale,
+                    to_world(Vec3::new(0.125 * scale, 0.5 * scale, 0.0)),
+                    entity.yaw,
+                    -swing,
+                    [4; 6],
+                    8,
+                    light_val,
+                );
+            }
+            EntityType::IronGolem => {
+                // Head
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.6, 0.4),
+                    Vec3::new(0.0, 0.3, 0.0),
+                    to_world(Vec3::new(0.0, 2.0, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [3, 3, 3, 3, 3, 3],
+                    3,
+                    light_val,
+                );
+                // Torso
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(1.1, 1.2, 0.6),
+                    Vec3::new(0.0, 0.6, 0.0),
+                    to_world(Vec3::new(0.0, 0.9, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [3; 6],
+                    3,
+                    light_val,
+                );
+                // Arms
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.3, 1.4, 0.3),
+                    Vec3::new(0.0, -0.6, 0.0),
+                    to_world(Vec3::new(-0.75, 1.9, 0.0)),
+                    entity.yaw,
+                    swing,
+                    [3; 6],
+                    3,
+                    light_val,
+                );
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.3, 1.4, 0.3),
+                    Vec3::new(0.0, -0.6, 0.0),
+                    to_world(Vec3::new(0.75, 1.9, 0.0)),
+                    entity.yaw,
+                    -swing,
+                    [3; 6],
+                    3,
+                    light_val,
+                );
+                // Legs
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.35, 0.9, 0.35),
+                    Vec3::new(0.0, -0.45, 0.0),
+                    to_world(Vec3::new(-0.3, 0.9, 0.0)),
+                    entity.yaw,
+                    -swing,
+                    [3; 6],
+                    3,
+                    light_val,
+                );
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.35, 0.9, 0.35),
+                    Vec3::new(0.0, -0.45, 0.0),
+                    to_world(Vec3::new(0.3, 0.9, 0.0)),
+                    entity.yaw,
+                    swing,
+                    [3; 6],
+                    3,
+                    light_val,
+                );
+            }
+            EntityType::Pillager => {
+                // Head
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.5, 0.5),
+                    Vec3::new(0.0, 0.25, 0.0),
+                    to_world(Vec3::new(0.0, 1.4, 0.0)),
+                    entity.yaw,
+                    entity.pitch,
+                    [5, 5, 5, 5, 5, 5],
+                    9,
+                    light_val,
+                );
+                // Torso
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.5, 0.75, 0.3),
+                    Vec3::new(0.0, 0.375, 0.0),
+                    to_world(Vec3::new(0.0, 0.65, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [5; 6],
+                    9,
+                    light_val,
+                );
+                // Arms
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.2, 0.75, 0.2),
+                    Vec3::new(0.0, -0.375, 0.0),
+                    to_world(Vec3::new(-0.35, 1.3, 0.0)),
+                    entity.yaw,
+                    -0.5,
+                    [5; 6],
+                    9,
+                    light_val,
+                );
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.2, 0.75, 0.2),
+                    Vec3::new(0.0, -0.375, 0.0),
+                    to_world(Vec3::new(0.35, 1.3, 0.0)),
+                    entity.yaw,
+                    -0.5,
+                    [5; 6],
+                    9,
+                    light_val,
+                );
+                // Legs
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.2, 0.75, 0.2),
+                    Vec3::new(0.0, -0.375, 0.0),
+                    to_world(Vec3::new(-0.125, 0.75, 0.0)),
+                    entity.yaw,
+                    swing,
+                    [5; 6],
+                    9,
+                    light_val,
+                );
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.2, 0.75, 0.2),
+                    Vec3::new(0.0, -0.375, 0.0),
+                    to_world(Vec3::new(0.125, 0.75, 0.0)),
+                    entity.yaw,
+                    -swing,
+                    [5; 6],
+                    9,
+                    light_val,
+                );
+            }
+            EntityType::Ravager => {
+                // Body
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(1.4, 1.2, 1.6),
+                    Vec3::new(0.0, 0.6, 0.0),
+                    to_world(Vec3::new(0.0, 0.8, 0.0)),
+                    entity.yaw,
+                    0.0,
+                    [6; 6],
+                    9,
+                    light_val,
+                );
+                // Head
+                add_cuboid(
+                    cuboid_instances,
+                    Vec3::new(0.8, 0.8, 0.9),
+                    Vec3::new(0.0, 0.4, 0.45),
+                    to_world(Vec3::new(0.0, 1.2, 0.7)),
+                    entity.yaw,
+                    entity.pitch,
+                    [6; 6],
+                    9,
+                    light_val,
+                );
+            }
             EntityType::ExperienceOrb => {}
         }
 

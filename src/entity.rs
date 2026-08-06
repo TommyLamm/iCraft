@@ -39,6 +39,10 @@ pub enum EntityType {
     Horse,
     Bat,
     Squid,
+    Villager,
+    IronGolem,
+    Pillager,
+    Ravager,
 }
 
 impl EntityType {
@@ -79,6 +83,10 @@ impl EntityType {
             Self::Horse => 32,
             Self::Bat => 33,
             Self::Squid => 34,
+            Self::Villager => 35,
+            Self::IronGolem => 36,
+            Self::Pillager => 37,
+            Self::Ravager => 38,
         }
     }
 
@@ -119,6 +127,10 @@ impl EntityType {
             32 => Some(Self::Horse),
             33 => Some(Self::Bat),
             34 => Some(Self::Squid),
+            35 => Some(Self::Villager),
+            36 => Some(Self::IronGolem),
+            37 => Some(Self::Pillager),
+            38 => Some(Self::Ravager),
             _ => None,
         }
     }
@@ -135,6 +147,8 @@ impl EntityType {
                 | Self::Horse
                 | Self::Bat
                 | Self::Squid
+                | Self::Villager
+                | Self::IronGolem
         )
     }
 
@@ -158,6 +172,8 @@ impl EntityType {
                 | Self::Ghast
                 | Self::MagmaCube
                 | Self::WitherSkeleton
+                | Self::Pillager
+                | Self::Ravager
         )
     }
 
@@ -292,6 +308,21 @@ pub struct Entity {
     pub ai_timer: f32,
     /// Continuous time the local player has kept this Enderman's head in view.
     pub enderman_gaze_timer: f32,
+
+    // Villager & Raid fields
+    pub profession: crate::village::poi::VillagerProfession,
+    pub villager_level: crate::village::trade::VillagerLevel,
+    pub villager_xp: u32,
+    pub offers: Vec<crate::village::trade::TradeOffer>,
+    pub home_poi: Option<(i32, i32, i32)>,
+    pub job_poi: Option<(i32, i32, i32)>,
+    pub meeting_poi: Option<(i32, i32, i32)>,
+    pub restock_count_today: u8,
+    pub last_restock_tick: u64,
+    pub food_count: u32,
+    pub is_raid_captain: bool,
+    pub bad_omen_level: u8,
+    pub hero_of_the_village_timer: f32,
 }
 
 impl Entity {
@@ -336,6 +367,9 @@ impl Entity {
             EntityType::Horse => Vec3::new(1.4, 1.6, 1.4),
             EntityType::Bat => Vec3::new(0.5, 0.9, 0.5),
             EntityType::Squid => Vec3::new(0.85, 0.95, 0.85),
+            EntityType::Villager | EntityType::Pillager => Vec3::new(0.6, 1.95, 0.6),
+            EntityType::IronGolem => Vec3::new(1.4, 2.7, 1.4),
+            EntityType::Ravager => Vec3::new(1.95, 2.2, 1.95),
         };
         let max_health = match entity_type {
             EntityType::Zombie | EntityType::Skeleton | EntityType::Creeper => 20.0,
@@ -367,6 +401,10 @@ impl Entity {
             EntityType::Cat | EntityType::Squid => 10.0,
             EntityType::Horse => 24.0,
             EntityType::Bat => 6.0,
+            EntityType::Villager => 20.0,
+            EntityType::IronGolem => 100.0,
+            EntityType::Pillager => 24.0,
+            EntityType::Ravager => 100.0,
         };
         Self {
             id,
@@ -418,6 +456,19 @@ impl Entity {
             ai_phase: 0,
             ai_timer: 0.0,
             enderman_gaze_timer: 0.0,
+            profession: crate::village::poi::VillagerProfession::Unemployed,
+            villager_level: crate::village::trade::VillagerLevel::Novice,
+            villager_xp: 0,
+            offers: Vec::new(),
+            home_poi: None,
+            job_poi: None,
+            meeting_poi: None,
+            restock_count_today: 0,
+            last_restock_tick: 0,
+            food_count: 0,
+            is_raid_captain: false,
+            bad_omen_level: 0,
+            hero_of_the_village_timer: 0.0,
         }
     }
 

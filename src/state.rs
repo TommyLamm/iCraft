@@ -201,7 +201,7 @@ fn closest_melee_target(
         return None;
     }
     let direction = direction.normalize();
-    const MELEE_TYPES: [crate::entity::EntityType; 14] = [
+    const MELEE_TYPES: [crate::entity::EntityType; 18] = [
         crate::entity::EntityType::Zombie,
         crate::entity::EntityType::Skeleton,
         crate::entity::EntityType::Creeper,
@@ -216,6 +216,10 @@ fn closest_melee_target(
         crate::entity::EntityType::EnderDragon,
         crate::entity::EntityType::Wither,
         crate::entity::EntityType::EndCrystal,
+        crate::entity::EntityType::Villager,
+        crate::entity::EntityType::IronGolem,
+        crate::entity::EntityType::Pillager,
+        crate::entity::EntityType::Ravager,
     ];
     entity_manager
         .query_radius_types(origin, reach, &MELEE_TYPES)
@@ -2940,6 +2944,7 @@ pub enum StationKind {
     Brewing,
     Anvil,
     Furnace,
+    Merchant,
 }
 
 pub enum NetworkHandle {
@@ -5224,6 +5229,14 @@ pub struct State {
     pub connection_lost: bool,
     network_position_timer: f32,
     network_pose_sequence: u32,
+    pub poi_manager: crate::village::PoiManager,
+    pub merchant_sessions: crate::village::MerchantSessionManager,
+    pub raid_manager: crate::village::RaidManager,
+    pub active_merchant_villager_id: Option<u64>,
+    pub active_merchant_offers: Vec<crate::village::trade::TradeOffer>,
+    pub active_merchant_profession: crate::village::poi::VillagerProfession,
+    pub active_merchant_level: crate::village::trade::VillagerLevel,
+    pub active_merchant_xp: u32,
     network_time_sync_timer: f32,
     network_time: f64,
     /// Client-only: chunk payloads that arrived from the host before the chunk
@@ -5591,6 +5604,8 @@ impl State {
             player_state.experience_level = player.experience_level;
             player_state.spawn_point = player.spawn_point;
             player_state.spawn_dimension = player.spawn_dimension;
+            player_state.bad_omen_level = player.bad_omen_level;
+            player_state.hero_of_the_village_timer = player.hero_of_the_village_timer;
             game_mode = player.game_mode;
             inventory = player.inventory.to_inventory();
             advancement_progress = player.advancements;
@@ -6824,6 +6839,14 @@ impl State {
             connection_lost: false,
             network_position_timer: 0.0,
             network_pose_sequence: 0,
+            poi_manager: crate::village::PoiManager::new(),
+            merchant_sessions: crate::village::MerchantSessionManager::new(),
+            raid_manager: crate::village::RaidManager::new(),
+            active_merchant_villager_id: None,
+            active_merchant_offers: Vec::new(),
+            active_merchant_profession: crate::village::poi::VillagerProfession::Unemployed,
+            active_merchant_level: crate::village::trade::VillagerLevel::Novice,
+            active_merchant_xp: 0,
             network_time_sync_timer: 0.0,
             network_time: 0.0,
             pending_chunk_payloads: std::collections::HashMap::new(),
@@ -10500,12 +10523,343 @@ impl State {
             }
         }
 
+        self.update_village_and_raid_systems(dt);
+
         self.broadcast_authoritative_replication(dt);
 
         self.perf_recorder.record(
             crate::perf::ScopeId::WorldTick,
             world_tick_started.elapsed(),
         );
+    }
+
+    pub fn update_village_and_raid_systems(&mut self, dt: f32) {
+        if self.player_state.hero_of_the_village_timer > 0.0 {
+            self.player_state.hero_of_the_village_timer =
+                (self.player_state.hero_of_the_village_timer - dt).max(0.0);
+        }
+
+        if !self.is_authoritative() {
+            return;
+        }
+
+        let dim = self.current_dimension;
+        self.poi_manager.update_village_clusters(dim);
+
+        let player_pos = (
+            self.player_physics.position.x.floor() as i32,
+            self.player_physics.position.y.floor() as i32,
+            self.player_physics.position.z.floor() as i32,
+        );
+
+        // Check Bad Omen raid trigger
+        let triggered_village_data = if self.player_state.bad_omen_level > 0 {
+            self.poi_manager
+                .villages
+                .iter()
+                .find(|v| {
+                    v.dimension == dim
+                        && (v.center.0 - player_pos.0).abs() <= 48
+                        && (v.center.2 - player_pos.2).abs() <= 48
+                })
+                .map(|v| (v.id, v.center))
+        } else {
+            None
+        };
+
+        if let Some((v_id, v_center)) = triggered_village_data {
+            let omen_level = self.player_state.bad_omen_level;
+            self.player_state.bad_omen_level = 0;
+            let raid_id = self
+                .raid_manager
+                .trigger_raid(v_id, v_center, dim, omen_level);
+            self.trigger_advancement(crate::advancements::AdvancementTrigger::VoluntaryExile);
+
+            let wave_info = crate::village::raid::RaidWave::for_wave(1);
+            let mut spawned_ids = Vec::new();
+
+            for i in 0..wave_info.pillager_count {
+                let offset_x = i as i32 * 3 - 5;
+                let offset_z = 24;
+                let spawn_pos = Vec3::new(
+                    (v_center.0 + offset_x) as f32,
+                    (v_center.1 + 1) as f32,
+                    (v_center.2 + offset_z) as f32,
+                );
+                let id = self
+                    .entity_manager
+                    .spawn(crate::entity::EntityType::Pillager, spawn_pos);
+                if i == 0 {
+                    if let Some(idx) = self.entity_manager.id_to_index.get(&id).copied() {
+                        self.entity_manager.entities[idx].is_raid_captain = true;
+                    }
+                }
+                spawned_ids.push(id);
+            }
+
+            if let Some(raid) = self.raid_manager.get_raid_mut(raid_id) {
+                raid.spawned_mob_ids = spawned_ids;
+            }
+        }
+
+        // Tick active raids
+        let mut raid_victories = Vec::new();
+        let raid_ids: Vec<u64> = self.raid_manager.active_raids.keys().copied().collect();
+
+        for raid_id in raid_ids {
+            let mut spawn_next_wave = false;
+            let mut wave_to_spawn = 1;
+            let mut raid_center = (0, 0, 0);
+
+            if let Some(raid) = self.raid_manager.get_raid_mut(raid_id) {
+                if raid.is_active() {
+                    raid.spawned_mob_ids.retain(|id| {
+                        self.entity_manager
+                            .id_to_index
+                            .get(id)
+                            .map(|&idx| self.entity_manager.entities[idx].health > 0.0)
+                            .unwrap_or(false)
+                    });
+
+                    if raid.spawned_mob_ids.is_empty() {
+                        if raid.wave_timer > 0.0 {
+                            raid.wave_timer -= dt;
+                        } else if raid.current_wave >= raid.max_waves {
+                            raid.status = crate::village::raid::RaidStatus::Victory;
+                            raid_victories.push(raid.id);
+                        } else {
+                            raid.current_wave += 1;
+                            raid.wave_timer = 5.0;
+                            spawn_next_wave = true;
+                            wave_to_spawn = raid.current_wave;
+                            raid_center = raid.center;
+                        }
+                    }
+                }
+            }
+
+            if spawn_next_wave {
+                let wave_info = crate::village::raid::RaidWave::for_wave(wave_to_spawn);
+                let mut new_mob_ids = Vec::new();
+
+                for i in 0..wave_info.pillager_count {
+                    let offset_x = i as i32 * 3 - 5;
+                    let offset_z = 20 + wave_to_spawn as i32 * 4;
+                    let spawn_pos = Vec3::new(
+                        (raid_center.0 + offset_x) as f32,
+                        (raid_center.1 + 1) as f32,
+                        (raid_center.2 + offset_z) as f32,
+                    );
+                    let id = self
+                        .entity_manager
+                        .spawn(crate::entity::EntityType::Pillager, spawn_pos);
+                    if i == 0 {
+                        if let Some(idx) = self.entity_manager.id_to_index.get(&id).copied() {
+                            self.entity_manager.entities[idx].is_raid_captain = true;
+                        }
+                    }
+                    new_mob_ids.push(id);
+                }
+
+                for i in 0..wave_info.ravager_count {
+                    let spawn_pos = Vec3::new(
+                        (raid_center.0 + i as i32 * 4) as f32,
+                        (raid_center.1 + 1) as f32,
+                        (raid_center.2 + 25) as f32,
+                    );
+                    let id = self
+                        .entity_manager
+                        .spawn(crate::entity::EntityType::Ravager, spawn_pos);
+                    new_mob_ids.push(id);
+                }
+
+                if let Some(raid) = self.raid_manager.get_raid_mut(raid_id) {
+                    raid.spawned_mob_ids = new_mob_ids;
+                }
+            }
+        }
+
+        for _ in raid_victories {
+            self.player_state.hero_of_the_village_timer = 2400.0;
+            self.trigger_advancement(crate::advancements::AdvancementTrigger::HeroOfTheVillage);
+        }
+
+        // Tick Villagers, Iron Golems, Pillagers
+        let mut new_baby_spawns = Vec::new();
+        let mut pillager_attack_positions = Vec::new();
+        let mut golem_attack_positions = Vec::new();
+
+        for entity in self.entity_manager.entities.iter_mut() {
+            if entity.health <= 0.0 {
+                continue;
+            }
+
+            match entity.entity_type {
+                crate::entity::EntityType::Villager => {
+                    if entity.age < 0.0 {
+                        entity.age += dt;
+                    }
+                    if entity.breed_cooldown > 0.0 {
+                        entity.breed_cooldown = (entity.breed_cooldown - dt).max(0.0);
+                    }
+
+                    let vpos = (
+                        entity.position.x.floor() as i32,
+                        entity.position.y.floor() as i32,
+                        entity.position.z.floor() as i32,
+                    );
+
+                    if entity.profession == crate::village::poi::VillagerProfession::Unemployed {
+                        for prof in [
+                            crate::village::poi::VillagerProfession::Farmer,
+                            crate::village::poi::VillagerProfession::Librarian,
+                            crate::village::poi::VillagerProfession::Armorer,
+                            crate::village::poi::VillagerProfession::Cleric,
+                        ] {
+                            if let Some(job_pos) = self.poi_manager.claim_poi(
+                                dim,
+                                crate::village::poi::PoiType::JobSite(prof),
+                                entity.id,
+                                vpos,
+                                32.0,
+                            ) {
+                                entity.profession = prof;
+                                entity.job_poi = Some(job_pos);
+                                entity.offers = crate::village::trade::generate_offers_for_level(
+                                    prof,
+                                    crate::village::trade::VillagerLevel::Novice,
+                                );
+                                break;
+                            }
+                        }
+                    } else if entity.job_poi.is_none() && entity.villager_xp == 0 {
+                        entity.profession = crate::village::poi::VillagerProfession::Unemployed;
+                        entity.offers.clear();
+                    }
+
+                    if let Some(job_pos) = entity.job_poi {
+                        let dist_sq = (vpos.0 - job_pos.0).pow(2)
+                            + (vpos.1 - job_pos.1).pow(2)
+                            + (vpos.2 - job_pos.2).pow(2);
+                        if dist_sq <= 9 && entity.restock_count_today < 2 {
+                            entity.restock_count_today += 1;
+                            for offer in &mut entity.offers {
+                                offer.uses = 0;
+                            }
+                        }
+                    }
+
+                    if entity.home_poi.is_none() {
+                        if let Some(bed_pos) = self.poi_manager.claim_poi(
+                            dim,
+                            crate::village::poi::PoiType::Bed,
+                            entity.id,
+                            vpos,
+                            32.0,
+                        ) {
+                            entity.home_poi = Some(bed_pos);
+                        }
+                    }
+
+                    if entity.age >= 0.0 && entity.food_count >= 3 && entity.breed_cooldown <= 0.0 {
+                        let unclaimed_beds = self
+                            .poi_manager
+                            .get_unclaimed_beds_in_radius(dim, vpos, 32.0);
+                        if unclaimed_beds > 0 {
+                            entity.food_count -= 3;
+                            entity.breed_cooldown = 300.0;
+                            new_baby_spawns.push(entity.position);
+                        }
+                    }
+                }
+                crate::entity::EntityType::Pillager => {
+                    entity.action_cooldown -= dt;
+                    if entity.action_cooldown <= 0.0 {
+                        pillager_attack_positions.push(entity.position);
+                        entity.action_cooldown = 1.5;
+                    }
+                }
+                crate::entity::EntityType::IronGolem => {
+                    entity.action_cooldown -= dt;
+                    if entity.action_cooldown <= 0.0 {
+                        golem_attack_positions.push(entity.position);
+                        entity.action_cooldown = 1.0;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for pos in pillager_attack_positions {
+            let target_id = self
+                .entity_manager
+                .query_radius_types(pos, 16.0, &[crate::entity::EntityType::Villager])
+                .find(|v| v.health > 0.0)
+                .map(|v| v.id);
+            if let Some(vid) = target_id {
+                if let Some(idx) = self.entity_manager.id_to_index.get(&vid).copied() {
+                    self.entity_manager.entities[idx].health =
+                        (self.entity_manager.entities[idx].health - 4.0).max(0.0);
+                }
+            }
+        }
+
+        for pos in golem_attack_positions {
+            let target_id = self
+                .entity_manager
+                .query_radius_types(
+                    pos,
+                    16.0,
+                    &[
+                        crate::entity::EntityType::Pillager,
+                        crate::entity::EntityType::Zombie,
+                        crate::entity::EntityType::Ravager,
+                    ],
+                )
+                .find(|h| h.health > 0.0)
+                .map(|h| h.id);
+            if let Some(hid) = target_id {
+                if let Some(idx) = self.entity_manager.id_to_index.get(&hid).copied() {
+                    self.entity_manager.entities[idx].health =
+                        (self.entity_manager.entities[idx].health - 12.0).max(0.0);
+                }
+            }
+        }
+
+        for pos in new_baby_spawns {
+            let baby_id = self
+                .entity_manager
+                .spawn(crate::entity::EntityType::Villager, pos);
+            if let Some(idx) = self.entity_manager.id_to_index.get(&baby_id).copied() {
+                self.entity_manager.entities[idx].age = -1200.0;
+            }
+        }
+
+        for village in &self.poi_manager.villages {
+            if village.bed_count >= 3 {
+                let golem_count = self
+                    .entity_manager
+                    .query_radius_types(
+                        Vec3::new(
+                            village.center.0 as f32,
+                            village.center.1 as f32,
+                            village.center.2 as f32,
+                        ),
+                        48.0,
+                        &[crate::entity::EntityType::IronGolem],
+                    )
+                    .count();
+                if golem_count == 0 {
+                    let spawn_pos = Vec3::new(
+                        village.center.0 as f32 + 2.0,
+                        village.center.1 as f32 + 1.0,
+                        village.center.2 as f32 + 2.0,
+                    );
+                    self.entity_manager
+                        .spawn(crate::entity::EntityType::IronGolem, spawn_pos);
+                }
+            }
+        }
     }
 
     pub fn check_claim_furnace_xp(&mut self, slot: SlotType) {
@@ -12986,6 +13340,30 @@ impl State {
             return;
         }
 
+        let dir = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        );
+        let villager_hit = self
+            .entity_manager
+            .query_radius_types(
+                self.camera.position,
+                4.0,
+                &[crate::entity::EntityType::Villager],
+            )
+            .find(|e| {
+                e.health > 0.0
+                    && crate::entity::ray_intersects_aabb(self.camera.position, dir, &e.get_aabb())
+                        .is_some()
+            })
+            .map(|e| e.id);
+
+        if let Some(vid) = villager_hit {
+            self.open_merchant_trade_window(vid);
+            return;
+        }
+
         // Try standard click (block interaction/placement) with mainhand
         self.handle_click(false);
 
@@ -14465,7 +14843,7 @@ impl State {
                     0.10 + slot_h,
                 ));
             }
-            None | Some(StationKind::Furnace) => {}
+            None | Some(StationKind::Furnace) | Some(StationKind::Merchant) => {}
         }
 
         slots
@@ -14633,6 +15011,26 @@ impl State {
             self.audio_manager
                 .play_sound(crate::audio::SoundId::UiClick);
             return;
+        }
+
+        if self.active_station == Some(StationKind::Merchant) && is_left {
+            let mut offer_y = 0.28;
+            for idx in 0..self.active_merchant_offers.len() {
+                if mouse_x >= -0.35
+                    && mouse_x <= 0.35
+                    && mouse_y >= offer_y - 0.04
+                    && mouse_y <= offer_y + 0.03
+                {
+                    if !self.active_merchant_offers[idx].is_out_of_stock() {
+                        let _ = self.execute_active_merchant_trade(idx);
+                    }
+                    return;
+                }
+                offer_y -= 0.09;
+                if offer_y < -0.30 {
+                    break;
+                }
+            }
         }
 
         if self.recipe_book_open
@@ -15242,6 +15640,190 @@ impl State {
         self.open_inventory();
     }
 
+    pub fn open_merchant_trade_window(&mut self, villager_id: u64) {
+        let villager_data =
+            if let Some(index) = self.entity_manager.id_to_index.get(&villager_id).copied() {
+                let entity = &self.entity_manager.entities[index];
+                if entity.entity_type == crate::entity::EntityType::Villager
+                    && entity.health > 0.0
+                    && entity.age >= 0.0
+                {
+                    let profession = entity.profession;
+                    let level = entity.villager_level;
+                    let xp = entity.villager_xp;
+                    let offers = if entity.offers.is_empty() {
+                        crate::village::trade::generate_offers_for_level(profession, level)
+                    } else {
+                        entity.offers.clone()
+                    };
+                    Some((profession, level, xp, offers))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        if let Some((profession, level, xp, offers)) = villager_data {
+            self.active_merchant_villager_id = Some(villager_id);
+            self.active_merchant_offers = offers;
+            self.active_merchant_profession = profession;
+            self.active_merchant_level = level;
+            self.active_merchant_xp = xp;
+            self.active_station = Some(StationKind::Merchant);
+            self.inventory.is_open = true;
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::UiClick);
+        }
+    }
+
+    pub fn execute_active_merchant_trade(&mut self, offer_index: usize) -> bool {
+        if self.active_station != Some(StationKind::Merchant) {
+            return false;
+        }
+        let Some(villager_id) = self.active_merchant_villager_id else {
+            return false;
+        };
+        if offer_index >= self.active_merchant_offers.len() {
+            return false;
+        }
+
+        let discount = if self.player_state.hero_of_the_village_timer > 0.0 {
+            0.3
+        } else {
+            0.0
+        };
+        let offer = &self.active_merchant_offers[offer_index];
+        if offer.is_out_of_stock() {
+            return false;
+        }
+
+        let required_a_count = offer.effective_cost_a(discount);
+        let mut count_a = 0;
+        let mut count_b = 0;
+
+        for slot in self
+            .inventory
+            .hotbar
+            .iter()
+            .chain(self.inventory.main.iter())
+            .flatten()
+        {
+            if slot.item == offer.buy_a.item {
+                count_a += slot.count;
+            }
+            if let Some(buy_b) = &offer.buy_b {
+                if slot.item == buy_b.item {
+                    count_b += slot.count;
+                }
+            }
+        }
+
+        if count_a < required_a_count {
+            return false;
+        }
+        if let Some(buy_b) = &offer.buy_b {
+            if count_b < buy_b.count {
+                return false;
+            }
+        }
+
+        // Deduct item A
+        let mut needed_a = required_a_count;
+        for slot in self
+            .inventory
+            .hotbar
+            .iter_mut()
+            .chain(self.inventory.main.iter_mut())
+        {
+            if needed_a == 0 {
+                break;
+            }
+            if let Some(stack) = slot {
+                if stack.item == offer.buy_a.item {
+                    let take = stack.count.min(needed_a);
+                    stack.count -= take;
+                    needed_a -= take;
+                    if stack.count == 0 {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+
+        // Deduct item B if present
+        if let Some(buy_b) = &offer.buy_b {
+            let mut needed_b = buy_b.count;
+            for slot in self
+                .inventory
+                .hotbar
+                .iter_mut()
+                .chain(self.inventory.main.iter_mut())
+            {
+                if needed_b == 0 {
+                    break;
+                }
+                if let Some(stack) = slot {
+                    if stack.item == buy_b.item {
+                        let take = stack.count.min(needed_b);
+                        stack.count -= take;
+                        needed_b -= take;
+                        if stack.count == 0 {
+                            *slot = None;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Grant sell item
+        let _ = self.inventory.add_stack(offer.sell);
+
+        // Update trade offer stock and XP
+        let mut new_xp = self.active_merchant_xp;
+        let mut new_level = self.active_merchant_level;
+
+        if let Some(offer_mut) = self.active_merchant_offers.get_mut(offer_index) {
+            offer_mut.uses += 1;
+            new_xp += offer_mut.xp_reward;
+        }
+
+        if let Some(next) = new_level.next_level() {
+            if new_xp >= next.xp_threshold() {
+                new_level = next;
+                let new_offers = crate::village::trade::generate_offers_for_level(
+                    self.active_merchant_profession,
+                    new_level,
+                );
+                for no in new_offers {
+                    if !self
+                        .active_merchant_offers
+                        .iter()
+                        .any(|o| o.buy_a == no.buy_a && o.sell == no.sell)
+                    {
+                        self.active_merchant_offers.push(no);
+                    }
+                }
+            }
+        }
+
+        self.active_merchant_xp = new_xp;
+        self.active_merchant_level = new_level;
+
+        // Persist to villager entity
+        if let Some(index) = self.entity_manager.id_to_index.get(&villager_id).copied() {
+            let entity = &mut self.entity_manager.entities[index];
+            entity.villager_xp = new_xp;
+            entity.villager_level = new_level;
+            entity.offers = self.active_merchant_offers.clone();
+        }
+
+        self.trigger_advancement(crate::advancements::AdvancementTrigger::VillagerTrade);
+        self.audio_manager
+            .play_sound(crate::audio::SoundId::UiClick);
+        true
+    }
+
     pub fn close_inventory(&mut self) -> bool {
         if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
             if let Some(pos) = self.container_target {
@@ -15281,7 +15863,7 @@ impl State {
                 .into_iter()
                 .flatten()
                 .collect(),
-            None | Some(StationKind::Furnace) => Vec::new(),
+            None | Some(StationKind::Furnace) | Some(StationKind::Merchant) => Vec::new(),
         });
 
         for stack in returning_items {
@@ -15317,13 +15899,20 @@ impl State {
                 self.anvil.left = None;
                 self.anvil.right = None;
             }
-            None | Some(StationKind::Furnace) => {}
+            None | Some(StationKind::Furnace) | Some(StationKind::Merchant) => {}
         }
 
         self.inventory.is_open = false;
         self.inventory.is_table_open = false;
         self.inventory.craft_input = vec![None; 4];
         self.inventory.craft_output = None;
+        if self.active_station == Some(StationKind::Merchant) {
+            if let Some(vid) = self.active_merchant_villager_id {
+                self.merchant_sessions.close_sessions_for_villager(vid);
+            }
+            self.active_merchant_villager_id = None;
+            self.active_merchant_offers.clear();
+        }
         self.active_station = None;
         self.container_target = None;
         self.container_is_double = false;
@@ -17442,6 +18031,80 @@ impl State {
                             [0.5, 1.0, 0.5, 1.0],
                             &mut ui_line_vertices,
                         );
+                    }
+                    Some(StationKind::Merchant) => {
+                        let title = format!(
+                            "VILLAGER TRADING ({}) - LEVEL {}",
+                            self.active_merchant_profession.display_name(),
+                            self.active_merchant_level as u8,
+                        );
+                        add_string_lines(
+                            &title,
+                            -0.35,
+                            0.38,
+                            0.010,
+                            0.020,
+                            0.003,
+                            [0.3, 0.9, 0.4, 1.0],
+                            &mut ui_line_vertices,
+                        );
+
+                        let mut offer_y = 0.28;
+                        let discount = if self.player_state.hero_of_the_village_timer > 0.0 {
+                            0.3
+                        } else {
+                            0.0
+                        };
+                        for (idx, offer) in self.active_merchant_offers.iter().enumerate() {
+                            let btn_hover = mouse_x >= -0.35
+                                && mouse_x <= 0.35
+                                && mouse_y >= offer_y - 0.04
+                                && mouse_y <= offer_y + 0.03;
+                            let cost_a = offer.effective_cost_a(discount);
+                            let text = format!(
+                                "[TRADE {}] {} {:?} -> {} {:?}",
+                                idx + 1,
+                                cost_a,
+                                offer.buy_a.item,
+                                offer.sell.count,
+                                offer.sell.item,
+                            );
+
+                            add_ui_quad(
+                                &mut ui_vertices,
+                                -0.36,
+                                0.36,
+                                offer_y - 0.04,
+                                offer_y + 0.03,
+                                if offer.is_out_of_stock() {
+                                    [0.2, 0.1, 0.1, 0.7]
+                                } else if btn_hover {
+                                    [0.2, 0.5, 0.3, 0.9]
+                                } else {
+                                    [0.15, 0.25, 0.18, 0.85]
+                                },
+                            );
+
+                            add_string_lines(
+                                &text,
+                                -0.34,
+                                offer_y,
+                                0.007,
+                                0.014,
+                                0.002,
+                                if offer.is_out_of_stock() {
+                                    [0.6, 0.6, 0.6, 1.0]
+                                } else {
+                                    [1.0, 1.0, 1.0, 1.0]
+                                },
+                                &mut ui_line_vertices,
+                            );
+
+                            offer_y -= 0.09;
+                            if offer_y < -0.30 {
+                                break;
+                            }
+                        }
                     }
                     None | Some(StationKind::Furnace) => {}
                 }

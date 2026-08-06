@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PotionWire {
@@ -446,6 +446,37 @@ pub enum Packet {
         player_id: PlayerId,
         is_sleeping: bool,
     },
+    OpenTradeWindow {
+        protocol_version: u32,
+        villager_id: u64,
+        profession: u8,
+        level: u8,
+        xp: u32,
+        offers: Vec<crate::village::trade::TradeOffer>,
+    },
+    ExecuteTradeRequest {
+        protocol_version: u32,
+        villager_id: u64,
+        offer_index: u16,
+    },
+    ExecuteTradeResult {
+        protocol_version: u32,
+        success: bool,
+        offer_index: u16,
+        new_uses: u32,
+        villager_xp: u32,
+        new_level: u8,
+    },
+    CloseTradeWindow {
+        protocol_version: u32,
+        villager_id: u64,
+    },
+    RaidStatusSync {
+        protocol_version: u32,
+        current_wave: u8,
+        max_waves: u8,
+        status: u8,
+    },
 }
 
 impl Packet {
@@ -523,6 +554,21 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::SleepStateSync {
+                protocol_version, ..
+            }
+            | Packet::OpenTradeWindow {
+                protocol_version, ..
+            }
+            | Packet::ExecuteTradeRequest {
+                protocol_version, ..
+            }
+            | Packet::ExecuteTradeResult {
+                protocol_version, ..
+            }
+            | Packet::CloseTradeWindow {
+                protocol_version, ..
+            }
+            | Packet::RaidStatusSync {
                 protocol_version, ..
             } => *protocol_version,
             Packet::ContainerOpenRequest {
