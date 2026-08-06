@@ -43,6 +43,9 @@ pub enum EntityType {
     IronGolem,
     Pillager,
     Ravager,
+    Boat,
+    Minecart,
+    FishingHook,
 }
 
 impl EntityType {
@@ -87,6 +90,9 @@ impl EntityType {
             Self::IronGolem => 36,
             Self::Pillager => 37,
             Self::Ravager => 38,
+            Self::Boat => 39,
+            Self::Minecart => 40,
+            Self::FishingHook => 41,
         }
     }
 
@@ -131,6 +137,9 @@ impl EntityType {
             36 => Some(Self::IronGolem),
             37 => Some(Self::Pillager),
             38 => Some(Self::Ravager),
+            39 => Some(Self::Boat),
+            40 => Some(Self::Minecart),
+            41 => Some(Self::FishingHook),
             _ => None,
         }
     }
@@ -281,6 +290,9 @@ pub struct Entity {
     pub is_persistent: bool,
     pub horse_speed: f32,
     pub horse_jump: f32,
+    pub has_saddle: bool,
+    pub vehicle_id: Option<u64>,
+    pub passengers: Vec<u64>,
 
     // Passive mob fields
     pub age: f32,
@@ -370,6 +382,9 @@ impl Entity {
             EntityType::Villager | EntityType::Pillager => Vec3::new(0.6, 1.95, 0.6),
             EntityType::IronGolem => Vec3::new(1.4, 2.7, 1.4),
             EntityType::Ravager => Vec3::new(1.95, 2.2, 1.95),
+            EntityType::Boat => Vec3::new(1.375, 0.5625, 1.375),
+            EntityType::Minecart => Vec3::new(0.98, 0.7, 0.98),
+            EntityType::FishingHook => Vec3::new(0.25, 0.25, 0.25),
         };
         let max_health = match entity_type {
             EntityType::Zombie | EntityType::Skeleton | EntityType::Creeper => 20.0,
@@ -405,6 +420,8 @@ impl Entity {
             EntityType::IronGolem => 100.0,
             EntityType::Pillager => 24.0,
             EntityType::Ravager => 100.0,
+            EntityType::Boat | EntityType::Minecart => 40.0,
+            EntityType::FishingHook => 1.0,
         };
         Self {
             id,
@@ -439,6 +456,9 @@ impl Entity {
             is_persistent: false,
             horse_speed: 0.225,
             horse_jump: 0.7,
+            has_saddle: false,
+            vehicle_id: None,
+            passengers: Vec::new(),
             age: 0.0,
             breeding_timer: 0.0,
             breed_cooldown: 0.0,

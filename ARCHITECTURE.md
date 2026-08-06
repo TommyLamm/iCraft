@@ -228,6 +228,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Equipment and effects | `enchantment.rs`, `brewing.rs`, `hand_renderer.rs` |
 | Entities and AI | `entity.rs`, `spawning.rs`, `ai/{mod, goal, brain, navigation}.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
 | Container & workstation system | `block_entity.rs` (ChestBlockEntity, FurnaceBlockEntity), `inventory.rs` (ContainerInventory), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (SlotType::ContainerSlot, container_target, open_chest, recipe_book_open, update_furnaces) |
+| Transport, mounts, navigation & fishing | `vehicle.rs` (MountManager, BoatState), `rail.rs` (MinecartState, RailShape), `navigation.rs` (Compass, Clock, MapData), `fishing.rs` (FishingManager, loot rolling) |
 | Networking | `network/{protocol,transport,server,client}.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
 | Performance instrumentation | `perf.rs`, `performance/` |

@@ -20,13 +20,16 @@ impl Camera {
         }
     }
 
+    pub fn forward(&self) -> Vec3 {
+        Vec3::new(
+            self.yaw.cos() * self.pitch.cos(),
+            self.pitch.sin(),
+            self.yaw.sin() * self.pitch.cos(),
+        )
+    }
+
     pub fn build_view_projection_matrix(&self, aspect: f32, far_plane: f32) -> Mat4 {
-        let target = self.position
-            + Vec3::new(
-                self.yaw.cos() * self.pitch.cos(),
-                self.pitch.sin(),
-                self.yaw.sin() * self.pitch.cos(),
-            );
+        let target = self.position + self.forward();
         let view = Mat4::look_at_lh(self.position, target, Vec3::Y);
         let proj = Mat4::perspective_lh(f32::to_radians(self.fov), aspect, 0.1, far_plane.max(1.0));
         proj * view

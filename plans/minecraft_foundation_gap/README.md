@@ -85,7 +85,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 10 | [程序化結構、戰利品與維度進度](10_structures_loot_and_dimension_progression.md) | 已完成 |
 | 11 | [生物生態、生成與寵物](11_mob_ecology_spawning_and_pets.md) | 已完成 |
 | 12 | [村莊、交易、POI 與襲擊](12_villages_trading_poi_and_raids.md) | 已完成 |
-| 13 | [載具、騎乘、導航與釣魚](13_transport_mounts_navigation_and_fishing.md) | 待執行 |
+| 13 | [載具、騎乘、導航與釣魚](13_transport_mounts_navigation_and_fishing.md) | 已完成 |
 | 14 | [紅石容器自動化](14_redstone_container_automation.md) | 待執行 |
 | 15 | [遊戲模式、規則、指令與世界建立](15_game_modes_world_rules_commands_and_creation.md) | 待執行 |
 | 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 待執行 |

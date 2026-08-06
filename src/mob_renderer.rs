@@ -2233,7 +2233,10 @@ pub fn render_mobs<'a>(
                     light_val,
                 );
             }
-            EntityType::ExperienceOrb => {}
+            EntityType::ExperienceOrb
+            | EntityType::Boat
+            | EntityType::Minecart
+            | EntityType::FishingHook => {}
         }
 
         if (entity.fire_aspect_timer > 0.0 || entity.burn_timer > 0.0)

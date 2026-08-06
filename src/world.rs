@@ -437,6 +437,10 @@ pub enum BlockType {
     EndStoneBrick = 112,
     RespawnAnchor = 113,
     EndGateway = 114,
+    Rail = 115,
+    PoweredRail = 116,
+    DetectorRail = 117,
+    ActivatorRail = 118,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -597,7 +601,7 @@ impl BlockState {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= BlockType::OakSign as u8 {
+        if val <= BlockType::ActivatorRail as u8 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -618,9 +622,7 @@ impl BlockType {
     /// known variant so unknown (newer) blocks are dropped gracefully instead
     /// of corrupting world state.
     pub fn from_wire(val: u32) -> Option<Self> {
-        if val <= BlockType::OakSign as u32 {
-            // SAFETY: `BlockType` is `#[repr(u8)]`, so every value in
-            // `0..=PotatoCrop` is a valid discriminant.
+        if val <= BlockType::ActivatorRail as u32 {
             Some(unsafe { std::mem::transmute(val as u8) })
         } else {
             None
@@ -1675,6 +1677,38 @@ impl BlockType {
                 is_passable: true,
                 light_emission: 15,
             },
+            BlockType::Rail => BlockProperties {
+                name: "Rail",
+                hardness: 0.7,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::PoweredRail => BlockProperties {
+                name: "Powered Rail",
+                hardness: 0.7,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::DetectorRail => BlockProperties {
+                name: "Detector Rail",
+                hardness: 0.7,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
+            BlockType::ActivatorRail => BlockProperties {
+                name: "Activator Rail",
+                hardness: 0.7,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: true,
+                light_emission: 0,
+            },
         }
     }
 
@@ -1877,6 +1911,10 @@ impl BlockType {
             BlockType::EndStoneBrick => (15, 10),
             BlockType::RespawnAnchor => (14, 11),
             BlockType::EndGateway => (14, 10),
+            BlockType::Rail => (0, 8),
+            BlockType::PoweredRail => (3, 8),
+            BlockType::DetectorRail => (3, 9),
+            BlockType::ActivatorRail => (3, 10),
         }
     }
 }
@@ -5348,7 +5386,7 @@ mod tests {
 
     #[test]
     fn block_type_from_wire_rejects_unknown_values() {
-        assert!(BlockType::from_wire(BlockType::OakSign as u32 + 1).is_none());
+        assert!(BlockType::from_wire(BlockType::ActivatorRail as u32 + 1).is_none());
         assert!(BlockType::from_wire(u32::MAX).is_none());
     }
 

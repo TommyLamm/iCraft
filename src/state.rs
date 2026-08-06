@@ -5080,6 +5080,9 @@ pub struct State {
     /// rendered and the camera sits behind the player.
     pub third_person: bool,
     pub entity_manager: crate::entity::EntityManager,
+    pub mount_manager: crate::vehicle::MountManager,
+    pub fishing_manager: crate::fishing::FishingManager,
+    pub map_manager: crate::navigation::MapManager,
     mob_instanced_pipeline: wgpu::RenderPipeline,
     particle_instanced_pipeline: wgpu::RenderPipeline,
 
@@ -6698,6 +6701,9 @@ impl State {
             show_debug,
             third_person: false,
             entity_manager: crate::entity::EntityManager::new(),
+            mount_manager: crate::vehicle::MountManager::new(),
+            fishing_manager: crate::fishing::FishingManager::new(),
+            map_manager: crate::navigation::MapManager::new(),
             mob_instanced_pipeline,
             particle_instanced_pipeline,
             mob_cuboid_proto_vbuf,
@@ -10524,6 +10530,7 @@ impl State {
         }
 
         self.update_village_and_raid_systems(dt);
+        self.update_vehicles_and_fishing(dt);
 
         self.broadcast_authoritative_replication(dt);
 
@@ -10859,6 +10866,165 @@ impl State {
                         .spawn(crate::entity::EntityType::IronGolem, spawn_pos);
                 }
             }
+        }
+    }
+
+    pub fn update_vehicles_and_fishing(&mut self, dt: f32) {
+        if self.is_authoritative() {
+            let entity_ids: Vec<(u64, crate::entity::EntityType)> = self
+                .entity_manager
+                .entities
+                .iter()
+                .map(|e| (e.id, e.entity_type))
+                .collect();
+
+            for (id, etype) in entity_ids {
+                match etype {
+                    crate::entity::EntityType::Boat => {
+                        if let Some(idx) = self.entity_manager.id_to_index.get(&id).copied() {
+                            let entity = &mut self.entity_manager.entities[idx];
+                            let mut boat =
+                                crate::vehicle::BoatState::new(entity.position, entity.yaw);
+                            let cm = &self.chunk_manager;
+                            boat.tick(
+                                dt,
+                                |x, y, z| cm.get_block(x, y, z) == BlockType::Water,
+                                |x, y, z| cm.get_block(x, y, z).properties().is_solid,
+                            );
+                            entity.position = boat.pos_vec3();
+                            entity.yaw = boat.yaw;
+                        }
+                    }
+                    crate::entity::EntityType::Minecart => {
+                        if let Some(idx) = self.entity_manager.id_to_index.get(&id).copied() {
+                            let entity = &mut self.entity_manager.entities[idx];
+                            let mut cart = crate::rail::MinecartState::new(entity.position);
+                            cart.set_vel(entity.velocity);
+                            let cm = &self.chunk_manager;
+                            cart.tick(
+                                dt,
+                                |x, y, z| {
+                                    let b = cm.get_block(x, y, z);
+                                    let rtype = match b {
+                                        BlockType::Rail => Some(crate::rail::RailType::Normal),
+                                        BlockType::PoweredRail => {
+                                            Some(crate::rail::RailType::Powered)
+                                        }
+                                        BlockType::DetectorRail => {
+                                            Some(crate::rail::RailType::Detector)
+                                        }
+                                        BlockType::ActivatorRail => {
+                                            Some(crate::rail::RailType::Activator)
+                                        }
+                                        _ => None,
+                                    }?;
+                                    Some((rtype, crate::rail::RailShape::NorthSouth, false))
+                                },
+                                |_x, _y, _z, _p| {},
+                            );
+                            entity.position = cart.pos_vec3();
+                            entity.velocity = cart.vel_vec3();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Synchronize mounted passenger positions
+            let local_player_id = 0u64;
+            if let Some(vehicle_id) = self.mount_manager.get_vehicle(local_player_id) {
+                if let Some(idx) = self.entity_manager.id_to_index.get(&vehicle_id).copied() {
+                    let vehicle = &self.entity_manager.entities[idx];
+                    let passengers = self.mount_manager.get_passengers(vehicle_id);
+                    if let Some(seat_idx) = passengers.iter().position(|&id| id == local_player_id)
+                    {
+                        let offset = match vehicle.entity_type {
+                            crate::entity::EntityType::Boat => {
+                                crate::vehicle::BoatState::seat_offset(seat_idx)
+                            }
+                            _ => crate::vehicle::SeatOffset::new(0.0, 0.75, 0.0),
+                        };
+                        let seat_pos = offset.world_position(vehicle.position, vehicle.yaw);
+                        self.player_physics.position = seat_pos;
+                        self.player_physics.velocity = glam::Vec3::ZERO;
+                    }
+                }
+            }
+        }
+
+        // Fishing manager tick
+        let mut player_positions = std::collections::HashMap::new();
+        player_positions.insert(0u64, self.player_physics.position);
+        for (&id, remote) in &self.remote_players {
+            player_positions.insert(
+                id,
+                remote
+                    .snapshots
+                    .back()
+                    .map(|s| s.position)
+                    .unwrap_or(glam::Vec3::ZERO),
+            );
+        }
+
+        let cm = &self.chunk_manager;
+        self.fishing_manager.tick(
+            dt,
+            &player_positions,
+            |x, y, z| cm.get_block(x, y, z) == BlockType::Water,
+            |_pos| {},
+        );
+    }
+
+    pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
+        let capacity = if let Some(idx) = self.entity_manager.id_to_index.get(&vehicle_id).copied()
+        {
+            match self.entity_manager.entities[idx].entity_type {
+                crate::entity::EntityType::Boat => 2,
+                _ => 1,
+            }
+        } else {
+            1
+        };
+        self.mount_manager
+            .mount(vehicle_id, passenger_id, capacity)
+            .is_ok()
+    }
+
+    pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
+        let vehicle_pos = if let Some(vid) = self.mount_manager.get_vehicle(passenger_id) {
+            self.entity_manager.get_by_id(vid).map(|e| e.position)
+        } else {
+            None
+        };
+        self.mount_manager.dismount(passenger_id);
+        if let Some(v_pos) = vehicle_pos {
+            let cm = &self.chunk_manager;
+            let safe_pos =
+                crate::vehicle::MountManager::find_dismount_position(v_pos, |x, y, z| {
+                    cm.get_block(x, y, z).properties().is_solid
+                });
+            if passenger_id == 0 {
+                self.player_physics.position = safe_pos;
+            }
+        }
+    }
+
+    pub fn use_fishing_rod(&mut self) {
+        let p_id = 0u64; // local player
+        if self.fishing_manager.get_hook(p_id).is_some() {
+            let mut rng_val = (self.total_time * 1000.0) as u32;
+            let result = self.fishing_manager.reel_in(p_id, || {
+                rng_val = rng_val.wrapping_mul(1103515245).wrapping_add(12345);
+                rng_val
+            });
+            if let Some(crate::fishing::FishingResult::Caught(stack)) = result {
+                self.inventory.add_stack(stack);
+                self.trigger_advancement(crate::advancements::AdvancementTrigger::FishCaught);
+            }
+        } else {
+            let look_dir = self.camera.forward();
+            self.fishing_manager
+                .cast_hook(p_id, self.player_physics.position, look_dir);
         }
     }
 

@@ -538,6 +538,8 @@ pub struct EntitySaveData {
     pub food_count: u32,
     #[serde(default)]
     pub is_raid_captain: bool,
+    #[serde(default)]
+    pub has_saddle: bool,
 }
 
 impl From<&crate::entity::Entity> for EntitySaveData {
@@ -580,6 +582,7 @@ impl From<&crate::entity::Entity> for EntitySaveData {
             last_restock_tick: entity.last_restock_tick,
             food_count: entity.food_count,
             is_raid_captain: entity.is_raid_captain,
+            has_saddle: entity.has_saddle,
         }
     }
 }
@@ -634,6 +637,7 @@ impl EntitySaveData {
         entity.last_restock_tick = self.last_restock_tick;
         entity.food_count = self.food_count;
         entity.is_raid_captain = self.is_raid_captain;
+        entity.has_saddle = self.has_saddle;
         entity
     }
 
@@ -642,6 +646,8 @@ impl EntitySaveData {
             || self.entity_type.is_persistent()
             || self.entity_type == crate::entity::EntityType::DroppedItem
             || self.entity_type == crate::entity::EntityType::ExperienceOrb
+            || self.entity_type == crate::entity::EntityType::Boat
+            || self.entity_type == crate::entity::EntityType::Minecart
     }
 }
 
@@ -2417,6 +2423,12 @@ impl SaveManager {
         cz: i32,
         data: ChunkSaveData,
     ) -> SaveResult<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_serialization) {
+            return Err(SaveError::Serialization(
+                "injected serialization failure".to_string(),
+            ));
+        }
         let rx = cx.div_euclid(32);
         let rz = cz.div_euclid(32);
         let lx = cx.rem_euclid(32) as u8;
@@ -2785,6 +2797,8 @@ mod tests {
             },
             advancements: Default::default(),
             unlocked_recipes: Default::default(),
+            bad_omen_level: 0,
+            hero_of_the_village_timer: 0.0,
         };
         let encoded_player = bincode::serialize(&player).unwrap();
         let decoded_player: PlayerData = bincode::deserialize(&encoded_player).unwrap();

@@ -35,6 +35,7 @@ pub enum AdvancementTrigger {
     VoluntaryExile,
     HeroOfTheVillage,
     VillagerTrade,
+    FishCaught,
     Root,
 }
 

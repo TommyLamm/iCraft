@@ -17,36 +17,36 @@
 
 ### A. 通用騎乘關係
 
-- [ ] Entity 增加 vehicle/passenger stable ID 和 seat transform；保存前驗證無環。
-- [ ] mount/dismount request 由 host 驗證距離、占用、維度和生存狀態。
-- [ ] 乘客位置由 vehicle 權威派生，不能同時跑獨立玩家碰撞。
-- [ ] 下車尋找安全位置；vehicle 被破壞、切維度、死亡、斷線時原子解除。
+- [x] Entity 增加 vehicle/passenger stable ID 和 seat transform；保存前驗證無環。
+- [x] mount/dismount request 由 host 驗證距離、占用、維度和生存狀態。
+- [x] 乘客位置由 vehicle 權威派生，不能同時跑獨立玩家碰撞。
+- [x] 下車尋找安全位置；vehicle 被破壞、切維度、死亡、斷線時原子解除。
 
 ### B. Boat
 
-- [ ] 補齊 sprint-swim／游泳姿態、上浮下潛與一格高空間碰撞，保持氧氣／水流現有語義。
-- [ ] Oak Boat item/entity、放置水面、雙槳輸入、轉向、浮力、陸地阻力與碰撞。
-- [ ] 支援一名駕駛和一個額外乘客；先不做 Chest Boat。
-- [ ] 破壞／撞擊掉落規則、Bubble Column 可列後續但水流影響需明確。
+- [x] 補齊 sprint-swim／游泳姿態、上浮下潛與一格高空間碰撞，保持氧氣／水流現有語義。
+- [x] Oak Boat item/entity、放置水面、雙槳輸入、轉向、浮力、陸地阻力與碰撞。
+- [x] 支援一名駕駛和一個額外乘客；先不做 Chest Boat。
+- [x] 破壞／撞擊掉落規則、Bubble Column 可列後續但水流影響需明確。
 
 ### C. Minecart 與 Rail
 
-- [ ] Rail、Powered Rail、Detector Rail、Activator Rail block state 與連接 shape。
-- [ ] Minecart 沿 rail graph 投影移動，坡道、彎道、交叉連接由鄰接 state 決定。
-- [ ] Powered Rail 加速／制動、Detector 輸出紅石；跨 Chunk rail 查詢缺失時安全停車。
-- [ ] 首版只做普通 Minecart，Chest/Furnace/Hopper Minecart 留到內容擴充。
+- [x] Rail、Powered Rail、Detector Rail、Activator Rail block state 與連接 shape。
+- [x] Minecart 沿 rail graph 投影移動，坡道、彎道、交叉連接由鄰接 state 決定。
+- [x] Powered Rail 加速／制動、Detector 輸出紅石；跨 Chunk rail 查詢缺失時安全停車。
+- [x] 首版只做普通 Minecart，Chest/Furnace/Hopper Minecart 留到內容擴充。
 
 ### D. Horse 騎乘
 
-- [ ] 接管 11 的 tamed Horse，加入 Saddle item/slot、jump charge、速度／跳躍屬性。
-- [ ] 玩家控制、碰撞、落下傷害、下車和保存；Horse Armor 可列為可選尾段。
+- [x] 接管 11 的 tamed Horse，加入 Saddle item/slot、jump charge、速度／跳躍屬性。
+- [x] 玩家控制、碰撞、落下傷害、下車和保存；Horse Armor 可列為可選尾段。
 
 ### E. 導航與釣魚
 
-- [ ] Compass 指向 world spawn；Clock 顯示 Overworld 時間，在其他維度有不穩定呈現。
-- [ ] 最小 Map：固定 scale、探索像素、玩家 marker、持久 ID；分批更新避免每幀掃區域。
-- [ ] Fishing Rod 使用 item-use 狀態生成 hook；等待、咬鉤、收線由 host 狀態機決定。
-- [ ] fishing loot 使用 10 Loot Table，區分 fish/junk/treasure 的最小集合。
+- [x] Compass 指向 world spawn；Clock 顯示 Overworld 時間，在其他維度有不穩定呈現。
+- [x] 最小 Map：固定 scale、探索像素、玩家 marker、持久 ID；分批更新避免每幀掃區域。
+- [x] Fishing Rod 使用 item-use 狀態生成 hook；等待、咬鉤、收線由 host 狀態機決定。
+- [x] fishing loot 使用 10 Loot Table，區分 fish/junk/treasure 的最小集合。
 
 ## 主要文件
 
@@ -57,12 +57,12 @@
 
 ## 驗收
 
-- [ ] vehicle/passenger 不可形成環，斷線／破壞／切維度不留幽靈乘客。
-- [ ] Boat 水面、岸邊、碰撞、兩乘客與 Host/Client 高延遲場景。
-- [ ] Rail 直線、彎道、坡道、Chunk 邊界、powered/detector redstone。
-- [ ] Horse 馴服→裝鞍→騎乘→跳躍→保存重載完整場景。
-- [ ] Compass/Clock 在三維度行為明確；Map 重載保持像素且有更新 budget。
-- [ ] 釣魚取消、成功、過早收線、玩家離開 Chunk 和兩 client 同步。
+- [x] vehicle/passenger 不可形成環，斷線／破壞／切維度不留幽靈乘客。
+- [x] Boat 水面、岸邊、碰撞、兩乘客與 Host/Client 高延遲場景。
+- [x] Rail 直線、彎道、坡道、Chunk 邊界、powered/detector redstone。
+- [x] Horse 馴服→裝鞍→騎乘→跳躍→保存重載完整場景。
+- [x] Compass/Clock 在三維度行為明確；Map 重載保持像素且有更新 budget。
+- [x] 釣魚取消、成功、過早收線、玩家離開 Chunk 和兩 client 同步。
 
 ## 完成閘門
 

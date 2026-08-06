@@ -222,6 +222,18 @@ pub enum Item {
     RawCod,
     RawSalmon,
     InkSac,
+    OakBoat,
+    Minecart,
+    Rail,
+    PoweredRail,
+    DetectorRail,
+    ActivatorRail,
+    Clock,
+    Map,
+    FishingRod,
+    RawFish,
+    TropicalFish,
+    LilyPad,
 }
 
 pub const ALL_ITEMS: &[Item] = &[
@@ -412,6 +424,29 @@ pub const ALL_ITEMS: &[Item] = &[
     Item::DiamondLeggings,
     Item::DiamondBoots,
     Item::Shield,
+    Item::Saddle,
+    Item::Emerald,
+    Item::Book,
+    Item::Paper,
+    Item::EnchantedBook,
+    Item::Compass,
+    Item::String,
+    Item::Slimeball,
+    Item::RawCod,
+    Item::RawSalmon,
+    Item::InkSac,
+    Item::OakBoat,
+    Item::Minecart,
+    Item::Rail,
+    Item::PoweredRail,
+    Item::DetectorRail,
+    Item::ActivatorRail,
+    Item::Clock,
+    Item::Map,
+    Item::FishingRod,
+    Item::RawFish,
+    Item::TropicalFish,
+    Item::LilyPad,
 ];
 
 impl Item {
@@ -1111,9 +1146,23 @@ impl Item {
             Item::GlassPane => Some(CreativeTab::Blocks),
             Item::OakLadder => Some(CreativeTab::Blocks),
             Item::OakSign => Some(CreativeTab::Blocks),
-            Item::String | Item::Slimeball | Item::RawCod | Item::RawSalmon | Item::InkSac => {
-                Some(CreativeTab::Misc)
-            }
+            Item::String
+            | Item::Slimeball
+            | Item::RawCod
+            | Item::RawSalmon
+            | Item::InkSac
+            | Item::OakBoat
+            | Item::Minecart
+            | Item::Rail
+            | Item::PoweredRail
+            | Item::DetectorRail
+            | Item::ActivatorRail
+            | Item::Clock
+            | Item::Map
+            | Item::FishingRod
+            | Item::RawFish
+            | Item::TropicalFish
+            | Item::LilyPad => Some(CreativeTab::Misc),
         }
     }
 
@@ -2441,7 +2490,19 @@ impl Item {
             | Item::Slimeball
             | Item::RawCod
             | Item::RawSalmon
-            | Item::InkSac) => {
+            | Item::InkSac
+            | Item::OakBoat
+            | Item::Minecart
+            | Item::Rail
+            | Item::PoweredRail
+            | Item::DetectorRail
+            | Item::ActivatorRail
+            | Item::Clock
+            | Item::Map
+            | Item::FishingRod
+            | Item::RawFish
+            | Item::TropicalFish
+            | Item::LilyPad) => {
                 let (name, max_stack, is_block, block_type, tex_coords) = match item {
                     Item::WoodenHoe => ("Wooden Hoe", 1, false, None, (0, 8)),
                     Item::StoneHoe => ("Stone Hoe", 1, false, None, (1, 8)),
@@ -2526,6 +2587,37 @@ impl Item {
                     Item::RawCod => ("Raw Cod", 64, false, None, (1, 10)),
                     Item::RawSalmon => ("Raw Salmon", 64, false, None, (2, 10)),
                     Item::InkSac => ("Ink Sac", 64, false, None, (15, 1)),
+                    Item::OakBoat => ("Oak Boat", 1, false, None, (8, 6)),
+                    Item::Minecart => ("Minecart", 1, false, None, (8, 7)),
+                    Item::Rail => ("Rail", 64, true, Some(BlockType::Rail), (0, 8)),
+                    Item::PoweredRail => (
+                        "Powered Rail",
+                        64,
+                        true,
+                        Some(BlockType::PoweredRail),
+                        (3, 8),
+                    ),
+                    Item::DetectorRail => (
+                        "Detector Rail",
+                        64,
+                        true,
+                        Some(BlockType::DetectorRail),
+                        (3, 9),
+                    ),
+                    Item::ActivatorRail => (
+                        "Activator Rail",
+                        64,
+                        true,
+                        Some(BlockType::ActivatorRail),
+                        (3, 10),
+                    ),
+                    Item::Clock => ("Clock", 64, false, None, (8, 4)),
+                    Item::Map => ("Map", 64, false, None, (8, 5)),
+                    Item::FishingRod => ("Fishing Rod", 1, false, None, (5, 4)),
+                    Item::RawFish => ("Raw Fish", 64, false, None, (1, 10)),
+                    Item::TropicalFish => ("Tropical Fish", 64, false, None, (3, 10)),
+                    Item::Pufferfish => ("Pufferfish", 64, false, None, (4, 10)),
+                    Item::LilyPad => ("Lily Pad", 64, false, None, (12, 0)),
                     _ => ("Unknown", 64, false, None, (0, 0)),
                 };
                 ItemProperties {
@@ -2585,6 +2677,10 @@ impl Item {
             BlockType::Dandelion => Item::Dandelion,
             BlockType::Poppy => Item::Poppy,
             BlockType::Cactus => Item::Cactus,
+            BlockType::Rail => Item::Rail,
+            BlockType::PoweredRail => Item::PoweredRail,
+            BlockType::DetectorRail => Item::DetectorRail,
+            BlockType::ActivatorRail => Item::ActivatorRail,
             BlockType::SugarCane => Item::SugarCane,
             BlockType::Pumpkin => Item::Pumpkin,
             BlockType::Melon => Item::Melon,
