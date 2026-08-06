@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-pub const PROTOCOL_VERSION: u32 = 11;
+/// Protocol v12 adds stable block-entity variants and revision-bearing
+/// automation state to chunk/entity deltas.  Older clients are rejected during
+/// the existing handshake instead of being allowed to simulate containers.
+pub const PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PotionWire {
@@ -412,6 +415,7 @@ pub enum Packet {
     ContainerClickRequest {
         protocol_version: u32,
         dimension: u8,
+        revision: u64,
         slot_index: u16,
         is_left: bool,
         dragged: Option<ItemWire>,
@@ -877,6 +881,7 @@ mod tests {
                     custom_name: None,
                     loot_table: None,
                     loot_seed: None,
+                    revision: 0,
                 },
             )),
         };
@@ -953,5 +958,35 @@ mod tests {
             }],
         };
         assert_eq!(effects, Packet::decode(&effects.encode()).unwrap());
+    }
+
+    #[test]
+    fn automation_block_entity_and_revision_roundtrip() {
+        let mut hopper = crate::block_entity::HopperBlockEntity::new();
+        hopper.facing = crate::redstone::Direction::East;
+        hopper.transfer_cooldown = 7;
+        hopper.is_powered = true;
+        hopper.revision = 11;
+        hopper.slots[0] = Some(ItemStack::new(Item::SplashPotion, 2));
+        let delta = Packet::BlockEntityDelta {
+            protocol_version: v(),
+            dimension: 1,
+            revision: 99,
+            x: -2,
+            y: 64,
+            z: 8,
+            entity: Some(crate::block_entity::BlockEntity::Hopper(hopper)),
+        };
+        assert_eq!(delta, Packet::decode(&delta.encode()).unwrap());
+
+        let click = Packet::ContainerClickRequest {
+            protocol_version: v(),
+            dimension: 1,
+            revision: 99,
+            slot_index: 0,
+            is_left: true,
+            dragged: Some(ItemWire::from_stack(&ItemStack::new(Item::Diamond, 1))),
+        };
+        assert_eq!(click, Packet::decode(&click.encode()).unwrap());
     }
 }

@@ -185,7 +185,7 @@ where
                 (Direction::North, true) => ([0.0, 0.0, 0.0], [1.0, 0.5, 0.5]),
                 (Direction::South, true) => ([0.0, 0.0, 0.5], [1.0, 0.5, 1.0]),
                 (Direction::West, true) => ([0.0, 0.0, 0.0], [0.5, 0.5, 1.0]),
-                (Direction::East, true) => ([0.5, 0.0, 0.0], [1.0, 0.5, 1.0]),
+                _ => ([0.5, 0.0, 0.0], [1.0, 0.5, 1.0]),
             };
             append_box(
                 target_v,
@@ -289,7 +289,7 @@ where
                             region_coord,
                         );
                     }
-                    Direction::West | Direction::East => {
+                    _ => {
                         append_box(
                             target_v,
                             target_i,
@@ -333,7 +333,7 @@ where
                             region_coord,
                         );
                     }
-                    Direction::West | Direction::East => {
+                    _ => {
                         append_box(
                             target_v,
                             target_i,
@@ -512,13 +512,44 @@ where
                 Direction::North => ([0.0, 0.0, 0.0], [1.0, 1.0, 2.0 * SIXTEENTH]),
                 Direction::South => ([0.0, 0.0, 14.0 * SIXTEENTH], [1.0, 1.0, 1.0]),
                 Direction::West => ([0.0, 0.0, 0.0], [2.0 * SIXTEENTH, 1.0, 1.0]),
-                Direction::East => ([14.0 * SIXTEENTH, 0.0, 0.0], [1.0, 1.0, 1.0]),
+                _ => ([14.0 * SIXTEENTH, 0.0, 0.0], [1.0, 1.0, 1.0]),
             };
             append_box(
                 target_v,
                 target_i,
                 origin,
                 bounds,
+                sky_light,
+                block_light,
+                tile,
+                region_coord,
+            );
+            true
+        }
+
+        // Hopper geometry is deliberately kept as two bounded boxes here so
+        // it follows the same CPU mesh/cache path as the collision shape. A
+        // hopper is not a greedy cube; returning `false` would make a placed
+        // automation block invisible even though its gameplay state exists.
+        BlockType::Hopper => {
+            append_box(
+                target_v,
+                target_i,
+                origin,
+                ([0.0, 10.0 * SIXTEENTH, 0.0], [1.0, 1.0, 1.0]),
+                sky_light,
+                block_light,
+                tile,
+                region_coord,
+            );
+            append_box(
+                target_v,
+                target_i,
+                origin,
+                (
+                    [6.0 * SIXTEENTH, 0.0, 6.0 * SIXTEENTH],
+                    [10.0 * SIXTEENTH, 10.0 * SIXTEENTH, 10.0 * SIXTEENTH],
+                ),
                 sky_light,
                 block_light,
                 tile,
@@ -572,7 +603,7 @@ where
                         [0.0, 4.0 * SIXTEENTH, 0.0],
                         [2.0 * SIXTEENTH, 12.0 * SIXTEENTH, 1.0],
                     ),
-                    Direction::East => (
+                    _ => (
                         [14.0 * SIXTEENTH, 4.0 * SIXTEENTH, 0.0],
                         [1.0, 12.0 * SIXTEENTH, 1.0],
                     ),

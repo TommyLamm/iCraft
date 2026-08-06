@@ -224,6 +224,7 @@ pub enum GameToClient {
     },
     ContainerClickRequest {
         dimension: u8,
+        revision: u64,
         slot_index: u16,
         is_left: bool,
         dragged: Option<crate::network::protocol::ItemWire>,
@@ -830,8 +831,8 @@ async fn run_client(
                                 return;
                             }
                         }
-                        Ok(GameToClient::ContainerClickRequest { dimension, slot_index, is_left, dragged }) => {
-                            if writer.send(&Packet::ContainerClickRequest { protocol_version: PROTOCOL_VERSION, dimension, slot_index, is_left, dragged }).await.is_err() {
+                        Ok(GameToClient::ContainerClickRequest { dimension, revision, slot_index, is_left, dragged }) => {
+                            if writer.send(&Packet::ContainerClickRequest { protocol_version: PROTOCOL_VERSION, dimension, revision, slot_index, is_left, dragged }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send ContainerClickRequest");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;

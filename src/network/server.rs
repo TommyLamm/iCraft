@@ -172,6 +172,7 @@ pub enum ServerToHost {
     ContainerClickRequest {
         id: PlayerId,
         dimension: u8,
+        revision: u64,
         slot_index: u16,
         is_left: bool,
         dragged: Option<crate::network::protocol::ItemWire>,
@@ -1025,8 +1026,8 @@ impl NetworkServer {
                                 break;
                             }
                         }
-                        Ok(Ok(Packet::ContainerClickRequest { dimension, slot_index, is_left, dragged, .. })) => {
-                            if server_to_host.send(ServerToHost::ContainerClickRequest { id, dimension, slot_index, is_left, dragged }).is_err() {
+                        Ok(Ok(Packet::ContainerClickRequest { dimension, revision, slot_index, is_left, dragged, .. })) => {
+                            if server_to_host.send(ServerToHost::ContainerClickRequest { id, dimension, revision, slot_index, is_left, dragged }).is_err() {
                                 disconnect_reason = "host channel closed (ContainerClickRequest)".into();
                                 break;
                             }

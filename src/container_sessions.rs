@@ -3,7 +3,7 @@
 // Sessions track player_id, dimension, block position, and revision.
 // Clicks are simulated on the host, committed atomically, and broadcast to viewers.
 
-use crate::block_entity::{BlockEntity, ChestBlockEntity};
+use crate::block_entity::BlockEntity;
 use crate::chunk_manager::ChunkManager;
 use crate::inventory::{apply_stack_click, ContainerInventory, ItemStack};
 use crate::network::protocol::PlayerId;
@@ -218,13 +218,10 @@ impl ContainerSessionManager {
         );
         if let Some(chunk) = chunk_manager.chunks.get_mut(&(cx, cz)) {
             if let Some(entry) = chunk.get_block_entity(bx, by, bz).cloned() {
-                if let BlockEntity::Chest(_) = entry {
-                    let updated = BlockEntity::Chest(ChestBlockEntity {
-                        inventory,
-                        custom_name: None,
-                        loot_table: None,
-                        loot_seed: None,
-                    });
+                if let BlockEntity::Chest(mut chest_be) = entry {
+                    chest_be.inventory = inventory;
+                    chest_be.revision = chest_be.revision.wrapping_add(1);
+                    let updated = BlockEntity::Chest(chest_be);
                     let _ = chunk.insert_block_entity(bx, by, bz, updated);
                     chunk_manager.dirty_chunks.mark_dirty(cx, cz);
                     return true;
@@ -241,6 +238,13 @@ impl ContainerSessionManager {
         z: i32,
         slots: &[Option<ItemStack>],
     ) -> bool {
+        if slots.iter().flatten().any(|stack| {
+            stack.count == 0
+                || stack.item == crate::inventory::Item::Air
+                || stack.count > stack.item.properties().max_stack
+        }) {
+            return false;
+        }
         if slots.len() == 54 {
             let state_raw = chunk_manager.get_block_state(x, y, z);
             let state = crate::world::BlockState::decode(state_raw);
@@ -255,22 +259,37 @@ impl ContainerSessionManager {
                 p_arr.copy_from_slice(primary_slice);
                 let mut pt_arr = [None; 27];
                 pt_arr.copy_from_slice(partner_slice);
-
-                let r1 = Self::set_single_chest_inventory(
-                    chunk_manager,
-                    x,
-                    y,
-                    z,
-                    ContainerInventory { slots: p_arr },
-                );
-                let r2 = Self::set_single_chest_inventory(
-                    chunk_manager,
+                // Validate and prepare both halves before committing either
+                // one. A malformed or unloaded partner must never leave a
+                // half-updated double chest.
+                let primary =
+                    chunk_manager
+                        .get_block_entity(x, y, z)
+                        .and_then(|entity| match entity {
+                            BlockEntity::Chest(chest) => Some(chest.clone()),
+                            _ => None,
+                        });
+                let partner = chunk_manager
+                    .get_block_entity(partner_pos.0, partner_pos.1, partner_pos.2)
+                    .and_then(|entity| match entity {
+                        BlockEntity::Chest(chest) => Some(chest.clone()),
+                        _ => None,
+                    });
+                let (Some(mut primary), Some(mut partner)) = (primary, partner) else {
+                    return false;
+                };
+                primary.inventory = ContainerInventory { slots: p_arr };
+                primary.revision = primary.revision.wrapping_add(1);
+                partner.inventory = ContainerInventory { slots: pt_arr };
+                partner.revision = partner.revision.wrapping_add(1);
+                chunk_manager.set_block_entity(x, y, z, Some(BlockEntity::Chest(primary)));
+                chunk_manager.set_block_entity(
                     partner_pos.0,
                     partner_pos.1,
                     partner_pos.2,
-                    ContainerInventory { slots: pt_arr },
+                    Some(BlockEntity::Chest(partner)),
                 );
-                return r1 && r2;
+                return true;
             }
         }
         if slots.len() == 27 {
@@ -343,6 +362,7 @@ impl ContainerSessionManager {
             if let Some(entry) = chunk.get_block_entity(bx, by, bz).cloned() {
                 if let BlockEntity::Furnace(mut furnace_be) = entry {
                     furnace_be.slots = *slots;
+                    furnace_be.revision = furnace_be.revision.wrapping_add(1);
                     let _ = chunk.insert_block_entity(bx, by, bz, BlockEntity::Furnace(furnace_be));
                     chunk_manager.dirty_chunks.mark_dirty(cx, cz);
                     return true;
@@ -353,17 +373,66 @@ impl ContainerSessionManager {
     }
 
     pub fn get_slot_count(chunk_manager: &ChunkManager, x: i32, y: i32, z: i32) -> usize {
-        let block = chunk_manager.get_block(x, y, z);
-        if matches!(
-            block,
-            crate::world::BlockType::Furnace | crate::world::BlockType::FurnaceLit
-        ) {
-            3
-        } else if Self::get_double_chest_partner(chunk_manager, x, y, z).is_some() {
-            54
+        if let Some(entity) = chunk_manager.get_block_entity(x, y, z) {
+            if matches!(entity, BlockEntity::Chest(_))
+                && Self::get_double_chest_partner(chunk_manager, x, y, z).is_some()
+            {
+                54
+            } else {
+                entity.slot_count()
+            }
         } else {
-            27
+            0
         }
+    }
+
+    /// Shared slot view used by UI and automation.  Chest halves retain their
+    /// existing deterministic 27/54 ordering; all other containers expose
+    /// their native slot count and complete metadata-bearing stacks.
+    pub fn get_container_slots(
+        chunk_manager: &ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<Vec<Option<ItemStack>>> {
+        let entity = chunk_manager.get_block_entity(x, y, z)?;
+        if matches!(entity, BlockEntity::Chest(_)) {
+            return Self::get_chest_slots(chunk_manager, x, y, z);
+        }
+        Some(
+            (0..entity.slot_count())
+                .map(|slot| entity.get_stack(slot).copied())
+                .collect(),
+        )
+    }
+
+    /// Atomically commits a complete container slot vector after validating the
+    /// target entity and exact length.  This prevents a malformed/stale click
+    /// from partially replacing a multi-slot inventory.
+    pub fn set_container_slots(
+        chunk_manager: &mut ChunkManager,
+        x: i32,
+        y: i32,
+        z: i32,
+        slots: &[Option<ItemStack>],
+    ) -> bool {
+        if matches!(
+            chunk_manager.get_block_entity(x, y, z),
+            Some(BlockEntity::Chest(_))
+        ) {
+            return Self::set_chest_slots(chunk_manager, x, y, z, slots);
+        }
+        let Some(mut entity) = chunk_manager.get_block_entity(x, y, z).cloned() else {
+            return false;
+        };
+        if slots.len() != entity.slot_count() {
+            return false;
+        }
+        if !entity.replace_slots(slots) {
+            return false;
+        }
+        chunk_manager.set_block_entity(x, y, z, Some(entity));
+        true
     }
 }
 
@@ -424,5 +493,38 @@ mod tests {
         assert_eq!(affected.len(), 2);
         assert!(manager.find_by_player(1).is_none());
         assert!(manager.find_by_player(2).is_none());
+    }
+
+    #[test]
+    fn container_slot_commit_rejects_invalid_stack_without_partial_write() {
+        let mut chunk_manager = ChunkManager::new(2);
+        chunk_manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        chunk_manager.set_block(0, 64, 0, crate::world::BlockType::Chest);
+        chunk_manager.set_block_entity(
+            0,
+            64,
+            0,
+            Some(BlockEntity::Chest(
+                crate::block_entity::ChestBlockEntity::new(),
+            )),
+        );
+        let original =
+            ContainerSessionManager::get_container_slots(&chunk_manager, 0, 64, 0).unwrap();
+        let mut invalid = original.clone();
+        invalid[3] = Some(ItemStack::new(Item::Stone, 0));
+
+        assert!(!ContainerSessionManager::set_container_slots(
+            &mut chunk_manager,
+            0,
+            64,
+            0,
+            &invalid,
+        ));
+        assert_eq!(
+            ContainerSessionManager::get_container_slots(&chunk_manager, 0, 64, 0).unwrap(),
+            original
+        );
     }
 }

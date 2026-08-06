@@ -441,6 +441,8 @@ pub enum BlockType {
     PoweredRail = 116,
     DetectorRail = 117,
     ActivatorRail = 118,
+    Hopper = 119,
+    Observer = 120,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -505,7 +507,7 @@ impl BlockState {
             Direction::North => 0b00,
             Direction::South => 0b01,
             Direction::West => 0b10,
-            Direction::East => 0b11,
+            _ => 0b11,
         };
         let half_bit = if self.is_top { 1 << 2 } else { 0 };
         let hinge_bit = if self.is_right_hinge { 1 << 3 } else { 0 };
@@ -556,13 +558,13 @@ impl BlockState {
             Direction::North => (-1, 0),
             Direction::South => (1, 0),
             Direction::West => (0, 1),
-            Direction::East => (0, -1),
+            _ => (0, -1),
         };
         let (right_dx, right_dz) = match facing {
             Direction::North => (1, 0),
             Direction::South => (-1, 0),
             Direction::West => (0, -1),
-            Direction::East => (0, 1),
+            _ => (0, 1),
         };
 
         let left_block = chunk_manager.get_block(x + left_dx, y, z + left_dz);
@@ -601,7 +603,7 @@ impl BlockState {
 
 impl BlockType {
     pub fn from_u8(val: u8) -> Self {
-        if val <= BlockType::ActivatorRail as u8 {
+        if val <= BlockType::Observer as u8 {
             unsafe { std::mem::transmute(val) }
         } else {
             BlockType::Air
@@ -622,7 +624,7 @@ impl BlockType {
     /// known variant so unknown (newer) blocks are dropped gracefully instead
     /// of corrupting world state.
     pub fn from_wire(val: u32) -> Option<Self> {
-        if val <= BlockType::ActivatorRail as u32 {
+        if val <= BlockType::Observer as u32 {
             Some(unsafe { std::mem::transmute(val as u8) })
         } else {
             None
@@ -1709,6 +1711,22 @@ impl BlockType {
                 is_passable: true,
                 light_emission: 0,
             },
+            BlockType::Hopper => BlockProperties {
+                name: "Hopper",
+                hardness: 3.0,
+                render_type: RenderType::Cutout,
+                is_solid: false,
+                is_passable: false,
+                light_emission: 0,
+            },
+            BlockType::Observer => BlockProperties {
+                name: "Observer",
+                hardness: 3.5,
+                render_type: RenderType::Opaque,
+                is_solid: true,
+                is_passable: false,
+                light_emission: 0,
+            },
         }
     }
 
@@ -1915,6 +1933,8 @@ impl BlockType {
             BlockType::PoweredRail => (3, 8),
             BlockType::DetectorRail => (3, 9),
             BlockType::ActivatorRail => (3, 10),
+            BlockType::Hopper => (11, 15),
+            BlockType::Observer => (11, 16),
         }
     }
 }
@@ -2431,21 +2451,21 @@ fn append_door_mesh(
             Direction::North => (0.0, 1.0, 0.0, THICKNESS),
             Direction::South => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
             Direction::West => (0.0, THICKNESS, 0.0, 1.0),
-            Direction::East => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+            _ => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
         }
     } else if !state.is_right_hinge {
         match state.facing {
             Direction::North => (0.0, THICKNESS, 0.0, 1.0),
             Direction::South => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
             Direction::West => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
-            Direction::East => (0.0, 1.0, 0.0, THICKNESS),
+            _ => (0.0, 1.0, 0.0, THICKNESS),
         }
     } else {
         match state.facing {
             Direction::North => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
             Direction::South => (0.0, THICKNESS, 0.0, 1.0),
             Direction::West => (0.0, 1.0, 0.0, THICKNESS),
-            Direction::East => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
+            _ => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
         }
     };
 
@@ -2480,7 +2500,7 @@ fn append_trapdoor_mesh(
             Direction::North => ([0.0, 0.0, 0.0], [1.0, 1.0, THICKNESS]),
             Direction::South => ([0.0, 0.0, 1.0 - THICKNESS], [1.0, 1.0, 1.0]),
             Direction::West => ([0.0, 0.0, 0.0], [THICKNESS, 1.0, 1.0]),
-            Direction::East => ([1.0 - THICKNESS, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            _ => ([1.0 - THICKNESS, 0.0, 0.0], [1.0, 1.0, 1.0]),
         }
     };
 
@@ -2521,6 +2541,7 @@ fn is_greedy_cube(block: BlockType) -> bool {
                 | BlockType::GlassPane
                 | BlockType::OakLadder
                 | BlockType::OakSign
+                | BlockType::Hopper
         )
 }
 
@@ -5386,7 +5407,7 @@ mod tests {
 
     #[test]
     fn block_type_from_wire_rejects_unknown_values() {
-        assert!(BlockType::from_wire(BlockType::ActivatorRail as u32 + 1).is_none());
+        assert!(BlockType::from_wire(BlockType::Observer as u32 + 1).is_none());
         assert!(BlockType::from_wire(u32::MAX).is_none());
     }
 
@@ -6006,7 +6027,7 @@ mod tests {
         assert!(BlockType::Fire.properties().is_passable);
         assert_eq!(BlockType::from_u8(74), BlockType::Fire);
         assert_eq!(BlockType::from_u8(75), BlockType::SnowLayer);
-        for id in 0..=BlockType::EndCityChest as u8 {
+        for id in 0..=BlockType::Observer as u8 {
             assert_eq!(BlockType::from_u8(id) as u8, id);
         }
         assert_eq!(BlockType::from_u8(255), BlockType::Air);
@@ -6668,6 +6689,7 @@ mod tests {
             custom_name: None,
             loot_table: None,
             loot_seed: None,
+            revision: 0,
         });
         // Valid insert
         assert_eq!(

@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-08-04
+> Last verified: 2026-08-06
 > Git baseline: tommy-dev
 >
 > This document is a concise navigation map. Source code remains authoritative.
@@ -62,7 +62,7 @@ the primary Vulkan path has caused a verified NVIDIA driver crash.
 4. Builds initial terrain meshes and starts background services.
 5. Streams the remaining render distance incrementally.
 
-Joining clients wait for a successful protocol-v7 login before using the host's
+Joining clients wait for a successful protocol-v12 login before using the host's
 seed and synchronized world state.
 
 ### Per-frame update
@@ -70,7 +70,8 @@ seed and synchronized world state.
 `State::update` drains network events first, then advances the major systems:
 
 1. Autosave and fixed/budgeted simulation work.
-2. Portals, redstone, brewing, effects, advancements, particles, and weather.
+2. Host-only redstone, hopper transfers, furnace ticking, brewing, effects,
+   advancements, particles, and weather.
 3. Player input/physics, damage/survival state, interactions, and chunk
    streaming.
 4. Projectiles, hostile/passive mobs, bosses, dropped items, and entity cleanup.
@@ -149,6 +150,15 @@ world_mutation::apply_batch / BlockMutationRequest
 `chunk_manager::mark_block_mesh_dependencies` is the shared mesh dependency rule.
 Redstone returns `BlockMutation` records and side-effect actions applied via host transaction handlers.
 
+Container automation keeps `BlockEntity` slots, revisions, hopper cooldown/power,
+facing, and observer baselines as authoritative state. `ContainerAccess` is the
+shared sided-capability gate for UI clicks and hopper transfers; complete slot
+vectors are committed atomically. A host redstone tick runs observers, bounded
+hopper work (one item per transfer), furnace progression, and dispenser/dropper
+actions. Joining clients never simulate these mutations; they only apply the
+host's revision-gated `BlockEntityDelta`/slot updates. Comparator dependencies are
+woken by container revision notifications rather than a world-wide per-tick scan.
+
 `BlockState` encodes facing (2 bits), is_top (1), is_right_hinge (1), is_open (1), and chest_type (2 bits: Single/Left/Right) in a single byte. Bit 7 is reserved. For Farmland and Crops (Wheat, Carrot, Potato), state byte `u8` stores moisture level (0..7) and crop growth age (0..7) in bits `0..2`.
 
 `src/voxel_shape.rs` defines `VoxelShape` (holding up to 8 AABBs without heap allocation) to provide unified `block_collision_shape`, `block_selection_shape`, and `block_occlusion_shape`. Player physics (`physics.rs`) iterates over all constituent AABBs for movement collision and ladder climbing. DDA raycasting (`interaction.rs`) queries `block_selection_shape.ray_intersects` at each voxel step. Non-full blocks (Slabs, Stairs, Fences, Fence Gates, Walls, Panes, Ladders, Signs) bypass greedy meshing via `is_greedy_cube` and generate faces via `src/block_model.rs` (`append_custom_block_mesh`).
@@ -169,8 +179,8 @@ Food items define `FoodProperties` (hunger, saturation, eating duration ticks, a
   bounded interpolation buffer.
 - Reliable queues carry login, chat, chunk, block, container transactions (open/click/close/slot update), and time/weather state.
 
-Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v7.
-Trading and Raid operations use `OpenTradeWindow`, `ExecuteTradeRequest`, `ExecuteTradeResult`, `CloseTradeWindow`, and `RaidStatusSync` packets over protocol v7.
+Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v12. Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta.
+Trading and Raid operations use `OpenTradeWindow`, `ExecuteTradeRequest`, `ExecuteTradeResult`, `CloseTradeWindow`, and `RaidStatusSync` packets over protocol v12.
 `ContainerSessionManager` and `MerchantSessionManager` track player ID, dimension, villager ID, and active trade offers.
 `PoiManager` (`src/village/poi.rs`) indexes Bed and JobSite POIs by chunk with max-distance spatial hashing, maintaining spatial village clusters for villager assignment and bed count tracking.
 `RaidManager` (`src/village/raid.rs`) tracks active village raids, wave progression (Pillager/Ravager counts), Bad Omen triggers, and raid victory/defeat states.
@@ -202,7 +212,7 @@ are deferred and replayed after stream-in.
 | `saves/<world>/dimension.dat` | Active dimension; missing legacy files default to Overworld. |
 | `saves/<world>/entities.dat` | Persistent Overworld living/persistent/dropped entities. |
 | `saves/<world>/regions/` | Overworld region data. |
-| `saves/<world>/regions/` (block_entities) | Per-chunk `BlockEntity` data (chest inventories, furnace block entities with 3 slots/burn/cook progress/accumulated XP, sign text) serialized via `ChunkSaveData`; `LegacyBlockEntity` fallback guarantees backward compatibility. |
+| `saves/<world>/regions/` (block_entities) | Per-chunk `BlockEntity` data (chest/furnace inventories and progress, hopper 5-slot transfer state, dispenser/dropper 9-slot inventories, observer baseline/pulse state, sign text) serialized via `ChunkSaveData`; legacy block-entity decoding and serde defaults preserve older saves. |
 | `saves/<world>/dimensions/{nether,end}/` | Dimension-specific entities and regions. |
 
 `SaveManager` owns serialization, legacy-player upgrades, atomic sidecar writes,
@@ -227,7 +237,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Player, recipes, gameplay data | `physics.rs`, `player.rs`, `inventory.rs`, `recipes.rs`, `crafting.rs` |
 | Equipment and effects | `enchantment.rs`, `brewing.rs`, `hand_renderer.rs` |
 | Entities and AI | `entity.rs`, `spawning.rs`, `ai/{mod, goal, brain, navigation}.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
-| Container & workstation system | `block_entity.rs` (ChestBlockEntity, FurnaceBlockEntity), `inventory.rs` (ContainerInventory), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (SlotType::ContainerSlot, container_target, open_chest, recipe_book_open, update_furnaces) |
+| Container & automation system | `block_entity.rs` (ContainerAccess, Chest/Furnace/Hopper/Dispenser/Dropper/Observer entities), `container_sessions.rs` (atomic UI transactions), `inventory.rs` (ContainerInventory/ItemStack), `world_tick.rs` (bounded hopper transfers), `redstone.rs` (comparators/observers/actions), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (host furnace/dispense loop and revision-gated replication) |
 | Transport, mounts, navigation & fishing | `vehicle.rs` (MountManager, BoatState), `rail.rs` (MinecartState, RailShape), `navigation.rs` (Compass, Clock, MapData), `fishing.rs` (FishingManager, loot rolling) |
 | Networking | `network/{protocol,transport,server,client}.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
@@ -256,9 +266,11 @@ placement, fluid tick, light propagation, world mutation validation) now use
 `dimension.height()` / `WorldHeight::contains_y` instead of hardcoded
 `0..CHUNK_HEIGHT`.
 
-Network protocol v10: `ChunkData` packet carries explicit `min_section_y: i8`
-and `section_count: u16`. Save format v2: `ChunkSaveData::data_version = 2`
-with height-aware flat array serialization. Legacy 0..255 format (data_version 0/1)
+Network protocol v12: `ChunkData` packet carries explicit `min_section_y: i8`
+and `section_count: u16`; block-entity variants and container updates carry
+stable revisions. Save format v3: `ChunkSaveData::data_version = 3` with
+height-aware flat arrays, compressed block entities, and redstone metadata.
+Legacy 0..255 format (data_version 0/1/2)
 maps into Y=0..255 with Y<0 and Y>=256 remaining empty/Air. SaveManager creates `.bin.bak`
 backups before modifying existing region files and aborts on deserialization corruption without overwriting.
 
@@ -286,6 +298,15 @@ section_and_local_y_to_world_y(sy: i8, ly: u8) -> i32;
   placement, and `dimension.dat` updates together.
 - Redstone component metadata is stored with chunk data; legacy saves may not
   contain it.
+- Hopper/dispenser/dropper/observer fields are part of the v3 block-entity
+  payload; missing fields use serde defaults, and legacy `LegacyBlockEntity`
+  entries are migrated before insertion. Slot metadata (count, durability,
+  enchantments, potion data, and custom names) is copied unchanged by every
+  automation transfer.
+- The host is the only authority for automation, comparator output, observer
+  pulses, item consumption, drops, and furnace progression. Hopper work is
+  capped per tick and observer scheduling is bounded; stale chunk/network
+  revisions are ignored rather than partially committed.
 - `Inventory` and `InventoryData` feature `offhand: Option<ItemStack>`, with `#[serde(default)]` backward compatibility for legacy save formats. F key swaps selected hotbar item with offhand item.
 - Combat calculation (`calculate_damage_reduction`, `can_shield_block`, `calculate_attack_damage`, `calculate_bow_shot`) is host-authoritative and uses pure functions in `player.rs`.
 - Shield blocking (180° facing arc) reduces damage by 100% for blockable sources and degrades shield durability; Axe attacks trigger a 5-second (100 ticks) shield disable.
@@ -324,6 +345,12 @@ tracked in
 [`performance/15_performance_audit_repair_plan.md`](performance/15_performance_audit_repair_plan.md).
 The host-authoritative model above remains the invariant; R4 repaired the
 joining-client simulation/replication and pause/death-policy gaps.
+
+Plan 14 headless verification covers the hopper smelting chain, unloaded-chunk
+atomicity, sided capability/transaction validation, comparator revision wake-up,
+observer edge/budget behavior, container revision ordering, and v3 save/snapshot
+round trips. A GPU/window Host+Join-client scene still requires manual execution
+outside the headless test environment.
 
 Use:
 

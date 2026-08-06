@@ -844,6 +844,11 @@ pub struct ChunkSaveData {
     pub data_version: u32,
 }
 
+/// Version of the chunk payload emitted by current saves.  Versions 0–2 are
+/// still accepted by `restore_to_chunk`; the new version only records that
+/// hopper/dispenser/dropper/observer state is included in every save path.
+pub const CHUNK_SAVE_DATA_VERSION: u32 = 3;
+
 impl ChunkSaveData {
     pub fn from_chunk(chunk: &Chunk) -> Self {
         Self::from_chunk_with_redstone(chunk, &[])
@@ -912,7 +917,7 @@ impl ChunkSaveData {
             block_states: compress_bytes(&block_states_raw).unwrap_or_default(),
             mutation_revision: 0,
             block_entities,
-            data_version: 2,
+            data_version: CHUNK_SAVE_DATA_VERSION,
         }
     }
 
@@ -1246,6 +1251,10 @@ pub struct UncompressedChunkSnapshot {
         [[[u8; crate::world::CHUNK_DEPTH]; crate::world::CHUNK_HEIGHT]; crate::world::CHUNK_WIDTH],
     >,
     pub redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
+    /// Block entities must travel with the immutable snapshot.  Keeping this
+    /// in the autosave/unload path prevents container inventories and pending
+    /// observer pulses from disappearing when a chunk leaves memory.
+    pub block_entities: Vec<((u8, i16, u8), crate::block_entity::BlockEntity)>,
     pub mutation_revision: u64,
 }
 
@@ -1323,6 +1332,10 @@ impl UncompressedChunkSnapshot {
             block_light,
             fluid_levels,
             redstone_metadata,
+            block_entities: chunk
+                .iter_block_entities()
+                .map(|(pos, entity)| (pos, entity.clone()))
+                .collect(),
             mutation_revision: 0,
         }
     }
@@ -1379,6 +1392,17 @@ impl UncompressedChunkSnapshot {
                 })?
         };
 
+        let block_entities_bytes = if self.block_entities.is_empty() {
+            Vec::new()
+        } else {
+            bincode::serialize(&self.block_entities)
+                .map_err(|error| SaveError::Serialization(error.to_string()))
+                .and_then(|bytes| {
+                    compress_bytes(&bytes)
+                        .map_err(|error| SaveError::Serialization(error.to_string()))
+                })?
+        };
+
         Ok(ChunkSaveData {
             chunk_x: self.chunk_x,
             chunk_z: self.chunk_z,
@@ -1394,8 +1418,8 @@ impl UncompressedChunkSnapshot {
             block_states: compress_bytes(&block_states_raw)
                 .map_err(|error| SaveError::Serialization(error.to_string()))?,
             mutation_revision: self.mutation_revision,
-            block_entities: Vec::new(),
-            data_version: 1,
+            block_entities: block_entities_bytes,
+            data_version: CHUNK_SAVE_DATA_VERSION,
         })
     }
 
@@ -1404,7 +1428,9 @@ impl UncompressedChunkSnapshot {
             crate::world::CHUNK_WIDTH * crate::world::CHUNK_HEIGHT * crate::world::CHUNK_DEPTH;
         (voxel_count * (std::mem::size_of::<BlockType>() + 4 * std::mem::size_of::<u8>())
             + self.redstone_metadata.len()
-                * std::mem::size_of::<crate::redstone::RedstoneComponentMetadata>()) as u64
+                * std::mem::size_of::<crate::redstone::RedstoneComponentMetadata>()
+            + self.block_entities.len() * std::mem::size_of::<crate::block_entity::BlockEntity>())
+            as u64
     }
 }
 
@@ -3041,6 +3067,162 @@ mod tests {
     }
 
     #[test]
+    fn automation_block_entities_roundtrip_and_snapshot_preserves_runtime_state() {
+        let mut chunk = Chunk::new(0, 0);
+        chunk.set_block_local(2, 64, 2, BlockType::Hopper);
+        let mut hopper = crate::block_entity::HopperBlockEntity::new();
+        hopper.facing = crate::redstone::Direction::West;
+        hopper.transfer_cooldown = 6;
+        hopper.is_powered = true;
+        hopper.revision = 9;
+        hopper.slots[0] = Some(crate::inventory::ItemStack::new(
+            crate::inventory::Item::Diamond,
+            3,
+        ));
+        chunk
+            .insert_block_entity(
+                2,
+                64,
+                2,
+                crate::block_entity::BlockEntity::Hopper(hopper.clone()),
+            )
+            .unwrap();
+
+        chunk.set_block_local(3, 64, 2, BlockType::Observer);
+        let observer = crate::block_entity::ObserverBlockEntity {
+            facing: crate::redstone::Direction::South,
+            pending_pulse: 1,
+            baseline_initialized: true,
+            observed_block: BlockType::Stone,
+            observed_state: 4,
+            observed_entity_revision: 12,
+            observed_entity_present: true,
+            revision: 5,
+        };
+        chunk
+            .insert_block_entity(
+                3,
+                64,
+                2,
+                crate::block_entity::BlockEntity::Observer(observer.clone()),
+            )
+            .unwrap();
+
+        chunk.set_block_local(4, 64, 2, BlockType::Dispenser);
+        let mut dispenser = crate::block_entity::DispenserBlockEntity::new();
+        dispenser.slots[4] = Some(crate::inventory::ItemStack::new(
+            crate::inventory::Item::Arrow,
+            2,
+        ));
+        dispenser.revision = 7;
+        chunk
+            .insert_block_entity(
+                4,
+                64,
+                2,
+                crate::block_entity::BlockEntity::Dispenser(dispenser.clone()),
+            )
+            .unwrap();
+
+        chunk.set_block_local(5, 64, 2, BlockType::Dropper);
+        let mut dropper = crate::block_entity::DropperBlockEntity::new();
+        dropper.slots[1] = Some(crate::inventory::ItemStack::new(
+            crate::inventory::Item::Diamond,
+            3,
+        ));
+        dropper.revision = 8;
+        chunk
+            .insert_block_entity(
+                5,
+                64,
+                2,
+                crate::block_entity::BlockEntity::Dropper(dropper.clone()),
+            )
+            .unwrap();
+
+        chunk.set_block_local(6, 64, 2, BlockType::Furnace);
+        let mut furnace = crate::block_entity::FurnaceBlockEntity::new();
+        furnace.slots[0] = Some(crate::inventory::ItemStack::new(
+            crate::inventory::Item::IronOre,
+            1,
+        ));
+        furnace.slots[1] = Some(crate::inventory::ItemStack::new(
+            crate::inventory::Item::Coal,
+            1,
+        ));
+        furnace.burn_time = 42;
+        furnace.cook_progress = 17;
+        furnace.revision = 11;
+        chunk
+            .insert_block_entity(
+                6,
+                64,
+                2,
+                crate::block_entity::BlockEntity::Furnace(furnace.clone()),
+            )
+            .unwrap();
+
+        let saved = ChunkSaveData::from_chunk(&chunk);
+        assert_eq!(saved.data_version, CHUNK_SAVE_DATA_VERSION);
+        assert!(!saved.block_entities.is_empty());
+        let mut restored = Chunk::new(0, 0);
+        saved.restore_to_chunk(&mut restored);
+        assert_eq!(
+            restored.get_block_entity(2, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Hopper(hopper.clone()))
+        );
+        assert_eq!(
+            restored.get_block_entity(3, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Observer(
+                observer.clone()
+            ))
+        );
+        assert_eq!(
+            restored.get_block_entity(4, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Dispenser(
+                dispenser.clone()
+            ))
+        );
+        assert_eq!(
+            restored.get_block_entity(5, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Dropper(dropper.clone()))
+        );
+        assert_eq!(
+            restored.get_block_entity(6, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Furnace(furnace.clone()))
+        );
+
+        let snapshot = UncompressedChunkSnapshot::from_chunk_with_redstone(
+            crate::dimension::Dimension::Overworld,
+            &chunk,
+            Vec::new(),
+        );
+        let snapshot_data = snapshot.try_to_chunk_save_data().unwrap();
+        let mut snapshot_restored = Chunk::new(0, 0);
+        snapshot_data.restore_to_chunk(&mut snapshot_restored);
+        assert_eq!(
+            snapshot_restored.get_block_entity(2, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Hopper(hopper))
+        );
+        assert_eq!(
+            snapshot_restored.get_block_entity(3, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Observer(observer))
+        );
+        assert_eq!(
+            snapshot_restored.get_block_entity(4, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Dispenser(dispenser))
+        );
+        assert_eq!(
+            snapshot_restored.get_block_entity(5, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Dropper(dropper))
+        );
+        assert_eq!(
+            snapshot_restored.get_block_entity(6, 64, 2),
+            Some(&crate::block_entity::BlockEntity::Furnace(furnace))
+        );
+    }
+
+    #[test]
     fn dimension_chunk_namespaces_are_independent() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3995,6 +4177,7 @@ mod tests {
             custom_name: Some("Secret Stash".to_string()),
             loot_table: None,
             loot_seed: None,
+            revision: 0,
         });
         chunk
             .insert_block_entity(1, 2, 3, chest_stub.clone())
@@ -4222,7 +4405,7 @@ mod tests {
         // 4. Modify and re-save chunk to trigger region update and original file backup
         modern_chunk.set_block_local(8, -10, 8, BlockType::Bedrock);
         let updated_save_data = ChunkSaveData::from_chunk(&modern_chunk);
-        assert_eq!(updated_save_data.data_version, 2);
+        assert_eq!(updated_save_data.data_version, CHUNK_SAVE_DATA_VERSION);
 
         manager.save_chunk(0, 0, updated_save_data).unwrap();
 

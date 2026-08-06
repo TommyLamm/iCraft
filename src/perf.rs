@@ -401,6 +401,14 @@ pub struct PerfCounters {
     pub network_inbound_latest_bytes: u64,
     pub network_catchup_mailbox_full: u64,
     pub prediction_rollback: u64,
+    /// Host redstone automation counters exposed in the debug HUD. Hopper
+    /// transfers are cumulative; the backlog/observer values are current.
+    pub hopper_transfers: u64,
+    pub hopper_container_checks: u64,
+    pub hopper_budget_exhausted: u64,
+    pub observer_pulses: u64,
+    pub redstone_scheduled_backlog: u64,
+    pub observer_pending_pulses: u64,
     pub loaded_region_cache_bytes: u64,
     pub frame_allocations: u64,
     pub gpu_sky_ns: u64,

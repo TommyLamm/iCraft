@@ -14,6 +14,18 @@ const NEIGHBORS: [BlockPos; 6] = [
     (0, 0, -1),
 ];
 const MAX_PROPAGATION_PASSES: usize = 64;
+/// Hard cap for delayed redstone work.  Observer pulses and repeaters are
+/// coalesced before this bound is reached so a machine cannot grow an
+/// unbounded queue during a single host tick.
+pub const MAX_SCHEDULED_REDSTONE_TICKS: usize = 4096;
+/// Maximum observer baselines evaluated by one host redstone tick.  The
+/// rotating start index below gives large streamed worlds bounded work without
+/// starving observers after the first page.
+pub const MAX_OBSERVER_CHECKS_PER_TICK: usize = 1024;
+/// Maximum block-entity snapshots attached to one redstone update.  Entries for
+/// the same position are coalesced so a pulse cannot create an unbounded
+/// replication burst.
+const MAX_REDSTONE_ENTITY_CHANGES_PER_UPDATE: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChargeKind {
@@ -37,12 +49,20 @@ impl Default for RedstoneState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Direction {
     North,
     South,
     West,
     East,
+    Up,
+    Down,
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Self::North
+    }
 }
 
 impl Direction {
@@ -68,6 +88,8 @@ impl Direction {
             Self::South => (0, 0, 1),
             Self::West => (-1, 0, 0),
             Self::East => (1, 0, 0),
+            Self::Up => (0, 1, 0),
+            Self::Down => (0, -1, 0),
         }
     }
 
@@ -75,25 +97,44 @@ impl Direction {
         self.delta().0
     }
 
+    pub fn dy(self) -> i32 {
+        self.delta().1
+    }
+
     pub fn dz(self) -> i32 {
         self.delta().2
     }
 
-    fn left(self) -> Self {
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::North => Self::South,
+            Self::South => Self::North,
+            Self::West => Self::East,
+            Self::East => Self::West,
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+        }
+    }
+
+    pub fn left(self) -> Self {
         match self {
             Self::North => Self::West,
             Self::South => Self::East,
             Self::West => Self::South,
             Self::East => Self::North,
+            Self::Up => Self::Up,
+            Self::Down => Self::Down,
         }
     }
 
-    fn right(self) -> Self {
+    pub fn right(self) -> Self {
         match self {
             Self::North => Self::East,
             Self::South => Self::West,
             Self::West => Self::North,
             Self::East => Self::South,
+            Self::Up => Self::Up,
+            Self::Down => Self::Down,
         }
     }
 }
@@ -112,6 +153,9 @@ struct ComponentState {
     comparator_mode: ComparatorMode,
     note: u8,
     last_powered: bool,
+    /// Absolute tick at which an observer pulse ends.  Zero means idle; the
+    /// persisted block entity carries the pending countdown across reloads.
+    observer_pulse_until: u64,
 }
 
 impl ComponentState {
@@ -131,6 +175,7 @@ impl ComponentState {
             comparator_mode: ComparatorMode::Compare,
             note: 0,
             last_powered: false,
+            observer_pulse_until: 0,
         }
     }
 
@@ -155,6 +200,8 @@ pub enum SavedDirection {
     South,
     West,
     East,
+    Up,
+    Down,
 }
 
 impl From<Direction> for SavedDirection {
@@ -164,17 +211,21 @@ impl From<Direction> for SavedDirection {
             Direction::South => SavedDirection::South,
             Direction::West => SavedDirection::West,
             Direction::East => SavedDirection::East,
+            Direction::Up => SavedDirection::Up,
+            Direction::Down => SavedDirection::Down,
         }
     }
 }
 
 impl SavedDirection {
-    fn into_direction(self) -> Direction {
+    pub fn into_direction(self) -> Direction {
         match self {
             SavedDirection::North => Direction::North,
             SavedDirection::South => Direction::South,
             SavedDirection::West => Direction::West,
             SavedDirection::East => Direction::East,
+            SavedDirection::Up => Direction::Up,
+            SavedDirection::Down => Direction::Down,
         }
     }
 }
@@ -226,6 +277,8 @@ enum ScheduledKind {
     ReleaseButton,
     Repeater(bool),
     Explode,
+    ObserverPulseOn,
+    ObserverPulseOff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +315,10 @@ pub enum RedstoneAction {
 pub struct RedstoneUpdate {
     pub mutations: Vec<BlockMutation>,
     pub actions: Vec<RedstoneAction>,
+    pub block_entity_changes: Vec<(BlockPos, crate::block_entity::BlockEntity)>,
     pub propagation_overflowed: bool,
+    /// Number of observer pulse-on edges emitted by this authoritative update.
+    pub observer_pulses: u32,
 }
 
 #[derive(Default)]
@@ -278,6 +334,10 @@ pub struct RedstoneSystem {
     /// and ordering irrelevant when deciding whether a sleeping system can
     /// return without scanning its pressure plates.
     previous_plate_occupants: HashSet<BlockPos>,
+    /// Last revision observed behind each comparator.  This dependency map
+    /// lets direct container mutations wake a sleeping redstone system without
+    /// rescanning every comparator every tick.
+    container_revisions: HashMap<BlockPos, u64>,
     #[cfg(test)]
     pressure_plate_scans: u64,
     #[cfg(test)]
@@ -296,6 +356,11 @@ impl RedstoneSystem {
 
     pub fn current_tick(&self) -> u64 {
         self.tick
+    }
+
+    /// Bounded delayed-work depth for the debug HUD and host telemetry.
+    pub fn scheduled_len(&self) -> usize {
+        self.scheduled.len()
     }
 
     /// Returns a deterministic, versioned byte representation of all runtime
@@ -333,6 +398,7 @@ impl RedstoneSystem {
             bytes.push(encode_comparator_mode(state.comparator_mode));
             bytes.push(state.note);
             bytes.push(state.last_powered as u8);
+            bytes.extend_from_slice(&state.observer_pulse_until.to_le_bytes());
         }
 
         // `scheduled` is a queue, so preserve its order while still encoding
@@ -352,6 +418,14 @@ impl RedstoneSystem {
                 }
                 ScheduledKind::Explode => {
                     bytes.push(2);
+                    bytes.push(0);
+                }
+                ScheduledKind::ObserverPulseOn => {
+                    bytes.push(3);
+                    bytes.push(0);
+                }
+                ScheduledKind::ObserverPulseOff => {
+                    bytes.push(4);
                     bytes.push(0);
                 }
             }
@@ -436,12 +510,14 @@ impl RedstoneSystem {
     pub fn set_repeater_delay(&mut self, pos: BlockPos, delay: u8) {
         if let Some(state) = self.components.get_mut(&pos) {
             state.repeater_delay = delay.clamp(1, 4);
+            self.mark_dirty(pos);
         }
     }
 
     pub fn set_comparator_mode(&mut self, pos: BlockPos, mode: ComparatorMode) {
         if let Some(state) = self.components.get_mut(&pos) {
             state.comparator_mode = mode;
+            self.mark_dirty(pos);
         }
     }
 
@@ -538,6 +614,24 @@ impl RedstoneSystem {
         }
     }
 
+    fn schedule_tick(&mut self, scheduled: ScheduledTick) -> bool {
+        if self
+            .scheduled
+            .iter()
+            .any(|existing| existing.pos == scheduled.pos && existing.kind == scheduled.kind)
+        {
+            return false;
+        }
+        if self.scheduled.len() >= MAX_SCHEDULED_REDSTONE_TICKS {
+            return false;
+        }
+        self.scheduled.push(scheduled);
+        self.scheduled
+            .sort_unstable_by_key(|entry| (entry.due, entry.pos, scheduled_kind_key(entry.kind)));
+        self.sleeping = false;
+        true
+    }
+
     fn mark_neighbors_dirty(&mut self, manager: &ChunkManager, pos: BlockPos) {
         if self.components.contains_key(&pos) {
             self.dirty.insert(pos);
@@ -559,6 +653,10 @@ impl RedstoneSystem {
                 }
             }
         }
+    }
+
+    pub fn mark_container_changed(&mut self, manager: &ChunkManager, pos: BlockPos) {
+        self.mark_neighbors_dirty(manager, pos);
     }
 
     pub fn on_block_changed(&mut self, manager: &ChunkManager, pos: BlockPos, facing: Direction) {
@@ -598,7 +696,7 @@ impl RedstoneSystem {
                 self.scheduled.retain(|scheduled| {
                     !(scheduled.pos == pos && scheduled.kind == ScheduledKind::ReleaseButton)
                 });
-                self.scheduled.push(ScheduledTick {
+                self.schedule_tick(ScheduledTick {
                     due: self.tick + 20,
                     pos,
                     kind: ScheduledKind::ReleaseButton,
@@ -637,6 +735,9 @@ impl RedstoneSystem {
     pub fn tick(&mut self, manager: &mut ChunkManager, occupants: &[BlockPos]) -> RedstoneUpdate {
         self.tick = self.tick.wrapping_add(1);
         self.sync_loaded_chunks(manager);
+        self.refresh_container_revisions(manager);
+        let mut update = RedstoneUpdate::default();
+        self.update_observers(manager, &mut update.block_entity_changes);
         let normalized_occupants = normalize_plate_occupants(self, manager, occupants);
 
         if self.sleeping
@@ -644,10 +745,9 @@ impl RedstoneSystem {
             && self.scheduled.is_empty()
             && normalized_occupants == self.previous_plate_occupants
         {
-            return RedstoneUpdate::default();
+            return update;
         }
 
-        let mut update = RedstoneUpdate::default();
         self.process_scheduled(manager, &mut update);
         self.update_pressure_plates(manager, occupants, &mut update.mutations);
 
@@ -662,6 +762,136 @@ impl RedstoneSystem {
         self.previous_plate_occupants = normalized_occupants;
 
         update
+    }
+
+    fn refresh_container_revisions(&mut self, manager: &ChunkManager) {
+        let mut comparators: Vec<BlockPos> = self
+            .components
+            .iter()
+            .filter_map(|(&pos, _)| {
+                matches!(
+                    get_block(manager, pos),
+                    BlockType::Comparator | BlockType::ComparatorPowered
+                )
+                .then_some(pos)
+            })
+            .collect();
+        comparators.sort_unstable();
+        let mut seen = HashSet::new();
+        for pos in comparators {
+            let Some(state) = self.components.get(&pos).copied() else {
+                continue;
+            };
+            let rear = sub(pos, state.facing.delta());
+            let revision = container_revision(manager, rear);
+            seen.insert(pos);
+            match self.container_revisions.insert(pos, revision) {
+                Some(previous) if previous != revision => self.mark_neighbors_dirty(manager, pos),
+                None => {}
+                _ => {}
+            }
+        }
+        self.container_revisions.retain(|pos, _| seen.contains(pos));
+    }
+
+    /// Compares each loaded observer's front block/state/entity revision to its
+    /// persisted baseline.  Baselines are initialized without a pulse, while a
+    /// real change schedules one bounded two-tick pulse.  An unloaded front is
+    /// intentionally skipped so streaming cannot create a false edge.
+    fn update_observers(
+        &mut self,
+        manager: &mut ChunkManager,
+        block_entity_changes: &mut Vec<(BlockPos, crate::block_entity::BlockEntity)>,
+    ) {
+        let mut observers: Vec<BlockPos> = self
+            .components
+            .iter()
+            .filter_map(|(&pos, _)| (get_block(manager, pos) == BlockType::Observer).then_some(pos))
+            .collect();
+        observers.sort_unstable();
+        if observers.is_empty() {
+            return;
+        }
+        let start = (self.tick as usize) % observers.len();
+        let checks = observers.len().min(MAX_OBSERVER_CHECKS_PER_TICK);
+        for offset in 0..checks {
+            let pos = observers[(start + offset) % observers.len()];
+            let facing = self
+                .components
+                .get(&pos)
+                .map(|state| state.facing)
+                .unwrap_or_default();
+            let front = add(pos, facing.delta());
+            if !manager.is_block_loaded(front.0, front.1, front.2) {
+                continue;
+            }
+            let Some(mut observer) = manager
+                .get_block_entity(pos.0, pos.1, pos.2)
+                .cloned()
+                .and_then(|entity| {
+                    if let crate::block_entity::BlockEntity::Observer(observer) = entity {
+                        Some(observer)
+                    } else {
+                        None
+                    }
+                })
+            else {
+                continue;
+            };
+            let observed_block = get_block(manager, front);
+            let observed_state = manager.get_block_state(front.0, front.1, front.2);
+            let observed_entity_revision = manager
+                .get_block_entity(front.0, front.1, front.2)
+                .map(crate::block_entity::BlockEntity::revision)
+                .unwrap_or(0);
+            let observed_entity_present = manager
+                .get_block_entity(front.0, front.1, front.2)
+                .is_some();
+            let changed = observer.baseline_initialized
+                && (observer.observed_block != observed_block
+                    || observer.observed_state != observed_state
+                    || observer.observed_entity_revision != observed_entity_revision
+                    || observer.observed_entity_present != observed_entity_present);
+            observer.observed_block = observed_block;
+            observer.observed_state = observed_state;
+            observer.observed_entity_revision = observed_entity_revision;
+            observer.observed_entity_present = observed_entity_present;
+            if !observer.baseline_initialized || changed {
+                observer.baseline_initialized = true;
+                if changed {
+                    observer.pending_pulse = observer.pending_pulse.max(2);
+                }
+                observer.revision = observer.revision.wrapping_add(1);
+                manager.set_block_entity(
+                    pos.0,
+                    pos.1,
+                    pos.2,
+                    Some(crate::block_entity::BlockEntity::Observer(observer.clone())),
+                );
+                manager.mark_block_entity_dirty(pos.0, pos.2);
+                record_block_entity_change(
+                    block_entity_changes,
+                    pos,
+                    crate::block_entity::BlockEntity::Observer(observer.clone()),
+                );
+                self.mark_dirty(pos);
+            }
+            if observer.pending_pulse > 0
+                && !self.scheduled.iter().any(|scheduled| {
+                    scheduled.pos == pos
+                        && matches!(
+                            scheduled.kind,
+                            ScheduledKind::ObserverPulseOn | ScheduledKind::ObserverPulseOff
+                        )
+                })
+            {
+                self.schedule_tick(ScheduledTick {
+                    due: self.tick + 1,
+                    pos,
+                    kind: ScheduledKind::ObserverPulseOn,
+                });
+            }
+        }
     }
 
     fn sync_loaded_chunks(&mut self, manager: &ChunkManager) {
@@ -699,7 +929,18 @@ impl RedstoneSystem {
                 let block = chunk.get_block_local(x, y, z);
                 use std::collections::hash_map::Entry;
                 if let Entry::Vacant(e) = self.components.entry(pos) {
-                    e.insert(ComponentState::new(block, Direction::North));
+                    let mut component = ComponentState::new(block, Direction::North);
+                    if block == BlockType::Observer {
+                        if let Some(crate::block_entity::BlockEntity::Observer(observer)) =
+                            chunk.get_block_entity(x as u8, y as i16, z as u8)
+                        {
+                            component.facing = observer.facing;
+                            if observer.pending_pulse > 0 {
+                                component.observer_pulse_until = self.tick + 2;
+                            }
+                        }
+                    }
+                    e.insert(component);
                     self.mark_dirty(pos);
                 }
             }
@@ -758,6 +999,76 @@ impl RedstoneSystem {
                 ScheduledKind::Explode => update
                     .actions
                     .push(RedstoneAction::Explode { pos: scheduled.pos }),
+                ScheduledKind::ObserverPulseOn => {
+                    if get_block(manager, scheduled.pos) == BlockType::Observer {
+                        update.observer_pulses = update.observer_pulses.saturating_add(1);
+                        if let Some(state) = self.components.get_mut(&scheduled.pos) {
+                            state.signal.power = 15;
+                            state.signal.charge = ChargeKind::Weak;
+                            state.observer_pulse_until = self.tick + 2;
+                        }
+                        let changed_entity =
+                            if let Some(crate::block_entity::BlockEntity::Observer(observer)) =
+                                manager.get_block_entity_mut(
+                                    scheduled.pos.0,
+                                    scheduled.pos.1,
+                                    scheduled.pos.2,
+                                )
+                            {
+                                observer.pending_pulse = observer.pending_pulse.saturating_sub(1);
+                                observer.revision = observer.revision.wrapping_add(1);
+                                Some(crate::block_entity::BlockEntity::Observer(observer.clone()))
+                            } else {
+                                None
+                            };
+                        if let Some(changed_entity) = changed_entity {
+                            manager.mark_block_entity_dirty(scheduled.pos.0, scheduled.pos.2);
+                            record_block_entity_change(
+                                &mut update.block_entity_changes,
+                                scheduled.pos,
+                                changed_entity,
+                            );
+                        }
+                        self.mark_neighbors_dirty(manager, scheduled.pos);
+                        self.schedule_tick(ScheduledTick {
+                            due: self.tick + 2,
+                            pos: scheduled.pos,
+                            kind: ScheduledKind::ObserverPulseOff,
+                        });
+                    }
+                }
+                ScheduledKind::ObserverPulseOff => {
+                    if get_block(manager, scheduled.pos) == BlockType::Observer {
+                        if let Some(state) = self.components.get_mut(&scheduled.pos) {
+                            state.signal.power = 0;
+                            state.signal.charge = ChargeKind::Unpowered;
+                            state.observer_pulse_until = 0;
+                        }
+                        let changed_entity =
+                            if let Some(crate::block_entity::BlockEntity::Observer(observer)) =
+                                manager.get_block_entity_mut(
+                                    scheduled.pos.0,
+                                    scheduled.pos.1,
+                                    scheduled.pos.2,
+                                )
+                            {
+                                observer.pending_pulse = 0;
+                                observer.revision = observer.revision.wrapping_add(1);
+                                Some(crate::block_entity::BlockEntity::Observer(observer.clone()))
+                            } else {
+                                None
+                            };
+                        if let Some(changed_entity) = changed_entity {
+                            manager.mark_block_entity_dirty(scheduled.pos.0, scheduled.pos.2);
+                            record_block_entity_change(
+                                &mut update.block_entity_changes,
+                                scheduled.pos,
+                                changed_entity,
+                            );
+                        }
+                        self.mark_neighbors_dirty(manager, scheduled.pos);
+                    }
+                }
             }
         }
     }
@@ -874,7 +1185,8 @@ impl RedstoneSystem {
         manager: &mut ChunkManager,
         update: &mut RedstoneUpdate,
     ) {
-        let positions: Vec<BlockPos> = self.components.keys().copied().collect();
+        let mut positions: Vec<BlockPos> = self.components.keys().copied().collect();
+        positions.sort_unstable();
         for pos in positions {
             let block = get_block(manager, pos);
             let Some(mut state) = self.components.get(&pos).copied() else {
@@ -899,7 +1211,7 @@ impl RedstoneSystem {
                         scheduled.pos == pos && matches!(scheduled.kind, ScheduledKind::Repeater(_))
                     });
                     if desired != current && !already_scheduled {
-                        self.scheduled.push(ScheduledTick {
+                        self.schedule_tick(ScheduledTick {
                             due: self.tick + state.repeater_delay as u64,
                             pos,
                             kind: ScheduledKind::Repeater(desired),
@@ -991,7 +1303,7 @@ impl RedstoneSystem {
                 }
                 BlockType::TNT if state.signal.power > 0 && !state.last_powered => {
                     set_block_record(manager, pos, BlockType::Air, &mut update.mutations);
-                    self.scheduled.push(ScheduledTick {
+                    self.schedule_tick(ScheduledTick {
                         due: self.tick + 80,
                         pos,
                         kind: ScheduledKind::Explode,
@@ -1106,7 +1418,19 @@ fn desired_power(
         BlockType::Repeater => 0,
         BlockType::Comparator | BlockType::ComparatorPowered => {
             let rear = sub(pos, state.facing.delta());
-            let rear_power = signal_from_position(manager, states, rear, pos, false);
+            let mut rear_power = signal_from_position(manager, states, rear, pos, false);
+            let container_signal =
+                crate::block_entity::calculate_container_comparator_signal(manager, rear);
+            if container_signal > 0 {
+                rear_power = rear_power.max(container_signal);
+            } else if get_block(manager, rear).properties().is_solid {
+                let rear_behind = sub(rear, state.facing.delta());
+                let behind_signal = crate::block_entity::calculate_container_comparator_signal(
+                    manager,
+                    rear_behind,
+                );
+                rear_power = rear_power.max(behind_signal);
+            }
             let left = add(pos, state.facing.left().delta());
             let right = add(pos, state.facing.right().delta());
             let side_power = signal_from_position(manager, states, left, pos, false)
@@ -1122,6 +1446,7 @@ fn desired_power(
                 ComparatorMode::Subtract => rear_power.saturating_sub(side_power),
             }
         }
+        BlockType::Observer => state.signal.power,
         BlockType::RedstoneLamp
         | BlockType::RedstoneLampLit
         | BlockType::OakDoor
@@ -1190,6 +1515,9 @@ fn emitted_toward(
                 .unwrap_or(0)
         }
         BlockType::Repeater | BlockType::Comparator => 0,
+        BlockType::Observer => (add(source, state.facing.opposite().delta()) == target)
+            .then_some(state.signal.power)
+            .unwrap_or(0),
         BlockType::RedstoneLamp
         | BlockType::RedstoneLampLit
         | BlockType::OakDoor
@@ -1251,6 +1579,46 @@ fn append_pos(bytes: &mut Vec<u8>, pos: BlockPos) {
     append_i32(bytes, pos.2);
 }
 
+fn scheduled_kind_key(kind: ScheduledKind) -> u8 {
+    match kind {
+        ScheduledKind::ReleaseButton => 0,
+        ScheduledKind::Repeater(false) => 1,
+        ScheduledKind::Repeater(true) => 2,
+        ScheduledKind::Explode => 3,
+        ScheduledKind::ObserverPulseOn => 4,
+        ScheduledKind::ObserverPulseOff => 5,
+    }
+}
+
+fn container_revision(manager: &ChunkManager, pos: BlockPos) -> u64 {
+    let own = manager
+        .get_block_entity(pos.0, pos.1, pos.2)
+        .map(crate::block_entity::BlockEntity::revision)
+        .unwrap_or(0);
+    let partner = crate::block_entity::double_chest_partner(manager, pos)
+        .and_then(|partner| manager.get_block_entity(partner.0, partner.1, partner.2))
+        .map(crate::block_entity::BlockEntity::revision)
+        .unwrap_or(0);
+    own.rotate_left(17) ^ partner.rotate_right(11)
+}
+
+fn record_block_entity_change(
+    changes: &mut Vec<(BlockPos, crate::block_entity::BlockEntity)>,
+    pos: BlockPos,
+    entity: crate::block_entity::BlockEntity,
+) {
+    if let Some((_, existing)) = changes
+        .iter_mut()
+        .find(|(existing_pos, _)| *existing_pos == pos)
+    {
+        *existing = entity;
+        return;
+    }
+    if changes.len() < MAX_REDSTONE_ENTITY_CHANGES_PER_UPDATE {
+        changes.push((pos, entity));
+    }
+}
+
 fn encode_charge(charge: ChargeKind) -> u8 {
     match charge {
         ChargeKind::Unpowered => 0,
@@ -1265,6 +1633,8 @@ fn encode_direction(direction: Direction) -> u8 {
         Direction::South => 1,
         Direction::West => 2,
         Direction::East => 3,
+        Direction::Up => 4,
+        Direction::Down => 5,
     }
 }
 
@@ -1322,6 +1692,7 @@ pub(crate) fn is_component(block: BlockType) -> bool {
             | BlockType::TNT
             | BlockType::Dispenser
             | BlockType::Dropper
+            | BlockType::Observer
             | BlockType::NoteBlock
     )
 }
@@ -1863,6 +2234,181 @@ mod tests {
         system.tick(&mut manager, &[]);
         assert_eq!(system.power_at((1, Y, 0)), 0);
         assert_eq!(manager.get_block(1, Y, 0), BlockType::Comparator);
+    }
+
+    #[test]
+    fn container_revision_wakes_sleeping_comparator() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        manager.set_block(0, Y, 0, BlockType::Chest);
+        manager.set_block_entity(
+            0,
+            Y,
+            0,
+            Some(crate::block_entity::BlockEntity::Chest(
+                crate::block_entity::ChestBlockEntity::new(),
+            )),
+        );
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::Comparator,
+            Direction::East,
+        );
+
+        system.tick(&mut manager, &[]);
+        assert_eq!(system.power_at((1, Y, 0)), 0);
+        assert!(system.is_sleeping());
+
+        if let Some(entity) = manager.get_block_entity_mut(0, Y, 0) {
+            entity.set_stack(
+                0,
+                Some(crate::inventory::ItemStack::new(
+                    crate::inventory::Item::Redstone,
+                    64,
+                )),
+            );
+        }
+        system.mark_container_changed(&manager, (0, Y, 0));
+        assert!(!system.is_sleeping());
+        system.tick(&mut manager, &[]);
+        assert!(system.power_at((1, Y, 0)) > 0);
+    }
+
+    #[test]
+    fn dispenser_actions_are_rising_edge_only_and_carry_facing() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        place(
+            &mut system,
+            &mut manager,
+            0,
+            BlockType::LeverOn,
+            Direction::East,
+        );
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::Dispenser,
+            Direction::South,
+        );
+
+        let first = system.tick(&mut manager, &[]);
+        assert_eq!(
+            first.actions,
+            vec![RedstoneAction::Dispense {
+                pos: (1, Y, 0),
+                facing: Direction::South,
+                dropper: false,
+            }]
+        );
+        assert!(system.tick(&mut manager, &[]).actions.is_empty());
+
+        manager.set_block(0, Y, 0, BlockType::Lever);
+        system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        assert!(system.tick(&mut manager, &[]).actions.is_empty());
+        manager.set_block(0, Y, 0, BlockType::LeverOn);
+        system.on_block_changed(&manager, (0, Y, 0), Direction::East);
+        let second = system.tick(&mut manager, &[]);
+        assert_eq!(second.actions.len(), 1);
+    }
+
+    #[test]
+    fn observer_baselines_without_false_pulse_and_pulses_on_rising_change() {
+        let mut manager = manager();
+        let mut observer_entity = crate::block_entity::ObserverBlockEntity::new();
+        observer_entity.facing = Direction::East;
+        manager.set_block(0, Y, 0, BlockType::Observer);
+        manager.set_block_entity(
+            0,
+            Y,
+            0,
+            Some(crate::block_entity::BlockEntity::Observer(observer_entity)),
+        );
+        manager.set_block(1, Y, 0, BlockType::Air);
+        let mut system = RedstoneSystem::new();
+
+        let initial = system.tick(&mut manager, &[]);
+        assert!(initial.actions.is_empty());
+        assert_eq!(system.power_at((0, Y, 0)), 0);
+
+        manager.set_block(1, Y, 0, BlockType::Stone);
+        system.tick(&mut manager, &[]);
+        // The edge is delayed by one redstone tick and is therefore not
+        // observable until the following tick.
+        assert_eq!(system.power_at((0, Y, 0)), 0);
+        system.tick(&mut manager, &[]);
+        assert_eq!(system.power_at((0, Y, 0)), 15);
+        system.tick(&mut manager, &[]);
+        assert_eq!(system.power_at((0, Y, 0)), 15);
+        system.tick(&mut manager, &[]);
+        assert_eq!(system.power_at((0, Y, 0)), 0);
+
+        // A fresh redstone runtime must use the persisted observer baseline,
+        // not emit a phantom pulse merely because the chunk was reloaded.
+        let mut reloaded = RedstoneSystem::new();
+        let update = reloaded.tick(&mut manager, &[]);
+        assert!(update.actions.is_empty());
+        assert_eq!(reloaded.power_at((0, Y, 0)), 0);
+    }
+
+    #[test]
+    fn observer_skips_unloaded_front_until_streamed() {
+        let mut manager = manager();
+        manager.set_block(15, Y, 0, BlockType::Observer);
+        manager.set_block_entity(
+            15,
+            Y,
+            0,
+            Some(crate::block_entity::BlockEntity::Observer(
+                crate::block_entity::ObserverBlockEntity {
+                    facing: Direction::East,
+                    ..Default::default()
+                },
+            )),
+        );
+        let mut system = RedstoneSystem::new();
+        system.tick(&mut manager, &[]);
+        let observer = manager.get_block_entity(15, Y, 0).unwrap();
+        assert!(matches!(
+            observer,
+            crate::block_entity::BlockEntity::Observer(o) if !o.baseline_initialized
+        ));
+
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.set_block(16, Y, 0, BlockType::Stone);
+        system.tick(&mut manager, &[]);
+        let observer = manager.get_block_entity(15, Y, 0).unwrap();
+        if let crate::block_entity::BlockEntity::Observer(observer) = observer {
+            assert!(observer.baseline_initialized);
+            assert_eq!(observer.pending_pulse, 0);
+        } else {
+            panic!("expected observer block entity");
+        }
+    }
+
+    #[test]
+    fn scheduled_redstone_work_is_bounded_and_deterministic() {
+        let mut system = RedstoneSystem::new();
+        for index in 0..(MAX_SCHEDULED_REDSTONE_TICKS + 128) {
+            system.schedule_tick(ScheduledTick {
+                due: index as u64,
+                pos: (index as i32, Y, 0),
+                kind: ScheduledKind::ObserverPulseOn,
+            });
+        }
+        assert_eq!(system.scheduled.len(), MAX_SCHEDULED_REDSTONE_TICKS);
+        assert!(system.scheduled.windows(2).all(|window| (
+            window[0].due,
+            window[0].pos,
+            scheduled_kind_key(window[0].kind)
+        ) <= (
+            window[1].due,
+            window[1].pos,
+            scheduled_kind_key(window[1].kind)
+        )));
     }
 
     #[test]

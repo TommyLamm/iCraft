@@ -1,6 +1,6 @@
 use crate::world::{
     BlockSupportStatus, BlockType, Chunk, MeshVoxel, SectionHaloSnapshot, SectionKey, CHUNK_DEPTH,
-    CHUNK_HEIGHT, CHUNK_WIDTH, SECTION_COUNT, SECTION_SIZE,
+    CHUNK_HEIGHT, CHUNK_WIDTH, SECTION_SIZE,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -282,6 +282,47 @@ impl ChunkManager {
         Some(chunk.get_block_local(bx, by, bz))
     }
 
+    pub fn get_block_entity(
+        &self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+    ) -> Option<&crate::block_entity::BlockEntity> {
+        let ((cx, cz), (bx, by, bz)) = self.world_to_local(wx, wy, wz)?;
+        let chunk = self.chunks.get(&(cx, cz))?;
+        chunk.get_block_entity(bx as u8, by as i16, bz as u8)
+    }
+
+    pub fn get_block_entity_mut(
+        &mut self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+    ) -> Option<&mut crate::block_entity::BlockEntity> {
+        let ((cx, cz), (bx, by, bz)) = self.world_to_local(wx, wy, wz)?;
+        let chunk = self.chunks.get_mut(&(cx, cz))?;
+        chunk.get_block_entity_mut(bx as u8, by as i16, bz as u8)
+    }
+
+    pub fn set_block_entity(
+        &mut self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
+    ) {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                if let Some(e) = entity {
+                    let _ = chunk.insert_block_entity(bx as u8, by as i16, bz as u8, e);
+                } else {
+                    let _ = chunk.remove_block_entity(bx as u8, by as i16, bz as u8);
+                }
+                self.dirty_chunks.mark_dirty(cx, cz);
+            }
+        }
+    }
+
     pub fn block_support_status(
         &self,
         block: BlockType,
@@ -517,6 +558,25 @@ impl ChunkManager {
         }
 
         self.break_unsupported_from_candidates(candidates, dirty_chunks, &mut on_break);
+    }
+
+    /// Returns whether the chunk containing a world coordinate is currently
+    /// loaded.  Automation must use this rather than treating an unloaded
+    /// destination as air, otherwise a hopper could consume its source item at
+    /// a streaming boundary.
+    pub fn is_block_loaded(&self, x: i32, _y: i32, z: i32) -> bool {
+        let cx = x.div_euclid(CHUNK_WIDTH as i32);
+        let cz = z.div_euclid(CHUNK_DEPTH as i32);
+        self.chunks.contains_key(&(cx, cz))
+    }
+
+    /// Marks a block entity mutation for the normal latest-wins save path.
+    pub fn mark_block_entity_dirty(&mut self, x: i32, z: i32) {
+        let cx = x.div_euclid(CHUNK_WIDTH as i32);
+        let cz = z.div_euclid(CHUNK_DEPTH as i32);
+        if self.chunks.contains_key(&(cx, cz)) {
+            self.dirty_chunks.mark_dirty(cx, cz);
+        }
     }
 
     fn break_unsupported_from_candidates<I, F>(

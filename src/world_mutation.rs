@@ -300,6 +300,7 @@ mod tests {
             custom_name: None,
             loot_table: None,
             loot_seed: None,
+            revision: 0,
         });
         let req = BlockMutationRequest {
             pos: (2, 64, 2),

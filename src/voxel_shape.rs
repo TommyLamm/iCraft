@@ -341,9 +341,7 @@ pub fn fence_gate_closed(facing: Direction) -> VoxelShape {
         Direction::North | Direction::South => {
             VoxelShape::from_box(aabb(0.0, 0.0, 6.0 * SIXTEENTH, 1.0, 1.5, 10.0 * SIXTEENTH))
         }
-        Direction::West | Direction::East => {
-            VoxelShape::from_box(aabb(6.0 * SIXTEENTH, 0.0, 0.0, 10.0 * SIXTEENTH, 1.5, 1.0))
-        }
+        _ => VoxelShape::from_box(aabb(6.0 * SIXTEENTH, 0.0, 0.0, 10.0 * SIXTEENTH, 1.5, 1.0)),
     }
 }
 
@@ -352,9 +350,7 @@ pub fn fence_gate_selection(facing: Direction) -> VoxelShape {
         Direction::North | Direction::South => {
             VoxelShape::from_box(aabb(0.0, 0.0, 6.0 * SIXTEENTH, 1.0, 1.0, 10.0 * SIXTEENTH))
         }
-        Direction::West | Direction::East => {
-            VoxelShape::from_box(aabb(6.0 * SIXTEENTH, 0.0, 0.0, 10.0 * SIXTEENTH, 1.0, 1.0))
-        }
+        _ => VoxelShape::from_box(aabb(6.0 * SIXTEENTH, 0.0, 0.0, 10.0 * SIXTEENTH, 1.0, 1.0)),
     }
 }
 
@@ -442,21 +438,21 @@ pub fn block_collision_shape(
                     Direction::North => (0.0, 1.0, 0.0, THICKNESS),
                     Direction::South => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
                     Direction::West => (0.0, THICKNESS, 0.0, 1.0),
-                    Direction::East => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+                    _ => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
                 }
             } else if !state.is_right_hinge {
                 match state.facing {
                     Direction::North => (0.0, THICKNESS, 0.0, 1.0),
                     Direction::South => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
                     Direction::West => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
-                    Direction::East => (0.0, 1.0, 0.0, THICKNESS),
+                    _ => (0.0, 1.0, 0.0, THICKNESS),
                 }
             } else {
                 match state.facing {
                     Direction::North => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
                     Direction::South => (0.0, THICKNESS, 0.0, 1.0),
                     Direction::West => (0.0, 1.0, 0.0, THICKNESS),
-                    Direction::East => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
+                    _ => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
                 }
             };
             VoxelShape::from_box(aabb(min_x, 0.0, min_z, max_x, 1.0, max_z))
@@ -473,7 +469,7 @@ pub fn block_collision_shape(
                     Direction::North => (0.0, 1.0, 0.0, THICKNESS),
                     Direction::South => (0.0, 1.0, 1.0 - THICKNESS, 1.0),
                     Direction::West => (0.0, THICKNESS, 0.0, 1.0),
-                    Direction::East => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
+                    _ => (1.0 - THICKNESS, 1.0, 0.0, 1.0),
                 };
                 VoxelShape::from_box(aabb(min_x, 0.0, min_z, max_x, 1.0, max_z))
             } else {
@@ -499,14 +495,14 @@ pub fn block_collision_shape(
                     Direction::North => stair_inverted_north(),
                     Direction::South => stair_inverted_south(),
                     Direction::West => stair_inverted_west(),
-                    Direction::East => stair_inverted_east(),
+                    _ => stair_inverted_east(),
                 }
             } else {
                 match state.facing {
                     Direction::North => stair_north(),
                     Direction::South => stair_south(),
                     Direction::West => stair_west(),
-                    Direction::East => stair_east(),
+                    _ => stair_east(),
                 }
             }
         }
@@ -541,7 +537,7 @@ pub fn block_collision_shape(
                 Direction::North => ladder_north(),
                 Direction::South => ladder_south(),
                 Direction::West => ladder_west(),
-                Direction::East => ladder_east(),
+                _ => ladder_east(),
             }
         }
 
@@ -553,6 +549,11 @@ pub fn block_collision_shape(
             1.0,
             1.0 - SIXTEENTH,
         )),
+
+        BlockType::Hopper => VoxelShape::from_boxes(&[
+            aabb(0.0, 0.625, 0.0, 1.0, 1.0, 1.0),
+            aabb(0.375, 0.0, 0.375, 0.625, 0.625, 0.625),
+        ]),
 
         BlockType::Farmland => {
             VoxelShape::from_box(aabb(0.0, 0.0, 0.0, 1.0, 15.0 * SIXTEENTH, 1.0))

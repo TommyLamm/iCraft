@@ -565,6 +565,15 @@ mod remote_sync_tests {
     }
 
     #[test]
+    fn container_revision_order_rejects_duplicates_and_accepts_wraparound() {
+        assert!(container_revision_is_newer(4, 5));
+        assert!(!container_revision_is_newer(5, 5));
+        assert!(!container_revision_is_newer(5, 4));
+        assert!(container_revision_is_newer(u64::MAX, 0));
+        assert!(!container_revision_is_newer(0, u64::MAX));
+    }
+
+    #[test]
     fn network_burst_budget_leaves_persistent_backlog() {
         let mut staging = NetworkStaging::default();
         for _ in 0..(NETWORK_MAX_EVENTS_PER_PASS + 17) {
@@ -706,6 +715,7 @@ mod remote_sync_tests {
             custom_name: Some("Host Chest".to_string()),
             loot_table: None,
             loot_seed: None,
+            revision: 0,
         });
 
         // Insert at revision 5
@@ -1907,6 +1917,14 @@ fn section_mesh_result_is_current(
         && current_identity == Some(result_identity)
 }
 
+/// Container entity revisions use serial-number arithmetic so a wrapped host
+/// revision remains newer than the last value while duplicate and stale
+/// packets are rejected.  This is the same half-range rule used for network
+/// sequence numbers elsewhere in the state machine.
+fn container_revision_is_newer(current: u64, candidate: u64) -> bool {
+    candidate != current && candidate.wrapping_sub(current) < (1_u64 << 63)
+}
+
 enum TerrainWorkerResult {
     Loaded(ChunkLoadResult),
     SectionMeshed(SectionMeshResult),
@@ -2053,31 +2071,29 @@ impl State {
     fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
         let mut dirty_chunks = std::collections::HashSet::new();
         let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
+        let mut entity_broadcasts: Vec<(
+            (i32, i32, i32),
+            Option<crate::block_entity::BlockEntity>,
+        )> = Vec::new();
         for &((x, y, z), new_block) in changes {
             let old_block = self.chunk_manager.get_block(x, y, z);
             if old_block == new_block {
                 continue;
             }
             if old_block != BlockType::Air {
-                if matches!(old_block, BlockType::Furnace | BlockType::FurnaceLit)
-                    && new_block == BlockType::Air
-                {
-                    let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
-                    let (bx, by, bz) = (x.rem_euclid(16) as u8, y as i16, z.rem_euclid(16) as u8);
-                    let mut items_to_drop = Vec::new();
-                    if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                        if let Some(crate::block_entity::BlockEntity::Furnace(furnace)) =
-                            chunk.get_block_entity(bx, by, bz)
-                        {
-                            for slot in furnace.slots.iter().flatten() {
-                                items_to_drop.push(slot.item);
-                            }
+                let old_entity = self.chunk_manager.get_block_entity(x, y, z).cloned();
+                let new_accepts_old = old_entity
+                    .as_ref()
+                    .is_some_and(|entity| entity.matches_block_type(new_block));
+                if let Some(entity) = old_entity {
+                    if !new_accepts_old {
+                        let sound_pos =
+                            glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                        for stack in entity.clone().drain_stacks() {
+                            self.spawn_dropped_stack(stack, sound_pos);
                         }
-                        chunk.remove_block_entity(bx, by, bz);
-                    }
-                    let sound_pos = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                    for item in items_to_drop {
-                        self.spawn_dropped_item(item, sound_pos);
+                        self.chunk_manager.set_block_entity(x, y, z, None);
+                        entity_broadcasts.push(((x, y, z), None));
                     }
                 }
                 self.chunk_manager.set_block(x, y, z, BlockType::Air);
@@ -2098,6 +2114,18 @@ impl State {
                 );
             }
             self.chunk_manager.set_block(x, y, z, new_block);
+            let existing_matches = self
+                .chunk_manager
+                .get_block_entity(x, y, z)
+                .is_some_and(|entity| entity.matches_block_type(new_block));
+            if !existing_matches {
+                if let Some(default_entity) = crate::block_entity::default_stub_for_block(new_block)
+                {
+                    self.chunk_manager
+                        .set_block_entity(x, y, z, Some(default_entity.clone()));
+                    entity_broadcasts.push(((x, y, z), Some(default_entity)));
+                }
+            }
             crate::lighting::update_sky_light_after_placed(
                 &mut self.chunk_manager,
                 x,
@@ -2126,6 +2154,9 @@ impl State {
         // Fan each authoritative batch mutation out to connected clients.
         for ((x, y, z), block) in broadcast {
             self.broadcast_block_change(x, y, z, block);
+        }
+        for ((x, y, z), entity) in entity_broadcasts {
+            self.broadcast_block_entity_delta(x, y, z, entity);
         }
     }
 
@@ -3789,6 +3820,7 @@ enum NetworkInbound {
     ContainerClickRequest {
         id: crate::network::protocol::PlayerId,
         dimension: u8,
+        revision: u64,
         slot_index: u16,
         is_left: bool,
         dragged: Option<crate::network::protocol::ItemWire>,
@@ -4254,12 +4286,14 @@ impl NetworkHandle {
                         crate::network::server::ServerToHost::ContainerClickRequest {
                             id,
                             dimension,
+                            revision,
                             slot_index,
                             is_left,
                             dragged,
                         } => NetworkInbound::ContainerClickRequest {
                             id,
                             dimension,
+                            revision,
                             slot_index,
                             is_left,
                             dragged,
@@ -7932,9 +7966,20 @@ impl State {
                 z,
             } => {
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
+                    let block = self.chunk_manager.get_block(x, y, z);
                     let mut valid = dimension == self.current_dimension as u8
-                        && self.chunk_manager.get_block(x, y, z) == BlockType::Chest;
-                    if valid {
+                        && matches!(
+                            block,
+                            BlockType::Chest
+                                | BlockType::EndCityChest
+                                | BlockType::Furnace
+                                | BlockType::FurnaceLit
+                                | BlockType::Hopper
+                                | BlockType::Dispenser
+                                | BlockType::Dropper
+                        )
+                        && self.chunk_manager.get_block_entity(x, y, z).is_some();
+                    if valid && matches!(block, BlockType::Chest | BlockType::EndCityChest) {
                         if self
                             .chunk_manager
                             .get_block(x, y + 1, z)
@@ -7962,16 +8007,25 @@ impl State {
                     }
 
                     if valid {
-                        crate::container_sessions::ContainerSessionManager::ensure_chest_loot_generated(
-                            &mut self.chunk_manager,
-                            x,
-                            y,
-                            z,
-                            self.world_seed,
-                        );
+                        if matches!(block, BlockType::Chest | BlockType::EndCityChest) {
+                            crate::container_sessions::ContainerSessionManager::ensure_chest_loot_generated(
+                                &mut self.chunk_manager,
+                                x,
+                                y,
+                                z,
+                                self.world_seed,
+                            );
+                        }
                         self.container_sessions.open(id, dimension, x, y, z);
+                        if let Some(session) = self.container_sessions.find_by_player_mut(id) {
+                            session.revision = self
+                                .chunk_manager
+                                .get_block_entity(x, y, z)
+                                .map(crate::block_entity::BlockEntity::revision)
+                                .unwrap_or(0);
+                        }
                         if let Some(slots_vec) =
-                            crate::container_sessions::ContainerSessionManager::get_chest_slots(
+                            crate::container_sessions::ContainerSessionManager::get_container_slots(
                                 &self.chunk_manager,
                                 x,
                                 y,
@@ -7987,6 +8041,11 @@ impl State {
                                 .collect();
                             let slot_count = slots_vec.len();
                             self.container_is_double = slot_count > 27;
+                            let revision = self
+                                .chunk_manager
+                                .get_block_entity(x, y, z)
+                                .map(crate::block_entity::BlockEntity::revision)
+                                .unwrap_or(0);
                             if let NetworkHandle::Host { host_to_server, .. } = &self.network {
                                 let _ = host_to_server.tracked_send(
                                     crate::network::server::HostToServer::SendContainerOpenResult {
@@ -7997,7 +8056,7 @@ impl State {
                                         y,
                                         z,
                                         slots,
-                                        revision: 0,
+                                        revision,
                                     },
                                 );
                             }
@@ -8023,7 +8082,8 @@ impl State {
             }
             NetworkInbound::ContainerClickRequest {
                 id,
-                dimension: _dimension,
+                dimension,
+                revision,
                 slot_index,
                 is_left,
                 dragged,
@@ -8031,7 +8091,9 @@ impl State {
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
                     if let Some(session) = self.container_sessions.find_by_player(id) {
                         let session = session.clone();
-                        let mut valid = session.dimension == self.current_dimension as u8;
+                        let mut valid = session.dimension == self.current_dimension as u8
+                            && dimension == self.current_dimension as u8
+                            && revision == session.revision;
                         if let Some(remote) = self.remote_players.get(&id) {
                             if let Some(snap) = remote.snapshots.back() {
                                 let chest_center = glam::Vec3::new(
@@ -8046,7 +8108,7 @@ impl State {
                         }
                         if valid {
                             if let Some(mut slots_vec) =
-                                crate::container_sessions::ContainerSessionManager::get_chest_slots(
+                                crate::container_sessions::ContainerSessionManager::get_container_slots(
                                     &self.chunk_manager,
                                     session.x,
                                     session.y,
@@ -8056,6 +8118,38 @@ impl State {
                                 if (slot_index as usize) < slots_vec.len() {
                                     let slot_item = slots_vec[slot_index as usize];
                                     let dragged_stack = dragged.and_then(|w| w.to_stack());
+                                    let Some(entity) = self
+                                        .chunk_manager
+                                        .get_block_entity(session.x, session.y, session.z)
+                                    else {
+                                        return;
+                                    };
+                                    let Some(access) =
+                                        crate::block_entity::ContainerAccess::for_entity(entity)
+                                    else {
+                                        return;
+                                    };
+                                    // A double chest is exposed as one 54-slot
+                                    // view, while each half's capability still
+                                    // owns 27 physical slots.
+                                    let capability_slot = if access.kind
+                                        == crate::block_entity::ContainerKind::Chest
+                                    {
+                                        slot_index as usize % 27
+                                    } else {
+                                        slot_index as usize
+                                    };
+                                    if dragged_stack
+                                        .as_ref()
+                                        .is_some_and(|stack| {
+                                            !access.can_insert(capability_slot, stack, None)
+                                        })
+                                        || (dragged_stack.is_none()
+                                            && slot_item.is_some()
+                                            && !access.can_extract(capability_slot, None))
+                                    {
+                                        return;
+                                    }
                                     let (new_slot, new_dragged) =
                                         crate::container_sessions::simulate_container_click(
                                             slot_item,
@@ -8066,16 +8160,31 @@ impl State {
                                     let slot_wire = new_slot
                                         .as_ref()
                                         .map(crate::network::protocol::ItemWire::from_stack);
-                                    crate::container_sessions::ContainerSessionManager::set_chest_slots(
+                                    let committed = crate::container_sessions::ContainerSessionManager::set_container_slots(
                                         &mut self.chunk_manager,
                                         session.x,
                                         session.y,
                                         session.z,
                                         &slots_vec,
                                     );
+                                    if !committed {
+                                        return;
+                                    }
                                     let dragged_wire = new_dragged
                                         .as_ref()
                                         .map(crate::network::protocol::ItemWire::from_stack);
+                                    let current_revision = self
+                                        .chunk_manager
+                                        .get_block_entity(session.x, session.y, session.z)
+                                        .map(crate::block_entity::BlockEntity::revision)
+                                        .unwrap_or(session.revision);
+                                    if let Some(active) = self.container_sessions.find_by_player_mut(id) {
+                                        active.revision = current_revision;
+                                    }
+                                    self.redstone.mark_container_changed(
+                                        &self.chunk_manager,
+                                        (session.x, session.y, session.z),
+                                    );
                                     if let NetworkHandle::Host { host_to_server, .. } =
                                         &self.network
                                     {
@@ -8083,7 +8192,7 @@ impl State {
                                             to: id, dimension: session.dimension, success: true, slot_index, slot: slot_wire, dragged: dragged_wire,
                                         });
                                         let _ = host_to_server.tracked_send(crate::network::server::HostToServer::BroadcastContainerSlotUpdate {
-                                            dimension: session.dimension, revision: session.revision + 1, x: session.x, y: session.y, z: session.z, slot_index, slot: slot_wire,
+                                            dimension: session.dimension, revision: current_revision, x: session.x, y: session.y, z: session.z, slot_index, slot: slot_wire,
                                         });
                                     }
                                 }
@@ -8107,121 +8216,112 @@ impl State {
                 self.close_inventory();
             }
             NetworkInbound::ContainerOpenResult {
-                dimension: _,
+                dimension,
                 success,
                 x,
                 y,
                 z,
                 slots,
-                revision: _,
+                revision,
             } => {
-                if success {
+                if success && dimension == self.current_dimension as u8 {
+                    let current_revision = self
+                        .chunk_manager
+                        .get_block_entity(x, y, z)
+                        .map(crate::block_entity::BlockEntity::revision)
+                        .unwrap_or(0);
+                    if !container_revision_is_newer(current_revision, revision)
+                        && current_revision != 0
+                    {
+                        return;
+                    }
+                    let mut committed = true;
                     if !slots.is_empty() {
-                        let (cx, cz) = (
-                            x.div_euclid(crate::world::CHUNK_WIDTH as i32),
-                            z.div_euclid(crate::world::CHUNK_DEPTH as i32),
-                        );
-                        let (bx, by, bz) = (
-                            x.rem_euclid(crate::world::CHUNK_WIDTH as i32) as u8,
-                            y as i16,
-                            z.rem_euclid(crate::world::CHUNK_DEPTH as i32) as u8,
-                        );
-                        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                            if let Some(entry) = chunk.get_block_entity(bx, by, bz).cloned() {
-                                if let crate::block_entity::BlockEntity::Chest(mut chest_be) = entry
-                                {
-                                    for (i, slot) in slots.iter().enumerate() {
-                                        if i < chest_be.inventory.slots.len() {
-                                            chest_be.inventory.slots[i] =
-                                                slot.as_ref().and_then(|w| w.to_stack());
-                                        }
-                                    }
-                                    let _ = chunk.insert_block_entity(
-                                        bx,
-                                        by,
-                                        bz,
-                                        crate::block_entity::BlockEntity::Chest(chest_be),
-                                    );
-                                }
-                            }
-                        }
+                        let stacks: Vec<Option<crate::inventory::ItemStack>> = slots
+                            .iter()
+                            .map(|slot| slot.as_ref().and_then(|wire| wire.to_stack()))
+                            .collect();
+                        committed =
+                            crate::container_sessions::ContainerSessionManager::set_container_slots(
+                                &mut self.chunk_manager,
+                                x,
+                                y,
+                                z,
+                                &stacks,
+                            );
+                    }
+                    if !committed {
+                        return;
+                    }
+                    if let Some(entity) = self.chunk_manager.get_block_entity_mut(x, y, z) {
+                        entity.set_revision(revision);
                     }
                     self.container_target = Some((x, y, z));
                     self.open_inventory();
                 }
             }
             NetworkInbound::ContainerClickResult {
-                dimension: _,
+                dimension,
                 success,
-                slot_index,
-                slot,
+                slot_index: _,
+                slot: _,
                 dragged,
             } => {
-                if success {
-                    // Apply the result to the client-side UI
-                    if let Some(pos) = self.container_target {
-                        let (cx, cz) = (
-                            pos.0.div_euclid(crate::world::CHUNK_WIDTH as i32),
-                            pos.2.div_euclid(crate::world::CHUNK_DEPTH as i32),
-                        );
-                        let (bx, by, bz) = (
-                            pos.0.rem_euclid(crate::world::CHUNK_WIDTH as i32) as u8,
-                            pos.1 as i16,
-                            pos.2.rem_euclid(crate::world::CHUNK_DEPTH as i32) as u8,
-                        );
-                        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                            if let Some(entry) = chunk.get_block_entity(bx, by, bz).cloned() {
-                                if let crate::block_entity::BlockEntity::Chest(mut chest_be) = entry
-                                {
-                                    chest_be.inventory.slots[slot_index as usize] =
-                                        slot.and_then(|w| w.to_stack());
-                                    let _ = chunk.insert_block_entity(
-                                        bx,
-                                        by,
-                                        bz,
-                                        crate::block_entity::BlockEntity::Chest(chest_be),
-                                    );
-                                }
-                            }
-                        }
-                    }
+                if success
+                    && dimension == self.current_dimension as u8
+                    && self.container_target.is_some()
+                {
+                    // The click result intentionally carries no authoritative
+                    // revision.  The paired ContainerSlotUpdate/BlockEntityDelta
+                    // is the only source allowed to mutate mirrored slots;
+                    // applying this payload here could reintroduce an older value
+                    // when reliable packets are retried or reordered.
                     self.inventory.dragged = dragged.and_then(|w| w.to_stack());
                 }
             }
             NetworkInbound::ContainerSlotUpdate {
-                dimension: _,
-                revision: _,
+                dimension,
+                revision,
                 x,
                 y,
                 z,
                 slot_index,
                 slot,
             } => {
-                if let Some(pos) = self.container_target {
-                    if pos == (x, y, z) {
-                        let (cx, cz) = (
-                            x.div_euclid(crate::world::CHUNK_WIDTH as i32),
-                            z.div_euclid(crate::world::CHUNK_DEPTH as i32),
-                        );
-                        let (bx, by, bz) = (
-                            x.rem_euclid(crate::world::CHUNK_WIDTH as i32) as u8,
-                            y as i16,
-                            z.rem_euclid(crate::world::CHUNK_DEPTH as i32) as u8,
-                        );
-                        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                            if let Some(entry) = chunk.get_block_entity(bx, by, bz).cloned() {
-                                if let crate::block_entity::BlockEntity::Chest(mut chest_be) = entry
-                                {
-                                    chest_be.inventory.slots[slot_index as usize] =
-                                        slot.and_then(|w| w.to_stack());
-                                    let _ = chunk.insert_block_entity(
-                                        bx,
-                                        by,
-                                        bz,
-                                        crate::block_entity::BlockEntity::Chest(chest_be),
-                                    );
-                                }
-                            }
+                if dimension != self.current_dimension as u8
+                    || self.container_target != Some((x, y, z))
+                {
+                    return;
+                }
+                let current_revision = self
+                    .chunk_manager
+                    .get_block_entity(x, y, z)
+                    .map(crate::block_entity::BlockEntity::revision)
+                    .unwrap_or(0);
+                if !container_revision_is_newer(current_revision, revision) {
+                    return;
+                }
+                if let Some(mut slots) =
+                    crate::container_sessions::ContainerSessionManager::get_container_slots(
+                        &self.chunk_manager,
+                        x,
+                        y,
+                        z,
+                    )
+                {
+                    if (slot_index as usize) < slots.len() {
+                        slots[slot_index as usize] = slot.and_then(|wire| wire.to_stack());
+                        if !crate::container_sessions::ContainerSessionManager::set_container_slots(
+                            &mut self.chunk_manager,
+                            x,
+                            y,
+                            z,
+                            &slots,
+                        ) {
+                            return;
+                        }
+                        if let Some(entity) = self.chunk_manager.get_block_entity_mut(x, y, z) {
+                            entity.set_revision(revision);
                         }
                     }
                 }
@@ -9858,8 +9958,51 @@ impl State {
                 )
             }));
             let update = self.redstone.tick(&mut self.chunk_manager, &occupants);
+            let observer_pulses = update.observer_pulses as u64;
             self.apply_redstone_update(update);
+            self.perf_counters.observer_pulses = self
+                .perf_counters
+                .observer_pulses
+                .saturating_add(observer_pulses);
+            self.update_hopper_power_states();
+            let hopper_result = crate::world_tick::tick_hoppers_with_entities(
+                &mut self.chunk_manager,
+                Some(&mut self.entity_manager),
+                64,
+            );
+            self.perf_counters.hopper_transfers = self
+                .perf_counters
+                .hopper_transfers
+                .saturating_add(hopper_result.transfers as u64);
+            self.perf_counters.hopper_container_checks = self
+                .perf_counters
+                .hopper_container_checks
+                .saturating_add(hopper_result.container_checks as u64);
+            if hopper_result.budget_exhausted {
+                self.perf_counters.hopper_budget_exhausted =
+                    self.perf_counters.hopper_budget_exhausted.saturating_add(1);
+            }
+            for (x, y, z) in hopper_result.changed_positions {
+                self.redstone
+                    .mark_container_changed(&self.chunk_manager, (x, y, z));
+                let entity = self.chunk_manager.get_block_entity(x, y, z).cloned();
+                self.broadcast_block_entity_delta(x, y, z, entity);
+            }
         }
+        self.perf_counters.redstone_scheduled_backlog = self.redstone.scheduled_len() as u64;
+        self.perf_counters.observer_pending_pulses = self
+            .chunk_manager
+            .chunks
+            .values()
+            .flat_map(|chunk| chunk.iter_block_entities())
+            .filter(|(_, entity)| {
+                matches!(
+                    entity,
+                    crate::block_entity::BlockEntity::Observer(observer)
+                        if observer.pending_pulse > 0
+                )
+            })
+            .count() as u64;
         if redstone_steps == 4 {
             self.redstone_tick_timer = self.redstone_tick_timer.min(0.05);
         }
@@ -11056,6 +11199,42 @@ impl State {
         }
     }
 
+    fn update_hopper_power_states(&mut self) {
+        let mut positions = Vec::new();
+        for (&(cx, cz), chunk) in &self.chunk_manager.chunks {
+            for (local, entity) in chunk.iter_block_entities() {
+                if matches!(entity, crate::block_entity::BlockEntity::Hopper(_)) {
+                    positions.push((
+                        cx * CHUNK_WIDTH as i32 + local.0 as i32,
+                        local.1 as i32,
+                        cz * CHUNK_DEPTH as i32 + local.2 as i32,
+                    ));
+                }
+            }
+        }
+        positions.sort_unstable();
+        for (x, y, z) in positions {
+            let powered = self
+                .redstone
+                .block_state_at(&self.chunk_manager, (x, y, z))
+                .power
+                > 0;
+            if let Some(crate::block_entity::BlockEntity::Hopper(hopper)) =
+                self.chunk_manager.get_block_entity_mut(x, y, z)
+            {
+                if hopper.is_powered != powered {
+                    hopper.is_powered = powered;
+                    hopper.revision = hopper.revision.wrapping_add(1);
+                    self.chunk_manager.mark_block_entity_dirty(x, z);
+                    self.redstone
+                        .mark_container_changed(&self.chunk_manager, (x, y, z));
+                    let entity = self.chunk_manager.get_block_entity(x, y, z).cloned();
+                    self.broadcast_block_entity_delta(x, y, z, entity);
+                }
+            }
+        }
+    }
+
     fn update_furnaces(&mut self, dt: f32) {
         if !self.is_authoritative() {
             return;
@@ -11065,6 +11244,7 @@ impl State {
             self.furnace_tick_timer -= 0.05;
 
             let mut block_changes = Vec::new();
+            let mut entity_changes = Vec::new();
             for ((cx, cz), chunk) in self.chunk_manager.chunks.iter_mut() {
                 let chunk_x = *cx;
                 let chunk_z = *cz;
@@ -11077,6 +11257,7 @@ impl State {
                     if let crate::block_entity::BlockEntity::Furnace(mut furnace) = entity {
                         let tick_res = furnace.tick(&self.recipe_manager);
                         if tick_res.slot_changed || tick_res.lit_changed {
+                            furnace.revision = furnace.revision.wrapping_add(1);
                             let is_lit = furnace.is_lit;
                             let slots_wire: Vec<_> = furnace
                                 .slots
@@ -11087,15 +11268,13 @@ impl State {
                                 })
                                 .collect();
 
-                            let _ = chunk.insert_block_entity(
-                                bx,
-                                by,
-                                bz,
-                                crate::block_entity::BlockEntity::Furnace(furnace),
-                            );
+                            let updated_entity =
+                                crate::block_entity::BlockEntity::Furnace(furnace.clone());
+                            let _ = chunk.insert_block_entity(bx, by, bz, updated_entity.clone());
                             let world_x = chunk_x * 16 + bx as i32;
                             let world_y = by as i32;
                             let world_z = chunk_z * 16 + bz as i32;
+                            entity_changes.push(((world_x, world_y, world_z), updated_entity));
 
                             if tick_res.lit_changed {
                                 let new_block = if is_lit {
@@ -11106,17 +11285,36 @@ impl State {
                                 block_changes.push(((world_x, world_y, world_z), new_block));
                             }
 
-                            if let Some(session) = self
+                            let has_session = self
                                 .container_sessions
                                 .sessions
                                 .iter()
-                                .find(|s| s.x == world_x && s.y == world_y && s.z == world_z)
-                                .cloned()
+                                .filter(|session| {
+                                    session.dimension == self.current_dimension as u8
+                                        && session.x == world_x
+                                        && session.y == world_y
+                                        && session.z == world_z
+                                })
+                                .next()
+                                .is_some();
+                            for session in
+                                self.container_sessions
+                                    .sessions
+                                    .iter_mut()
+                                    .filter(|session| {
+                                        session.dimension == self.current_dimension as u8
+                                            && session.x == world_x
+                                            && session.y == world_y
+                                            && session.z == world_z
+                                    })
                             {
+                                session.revision = furnace.revision;
+                            }
+                            if has_session {
                                 for slot_idx in 0..3 {
                                     self.network.broadcast_container_slot_update(
-                                        session.dimension,
-                                        session.revision,
+                                        self.current_dimension as u8,
+                                        furnace.revision,
                                         world_x,
                                         world_y,
                                         world_z,
@@ -11132,6 +11330,12 @@ impl State {
 
             if !block_changes.is_empty() {
                 self.apply_block_changes(&block_changes);
+            }
+            for ((x, y, z), entity) in entity_changes {
+                self.chunk_manager.mark_block_entity_dirty(x, z);
+                self.redstone
+                    .mark_container_changed(&self.chunk_manager, (x, y, z));
+                self.broadcast_block_entity_delta(x, y, z, Some(entity));
             }
         }
     }
@@ -11963,6 +12167,16 @@ impl State {
             self.broadcast_block_change(x, y, z, block);
         }
 
+        // Observer baseline/pulse revisions are authoritative block-entity
+        // mutations even though the observer block id itself stays unchanged.
+        // Replicate them through the same chunk-revision path as container
+        // updates so reconnecting/joining clients cannot retain stale pulse
+        // state.
+        for ((x, y, z), entity) in update.block_entity_changes {
+            self.chunk_manager.mark_block_entity_dirty(x, z);
+            self.broadcast_block_entity_delta(x, y, z, Some(entity));
+        }
+
         for action in update.actions {
             match action {
                 crate::redstone::RedstoneAction::Explode { pos } => {
@@ -11992,31 +12206,7 @@ impl State {
                     facing,
                     dropper,
                 } => {
-                    let delta = facing.delta();
-                    let spawn_pos = Vec3::new(
-                        pos.0 as f32 + 0.5 + delta.0 as f32 * 0.7,
-                        pos.1 as f32 + 0.5,
-                        pos.2 as f32 + 0.5 + delta.2 as f32 * 0.7,
-                    );
-                    if dropper {
-                        self.spawn_dropped_item(Item::Redstone, spawn_pos);
-                    } else {
-                        let id = self
-                            .entity_manager
-                            .spawn(crate::entity::EntityType::Arrow, spawn_pos);
-                        if let Some(arrow) = self
-                            .entity_manager
-                            .entities
-                            .iter_mut()
-                            .find(|entity| entity.id == id)
-                        {
-                            arrow.velocity = Vec3::new(delta.0 as f32, 0.0, delta.2 as f32) * 18.0;
-                            arrow.friendly_projectile = true;
-                            arrow.projectile_damage = 4.0;
-                        }
-                        self.audio_manager
-                            .play_sound(crate::audio::SoundId::ArrowShoot);
-                    }
+                    self.execute_container_dispense_action(pos, facing, dropper);
                 }
                 crate::redstone::RedstoneAction::PlayNote { pos, note } => {
                     let sound_pos =
@@ -12036,6 +12226,305 @@ impl State {
 
         if update.propagation_overflowed {
             eprintln!("[Redstone] propagation pass limit reached; continuing next tick");
+        }
+    }
+
+    fn consume_container_slot_one(&mut self, pos: (i32, i32, i32), slot: usize) -> bool {
+        let Some(entity) = self
+            .chunk_manager
+            .get_block_entity(pos.0, pos.1, pos.2)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(stack) = entity.get_stack(slot).copied() else {
+            return false;
+        };
+        let mut updated = entity;
+        updated.set_stack(
+            slot,
+            (stack.count > 1).then_some(crate::inventory::ItemStack {
+                count: stack.count - 1,
+                ..stack
+            }),
+        );
+        self.chunk_manager
+            .set_block_entity(pos.0, pos.1, pos.2, Some(updated));
+        self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
+        true
+    }
+
+    fn replace_container_slot(
+        &mut self,
+        pos: (i32, i32, i32),
+        slot: usize,
+        stack: Option<crate::inventory::ItemStack>,
+    ) -> bool {
+        let Some(mut entity) = self
+            .chunk_manager
+            .get_block_entity(pos.0, pos.1, pos.2)
+            .cloned()
+        else {
+            return false;
+        };
+        entity.set_stack(slot, stack);
+        self.chunk_manager
+            .set_block_entity(pos.0, pos.1, pos.2, Some(entity));
+        self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
+        true
+    }
+
+    fn apply_automation_block_change(&mut self, pos: (i32, i32, i32), block: BlockType) {
+        let old = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+        if old == block {
+            return;
+        }
+        self.chunk_manager.set_block(pos.0, pos.1, pos.2, block);
+        let mut dirty_chunks = std::collections::HashSet::new();
+        if block.properties().is_solid {
+            crate::lighting::update_sky_light_after_placed(
+                &mut self.chunk_manager,
+                pos.0,
+                pos.1,
+                pos.2,
+                &mut dirty_chunks,
+            );
+        } else {
+            crate::lighting::update_sky_light_after_removed(
+                &mut self.chunk_manager,
+                pos.0,
+                pos.1,
+                pos.2,
+                &mut dirty_chunks,
+            );
+        }
+        if block.properties().light_emission > 0 {
+            crate::lighting::update_block_light_after_placed(
+                &mut self.chunk_manager,
+                pos.0,
+                pos.1,
+                pos.2,
+                block.properties().light_emission,
+                &mut dirty_chunks,
+            );
+        }
+        mark_block_mesh_dependencies(&mut dirty_chunks, pos.0, pos.2);
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Redstone);
+        self.redstone
+            .on_block_changed(&self.chunk_manager, pos, crate::redstone::Direction::North);
+        self.broadcast_block_change(pos.0, pos.1, pos.2, block);
+    }
+
+    pub fn execute_container_dispense_action(
+        &mut self,
+        pos: (i32, i32, i32),
+        facing: crate::redstone::Direction,
+        is_dropper: bool,
+    ) {
+        use crate::inventory::{Item, ItemStack};
+
+        if !self.is_authoritative() {
+            return;
+        }
+
+        let delta = facing.delta();
+        let front_pos = (pos.0 + delta.0, pos.1 + delta.1, pos.2 + delta.2);
+        // A loaded source must not resolve an unloaded destination as Air and
+        // then consume/spawn an item across the streaming boundary.
+        if !self
+            .chunk_manager
+            .is_block_loaded(front_pos.0, front_pos.1, front_pos.2)
+        {
+            return;
+        }
+        let spawn_pos = Vec3::new(
+            pos.0 as f32 + 0.5 + delta.0 as f32 * 0.7,
+            pos.1 as f32 + 0.5 + delta.1 as f32 * 0.7,
+            pos.2 as f32 + 0.5 + delta.2 as f32 * 0.7,
+        );
+
+        let seed = (pos.0 as u64)
+            ^ ((pos.1 as u64) << 16)
+            ^ ((pos.2 as u64) << 32)
+            ^ self.redstone.current_tick();
+
+        let Some(source) = self
+            .chunk_manager
+            .get_block_entity(pos.0, pos.1, pos.2)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(slot_idx) = source.select_random_non_empty_slot(seed) else {
+            return;
+        };
+        let Some(stack) = source.get_stack(slot_idx).copied() else {
+            return;
+        };
+        let one = ItemStack { count: 1, ..stack };
+        let mut changed = false;
+        let mut target_changed = false;
+
+        if is_dropper {
+            // A dropper first attempts a sided, metadata-preserving insertion;
+            // a full/invalid target falls back to dropping the same one-item
+            // stack.  Both outcomes are successful and consume exactly one.
+            let target = self
+                .chunk_manager
+                .get_block_entity(front_pos.0, front_pos.1, front_pos.2)
+                .cloned();
+            if let Some(target) = target {
+                let mut target_after = target;
+                if target_after.try_insert_item(Some(facing.opposite()), one) {
+                    let mut source_after = source.clone();
+                    source_after.set_stack(
+                        slot_idx,
+                        (stack.count > 1).then_some(ItemStack {
+                            count: stack.count - 1,
+                            ..stack
+                        }),
+                    );
+                    self.chunk_manager
+                        .set_block_entity(pos.0, pos.1, pos.2, Some(source_after));
+                    self.chunk_manager.set_block_entity(
+                        front_pos.0,
+                        front_pos.1,
+                        front_pos.2,
+                        Some(target_after),
+                    );
+                    changed = true;
+                    target_changed = true;
+                }
+            }
+            if !changed {
+                self.spawn_dropped_stack(one, spawn_pos);
+                self.consume_container_slot_one(pos, slot_idx);
+                changed = true;
+            }
+        } else {
+            match stack.item {
+                Item::Arrow => {
+                    let id = self
+                        .entity_manager
+                        .spawn(crate::entity::EntityType::Arrow, spawn_pos);
+                    if let Some(arrow) = self.entity_manager.get_by_id_mut(id) {
+                        arrow.velocity =
+                            Vec3::new(delta.0 as f32, delta.1 as f32, delta.2 as f32) * 18.0;
+                        arrow.friendly_projectile = true;
+                        arrow.projectile_damage = 4.0;
+                    }
+                    self.audio_manager
+                        .play_sound(crate::audio::SoundId::ArrowShoot);
+                    self.consume_container_slot_one(pos, slot_idx);
+                    changed = true;
+                }
+                Item::SplashPotion => {
+                    let id = self
+                        .entity_manager
+                        .spawn(crate::entity::EntityType::SplashPotion, spawn_pos);
+                    if let Some(potion) = self.entity_manager.get_by_id_mut(id) {
+                        potion.velocity =
+                            Vec3::new(delta.0 as f32, delta.1 as f32, delta.2 as f32) * 10.0;
+                        potion.potion = stack.potion;
+                    }
+                    self.consume_container_slot_one(pos, slot_idx);
+                    changed = true;
+                }
+                Item::Bucket => {
+                    let filled =
+                        match self
+                            .chunk_manager
+                            .get_block(front_pos.0, front_pos.1, front_pos.2)
+                        {
+                            BlockType::Water => Some(Item::WaterBucket),
+                            BlockType::Lava => Some(Item::LavaBucket),
+                            _ => None,
+                        };
+                    if let Some(filled) = filled {
+                        self.apply_automation_block_change(front_pos, BlockType::Air);
+                        self.replace_container_slot(
+                            pos,
+                            slot_idx,
+                            Some(ItemStack {
+                                item: filled,
+                                ..stack
+                            }),
+                        );
+                        changed = true;
+                    }
+                }
+                Item::WaterBucket | Item::LavaBucket => {
+                    if self
+                        .chunk_manager
+                        .get_block(front_pos.0, front_pos.1, front_pos.2)
+                        == BlockType::Air
+                    {
+                        let place_block = if stack.item == Item::WaterBucket {
+                            BlockType::Water
+                        } else {
+                            BlockType::Lava
+                        };
+                        self.apply_automation_block_change(front_pos, place_block);
+                        self.replace_container_slot(
+                            pos,
+                            slot_idx,
+                            Some(ItemStack {
+                                item: Item::Bucket,
+                                ..stack
+                            }),
+                        );
+                        changed = true;
+                    }
+                }
+                Item::FlintAndSteel => {
+                    let target =
+                        self.chunk_manager
+                            .get_block(front_pos.0, front_pos.1, front_pos.2);
+                    let below =
+                        self.chunk_manager
+                            .get_block(front_pos.0, front_pos.1 - 1, front_pos.2);
+                    if target == BlockType::Air && below.properties().is_solid {
+                        self.apply_automation_block_change(front_pos, BlockType::Fire);
+                        self.consume_container_slot_one(pos, slot_idx);
+                        changed = true;
+                    }
+                }
+                _ => {
+                    // The item is a valid dispenser payload even when this
+                    // simplified runtime has no special entity for it: drop a
+                    // full metadata-bearing stack item and consume one.
+                    self.spawn_dropped_stack(one, spawn_pos);
+                    self.consume_container_slot_one(pos, slot_idx);
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
+            self.redstone
+                .mark_container_changed(&self.chunk_manager, pos);
+            let entity = self
+                .chunk_manager
+                .get_block_entity(pos.0, pos.1, pos.2)
+                .cloned();
+            self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, entity);
+            if target_changed {
+                self.chunk_manager
+                    .mark_block_entity_dirty(front_pos.0, front_pos.2);
+                self.redstone
+                    .mark_container_changed(&self.chunk_manager, front_pos);
+                let target_entity = self
+                    .chunk_manager
+                    .get_block_entity(front_pos.0, front_pos.1, front_pos.2)
+                    .cloned();
+                self.broadcast_block_entity_delta(
+                    front_pos.0,
+                    front_pos.1,
+                    front_pos.2,
+                    target_entity,
+                );
+            }
         }
     }
 
@@ -12525,11 +13014,22 @@ impl State {
                     return;
                 }
 
-                // Chest-specific: drop inventory before destroying the block.
+                if matches!(
+                    old_block,
+                    BlockType::Chest
+                        | BlockType::EndCityChest
+                        | BlockType::Furnace
+                        | BlockType::FurnaceLit
+                        | BlockType::Hopper
+                        | BlockType::Dispenser
+                        | BlockType::Dropper
+                ) {
+                    self.drop_block_entity_inventory((x, y, z));
+                }
+                // Double chest topology is independent of the inventory drain.
                 if old_block == crate::world::BlockType::Chest {
                     let old_state_raw = self.chunk_manager.get_block_state(x, y, z);
                     let old_state = crate::world::BlockState::decode(old_state_raw);
-                    self.drop_chest_inventory((x, y, z));
                     if old_state.chest_type != crate::world::ChestType::Single {
                         if let Some(partner) =
                             self.double_chest_partner((x, y, z), old_state.chest_type)
@@ -12616,11 +13116,27 @@ impl State {
 
                 let mut dirty_chunks = std::collections::HashSet::new();
                 self.chunk_manager.set_block(x, y, z, block);
-                self.redstone.on_block_changed(
-                    &self.chunk_manager,
-                    (x, y, z),
-                    crate::redstone::Direction::North,
-                );
+                let facing = crate::redstone::Direction::North;
+                if matches!(
+                    block,
+                    BlockType::Hopper
+                        | BlockType::Observer
+                        | BlockType::Dispenser
+                        | BlockType::Dropper
+                ) {
+                    let mut state = crate::world::BlockState::decode(
+                        self.chunk_manager.get_block_state(x, y, z),
+                    );
+                    state.facing = facing;
+                    self.chunk_manager.set_block_state(x, y, z, state.encode());
+                }
+                if let Some(block_entity) = crate::block_entity::default_stub_for_block(block) {
+                    self.chunk_manager
+                        .set_block_entity(x, y, z, Some(block_entity.clone()));
+                    self.broadcast_block_entity_delta(x, y, z, Some(block_entity));
+                }
+                self.redstone
+                    .on_block_changed(&self.chunk_manager, (x, y, z), facing);
                 let properties = block.properties();
                 if properties.is_solid {
                     crate::lighting::update_sky_light_after_placed(
@@ -14231,7 +14747,13 @@ impl State {
                 }
                 if matches!(
                     clicked_block,
-                    BlockType::Chest | BlockType::Furnace | BlockType::FurnaceLit
+                    BlockType::Chest
+                        | BlockType::EndCityChest
+                        | BlockType::Furnace
+                        | BlockType::FurnaceLit
+                        | BlockType::Hopper
+                        | BlockType::Dispenser
+                        | BlockType::Dropper
                 ) {
                     let pos = (
                         hit.block_pos.x as i32,
@@ -14369,11 +14891,20 @@ impl State {
                     if !can_break_block(old_block, self.game_mode) {
                         return;
                     }
-                    // Chest-specific: drop inventory before destroying the block.
-                    if old_block == crate::world::BlockType::Chest {
-                        let old_state_raw = self.chunk_manager.get_block_state(wx, wy, wz);
-                        let old_state = crate::world::BlockState::decode(old_state_raw);
-                        self.drop_chest_inventory((wx, wy, wz));
+                    // Inventory-bearing entities are authoritative state and
+                    // must be drained before the block is removed.  The same
+                    // path is used for every automation container.
+                    if matches!(
+                        old_block,
+                        BlockType::Chest
+                            | BlockType::EndCityChest
+                            | BlockType::Furnace
+                            | BlockType::FurnaceLit
+                            | BlockType::Hopper
+                            | BlockType::Dispenser
+                            | BlockType::Dropper
+                    ) {
+                        self.drop_block_entity_inventory((wx, wy, wz));
                         let affected = self.container_sessions.close_by_block(wx, wy, wz);
                         for pid in affected {
                             if let NetworkHandle::Host { host_to_server, .. } = &self.network {
@@ -14394,6 +14925,10 @@ impl State {
                         if self.container_target == Some((wx, wy, wz)) {
                             self.close_inventory();
                         }
+                    }
+                    if old_block == crate::world::BlockType::Chest {
+                        let old_state_raw = self.chunk_manager.get_block_state(wx, wy, wz);
+                        let old_state = crate::world::BlockState::decode(old_state_raw);
                         // If part of a double chest, revert partner to single.
                         if old_state.chest_type != crate::world::ChestType::Single {
                             if let Some(partner) =
@@ -14702,13 +15237,49 @@ impl State {
                             return;
                         }
 
+                        let placement_facing =
+                            crate::redstone::Direction::from_yaw(self.camera.yaw);
                         self.chunk_manager.set_block(wx, wy, wz, placed_block);
+                        if matches!(
+                            placed_block,
+                            BlockType::Hopper
+                                | BlockType::Observer
+                                | BlockType::Dispenser
+                                | BlockType::Dropper
+                        ) {
+                            let mut state = crate::world::BlockState::decode(
+                                self.chunk_manager.get_block_state(wx, wy, wz),
+                            );
+                            state.facing = placement_facing;
+                            self.chunk_manager
+                                .set_block_state(wx, wy, wz, state.encode());
+                        }
+                        if let Some(mut block_entity) =
+                            crate::block_entity::default_stub_for_block(placed_block)
+                        {
+                            match &mut block_entity {
+                                crate::block_entity::BlockEntity::Hopper(hopper) => {
+                                    hopper.facing = placement_facing;
+                                }
+                                crate::block_entity::BlockEntity::Observer(observer) => {
+                                    observer.facing = placement_facing;
+                                }
+                                _ => {}
+                            }
+                            self.chunk_manager.set_block_entity(
+                                wx,
+                                wy,
+                                wz,
+                                Some(block_entity.clone()),
+                            );
+                            self.broadcast_block_entity_delta(wx, wy, wz, Some(block_entity));
+                        }
                         self.network
                             .send_action(crate::network::protocol::Action::Place);
                         self.redstone.on_block_changed(
                             &self.chunk_manager,
                             (wx, wy, wz),
-                            crate::redstone::Direction::from_yaw(self.camera.yaw),
+                            placement_facing,
                         );
 
                         let sound_pos =
@@ -14899,8 +15470,14 @@ impl State {
                     out_y0 + slot_h,
                 ));
             } else {
-                let container_slots = if self.container_is_double { 54 } else { 27 };
-                let container_rows = container_slots / 9;
+                let container_slots =
+                    crate::container_sessions::ContainerSessionManager::get_slot_count(
+                        &self.chunk_manager,
+                        pos.0,
+                        pos.1,
+                        pos.2,
+                    );
+                let container_rows = container_slots.saturating_add(8) / 9;
                 let x_start = -0.40;
                 let y_start = -0.70 - (container_rows as f32) * (slot_h + gap) - gap;
                 for r in 0..container_rows {
@@ -15032,24 +15609,13 @@ impl State {
             SlotType::AnvilRight => self.anvil.right,
             SlotType::AnvilOutput => self.anvil.output,
             SlotType::ContainerSlot(i) => self.container_target.and_then(|pos| {
-                let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
-                    crate::container_sessions::ContainerSessionManager::get_furnace_slots(
-                        &self.chunk_manager,
-                        pos.0,
-                        pos.1,
-                        pos.2,
-                    )
-                    .and_then(|slots| slots.get(i).copied().flatten())
-                } else {
-                    crate::container_sessions::ContainerSessionManager::get_chest_slots(
-                        &self.chunk_manager,
-                        pos.0,
-                        pos.1,
-                        pos.2,
-                    )
-                    .and_then(|slots| slots.get(i).copied().flatten())
-                }
+                crate::container_sessions::ContainerSessionManager::get_container_slots(
+                    &self.chunk_manager,
+                    pos.0,
+                    pos.1,
+                    pos.2,
+                )
+                .and_then(|slots| slots.get(i).copied().flatten())
             }),
         }
     }
@@ -15076,45 +15642,37 @@ impl State {
             SlotType::AnvilOutput => {}
             SlotType::ContainerSlot(i) => {
                 if let Some(pos) = self.container_target {
-                    let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                    if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
-                        if let Some(mut slots) =
-                            crate::container_sessions::ContainerSessionManager::get_furnace_slots(
-                                &self.chunk_manager,
-                                pos.0,
-                                pos.1,
-                                pos.2,
-                            )
-                        {
-                            if i < 3 {
+                    if let Some(mut slots) =
+                        crate::container_sessions::ContainerSessionManager::get_container_slots(
+                            &self.chunk_manager,
+                            pos.0,
+                            pos.1,
+                            pos.2,
+                        )
+                    {
+                        if i < slots.len() {
+                            let access = self
+                                .chunk_manager
+                                .get_block_entity(pos.0, pos.1, pos.2)
+                                .and_then(crate::block_entity::ContainerAccess::for_entity);
+                            if access.is_some_and(|access| {
+                                stack
+                                    .as_ref()
+                                    .map_or(true, |item| access.can_insert(i, item, None))
+                            }) {
                                 slots[i] = stack;
-                                crate::container_sessions::ContainerSessionManager::set_furnace_slots(
+                                if crate::container_sessions::ContainerSessionManager::set_container_slots(
                                     &mut self.chunk_manager,
                                     pos.0,
                                     pos.1,
                                     pos.2,
                                     &slots,
-                                );
-                            }
-                        }
-                    } else {
-                        if let Some(mut slots) =
-                            crate::container_sessions::ContainerSessionManager::get_chest_slots(
-                                &self.chunk_manager,
-                                pos.0,
-                                pos.1,
-                                pos.2,
-                            )
-                        {
-                            if i < slots.len() {
-                                slots[i] = stack;
-                                crate::container_sessions::ContainerSessionManager::set_chest_slots(
-                                    &mut self.chunk_manager,
-                                    pos.0,
-                                    pos.1,
-                                    pos.2,
-                                    &slots,
-                                );
+                                ) {
+                                    self.redstone
+                                        .mark_container_changed(&self.chunk_manager, pos);
+                                    let entity = self.chunk_manager.get_block_entity(pos.0, pos.1, pos.2).cloned();
+                                    self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, entity);
+                                }
                             }
                         }
                     }
@@ -15132,9 +15690,16 @@ impl State {
             SlotType::AnvilOutput | SlotType::CraftOutput => false,
             SlotType::ContainerSlot(i) => {
                 if let Some(pos) = self.container_target {
-                    let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                    if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) && i == 2 {
+                    let Some(entity) = self.chunk_manager.get_block_entity(pos.0, pos.1, pos.2)
+                    else {
                         return false;
+                    };
+                    let Some(access) = crate::block_entity::ContainerAccess::for_entity(entity)
+                    else {
+                        return false;
+                    };
+                    if let Some(item) = Some(stack) {
+                        return access.can_insert(i, &item, None);
                     }
                 }
                 true
@@ -15350,6 +15915,9 @@ impl State {
                 SlotType::ContainerSlot(slot_index)
                     if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) =>
                 {
+                    let Some(container_pos) = self.container_target else {
+                        return;
+                    };
                     if let crate::state::NetworkHandle::Client { game_to_client, .. } =
                         &self.network
                     {
@@ -15361,6 +15929,15 @@ impl State {
                         let _ = game_to_client.tracked_send(
                             crate::network::client::GameToClient::ContainerClickRequest {
                                 dimension: self.current_dimension as u8,
+                                revision: self
+                                    .chunk_manager
+                                    .get_block_entity(
+                                        container_pos.0,
+                                        container_pos.1,
+                                        container_pos.2,
+                                    )
+                                    .map(crate::block_entity::BlockEntity::revision)
+                                    .unwrap_or(0),
                                 slot_index: slot_index as u16,
                                 is_left,
                                 dragged,
@@ -15730,6 +16307,40 @@ impl State {
         }
         true
     }
+
+    /// Drops and removes any inventory-bearing block entity at `pos` while
+    /// preserving complete stack metadata.  This is shared by chest, furnace,
+    /// hopper, dispenser, and dropper break paths.
+    fn drop_block_entity_inventory(&mut self, pos: (i32, i32, i32)) -> bool {
+        let Some(mut entity) = self
+            .chunk_manager
+            .get_block_entity(pos.0, pos.1, pos.2)
+            .cloned()
+        else {
+            return false;
+        };
+        let stacks = entity.drain_stacks();
+        if stacks.is_empty() {
+            self.chunk_manager
+                .set_block_entity(pos.0, pos.1, pos.2, None);
+            self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
+            self.redstone
+                .mark_container_changed(&self.chunk_manager, pos);
+            self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, None);
+            return false;
+        }
+        let sound_pos = Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
+        for stack in stacks {
+            self.spawn_dropped_stack(stack, sound_pos);
+        }
+        self.chunk_manager
+            .set_block_entity(pos.0, pos.1, pos.2, None);
+        self.chunk_manager.mark_block_entity_dirty(pos.0, pos.2);
+        self.redstone
+            .mark_container_changed(&self.chunk_manager, pos);
+        self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, None);
+        true
+    }
     fn open_chest(&mut self, pos: (i32, i32, i32)) {
         let (cx, cz) = (
             pos.0.div_euclid(crate::world::CHUNK_WIDTH as i32),
@@ -15750,6 +16361,9 @@ impl State {
             entity,
             crate::block_entity::BlockEntity::Chest(_)
                 | crate::block_entity::BlockEntity::Furnace(_)
+                | crate::block_entity::BlockEntity::Hopper(_)
+                | crate::block_entity::BlockEntity::Dispenser(_)
+                | crate::block_entity::BlockEntity::Dropper(_)
         ) {
             return;
         }
@@ -18937,6 +19551,23 @@ impl State {
                         self.debug_str_scratch,
                         "XYZ: {:.3} / {:.3} / {:.3}",
                         pos.x, pos.y, pos.z
+                    );
+                    render_line(
+                        &self.debug_str_scratch,
+                        [1.0, 1.0, 1.0, 1.0],
+                        &mut ui_line_vertices,
+                    );
+
+                    self.debug_str_scratch.clear();
+                    let _ = write!(
+                        self.debug_str_scratch,
+                        "AUTOMATION: MOVES {} / CHECKS {} / PULSES {} / BUDGET {} / REDSTONE Q {} / OBSERVER {}",
+                        self.perf_counters.hopper_transfers,
+                        self.perf_counters.hopper_container_checks,
+                        self.perf_counters.observer_pulses,
+                        self.perf_counters.hopper_budget_exhausted,
+                        self.perf_counters.redstone_scheduled_backlog,
+                        self.perf_counters.observer_pending_pulses
                     );
                     render_line(
                         &self.debug_str_scratch,

@@ -234,6 +234,12 @@ pub enum Item {
     RawFish,
     TropicalFish,
     LilyPad,
+
+    // Automation items appended to preserve every legacy item discriminant.
+    WaterBucket,
+    LavaBucket,
+    Hopper,
+    Observer,
 }
 
 pub const ALL_ITEMS: &[Item] = &[
@@ -447,6 +453,10 @@ pub const ALL_ITEMS: &[Item] = &[
     Item::RawFish,
     Item::TropicalFish,
     Item::LilyPad,
+    Item::WaterBucket,
+    Item::LavaBucket,
+    Item::Hopper,
+    Item::Observer,
 ];
 
 impl Item {
@@ -844,6 +854,22 @@ impl ContainerInventory {
             })
             .sum()
     }
+
+    /// Selects a random non-empty slot index deterministically given a seed value.
+    pub fn select_random_non_empty_slot(&self, seed: u64) -> Option<usize> {
+        let non_empty: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_ref().filter(|s| s.count > 0).map(|_| i))
+            .collect();
+        if non_empty.is_empty() {
+            None
+        } else {
+            let idx = (seed as usize) % non_empty.len();
+            Some(non_empty[idx])
+        }
+    }
 }
 pub(crate) struct StackClickResult {
     pub slot: Option<ItemStack>,
@@ -1025,6 +1051,8 @@ impl Item {
             | Item::DiamondHoe
             | Item::Shears
             | Item::Bucket
+            | Item::WaterBucket
+            | Item::LavaBucket
             | Item::MilkBucket
             | Item::FlintAndSteel
             | Item::Elytra => Some(CreativeTab::Tools),
@@ -1108,7 +1136,9 @@ impl Item {
             | Item::OakTrapdoor
             | Item::Dispenser
             | Item::Dropper
-            | Item::NoteBlock => Some(CreativeTab::Redstone),
+            | Item::NoteBlock
+            | Item::Hopper
+            | Item::Observer => Some(CreativeTab::Redstone),
             Item::Stick
             | Item::Coal
             | Item::IronIngot
@@ -2069,6 +2099,20 @@ impl Item {
                 block_type: None,
                 tex_coords: (1, 11),
             },
+            Item::WaterBucket => ItemProperties {
+                name: "Water Bucket",
+                max_stack: 1,
+                is_block: false,
+                block_type: None,
+                tex_coords: (1, 11),
+            },
+            Item::LavaBucket => ItemProperties {
+                name: "Lava Bucket",
+                max_stack: 1,
+                is_block: false,
+                block_type: None,
+                tex_coords: (1, 11),
+            },
             Item::MilkBucket => ItemProperties {
                 name: "Milk Bucket",
                 max_stack: 1,
@@ -2361,7 +2405,9 @@ impl Item {
             | Item::OakTrapdoor
             | Item::Dispenser
             | Item::Dropper
-            | Item::NoteBlock) => {
+            | Item::NoteBlock
+            | Item::Hopper
+            | Item::Observer) => {
                 let (name, block_type, tex_coords) = match item {
                     Item::RedstoneWire => ("Redstone Wire", BlockType::RedstoneWire, (5, 2)),
                     Item::RedstoneTorch => ("Redstone Torch", BlockType::RedstoneTorch, (6, 2)),
@@ -2380,6 +2426,8 @@ impl Item {
                     Item::Dispenser => ("Dispenser", BlockType::Dispenser, (11, 14)),
                     Item::Dropper => ("Dropper", BlockType::Dropper, (12, 14)),
                     Item::NoteBlock => ("Note Block", BlockType::NoteBlock, (13, 14)),
+                    Item::Hopper => ("Hopper", BlockType::Hopper, (11, 15)),
+                    Item::Observer => ("Observer", BlockType::Observer, (11, 16)),
                     _ => unreachable!(),
                 };
                 ItemProperties {
@@ -2702,6 +2750,8 @@ impl Item {
             BlockType::Dispenser => Item::Dispenser,
             BlockType::Dropper => Item::Dropper,
             BlockType::NoteBlock => Item::NoteBlock,
+            BlockType::Hopper => Item::Hopper,
+            BlockType::Observer => Item::Observer,
             BlockType::SnowLayer => Item::Snow,
             BlockType::Fire => Item::Air,
             BlockType::Netherrack => Item::Netherrack,
@@ -3520,5 +3570,19 @@ mod tests {
         let potion = stack.potion.expect("splash potion metadata");
         assert_eq!(potion.kind, crate::brewing::PotionKind::Water);
         assert!(potion.splash);
+    }
+
+    #[test]
+    fn automation_item_ids_append_without_reindexing_legacy_items() {
+        // The wire/save ID is the enum discriminant.  Keep the catalog and
+        // enum in lock-step, and assert the automation additions are appended
+        // after the legacy catalog rather than silently shifting old saves.
+        assert_eq!(ALL_ITEMS.len(), Item::Observer as usize + 1);
+        for (id, item) in ALL_ITEMS.iter().copied().enumerate() {
+            assert_eq!(item.to_u32(), id as u32);
+            assert_eq!(Item::from_u32(id as u32), Some(item));
+        }
+        assert_eq!(Item::WaterBucket as usize + 3, Item::Observer as usize);
+        assert_eq!(Item::from_u32(Item::Hopper.to_u32()), Some(Item::Hopper));
     }
 }
