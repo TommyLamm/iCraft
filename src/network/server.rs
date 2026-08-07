@@ -9,8 +9,8 @@ use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::time::{self, Instant};
 
 use super::protocol::{
-    Action, EntityStateWire, GameplayRequest, GameplayResponse, LightningStrike, Packet,
-    PlayerEffectWire, PlayerId, RejectReason, PROTOCOL_VERSION,
+    Action, EntityStateWire, GameplayOperation, GameplayRequest, GameplayResponse, LightningStrike,
+    Packet, PlayerEffectWire, PlayerId, RejectReason, RequestId, ServerSequence, PROTOCOL_VERSION,
 };
 use super::transport::Connection;
 
@@ -370,6 +370,76 @@ struct ClientSession {
     state_mailbox: Arc<StateMailbox>,
     catchup_mailbox: Arc<CatchupMailbox>,
     cancel_tx: watch::Sender<bool>,
+    gameplay: GameplaySessionState,
+}
+
+/// Transport-side state for the authoritative gameplay envelope.  The
+/// authority core owns the world mutation, while the network owns the
+/// authenticated identity and bounded replay window needed before/after the
+/// request crosses the host channel.
+#[derive(Debug)]
+struct GameplaySessionState {
+    next_request_id: RequestId,
+    last_client_sequence: u64,
+    last_client_revision: u64,
+    last_server_sequence: ServerSequence,
+    response_cache: VecDeque<GameplayResponse>,
+    in_flight: HashSet<RequestId>,
+    active_container: Option<(u8, i32, i32, i32)>,
+    current_dimension: u8,
+}
+
+impl Default for GameplaySessionState {
+    fn default() -> Self {
+        Self {
+            next_request_id: 1,
+            last_client_sequence: 0,
+            last_client_revision: 0,
+            last_server_sequence: 0,
+            response_cache: VecDeque::with_capacity(crate::authority::RESPONSE_CACHE_CAPACITY),
+            in_flight: HashSet::new(),
+            active_container: None,
+            current_dimension: 0,
+        }
+    }
+}
+
+impl GameplaySessionState {
+    fn allocate_request_id(&mut self) -> RequestId {
+        let id = self.next_request_id.max(1);
+        self.next_request_id = id.wrapping_add(1).max(1);
+        id
+    }
+
+    fn allocate_server_sequence(&mut self) -> ServerSequence {
+        self.last_server_sequence = self.last_server_sequence.wrapping_add(1).max(1);
+        self.last_server_sequence
+    }
+
+    fn cache_response(&mut self, response: GameplayResponse) {
+        self.in_flight.remove(&response.request_id);
+        if self.response_cache.len() >= crate::authority::RESPONSE_CACHE_CAPACITY {
+            self.response_cache.pop_front();
+        }
+        self.response_cache.push_back(response);
+    }
+
+    fn cached_response(&self, request_id: RequestId) -> Option<GameplayResponse> {
+        self.response_cache
+            .iter()
+            .find(|response| response.request_id == request_id)
+            .cloned()
+    }
+
+    fn rejection(&mut self, request_id: RequestId, reason: RejectReason) -> GameplayResponse {
+        let response = GameplayResponse {
+            request_id,
+            server_sequence: self.allocate_server_sequence(),
+            outcome: crate::network::protocol::GameplayOutcome::Rejected { reason },
+        };
+        self.cache_response(response.clone());
+        response
+    }
 }
 
 struct RequestRateLimiter {
@@ -800,6 +870,119 @@ impl NetworkServer {
         }
     }
 
+    fn prepare_gameplay_request(
+        session: &mut ClientSession,
+        mut request: GameplayRequest,
+    ) -> GameplayRequest {
+        let state = &mut session.gameplay;
+        if request.request_id == 0 {
+            request.request_id = state.allocate_request_id();
+        } else if request.request_id >= state.next_request_id {
+            state.next_request_id = request.request_id.wrapping_add(1).max(1);
+        }
+        if request.client_sequence == 0 {
+            request.client_sequence = state.last_client_sequence.wrapping_add(1).max(1);
+        }
+        // The connection, rather than the packet, is the authenticated owner.
+        request.session_id = session.id;
+        if request.dimension <= 2 {
+            state.current_dimension = request.dimension;
+        }
+        request
+    }
+
+    fn legacy_gameplay_request(
+        session: &mut ClientSession,
+        dimension: u8,
+        client_revision: u64,
+        operation: GameplayOperation,
+    ) -> GameplayRequest {
+        let session_id = session.id;
+        Self::prepare_gameplay_request(
+            session,
+            GameplayRequest {
+                request_id: 0,
+                client_sequence: 0,
+                session_id,
+                dimension,
+                client_revision,
+                operation,
+            },
+        )
+    }
+
+    /// Apply transport/session gates once for both native envelopes and legacy
+    /// adapters. A rejection is sent with a real server sequence and cached;
+    /// accepted requests are forwarded exactly once to the authority channel.
+    async fn route_gameplay_request(
+        sessions: &Sessions,
+        id: PlayerId,
+        mut request: GameplayRequest,
+        request_rate: &mut RequestRateLimiter,
+        server_to_host: &std_mpsc::Sender<ServerToHost>,
+    ) -> Result<(), String> {
+        let mut immediate_response = None;
+        let mut forward = None;
+        {
+            let mut sessions_guard = sessions.lock().await;
+            let Some(session) = sessions_guard.get_mut(&id) else {
+                return Err("authenticated session disappeared".into());
+            };
+            request = Self::prepare_gameplay_request(session, request);
+            let state = &mut session.gameplay;
+
+            if let Some(cached) = state.cached_response(request.request_id) {
+                immediate_response = Some(cached);
+            } else if state.in_flight.contains(&request.request_id) {
+                // The first copy is still being processed by the authority;
+                // retransmission remains idempotent and needs no second event.
+                return Ok(());
+            } else if let Err(reason) = request.validate_bounds() {
+                immediate_response = Some(state.rejection(request.request_id, reason));
+            } else if request.client_sequence <= state.last_client_sequence {
+                immediate_response =
+                    Some(state.rejection(request.request_id, RejectReason::OutOfOrder));
+            } else if request.client_revision < state.last_client_revision {
+                immediate_response =
+                    Some(state.rejection(request.request_id, RejectReason::InvalidRevision));
+            } else if !request_rate.allow() {
+                immediate_response =
+                    Some(state.rejection(request.request_id, RejectReason::RateLimited));
+            } else {
+                state.last_client_sequence = request.client_sequence;
+                state.last_client_revision = request.client_revision;
+                state.in_flight.insert(request.request_id);
+                forward = Some(request);
+            }
+        }
+
+        if let Some(response) = immediate_response {
+            let failed = Self::send_to(
+                sessions,
+                id,
+                Packet::GameplayResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    response,
+                },
+            )
+            .await;
+            if !failed.is_empty() {
+                return Err("gameplay response queue is unavailable".into());
+            }
+            return Ok(());
+        }
+
+        if let Some(request) = forward {
+            if server_to_host
+                .send(ServerToHost::GameplayRequest { id, request })
+                .is_err()
+            {
+                return Err("host channel closed (GameplayRequest)".into());
+            }
+        }
+        Ok(())
+    }
+
     async fn run_client(
         mut connection: Connection,
         seed: u64,
@@ -1026,6 +1209,7 @@ impl NetworkServer {
                 state_mailbox: Arc::clone(&state_mailbox),
                 catchup_mailbox: Arc::clone(&catchup_mailbox),
                 cancel_tx,
+                gameplay: GameplaySessionState::default(),
             },
         );
         let mut roster: Vec<(PlayerId, String)> = sessions
@@ -1097,57 +1281,87 @@ impl NetworkServer {
                                 break;
                             }
                         }
-                        Ok(Ok(Packet::GameplayRequest { mut request, .. })) => {
-                            if !request_rate.allow() {
-                                let response = GameplayResponse {
-                                    request_id: request.request_id,
-                                    server_sequence: 0,
-                                    outcome: crate::network::protocol::GameplayOutcome::Rejected {
-                                        reason: RejectReason::RateLimited,
-                                    },
-                                };
-                                if !Self::send_to(
-                                    &sessions,
-                                    id,
-                                    Packet::GameplayResponse {
-                                        protocol_version: PROTOCOL_VERSION,
-                                        response,
-                                    },
-                                )
-                                .await
-                                .is_empty()
-                                {
-                                    disconnect_reason = "request rate limit response failed".into();
-                                    break;
-                                }
-                                continue;
-                            }
-                            if request.encoded_len() > crate::network::protocol::MAX_REQUEST_BYTES {
-                                disconnect_reason = "gameplay request exceeds maximum size".into();
-                                break;
-                            }
-                            request.session_id = id;
-                            if server_to_host
-                                .send(ServerToHost::GameplayRequest { id, request })
-                                .is_err()
+                        Ok(Ok(Packet::GameplayRequest { request, .. })) => {
+                            if let Err(reason) = Self::route_gameplay_request(
+                                &sessions,
+                                id,
+                                request,
+                                &mut request_rate,
+                                &server_to_host,
+                            )
+                            .await
                             {
-                                disconnect_reason = "host channel closed (GameplayRequest)".into();
+                                disconnect_reason = reason;
                                 break;
                             }
                         }
-                        Ok(Ok(Packet::BlockChange { x, y, z, block, state, .. })) => {
-                            if server_to_host.send(ServerToHost::ClientBlockChange {
-                                id, x, y, z, block, state,
-                            }).is_err() {
-                                disconnect_reason = "host channel closed (ClientBlockChange)".into();
+                        Ok(Ok(Packet::BlockChange {
+                            dimension,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            block,
+                            ..
+                        })) => {
+                            let request = {
+                                let mut sessions_guard = sessions.lock().await;
+                                let Some(session) = sessions_guard.get_mut(&id) else {
+                                    disconnect_reason = "authenticated session disappeared".into();
+                                    break;
+                                };
+                                Self::legacy_gameplay_request(
+                                    session,
+                                    dimension,
+                                    revision,
+                                    GameplayOperation::BlockUse { x, y, z, block },
+                                )
+                            };
+                            if let Err(reason) = Self::route_gameplay_request(
+                                &sessions,
+                                id,
+                                request,
+                                &mut request_rate,
+                                &server_to_host,
+                            )
+                            .await
+                            {
+                                disconnect_reason = reason;
                                 break;
                             }
                         }
-                        Ok(Ok(Packet::BlockActionRequest { action, x, y, z, block, held_item, .. })) => {
-                            if server_to_host.send(ServerToHost::ClientBlockAction {
-                                id, action, x, y, z, block, held_item,
-                            }).is_err() {
-                                disconnect_reason = "host channel closed (ClientBlockAction)".into();
+                        Ok(Ok(Packet::BlockActionRequest {
+                            action: _action,
+                            x,
+                            y,
+                            z,
+                            block,
+                            held_item: _held_item,
+                            ..
+                        })) => {
+                            let request = {
+                                let mut sessions_guard = sessions.lock().await;
+                                let Some(session) = sessions_guard.get_mut(&id) else {
+                                    disconnect_reason = "authenticated session disappeared".into();
+                                    break;
+                                };
+                                Self::legacy_gameplay_request(
+                                    session,
+                                    session.gameplay.current_dimension,
+                                    session.gameplay.last_client_revision,
+                                    GameplayOperation::BlockUse { x, y, z, block },
+                                )
+                            };
+                            if let Err(reason) = Self::route_gameplay_request(
+                                &sessions,
+                                id,
+                                request,
+                                &mut request_rate,
+                                &server_to_host,
+                            )
+                            .await
+                            {
+                                disconnect_reason = reason;
                                 break;
                             }
                         }
@@ -1182,26 +1396,148 @@ impl NetworkServer {
                             }
                         }
                         Ok(Ok(Packet::SleepRequest { x, y, z, .. })) => {
-                            if server_to_host.send(ServerToHost::ClientSleepRequest { id, bed_x: x, bed_y: y, bed_z: z }).is_err() {
-                                disconnect_reason = "host channel closed (ClientSleepRequest)".into();
+                            let request = {
+                                let mut sessions_guard = sessions.lock().await;
+                                let Some(session) = sessions_guard.get_mut(&id) else {
+                                    disconnect_reason = "authenticated session disappeared".into();
+                                    break;
+                                };
+                                let dimension = session.gameplay.current_dimension;
+                                let revision = session.gameplay.last_client_revision;
+                                Self::legacy_gameplay_request(
+                                    session,
+                                    dimension,
+                                    revision,
+                                    GameplayOperation::Sleep { x, y, z },
+                                )
+                            };
+                            if let Err(reason) = Self::route_gameplay_request(
+                                &sessions,
+                                id,
+                                request,
+                                &mut request_rate,
+                                &server_to_host,
+                            )
+                            .await
+                            {
+                                disconnect_reason = reason;
                                 break;
                             }
                         }
                         Ok(Ok(Packet::ContainerOpenRequest { dimension, x, y, z, .. })) => {
-                            if server_to_host.send(ServerToHost::ContainerOpenRequest { id, dimension, x, y, z }).is_err() {
-                                disconnect_reason = "host channel closed (ContainerOpenRequest)".into();
+                            let request = {
+                                let mut sessions_guard = sessions.lock().await;
+                                let Some(session) = sessions_guard.get_mut(&id) else {
+                                    disconnect_reason = "authenticated session disappeared".into();
+                                    break;
+                                };
+                                session.gameplay.active_container = Some((dimension, x, y, z));
+                                Self::legacy_gameplay_request(
+                                    session,
+                                    dimension,
+                                    session.gameplay.last_client_revision,
+                                    GameplayOperation::Container {
+                                        action: 0,
+                                        x,
+                                        y,
+                                        z,
+                                        slot: 0,
+                                    },
+                                )
+                            };
+                            if let Err(reason) = Self::route_gameplay_request(
+                                &sessions,
+                                id,
+                                request,
+                                &mut request_rate,
+                                &server_to_host,
+                            )
+                            .await
+                            {
+                                disconnect_reason = reason;
                                 break;
                             }
                         }
-                        Ok(Ok(Packet::ContainerClickRequest { dimension, revision, slot_index, is_left, dragged, .. })) => {
-                            if server_to_host.send(ServerToHost::ContainerClickRequest { id, dimension, revision, slot_index, is_left, dragged }).is_err() {
-                                disconnect_reason = "host channel closed (ContainerClickRequest)".into();
+                        Ok(Ok(Packet::ContainerClickRequest {
+                            dimension,
+                            revision,
+                            slot_index,
+                            is_left: _is_left,
+                            dragged: _dragged,
+                            ..
+                        })) => {
+                            let request = {
+                                let mut sessions_guard = sessions.lock().await;
+                                let Some(session) = sessions_guard.get_mut(&id) else {
+                                    disconnect_reason = "authenticated session disappeared".into();
+                                    break;
+                                };
+                                let (_active_dimension, x, y, z) = session
+                                    .gameplay
+                                    .active_container
+                                    .unwrap_or((dimension, 0, 0, 0));
+                                Self::legacy_gameplay_request(
+                                    session,
+                                    dimension,
+                                    revision,
+                                    GameplayOperation::Container {
+                                        // The legacy boolean selects click
+                                        // semantics, while the envelope action
+                                        // identifies the container operation.
+                                        // Both left and right clicks are action 1.
+                                        action: 1,
+                                        x,
+                                        y,
+                                        z,
+                                        slot: slot_index,
+                                    },
+                                )
+                            };
+                            if let Err(reason) = Self::route_gameplay_request(
+                                &sessions,
+                                id,
+                                request,
+                                &mut request_rate,
+                                &server_to_host,
+                            )
+                            .await
+                            {
+                                disconnect_reason = reason;
                                 break;
                             }
                         }
                         Ok(Ok(Packet::ContainerClose { dimension, x, y, z, .. })) => {
-                            if server_to_host.send(ServerToHost::ContainerClose { id, dimension, x, y, z }).is_err() {
-                                disconnect_reason = "host channel closed (ContainerClose)".into();
+                            let request = {
+                                let mut sessions_guard = sessions.lock().await;
+                                let Some(session) = sessions_guard.get_mut(&id) else {
+                                    disconnect_reason = "authenticated session disappeared".into();
+                                    break;
+                                };
+                                let request = Self::legacy_gameplay_request(
+                                    session,
+                                    dimension,
+                                    session.gameplay.last_client_revision,
+                                    GameplayOperation::Container {
+                                        action: 2,
+                                        x,
+                                        y,
+                                        z,
+                                        slot: 0,
+                                    },
+                                );
+                                session.gameplay.active_container = None;
+                                request
+                            };
+                            if let Err(reason) = Self::route_gameplay_request(
+                                &sessions,
+                                id,
+                                request,
+                                &mut request_rate,
+                                &server_to_host,
+                            )
+                            .await
+                            {
+                                disconnect_reason = reason;
                                 break;
                             }
                         }
@@ -1276,6 +1612,34 @@ impl NetworkServer {
         )
         .await;
         Self::evict_slow_clients(sessions, server_to_host, failed).await;
+    }
+
+    async fn normalize_host_response(
+        sessions: &Sessions,
+        id: PlayerId,
+        mut response: GameplayResponse,
+    ) -> GameplayResponse {
+        let mut sessions_guard = sessions.lock().await;
+        let Some(session) = sessions_guard.get_mut(&id) else {
+            if response.server_sequence == 0 {
+                response.server_sequence = 1;
+            }
+            return response;
+        };
+        let state = &mut session.gameplay;
+        if let Some(cached) = state.cached_response(response.request_id) {
+            return cached;
+        }
+        if response.server_sequence == 0 || response.server_sequence <= state.last_server_sequence {
+            response.server_sequence = state.allocate_server_sequence();
+        } else {
+            state.last_server_sequence = response.server_sequence;
+        }
+        if let crate::network::protocol::GameplayOutcome::Accepted { revision } = response.outcome {
+            state.last_client_revision = state.last_client_revision.max(revision);
+        }
+        state.cache_response(response.clone());
+        response
     }
 
     async fn handle_host_command(&self, command: HostToServer) {
@@ -1575,6 +1939,7 @@ impl NetworkServer {
                 unreachable!("player positions use the latest-wins pose channel")
             }
             HostToServer::SendGameplayResponse { to, response } => {
+                let response = Self::normalize_host_response(&self.sessions, to, response).await;
                 let packet = Packet::GameplayResponse {
                     protocol_version: PROTOCOL_VERSION,
                     response,
@@ -2046,6 +2411,304 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gameplay_requests_are_idempotent_and_rejections_keep_sequences() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client, id) = server.connect("sequencer").await;
+        let request = GameplayRequest {
+            request_id: 700,
+            client_sequence: 1,
+            session_id: 999_999,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+        };
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: request.clone(),
+            })
+            .await
+            .unwrap();
+        let forwarded = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            forwarded,
+            ServerToHost::GameplayRequest { id: event_id, request }
+                if event_id == id
+                    && request.request_id == 700
+                    && request.session_id == id
+                    && request.client_sequence == 1
+        ));
+
+        let accepted = GameplayResponse {
+            request_id: 700,
+            server_sequence: 40,
+            outcome: crate::network::protocol::GameplayOutcome::Accepted { revision: 5 },
+        };
+        server
+            .host_tx
+            .send(HostToServer::SendGameplayResponse {
+                to: id,
+                response: accepted.clone(),
+            })
+            .unwrap();
+        let first = recv_matching(&mut client, |packet| {
+            matches!(packet, Packet::GameplayResponse { .. })
+        })
+        .await;
+        assert!(matches!(
+            first,
+            Packet::GameplayResponse { response, .. } if response == accepted
+        ));
+
+        // A retransmit is answered from the bounded cache and never forwarded
+        // to the authority a second time.
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: request.clone(),
+            })
+            .await
+            .unwrap();
+        let duplicate = recv_matching(&mut client, |packet| {
+            matches!(packet, Packet::GameplayResponse { .. })
+        })
+        .await;
+        assert!(matches!(
+            duplicate,
+            Packet::GameplayResponse { response, .. } if response == accepted
+        ));
+        assert!(
+            time::timeout(Duration::from_millis(100), async {
+                loop {
+                    if matches!(
+                        server.event_rx.try_recv(),
+                        Ok(ServerToHost::GameplayRequest { .. })
+                    ) {
+                        return true;
+                    }
+                    time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_err(),
+            "duplicate request was forwarded"
+        );
+
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: GameplayRequest {
+                    request_id: 701,
+                    client_sequence: 1,
+                    ..request.clone()
+                },
+            })
+            .await
+            .unwrap();
+        let out_of_order = recv_matching(&mut client, |packet| {
+            matches!(packet, Packet::GameplayResponse { .. })
+        })
+        .await;
+        assert!(matches!(
+            out_of_order,
+            Packet::GameplayResponse { response, .. }
+                if response.server_sequence > accepted.server_sequence
+                    && matches!(
+                        response.outcome,
+                        crate::network::protocol::GameplayOutcome::Rejected {
+                            reason: RejectReason::OutOfOrder
+                        }
+                    )
+        ));
+
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: GameplayRequest {
+                    request_id: 702,
+                    client_sequence: 2,
+                    client_revision: 4,
+                    ..request.clone()
+                },
+            })
+            .await
+            .unwrap();
+        let stale = recv_matching(&mut client, |packet| {
+            matches!(packet, Packet::GameplayResponse { .. })
+        })
+        .await;
+        assert!(matches!(
+            stale,
+            Packet::GameplayResponse { response, .. }
+                if response.server_sequence > accepted.server_sequence
+                    && matches!(
+                        response.outcome,
+                        crate::network::protocol::GameplayOutcome::Rejected {
+                            reason: RejectReason::InvalidRevision
+                        }
+                    )
+        ));
+
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: GameplayRequest {
+                    request_id: 703,
+                    client_sequence: 3,
+                    client_revision: 5,
+                    operation: GameplayOperation::Command {
+                        command: "x".repeat(crate::network::protocol::MAX_COMMAND_BYTES + 1),
+                    },
+                    ..request
+                },
+            })
+            .await
+            .unwrap();
+        let bounds = recv_matching(&mut client, |packet| {
+            matches!(packet, Packet::GameplayResponse { .. })
+        })
+        .await;
+        assert!(matches!(
+            bounds,
+            Packet::GameplayResponse { response, .. }
+                if response.server_sequence > accepted.server_sequence
+                    && matches!(
+                        response.outcome,
+                        crate::network::protocol::GameplayOutcome::Rejected {
+                            reason: RejectReason::StringTooLong
+                        }
+                    )
+        ));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_sleep_and_container_fields_are_preserved_in_envelopes() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client, id) = server.connect("legacy-adapter").await;
+
+        client
+            .send(&Packet::SleepRequest {
+                protocol_version: PROTOCOL_VERSION,
+                x: -3,
+                y: 70,
+                z: 11,
+            })
+            .await
+            .unwrap();
+        let sleep = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            sleep,
+            ServerToHost::GameplayRequest { id: event_id, request }
+                if event_id == id
+                    && request.client_sequence == 1
+                    && matches!(
+                        request.operation,
+                        GameplayOperation::Sleep { x: -3, y: 70, z: 11 }
+                    )
+        ));
+
+        client
+            .send(&Packet::ContainerOpenRequest {
+                protocol_version: PROTOCOL_VERSION,
+                dimension: 1,
+                x: 12,
+                y: 65,
+                z: -8,
+            })
+            .await
+            .unwrap();
+        let open = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            open,
+            ServerToHost::GameplayRequest { id: event_id, request }
+                if event_id == id
+                    && request.dimension == 1
+                    && request.client_sequence == 2
+                    && matches!(
+                        request.operation,
+                        GameplayOperation::Container {
+                            action: 0,
+                            x: 12,
+                            y: 65,
+                            z: -8,
+                            slot: 0,
+                        }
+                    )
+        ));
+
+        client
+            .send(&Packet::ContainerClickRequest {
+                protocol_version: PROTOCOL_VERSION,
+                dimension: 1,
+                revision: 17,
+                slot_index: 4,
+                is_left: true,
+                dragged: None,
+            })
+            .await
+            .unwrap();
+        let click = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            click,
+            ServerToHost::GameplayRequest { id: event_id, request }
+                if event_id == id
+                    && request.dimension == 1
+                    && request.client_revision == 17
+                    && request.client_sequence == 3
+                    && matches!(
+                        request.operation,
+                        GameplayOperation::Container {
+                            action: 1,
+                            x: 12,
+                            y: 65,
+                            z: -8,
+                            slot: 4,
+                        }
+                    )
+        ));
+
+        client
+            .send(&Packet::ContainerClose {
+                protocol_version: PROTOCOL_VERSION,
+                dimension: 1,
+                x: 12,
+                y: 65,
+                z: -8,
+            })
+            .await
+            .unwrap();
+        let close = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            close,
+            ServerToHost::GameplayRequest { id: event_id, request }
+                if event_id == id
+                    && request.client_sequence == 4
+                    && matches!(
+                        request.operation,
+                        GameplayOperation::Container {
+                            action: 2,
+                            x: 12,
+                            y: 65,
+                            z: -8,
+                            slot: 0,
+                        }
+                    )
+        ));
+        server.stop().await;
+    }
+
+    #[tokio::test]
     async fn server_list_ping_reports_version_and_capacity_without_login() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let mut client = Connection::new(server.connect_stream().await);
@@ -2091,18 +2754,25 @@ mod tests {
             .unwrap();
 
         let event = server
-            .next_event_matching(|event| matches!(event, ServerToHost::ClientBlockChange { .. }))
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
             .await;
         assert!(matches!(
             event,
-            ServerToHost::ClientBlockChange {
-                id: event_id,
-                x: 3,
-                y: 80,
-                z: -4,
-                block: 3,
-                state: 0,
-            } if event_id == id
+            ServerToHost::GameplayRequest { id: event_id, request }
+                if event_id == id
+                    && request.session_id == id
+                    && request.request_id != 0
+                    && request.client_sequence == 1
+                    && request.client_revision == 0
+                    && matches!(
+                        request.operation,
+                        crate::network::protocol::GameplayOperation::BlockUse {
+                            x: 3,
+                            y: 80,
+                            z: -4,
+                            block: 3,
+                        }
+                    )
         ));
 
         server.stop().await;
@@ -2239,6 +2909,7 @@ mod tests {
                 state_mailbox: Arc::new(StateMailbox::default()),
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
+                gameplay: GameplaySessionState::default(),
             },
         );
 
@@ -2303,6 +2974,7 @@ mod tests {
                 state_mailbox: Arc::new(StateMailbox::default()),
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
+                gameplay: GameplaySessionState::default(),
             },
         );
 
@@ -2317,6 +2989,7 @@ mod tests {
                 state_mailbox: Arc::new(StateMailbox::default()),
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
+                gameplay: GameplaySessionState::default(),
             },
         );
 
@@ -2391,6 +3064,7 @@ mod tests {
                 state_mailbox: Arc::new(StateMailbox::default()),
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx,
+                gameplay: GameplaySessionState::default(),
             },
         );
 
@@ -2852,11 +3526,22 @@ mod tests {
             .unwrap();
 
         let event = server
-            .next_event_matching(|e| matches!(e, ServerToHost::ClientBlockAction { .. }))
+            .next_event_matching(|e| matches!(e, ServerToHost::GameplayRequest { .. }))
             .await;
         assert!(matches!(
             event,
-            ServerToHost::ClientBlockAction { id, action: Action::Break, x: 10, y: 64, z: 20, .. } if id == id_a
+            ServerToHost::GameplayRequest { id, request } if id == id_a
+                && request.session_id == id_a
+                && request.client_sequence == 1
+                    && matches!(
+                        request.operation,
+                        crate::network::protocol::GameplayOperation::BlockUse {
+                            x: 10,
+                            y: 64,
+                            z: 20,
+                            block: 0,
+                        }
+                    )
         ));
 
         // Host sends targeted result to client_a

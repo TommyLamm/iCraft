@@ -1056,6 +1056,34 @@ mod tests {
     }
 
     #[test]
+    fn gameplay_bounds_keep_specific_reject_reasons() {
+        let oversized = GameplayRequest {
+            request_id: 1,
+            client_sequence: 1,
+            session_id: 1,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::Command {
+                command: "x".repeat(MAX_REQUEST_BYTES),
+            },
+        };
+        assert_eq!(oversized.validate_bounds(), Err(RejectReason::QueueFull));
+
+        let invalid_dimension = GameplayRequest {
+            request_id: 2,
+            client_sequence: 2,
+            session_id: 1,
+            dimension: 3,
+            client_revision: 0,
+            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+        };
+        assert_eq!(
+            invalid_dimension.validate_bounds(),
+            Err(RejectReason::InvalidDimension)
+        );
+    }
+
+    #[test]
     fn invalid_bytes_rejected() {
         assert!(Packet::decode(&[0xFF; 3]).is_err());
     }

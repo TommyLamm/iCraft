@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -275,6 +275,8 @@ struct ReplicationGate {
     entity_sequences: HashMap<u64, u64>,
     health_sequences: HashMap<PlayerId, u64>,
     effect_sequences: HashMap<PlayerId, u64>,
+    block_entity_revisions: HashMap<(u8, i32, i32, i32), u64>,
+    container_revisions: HashMap<(u8, i32, i32, i32), u64>,
 }
 
 impl ReplicationGate {
@@ -302,6 +304,51 @@ impl ReplicationGate {
             return false;
         }
         *latest = sequence;
+        true
+    }
+
+    fn accept_block_entity(&mut self, key: (u8, i32, i32, i32), revision: u64) -> bool {
+        let latest = self.block_entity_revisions.entry(key).or_default();
+        if revision <= *latest {
+            return false;
+        }
+        *latest = revision;
+        true
+    }
+
+    fn accept_container_update(&mut self, key: (u8, i32, i32, i32), revision: u64) -> bool {
+        let latest = self.container_revisions.entry(key).or_default();
+        if revision <= *latest {
+            return false;
+        }
+        *latest = revision;
+        true
+    }
+}
+
+#[derive(Default)]
+struct GameplayResponseGate {
+    latest_server_sequence: u64,
+    seen_request_ids: HashSet<crate::network::protocol::RequestId>,
+    seen_order: VecDeque<crate::network::protocol::RequestId>,
+}
+
+impl GameplayResponseGate {
+    fn accept(&mut self, response: &GameplayResponse) -> bool {
+        if response.server_sequence == 0 || response.server_sequence <= self.latest_server_sequence
+        {
+            return false;
+        }
+        if !self.seen_request_ids.insert(response.request_id) {
+            return false;
+        }
+        if self.seen_order.len() >= crate::authority::RESPONSE_CACHE_CAPACITY {
+            if let Some(evicted) = self.seen_order.pop_front() {
+                self.seen_request_ids.remove(&evicted);
+            }
+        }
+        self.seen_order.push_back(response.request_id);
+        self.latest_server_sequence = response.server_sequence;
         true
     }
 }
@@ -349,7 +396,7 @@ impl RevisionGate {
     ) -> Vec<ClientToGame> {
         let key = (dimension, cx, cz);
         let current = self.applied.get(&key).copied().unwrap_or(0);
-        if revision < current {
+        if revision <= current {
             return Vec::new();
         }
         self.applied.insert(key, revision);
@@ -420,6 +467,56 @@ fn authoritative_weather_event(packet: &Packet) -> Option<ClientToGame> {
         Packet::LightningStrike { strike, .. } => Some(ClientToGame::LightningStrike(*strike)),
         _ => None,
     }
+}
+
+fn prepare_gameplay_request(
+    mut request: GameplayRequest,
+    player_id: PlayerId,
+    next_request_id: &mut crate::network::protocol::RequestId,
+    last_client_sequence: &mut u64,
+    last_client_revision: &mut u64,
+) -> GameplayRequest {
+    if request.request_id == 0 {
+        request.request_id = (*next_request_id).max(1);
+    }
+    *next_request_id = (*next_request_id)
+        .max(request.request_id.saturating_add(1))
+        .max(1);
+    if request.client_sequence <= *last_client_sequence {
+        request.client_sequence = (*last_client_sequence).wrapping_add(1).max(1);
+    }
+    *last_client_sequence = request.client_sequence;
+    if request.client_revision < *last_client_revision {
+        request.client_revision = *last_client_revision;
+    }
+    *last_client_revision = (*last_client_revision).max(request.client_revision);
+    request.session_id = player_id;
+    request
+}
+
+fn legacy_gameplay_request(
+    operation: crate::network::protocol::GameplayOperation,
+    dimension: u8,
+    client_revision: u64,
+    player_id: PlayerId,
+    next_request_id: &mut crate::network::protocol::RequestId,
+    last_client_sequence: &mut u64,
+    last_client_revision: &mut u64,
+) -> GameplayRequest {
+    prepare_gameplay_request(
+        GameplayRequest {
+            request_id: 0,
+            client_sequence: 0,
+            session_id: player_id,
+            dimension,
+            client_revision,
+            operation,
+        },
+        player_id,
+        next_request_id,
+        last_client_sequence,
+        last_client_revision,
+    )
 }
 
 impl NetworkClient {
@@ -549,6 +646,12 @@ async fn run_client(
     let mut tick = time::interval(Duration::from_millis(10));
     let mut revision_gate = RevisionGate::default();
     let mut replication_gate = ReplicationGate::default();
+    let mut gameplay_response_gate = GameplayResponseGate::default();
+    let mut next_request_id: crate::network::protocol::RequestId = 1;
+    let mut last_client_sequence = 0u64;
+    let mut last_client_revision = 0u64;
+    let mut current_dimension = 0u8;
+    let mut active_container: Option<(u8, i32, i32, i32)> = None;
     loop {
         tokio::select! {
             incoming = reader.recv() => {
@@ -576,6 +679,8 @@ async fn run_client(
                         state,
                         ..
                     }) => {
+                        current_dimension = dimension;
+                        last_client_revision = last_client_revision.max(revision);
                         for event in revision_gate.accept_block_change(
                             dimension, revision, x, y, z, block, state,
                         ) {
@@ -591,32 +696,46 @@ async fn run_client(
                         entity,
                         ..
                     }) => {
-                        let _ = client_to_game.send(ClientToGame::BlockEntityDelta {
-                            dimension,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            entity,
-                        });
+                        current_dimension = dimension;
+                        if replication_gate.accept_block_entity((dimension, x, y, z), revision) {
+                            last_client_revision = last_client_revision.max(revision);
+                            let _ = client_to_game.send(ClientToGame::BlockEntityDelta {
+                                dimension,
+                                revision,
+                                x,
+                                y,
+                                z,
+                                entity,
+                            });
+                        }
                     }
                     Ok(Packet::BlockActionResult { x, y, z, success, consumed_item, drops, .. }) => {
                         let _ = client_to_game.send(ClientToGame::BlockActionResult { x, y, z, success, consumed_item, drops });
                     }
                     Ok(Packet::ContainerOpenResult { dimension, success, x, y, z, slots, revision, .. }) => {
-                        let _ = client_to_game.send(ClientToGame::ContainerOpenResult { dimension, success, x, y, z, slots, revision });
+                        if replication_gate.accept_container_update((dimension, x, y, z), revision) {
+                            current_dimension = dimension;
+                            last_client_revision = last_client_revision.max(revision);
+                            active_container = success.then_some((dimension, x, y, z));
+                            let _ = client_to_game.send(ClientToGame::ContainerOpenResult { dimension, success, x, y, z, slots, revision });
+                        }
                     }
                     Ok(Packet::ContainerClickResult { dimension, success, slot_index, slot, dragged, .. }) => {
                         let _ = client_to_game.send(ClientToGame::ContainerClickResult { dimension, success, slot_index, slot, dragged });
                     }
                     Ok(Packet::PlayerRespawnResult { position, dimension, .. }) => {
+                        current_dimension = dimension;
                         let _ = client_to_game.send(ClientToGame::PlayerRespawnResult { position, dimension });
                     }
                     Ok(Packet::SleepStateSync { player_id, is_sleeping, .. }) => {
                         let _ = client_to_game.send(ClientToGame::SleepStateSync { player_id, is_sleeping });
                     }
                     Ok(Packet::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot, .. }) => {
-                        let _ = client_to_game.send(ClientToGame::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot });
+                        current_dimension = dimension;
+                        if replication_gate.accept_container_update((dimension, x, y, z), revision) {
+                            last_client_revision = last_client_revision.max(revision);
+                            let _ = client_to_game.send(ClientToGame::ContainerSlotUpdate { dimension, revision, x, y, z, slot_index, slot });
+                        }
                     }
                     Ok(Packet::ChunkData {
                         dimension,
@@ -630,6 +749,8 @@ async fn run_client(
                         block_entities,
                         ..
                     }) => {
+                        current_dimension = dimension;
+                        last_client_revision = last_client_revision.max(revision);
                         for event in revision_gate.accept_snapshot(
                             dimension,
                             cx,
@@ -752,7 +873,12 @@ async fn run_client(
                         let _ = client_to_game.send(ClientToGame::WorldRulesSync { rules });
                     }
                     Ok(Packet::GameplayResponse { response, .. }) => {
-                        let _ = client_to_game.send(ClientToGame::GameplayResponse { response });
+                        if gameplay_response_gate.accept(&response) {
+                            if let crate::network::protocol::GameplayOutcome::Accepted { revision } = response.outcome {
+                                last_client_revision = last_client_revision.max(revision);
+                            }
+                            let _ = client_to_game.send(ClientToGame::GameplayResponse { response });
+                        }
                     }
                     Ok(Packet::ChatMessage { sender, message, .. }) => { let _ = client_to_game.send(ClientToGame::Chat { sender, message }); }
                     Ok(Packet::Keepalive { .. }) => {
@@ -811,24 +937,40 @@ async fn run_client(
                             }
                         }
                         Ok(GameToClient::RequestBlockChange { x, y, z, block }) => {
-                            if writer.send(&Packet::BlockChange {
+                            let request = legacy_gameplay_request(
+                                crate::network::protocol::GameplayOperation::BlockUse { x, y, z, block },
+                                current_dimension,
+                                last_client_revision,
+                                player_id,
+                                &mut next_request_id,
+                                &mut last_client_sequence,
+                                &mut last_client_revision,
+                            );
+                            if writer.send(&Packet::GameplayRequest {
                                 protocol_version: PROTOCOL_VERSION,
-                                dimension: 0,
-                                revision: 0,
-                                x,
-                                y,
-                                z,
-                                block,
-                                state: 0,
+                                request,
                             }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send BlockChange");
+                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy BlockChange envelope");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
                         }
-                        Ok(GameToClient::RequestBlockAction { action, x, y, z, block, held_item }) => {
-                            if writer.send(&Packet::BlockActionRequest { protocol_version: PROTOCOL_VERSION, action, x, y, z, block, held_item }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send BlockActionRequest");
+                        Ok(GameToClient::RequestBlockAction { action, x, y, z, block, held_item: _held_item }) => {
+                            let _ = action;
+                            let request = legacy_gameplay_request(
+                                crate::network::protocol::GameplayOperation::BlockUse { x, y, z, block },
+                                current_dimension,
+                                last_client_revision,
+                                player_id,
+                                &mut next_request_id,
+                                &mut last_client_sequence,
+                                &mut last_client_revision,
+                            );
+                            if writer.send(&Packet::GameplayRequest {
+                                protocol_version: PROTOCOL_VERSION,
+                                request,
+                            }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy BlockAction envelope");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
@@ -841,22 +983,74 @@ async fn run_client(
                             }
                         }
                         Ok(GameToClient::ContainerOpenRequest { dimension, x, y, z }) => {
-                            if writer.send(&Packet::ContainerOpenRequest { protocol_version: PROTOCOL_VERSION, dimension, x, y, z }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send ContainerOpenRequest");
+                            current_dimension = dimension;
+                            active_container = Some((dimension, x, y, z));
+                            let request = legacy_gameplay_request(
+                                crate::network::protocol::GameplayOperation::Container {
+                                    action: 0,
+                                    x,
+                                    y,
+                                    z,
+                                    slot: 0,
+                                },
+                                dimension,
+                                last_client_revision,
+                                player_id,
+                                &mut next_request_id,
+                                &mut last_client_sequence,
+                                &mut last_client_revision,
+                            );
+                            if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy ContainerOpen envelope");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
                         }
-                        Ok(GameToClient::ContainerClickRequest { dimension, revision, slot_index, is_left, dragged }) => {
-                            if writer.send(&Packet::ContainerClickRequest { protocol_version: PROTOCOL_VERSION, dimension, revision, slot_index, is_left, dragged }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send ContainerClickRequest");
+                        Ok(GameToClient::ContainerClickRequest { dimension, revision, slot_index, is_left: _is_left, dragged }) => {
+                            let (x, y, z) = active_container
+                                .filter(|(active_dimension, ..)| *active_dimension == dimension)
+                                .map_or((0, 0, 0), |(_, x, y, z)| (x, y, z));
+                            let request = legacy_gameplay_request(
+                                crate::network::protocol::GameplayOperation::Container {
+                                    action: 1,
+                                    x,
+                                    y,
+                                    z,
+                                    slot: slot_index,
+                                },
+                                dimension,
+                                revision,
+                                player_id,
+                                &mut next_request_id,
+                                &mut last_client_sequence,
+                                &mut last_client_revision,
+                            );
+                            let _ = dragged;
+                            if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy ContainerClick envelope");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
                         }
                         Ok(GameToClient::ContainerClose { dimension, x, y, z }) => {
-                            if writer.send(&Packet::ContainerClose { protocol_version: PROTOCOL_VERSION, dimension, x, y, z }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send ContainerClose");
+                            let request = legacy_gameplay_request(
+                                crate::network::protocol::GameplayOperation::Container {
+                                    action: 2,
+                                    x,
+                                    y,
+                                    z,
+                                    slot: 0,
+                                },
+                                dimension,
+                                last_client_revision,
+                                player_id,
+                                &mut next_request_id,
+                                &mut last_client_sequence,
+                                &mut last_client_revision,
+                            );
+                            active_container = None;
+                            if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy ContainerClose envelope");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
@@ -869,13 +1063,29 @@ async fn run_client(
                             }
                         }
                         Ok(GameToClient::SleepRequest { x, y, z }) => {
-                            if writer.send(&Packet::SleepRequest { protocol_version: PROTOCOL_VERSION, x, y, z }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send SleepRequest");
+                            let request = legacy_gameplay_request(
+                                crate::network::protocol::GameplayOperation::Sleep { x, y, z },
+                                current_dimension,
+                                last_client_revision,
+                                player_id,
+                                &mut next_request_id,
+                                &mut last_client_sequence,
+                                &mut last_client_revision,
+                            );
+                            if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy Sleep envelope");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
                         }
                         Ok(GameToClient::GameplayRequest { request }) => {
+                            let request = prepare_gameplay_request(
+                                request,
+                                player_id,
+                                &mut next_request_id,
+                                &mut last_client_sequence,
+                                &mut last_client_revision,
+                            );
                             if writer
                                 .send(&Packet::GameplayRequest {
                                     protocol_version: PROTOCOL_VERSION,
@@ -1627,6 +1837,138 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn legacy_client_inputs_are_single_gameplay_envelopes() {
+        let _guard = network_test_guard();
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = mpsc::channel();
+        let (server_tx, server_rx) = mpsc::channel();
+        let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
+        let (game_tx, game_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let client = NetworkClient::spawn(addr, "legacy-client".into(), game_rx, event_tx);
+        let player_id = match wait_for_event(&event_rx) {
+            ClientToGame::Connected { player_id, .. } => player_id,
+            other => panic!("expected Connected, got {other:?}"),
+        };
+        assert!(matches!(
+            server_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            ServerToHost::ClientJoined { id, .. } if id == player_id
+        ));
+
+        let next_request = |server_rx: &Receiver<ServerToHost>| loop {
+            match server_rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                ServerToHost::GameplayRequest { request, .. } => break request,
+                _ => {}
+            }
+        };
+
+        game_tx
+            .send(GameToClient::RequestBlockChange {
+                x: 3,
+                y: 80,
+                z: -4,
+                block: 7,
+            })
+            .unwrap();
+        let block = next_request(&server_rx);
+        assert!(matches!(
+            block.operation,
+            crate::network::protocol::GameplayOperation::BlockUse {
+                x: 3,
+                y: 80,
+                z: -4,
+                block: 7,
+            }
+        ));
+        assert_eq!(block.session_id, player_id);
+        assert_eq!(block.client_sequence, 1);
+
+        game_tx
+            .send(GameToClient::RequestBlockAction {
+                action: Action::Break,
+                x: 10,
+                y: 64,
+                z: 20,
+                block: 0,
+                held_item: None,
+            })
+            .unwrap();
+        let action = next_request(&server_rx);
+        assert_eq!(action.client_sequence, 2);
+        assert!(matches!(
+            action.operation,
+            crate::network::protocol::GameplayOperation::BlockUse {
+                x: 10,
+                y: 64,
+                z: 20,
+                block: 0,
+            }
+        ));
+
+        game_tx
+            .send(GameToClient::SleepRequest { x: 2, y: 70, z: 5 })
+            .unwrap();
+        let sleep = next_request(&server_rx);
+        assert_eq!(sleep.client_sequence, 3);
+        assert!(matches!(
+            sleep.operation,
+            crate::network::protocol::GameplayOperation::Sleep { x: 2, y: 70, z: 5 }
+        ));
+
+        game_tx
+            .send(GameToClient::ContainerOpenRequest {
+                dimension: 1,
+                x: 12,
+                y: 65,
+                z: -8,
+            })
+            .unwrap();
+        let open = next_request(&server_rx);
+        assert_eq!(open.client_sequence, 4);
+        assert_eq!(open.dimension, 1);
+        assert!(matches!(
+            open.operation,
+            crate::network::protocol::GameplayOperation::Container {
+                action: 0,
+                x: 12,
+                y: 65,
+                z: -8,
+                slot: 0,
+            }
+        ));
+
+        game_tx
+            .send(GameToClient::ContainerClickRequest {
+                dimension: 1,
+                revision: 17,
+                slot_index: 4,
+                is_left: true,
+                dragged: None,
+            })
+            .unwrap();
+        let click = next_request(&server_rx);
+        assert_eq!(click.client_sequence, 5);
+        assert_eq!(click.client_revision, 17);
+        assert!(matches!(
+            click.operation,
+            crate::network::protocol::GameplayOperation::Container {
+                action: 1,
+                x: 12,
+                y: 65,
+                z: -8,
+                slot: 4,
+            }
+        ));
+
+        game_tx.send(GameToClient::Disconnect).unwrap();
+        client.join().unwrap();
+        host_tx.send(HostToServer::Stop).unwrap();
+        server.join().unwrap();
+    }
+
     /// Step 2 (Task 5) two-instance smoke test: when the host stops the server,
     /// the remaining client observes a `Disconnected` event and its background
     /// thread exits cleanly without hanging. This automates the "quitting either
@@ -1817,6 +2159,51 @@ mod tests {
         assert!(!gate.accept_health(4, 6));
         assert!(gate.accept_effect(4, 7));
         assert!(!gate.accept_effect(4, 7));
+    }
+
+    #[test]
+    fn gameplay_response_gate_drops_duplicate_and_out_of_order_responses() {
+        let mut gate = GameplayResponseGate::default();
+        let response_two = GameplayResponse {
+            request_id: 2,
+            server_sequence: 2,
+            outcome: crate::network::protocol::GameplayOutcome::Rejected {
+                reason: crate::network::protocol::RejectReason::Unsupported,
+            },
+        };
+        assert!(gate.accept(&response_two));
+
+        let response_one = GameplayResponse {
+            request_id: 1,
+            server_sequence: 1,
+            outcome: crate::network::protocol::GameplayOutcome::Accepted { revision: 1 },
+        };
+        assert!(!gate.accept(&response_one));
+
+        let duplicate = GameplayResponse {
+            request_id: 2,
+            server_sequence: 3,
+            outcome: response_two.outcome.clone(),
+        };
+        assert!(!gate.accept(&duplicate));
+        assert!(!gate.accept(&GameplayResponse {
+            request_id: 3,
+            server_sequence: 0,
+            outcome: crate::network::protocol::GameplayOutcome::Rejected {
+                reason: crate::network::protocol::RejectReason::QueueFull,
+            },
+        }));
+    }
+
+    #[test]
+    fn replication_gate_drops_stale_block_entity_and_container_deltas() {
+        let mut gate = ReplicationGate::default();
+        assert!(gate.accept_block_entity((1, 2, 64, 3), 9));
+        assert!(!gate.accept_block_entity((1, 2, 64, 3), 8));
+        assert!(!gate.accept_block_entity((1, 2, 64, 3), 9));
+        assert!(gate.accept_block_entity((1, 2, 64, 3), 10));
+        assert!(gate.accept_container_update((0, 8, 80, 8), 3));
+        assert!(!gate.accept_container_update((0, 8, 80, 8), 2));
     }
 
     #[test]
