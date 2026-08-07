@@ -229,11 +229,14 @@ impl ServerAddressBook {
                 .take(MAX_ENTRIES)
                 .map(|result| DiskPingResult {
                     address: result.address.clone(),
-                    version: result.version.clone(),
-                    motd: result.motd.clone(),
+                    version: sanitize_text(&result.version, MAX_TEXT_BYTES),
+                    motd: sanitize_text(&result.motd, MAX_TEXT_BYTES),
                     online_players: result.online_players,
                     max_players: result.max_players,
-                    error: result.error.clone(),
+                    error: result
+                        .error
+                        .as_deref()
+                        .map(|error| sanitize_text(error, MAX_TEXT_BYTES)),
                 })
                 .collect(),
         };
@@ -292,20 +295,19 @@ impl ServerAddressBook {
     }
 
     pub fn record_ping(&mut self, result: ServerPingResult) {
-        if !valid_result(&result) {
+        let Some(address) = normalize_address(&result.address) else {
             return;
-        }
-        let address = normalize_address(&result.address).unwrap_or_default();
+        };
         let result = ServerPingResult {
             address,
-            version: bounded_text(&result.version, MAX_TEXT_BYTES),
-            motd: bounded_text(&result.motd, MAX_TEXT_BYTES),
+            version: sanitize_text(&result.version, MAX_TEXT_BYTES),
+            motd: sanitize_text(&result.motd, MAX_TEXT_BYTES),
             online_players: result.online_players,
             max_players: result.max_players,
             error: result
                 .error
                 .as_deref()
-                .map(|error| bounded_text(error, MAX_TEXT_BYTES)),
+                .map(|error| sanitize_text(error, MAX_TEXT_BYTES)),
         };
         self.remember(result.address.clone());
         self.recent_results
@@ -371,16 +373,16 @@ fn normalize_address(address: &str) -> Option<String> {
     Some(address.to_string())
 }
 
-fn bounded_text(value: &str, limit: usize) -> String {
-    if value.len() <= limit {
-        value.to_string()
-    } else {
-        let mut end = limit;
-        while end > 0 && !value.is_char_boundary(end) {
-            end -= 1;
+fn sanitize_text(value: &str, limit: usize) -> String {
+    let mut output = String::new();
+    for ch in value.chars() {
+        let ch = if ch.is_control() { ' ' } else { ch };
+        if output.len() + ch.len_utf8() > limit {
+            break;
         }
-        value[..end].to_string()
+        output.push(ch);
     }
+    output
 }
 
 fn valid_result(result: &ServerPingResult) -> bool {
@@ -539,6 +541,29 @@ mod tests {
             Err(AddressBookError::Invalid(_))
         ));
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn ping_text_is_bounded_and_safe_for_menu_rendering() {
+        let mut book = ServerAddressBook::new(1);
+        book.record_ping(ServerPingResult {
+            address: "example.test:25565".into(),
+            version: "v\n".to_string() + &"x".repeat(MAX_TEXT_BYTES + 32),
+            motd: "hello\r\nworld".into(),
+            online_players: 0,
+            max_players: 20,
+            error: Some("bad\t".into()),
+        });
+        let result = &book.recent_results()[0];
+        assert!(result.version.len() <= MAX_TEXT_BYTES);
+        assert!(!result.version.chars().any(char::is_control));
+        assert!(!result.motd.chars().any(char::is_control));
+        assert!(!result
+            .error
+            .as_deref()
+            .unwrap()
+            .chars()
+            .any(char::is_control));
     }
 
     #[test]
