@@ -2073,6 +2073,12 @@ impl State {
         }
     }
     fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
+        if self.authority_boundary.is_some() {
+            for &((x, y, z), block) in changes {
+                let _ = self.submit_local_authority_block_use(x, y, z, block);
+            }
+            return;
+        }
         let mut dirty_chunks = std::collections::HashSet::new();
         let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
         let mut entity_broadcasts: Vec<(
@@ -5541,6 +5547,10 @@ impl State {
     pub async fn new(window: Arc<Window>, launch: WorldLaunch, settings: GameSettings) -> Self {
         let role = launch.role.clone();
         let is_client = matches!(role, MultiplayerRole::Client { .. });
+        let in_process_authority = matches!(
+            &role,
+            MultiplayerRole::Singleplayer | MultiplayerRole::Host { .. }
+        );
         let size = window.inner_size();
         // The NVIDIA Vulkan ICD crashes during the menu-to-world transition on
         // this Windows setup. `PRIMARY` still chooses Vulkan first, so force
@@ -6342,6 +6352,7 @@ impl State {
         // leaves the chest on top of terrain in both default and superflat
         // presets.
         if !is_client
+            && !in_process_authority
             && !has_save
             && bonus_chest
             && current_dimension == crate::dimension::Dimension::Overworld
@@ -6873,7 +6884,7 @@ impl State {
         };
 
         let (gpu_completion_tx, gpu_completion_rx) = std::sync::mpsc::channel();
-        let authority_boundary = match &role {
+        let mut authority_boundary = match &role {
             MultiplayerRole::Singleplayer => Some(AuthorityBoundary::new(
                 AuthorityConfig {
                     seed: world_seed,
@@ -6912,6 +6923,15 @@ impl State {
             )),
             MultiplayerRole::Client { .. } => None,
         };
+        if in_process_authority
+            && !has_save
+            && bonus_chest
+            && current_dimension == crate::dimension::Dimension::Overworld
+        {
+            if let Some(boundary) = authority_boundary.as_mut() {
+                boundary.seed_bonus_chest(world_spawn);
+            }
+        }
         let mut state = Self {
             window,
             surface,
@@ -7183,6 +7203,13 @@ impl State {
         let initial_mode = state.game_mode;
         state.set_game_mode(initial_mode);
 
+        let initial_authority_mutations = state
+            .authority_boundary
+            .as_mut()
+            .map(|boundary| boundary.take_pending_mutations())
+            .unwrap_or_default();
+        state.project_authority_mutations(&initial_authority_mutations);
+
         let initial_mesh_coords: Vec<_> = state.chunk_meshes.keys().copied().collect();
         state.invalidate_chunk_meshes(initial_mesh_coords, DependencyReason::ChunkLoad);
         state.load_current_dimension_entities();
@@ -7223,21 +7250,172 @@ impl State {
     pub fn tick_authority_boundary(
         &mut self,
     ) -> Option<crate::authority::contract::AuthoritySnapshot> {
-        let boundary = self.authority_boundary.as_mut()?;
-        boundary.set_position(self.player_physics.position.to_array());
-        let snapshot = boundary.tick();
+        let (snapshot, rules) = {
+            let boundary = self.authority_boundary.as_mut()?;
+            boundary.set_position(self.player_physics.position.to_array());
+            let snapshot = boundary.tick();
+            let rules = boundary.core.world.rules;
+            (snapshot, rules)
+        };
+        self.project_authority_mutations(&snapshot.mutations);
         self.world_time.ticks = snapshot.tick;
-        self.world_rules = boundary.core.world.rules;
+        self.world_rules = rules;
         Some(snapshot)
+    }
+
+    /// Apply authority output to the renderer-owned cache.  This is a one-way
+    /// projection: the GPU-side chunk manager is never consulted by the core
+    /// and never performs an authoritative mutation for Singleplayer/Host.
+    fn project_authority_mutations(
+        &mut self,
+        mutations: &[crate::authority::contract::WorldMutation],
+    ) {
+        let mut dirty_chunks = std::collections::HashSet::new();
+        for mutation in mutations {
+            if mutation.dimension != self.current_dimension as u8 {
+                continue;
+            }
+            let Some(block) = BlockType::from_wire(mutation.block) else {
+                continue;
+            };
+            let (x, y, z) = mutation.position;
+            if let Some(dirty) =
+                apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, mutation.state)
+            {
+                dirty_chunks.extend(dirty);
+            }
+            let entity = self
+                .authority_boundary
+                .as_ref()
+                .and_then(|boundary| boundary.block_entity_at((x, y, z)));
+            self.chunk_manager.set_block_entity(x, y, z, entity);
+        }
+        if !dirty_chunks.is_empty() {
+            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
+        }
     }
 
     pub fn submit_authority_request(
         &mut self,
-        request: crate::network::protocol::GameplayRequest,
+        mut request: crate::network::protocol::GameplayRequest,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        self.authority_boundary
-            .as_mut()
-            .map(|boundary| boundary.submit(request))
+        let (response, pending) = {
+            let boundary = self.authority_boundary.as_mut()?;
+            request.request_id = self.authority_request_id;
+            request.client_sequence = self.authority_client_sequence;
+            request.session_id = boundary.session_id;
+            request.client_revision = boundary.core.current_revision();
+            let response = boundary.submit(request);
+            let pending = boundary.take_pending_mutations();
+            (response, pending)
+        };
+        self.authority_request_id = self.authority_request_id.wrapping_add(1);
+        self.authority_client_sequence = self.authority_client_sequence.saturating_add(1);
+        self.project_authority_mutations(&pending);
+        self.last_gameplay_response = Some(response.clone());
+        Some(response)
+    }
+
+    fn submit_local_authority_block_use(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: BlockType,
+    ) -> Option<crate::network::protocol::GameplayResponse> {
+        let (response, pending, rules, time) = {
+            let boundary = self.authority_boundary.as_mut()?;
+            let request = crate::network::protocol::GameplayRequest {
+                request_id: self.authority_request_id,
+                client_sequence: self.authority_client_sequence,
+                session_id: boundary.session_id,
+                dimension: self.current_dimension as u8,
+                client_revision: boundary.core.current_revision(),
+                operation: crate::network::protocol::GameplayOperation::BlockUse {
+                    x,
+                    y,
+                    z,
+                    block: block.to_wire(),
+                },
+            };
+            let response = boundary.submit(request);
+            let pending = boundary.take_pending_mutations();
+            let rules = boundary.core.world.rules;
+            let time = boundary.core.world.time;
+            (response, pending, rules, time)
+        };
+        self.authority_request_id = self.authority_request_id.wrapping_add(1);
+        self.authority_client_sequence = self.authority_client_sequence.saturating_add(1);
+        self.project_authority_mutations(&pending);
+        self.last_gameplay_response = Some(response.clone());
+        if matches!(
+            response.outcome,
+            crate::network::protocol::GameplayOutcome::Accepted { .. }
+        ) {
+            self.world_rules = rules;
+            self.world_time.ticks = time;
+        }
+        Some(response)
+    }
+
+    fn submit_remote_authority_block_use(
+        &mut self,
+        session_id: crate::network::protocol::PlayerId,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+    ) -> Option<crate::network::protocol::GameplayResponse> {
+        let (response, pending) = {
+            let boundary = self.authority_boundary.as_mut()?;
+            let sequence = boundary
+                .core
+                .session(session_id)
+                .map(|session| session.last_client_sequence.saturating_add(1))
+                .unwrap_or(1);
+            let request = crate::network::protocol::GameplayRequest {
+                request_id: self.authority_request_id,
+                client_sequence: sequence,
+                session_id,
+                dimension: self.current_dimension as u8,
+                client_revision: boundary.core.current_revision(),
+                operation: crate::network::protocol::GameplayOperation::BlockUse { x, y, z, block },
+            };
+            let response = boundary.submit_for_session(session_id, request);
+            let pending = boundary.take_pending_mutations();
+            (response, pending)
+        };
+        self.authority_request_id = self.authority_request_id.wrapping_add(1);
+        self.project_authority_mutations(&pending);
+        self.last_gameplay_response = Some(response.clone());
+        Some(response)
+    }
+
+    fn handle_authority_client_block_action(
+        &mut self,
+        requester_id: crate::network::protocol::PlayerId,
+        action: crate::network::protocol::Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+    ) {
+        let requested_block = match action {
+            crate::network::protocol::Action::Break => BlockType::Air.to_wire(),
+            crate::network::protocol::Action::Place => block,
+            crate::network::protocol::Action::Use => self
+                .authority_boundary
+                .as_ref()
+                .map(|boundary| boundary.core.world.get_block(x, y, z).to_wire())
+                .unwrap_or(BlockType::Air.to_wire()),
+        };
+        let response =
+            self.submit_remote_authority_block_use(requester_id, x, y, z, requested_block);
+        let success = matches!(
+            response.as_ref().map(|response| &response.outcome),
+            Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
+        );
+        self.send_block_action_result(requester_id, x, y, z, success, false, vec![]);
     }
 
     /// Route the command domains already understood by `ServerWorld` through
@@ -7248,27 +7426,40 @@ impl State {
         &mut self,
         command: &str,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        let boundary = self.authority_boundary.as_mut()?;
-        let request = crate::network::protocol::GameplayRequest {
-            request_id: self.authority_request_id,
-            client_sequence: self.authority_client_sequence,
-            session_id: boundary.session_id,
-            dimension: self.current_dimension as u8,
-            client_revision: boundary.core.current_revision(),
-            operation: crate::network::protocol::GameplayOperation::Command {
-                command: command.to_string(),
-            },
+        let (response, pending, rules, time, session) = {
+            let boundary = self.authority_boundary.as_mut()?;
+            let request = crate::network::protocol::GameplayRequest {
+                request_id: self.authority_request_id,
+                client_sequence: self.authority_client_sequence,
+                session_id: boundary.session_id,
+                dimension: self.current_dimension as u8,
+                client_revision: boundary.core.current_revision(),
+                operation: crate::network::protocol::GameplayOperation::Command {
+                    command: command.to_string(),
+                },
+            };
+            let response = boundary.submit(request);
+            let pending = boundary.take_pending_mutations();
+            let rules = boundary.core.world.rules;
+            let time = boundary.core.world.time;
+            let session = boundary.core.session(boundary.session_id).cloned();
+            (response, pending, rules, time, session)
         };
         self.authority_request_id = self.authority_request_id.wrapping_add(1);
         self.authority_client_sequence = self.authority_client_sequence.saturating_add(1);
-        let response = boundary.submit(request);
+        self.project_authority_mutations(&pending);
         self.last_gameplay_response = Some(response.clone());
         if matches!(
             response.outcome,
             crate::network::protocol::GameplayOutcome::Accepted { .. }
         ) {
-            self.world_rules = boundary.core.world.rules;
-            self.world_time.ticks = boundary.core.world.time;
+            self.world_rules = rules;
+            self.world_time.ticks = time;
+            if let Some(session) = session {
+                self.set_game_mode(session.game_mode);
+                self.player_physics.position = Vec3::from_array(session.position);
+                self.player_physics.velocity = Vec3::ZERO;
+            }
         }
         Some(response)
     }
@@ -7804,17 +7995,23 @@ impl State {
             NetworkInbound::GameplayRequest { id, mut request } => {
                 request.session_id = id;
                 let request_id = request.request_id;
-                let response = self
-                    .authority_boundary
-                    .as_mut()
-                    .map(|boundary| boundary.submit_for_session(id, request))
-                    .unwrap_or(crate::network::protocol::GameplayResponse {
-                        request_id,
-                        server_sequence: 0,
-                        outcome: crate::network::protocol::GameplayOutcome::Rejected {
-                            reason: crate::network::protocol::RejectReason::Unauthorized,
+                let (response, pending) = if let Some(boundary) = self.authority_boundary.as_mut() {
+                    let response = boundary.submit_for_session(id, request);
+                    let pending = boundary.take_pending_mutations();
+                    (response, pending)
+                } else {
+                    (
+                        crate::network::protocol::GameplayResponse {
+                            request_id,
+                            server_sequence: 0,
+                            outcome: crate::network::protocol::GameplayOutcome::Rejected {
+                                reason: crate::network::protocol::RejectReason::Unauthorized,
+                            },
                         },
-                    });
+                        Vec::new(),
+                    )
+                };
+                self.project_authority_mutations(&pending);
                 self.last_gameplay_response = Some(response.clone());
                 self.network.send_gameplay_response(id, response);
             }
@@ -8070,7 +8267,11 @@ impl State {
                 block,
                 state,
             } => {
-                self.set_block_and_broadcast(id, x, y, z, block, state);
+                if self.authority_boundary.is_some() {
+                    let _ = self.submit_remote_authority_block_use(id, x, y, z, block);
+                } else {
+                    self.set_block_and_broadcast(id, x, y, z, block, state);
+                }
             }
             NetworkInbound::ClientBlockAction {
                 id,
@@ -8081,7 +8282,11 @@ impl State {
                 block,
                 held_item,
             } => {
-                self.handle_client_block_action(id, action, x, y, z, block, held_item);
+                if self.authority_boundary.is_some() {
+                    self.handle_authority_client_block_action(id, action, x, y, z, block);
+                } else {
+                    self.handle_client_block_action(id, action, x, y, z, block, held_item);
+                }
             }
             NetworkInbound::BlockActionResult {
                 x,
@@ -8925,7 +9130,10 @@ impl State {
     }
 
     fn broadcast_authoritative_replication(&mut self, dt: f32) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) || !self.network_ready {
+        if self.authority_boundary.is_some()
+            || !matches!(self.role, MultiplayerRole::Host { .. })
+            || !self.network_ready
+        {
             return;
         }
 
@@ -9188,14 +9396,14 @@ impl State {
 
         use crate::commands::{Command, CommandTarget, TimeCommand, WeatherCommand};
 
-        // GameRule mutations and time changes are already implemented by the
-        // headless core. Route those domains through the same envelope used by
-        // dedicated/listen runtime; read-only rule queries and the remaining
-        // legacy command domains stay on the presentation adapter for now.
+        // Every mutating command is submitted to the headless core for
+        // Singleplayer/listen-host.  Help and read-only gamerule queries are
+        // presentation-only; unsupported mutating domains receive an explicit
+        // core rejection rather than falling back to renderer state.
         if self.authority_boundary.is_some()
-            && matches!(
+            && !matches!(
                 &command,
-                Command::GameRule { value: Some(_), .. } | Command::Time(_)
+                Command::Help(_) | Command::GameRule { value: None, .. }
             )
         {
             let response = self.submit_local_authority_command(input);
@@ -9204,9 +9412,11 @@ impl State {
                     if matches!(&command, Command::GameRule { .. }) {
                         self.broadcast_world_rules();
                         "Game rule updated by authority.".to_string()
-                    } else {
+                    } else if matches!(&command, Command::Time(_)) {
                         self.broadcast_time_sync();
                         format!("Time is now {}.", self.world_time.ticks)
+                    } else {
+                        format!("{} accepted by authority.", command.name())
                     }
                 }
                 Some(crate::network::protocol::GameplayOutcome::Rejected { reason }) => {
@@ -10291,7 +10501,7 @@ impl State {
                         .collect_chunk_metadata(&self.chunk_manager, cx, cz)
                 });
                 if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                    if self.is_authoritative() {
+                    if self.is_authoritative() && self.authority_boundary.is_none() {
                         if let (Some(revision), Some(redstone_metadata)) =
                             (revision, redstone_metadata)
                         {
@@ -10542,7 +10752,14 @@ impl State {
     pub fn tick_simulation(&mut self, dt: f32) {
         self.prev_player_position = self.player_physics.position;
         let world_tick_started = Instant::now();
-        let authoritative = self.is_authoritative();
+        // Singleplayer and listen-host worlds advance exclusively in the
+        // headless AuthorityCore.  The renderer-side simulation remains only
+        // as a compatibility path for legacy worlds without a boundary.
+        let has_authority_boundary = self.authority_boundary.is_some();
+        if has_authority_boundary {
+            let _ = self.tick_authority_boundary();
+        }
+        let authoritative = self.is_authoritative() && !has_authority_boundary;
 
         // Tick attack cooldown & shield disable ticks
         if self.player_state.attack_cooldown_ticks < self.player_state.attack_cooldown_max_ticks {
@@ -10621,7 +10838,7 @@ impl State {
         }
 
         self.autosave_timer += dt;
-        if self.is_authoritative() && self.autosave_timer >= 300.0 {
+        if authoritative && self.autosave_timer >= 300.0 {
             self.autosave_timer = 0.0;
             if let Err(error) = self.trigger_background_save() {
                 eprintln!("[Save] Could not enqueue autosave: {error}");
@@ -10629,7 +10846,7 @@ impl State {
         }
 
         self.water_tick_timer += dt;
-        if self.is_authoritative() && self.water_tick_timer >= 0.25 {
+        if authoritative && self.water_tick_timer >= 0.25 {
             self.water_tick_timer = 0.0;
             let lighting_started = Instant::now();
             let (mut dirty, mutations) =
@@ -10648,7 +10865,7 @@ impl State {
         }
 
         self.lava_tick_timer += dt;
-        if self.is_authoritative() && self.lava_tick_timer >= 1.5 {
+        if authoritative && self.lava_tick_timer >= 1.5 {
             self.lava_tick_timer = 0.0;
             let lighting_started = Instant::now();
             let (mut dirty, mutations) =
@@ -10666,16 +10883,16 @@ impl State {
             );
         }
 
-        if self.is_authoritative() {
+        if authoritative {
             self.update_portal_travel(dt);
         }
 
-        if self.is_authoritative() {
+        if authoritative {
             self.redstone_tick_timer += dt;
         }
         let redstone_started = Instant::now();
         let mut redstone_steps = 0;
-        while self.is_authoritative() && self.redstone_tick_timer >= 0.05 && redstone_steps < 4 {
+        while authoritative && self.redstone_tick_timer >= 0.05 && redstone_steps < 4 {
             self.redstone_tick_timer -= 0.05;
             redstone_steps += 1;
             let mut occupants = Vec::with_capacity(self.entity_manager.entities.len() + 1);
@@ -10749,19 +10966,21 @@ impl State {
             redstone_elapsed,
         );
 
-        self.brewing.update(dt);
+        if !has_authority_boundary {
+            self.brewing.update(dt);
+        }
         self.update_furnaces(dt);
         let effect_health = self.potion_effects.update(dt);
-        if self.is_authoritative() && effect_health > 0.0 {
+        if authoritative && effect_health > 0.0 {
             self.player_state.health =
                 (self.player_state.health + effect_health).min(self.player_state.max_health);
-        } else if self.is_authoritative() && effect_health < 0.0 && self.player_state.health > 1.0 {
+        } else if authoritative && effect_health < 0.0 && self.player_state.health > 1.0 {
             self.take_damage(
                 (-effect_health).min(self.player_state.health - 1.0),
                 DamageSource::Mob,
             );
         }
-        if self.is_authoritative() && self.wither_effect_timer > 0.0 {
+        if authoritative && self.wither_effect_timer > 0.0 {
             self.wither_effect_timer = (self.wither_effect_timer - dt).max(0.0);
             self.wither_damage_timer += dt;
             if self.wither_damage_timer >= 1.0 {
@@ -10849,14 +11068,16 @@ impl State {
         } else {
             0.0
         };
-        self.world_time.tick_accumulator += elapsed_world_ticks;
-        let new_ticks = self.world_time.tick_accumulator.floor() as u64;
-        self.world_time.ticks += new_ticks;
-        self.world_time.tick_accumulator -= new_ticks as f32;
+        if !has_authority_boundary {
+            self.world_time.tick_accumulator += elapsed_world_ticks;
+            let new_ticks = self.world_time.tick_accumulator.floor() as u64;
+            self.world_time.ticks += new_ticks;
+            self.world_time.tick_accumulator -= new_ticks as f32;
+        }
         if self.current_dimension == crate::dimension::Dimension::Overworld {
             let weather_update = if !self.world_rules.do_weather_cycle {
                 crate::weather::WeatherUpdate::default()
-            } else if self.is_authoritative() {
+            } else if authoritative {
                 self.weather.update_authoritative(elapsed_world_ticks, dt)
             } else {
                 self.weather.update_client(elapsed_world_ticks, dt);
@@ -11169,7 +11390,7 @@ impl State {
 
         // Leaf Decay Random Ticks (30 random ticks per 20 Hz sim tick)
         let chunk_keys: Vec<(i32, i32)> = self.chunk_manager.chunks.keys().cloned().collect();
-        if self.is_authoritative() && !chunk_keys.is_empty() {
+        if authoritative && !chunk_keys.is_empty() {
             let mut rng_seed = (self.total_time * 1000.0) as u32;
             let mut next_rand = |max: u32| -> u32 {
                 rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
@@ -11306,7 +11527,7 @@ impl State {
             .sum();
         let water_breathing = self.potion_effects.has_water_breathing();
         let oxygen_rate = 1.0 / (1.0 + respiration_level as f32);
-        if self.is_authoritative() && self.game_mode_policy().can_take_damage {
+        if authoritative && self.game_mode_policy().can_take_damage {
             if let Some((dmg, src)) = self.player_state.update_with_oxygen_rate(
                 dt,
                 is_underwater && !water_breathing,
@@ -11487,6 +11708,9 @@ impl State {
     }
 
     pub fn update_village_and_raid_systems(&mut self, dt: f32) {
+        if self.authority_boundary.is_some() {
+            return;
+        }
         if self.player_state.hero_of_the_village_timer > 0.0 {
             self.player_state.hero_of_the_village_timer =
                 (self.player_state.hero_of_the_village_timer - dt).max(0.0);
@@ -11816,6 +12040,9 @@ impl State {
     }
 
     pub fn update_vehicles_and_fishing(&mut self, dt: f32) {
+        if self.authority_boundary.is_some() {
+            return;
+        }
         if self.is_authoritative() {
             let entity_ids: Vec<(u64, crate::entity::EntityType)> = self
                 .entity_manager
@@ -12003,6 +12230,9 @@ impl State {
     }
 
     fn update_hopper_power_states(&mut self) {
+        if self.authority_boundary.is_some() {
+            return;
+        }
         let mut positions = Vec::new();
         for (&(cx, cz), chunk) in &self.chunk_manager.chunks {
             for (local, entity) in chunk.iter_block_entities() {
@@ -12039,7 +12269,7 @@ impl State {
     }
 
     fn update_furnaces(&mut self, dt: f32) {
-        if !self.is_authoritative() {
+        if self.authority_boundary.is_some() || !self.is_authoritative() {
             return;
         }
         self.furnace_tick_timer += dt;
@@ -12598,7 +12828,7 @@ impl State {
             listener_right,
         );
 
-        if self.is_authoritative() {
+        if self.is_authoritative() && self.authority_boundary.is_none() {
             for entity in &mut self.entity_manager.entities {
                 if entity.entity_type == crate::entity::EntityType::RemotePlayer {
                     continue;
@@ -12642,6 +12872,7 @@ impl State {
         let support_y = fire_y - 1;
         let support = self.chunk_manager.get_block(strike.x, support_y, strike.z);
         if self.is_authoritative()
+            && self.authority_boundary.is_none()
             && fire_y < CHUNK_HEIGHT as i32
             && support.properties().is_solid
             && !matches!(
@@ -12655,7 +12886,7 @@ impl State {
     }
 
     fn apply_weather_block_change(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
-        if !self.is_authoritative() {
+        if self.authority_boundary.is_some() || !self.is_authoritative() {
             return;
         }
         let old = self.chunk_manager.get_block(wx, wy, wz);
@@ -12913,6 +13144,9 @@ impl State {
     }
 
     fn apply_redstone_update(&mut self, update: crate::redstone::RedstoneUpdate) {
+        if self.authority_boundary.is_some() {
+            return;
+        }
         let mut dirty_chunks = std::collections::HashSet::new();
         let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
         for mutation in update.mutations {
@@ -13126,7 +13360,7 @@ impl State {
     ) {
         use crate::inventory::{Item, ItemStack};
 
-        if !self.is_authoritative() {
+        if self.authority_boundary.is_some() || !self.is_authoritative() {
             return;
         }
 
@@ -13609,6 +13843,15 @@ impl State {
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
+        if self.authority_boundary.is_some() {
+            let _ = self.submit_local_authority_block_use(
+                pos.x as i32,
+                pos.y as i32,
+                pos.z as i32,
+                BlockType::Air,
+            );
+            return;
+        }
         let lighting_started = Instant::now();
         let wx = pos.x as i32;
         let wy = pos.y as i32;
@@ -14075,6 +14318,9 @@ impl State {
     }
 
     fn update_dropped_items_and_orbs(&mut self, dt: f32) {
+        if self.authority_boundary.is_some() {
+            return;
+        }
         let mut remove_ids = Vec::new();
         let mut merges = Vec::new();
 
@@ -14553,6 +14799,20 @@ impl State {
     }
 
     pub fn respawn(&mut self) {
+        if self.authority_boundary.is_some() {
+            // Keep respawn presentation-only until the authority session
+            // contract carries player health/death state; never repair voxels
+            // directly from this GPU root.
+            self.player_physics.position = Vec3::new(
+                self.world_spawn.0 as f32 + 0.5,
+                self.world_spawn.1 as f32,
+                self.world_spawn.2 as f32 + 0.5,
+            );
+            self.player_physics.velocity = Vec3::ZERO;
+            self.player_state.reset_for_respawn();
+            self.sync_cursor_mode();
+            return;
+        }
         if self.world_rules.hardcore && self.player_state.is_dead {
             // Hardcore worlds never respawn a dead player into Survival.  The
             // permitted recovery path is a read-only Spectator observer.
@@ -14659,7 +14919,8 @@ impl State {
     }
 
     pub fn handle_primary_press(&mut self) -> bool {
-        let melee_consumed = self.is_authoritative() && self.try_melee_attack();
+        let melee_consumed =
+            self.is_authoritative() && self.authority_boundary.is_none() && self.try_melee_attack();
         let decision = primary_press_decision(self.game_mode, melee_consumed);
         if decision.instant_break {
             self.handle_click(true);
@@ -14980,7 +15241,7 @@ impl State {
                         }
                     }
 
-                    if self.is_authoritative() {
+                    if self.is_authoritative() && self.authority_boundary.is_none() {
                         let dir = Vec3::new(
                             self.camera.yaw.cos() * self.camera.pitch.cos(),
                             self.camera.pitch.sin(),
@@ -15059,6 +15320,11 @@ impl State {
                         .send_action(crate::network::protocol::Action::Place);
                 }
             }
+            return;
+        }
+
+        if self.authority_boundary.is_some() {
+            self.handle_authority_click(is_left_click);
             return;
         }
 
@@ -16187,6 +16453,134 @@ impl State {
                 self.broadcast_block_change(wx, wy, wz, block);
             }
         }
+    }
+
+    /// Translate local presentation input into the transport-independent
+    /// gameplay envelope.  Unsupported interactions are deliberately rejected
+    /// by the core; they never fall back to mutating renderer chunks.
+    fn handle_authority_click(&mut self, is_left_click: bool) {
+        let direction = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        )
+        .normalize_or_zero();
+        let target_policy = if is_left_click {
+            RaycastTargetPolicy::Break
+        } else {
+            RaycastTargetPolicy::Place
+        };
+        let Some(hit) = raycast(
+            self.camera.position,
+            direction,
+            5.0,
+            &self.chunk_manager,
+            target_policy,
+        ) else {
+            return;
+        };
+        let clicked = (
+            hit.block_pos.x as i32,
+            hit.block_pos.y as i32,
+            hit.block_pos.z as i32,
+        );
+        if is_left_click {
+            if !self.can_break_current_block(
+                self.chunk_manager
+                    .get_block(clicked.0, clicked.1, clicked.2),
+            ) {
+                return;
+            }
+            let _ = self.submit_local_authority_block_use(
+                clicked.0,
+                clicked.1,
+                clicked.2,
+                BlockType::Air,
+            );
+            self.network
+                .send_action(crate::network::protocol::Action::Break);
+            return;
+        }
+
+        let clicked_block = self
+            .chunk_manager
+            .get_block(clicked.0, clicked.1, clicked.2);
+        if matches!(
+            clicked_block,
+            BlockType::Chest
+                | BlockType::EndCityChest
+                | BlockType::Furnace
+                | BlockType::FurnaceLit
+                | BlockType::Hopper
+                | BlockType::Dispenser
+                | BlockType::Dropper
+        ) {
+            let response =
+                self.submit_authority_request(crate::network::protocol::GameplayRequest {
+                    request_id: self.authority_request_id,
+                    client_sequence: self.authority_client_sequence,
+                    session_id: 0,
+                    dimension: self.current_dimension as u8,
+                    client_revision: self
+                        .authority_boundary
+                        .as_ref()
+                        .map(|boundary| boundary.core.current_revision())
+                        .unwrap_or_default(),
+                    operation: crate::network::protocol::GameplayOperation::Container {
+                        action: 1,
+                        x: clicked.0,
+                        y: clicked.1,
+                        z: clicked.2,
+                        slot: 0,
+                    },
+                });
+            if matches!(
+                response.as_ref().map(|response| &response.outcome),
+                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
+            ) {
+                self.open_chest(clicked);
+            }
+            return;
+        }
+        if clicked_block == BlockType::Bed {
+            let _ = self.submit_authority_request(crate::network::protocol::GameplayRequest {
+                request_id: self.authority_request_id,
+                client_sequence: self.authority_client_sequence,
+                session_id: 0,
+                dimension: self.current_dimension as u8,
+                client_revision: self
+                    .authority_boundary
+                    .as_ref()
+                    .map(|boundary| boundary.core.current_revision())
+                    .unwrap_or_default(),
+                operation: crate::network::protocol::GameplayOperation::Sleep {
+                    x: clicked.0,
+                    y: clicked.1,
+                    z: clicked.2,
+                },
+            });
+            return;
+        }
+
+        let target = hit.block_pos + hit.normal;
+        let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
+        let Some(block) = self.inventory.get_selected_block() else {
+            // Send a deterministic same-block request so the core returns an
+            // explicit domain rejection instead of allowing a local fallback.
+            let _ = self.submit_local_authority_block_use(
+                clicked.0,
+                clicked.1,
+                clicked.2,
+                clicked_block,
+            );
+            return;
+        };
+        if !self.can_place_block_at(x, y, z, block) {
+            return;
+        }
+        let _ = self.submit_local_authority_block_use(x, y, z, block);
+        self.network
+            .send_action(crate::network::protocol::Action::Place);
     }
 
     pub fn is_creative_catalog_open(&self) -> bool {

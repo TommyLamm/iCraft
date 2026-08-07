@@ -49,6 +49,7 @@ pub struct ServerWorld {
     pub chunks: ChunkManager,
     pub entities: EntityManager,
     pub redstone: RedstoneSystem,
+    pub recipe_manager: crate::crafting::RecipeManager,
     pub container_viewers: BTreeMap<(i32, i32, i32), BTreeSet<PlayerId>>,
     pub sleeping_players: BTreeSet<PlayerId>,
     block_revisions: BTreeMap<(i32, i32, i32), u64>,
@@ -75,6 +76,7 @@ impl ServerWorld {
             chunks: ChunkManager::new_in_dimension(render_distance.max(1), dimension),
             entities: EntityManager::new(),
             redstone: RedstoneSystem::new(),
+            recipe_manager: crate::crafting::RecipeManager::new(),
             container_viewers: BTreeMap::new(),
             sleeping_players: BTreeSet::new(),
             block_revisions: BTreeMap::new(),
@@ -153,6 +155,33 @@ impl ServerWorld {
         }))
     }
 
+    /// Seed the optional world-creation chest in the authoritative world. The
+    /// caller decides whether this is a new Overworld; renderer roots only
+    /// project the returned revision-bearing mutation.
+    pub fn place_bonus_chest(&mut self, position: (i32, i32, i32)) -> Option<WorldMutation> {
+        if self.get_block(position.0, position.1, position.2) != BlockType::Air {
+            return None;
+        }
+        let mutation = self
+            .set_block(position.0, position.1, position.2, BlockType::Chest, 0)
+            .ok()??;
+        if let Some(BlockEntity::Chest(chest)) = self
+            .chunks
+            .get_block_entity_mut(position.0, position.1, position.2)
+        {
+            use crate::inventory::{Item, ItemStack};
+            for (slot, item, count) in [
+                (0, Item::OakLog, 4),
+                (1, Item::OakPlanks, 8),
+                (2, Item::Stick, 8),
+                (3, Item::Bread, 4),
+            ] {
+                chest.set_stack(slot, Some(ItemStack::new(item, count)));
+            }
+        }
+        Some(mutation)
+    }
+
     pub fn validate_request(
         &self,
         request: &GameplayRequest,
@@ -193,6 +222,9 @@ impl ServerWorld {
             GameplayOperation::BlockUse { x, y, z, block } => {
                 let block = BlockType::from_wire(*block)
                     .ok_or_else(|| WorldDispatchError::new(RejectReason::InvalidState))?;
+                if self.get_block(*x, *y, *z) == block {
+                    return Err(WorldDispatchError::new(RejectReason::InvalidState));
+                }
                 self.set_block(*x, *y, *z, block, 0)
             }
             GameplayOperation::Container {
@@ -373,6 +405,36 @@ impl ServerWorld {
             }
         }
 
+        // Random ticks (crop growth, fire and leaf decay) run in the same
+        // deterministic headless world as redstone/fluid automation.  The
+        // renderer never performs a second random-tick pass for a boundary.
+        let (mut random_ticks, _) = crate::world_tick::sample_random_ticks(
+            &self.chunks,
+            self.seed as u64,
+            self.time,
+            self.dimension as u8,
+            128,
+        );
+        if !self.rules.do_fire_tick {
+            random_ticks.retain(|mutation| {
+                self.get_block(mutation.pos.0, mutation.pos.1, mutation.pos.2) != BlockType::Fire
+            });
+        }
+        random_ticks.sort_by_key(|mutation| mutation.pos);
+        for mutation in random_ticks {
+            if let Ok(Some(event)) = self.set_block(
+                mutation.pos.0,
+                mutation.pos.1,
+                mutation.pos.2,
+                mutation.new_block,
+                mutation.new_state,
+            ) {
+                mutations.push(event);
+            }
+        }
+
+        mutations.extend(self.tick_furnaces());
+
         self.tick_entities(players);
         mutations.sort_by_key(|mutation| mutation.revision);
         let checksum = self.checksum(&mutations);
@@ -384,6 +446,50 @@ impl ServerWorld {
         };
         self.last_snapshot = snapshot.clone();
         snapshot
+    }
+
+    fn tick_furnaces(&mut self) -> Vec<WorldMutation> {
+        let mut positions = Vec::new();
+        for (&(cx, cz), chunk) in &self.chunks.chunks {
+            for (local, entity) in chunk.iter_block_entities() {
+                if matches!(entity, BlockEntity::Furnace(_)) {
+                    positions.push((
+                        cx * 16 + local.0 as i32,
+                        local.1 as i32,
+                        cz * 16 + local.2 as i32,
+                    ));
+                }
+            }
+        }
+        positions.sort_unstable();
+        let mut mutations = Vec::new();
+        for (x, y, z) in positions {
+            let Some(BlockEntity::Furnace(furnace)) = self.chunks.get_block_entity_mut(x, y, z)
+            else {
+                continue;
+            };
+            let was_lit = furnace.is_lit;
+            let result = furnace.tick(&self.recipe_manager);
+            if !result.slot_changed && !result.lit_changed {
+                continue;
+            }
+            furnace.revision = furnace.revision.wrapping_add(1);
+            let is_lit = furnace.is_lit;
+            let _ = furnace;
+            if was_lit != is_lit {
+                let block = if is_lit {
+                    BlockType::FurnaceLit
+                } else {
+                    BlockType::Furnace
+                };
+                if let Ok(Some(event)) = self.set_block(x, y, z, block, 0) {
+                    mutations.push(event);
+                }
+            } else {
+                mutations.push(self.touch_revision(x, y, z));
+            }
+        }
+        mutations
     }
 
     fn tick_entities(&mut self, players: &[(PlayerId, [f32; 3])]) {
@@ -414,7 +520,7 @@ impl ServerWorld {
         self.entities.sync_positions();
     }
 
-    fn checksum(&self, mutations: &[WorldMutation]) -> u64 {
+    pub(crate) fn checksum(&self, mutations: &[WorldMutation]) -> u64 {
         // Stable FNV-1a over authoritative values.  HashMap iteration is never
         // used directly; chunks and block revisions are sorted first.
         let mut hash = 0xcbf29ce484222325u64;

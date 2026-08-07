@@ -49,6 +49,10 @@ pub struct AuthorityCore {
     pub world: ServerWorld,
     sessions: BTreeMap<PlayerId, SessionContract>,
     last_snapshot: AuthoritySnapshot,
+    /// Mutations emitted between fixed ticks (for example an authenticated
+    /// player request).  Presentation roots drain these through the same
+    /// snapshot projection as tick-driven automation.
+    pending_mutations: Vec<WorldMutation>,
 }
 
 /// Presentation roots use this small in-process boundary for Singleplayer and
@@ -152,6 +156,26 @@ impl AuthorityBoundary {
     pub fn set_rules(&mut self, rules: WorldRules) {
         self.core.world.rules = rules.normalized();
     }
+
+    pub fn take_pending_mutations(&mut self) -> Vec<WorldMutation> {
+        self.core.take_pending_mutations()
+    }
+
+    pub fn block_entity_at(
+        &self,
+        position: (i32, i32, i32),
+    ) -> Option<crate::block_entity::BlockEntity> {
+        self.core
+            .world
+            .get_block_entity(position.0, position.1, position.2)
+            .cloned()
+    }
+
+    pub fn seed_bonus_chest(&mut self, position: (i32, i32, i32)) {
+        if let Some(mutation) = self.core.world.place_bonus_chest(position) {
+            self.core.pending_mutations.push(mutation);
+        }
+    }
 }
 
 impl AuthorityCore {
@@ -168,6 +192,7 @@ impl AuthorityCore {
             ),
             sessions: BTreeMap::new(),
             last_snapshot: AuthoritySnapshot::empty(),
+            pending_mutations: Vec::new(),
         }
     }
 
@@ -211,7 +236,15 @@ impl AuthorityCore {
             .values()
             .map(|session| (session.id, session.position))
             .collect();
-        let snapshot = self.world.tick(&players);
+        let mut snapshot = self.world.tick(&players);
+        if !self.pending_mutations.is_empty() {
+            let mut pending = std::mem::take(&mut self.pending_mutations);
+            pending.append(&mut snapshot.mutations);
+            pending.sort_by_key(|mutation| mutation.revision);
+            snapshot.mutations = pending;
+            snapshot.revision = self.world.revisions.current();
+            snapshot.checksum = self.world.checksum(&snapshot.mutations);
+        }
         self.last_snapshot = snapshot.clone();
         snapshot
     }
@@ -240,6 +273,19 @@ impl AuthorityCore {
         if request.client_revision > self.current_revision() {
             return self.reject_for_session(id, request_id, RejectReason::InvalidRevision, None);
         }
+        if session.game_mode == crate::inventory::GameMode::Spectator
+            && matches!(
+                &request.operation,
+                crate::network::protocol::GameplayOperation::BlockUse { .. }
+                    | crate::network::protocol::GameplayOperation::Container { .. }
+                    | crate::network::protocol::GameplayOperation::ItemUse { .. }
+                    | crate::network::protocol::GameplayOperation::Combat { .. }
+                    | crate::network::protocol::GameplayOperation::Trade { .. }
+                    | crate::network::protocol::GameplayOperation::Mount { .. }
+            )
+        {
+            return self.reject_for_session(id, request_id, RejectReason::PermissionDenied, None);
+        }
         let session_position = session.position;
         let operator = session.operator || session.cheats_enabled;
         if let Err(reason) =
@@ -249,9 +295,18 @@ impl AuthorityCore {
             return self.reject_for_session(id, request_id, reason, None);
         }
 
-        let result = self.world.dispatch(&request, id, operator);
+        let result = self
+            .dispatch_session_command(&request, id)
+            .unwrap_or_else(|| {
+                self.world
+                    .dispatch(&request, id, operator)
+                    .map_err(|error| error.reason())
+            });
         let response = match result {
             Ok(mutation) => {
+                if let Some(mutation) = mutation {
+                    self.pending_mutations.push(mutation);
+                }
                 let revision = mutation
                     .map(|mutation| mutation.revision)
                     .unwrap_or_else(|| self.world.revisions.allocate());
@@ -261,17 +316,12 @@ impl AuthorityCore {
                     outcome: GameplayOutcome::Accepted { revision },
                 }
             }
-            Err(error) => {
+            Err(reason) => {
                 // A well-formed, authenticated request consumes its client
                 // sequence even when the domain rejects it.  This prevents a
                 // rejected operation from being replayed under a later ACK
                 // and keeps the 128-entry cache idempotent.
-                self.reject_for_session(
-                    id,
-                    request_id,
-                    error.reason(),
-                    Some(request.client_sequence),
-                )
+                self.reject_for_session(id, request_id, reason, Some(request.client_sequence))
             }
         };
         if let Some(session) = self.sessions.get_mut(&id) {
@@ -284,6 +334,65 @@ impl AuthorityCore {
             }
         }
         response
+    }
+
+    /// Commands that mutate authenticated session state (rather than world
+    /// voxels) still execute in the same core.  `State` only projects the
+    /// resulting session snapshot and never edits its local player position or
+    /// game mode as authority.
+    fn dispatch_session_command(
+        &mut self,
+        request: &GameplayRequest,
+        session_id: PlayerId,
+    ) -> Option<Result<Option<WorldMutation>, RejectReason>> {
+        let crate::network::protocol::GameplayOperation::Command { command } = &request.operation
+        else {
+            return None;
+        };
+        let parsed = match crate::commands::parse(command) {
+            Ok(parsed) => parsed,
+            Err(_) => return Some(Err(RejectReason::InvalidState)),
+        };
+        match parsed {
+            crate::commands::Command::GameMode { mode, target } => {
+                if target.is_some_and(|target| {
+                    !matches!(
+                        target,
+                        crate::commands::CommandTarget::SelfPlayer
+                            | crate::commands::CommandTarget::NearestPlayer
+                    )
+                }) {
+                    return Some(Err(RejectReason::PermissionDenied));
+                }
+                let Some(session) = self.sessions.get_mut(&session_id) else {
+                    return Some(Err(RejectReason::Unauthorized));
+                };
+                session.game_mode = mode;
+                Some(Ok(None))
+            }
+            crate::commands::Command::Teleport { target, position } => {
+                if !matches!(
+                    target,
+                    crate::commands::CommandTarget::SelfPlayer
+                        | crate::commands::CommandTarget::NearestPlayer
+                ) {
+                    return Some(Err(RejectReason::PermissionDenied));
+                }
+                if !self.world.dimension.height().contains_y(position[1]) {
+                    return Some(Err(RejectReason::InvalidCoordinate));
+                }
+                let Some(session) = self.sessions.get_mut(&session_id) else {
+                    return Some(Err(RejectReason::Unauthorized));
+                };
+                session.position = [
+                    position[0] as f32 + 0.5,
+                    position[1] as f32,
+                    position[2] as f32 + 0.5,
+                ];
+                Some(Ok(None))
+            }
+            _ => None,
+        }
     }
 
     fn rejected(&mut self, request_id: u128, reason: RejectReason) -> GameplayResponse {
@@ -323,6 +432,11 @@ impl AuthorityCore {
 
     pub fn world_mutations(&self) -> &[WorldMutation] {
         &self.last_snapshot.mutations
+    }
+
+    /// Drain request mutations without advancing the simulation clock.
+    pub fn take_pending_mutations(&mut self) -> Vec<WorldMutation> {
+        std::mem::take(&mut self.pending_mutations)
     }
 }
 
@@ -394,6 +508,29 @@ mod tests {
         assert_eq!(first, duplicate);
         assert_eq!(core.session(7).unwrap().last_client_sequence, 0);
         assert_eq!(core.session(7).unwrap().cache_len(), 1);
+    }
+
+    #[test]
+    fn request_mutation_is_drained_into_the_next_authority_snapshot() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        let request = GameplayRequest {
+            request_id: 21,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::BlockUse {
+                x: 8,
+                y: 80,
+                z: 8,
+                block: 3,
+            },
+        };
+        let response = core.submit_request(request);
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        let pending = core.take_pending_mutations();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].position, (8, 80, 8));
     }
 
     #[test]

@@ -90,7 +90,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 15 | [遊戲模式、規則、指令與世界建立](15_game_modes_world_rules_commands_and_creation.md) | 已完成（headless 通過；Host+Join GPU 實機待執行） |
 | 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已實作基礎；核心權威遷移缺口轉 18（headless dedicated/runtime 短跑通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
 | 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 已實作基礎；真 E2E、consumer 接線與 Accessibility presentation 缺口轉 Plan19（GPU、30 分鐘 soak、三拓撲實機待執行；權威缺口轉 Plan18） |
-| 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | Phase 0/A foundation 已提交（headless AuthorityCore/ServerWorld、runtime contract、State local/Host bridge）；State renderer cutover 與 B–E 尚未完成，實機未驗證 |
+| 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | Phase 0/A cutover 已提交（headless AuthorityCore/ServerWorld fixed tick、request/session mutations、State Singleplayer/Host projection）；B–E 保存/interest/transport/harness 與 GPU/實機驗收仍未完成 |
 | 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | 待 Plan17 基礎完成後執行；A 網路拓撲依賴 Plan18，B/C 可並行 |
 
 官方資料也佐證上述族群屬於基礎體驗：

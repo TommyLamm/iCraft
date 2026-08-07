@@ -12,8 +12,8 @@
 - `winit` owns the desktop event loop and input.
 - `wgpu` renders the menu, terrain, entities, particles, and immediate-mode UI.
 - `authority::AuthorityCore` owns the GPU-independent gameplay contract; the
-  desktop `State` remains the presentation/input composition root while its
-  Singleplayer/Host cutover is in progress.
+  desktop `State` is a presentation/input composition root and projects
+  Singleplayer/Host authority snapshots into renderer caches.
 - Rayon workers generate/load chunks and build terrain meshes.
 - Dedicated Tokio threads run TCP host/client networking.
 - `src/lib.rs` exposes the simulation/network contract to `icraft-server`.
@@ -64,10 +64,13 @@ flush level and per-player files.
 `AuthorityBoundary` is the in-process bridge used by Singleplayer and the
 listen-server host. It registers a local pseudo-session and submits the same
 `GameplayRequest`/fixed-tick path as `AuthorityCore` in the dedicated binary.
-The renderer still keeps a projection in `State`; the complete renderer cutover
-(including removal of the legacy local simulation path) remains an explicit
-Plan 18 Phase A follow-up. This bridge is not evidence that Phase A has passed
-its completion gate.
+Accepted request mutations and fixed-tick snapshots are projected one-way into
+`State` for lighting, mesh invalidation, block-entity UI, and local input
+feedback. Boundary worlds disable the renderer's legacy redstone, fluid,
+random-tick, furnace, mob, vehicle, village, and dropped-entity authority
+paths; unsupported presentation interactions are rejected by the core. Player
+health/effects persistence, interest routing, and full network migration remain
+Plan 18 B–E work.
 
 On Windows, menu and game GPU initialization intentionally select DX12 because
 the primary Vulkan path has caused a verified NVIDIA driver crash.
@@ -90,18 +93,17 @@ seed and synchronized world state.
 
 ### Per-frame update
 
-`State::update` drains network events first, then advances the major systems
-while the authority cutover is staged:
+`State::update` drains network events first, then advances the major systems:
 
-1. Autosave and fixed/budgeted presentation work.
-2. Authoritative headless ticks are scheduled by `AuthorityCore`/`ServerRuntime`;
-   the renderer-side redstone, hopper, furnace, brewing, effects,
-   advancements, particles, and weather path remains a temporary migration
-   seam for the GPU composition root.
-3. Player input/physics, damage/survival state, interactions, and chunk
-   streaming.
-4. Projectiles, hostile/passive mobs, bosses, dropped items, and entity cleanup.
-5. Camera/uniform synchronization and continuous mining.
+1. Fixed/budgeted authority ticks are scheduled by `AuthorityCore` (or
+   `ServerRuntime` for dedicated) and mutation/snapshot deltas are projected
+   into renderer caches.
+2. Player local input/physics presentation and chunk streaming.
+3. Camera/uniform synchronization, UI, and continuous mining.
+
+The legacy renderer simulation remains available only for a compatibility path
+without an `AuthorityBoundary`; Singleplayer and listen-host worlds do not
+enter it.
 
 Paused/dead/UI states gate gameplay input, but maintenance work that must remain
 safe across pauses is handled before the relevant early return. Inspect
@@ -157,9 +159,9 @@ particles/effects, mining overlay, UI, and present.
 ## World mutation rules
 
 `ServerWorld::chunks` is authoritative for the headless authority path. The
-renderer `ChunkManager::chunks` is a presentation projection while Plan 18's
-State cutover is staged; terrain meshes, visibility sets, GPU allocations, and
-particle vertices are always derived caches.
+renderer `ChunkManager::chunks` is a one-way presentation projection; terrain
+meshes, visibility sets, GPU allocations, and particle vertices are always
+derived caches.
 
 `AuthorityCore` owns one `ServerWorld`, a deterministic 20 Hz tick, sorted
 session/entity iteration, `RevisionClock`, bounded response cache, and the
@@ -221,9 +223,10 @@ The shared headless authority lives in `authority::AuthorityCore` and
 - `ServerRuntime` is transport/session/scheduling/save/metrics glue. It does
   not maintain a parallel authoritative block/entity map.
 
-The State renderer projection and legacy local simulation are still being
-removed in the remaining Plan 18 Phase A cutover; until that work lands, GPU
-manual acceptance must not be inferred from headless authority tests.
+The Phase A boundary cutover is covered by headless authority/projection seams.
+GPU Host+Join, persistence/interest integration, and the remaining B–E
+acceptance evidence are still manual or follow-up work; headless tests must
+not be presented as a GPU/manual pass.
 
 `src/network/` contains a versioned bincode protocol over length-prefixed TCP:
 

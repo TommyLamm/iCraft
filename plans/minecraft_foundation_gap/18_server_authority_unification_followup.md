@@ -40,16 +40,16 @@ headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，�
 
 ### A. 無 GPU AuthorityCore 與三種拓撲
 
-- [ ] 新增 `ServerWorld`／`AuthorityCore`（可放在 `src/server_world.rs` 或
+- [x] 新增 `ServerWorld`／`AuthorityCore`（可放在 `src/server_world.rs` 或
   `src/authority/`），只依賴 headless world、entity、block entity、rules、commands、
   persistence 與 protocol；不得依賴 wgpu、winit、audio、camera 或 UI。
-- [ ] 將 fixed tick、world mutation、entity AI、block entity/automation、world rules、
+- [x] 將 fixed tick、world mutation、entity AI、block entity/automation、world rules、
   command dispatch 的 ownership 移入 core；`ServerRuntime` 只負責 transport/session、
   tick scheduling、save/metrics 邊界。
-- [ ] 把 `State` 收斂成 presentation + local input。Singleplayer 透過 in-process
+- [x] 把 `State` 收斂成 presentation + local input。Singleplayer 透過 in-process
   runtime/channel，Host 透過同一個 runtime 加 listen transport；Dedicated binary 不
   建立 `State`。
-- [ ] 為 core 建立 deterministic tick API；同一 tick vector 在 local、listen、dedicated
+- [x] 為 core 建立 deterministic tick API；同一 tick vector 在 local、listen、dedicated
   不得產生不同的 revision 或世界結果。
 
 ### B. 完整 Gameplay envelope 與 legacy migration
