@@ -20,6 +20,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         print_help();
         return Ok(());
     }
+    validate_args(&args)?;
 
     let config_path = value(&args, "--config")
         .map(PathBuf::from)
@@ -148,6 +149,60 @@ fn value(args: &[String], key: &str) -> Option<String> {
         .map(|window| window[1].clone())
 }
 
+fn validate_args(args: &[String]) -> Result<(), io::Error> {
+    const VALUE_FLAGS: &[&str] = &[
+        "--config",
+        "--world",
+        "--bind",
+        "--port",
+        "--max-players",
+        "--view-distance",
+        "--simulation-distance",
+        "--difficulty",
+        "--motd",
+        "--pvp",
+        "--online-mode",
+        "--whitelist",
+        "--operators",
+        "--seed",
+        "--ticks",
+    ];
+    const SWITCH_FLAGS: &[&str] = &["--once"];
+    let known = VALUE_FLAGS
+        .iter()
+        .chain(SWITCH_FLAGS.iter())
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if !known.contains(arg.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown argument {arg:?}"),
+            ));
+        }
+        if VALUE_FLAGS.contains(&arg.as_str()) {
+            let Some(value) = args.get(index + 1) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("missing value for {arg}"),
+                ));
+            };
+            if value.starts_with("--") {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("missing value for {arg}"),
+                ));
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
 fn parse_difficulty(value: &str) -> Result<String, io::Error> {
     let normalized = value.trim().to_ascii_lowercase();
     if matches!(normalized.as_str(), "peaceful" | "easy" | "normal" | "hard") {
@@ -235,6 +290,10 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains("alex"));
         assert!(names.contains("steve"));
+        assert!(validate_args(&["--port".into()]).is_err());
+        assert!(validate_args(&["--port".into(), "--once".into()]).is_err());
+        assert!(validate_args(&["--nope".into()]).is_err());
+        assert!(validate_args(&["--once".into()]).is_ok());
     }
 
     #[test]
