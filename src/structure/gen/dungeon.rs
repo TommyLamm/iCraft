@@ -87,6 +87,7 @@ pub fn generate_dungeon(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
             inventory: ContainerInventory::new(),
             loot_table: Some(LootTableId::Dungeon.as_str().to_string()),
             loot_seed: Some(seed as u64 ^ (cx as u64 * 31 + cz as u64)),
+            revision: 0,
         });
         blocks.push(BlockPlacement {
             world_x: cx,

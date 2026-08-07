@@ -1,3 +1,4 @@
+use crate::game_rules::{WorldCreationOptions, WorldType};
 use crate::inventory::GameMode;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ const SETTINGS_FILE: &str = "settings.txt";
 const CONTROLS_FILE: &str = "controls.config";
 const SAVES_DIR: &str = "saves";
 const META_FILE: &str = "world.meta";
+const CURRENT_WORLD_FORMAT_VERSION: u32 = 3;
 const OPTIONS_ROW_TOPS: [f32; 6] = [0.58, 0.38, 0.18, -0.02, -0.22, -0.42];
 
 fn clamp_setting_volume(value: f32, fallback: f32) -> f32 {
@@ -708,6 +710,13 @@ struct WorldMetadata {
     game_mode: GameMode,
     difficulty: Difficulty,
     last_played: u64,
+    world_type: WorldType,
+    generate_structures: bool,
+    bonus_chest: bool,
+    cheats_enabled: bool,
+    hardcore: bool,
+    version: u32,
+    needs_upgrade: bool,
 }
 
 impl WorldMetadata {
@@ -718,6 +727,13 @@ impl WorldMetadata {
         let mut game_mode = GameMode::Survival;
         let mut difficulty = Difficulty::Normal;
         let mut last_played = 0;
+        let mut world_type = WorldType::Default;
+        let mut generate_structures = true;
+        let mut bonus_chest = false;
+        let mut cheats_enabled = false;
+        let mut hardcore = false;
+        let mut version = 0;
+        let mut needs_upgrade = false;
         for line in contents.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
@@ -728,15 +744,32 @@ impl WorldMetadata {
                 "game_mode" => game_mode = parse_game_mode(value),
                 "difficulty" => difficulty = Difficulty::parse(value),
                 "last_played" => last_played = value.trim().parse().unwrap_or(0),
+                "world_type" => world_type = WorldType::parse(value),
+                "generate_structures" => {
+                    generate_structures = parse_bool(value, generate_structures)
+                }
+                "bonus_chest" => bonus_chest = parse_bool(value, bonus_chest),
+                "cheats" | "cheats_enabled" => cheats_enabled = parse_bool(value, cheats_enabled),
+                "hardcore" => hardcore = parse_bool(value, hardcore),
+                "version" | "format_version" => version = value.trim().parse().unwrap_or(version),
+                "needs_upgrade" => needs_upgrade = parse_bool(value, needs_upgrade),
                 _ => {}
             }
         }
+        needs_upgrade |= version < CURRENT_WORLD_FORMAT_VERSION;
         Some(Self {
             name: name?,
             seed,
             game_mode,
             difficulty,
             last_played,
+            world_type,
+            generate_structures,
+            bonus_chest,
+            cheats_enabled,
+            hardcore,
+            version,
+            needs_upgrade,
         })
     }
 
@@ -745,16 +778,38 @@ impl WorldMetadata {
         crate::save::atomic_write(
             world_dir.join(META_FILE),
             format!(
-                "name:{}\nseed:{}\ngame_mode:{}\ndifficulty:{}\nlast_played:{}\n",
+                "name:{}\nseed:{}\ngame_mode:{}\ndifficulty:{}\nlast_played:{}\nworld_type:{}\ngenerate_structures:{}\nbonus_chest:{}\ncheats_enabled:{}\nhardcore:{}\nversion:{}\nneeds_upgrade:{}\n",
                 self.name,
                 self.seed,
                 game_mode_name(self.game_mode),
                 self.difficulty.as_str(),
-                self.last_played
+                self.last_played,
+                self.world_type.as_str(),
+                self.generate_structures,
+                self.bonus_chest,
+                self.cheats_enabled,
+                self.hardcore,
+                self.version,
+                self.needs_upgrade,
             )
             .as_bytes(),
         )
     }
+}
+
+/// Load creation-only options without exposing the menu's text metadata type.
+/// Legacy worlds use the documented defaults until their next authoritative
+/// level save writes the richer binary fields.
+pub fn load_world_creation_options(world_dir: &Path) -> WorldCreationOptions {
+    WorldMetadata::load(world_dir)
+        .map(|metadata| WorldCreationOptions {
+            world_type: metadata.world_type,
+            generate_structures: metadata.generate_structures,
+            bonus_chest: metadata.bonus_chest,
+            cheats_enabled: metadata.cheats_enabled,
+            hardcore: metadata.hardcore,
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -767,14 +822,17 @@ fn game_mode_name(mode: GameMode) -> &'static str {
     match mode {
         GameMode::Survival => "SURVIVAL",
         GameMode::Creative => "CREATIVE",
+        GameMode::Adventure => "ADVENTURE",
+        GameMode::Spectator => "SPECTATOR",
     }
 }
 
 fn parse_game_mode(value: &str) -> GameMode {
-    if value.trim().eq_ignore_ascii_case("creative") {
-        GameMode::Creative
-    } else {
-        GameMode::Survival
+    match value.trim().to_ascii_lowercase().as_str() {
+        "creative" => GameMode::Creative,
+        "adventure" => GameMode::Adventure,
+        "spectator" => GameMode::Spectator,
+        _ => GameMode::Survival,
     }
 }
 
@@ -830,11 +888,35 @@ pub fn update_world_metadata(
             game_mode,
             difficulty,
             last_played: 0,
+            world_type: WorldType::Default,
+            generate_structures: true,
+            bonus_chest: false,
+            cheats_enabled: false,
+            hardcore: false,
+            version: CURRENT_WORLD_FORMAT_VERSION,
+            needs_upgrade: false,
         });
+    if metadata.needs_upgrade {
+        let base = world_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(slugify)
+            .unwrap_or_else(|| "world".to_string());
+        let mut backup_path = Path::new(SAVES_DIR).join(format!("{base}_backup_{}", unix_now()));
+        let mut suffix = 2;
+        while backup_path.exists() {
+            backup_path =
+                Path::new(SAVES_DIR).join(format!("{base}_backup_{}_{}", unix_now(), suffix));
+            suffix += 1;
+        }
+        backup_world(world_dir, &backup_path)?;
+    }
     metadata.seed = seed;
     metadata.game_mode = game_mode;
     metadata.difficulty = difficulty;
     metadata.last_played = unix_now();
+    metadata.version = CURRENT_WORLD_FORMAT_VERSION;
+    metadata.needs_upgrade = false;
     metadata.save(world_dir)
 }
 
@@ -862,6 +944,13 @@ fn legacy_metadata(directory: &Path) -> Option<WorldMetadata> {
         game_mode: player.game_mode,
         difficulty: Difficulty::Normal,
         last_played: modified,
+        world_type: WorldType::Default,
+        generate_structures: true,
+        bonus_chest: false,
+        cheats_enabled: false,
+        hardcore: false,
+        version: level.version,
+        needs_upgrade: level.version < CURRENT_WORLD_FORMAT_VERSION,
     })
 }
 
@@ -901,6 +990,92 @@ fn unique_world_dir(name: &str) -> PathBuf {
         suffix += 1;
     }
     candidate
+}
+
+fn canonical_saves_root() -> std::io::Result<PathBuf> {
+    let root = Path::new(SAVES_DIR);
+    if !root.exists() {
+        fs::create_dir_all(root)?;
+    }
+    fs::canonicalize(root)
+}
+
+fn path_is_within(root: &Path, candidate: &Path) -> bool {
+    candidate != root && candidate.starts_with(root)
+}
+
+/// Resolve a world directory while rejecting the saves root itself, traversal,
+/// and symlink escapes. All destructive/copy operations use this guard.
+pub fn validated_world_path(path: &Path) -> std::io::Result<PathBuf> {
+    let root = canonical_saves_root()?;
+    let candidate = fs::canonicalize(path)?;
+    if path_is_within(&root, &candidate) {
+        Ok(candidate)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "world path must remain inside the saves directory",
+        ))
+    }
+}
+
+pub fn delete_world(path: &Path) -> std::io::Result<()> {
+    let directory = validated_world_path(path)?;
+    fs::remove_dir_all(directory)
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "symlink entries are not valid world data",
+        ));
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, destination)?;
+    }
+    Ok(())
+}
+
+pub fn copy_world(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source = validated_world_path(source)?;
+    let root = canonical_saves_root()?;
+    let destination = if destination.exists() {
+        fs::canonicalize(destination)?
+    } else {
+        let parent = destination.parent().unwrap_or(Path::new(SAVES_DIR));
+        let parent = fs::canonicalize(parent)?;
+        parent.join(destination.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no name")
+        })?)
+    };
+    if !path_is_within(&root, &destination) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "destination must remain inside the saves directory",
+        ));
+    }
+    if destination.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "destination world already exists",
+        ));
+    }
+    copy_tree(&source, &destination)
+}
+
+pub fn backup_world(source: &Path, destination: &Path) -> std::io::Result<()> {
+    copy_world(source, destination)
 }
 
 #[repr(C)]
@@ -1039,6 +1214,11 @@ pub struct Menu {
     create_seed: String,
     create_mode: GameMode,
     create_difficulty: Difficulty,
+    create_world_type: WorldType,
+    create_generate_structures: bool,
+    create_bonus_chest: bool,
+    create_cheats: bool,
+    create_hardcore: bool,
     multiplayer_mode: MultiplayerMode,
     selected_role: MultiplayerRole,
     host_port: String,
@@ -1230,6 +1410,11 @@ impl Menu {
             create_seed: String::new(),
             create_mode: GameMode::Survival,
             create_difficulty: settings.difficulty,
+            create_world_type: WorldType::Default,
+            create_generate_structures: true,
+            create_bonus_chest: false,
+            create_cheats: false,
+            create_hardcore: false,
             multiplayer_mode: MultiplayerMode::Host,
             selected_role: MultiplayerRole::Singleplayer,
             host_port: settings.mp_host_port.clone(),
@@ -1473,12 +1658,47 @@ impl Menu {
                     self.create_seed.clear();
                     self.create_mode = GameMode::Survival;
                     self.create_difficulty = self.settings.difficulty;
+                    self.create_world_type = WorldType::Default;
+                    self.create_generate_structures = true;
+                    self.create_bonus_chest = false;
+                    self.create_cheats = false;
+                    self.create_hardcore = false;
                     self.screen = MenuScreen::CreateWorld;
                 } else if hit(x, y, 0.27, 0.72, -0.64, -0.51) {
                     if self.selected_world.is_some() {
                         self.screen = MenuScreen::ConfirmDelete;
                     }
-                } else if hit(x, y, -0.2, 0.2, -0.84, -0.72) {
+                } else if hit(x, y, -0.72, -0.27, -0.84, -0.72) {
+                    if let Some(directory) = self.selected_world.clone() {
+                        let base = directory
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("world");
+                        let destination = unique_world_dir(&format!("{base}_copy"));
+                        match copy_world(&directory, &destination) {
+                            Ok(()) => {
+                                self.worlds = discover_worlds();
+                                self.message = Some("WORLD COPIED".to_string());
+                            }
+                            Err(error) => self.message = Some(format!("COPY FAILED: {error}")),
+                        }
+                    }
+                } else if hit(x, y, -0.23, 0.23, -0.84, -0.72) {
+                    if let Some(directory) = self.selected_world.clone() {
+                        let base = directory
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("world");
+                        let destination = unique_world_dir(&format!("{base}_backup"));
+                        match backup_world(&directory, &destination) {
+                            Ok(()) => {
+                                self.worlds = discover_worlds();
+                                self.message = Some("WORLD BACKED UP".to_string());
+                            }
+                            Err(error) => self.message = Some(format!("BACKUP FAILED: {error}")),
+                        }
+                    }
+                } else if hit(x, y, 0.27, 0.72, -0.84, -0.72) {
                     self.screen = MenuScreen::Main;
                 }
             }
@@ -1490,14 +1710,33 @@ impl Menu {
                 } else if hit(x, y, -0.52, 0.52, -0.08, 0.05) {
                     self.create_mode = match self.create_mode {
                         GameMode::Survival => GameMode::Creative,
-                        GameMode::Creative => GameMode::Survival,
+                        GameMode::Creative => GameMode::Adventure,
+                        GameMode::Adventure => GameMode::Spectator,
+                        GameMode::Spectator => GameMode::Survival,
                     };
                 } else if hit(x, y, -0.52, 0.52, -0.29, -0.16) {
                     self.create_difficulty =
                         self.create_difficulty.step(if x < 0.0 { -1 } else { 1 });
-                } else if hit(x, y, -0.52, -0.02, -0.58, -0.45) {
+                } else if hit(x, y, -0.52, 0.52, -0.42, -0.30) {
+                    self.create_world_type = match self.create_world_type {
+                        WorldType::Default => WorldType::Superflat,
+                        WorldType::Superflat => WorldType::Default,
+                    };
+                } else if hit(x, y, -0.52, -0.02, -0.54, -0.43) {
+                    self.create_generate_structures = !self.create_generate_structures;
+                } else if hit(x, y, 0.02, 0.52, -0.54, -0.43) {
+                    self.create_hardcore = !self.create_hardcore;
+                    if self.create_hardcore {
+                        self.create_mode = GameMode::Survival;
+                        self.create_difficulty = Difficulty::Hard;
+                    }
+                } else if hit(x, y, -0.52, -0.02, -0.69, -0.58) {
+                    self.create_bonus_chest = !self.create_bonus_chest;
+                } else if hit(x, y, 0.02, 0.52, -0.69, -0.58) {
+                    self.create_cheats = !self.create_cheats;
+                } else if hit(x, y, -0.52, -0.02, -0.84, -0.71) {
                     return self.create_world();
-                } else if hit(x, y, 0.02, 0.52, -0.58, -0.45) {
+                } else if hit(x, y, 0.02, 0.52, -0.84, -0.71) {
                     self.active_field = None;
                     self.screen = MenuScreen::Worlds;
                 }
@@ -1544,7 +1783,7 @@ impl Menu {
                         if let Some(world) = world_index_by_directory(&self.worlds, directory)
                             .and_then(|index| self.worlds.get(index))
                         {
-                            if let Err(error) = fs::remove_dir_all(&world.directory) {
+                            if let Err(error) = delete_world(&world.directory) {
                                 self.message = Some(format!("DELETE FAILED: {error}"));
                                 self.screen = MenuScreen::Worlds;
                                 return MenuAction::None;
@@ -1627,6 +1866,13 @@ impl Menu {
             game_mode: self.create_mode,
             difficulty: self.create_difficulty,
             last_played: unix_now(),
+            world_type: self.create_world_type,
+            generate_structures: self.create_generate_structures,
+            bonus_chest: self.create_bonus_chest,
+            cheats_enabled: self.create_cheats,
+            hardcore: self.create_hardcore,
+            version: CURRENT_WORLD_FORMAT_VERSION,
+            needs_upgrade: false,
         };
         if let Err(error) = metadata.save(&world_dir) {
             self.message = Some(format!("CREATE FAILED: {error}"));
@@ -2029,10 +2275,22 @@ impl Menu {
                 [1.0; 4],
             );
             let detail = format!(
-                "{} / {} / {}",
+                "{} / {} / {} / {}{} / v{}{}",
                 relative_time(world.metadata.last_played),
                 game_mode_name(world.metadata.game_mode),
-                world.metadata.difficulty.as_str()
+                world.metadata.difficulty.as_str(),
+                world.metadata.world_type.as_str(),
+                if world.metadata.hardcore {
+                    " / HARDCORE"
+                } else {
+                    ""
+                },
+                world.metadata.version,
+                if world.metadata.needs_upgrade {
+                    " / UPGRADE"
+                } else {
+                    ""
+                },
             );
             draw_text(
                 vertices,
@@ -2070,26 +2328,25 @@ impl Menu {
             );
             draw_centered_text_in(vertices, label, x0, x1, -0.602, 0.006, aspect, [1.0; 4]);
         }
-        draw_button(
-            vertices,
-            -0.2,
-            0.2,
-            -0.84,
-            -0.72,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.2,
-                0.2,
+        for (x0, x1, label) in [
+            (-0.72, -0.27, "COPY"),
+            (-0.23, 0.23, "BACKUP"),
+            (0.27, 0.72, "BACK"),
+        ] {
+            draw_button(
+                vertices,
+                x0,
+                x1,
                 -0.84,
                 -0.72,
-            ),
-        );
-        draw_centered_text(vertices, "BACK", -0.805, 0.008, aspect, [1.0; 4]);
+                hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.84, -0.72),
+            );
+            draw_centered_text_in(vertices, label, x0, x1, -0.805, 0.006, aspect, [1.0; 4]);
+        }
     }
 
     fn draw_create(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
-        panel(vertices, -0.64, 0.64, -0.72, 0.78);
+        panel(vertices, -0.64, 0.64, -0.92, 0.78);
         draw_centered_text(vertices, "CREATE NEW WORLD", 0.67, 0.012, aspect, [1.0; 4]);
         draw_field(
             vertices,
@@ -2167,31 +2424,167 @@ impl Menu {
         draw_button(
             vertices,
             -0.52,
+            0.52,
+            -0.42,
+            -0.30,
+            hit(
+                self.mouse_ndc[0],
+                self.mouse_ndc[1],
+                -0.52,
+                0.52,
+                -0.42,
+                -0.30,
+            ),
+        );
+        draw_centered_text(
+            vertices,
+            &format!("WORLD TYPE: < {} >", self.create_world_type.as_str()),
+            -0.372,
+            0.007,
+            aspect,
+            [1.0; 4],
+        );
+        draw_button(
+            vertices,
+            -0.52,
             -0.02,
-            -0.58,
-            -0.45,
+            -0.54,
+            -0.43,
             hit(
                 self.mouse_ndc[0],
                 self.mouse_ndc[1],
                 -0.52,
                 -0.02,
-                -0.58,
-                -0.45,
+                -0.54,
+                -0.43,
             ),
         );
         draw_button(
             vertices,
             0.02,
             0.52,
-            -0.58,
-            -0.45,
+            -0.54,
+            -0.43,
             hit(
                 self.mouse_ndc[0],
                 self.mouse_ndc[1],
                 0.02,
                 0.52,
+                -0.54,
+                -0.43,
+            ),
+        );
+        draw_centered_text_in(
+            vertices,
+            &format!(
+                "STRUCTURES: {}",
+                if self.create_generate_structures {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ),
+            -0.52,
+            -0.02,
+            -0.505,
+            0.005,
+            aspect,
+            [1.0; 4],
+        );
+        draw_centered_text_in(
+            vertices,
+            &format!(
+                "HARDCORE: {}",
+                if self.create_hardcore { "ON" } else { "OFF" }
+            ),
+            0.02,
+            0.52,
+            -0.505,
+            0.005,
+            aspect,
+            [1.0; 4],
+        );
+        draw_button(
+            vertices,
+            -0.52,
+            -0.02,
+            -0.69,
+            -0.58,
+            hit(
+                self.mouse_ndc[0],
+                self.mouse_ndc[1],
+                -0.52,
+                -0.02,
+                -0.69,
                 -0.58,
-                -0.45,
+            ),
+        );
+        draw_button(
+            vertices,
+            0.02,
+            0.52,
+            -0.69,
+            -0.58,
+            hit(
+                self.mouse_ndc[0],
+                self.mouse_ndc[1],
+                0.02,
+                0.52,
+                -0.69,
+                -0.58,
+            ),
+        );
+        draw_centered_text_in(
+            vertices,
+            &format!(
+                "BONUS CHEST: {}",
+                if self.create_bonus_chest { "ON" } else { "OFF" }
+            ),
+            -0.52,
+            -0.02,
+            -0.657,
+            0.0048,
+            aspect,
+            [1.0; 4],
+        );
+        draw_centered_text_in(
+            vertices,
+            &format!("CHEATS: {}", if self.create_cheats { "ON" } else { "OFF" }),
+            0.02,
+            0.52,
+            -0.657,
+            0.0048,
+            aspect,
+            [1.0; 4],
+        );
+        draw_button(
+            vertices,
+            -0.52,
+            -0.02,
+            -0.84,
+            -0.71,
+            hit(
+                self.mouse_ndc[0],
+                self.mouse_ndc[1],
+                -0.52,
+                -0.02,
+                -0.84,
+                -0.71,
+            ),
+        );
+        draw_button(
+            vertices,
+            0.02,
+            0.52,
+            -0.84,
+            -0.71,
+            hit(
+                self.mouse_ndc[0],
+                self.mouse_ndc[1],
+                0.02,
+                0.52,
+                -0.84,
+                -0.71,
             ),
         );
         draw_centered_text_in(
@@ -2199,13 +2592,13 @@ impl Menu {
             "CREATE WORLD",
             -0.52,
             -0.02,
-            -0.542,
+            -0.798,
             0.007,
             aspect,
             [1.0; 4],
         );
         draw_centered_text_in(
-            vertices, "CANCEL", 0.02, 0.52, -0.542, 0.007, aspect, [1.0; 4],
+            vertices, "CANCEL", 0.02, 0.52, -0.798, 0.007, aspect, [1.0; 4],
         );
     }
 
@@ -2825,6 +3218,13 @@ mod tests {
             game_mode: GameMode::Creative,
             difficulty: Difficulty::Normal,
             last_played,
+            world_type: WorldType::Default,
+            generate_structures: true,
+            bonus_chest: false,
+            cheats_enabled: false,
+            hardcore: false,
+            version: CURRENT_WORLD_FORMAT_VERSION,
+            needs_upgrade: false,
         };
         let first_dir = PathBuf::from("C:/saves/first");
         let second_dir = PathBuf::from("C:/saves/second");
@@ -2979,6 +3379,11 @@ mod tests {
         assert_eq!(screen, MenuScreen::Options);
         assert_eq!(active_field, None);
         assert_eq!(rebinding, None);
+    }
+
+    #[test]
+    fn world_path_guard_rejects_saves_root() {
+        assert!(validated_world_path(Path::new(SAVES_DIR)).is_err());
     }
 
     #[test]

@@ -22,7 +22,6 @@ use crate::physics::{
 use crate::player::{DamageSource, PlayerState};
 use crate::world::{
     Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
-    SECTION_COUNT,
 };
 use glam::{Mat4, Vec2, Vec3};
 use std::sync::Arc;
@@ -184,6 +183,8 @@ fn primary_press_decision(game_mode: GameMode, melee_consumed: bool) -> PrimaryP
 
 fn can_break_block(block: BlockType, game_mode: GameMode) -> bool {
     block != BlockType::Air
+        && (crate::game_rules::GameModePolicy::for_mode(game_mode, true).can_break
+            || game_mode == GameMode::Adventure)
         && (game_mode == GameMode::Creative || block.properties().hardness >= 0.0)
 }
 
@@ -201,7 +202,7 @@ fn closest_melee_target(
         return None;
     }
     let direction = direction.normalize();
-    const MELEE_TYPES: [crate::entity::EntityType; 18] = [
+    const MELEE_TYPES: [crate::entity::EntityType; 19] = [
         crate::entity::EntityType::Zombie,
         crate::entity::EntityType::Skeleton,
         crate::entity::EntityType::Creeper,
@@ -220,6 +221,7 @@ fn closest_melee_target(
         crate::entity::EntityType::IronGolem,
         crate::entity::EntityType::Pillager,
         crate::entity::EntityType::Ravager,
+        crate::entity::EntityType::RemotePlayer,
     ];
     entity_manager
         .query_radius_types(origin, reach, &MELEE_TYPES)
@@ -2199,7 +2201,7 @@ impl State {
 
     fn finish_unsupported_breaks(&mut self, broken_blocks: Vec<((i32, i32, i32), BlockType)>) {
         for ((x, y, z), block) in broken_blocks {
-            if self.game_mode == GameMode::Survival {
+            if self.game_mode_policy().can_take_damage {
                 let drop_item = match block {
                     BlockType::TallGrass => {
                         let rng = (x as u32)
@@ -2351,7 +2353,16 @@ impl State {
 
         let cx = (destination.x / CHUNK_WIDTH as f32).floor() as i32;
         let cz = (destination.z / CHUNK_DEPTH as f32).floor() as i32;
-        let mut chunk = crate::dimension::generate_chunk(target, cx, cz, self.world_seed);
+        let mut chunk = crate::dimension::generate_chunk_with_options(
+            target,
+            cx,
+            cz,
+            self.world_seed,
+            crate::dimension::WorldGenerationOptions {
+                world_type: self.world_type,
+                generate_structures: self.generate_structures,
+            },
+        );
         let mut restored_redstone = Vec::new();
         let saved_chunk = self
             .save_manager
@@ -2643,7 +2654,9 @@ fn allows_continuous_mining(
     game_mode: GameMode,
     gameplay_input_allowed: bool,
 ) -> bool {
-    left_mouse_pressed && game_mode == GameMode::Survival && gameplay_input_allowed
+    left_mouse_pressed
+        && matches!(game_mode, GameMode::Survival | GameMode::Adventure)
+        && gameplay_input_allowed
 }
 
 fn cursor_position_to_ndc(x: f64, y: f64, width: u32, height: u32) -> [f32; 2] {
@@ -2742,7 +2755,7 @@ fn should_exit_creative_flight(was_flying: bool, vertical_input: f32, on_ground:
 }
 
 fn sprint_allowed(game_mode: GameMode, hunger: f32) -> bool {
-    game_mode == GameMode::Creative || hunger > 6.0
+    crate::game_rules::GameModePolicy::for_mode(game_mode, true).can_fly || hunger > 6.0
 }
 
 fn sprint_exhaustion_amount(
@@ -2751,7 +2764,10 @@ fn sprint_exhaustion_amount(
     is_moving: bool,
     dt: f32,
 ) -> f32 {
-    if game_mode == GameMode::Survival && is_sprinting && is_moving {
+    if crate::game_rules::GameModePolicy::for_mode(game_mode, true).hunger_enabled
+        && is_sprinting
+        && is_moving
+    {
         dt * 0.15
     } else {
         0.0
@@ -3603,6 +3619,14 @@ fn normalized_chat_message(input: &str) -> Option<String> {
     (!message.is_empty()).then_some(message)
 }
 
+fn parse_command_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 fn push_chat_history(
     history: &mut std::collections::VecDeque<(String, String)>,
     sender: String,
@@ -3768,6 +3792,9 @@ enum NetworkInbound {
         ticks: u64,
         weather: u8,
         weather_remaining_ticks: f32,
+    },
+    WorldRulesSync {
+        rules: crate::game_rules::WorldRules,
     },
     LightningStrike(crate::network::protocol::LightningStrike),
     ChatFromClient {
@@ -4502,6 +4529,9 @@ impl NetworkHandle {
                             weather,
                             weather_remaining_ticks,
                         },
+                        crate::network::client::ClientToGame::WorldRulesSync { rules } => {
+                            NetworkInbound::WorldRulesSync { rules }
+                        }
                         crate::network::client::ClientToGame::LightningStrike(strike) => {
                             NetworkInbound::LightningStrike(strike)
                         }
@@ -4928,6 +4958,24 @@ impl NetworkHandle {
         }
     }
 
+    fn broadcast_world_rules(&self, rules: crate::game_rules::WorldRules) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server
+                .tracked_send(crate::network::server::HostToServer::BroadcastWorldRules { rules });
+        }
+    }
+
+    fn send_world_rules_to(
+        &self,
+        rules: crate::game_rules::WorldRules,
+        to: crate::network::protocol::PlayerId,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server
+                .tracked_send(crate::network::server::HostToServer::SendWorldRules { rules, to });
+        }
+    }
+
     fn broadcast_lightning_strike(&self, strike: crate::network::protocol::LightningStrike) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server
@@ -5230,6 +5278,12 @@ pub struct State {
     pub world_seed: u32,
     pub world_spawn: (i32, i32, i32),
     pub difficulty: Difficulty,
+    /// One authoritative snapshot consumed by simulation and commands.
+    pub world_rules: crate::game_rules::WorldRules,
+    pub world_type: crate::game_rules::WorldType,
+    pub generate_structures: bool,
+    pub bonus_chest: bool,
+    pub cheats_enabled: bool,
     pub current_dimension: crate::dimension::Dimension,
     portal_contact_time: f32,
     portal_cooldown: f32,
@@ -5602,17 +5656,31 @@ impl State {
         audio_manager.set_weather_volume(settings.weather_volume);
 
         // Load save data if exists
+        let creation_options = crate::menu::load_world_creation_options(&launch.world_dir);
         let mut game_mode = launch.game_mode;
         let mut inventory = match launch.game_mode {
             GameMode::Creative => Inventory::new_creative(),
-            GameMode::Survival => Inventory::new(),
+            GameMode::Survival | GameMode::Adventure | GameMode::Spectator => Inventory::new(),
         };
         let mut player_state = PlayerState::new();
         let mut camera_yaw = f32::to_radians(90.0);
         let mut camera_pitch = f32::to_radians(-20.0);
         let mut world_time = crate::camera::WorldTime::new();
         let mut world_seed = launch.seed;
-        let mut world_spawn = (8, 80, 8);
+        let mut world_spawn =
+            if creation_options.world_type == crate::game_rules::WorldType::Superflat {
+                (8, 65, 8)
+            } else {
+                (8, 80, 8)
+            };
+        let mut world_rules = crate::game_rules::WorldRules {
+            hardcore: creation_options.hardcore,
+            ..Default::default()
+        };
+        let mut world_type = creation_options.world_type;
+        let mut generate_structures = creation_options.generate_structures;
+        let mut bonus_chest = creation_options.bonus_chest;
+        let mut cheats_enabled = creation_options.cheats_enabled || is_client;
 
         let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
         let has_save = !is_client && {
@@ -5628,6 +5696,12 @@ impl State {
             world_seed = level.seed;
             world_time.ticks = level.time;
             world_spawn = (level.spawn_x, level.spawn_y, level.spawn_z);
+            world_rules = level.rules.normalized();
+            world_rules.hardcore = level.hardcore || world_rules.hardcore;
+            world_type = level.world_type;
+            generate_structures = level.generate_structures;
+            bonus_chest = level.bonus_chest;
+            cheats_enabled = level.cheats_enabled;
             player_physics.position = Vec3::from_slice(&player.position);
             player_physics.velocity = Vec3::from_slice(&player.velocity);
             camera_yaw = player.yaw;
@@ -5643,6 +5717,7 @@ impl State {
             player_state.spawn_dimension = player.spawn_dimension;
             player_state.bad_omen_level = player.bad_omen_level;
             player_state.hero_of_the_village_timer = player.hero_of_the_village_timer;
+            player_state.is_dead = player.is_dead;
             game_mode = player.game_mode;
             inventory = player.inventory.to_inventory();
             advancement_progress = player.advancements;
@@ -6166,8 +6241,16 @@ impl State {
             let initial_radius = initial_chunk_radius(render_distance);
             for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
                 for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
-                    let mut chunk =
-                        crate::dimension::generate_chunk(current_dimension, cx, cz, world_seed);
+                    let mut chunk = crate::dimension::generate_chunk_with_options(
+                        current_dimension,
+                        cx,
+                        cz,
+                        world_seed,
+                        crate::dimension::WorldGenerationOptions {
+                            world_type,
+                            generate_structures,
+                        },
+                    );
                     let saved_chunk = {
                         let mut manager = save_manager.lock().unwrap();
                         manager.load_chunk_in(current_dimension, cx, cz)
@@ -6195,6 +6278,78 @@ impl State {
                         }
                     }
                     chunk_manager.chunks.insert((cx, cz), chunk);
+                }
+            }
+        }
+
+        // A bonus chest is created exactly once for a newly-created Overworld.
+        // Keep it in the spawn column so the option is deterministic and does
+        // not require an additional chunk-load request.  The heightmap points
+        // at the highest non-air block, therefore placing at `surface + 1`
+        // leaves the chest on top of terrain in both default and superflat
+        // presets.
+        if !is_client
+            && !has_save
+            && bonus_chest
+            && current_dimension == crate::dimension::Dimension::Overworld
+        {
+            let (spawn_x, _, spawn_z) = world_spawn;
+            let chunk_key = (
+                spawn_x.div_euclid(CHUNK_WIDTH as i32),
+                spawn_z.div_euclid(CHUNK_DEPTH as i32),
+            );
+            let local_x = spawn_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
+            let local_z = spawn_z.rem_euclid(CHUNK_DEPTH as i32) as usize;
+            let surface_y = chunk_manager
+                .chunks
+                .get(&chunk_key)
+                .map(|chunk| chunk.heightmap[local_x][local_z] as i32);
+            if let Some(surface_y) = surface_y {
+                let chest_y = surface_y.saturating_add(1);
+                if chunk_manager.get_block(spawn_x, chest_y, spawn_z) == BlockType::Air {
+                    chunk_manager.set_block(spawn_x, chest_y, spawn_z, BlockType::Chest);
+                    let mut chest = crate::block_entity::ChestBlockEntity::default();
+                    chest.set_stack(
+                        0,
+                        Some(crate::inventory::ItemStack::new(
+                            crate::inventory::Item::OakLog,
+                            4,
+                        )),
+                    );
+                    chest.set_stack(
+                        1,
+                        Some(crate::inventory::ItemStack::new(
+                            crate::inventory::Item::OakPlanks,
+                            8,
+                        )),
+                    );
+                    chest.set_stack(
+                        2,
+                        Some(crate::inventory::ItemStack::new(
+                            crate::inventory::Item::Stick,
+                            8,
+                        )),
+                    );
+                    chest.set_stack(
+                        3,
+                        Some(crate::inventory::ItemStack::new(
+                            crate::inventory::Item::Bread,
+                            4,
+                        )),
+                    );
+                    chest.set_stack(
+                        4,
+                        Some(crate::inventory::ItemStack::new(
+                            crate::inventory::Item::Torch,
+                            8,
+                        )),
+                    );
+                    chunk_manager.set_block_entity(
+                        spawn_x,
+                        chest_y,
+                        spawn_z,
+                        Some(crate::block_entity::BlockEntity::Chest(chest)),
+                    );
                 }
             }
         }
@@ -6627,6 +6782,8 @@ impl State {
                 let gamemode = match game_mode {
                     GameMode::Creative => 0,
                     GameMode::Survival => 1,
+                    GameMode::Adventure => 2,
+                    GameMode::Spectator => 3,
                 };
                 let thread = crate::network::server::NetworkServer::spawn(
                     format!("0.0.0.0:{port}"),
@@ -6849,6 +7006,11 @@ impl State {
             recipe_book_search: String::new(),
             weather,
             difficulty: launch.difficulty,
+            world_rules,
+            world_type,
+            generate_structures,
+            bonus_chest,
+            cheats_enabled,
             world_seed,
             world_spawn,
             settings,
@@ -6916,6 +7078,11 @@ impl State {
                 .restore_chunk_metadata(&state.chunk_manager, cx, cz, &metadata);
         }
 
+        // Apply the centralized mode policy to the freshly loaded player (in
+        // particular Spectator noclip/flight) before the first simulation tick.
+        let initial_mode = state.game_mode;
+        state.set_game_mode(initial_mode);
+
         let initial_mesh_coords: Vec<_> = state.chunk_meshes.keys().copied().collect();
         state.invalidate_chunk_meshes(initial_mesh_coords, DependencyReason::ChunkLoad);
         state.load_current_dimension_entities();
@@ -6944,6 +7111,15 @@ impl State {
     }
 
     fn can_place_block_at(&self, x: i32, y: i32, z: i32, block: BlockType) -> bool {
+        let policy = self.game_mode_policy();
+        if (!policy.can_place && self.game_mode != GameMode::Adventure)
+            || !policy.can_place_stack(
+                self.inventory.hotbar[self.inventory.selected].as_ref(),
+                block,
+            )
+        {
+            return false;
+        }
         matches!(
             placement_decision_for_players(
                 block,
@@ -6953,6 +7129,14 @@ impl State {
             ),
             BlockPlacementDecision::Allowed
         )
+    }
+
+    fn can_break_current_block(&self, block: BlockType) -> bool {
+        can_break_block(block, self.game_mode)
+            && self.game_mode_policy().can_break_stack(
+                self.inventory.hotbar[self.inventory.selected].as_ref(),
+                block,
+            )
     }
 
     fn broadcast_block_change(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
@@ -7458,15 +7642,18 @@ impl State {
             } => {
                 self.local_player_id = Some(player_id);
                 self.world_seed = seed as u32;
-                let game_mode = if gamemode == 0 {
-                    GameMode::Creative
-                } else {
-                    GameMode::Survival
+                let game_mode = match gamemode {
+                    0 => GameMode::Creative,
+                    2 => GameMode::Adventure,
+                    3 => GameMode::Spectator,
+                    _ => GameMode::Survival,
                 };
                 self.set_game_mode(game_mode);
                 self.inventory = match self.game_mode {
                     GameMode::Creative => Inventory::new_creative(),
-                    GameMode::Survival => Inventory::new(),
+                    GameMode::Survival | GameMode::Adventure | GameMode::Spectator => {
+                        Inventory::new()
+                    }
                 };
                 self.weather = crate::weather::WeatherSystem::new(self.world_seed);
                 self.chunk_manager.chunks.clear();
@@ -7536,6 +7723,7 @@ impl State {
                     self.remote_player_effects.entry(id).or_default();
                     self.network.notify_player_join(id, username);
                     self.send_time_sync_to(id);
+                    self.network.send_world_rules_to(self.world_rules, id);
                     self.schedule_player_catchup(id);
                 }
             }
@@ -7846,6 +8034,11 @@ impl State {
                                 remaining_ticks: weather_remaining_ticks,
                             });
                     }
+                }
+            }
+            NetworkInbound::WorldRulesSync { rules } => {
+                if !self.is_authoritative() {
+                    self.set_world_rules(rules);
                 }
             }
             NetworkInbound::LightningStrike(strike) => {
@@ -8669,7 +8862,7 @@ impl State {
     }
 
     pub fn handle_jump_pressed(&mut self, now: Instant, repeat: bool) {
-        let can_fly = self.game_mode == GameMode::Creative && !self.player_state.is_dead;
+        let can_fly = self.game_mode_policy().can_fly && !self.player_state.is_dead;
         if self.jump_taps.register(now, can_fly, repeat) {
             let flying = !self.player_physics.is_flying();
             self.player_physics.set_flying(flying);
@@ -8678,10 +8871,33 @@ impl State {
 
     pub fn set_game_mode(&mut self, game_mode: GameMode) {
         self.jump_taps.reset();
-        if game_mode != GameMode::Creative {
+        let policy = crate::game_rules::GameModePolicy::for_rules(game_mode, &self.world_rules);
+        if !policy.can_fly {
             self.player_physics.set_flying(false);
+        } else if game_mode == GameMode::Spectator {
+            self.player_physics.set_flying(true);
         }
+        self.player_physics.set_no_clip(policy.can_phase);
         self.game_mode = game_mode;
+        if game_mode == GameMode::Spectator {
+            self.inventory.is_open = false;
+            self.active_station = None;
+            self.container_target = None;
+        }
+    }
+
+    pub fn game_mode_policy(&self) -> crate::game_rules::GameModePolicy {
+        crate::game_rules::GameModePolicy::for_rules(self.game_mode, &self.world_rules)
+    }
+
+    pub fn set_world_rules(&mut self, rules: crate::game_rules::WorldRules) {
+        self.world_rules = rules.normalized();
+        self.player_physics
+            .set_no_clip(self.game_mode_policy().can_phase);
+    }
+
+    pub fn broadcast_world_rules(&self) {
+        self.network.broadcast_world_rules(self.world_rules);
     }
 
     pub fn open_chat(&mut self) {
@@ -8717,6 +8933,25 @@ impl State {
             return;
         };
 
+        if message.starts_with('/') {
+            if !self.is_authoritative() {
+                push_chat_history(
+                    &mut self.chat_messages,
+                    "System".to_string(),
+                    "Commands can only be run by the host.".to_string(),
+                );
+            } else if !self.cheats_enabled && !matches!(self.role, MultiplayerRole::Host { .. }) {
+                push_chat_history(
+                    &mut self.chat_messages,
+                    "System".to_string(),
+                    "Commands are disabled for this world.".to_string(),
+                );
+            } else {
+                self.execute_command_line(&message);
+            }
+            return;
+        }
+
         let sender = match &self.role {
             MultiplayerRole::Client { username, .. } => username.clone(),
             MultiplayerRole::Host { .. } => "Host".to_string(),
@@ -8726,6 +8961,252 @@ impl State {
             push_chat_history(&mut self.chat_messages, sender.clone(), message.clone());
         }
         self.network.send_chat(sender, message);
+    }
+
+    /// Executes a bounded, typed command on the authoritative world. This is
+    /// intentionally kept on `State` so every mutation passes the same host
+    /// authority and persistence path as regular gameplay input.
+    pub fn execute_command_line(&mut self, input: &str) {
+        let command = match crate::commands::parse(input) {
+            Ok(command) => command,
+            Err(error) => {
+                push_chat_history(
+                    &mut self.chat_messages,
+                    "Command".to_string(),
+                    format!("at {}: {}", error.position, error.message),
+                );
+                return;
+            }
+        };
+
+        use crate::commands::{Command, CommandTarget, TimeCommand, WeatherCommand};
+
+        let target_is_local = |target: Option<&CommandTarget>| {
+            target.is_none()
+                || matches!(
+                    target,
+                    Some(CommandTarget::SelfPlayer | CommandTarget::NearestPlayer)
+                )
+        };
+        let target_is_single_local = |target: &CommandTarget| {
+            matches!(
+                target,
+                CommandTarget::SelfPlayer | CommandTarget::NearestPlayer
+            )
+        };
+        let mut feedback = None::<String>;
+
+        match command {
+            Command::Help(command) => {
+                feedback = Some(crate::commands::help_text(command.as_deref()).into())
+            }
+            Command::GameMode { mode, target } => {
+                if !target_is_local(target.as_ref()) {
+                    feedback = Some("Only the local player can be targeted in this client.".into());
+                } else if self.world_rules.hardcore
+                    && self.player_state.is_dead
+                    && mode == GameMode::Survival
+                {
+                    feedback =
+                        Some("Hardcore players cannot return to Survival after death.".into());
+                } else {
+                    self.set_game_mode(mode);
+                    feedback = Some(format!("Game mode set to {mode:?}."));
+                }
+            }
+            Command::Difficulty(difficulty) => {
+                self.difficulty = if self.world_rules.hardcore {
+                    Difficulty::Hard
+                } else {
+                    difficulty
+                };
+                feedback = Some(format!("Difficulty set to {:?}.", self.difficulty));
+            }
+            Command::GameRule { rule, value } => {
+                if let Some(value) = value {
+                    let changed = if matches!(
+                        rule.as_str(),
+                        "playerssleepingpercentage" | "sleepingpercentage" | "sleeping_percentage"
+                    ) {
+                        value
+                            .parse::<u8>()
+                            .ok()
+                            .map(|value| {
+                                self.world_rules.set_sleeping_percentage(value);
+                                true
+                            })
+                            .unwrap_or(false)
+                    } else if let Some(value) = parse_command_bool(&value) {
+                        self.world_rules.set(&rule, value).is_ok()
+                    } else {
+                        false
+                    };
+                    if changed {
+                        self.set_world_rules(self.world_rules);
+                        feedback = Some(format!("Game rule {rule} updated."));
+                        self.broadcast_world_rules();
+                    } else {
+                        feedback = Some(format!("Unknown or invalid game rule: {rule}."));
+                    }
+                } else if let Some(current) = self.world_rules.value(&rule) {
+                    feedback = Some(format!("{rule} = {current}"));
+                } else if matches!(
+                    rule.as_str(),
+                    "playerssleepingpercentage" | "sleepingpercentage" | "sleeping_percentage"
+                ) {
+                    feedback = Some(format!(
+                        "playersSleepingPercentage = {}",
+                        self.world_rules.sleeping_percentage
+                    ));
+                } else {
+                    feedback = Some(format!("Unknown game rule: {rule}."));
+                }
+            }
+            Command::Time(time) => {
+                match time {
+                    TimeCommand::Set(ticks) => self.world_time.ticks = ticks,
+                    TimeCommand::Add(ticks) => {
+                        self.world_time.ticks = self.world_time.ticks.saturating_add(ticks)
+                    }
+                }
+                self.broadcast_time_sync();
+                feedback = Some(format!("Time is now {}.", self.world_time.ticks));
+            }
+            Command::Weather(weather) => {
+                let (kind, duration) = match weather {
+                    WeatherCommand::Clear(duration) => (crate::weather::Weather::Clear, duration),
+                    WeatherCommand::Rain(duration) => (crate::weather::Weather::Rain, duration),
+                    WeatherCommand::Thunder(duration) => {
+                        (crate::weather::Weather::Thunder, duration)
+                    }
+                };
+                self.weather.set_weather(kind, duration);
+                self.broadcast_time_sync();
+                feedback = Some(format!("Weather set to {:?}.", kind));
+            }
+            Command::Teleport { target, position } => {
+                if !target_is_single_local(&target) {
+                    feedback = Some("Only the local player can be targeted in this client.".into());
+                } else if self.current_dimension.height().contains_y(position[1]) {
+                    self.player_physics.position = Vec3::new(
+                        position[0] as f32 + 0.5,
+                        position[1] as f32,
+                        position[2] as f32 + 0.5,
+                    );
+                    self.player_physics.velocity = Vec3::ZERO;
+                    self.camera.position = self.player_physics.position + Vec3::Y * 1.6;
+                    feedback = Some(format!(
+                        "Teleported to {}, {}, {}.",
+                        position[0], position[1], position[2]
+                    ));
+                } else {
+                    feedback = Some("Teleport destination is outside this dimension.".into());
+                }
+            }
+            Command::Give {
+                target,
+                item,
+                count,
+            } => {
+                if !target_is_single_local(&target) {
+                    feedback = Some("Only the local player can be targeted in this client.".into());
+                } else {
+                    let remainder = self.inventory.add_stack(ItemStack::new(item, count));
+                    let received = remainder
+                        .as_ref()
+                        .map_or(count, |remaining| count - remaining.count);
+                    feedback = Some(format!("Gave {received} {:?}.", item));
+                }
+            }
+            Command::Kill(target) => {
+                if !target_is_local(target.as_ref()) {
+                    feedback = Some("Only the local player can be targeted in this client.".into());
+                } else {
+                    self.player_state.invulnerable_time = 0.0;
+                    self.take_damage(1.0e9, DamageSource::Void);
+                    feedback = Some("Killed the local player.".into());
+                }
+            }
+            Command::SpawnPoint { target, position } => {
+                if !target_is_single_local(&target) {
+                    feedback = Some("Only the local player can be targeted in this client.".into());
+                } else {
+                    let position = position.unwrap_or([
+                        self.player_physics.position.x.floor() as i32,
+                        self.player_physics.position.y.floor() as i32,
+                        self.player_physics.position.z.floor() as i32,
+                    ]);
+                    self.player_state.spawn_point = Some(position);
+                    self.player_state.spawn_dimension = Some(self.current_dimension);
+                    feedback = Some(format!(
+                        "Spawn point set to {}, {}, {}.",
+                        position[0], position[1], position[2]
+                    ));
+                }
+            }
+            Command::SetWorldSpawn(position) => {
+                let position = position.unwrap_or([
+                    self.player_physics.position.x.floor() as i32,
+                    self.player_physics.position.y.floor() as i32,
+                    self.player_physics.position.z.floor() as i32,
+                ]);
+                if crate::dimension::Dimension::Overworld
+                    .height()
+                    .contains_y(position[1])
+                {
+                    self.world_spawn = (position[0], position[1], position[2]);
+                    feedback = Some(format!(
+                        "World spawn set to {}, {}, {}.",
+                        position[0], position[1], position[2]
+                    ));
+                } else {
+                    feedback = Some("World spawn is outside the Overworld height range.".into());
+                }
+            }
+            Command::Locate(structure) => {
+                let structure_id = match structure.as_str() {
+                    "dungeon" => Some(crate::structure::StructureId::Dungeon),
+                    "mineshaft" => Some(crate::structure::StructureId::Mineshaft),
+                    "village" => Some(crate::structure::StructureId::Village),
+                    "stronghold" => Some(crate::structure::StructureId::Stronghold),
+                    "fortress" | "nether_fortress" => {
+                        Some(crate::structure::StructureId::NetherFortress)
+                    }
+                    "endcity" | "end_city" => Some(crate::structure::StructureId::EndCity),
+                    _ => None,
+                };
+                feedback = match structure_id {
+                    Some(id) => {
+                        let current = [
+                            self.player_physics.position.x.floor() as i32,
+                            self.player_physics.position.y.floor() as i32,
+                            self.player_physics.position.z.floor() as i32,
+                        ];
+                        match crate::structure::locate_structure(
+                            id,
+                            (current[0], current[1], current[2]),
+                            self.world_seed,
+                            self.current_dimension,
+                        ) {
+                            Some((x, y, z)) => {
+                                Some(format!("Nearest {structure} is at {x}, {y}, {z}."))
+                            }
+                            None => Some(format!("No {structure} was found nearby.")),
+                        }
+                    }
+                    None => Some(format!("Unknown structure: {structure}.")),
+                };
+            }
+            Command::Seed => feedback = Some(format!("Seed: {}.", self.world_seed)),
+            Command::SaveAll => match self.save_synchronously() {
+                Ok(()) => feedback = Some("Saved the world.".into()),
+                Err(error) => feedback = Some(format!("Save failed: {error}")),
+            },
+        }
+
+        if let Some(feedback) = feedback {
+            push_chat_history(&mut self.chat_messages, "Command".to_string(), feedback);
+        }
     }
 
     pub fn handle_connection_lost_click(&mut self) -> bool {
@@ -8829,7 +9310,13 @@ impl State {
             spawn_z: self.world_spawn.2,
             spawn_dimension: crate::dimension::Dimension::Overworld,
             spawn_yaw: 0.0,
-            version: 2,
+            version: 3,
+            rules: self.world_rules,
+            world_type: self.world_type,
+            generate_structures: self.generate_structures,
+            bonus_chest: self.bonus_chest,
+            cheats_enabled: self.cheats_enabled,
+            hardcore: self.world_rules.hardcore,
         };
         let player = crate::save::PlayerData::from_state(
             self.player_physics.position,
@@ -9446,11 +9933,21 @@ impl State {
         let generation = self.terrain_generation;
         let dimension = self.current_dimension;
         let world_seed = self.world_seed;
+        let world_type = self.world_type;
+        let generate_structures = self.generate_structures;
         let authoritative = self.is_authoritative();
         let save_manager = self.save_manager.clone();
         rayon::spawn(move || {
-            let mut chunk =
-                crate::dimension::generate_chunk(dimension, coord.0, coord.1, world_seed);
+            let mut chunk = crate::dimension::generate_chunk_with_options(
+                dimension,
+                coord.0,
+                coord.1,
+                world_seed,
+                crate::dimension::WorldGenerationOptions {
+                    world_type,
+                    generate_structures,
+                },
+            );
             let mut mutated = false;
             let mut redstone_metadata = Vec::new();
             if authoritative {
@@ -9852,7 +10349,7 @@ impl State {
                         } else if using.action == crate::player::ItemUseAction::Drink {
                             if item == Item::MilkBucket {
                                 self.potion_effects.active.clear();
-                                if self.game_mode == GameMode::Survival {
+                                if self.game_mode_policy().hunger_enabled {
                                     let _ =
                                         self.inventory.add_stack(ItemStack::new(Item::Bucket, 1));
                                 }
@@ -9866,7 +10363,7 @@ impl State {
                                     .use_selected_item(self.game_mode == GameMode::Creative);
                             }
                             crate::player::HandSlot::OffHand => {
-                                if self.game_mode != GameMode::Creative {
+                                if self.game_mode_policy().hunger_enabled {
                                     if let Some(ref mut offhand) = self.inventory.offhand {
                                         if offhand.count > 1 {
                                             offhand.count -= 1;
@@ -10081,13 +10578,19 @@ impl State {
 
         // Update game time
         let speed_multiplier = if self.keys.f { 60.0 } else { 1.0 };
-        let elapsed_world_ticks = dt * 20.0 * speed_multiplier;
+        let elapsed_world_ticks = if self.world_rules.do_daylight_cycle {
+            dt * 20.0 * speed_multiplier
+        } else {
+            0.0
+        };
         self.world_time.tick_accumulator += elapsed_world_ticks;
         let new_ticks = self.world_time.tick_accumulator.floor() as u64;
         self.world_time.ticks += new_ticks;
         self.world_time.tick_accumulator -= new_ticks as f32;
         if self.current_dimension == crate::dimension::Dimension::Overworld {
-            let weather_update = if self.is_authoritative() {
+            let weather_update = if !self.world_rules.do_weather_cycle {
+                crate::weather::WeatherUpdate::default()
+            } else if self.is_authoritative() {
                 self.weather.update_authoritative(elapsed_world_ticks, dt)
             } else {
                 self.weather.update_client(elapsed_world_ticks, dt);
@@ -10132,7 +10635,7 @@ impl State {
 
         // Jump exhaustion check
         let jumped = !was_flying && self.keys.space && self.player_physics.on_ground;
-        if authoritative && jumped && self.game_mode == GameMode::Survival {
+        if authoritative && jumped && self.game_mode_policy().hunger_enabled {
             self.player_state.add_exhaustion(0.05);
         }
         if jumped {
@@ -10183,7 +10686,7 @@ impl State {
         }
 
         // Apply fall damage
-        if self.game_mode == GameMode::Survival && fall_damage > 0.0 {
+        if self.game_mode_policy().can_take_damage && fall_damage > 0.0 {
             self.take_damage(fall_damage, DamageSource::Fall);
         }
 
@@ -10193,7 +10696,7 @@ impl State {
             self.player_physics.position.z - old_pos.z,
         )
         .length();
-        if authoritative && self.game_mode == GameMode::Survival {
+        if authoritative && self.game_mode_policy().hunger_enabled {
             self.player_state.add_exhaustion(0.02 * horizontal_dist);
         }
 
@@ -10267,7 +10770,13 @@ impl State {
                 }
             }
 
-            if total_overworld_players > 0 && total_overworld_players == sleeping_overworld_players
+            let required_sleepers =
+                ((total_overworld_players * self.world_rules.sleeping_percentage as usize + 99)
+                    / 100)
+                    .max(1);
+            if self.world_rules.do_daylight_cycle
+                && total_overworld_players > 0
+                && sleeping_overworld_players >= required_sleepers
             {
                 let ready_to_skip = if self.player_state.is_sleeping {
                     self.player_state.sleep_timer >= 5.0
@@ -10313,7 +10822,7 @@ impl State {
         }
 
         // Dropped item & XP collection
-        {
+        if self.game_mode_policy().can_pickup {
             let player_pos = self.player_physics.position;
             let to_collect: Vec<u64> = self
                 .entity_manager
@@ -10531,7 +11040,7 @@ impl State {
             .sum();
         let water_breathing = self.potion_effects.has_water_breathing();
         let oxygen_rate = 1.0 / (1.0 + respiration_level as f32);
-        if self.is_authoritative() {
+        if self.is_authoritative() && self.game_mode_policy().can_take_damage {
             if let Some((dmg, src)) = self.player_state.update_with_oxygen_rate(
                 dt,
                 is_underwater && !water_breathing,
@@ -10549,7 +11058,13 @@ impl State {
                 self.entity_manager
                     .entities
                     .retain(|entity| !entity.entity_type.is_hostile());
-            } else if self.current_dimension == crate::dimension::Dimension::Overworld {
+            } else if self.world_rules.do_mob_spawning
+                && self.current_dimension == crate::dimension::Dimension::Overworld
+                // Phantom entities are not part of the current entity registry;
+                // until they are added, the insomnia rule gates the night-time
+                // ambient hostile spawn budget (daylight spawns remain intact).
+                && (self.world_rules.do_insomnia || self.world_time.sky_light_level() > 7)
+            {
                 crate::mob::spawn_mobs(
                     &mut self.entity_manager,
                     &self.chunk_manager,
@@ -10559,7 +11074,10 @@ impl State {
                 );
             }
 
-            if self.difficulty != Difficulty::Peaceful {
+            if self.difficulty != Difficulty::Peaceful
+                && self.world_rules.do_mob_spawning
+                && self.game_mode_policy().can_target_mobs
+            {
                 crate::boss::ensure_dimension_entities(
                     self.current_dimension,
                     &mut self.entity_manager,
@@ -10590,22 +11108,27 @@ impl State {
                 crate::weather::Weather::Rain | crate::weather::Weather::Thunder
             );
             let mut mob_dirty_meshes = std::collections::HashSet::new();
-            let exploded_blocks = crate::mob::update_mobs(
-                &mut self.entity_manager,
-                &mut self.chunk_manager,
-                &mut mob_dirty_meshes,
-                &mut self.player_physics,
-                &mut self.player_state,
-                self.game_mode,
-                self.world_time.sky_light_level(),
-                is_raining,
-                dt,
-                &mut self.audio_manager,
-                right,
-                self.potion_effects.has_invisibility(),
-                crate::enchantment::protection_multiplier(&self.inventory.armor, false),
-                authoritative,
-            );
+            let exploded_blocks =
+                if self.world_rules.mob_griefing && self.game_mode_policy().can_target_mobs {
+                    crate::mob::update_mobs(
+                        &mut self.entity_manager,
+                        &mut self.chunk_manager,
+                        &mut mob_dirty_meshes,
+                        &mut self.player_physics,
+                        &mut self.player_state,
+                        self.game_mode,
+                        self.world_time.sky_light_level(),
+                        is_raining,
+                        dt,
+                        &mut self.audio_manager,
+                        right,
+                        self.potion_effects.has_invisibility(),
+                        crate::enchantment::protection_multiplier(&self.inventory.armor, false),
+                        authoritative,
+                    )
+                } else {
+                    Vec::new()
+                };
             self.invalidate_chunk_meshes(mob_dirty_meshes, DependencyReason::Mob);
             for (x, y, z) in exploded_blocks {
                 self.broadcast_block_change(x, y, z, BlockType::Air);
@@ -10618,24 +11141,31 @@ impl State {
             // Update passive mobs
             let passive_mobs_started = Instant::now();
             let mut passive_dirty_meshes = std::collections::HashSet::new();
-            let grazed_blocks = crate::passive_mob::update_passive_mobs(
-                &mut self.entity_manager,
-                &mut self.chunk_manager,
-                &mut passive_dirty_meshes,
-                &self.player_physics,
-                &mut self.inventory,
-                self.game_mode,
-                dt,
-                self.total_time,
-                authoritative,
-            );
+            let grazed_blocks =
+                if self.game_mode_policy().can_target_mobs && self.world_rules.mob_griefing {
+                    crate::passive_mob::update_passive_mobs(
+                        &mut self.entity_manager,
+                        &mut self.chunk_manager,
+                        &mut passive_dirty_meshes,
+                        &self.player_physics,
+                        &mut self.inventory,
+                        self.game_mode,
+                        dt,
+                        self.total_time,
+                        authoritative,
+                    )
+                } else {
+                    Vec::new()
+                };
             self.invalidate_chunk_meshes(passive_dirty_meshes, DependencyReason::Mob);
             for (x, y, z) in grazed_blocks {
                 self.broadcast_block_change(x, y, z, BlockType::Dirt);
             }
 
             // Spawn passive mobs (daytime spawn)
-            if self.current_dimension == crate::dimension::Dimension::Overworld {
+            if self.world_rules.do_mob_spawning
+                && self.current_dimension == crate::dimension::Dimension::Overworld
+            {
                 crate::passive_mob::spawn_passive_mobs(
                     &mut self.entity_manager,
                     &self.chunk_manager,
@@ -10648,13 +11178,20 @@ impl State {
                 crate::perf::ScopeId::PassiveMobs,
                 passive_mobs_started.elapsed(),
             );
-            let (mutations, _stats) = crate::world_tick::sample_random_ticks(
+            let (mut mutations, _stats) = crate::world_tick::sample_random_ticks(
                 &self.chunk_manager,
                 self.world_seed as u64,
                 self.world_time.ticks,
                 self.current_dimension as u8,
                 512,
             );
+            if !self.world_rules.do_fire_tick {
+                mutations.retain(|mutation| {
+                    self.chunk_manager
+                        .get_block(mutation.pos.0, mutation.pos.1, mutation.pos.2)
+                        != BlockType::Fire
+                });
+            }
             if !mutations.is_empty() {
                 if let Ok(outcome) =
                     crate::world_mutation::apply_batch(&mut self.chunk_manager, mutations)
@@ -11538,7 +12075,7 @@ impl State {
                     self.chunk_manager
                         .get_block(target.x as i32, target.y as i32, target.z as i32);
 
-                if can_break_block(block, self.game_mode) {
+                if self.can_break_current_block(block) {
                     if self.mining_target != Some(target) {
                         self.mining_target = Some(target);
                         self.mining_progress = 0.0;
@@ -13379,7 +13916,7 @@ impl State {
     }
 
     fn settle_standard_player_kill(&mut self, kill: PlayerKill, looting: u8) {
-        if self.game_mode != GameMode::Survival {
+        if matches!(self.game_mode, GameMode::Creative | GameMode::Spectator) {
             return;
         }
 
@@ -13594,7 +14131,7 @@ impl State {
         attacker_pos: Option<[f32; 3]>,
         attacker_item: Option<Item>,
     ) {
-        if !self.is_authoritative() || self.game_mode == GameMode::Creative {
+        if !self.is_authoritative() || !self.game_mode_policy().can_take_damage {
             return;
         }
 
@@ -13729,8 +14266,10 @@ impl State {
                 }
             }
 
-            for stack in to_drop {
-                self.spawn_dropped_stack(stack, pos);
+            if !self.world_rules.keep_inventory {
+                for stack in to_drop {
+                    self.spawn_dropped_stack(stack, pos);
+                }
             }
 
             let xp_drop = self.player_state.death_experience_drop();
@@ -13738,7 +14277,9 @@ impl State {
                 self.spawn_xp_orb(xp_drop, pos);
             }
 
-            self.inventory.clear();
+            if !self.world_rules.keep_inventory {
+                self.inventory.clear();
+            }
         } else {
             self.audio_manager
                 .play_sound(crate::audio::SoundId::PlayerHurt);
@@ -13746,6 +14287,15 @@ impl State {
     }
 
     pub fn respawn(&mut self) {
+        if self.world_rules.hardcore && self.player_state.is_dead {
+            // Hardcore worlds never respawn a dead player into Survival.  The
+            // permitted recovery path is a read-only Spectator observer.
+            self.player_state.is_dead = false;
+            self.player_state.health = self.player_state.max_health;
+            self.set_game_mode(GameMode::Spectator);
+            self.sync_cursor_mode();
+            return;
+        }
         self.player_physics.set_flying(false);
         self.jump_taps.reset();
 
@@ -13870,6 +14420,17 @@ impl State {
         ) else {
             return false;
         };
+
+        if self
+            .entity_manager
+            .get_by_id(entity_id)
+            .is_some_and(|entity| {
+                entity.entity_type == crate::entity::EntityType::RemotePlayer
+                    && !self.game_mode_policy().can_attack_players
+            })
+        {
+            return false;
+        }
 
         let held_stack = self.inventory.hotbar[self.inventory.selected];
         let held_item = held_stack
@@ -14268,7 +14829,7 @@ impl State {
             }
             if held_item == Item::MilkBucket {
                 self.potion_effects.active.clear();
-                if self.game_mode == GameMode::Survival {
+                if self.game_mode_policy().hunger_enabled {
                     self.inventory.replace_selected_item(Item::Bucket);
                 }
                 return;
@@ -14888,7 +15449,7 @@ impl State {
             if is_left_click {
                 let old_block = self.chunk_manager.get_block(wx, wy, wz);
                 if old_block != BlockType::Air {
-                    if !can_break_block(old_block, self.game_mode) {
+                    if !self.can_break_current_block(old_block) {
                         return;
                     }
                     // Inventory-bearing entities are authoritative state and
@@ -16223,6 +16784,9 @@ impl State {
     }
 
     pub fn open_inventory(&mut self) {
+        if !self.game_mode_policy().can_use_containers {
+            return;
+        }
         self.inventory.is_open = true;
         if self.advancement_gui.is_open {
             self.close_advancements_ui();
@@ -16342,6 +16906,9 @@ impl State {
         true
     }
     fn open_chest(&mut self, pos: (i32, i32, i32)) {
+        if !self.game_mode_policy().can_use_containers {
+            return;
+        }
         let (cx, cz) = (
             pos.0.div_euclid(crate::world::CHUNK_WIDTH as i32),
             pos.2.div_euclid(crate::world::CHUNK_DEPTH as i32),
@@ -16392,6 +16959,9 @@ impl State {
     }
 
     fn open_station(&mut self, kind: StationKind, position: Vec3) {
+        if !self.game_mode_policy().can_use_containers {
+            return;
+        }
         self.active_station = Some(kind);
         if kind == StationKind::Enchanting {
             let wx = position.x as i32;
@@ -16421,6 +16991,9 @@ impl State {
     }
 
     pub fn open_merchant_trade_window(&mut self, villager_id: u64) {
+        if !self.game_mode_policy().can_use_containers {
+            return;
+        }
         let villager_data =
             if let Some(index) = self.entity_manager.id_to_index.get(&villager_id).copied() {
                 let entity = &self.entity_manager.entities[index];
@@ -19223,7 +19796,7 @@ impl State {
                     }
                 }
 
-                if self.game_mode == GameMode::Survival {
+                if self.game_mode_policy().can_take_damage {
                     // Draw Health HUD
                     let hud_w = 0.03;
                     let hud_h = 0.03 * aspect;
@@ -19421,6 +19994,8 @@ impl State {
                     (GameMode::Creative, true) => "CREATIVE MODE - FLYING",
                     (GameMode::Creative, false) => "CREATIVE MODE",
                     (GameMode::Survival, _) => "SURVIVAL MODE",
+                    (GameMode::Adventure, _) => "ADVENTURE MODE",
+                    (GameMode::Spectator, _) => "SPECTATOR MODE",
                 };
                 let mode_w = 0.009;
                 let mode_h = 0.018;
@@ -19439,7 +20014,7 @@ impl State {
                     &mut ui_line_vertices,
                 );
 
-                if self.game_mode == GameMode::Survival {
+                if self.game_mode_policy().can_take_damage {
                     let xp_text = format!("LEVEL {}", self.player_state.experience_level);
                     let width = xp_text.len() as f32 * 0.009;
                     add_string_lines(
@@ -21479,7 +22054,7 @@ pub fn calculate_block_break_rewards(
     held_stack: Option<&ItemStack>,
     game_mode: GameMode,
 ) -> BlockBreakRewards {
-    if game_mode != GameMode::Survival {
+    if matches!(game_mode, GameMode::Creative | GameMode::Spectator) {
         return BlockBreakRewards {
             drops: Vec::new(),
             xp: 0,

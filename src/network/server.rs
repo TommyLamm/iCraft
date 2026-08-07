@@ -266,6 +266,13 @@ pub enum HostToServer {
         weather: u8,
         weather_remaining_ticks: f32,
     },
+    BroadcastWorldRules {
+        rules: crate::game_rules::WorldRules,
+    },
+    SendWorldRules {
+        rules: crate::game_rules::WorldRules,
+        to: PlayerId,
+    },
     SendTimeSync {
         ticks: u64,
         weather: u8,
@@ -1265,6 +1272,7 @@ impl NetworkServer {
                 | HostToServer::BroadcastChat { .. }
                 | HostToServer::NotifyPlayerJoin { .. }
                 | HostToServer::BroadcastTimeSync { .. }
+                | HostToServer::BroadcastWorldRules { .. }
                 | HostToServer::BroadcastLightningStrike { .. }
                 | HostToServer::BroadcastSleepStateSync { .. }
         );
@@ -1367,6 +1375,20 @@ impl NetworkServer {
                     weather_remaining_ticks,
                 },
                 None,
+            ),
+            HostToServer::BroadcastWorldRules { rules } => (
+                Packet::WorldRulesSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    rules,
+                },
+                None,
+            ),
+            HostToServer::SendWorldRules { rules, to } => (
+                Packet::WorldRulesSync {
+                    protocol_version: PROTOCOL_VERSION,
+                    rules,
+                },
+                Some(to),
             ),
             HostToServer::SendTimeSync {
                 ticks,

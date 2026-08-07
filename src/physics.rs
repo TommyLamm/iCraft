@@ -128,6 +128,7 @@ pub struct PlayerPhysics {
     pub on_ground: bool,
     pub highest_y: f32,
     is_flying: bool,
+    no_clip: bool,
 }
 
 impl PlayerPhysics {
@@ -139,6 +140,7 @@ impl PlayerPhysics {
             on_ground: false,
             highest_y: position.y,
             is_flying: false,
+            no_clip: false,
         }
     }
 
@@ -164,6 +166,20 @@ impl PlayerPhysics {
         if flying {
             self.on_ground = false;
         }
+    }
+
+    pub fn set_no_clip(&mut self, no_clip: bool) {
+        if self.no_clip == no_clip {
+            return;
+        }
+        self.no_clip = no_clip;
+        self.on_ground = false;
+        self.velocity.y = 0.0;
+        self.highest_y = self.position.y;
+    }
+
+    pub fn is_no_clip(&self) -> bool {
+        self.no_clip
     }
 
     pub fn get_aabb(&self) -> AABB {
@@ -399,6 +415,9 @@ impl PlayerPhysics {
     }
 
     fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
+        if self.no_clip {
+            return;
+        }
         let player_aabb = self.get_aabb();
         let height = chunk_manager.dimension.height();
 

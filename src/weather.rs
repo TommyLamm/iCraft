@@ -86,6 +86,23 @@ impl WeatherSystem {
         self.lightning_timer = f32::INFINITY;
     }
 
+    /// Applies an authoritative command-style weather change. A zero
+    /// duration uses the normal deterministic cycle duration.
+    pub fn set_weather(&mut self, weather: Weather, duration_ticks: Option<u32>) {
+        self.current = weather;
+        self.remaining_ticks = duration_ticks
+            .map(|ticks| ticks as f32)
+            .filter(|ticks| *ticks > 0.0)
+            .unwrap_or_else(|| self.random_duration_ticks());
+        self.lightning_timer = if weather == Weather::Thunder {
+            self.random_lightning_interval()
+        } else {
+            f32::INFINITY
+        };
+        self.precipitation_accumulator = 0.0;
+        self.snow_accumulation_timer = 0.0;
+    }
+
     pub fn is_thundering(&self) -> bool {
         self.current == Weather::Thunder
     }

@@ -427,7 +427,11 @@ pub fn update_mobs(
             || entity.entity_type == EntityType::Creeper;
 
         let dist_sq = entity.position.distance_squared(player_pos);
-        if is_hostile && dist_sq <= 256.0 && !player_invisible && game_mode != GameMode::Creative {
+        if is_hostile
+            && dist_sq <= 256.0
+            && !player_invisible
+            && !matches!(game_mode, GameMode::Creative | GameMode::Spectator)
+        {
             entity.target_player = true;
 
             // Turn towards player

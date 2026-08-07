@@ -141,6 +141,9 @@ pub enum ClientToGame {
         weather: u8,
         weather_remaining_ticks: f32,
     },
+    WorldRulesSync {
+        rules: crate::game_rules::WorldRules,
+    },
     LightningStrike(LightningStrike),
     Chat {
         sender: String,
@@ -737,6 +740,9 @@ async fn run_client(
                         if let Some(event) = authoritative_weather_event(&packet) {
                             let _ = client_to_game.send(event);
                         }
+                    }
+                    Ok(Packet::WorldRulesSync { rules, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::WorldRulesSync { rules });
                     }
                     Ok(Packet::ChatMessage { sender, message, .. }) => { let _ = client_to_game.send(ClientToGame::Chat { sender, message }); }
                     Ok(Packet::Keepalive { .. }) => {

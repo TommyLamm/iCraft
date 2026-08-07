@@ -101,6 +101,7 @@ pub fn generate_mineshaft(
         inventory: ContainerInventory::new(),
         loot_table: Some(LootTableId::Mineshaft.as_str().to_string()),
         loot_seed: Some(seed as u64 ^ 0x4D49_4E45),
+        revision: 0,
     });
     blocks.push(BlockPlacement {
         world_x: cx,

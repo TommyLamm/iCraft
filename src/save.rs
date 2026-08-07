@@ -420,6 +420,80 @@ pub struct LevelData {
     pub spawn_yaw: f32,
     #[serde(default)]
     pub version: u32,
+    #[serde(default)]
+    pub rules: crate::game_rules::WorldRules,
+    #[serde(default)]
+    pub world_type: crate::game_rules::WorldType,
+    #[serde(default = "default_true_bool")]
+    pub generate_structures: bool,
+    #[serde(default)]
+    pub bonus_chest: bool,
+    #[serde(default)]
+    pub cheats_enabled: bool,
+    #[serde(default)]
+    pub hardcore: bool,
+}
+
+/// The level payload written before Plan 15 added creation options and rules.
+/// Bincode does not apply serde defaults to fields that are absent from the
+/// byte stream, so old worlds need an explicit prefix migration on load.
+#[derive(Serialize, Deserialize)]
+struct LegacyLevelData {
+    seed: u32,
+    time: u64,
+    #[serde(default = "default_spawn_x")]
+    spawn_x: i32,
+    #[serde(default = "default_spawn_y")]
+    spawn_y: i32,
+    #[serde(default = "default_spawn_z")]
+    spawn_z: i32,
+    #[serde(default)]
+    spawn_dimension: crate::dimension::Dimension,
+    #[serde(default)]
+    spawn_yaw: f32,
+    #[serde(default)]
+    version: u32,
+}
+
+impl From<LegacyLevelData> for LevelData {
+    fn from(legacy: LegacyLevelData) -> Self {
+        Self {
+            seed: legacy.seed,
+            time: legacy.time,
+            spawn_x: legacy.spawn_x,
+            spawn_y: legacy.spawn_y,
+            spawn_z: legacy.spawn_z,
+            spawn_dimension: legacy.spawn_dimension,
+            spawn_yaw: legacy.spawn_yaw,
+            version: legacy.version,
+            ..Self::default()
+        }
+    }
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+impl Default for LevelData {
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            time: 0,
+            spawn_x: default_spawn_x(),
+            spawn_y: default_spawn_y(),
+            spawn_z: default_spawn_z(),
+            spawn_dimension: crate::dimension::Dimension::Overworld,
+            spawn_yaw: 0.0,
+            version: 0,
+            rules: Default::default(),
+            world_type: Default::default(),
+            generate_structures: true,
+            bonus_chest: false,
+            cheats_enabled: false,
+            hardcore: false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -430,6 +504,10 @@ pub struct ItemStackData {
     pub enchantments: crate::enchantment::EnchantmentSet,
     pub potion: Option<crate::brewing::PotionData>,
     pub custom_name: crate::enchantment::ItemName,
+    #[serde(default)]
+    pub can_break: u128,
+    #[serde(default)]
+    pub can_place_on: u128,
 }
 
 impl ItemStackData {
@@ -441,6 +519,8 @@ impl ItemStackData {
             enchantments: self.enchantments,
             potion: self.potion,
             custom_name: self.custom_name,
+            can_break: self.can_break,
+            can_place_on: self.can_place_on,
         }
     }
 }
@@ -454,6 +534,8 @@ impl From<&ItemStack> for ItemStackData {
             enchantments: stack.enchantments,
             potion: stack.potion,
             custom_name: stack.custom_name,
+            can_break: stack.can_break,
+            can_place_on: stack.can_place_on,
         }
     }
 }
@@ -733,6 +815,8 @@ pub struct PlayerData {
     pub experience: u32,
     pub experience_level: u32,
     pub game_mode: GameMode,
+    #[serde(default)]
+    pub is_dead: bool,
     pub inventory: InventoryData,
     #[serde(default)]
     pub advancements: crate::advancements::AdvancementProgressData,
@@ -772,6 +856,7 @@ impl PlayerData {
             experience: state.experience,
             experience_level: state.experience_level,
             game_mode,
+            is_dead: state.is_dead,
             inventory: InventoryData::from(inventory),
             advancements,
             spawn_point: state.spawn_point,
@@ -2590,8 +2675,19 @@ impl SaveManager {
         let mut lf = File::open(&level_file)?;
         let mut level_bytes = Vec::new();
         lf.read_to_end(&mut level_bytes)?;
-        let level = bincode::deserialize::<LevelData>(&level_bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let level = match bincode::deserialize::<LevelData>(&level_bytes) {
+            Ok(level) => level,
+            Err(current_error) => bincode::deserialize::<LegacyLevelData>(&level_bytes)
+                .map(LevelData::from)
+                .map_err(|legacy_error| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!(
+                            "level decode failed (current: {current_error}; legacy: {legacy_error})"
+                        ),
+                    )
+                })?,
+        };
 
         let mut pf = File::open(&player_file)?;
         let mut player_bytes = Vec::new();
@@ -2667,6 +2763,7 @@ impl From<PreviousPlayerData> for PlayerData {
             experience: old.experience,
             experience_level: old.experience_level,
             game_mode: old.game_mode,
+            is_dead: false,
             inventory: old.inventory.into(),
             advancements: old.advancements,
             spawn_point: None,
@@ -2717,6 +2814,8 @@ impl From<LegacyItemStackData> for ItemStackData {
             enchantments: Default::default(),
             potion: None,
             custom_name: Default::default(),
+            can_break: 0,
+            can_place_on: 0,
         }
     }
 }
@@ -2756,6 +2855,7 @@ impl From<LegacyPlayerData> for PlayerData {
             experience: 0,
             experience_level: 0,
             game_mode: old.game_mode,
+            is_dead: false,
             inventory: old.inventory.into(),
             advancements: crate::advancements::AdvancementProgressData::default(),
             spawn_point: None,
@@ -2784,6 +2884,7 @@ mod tests {
             spawn_dimension: Dimension::Overworld,
             spawn_yaw: 0.0,
             version: 2,
+            ..LevelData::default()
         };
         let encoded_level = bincode::serialize(&level).unwrap();
         let decoded_level: LevelData = bincode::deserialize(&encoded_level).unwrap();
@@ -2803,6 +2904,7 @@ mod tests {
             experience: 120,
             experience_level: 12,
             game_mode: GameMode::Survival,
+            is_dead: false,
             spawn_point: None,
             spawn_dimension: None,
             inventory: InventoryData {
@@ -2813,6 +2915,8 @@ mod tests {
                     enchantments: Default::default(),
                     potion: None,
                     custom_name: Default::default(),
+                    can_break: 0,
+                    can_place_on: 0,
                 })],
                 main: vec![None],
                 armor: vec![None],
@@ -2925,6 +3029,7 @@ mod tests {
             experience: 10,
             experience_level: 2,
             game_mode: GameMode::Creative,
+            is_dead: false,
             inventory: InventoryData::from(&inventory),
             advancements: Default::default(),
             spawn_point: None,
@@ -2955,6 +3060,7 @@ mod tests {
                     spawn_dimension: Dimension::Overworld,
                     spawn_yaw: 0.0,
                     version: 2,
+                    ..LevelData::default()
                 },
                 &player,
             )
@@ -3019,6 +3125,7 @@ mod tests {
                 spawn_dimension: Dimension::Overworld,
                 spawn_yaw: 0.0,
                 version: 2,
+                ..LevelData::default()
             })
             .unwrap(),
         )
@@ -4212,12 +4319,33 @@ mod tests {
             spawn_dimension: crate::dimension::Dimension::Overworld,
             spawn_yaw: 90.0,
             version: 2,
+            ..LevelData::default()
         };
         let bytes = bincode::serialize(&level).unwrap();
         let restored_level: LevelData = bincode::deserialize(&bytes).unwrap();
         assert_eq!(restored_level.spawn_x, 100);
         assert_eq!(restored_level.spawn_y, 65);
         assert_eq!(restored_level.spawn_z, -200);
+
+        // A pre-Plan-15 level payload must load with explicit rule/creation
+        // defaults instead of failing at the newly appended bincode fields.
+        let legacy = LegacyLevelData {
+            seed: 77,
+            time: 123,
+            spawn_x: 4,
+            spawn_y: 80,
+            spawn_z: -9,
+            spawn_dimension: crate::dimension::Dimension::Overworld,
+            spawn_yaw: 0.0,
+            version: 2,
+        };
+        let legacy_bytes = bincode::serialize(&legacy).unwrap();
+        let migrated = bincode::deserialize::<LevelData>(&legacy_bytes)
+            .or_else(|_| bincode::deserialize::<LegacyLevelData>(&legacy_bytes).map(Into::into))
+            .unwrap();
+        assert_eq!(migrated.seed, 77);
+        assert!(migrated.rules == crate::game_rules::WorldRules::default());
+        assert!(migrated.generate_structures);
 
         // 2. EntitySaveData dropped_stack migration
         let mut stack = crate::inventory::ItemStack::new(crate::inventory::Item::DiamondSword, 1);

@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-08-06
+> Last verified: 2026-08-08
 > Git baseline: tommy-dev
 >
 > This document is a concise navigation map. Source code remains authoritative.
@@ -62,7 +62,7 @@ the primary Vulkan path has caused a verified NVIDIA driver crash.
 4. Builds initial terrain meshes and starts background services.
 5. Streams the remaining render distance incrementally.
 
-Joining clients wait for a successful protocol-v12 login before using the host's
+Joining clients wait for a successful protocol-v13 login before using the host's
 seed and synchronized world state.
 
 ### Per-frame update
@@ -179,7 +179,7 @@ Food items define `FoodProperties` (hunger, saturation, eating duration ticks, a
   bounded interpolation buffer.
 - Reliable queues carry login, chat, chunk, block, container transactions (open/click/close/slot update), and time/weather state.
 
-Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v12. Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta.
+Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v13. Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta. `WorldRulesSync` carries the host's serialized `WorldRules` snapshot to clients; clients apply it for display/runtime policy and cannot submit rule mutations.
 Trading and Raid operations use `OpenTradeWindow`, `ExecuteTradeRequest`, `ExecuteTradeResult`, `CloseTradeWindow`, and `RaidStatusSync` packets over protocol v12.
 `ContainerSessionManager` and `MerchantSessionManager` track player ID, dimension, villager ID, and active trade offers.
 `PoiManager` (`src/village/poi.rs`) indexes Bed and JobSite POIs by chunk with max-distance spatial hashing, maintaining spatial village clusters for villager assignment and bed count tracking.
@@ -200,15 +200,33 @@ Redstone, fluids, weather placement, random ticks, explosions, mob world
 changes, and unsupported-block cascades remain host-side. Unloaded-chunk changes
 are deferred and replayed after stream-in.
 
+## Modes, world rules, and commands (Plan 15)
+
+`game_rules.rs` is the single runtime policy layer. `GameModePolicy` derives
+collision, phase/noclip, damage, hunger, flight, interaction, pickup, and mob
+targeting decisions from the player's `GameMode` and the host's `WorldRules`.
+Adventure item stacks carry compact `can_break`/`can_place_on` block masks;
+Spectator is read-only and cannot open or mutate containers. Hardcore is a
+persisted world property (with Hard difficulty) and a persisted player death
+marker, so reconnect/respawn cannot silently return a dead player to Survival.
+
+`commands/` contains the bounded typed parser and dispatcher used by host
+commands. Commands are accepted only from the host/authorized operator or when
+single-player cheats are enabled; ordinary client chat is never interpreted as
+an administrative command. Rule changes are saved with `LevelData` and sent to
+clients through `WorldRulesSync`. The menu persists Default/Superflat creation
+options and validates world copy/backup/delete paths beneath the canonical
+`saves/` root.
+
 ## Persistence and configuration
 
 | Path | Authoritative contents |
 | --- | --- |
 | `settings.txt` | Display, audio, difficulty, language, view, and related `GameSettings` values. |
 | `controls.config` | Configurable key bindings; loaded and saved by `GameSettings`. |
-| `saves/<world>/world.meta` | World-list name, seed, game mode, difficulty, and last-played time. |
-| `saves/<world>/level.dat` | Bincode `LevelData`: seed, game time, world spawn coordinates, dimension, yaw, and version. |
-| `saves/<world>/player.dat` | Bincode player, inventory/item metadata, game mode, XP, spawn point, spawn dimension, unlocked_recipes, and advancement progress. |
+| `saves/<world>/world.meta` | World-list name, seed, game mode, difficulty, world type, structure/bonus/cheat flags, Hardcore flag, and last-played time. |
+| `saves/<world>/level.dat` | Bincode `LevelData`: seed, game time, world spawn coordinates, dimension, yaw, format version, world type/structure flags, Hardcore flag, and the serialized `WorldRules` snapshot. |
+| `saves/<world>/player.dat` | Bincode player, inventory/item metadata (including Adventure break/place masks), game mode, XP, spawn point, spawn dimension, unlocked_recipes, advancement progress, and the persistent death marker used by Hardcore. |
 | `saves/<world>/dimension.dat` | Active dimension; missing legacy files default to Overworld. |
 | `saves/<world>/entities.dat` | Persistent Overworld living/persistent/dropped entities. |
 | `saves/<world>/regions/` | Overworld region data. |
@@ -241,6 +259,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Transport, mounts, navigation & fishing | `vehicle.rs` (MountManager, BoatState), `rail.rs` (MinecartState, RailShape), `navigation.rs` (Compass, Clock, MapData), `fishing.rs` (FishingManager, loot rolling) |
 | Networking | `network/{protocol,transport,server,client}.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
+| Modes, rules, commands | `game_rules.rs`, `commands/`, `state.rs`, `menu.rs` |
 | Performance instrumentation | `perf.rs`, `performance/` |
 
 Start with the exact symbol related to the task; avoid reading all of

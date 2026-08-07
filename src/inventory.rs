@@ -4,6 +4,8 @@ use crate::world::BlockType;
 pub enum GameMode {
     Creative,
     Survival,
+    Adventure,
+    Spectator,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -738,6 +740,14 @@ pub struct ItemStack {
     pub enchantments: crate::enchantment::EnchantmentSet,
     pub potion: Option<crate::brewing::PotionData>,
     pub custom_name: crate::enchantment::ItemName,
+    /// Adventure-mode permission tags encoded as a compact block-id bitset.
+    /// Keeping this copyable preserves the inventory's fixed-size slot arrays;
+    /// serde defaults keep old saves compatible.  Use the helpers below rather
+    /// than depending on the representation.
+    #[serde(default)]
+    pub can_break: u128,
+    #[serde(default)]
+    pub can_place_on: u128,
 }
 
 impl ItemStack {
@@ -770,6 +780,8 @@ impl ItemStack {
             enchantments: crate::enchantment::EnchantmentSet::default(),
             potion,
             custom_name: crate::enchantment::ItemName::default(),
+            can_break: 0,
+            can_place_on: 0,
         }
     }
 
@@ -779,6 +791,26 @@ impl ItemStack {
             && self.enchantments == other.enchantments
             && self.potion == other.potion
             && self.custom_name == other.custom_name
+            && self.can_break == other.can_break
+            && self.can_place_on == other.can_place_on
+    }
+
+    pub fn with_can_break(mut self, block: BlockType) -> Self {
+        self.can_break |= 1u128 << (block as u8);
+        self
+    }
+
+    pub fn with_can_place_on(mut self, block: BlockType) -> Self {
+        self.can_place_on |= 1u128 << (block as u8);
+        self
+    }
+
+    pub fn can_break_block(&self, block: BlockType) -> bool {
+        self.can_break & (1u128 << (block as u8)) != 0
+    }
+
+    pub fn can_place_on_block(&self, block: BlockType) -> bool {
+        self.can_place_on & (1u128 << (block as u8)) != 0
     }
 }
 

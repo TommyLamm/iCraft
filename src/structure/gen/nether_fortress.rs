@@ -96,6 +96,7 @@ pub fn generate_nether_fortress(
         inventory: ContainerInventory::new(),
         loot_table: Some(LootTableId::NetherBridge.as_str().to_string()),
         loot_seed: Some(seed as u64 ^ 0x464F_5254),
+        revision: 0,
     });
     blocks.push(BlockPlacement {
         world_x: origin_x + 3,

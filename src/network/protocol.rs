@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u64;
 
-/// Protocol v12 adds stable block-entity variants and revision-bearing
+/// Protocol v13 adds authoritative world-rule synchronization to the stable
+/// block-entity variants and revision-bearing
 /// automation state to chunk/entity deltas.  Older clients are rejected during
 /// the existing handshake instead of being allowed to simulate containers.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PotionWire {
@@ -481,6 +482,10 @@ pub enum Packet {
         max_waves: u8,
         status: u8,
     },
+    WorldRulesSync {
+        protocol_version: u32,
+        rules: crate::game_rules::WorldRules,
+    },
 }
 
 impl Packet {
@@ -573,6 +578,9 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::RaidStatusSync {
+                protocol_version, ..
+            } => *protocol_version,
+            Packet::WorldRulesSync {
                 protocol_version, ..
             } => *protocol_version,
             Packet::ContainerOpenRequest {
@@ -831,6 +839,19 @@ mod tests {
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_ne!(decoded.protocol_version(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn world_rules_sync_roundtrip() {
+        let packet = Packet::WorldRulesSync {
+            protocol_version: PROTOCOL_VERSION,
+            rules: crate::game_rules::WorldRules {
+                keep_inventory: true,
+                pvp: false,
+                ..Default::default()
+            },
+        };
+        assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
     }
 
     #[test]

@@ -104,6 +104,7 @@ pub fn generate_village(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
         inventory: ContainerInventory::new(),
         loot_table: Some(LootTableId::Village.as_str().to_string()),
         loot_seed: Some(seed as u64 ^ 0x5649_4C4C),
+        revision: 0,
     });
     blocks.push(BlockPlacement {
         world_x: origin_x + 5,

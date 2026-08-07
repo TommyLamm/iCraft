@@ -679,7 +679,9 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
         } else if code == controls.gamemode && !event.repeat {
             let game_mode = match state.game_mode {
                 crate::inventory::GameMode::Creative => crate::inventory::GameMode::Survival,
-                crate::inventory::GameMode::Survival => crate::inventory::GameMode::Creative,
+                crate::inventory::GameMode::Survival => crate::inventory::GameMode::Adventure,
+                crate::inventory::GameMode::Adventure => crate::inventory::GameMode::Spectator,
+                crate::inventory::GameMode::Spectator => crate::inventory::GameMode::Creative,
             };
             state.set_game_mode(game_mode);
         }

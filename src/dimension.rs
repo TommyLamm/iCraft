@@ -170,16 +170,75 @@ pub fn transform_position(from: Dimension, to: Dimension, mut position: Vec3) ->
     position
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldGenerationOptions {
+    pub world_type: crate::game_rules::WorldType,
+    pub generate_structures: bool,
+}
+
+impl Default for WorldGenerationOptions {
+    fn default() -> Self {
+        Self {
+            world_type: crate::game_rules::WorldType::Default,
+            generate_structures: true,
+        }
+    }
+}
+
 pub fn generate_chunk(dimension: Dimension, chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
+    generate_chunk_with_options(
+        dimension,
+        chunk_x,
+        chunk_z,
+        seed,
+        WorldGenerationOptions::default(),
+    )
+}
+
+pub fn generate_chunk_with_options(
+    dimension: Dimension,
+    chunk_x: i32,
+    chunk_z: i32,
+    seed: u32,
+    options: WorldGenerationOptions,
+) -> Chunk {
     let mut chunk = match dimension {
+        Dimension::Overworld if options.world_type == crate::game_rules::WorldType::Superflat => {
+            generate_superflat_chunk(chunk_x, chunk_z, seed)
+        }
         Dimension::Overworld => generate_overworld_chunk(chunk_x, chunk_z, seed),
         Dimension::Nether => generate_nether_chunk(chunk_x, chunk_z, seed),
         Dimension::End => generate_end_chunk(chunk_x, chunk_z, seed),
     };
-    static STRUCTURE_MANAGER: std::sync::OnceLock<crate::structure::StructureManager> =
-        std::sync::OnceLock::new();
-    let manager = STRUCTURE_MANAGER.get_or_init(|| crate::structure::StructureManager::new());
-    manager.apply_structures_to_chunk(&mut chunk, dimension, seed);
+    if options.generate_structures {
+        static STRUCTURE_MANAGER: std::sync::OnceLock<crate::structure::StructureManager> =
+            std::sync::OnceLock::new();
+        let manager = STRUCTURE_MANAGER.get_or_init(|| crate::structure::StructureManager::new());
+        manager.apply_structures_to_chunk(&mut chunk, dimension, seed);
+    }
+    chunk
+}
+
+fn generate_superflat_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
+    let mut chunk = Chunk::new_with_seed(chunk_x, chunk_z, seed);
+    let height = Dimension::Overworld.height();
+    for x in 0..CHUNK_WIDTH {
+        for z in 0..CHUNK_DEPTH {
+            for y in height.min_y()..height.max_y_exclusive() {
+                let block = match y {
+                    -64 => BlockType::Bedrock,
+                    -63..=61 => BlockType::Stone,
+                    62..=63 => BlockType::Dirt,
+                    64 => BlockType::Grass,
+                    _ => BlockType::Air,
+                };
+                chunk.set_block_local(x, y, z, block);
+            }
+            chunk.update_heightmap(x, z);
+        }
+    }
+    chunk.rebuild_torch_index();
+    chunk.rebuild_redstone_index();
     chunk
 }
 
@@ -1048,5 +1107,31 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn superflat_generation_is_signed_height_and_deterministic() {
+        let options = WorldGenerationOptions {
+            world_type: crate::game_rules::WorldType::Superflat,
+            generate_structures: false,
+        };
+        let first = generate_chunk_with_options(Dimension::Overworld, 3, -2, 123, options);
+        let second = generate_chunk_with_options(Dimension::Overworld, 3, -2, 123, options);
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                assert_eq!(first.get_block_local(x, -64, z), BlockType::Bedrock);
+                assert_eq!(first.get_block_local(x, 64, z), BlockType::Grass);
+                for y in [-63, 0, 61] {
+                    assert_eq!(first.get_block_local(x, y, z), BlockType::Stone);
+                }
+                assert_eq!(first.get_block_local(x, 65, z), BlockType::Air);
+                for y in -64..320 {
+                    assert_eq!(
+                        first.get_block_local(x, y, z),
+                        second.get_block_local(x, y, z)
+                    );
+                }
+            }
+        }
     }
 }

@@ -74,6 +74,7 @@ pub fn generate_end_city(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32)
         inventory: ContainerInventory::new(),
         loot_table: Some(LootTableId::EndCity.as_str().to_string()),
         loot_seed: Some(seed as u64 ^ 0x454E_4443),
+        revision: 0,
     });
     blocks.push(BlockPlacement {
         world_x: chest_x,

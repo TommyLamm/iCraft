@@ -52,6 +52,7 @@ pub fn generate_stronghold(
         inventory: ContainerInventory::new(),
         loot_table: Some(LootTableId::StrongholdCorridor.as_str().to_string()),
         loot_seed: Some(seed as u64 ^ 0x5354_524F),
+        revision: 0,
     });
     blocks.push(BlockPlacement {
         world_x: origin_x + 2,
