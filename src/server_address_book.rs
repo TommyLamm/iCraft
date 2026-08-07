@@ -179,15 +179,17 @@ impl ServerAddressBook {
         }
         .clamp(1, MAX_ENTRIES);
         let mut book = Self::new(capacity);
-        for address in disk.addresses.into_iter().rev().take(MAX_ENTRIES) {
-            if normalize_address(&address).is_none() {
+        for address in disk.addresses.into_iter().take(MAX_ENTRIES) {
+            let Some(address) = normalize_address(&address) else {
                 return Err(AddressBookError::Invalid(
                     "saved address is empty, contains whitespace, or exceeds the limit".into(),
                 ));
+            };
+            if !book.addresses.iter().any(|existing| existing == &address) {
+                book.addresses.push(address);
             }
-            book.remember(address);
         }
-        for result in disk.recent_results.into_iter().rev().take(MAX_ENTRIES) {
+        for result in disk.recent_results.into_iter().take(MAX_ENTRIES) {
             let result = ServerPingResult {
                 address: result.address,
                 version: result.version,
@@ -201,8 +203,16 @@ impl ServerAddressBook {
                     "saved ping result contains an invalid or oversized field".into(),
                 ));
             }
-            book.record_ping(result);
+            if !book
+                .recent_results
+                .iter()
+                .any(|existing| existing.address == result.address)
+            {
+                book.recent_results.push(result);
+            }
         }
+        book.addresses.truncate(book.capacity);
+        book.recent_results.truncate(book.capacity);
         Ok(book)
     }
 
@@ -490,6 +500,8 @@ mod tests {
             max_players: 0,
             error: Some("offline".into()),
         });
+        book.save(&path).unwrap();
+        book.remember("second.test:25565");
         book.save(&path).unwrap();
         let loaded = ServerAddressBook::load(&path).unwrap();
         assert_eq!(loaded.addresses(), book.addresses());
