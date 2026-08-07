@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 
 pub const MAX_PACK_ENTRIES: usize = 4096;
@@ -18,6 +18,8 @@ pub const MAX_PACK_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_PACK_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_COMPRESSION_RATIO: u64 = 1_000;
 const BUILTIN_PACK_ID: &str = "icraft.builtin";
+const MAX_PACK_DESCRIPTION_BYTES: usize = 1024;
+const MAX_PACK_DEPENDENCIES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourcePackManifest {
@@ -32,13 +34,7 @@ pub struct ResourcePackManifest {
 
 impl ResourcePackManifest {
     pub fn validate(&self) -> Result<(), PackError> {
-        if self.id.is_empty()
-            || self.id.len() > 64
-            || !self
-                .id
-                .chars()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ".-_".contains(ch))
-        {
+        if !valid_pack_id(&self.id) {
             return Err(PackError::InvalidManifest(
                 "id must use lowercase ASCII letters, digits, '.', '-' or '_'".into(),
             ));
@@ -58,8 +54,23 @@ impl ResourcePackManifest {
                 "unsupported iCraft pack format".into(),
             ));
         }
+        if self.description.len() > MAX_PACK_DESCRIPTION_BYTES {
+            return Err(PackError::InvalidManifest(
+                "description must be at most 1024 bytes".into(),
+            ));
+        }
+        if self.dependencies.len() > MAX_PACK_DEPENDENCIES {
+            return Err(PackError::InvalidManifest(
+                "dependencies exceed the 128-entry limit".into(),
+            ));
+        }
         let mut seen = HashSet::new();
         for dependency in &self.dependencies {
+            if !valid_pack_id(dependency) {
+                return Err(PackError::InvalidManifest(format!(
+                    "dependency id is invalid: {dependency}"
+                )));
+            }
             if dependency == &self.id || !seen.insert(dependency) {
                 return Err(PackError::InvalidManifest(
                     "dependencies must be unique and cannot include the pack itself".into(),
@@ -68,6 +79,14 @@ impl ResourcePackManifest {
         }
         Ok(())
     }
+}
+
+fn valid_pack_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ".-_".contains(ch))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +154,7 @@ struct LoadedPack {
 pub struct ResourcePackManager {
     builtin_root: PathBuf,
     user_root: PathBuf,
+    override_path: Option<PathBuf>,
     packs: Vec<LoadedPack>,
     enabled_order: Vec<String>,
     diagnostics: Vec<PackDiagnostic>,
@@ -149,19 +169,36 @@ impl Default for ResourcePackManager {
 
 impl ResourcePackManager {
     pub fn discover_default() -> Self {
-        Self::discover("assets", "resourcepacks")
+        let override_path = std::env::var_os("ICRAFT_RESOURCE_PACK").map(PathBuf::from);
+        Self::discover_with_override("assets", "resourcepacks", override_path)
     }
 
     pub fn discover(builtin_root: impl Into<PathBuf>, user_root: impl Into<PathBuf>) -> Self {
+        Self::discover_with_override(builtin_root, user_root, None)
+    }
+
+    /// Discover packs with an explicit development/test override.  The
+    /// override is intentionally injected by the caller so tests never need
+    /// to mutate process-wide environment variables.  When present it is the
+    /// only user pack root considered; the normal workspace `resourcepacks`
+    /// directory is not implicitly mixed into the override.
+    pub fn discover_with_override(
+        builtin_root: impl Into<PathBuf>,
+        user_root: impl Into<PathBuf>,
+        override_path: Option<PathBuf>,
+    ) -> Self {
         let mut manager = Self {
             builtin_root: builtin_root.into(),
             user_root: user_root.into(),
+            override_path,
             packs: Vec::new(),
             enabled_order: Vec::new(),
             diagnostics: Vec::new(),
             diagnostic_keys: HashSet::new(),
         };
-        let _ = manager.reload();
+        if let Err(error) = manager.reload() {
+            manager.record_diagnostic(Path::new("resourcepacks"), &error.to_string());
+        }
         manager
     }
 
@@ -180,26 +217,21 @@ impl ResourcePackManager {
         }
         self.packs.push(builtin);
 
-        let mut candidates = fs::read_dir(&self.user_root)
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .map(|entry| entry.path())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let mut candidates = if let Some(path) = &self.override_path {
+            vec![path.clone()]
+        } else {
+            fs::read_dir(&self.user_root)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
         candidates.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
         for path in candidates {
-            let loaded = if path.is_dir() {
-                load_directory_pack(&path)
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
-            {
-                load_zip_pack(&path)
-            } else {
-                continue;
-            };
+            let loaded = load_pack_path(&path);
             match loaded {
                 Ok(pack) => {
                     if self
@@ -264,7 +296,12 @@ impl ResourcePackManager {
                 }
             }
         }
-        self.enabled_order = requested;
+        let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
+        let topological = self.dependency_order()?;
+        self.enabled_order = topological
+            .into_iter()
+            .filter(|id| id != BUILTIN_PACK_ID && requested_set.contains(id.as_str()))
+            .collect();
         Ok(())
     }
 
@@ -305,6 +342,54 @@ impl ResourcePackManager {
         value
     }
 
+    /// Resolve and validate a texture through the pack manager.  Invalid
+    /// overrides are skipped so a valid built-in texture still wins over a
+    /// corrupt selected-pack entry.
+    pub fn resolve_texture(&mut self, relative: &str) -> Option<Vec<u8>> {
+        self.resolve_validated_asset(relative, "texture", |bytes| {
+            image::load_from_memory(bytes).is_ok()
+        })
+    }
+
+    pub fn texture_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
+        self.resolve_texture(relative)
+    }
+
+    /// Resolve a JSON item/block model descriptor.  The small client model
+    /// format intentionally accepts any JSON object; malformed JSON and
+    /// scalar/array descriptors fall back to the built-in/procedural model.
+    pub fn resolve_model(&mut self, relative: &str) -> Option<Vec<u8>> {
+        self.resolve_validated_asset(relative, "model", |bytes| {
+            serde_json::from_slice::<serde_json::Value>(bytes)
+                .map(|value| value.is_object())
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn model_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
+        self.resolve_model(relative)
+    }
+
+    /// Resolve a TrueType/OpenType/WebFont payload.  Font parsing is kept
+    /// dependency-free and bounded by checking the format's mandatory magic.
+    pub fn resolve_font(&mut self, relative: &str) -> Option<Vec<u8>> {
+        self.resolve_validated_asset(relative, "font", font_bytes_are_decodable)
+    }
+
+    pub fn font_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
+        self.resolve_font(relative)
+    }
+
+    /// Resolve a sound through the same manager entry point used by the audio
+    /// consumer.  Rodio performs the actual bounded decoder validation.
+    pub fn resolve_sound(&mut self, relative: &str) -> Option<Vec<u8>> {
+        self.resolve_validated_asset(relative, "sound", sound_bytes_are_decodable)
+    }
+
+    pub fn sound_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
+        self.resolve_sound(relative)
+    }
+
     pub fn read_asset(&self, relative: &str) -> Option<Vec<u8>> {
         let relative = normalize_logical_path(relative).ok()?;
         for id in self.enabled_order.iter().rev() {
@@ -321,7 +406,94 @@ impl ResourcePackManager {
     }
 
     pub fn locale_bytes(&self, language: &str) -> Option<Vec<u8>> {
-        self.read_asset(&format!("lang/{}.json", language.to_ascii_lowercase()))
+        let language = normalize_locale_code(language)?;
+        self.read_asset(&format!("lang/{language}.json"))
+    }
+
+    pub fn resolve_locale(&mut self, language: &str) -> Option<Vec<u8>> {
+        let language = match normalize_locale_code(language) {
+            Some(language) => language,
+            None => {
+                self.record_asset_diagnostic(
+                    language,
+                    "locale",
+                    "invalid locale code; using built-in fallback",
+                );
+                return None;
+            }
+        };
+        self.resolve_validated_asset(&format!("lang/{language}.json"), "locale", |bytes| {
+            let Ok(text) = std::str::from_utf8(bytes) else {
+                return false;
+            };
+            serde_json::from_str::<HashMap<String, String>>(text).is_ok()
+        })
+    }
+
+    /// Record a consumer-side validation failure once for a logical asset.
+    /// This is used by audio after a decoder-specific check and keeps the
+    /// diagnostic key independent of the selected pack's physical path.
+    pub fn record_asset_diagnostic(&mut self, relative: &str, kind: &str, message: &str) {
+        let normalized =
+            normalize_logical_path(relative).unwrap_or_else(|_| relative.replace('\\', "/"));
+        let key = format!("asset::{kind}::{normalized}");
+        if self.diagnostic_keys.insert(key) {
+            self.diagnostics.push(PackDiagnostic {
+                source: normalized,
+                message: message.to_string(),
+            });
+        }
+    }
+
+    fn resolve_validated_asset<F>(
+        &mut self,
+        relative: &str,
+        kind: &str,
+        validator: F,
+    ) -> Option<Vec<u8>>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        let normalized = match normalize_logical_path(relative) {
+            Ok(path) => path,
+            Err(error) => {
+                self.record_asset_diagnostic(relative, kind, &error.to_string());
+                return None;
+            }
+        };
+        let mut candidates = Vec::new();
+        for id in self.enabled_order.iter().rev() {
+            if let Some(pack) = self.packs.iter().find(|pack| pack.manifest.id == *id) {
+                if let Some(bytes) = lookup_asset(pack, &normalized) {
+                    candidates.push(bytes.to_vec());
+                }
+            }
+        }
+        if let Some(pack) = self
+            .packs
+            .iter()
+            .find(|pack| pack.manifest.id == BUILTIN_PACK_ID)
+        {
+            if let Some(bytes) = lookup_asset(pack, &normalized) {
+                candidates.push(bytes.to_vec());
+            }
+        }
+        for bytes in candidates {
+            if validator(&bytes) {
+                return Some(bytes);
+            }
+            self.record_asset_diagnostic(
+                &normalized,
+                kind,
+                &format!("invalid {kind} asset; using built-in/procedural fallback"),
+            );
+        }
+        self.record_asset_diagnostic(
+            &normalized,
+            kind,
+            &format!("{kind} asset missing or invalid; using built-in/procedural fallback"),
+        );
+        None
     }
 
     fn dependency_order(&self) -> Result<Vec<String>, PackError> {
@@ -379,13 +551,42 @@ fn visit_dependency<'a>(
     Ok(())
 }
 
+fn load_pack_path(path: &Path) -> Result<LoadedPack, PackError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(PackError::UnsafePath(path.display().to_string()));
+    }
+    if metadata.is_dir() {
+        load_directory_pack(path)
+    } else if metadata.is_file()
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    {
+        load_zip_pack(path)
+    } else {
+        Err(PackError::InvalidManifest(format!(
+            "resource-pack path is not a directory or .zip: {}",
+            path.display()
+        )))
+    }
+}
+
 fn load_directory_pack(root: &Path) -> Result<LoadedPack, PackError> {
+    let root_metadata = fs::symlink_metadata(root)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(PackError::UnsafePath(root.display().to_string()));
+    }
     let manifest_path = [root.join("pack.json"), root.join("assets/pack.json")]
         .into_iter()
-        .find(|path| path.is_file())
+        .find(|path| {
+            fs::symlink_metadata(path)
+                .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+                .unwrap_or(false)
+        })
         .ok_or_else(|| PackError::InvalidManifest("pack.json is missing".into()))?;
-    let manifest = parse_manifest(&fs::read(&manifest_path)?)?;
     let mut assets = HashMap::new();
+    let mut manifest_bytes = None;
     let mut total = 0u64;
     let mut entries = 0usize;
     let mut stack = vec![root.to_path_buf()];
@@ -422,9 +623,15 @@ fn load_directory_pack(root: &Path) -> Result<LoadedPack, PackError> {
                 .map_err(|_| PackError::UnsafePath(path.display().to_string()))?;
             let relative = normalize_logical_path(&relative.to_string_lossy())?;
             let bytes = fs::read(&path)?;
+            if path == manifest_path {
+                manifest_bytes = Some(bytes.clone());
+            }
             insert_asset_aliases(&mut assets, &relative, bytes);
         }
     }
+    let manifest = parse_manifest(
+        &manifest_bytes.ok_or_else(|| PackError::InvalidManifest("pack.json is missing".into()))?,
+    )?;
     Ok(LoadedPack {
         manifest,
         source: root.display().to_string(),
@@ -442,15 +649,36 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
     }
     let eocd = find_zip_end(&bytes)
         .ok_or_else(|| PackError::Archive("ZIP end record is missing".into()))?;
+    if (eocd >= 20 && read_u32(&bytes, eocd - 20) == Some(0x0706_4b50))
+        || bytes.get(..eocd).is_some_and(|prefix| {
+            prefix
+                .windows(4)
+                .any(|window| window == [0x50, 0x4b, 0x06, 0x06])
+        })
+    {
+        return Err(PackError::Archive(
+            "ZIP64 archives are not supported".into(),
+        ));
+    }
     let entry_count = read_u16(&bytes, eocd + 10)
         .ok_or_else(|| PackError::Archive("truncated ZIP end record".into()))?
         as usize;
+    if entry_count == u16::MAX as usize {
+        return Err(PackError::Archive(
+            "ZIP64 archives are not supported".into(),
+        ));
+    }
     let central_size = read_u32(&bytes, eocd + 12)
         .ok_or_else(|| PackError::Archive("truncated ZIP end record".into()))?
         as usize;
     let central_offset = read_u32(&bytes, eocd + 16)
         .ok_or_else(|| PackError::Archive("truncated ZIP end record".into()))?
         as usize;
+    if central_size == u32::MAX as usize || central_offset == u32::MAX as usize {
+        return Err(PackError::Archive(
+            "ZIP64 archives are not supported".into(),
+        ));
+    }
     if entry_count > MAX_PACK_ENTRIES {
         return Err(PackError::TooManyEntries);
     }
@@ -478,6 +706,8 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
         let compressed_size = read_u32(&bytes, cursor + 20)
             .ok_or_else(|| PackError::Archive("truncated ZIP compressed size".into()))?
             as u64;
+        let central_crc = read_u32(&bytes, cursor + 16)
+            .ok_or_else(|| PackError::Archive("truncated ZIP CRC".into()))?;
         let uncompressed_size = read_u32(&bytes, cursor + 24)
             .ok_or_else(|| PackError::Archive("truncated ZIP uncompressed size".into()))?
             as u64;
@@ -533,8 +763,7 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
         if uncompressed_size > MAX_PACK_ENTRY_BYTES {
             return Err(PackError::EntryTooLarge(raw_name));
         }
-        if compressed_size > 0 && uncompressed_size / compressed_size.max(1) > MAX_COMPRESSION_RATIO
-        {
+        if uncompressed_size > compressed_size.saturating_mul(MAX_COMPRESSION_RATIO) {
             return Err(PackError::CompressionBomb(raw_name));
         }
         total = total.saturating_add(uncompressed_size);
@@ -553,6 +782,36 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
         let local_extra_len = read_u16(&bytes, local_offset + 28)
             .ok_or_else(|| PackError::Archive("truncated ZIP local extra length".into()))?
             as usize;
+        let local_flags = read_u16(&bytes, local_offset + 6)
+            .ok_or_else(|| PackError::Archive("truncated ZIP local flags".into()))?;
+        let local_compression = read_u16(&bytes, local_offset + 8)
+            .ok_or_else(|| PackError::Archive("truncated ZIP local method".into()))?;
+        let local_crc = read_u32(&bytes, local_offset + 14)
+            .ok_or_else(|| PackError::Archive("truncated ZIP local CRC".into()))?;
+        if local_flags != flags || local_compression != compression {
+            return Err(PackError::Archive(format!(
+                "ZIP local/central header mismatch for {raw_name}"
+            )));
+        }
+        if flags & 0x08 == 0 && local_crc != central_crc {
+            return Err(PackError::Archive(format!(
+                "ZIP local CRC mismatch for {raw_name}"
+            )));
+        }
+        let local_name_end = local_end
+            .checked_add(local_name_len)
+            .ok_or_else(|| PackError::Archive("ZIP local name length overflow".into()))?;
+        let local_extra_end = local_name_end
+            .checked_add(local_extra_len)
+            .ok_or_else(|| PackError::Archive("ZIP local extra length overflow".into()))?;
+        if local_extra_end > bytes.len() {
+            return Err(PackError::Archive("ZIP local header is truncated".into()));
+        }
+        if bytes.get(local_end..local_name_end) != Some(raw_name.as_bytes()) {
+            return Err(PackError::Archive(format!(
+                "ZIP local/central name mismatch for {raw_name}"
+            )));
+        }
         let data_offset = local_end
             .checked_add(local_name_len)
             .and_then(|value| value.checked_add(local_extra_len))
@@ -586,10 +845,20 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
                 "ZIP size mismatch for {raw_name}"
             )));
         }
+        if crc32(&data) != central_crc {
+            return Err(PackError::Archive(format!(
+                "ZIP CRC mismatch for {raw_name}"
+            )));
+        }
         if relative == "pack.json" || relative == "assets/pack.json" {
             manifest_bytes = Some(data.clone());
         }
         insert_asset_aliases(&mut assets, &relative, data);
+    }
+    if cursor != central_offset + central_size {
+        return Err(PackError::Archive(
+            "ZIP central directory size does not match entry count".into(),
+        ));
     }
     let manifest = parse_manifest(
         &manifest_bytes.ok_or_else(|| PackError::InvalidManifest("pack.json is missing".into()))?,
@@ -606,6 +875,18 @@ fn find_zip_end(bytes: &[u8]) -> Option<usize> {
     (start..bytes.len().saturating_sub(3))
         .rev()
         .find(|&index| read_u32(bytes, index) == Some(0x0605_4b50))
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -648,6 +929,36 @@ fn normalize_logical_path(raw: &str) -> Result<String, PackError> {
         return Err(PackError::UnsafePath(normalized));
     }
     Ok(normalized)
+}
+
+fn normalize_locale_code(raw: &str) -> Option<String> {
+    let code = raw.trim().to_ascii_lowercase();
+    if code.is_empty()
+        || code.len() > 32
+        || !code
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+    {
+        return None;
+    }
+    Some(code)
+}
+
+fn font_bytes_are_decodable(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"OTTO")
+        || bytes.starts_with(b"true")
+        || bytes.starts_with(b"typ1")
+        || bytes.starts_with(b"ttcf")
+        || bytes.starts_with(b"wOFF")
+        || bytes.starts_with(b"wOF2")
+        || bytes.starts_with(&[0, 1, 0, 0])
+}
+
+pub(crate) fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    rodio::Decoder::new(Cursor::new(bytes.to_vec())).is_ok()
 }
 
 fn insert_asset_aliases(assets: &mut HashMap<String, Vec<u8>>, relative: &str, bytes: Vec<u8>) {
@@ -738,6 +1049,52 @@ mod tests {
         .to_string()
     }
 
+    fn write_pack(root: &Path, id: &str, dependencies: &[&str]) {
+        fs::create_dir_all(root).unwrap();
+        fs::write(root.join("pack.json"), manifest(id, dependencies)).unwrap();
+    }
+
+    fn single_entry_zip(name: &[u8], payload: &[u8], central_crc: u32) -> Vec<u8> {
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&[0; 4]);
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(name);
+        archive.extend_from_slice(payload);
+        let central_offset = archive.len() as u32;
+        archive.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        archive.extend_from_slice(&[20, 0, 20, 0]);
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&[0; 4]);
+        archive.extend_from_slice(&central_crc.to_le_bytes());
+        archive.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        archive.extend_from_slice(&[0; 2]);
+        archive.extend_from_slice(&[0; 2]);
+        archive.extend_from_slice(&[0; 4]);
+        archive.extend_from_slice(&[0; 4]);
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(name);
+        let central_size = archive.len() as u32 - central_offset;
+        archive.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        archive.extend_from_slice(&[0; 4]);
+        archive.extend_from_slice(&1u16.to_le_bytes());
+        archive.extend_from_slice(&1u16.to_le_bytes());
+        archive.extend_from_slice(&central_size.to_le_bytes());
+        archive.extend_from_slice(&central_offset.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive
+    }
+
     #[test]
     fn manifest_and_dependency_order_are_deterministic() {
         let root = temp_dir("packs");
@@ -763,8 +1120,98 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["test.base", "test.theme"]
         );
+        let mut manager = manager;
         assert_eq!(manager.read_asset("lang/de_de.json"), Some(b"{}".to_vec()));
+        manager
+            .apply_enabled_order(["test.theme", "test.base"])
+            .unwrap();
+        assert_eq!(manager.enabled_order(), ["test.base", "test.theme"]);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typed_consumers_skip_invalid_override_and_deduplicate_diagnostics() {
+        let root = temp_dir("typed_consumers");
+        write_pack(&root, BUILTIN_PACK_ID, &[]);
+        fs::create_dir_all(root.join("textures")).unwrap();
+        fs::create_dir_all(root.join("sounds")).unwrap();
+        fs::create_dir_all(root.join("lang")).unwrap();
+        fs::create_dir_all(root.join("models")).unwrap();
+        fs::create_dir_all(root.join("font")).unwrap();
+        let texture = include_bytes!("../assets/vanilla/textures/block/stone.png");
+        let sound = include_bytes!("../assets/sounds/click.wav");
+        fs::write(root.join("textures/stone.png"), texture).unwrap();
+        fs::write(root.join("sounds/click.wav"), sound).unwrap();
+        fs::write(root.join("lang/en_us.json"), br#"{"hello":"Hello"}"#).unwrap();
+        fs::write(root.join("models/block.json"), br#"{"parent":"builtin"}"#).unwrap();
+        fs::write(root.join("font/main.ttf"), b"OTTOfont").unwrap();
+
+        let user = root.join("resourcepacks");
+        let override_pack = user.join("override");
+        write_pack(&override_pack, "test.override", &[]);
+        fs::create_dir_all(override_pack.join("textures")).unwrap();
+        fs::create_dir_all(override_pack.join("sounds")).unwrap();
+        fs::create_dir_all(override_pack.join("lang")).unwrap();
+        fs::create_dir_all(override_pack.join("models")).unwrap();
+        fs::create_dir_all(override_pack.join("font")).unwrap();
+        fs::write(override_pack.join("textures/stone.png"), b"not png").unwrap();
+        fs::write(override_pack.join("sounds/click.wav"), b"not sound").unwrap();
+        fs::write(override_pack.join("lang/en_us.json"), [0xff, 0xfe]).unwrap();
+        fs::write(override_pack.join("models/block.json"), b"[]").unwrap();
+        fs::write(override_pack.join("font/main.ttf"), b"not font").unwrap();
+
+        let mut manager = ResourcePackManager::discover(&root, &user);
+        manager.apply_enabled_order(["test.override"]).unwrap();
+        assert_eq!(
+            manager.resolve_texture("textures/stone.png"),
+            Some(texture.to_vec())
+        );
+        assert_eq!(
+            manager.resolve_sound("sounds/click.wav"),
+            Some(sound.to_vec())
+        );
+        assert_eq!(
+            manager.resolve_locale("en_us"),
+            Some(br#"{"hello":"Hello"}"#.to_vec())
+        );
+        assert_eq!(
+            manager.resolve_model("models/block.json"),
+            Some(br#"{"parent":"builtin"}"#.to_vec())
+        );
+        assert_eq!(
+            manager.resolve_font("font/main.ttf"),
+            Some(b"OTTOfont".to_vec())
+        );
+        let diagnostics = manager.diagnostics().len();
+        assert!(diagnostics >= 5);
+        manager.resolve_texture("textures/stone.png");
+        manager.resolve_sound("sounds/click.wav");
+        manager.resolve_locale("en_us");
+        manager.resolve_model("models/block.json");
+        manager.resolve_font("font/main.ttf");
+        assert_eq!(manager.diagnostics().len(), diagnostics);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_validates_description_and_dependency_ids() {
+        let mut value = ResourcePackManifest {
+            id: "test.pack".into(),
+            name: "Test".into(),
+            version: "1".into(),
+            format: 1,
+            description: "x".into(),
+            dependencies: vec!["bad id".into()],
+        };
+        assert!(matches!(
+            value.validate(),
+            Err(PackError::InvalidManifest(message)) if message.contains("dependency id")
+        ));
+        value.dependencies.clear();
+        value.description = "x".repeat(MAX_PACK_DESCRIPTION_BYTES + 1);
+        assert!(
+            matches!(value.validate(), Err(PackError::InvalidManifest(message)) if message.contains("description"))
+        );
     }
 
     #[test]
@@ -827,6 +1274,29 @@ mod tests {
             Err(PackError::UnsafePath(_))
         ));
         assert!(!root.parent().unwrap().join("escape.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zip_crc_mismatch_and_zip64_markers_are_rejected() {
+        let root = temp_dir("zip_integrity");
+        let archive_path = root.join("bad_crc.zip");
+        let payload = b"payload";
+        let archive = single_entry_zip(b"asset.txt", payload, 0);
+        fs::write(&archive_path, archive).unwrap();
+        assert!(matches!(
+            load_zip_pack(&archive_path),
+            Err(PackError::Archive(message)) if message.contains("CRC mismatch")
+        ));
+
+        let mut zip64 = single_entry_zip(b"asset.txt", payload, crc32(payload));
+        let eocd = zip64.len() - 22;
+        zip64[eocd + 10..eocd + 12].copy_from_slice(&u16::MAX.to_le_bytes());
+        fs::write(root.join("zip64.zip"), zip64).unwrap();
+        assert!(matches!(
+            load_zip_pack(&root.join("zip64.zip")),
+            Err(PackError::Archive(message)) if message.contains("ZIP64")
+        ));
         let _ = fs::remove_dir_all(root);
     }
 

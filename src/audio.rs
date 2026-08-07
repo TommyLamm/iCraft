@@ -5,8 +5,7 @@ use crate::resources::ResourcePackManager;
 use glam::Vec3;
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source, SpatialSink};
 use std::collections::HashMap;
-use std::fs::{create_dir_all, File};
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -159,7 +158,7 @@ fn create_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 }
 
 fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
-    rodio::Decoder::new(Cursor::new(bytes.to_vec())).is_ok()
+    crate::resources::sound_bytes_are_decodable(bytes)
 }
 
 fn load_or_synthesize_sound(file_path: &Path, sound_id: SoundId) -> (Vec<u8>, bool) {
@@ -432,11 +431,6 @@ impl AudioManager {
             }
         };
 
-        let sound_dir = Path::new("assets/sounds");
-        if !sound_dir.exists() {
-            let _ = create_dir_all(sound_dir);
-        }
-
         let mut sound_cache = HashMap::new();
         let sound_ids = vec![
             SoundId::Jump,
@@ -486,23 +480,10 @@ impl AudioManager {
 
         for id in sound_ids {
             let filename = id.filename();
-            let file_path = sound_dir.join(&filename);
             let logical_path = format!("sounds/{filename}");
-            let (loaded_bytes, synthesized) = manager
-                .read_asset(&logical_path)
-                .filter(|bytes| sound_bytes_are_decodable(bytes))
-                .map(|bytes| (bytes, false))
-                .unwrap_or_else(|| load_or_synthesize_sound(&file_path, id));
-
-            if synthesized {
-                // Note-block pitches are cheap procedural variants; keep them
-                // in memory instead of creating 25 generated files per world.
-                if !matches!(id, SoundId::Note(_)) {
-                    if let Ok(mut f) = File::create(&file_path) {
-                        let _ = f.write_all(&loaded_bytes);
-                    }
-                }
-            }
+            let loaded_bytes = manager
+                .resolve_sound(&logical_path)
+                .unwrap_or_else(|| create_wav_bytes(&synth_sound(id), 22050));
 
             sound_cache.insert(id, loaded_bytes);
         }

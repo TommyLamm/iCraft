@@ -1,6 +1,9 @@
 use crate::game_rules::{WorldCreationOptions, WorldType};
 use crate::inventory::GameMode;
-use crate::{accessibility::AccessibilitySettings, resources::ResourcePackManager};
+use crate::{
+    accessibility::AccessibilitySettings, localization::TranslationCatalog,
+    resources::ResourcePackManager,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1338,11 +1341,23 @@ pub struct Menu {
     message: Option<String>,
     pub settings: GameSettings,
     resource_packs: ResourcePackManager,
+    catalog: TranslationCatalog,
     focus_index: usize,
     supported_present_modes: Vec<wgpu::PresentMode>,
 }
 
 impl Menu {
+    fn refresh_catalog(&mut self) {
+        self.catalog = TranslationCatalog::from_resource_packs_mut(
+            &mut self.resource_packs,
+            self.settings.language,
+        );
+    }
+
+    fn tr(&self, key: &str) -> String {
+        self.catalog.lookup(key)
+    }
+
     pub async fn new(window: Arc<Window>, settings: GameSettings) -> Self {
         window.set_cursor_visible(true);
         let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
@@ -1502,6 +1517,8 @@ impl Menu {
         if !settings.resource_packs.is_empty() {
             let _ = resource_packs.apply_enabled_order(&settings.resource_packs);
         }
+        let catalog =
+            TranslationCatalog::from_resource_packs_mut(&mut resource_packs, settings.language);
         Self {
             window,
             surface,
@@ -1540,6 +1557,7 @@ impl Menu {
             message: None,
             settings,
             resource_packs,
+            catalog,
             focus_index: 0,
             supported_present_modes,
         }
@@ -1915,8 +1933,7 @@ impl Menu {
                         }
                     };
                     let Some(role) = role else {
-                        self.message =
-                            Some(tr(self.settings.language, "menu.enter_valid_multiplayer"));
+                        self.message = Some(self.tr("menu.enter_valid_multiplayer"));
                         return MenuAction::None;
                     };
                     let is_client = matches!(role, MultiplayerRole::Client { .. });
@@ -1974,8 +1991,7 @@ impl Menu {
                         match copy_world(&directory, &destination) {
                             Ok(()) => {
                                 self.worlds = discover_worlds();
-                                self.message =
-                                    Some(tr(self.settings.language, "menu.world_copied"));
+                                self.message = Some(self.tr("menu.world_copied"));
                             }
                             Err(error) => self.message = Some(format!("COPY FAILED: {error}")),
                         }
@@ -1990,8 +2006,7 @@ impl Menu {
                         match backup_world(&directory, &destination) {
                             Ok(()) => {
                                 self.worlds = discover_worlds();
-                                self.message =
-                                    Some(tr(self.settings.language, "menu.world_backed_up"));
+                                self.message = Some(self.tr("menu.world_backed_up"));
                             }
                             Err(error) => self.message = Some(format!("BACKUP FAILED: {error}")),
                         }
@@ -2269,7 +2284,10 @@ impl Menu {
                 self.settings.weather_volume =
                     (self.settings.weather_volume + delta * 0.1).clamp(0.0, 1.0)
             }
-            (_, true, Some(4)) => self.settings.language = self.settings.language.toggle(),
+            (_, true, Some(4)) => {
+                self.settings.language = self.settings.language.toggle();
+                self.refresh_catalog();
+            }
             (_, true, Some(5)) => {
                 self.screen = MenuScreen::Accessibility;
                 return;
@@ -2410,7 +2428,7 @@ impl Menu {
                 );
                 draw_centered_text(
                     vertices,
-                    &tr(self.settings.language, "menu.singleplayer"),
+                    &self.tr("menu.singleplayer"),
                     0.248,
                     0.010,
                     aspect,
@@ -2419,7 +2437,7 @@ impl Menu {
                 draw_centered_text(vertices, "MULTIPLAYER", 0.068, 0.010, aspect, [1.0; 4]);
                 draw_centered_text(
                     vertices,
-                    &tr(self.settings.language, "menu.options"),
+                    &self.tr("menu.options"),
                     -0.112,
                     0.010,
                     aspect,
@@ -2427,7 +2445,7 @@ impl Menu {
                 );
                 draw_centered_text(
                     vertices,
-                    &tr(self.settings.language, "menu.quit_game"),
+                    &self.tr("menu.quit_game"),
                     -0.292,
                     0.010,
                     aspect,
@@ -2572,7 +2590,7 @@ impl Menu {
         panel(vertices, -0.82, 0.82, -0.9, 0.82);
         draw_centered_text(
             vertices,
-            &tr(self.settings.language, "menu.select_world"),
+            &self.tr("menu.select_world"),
             0.72,
             0.012,
             aspect,
@@ -2947,7 +2965,7 @@ impl Menu {
         panel(vertices, -0.9, 0.9, -0.88, 0.82);
         draw_centered_text(
             vertices,
-            &tr(self.settings.language, "menu.options"),
+            &self.tr("menu.options"),
             0.72,
             0.012,
             aspect,
@@ -2973,7 +2991,7 @@ impl Menu {
                 percent(self.settings.weather_volume)
             ),
             format!("LANGUAGE: < {} >", self.settings.language.as_str()),
-            crate::localization::translate(self.settings.language, "menu.accessibility"),
+            self.tr("menu.accessibility"),
         ];
         for (row, label) in left.iter().enumerate() {
             let top = OPTIONS_ROW_TOPS[row];
@@ -3091,6 +3109,8 @@ impl Menu {
                 }
                 if let Err(error) = self.resource_packs.apply_enabled_order(&selected) {
                     self.message = Some(format!("PACK REJECTED: {error}"));
+                } else {
+                    self.refresh_catalog();
                 }
             }
         } else if hit(x, y, -0.78, -0.28, -0.78, -0.64) {
@@ -3104,6 +3124,9 @@ impl Menu {
                 let _ = self
                     .resource_packs
                     .apply_enabled_order(&self.settings.resource_packs);
+                self.refresh_catalog();
+            } else {
+                self.refresh_catalog();
             }
         } else if hit(x, y, 0.28, 0.78, -0.78, -0.64) {
             self.screen = MenuScreen::Options;
@@ -3115,7 +3138,7 @@ impl Menu {
         panel(vertices, -0.90, 0.90, -0.88, 0.82);
         draw_centered_text(
             vertices,
-            &tr(self.settings.language, "menu.accessibility"),
+            &self.tr("menu.accessibility"),
             0.72,
             0.012,
             aspect,
@@ -3147,7 +3170,7 @@ impl Menu {
                 ),
                 _ => format!(
                     "{}: < {} >",
-                    accessibility_label(self.settings.language, setting),
+                    accessibility_label(&self.catalog, setting),
                     on_off(self.settings.accessibility.bool_value(setting))
                 ),
             };
@@ -3194,7 +3217,7 @@ impl Menu {
         );
         draw_centered_text(
             vertices,
-            &tr(self.settings.language, "menu.done"),
+            &self.tr("menu.done"),
             -0.738,
             0.008,
             aspect,
@@ -3206,7 +3229,7 @@ impl Menu {
         panel(vertices, -0.86, 0.86, -0.88, 0.82);
         draw_centered_text(
             vertices,
-            &tr(self.settings.language, "menu.resource_packs"),
+            &self.tr("menu.resource_packs"),
             0.72,
             0.012,
             aspect,
@@ -3508,7 +3531,10 @@ fn on_off(value: bool) -> &'static str {
     }
 }
 
-fn accessibility_label(language: Language, row: crate::accessibility::AccessibilityRow) -> String {
+fn accessibility_label(
+    catalog: &TranslationCatalog,
+    row: crate::accessibility::AccessibilityRow,
+) -> String {
     let key = match row {
         crate::accessibility::AccessibilityRow::UiScale => "menu.ui_scale",
         crate::accessibility::AccessibilityRow::ChatScale => "menu.chat_scale",
@@ -3521,11 +3547,7 @@ fn accessibility_label(language: Language, row: crate::accessibility::Accessibil
         crate::accessibility::AccessibilityRow::CameraBobbing => "menu.camera_bobbing",
         crate::accessibility::AccessibilityRow::DamageTilt => "menu.damage_tilt",
     };
-    crate::localization::translate(language, key)
-}
-
-fn tr(language: Language, key: &str) -> String {
-    crate::localization::translate(language, key)
+    catalog.lookup(key)
 }
 
 fn hit(x: f32, y: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> bool {

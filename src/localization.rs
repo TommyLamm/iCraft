@@ -131,12 +131,23 @@ impl TranslationCatalog {
     }
 
     pub fn from_resource_packs(manager: &ResourcePackManager, language: Language) -> Self {
+        // Keep the original shared-reference API for callers that do not
+        // need diagnostics. Clone the bounded manager so validation still
+        // follows the exact same selected-pack path as the mutable API.
+        let mut manager = manager.clone();
+        Self::from_resource_packs_mut(&mut manager, language)
+    }
+
+    /// Build a catalog through validated ResourcePackManager locale bytes.
+    /// Invalid UTF-8/JSON entries are skipped with one manager diagnostic and
+    /// the next lower-priority pack (usually built-in) is selected.
+    pub fn from_resource_packs_mut(manager: &mut ResourcePackManager, language: Language) -> Self {
         let english = manager
-            .locale_bytes(Language::English.code())
+            .resolve_locale(Language::English.code())
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .unwrap_or_else(|| include_str!("../assets/lang/en_us.json").to_string());
         let active = manager
-            .locale_bytes(language.code())
+            .resolve_locale(language.code())
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .unwrap_or_else(|| {
                 if language == Language::English {
@@ -149,15 +160,27 @@ impl TranslationCatalog {
     }
 
     pub fn translate(&mut self, key: &str) -> String {
-        if let Some(value) = self.active.get(key) {
-            return value.clone();
+        let value = self.lookup(key);
+        if self.active.contains_key(key) {
+            return value;
         }
-        if let Some(value) = self.english.get(key) {
+        if self.english.contains_key(key) {
             self.missing.insert(key.to_string());
-            return value.clone();
+            return value;
         }
         self.missing.insert(key.to_string());
-        key.to_string()
+        value
+    }
+
+    /// Read a translated value without mutating missing-key diagnostics. UI
+    /// render methods use this immutable view while the catalog remains
+    /// owned by the menu/state runtime.
+    pub fn lookup(&self, key: &str) -> String {
+        self.active
+            .get(key)
+            .or_else(|| self.english.get(key))
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
     }
 
     pub fn format(&mut self, key: &str, arguments: &[(&str, &str)]) -> String {
@@ -269,5 +292,92 @@ mod tests {
         );
         assert_eq!(catalog.plural("item", 1), "1 item");
         assert_eq!(catalog.plural("item", 2), "2 items");
+    }
+
+    #[test]
+    fn selected_pack_locale_is_used_and_german_missing_keys_fall_back_to_english() {
+        let root = std::env::temp_dir().join(format!(
+            "icraft_locale_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let builtin = root.join("builtin");
+        let user = root.join("resourcepacks");
+        let pack = user.join("selected");
+        std::fs::create_dir_all(builtin.join("lang")).unwrap();
+        std::fs::write(
+            builtin.join("pack.json"),
+            r#"{"id":"icraft.builtin","name":"builtin","version":"1","format":1,"description":"builtin"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            builtin.join("lang/en_us.json"),
+            br#"{"hello":"Built-in","fallback":"English"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(pack.join("lang")).unwrap();
+        std::fs::write(
+            pack.join("pack.json"),
+            r#"{"id":"test.selected","name":"selected","version":"1","format":1,"description":"selected"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack.join("lang/en_us.json"),
+            br#"{"hello":"Selected","fallback":"Selected English"}"#,
+        )
+        .unwrap();
+        std::fs::write(pack.join("lang/de_de.json"), br#"{"hello":"Deutsch"}"#).unwrap();
+
+        let mut manager = ResourcePackManager::discover(&builtin, &user);
+        manager.apply_enabled_order(["test.selected"]).unwrap();
+        let mut catalog =
+            TranslationCatalog::from_resource_packs_mut(&mut manager, Language::German);
+        assert_eq!(catalog.translate("hello"), "Deutsch");
+        assert_eq!(catalog.translate("fallback"), "Selected English");
+        assert!(catalog.missing_keys().contains(&"fallback".to_string()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_selected_locale_falls_back_and_reports_once() {
+        let root = std::env::temp_dir().join(format!(
+            "icraft_locale_bad_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let builtin = root.join("builtin");
+        let user = root.join("resourcepacks");
+        let pack = user.join("bad");
+        std::fs::create_dir_all(builtin.join("lang")).unwrap();
+        std::fs::write(
+            builtin.join("pack.json"),
+            r#"{"id":"icraft.builtin","name":"builtin","version":"1","format":1,"description":"builtin"}"#,
+        )
+        .unwrap();
+        std::fs::write(builtin.join("lang/en_us.json"), br#"{"hello":"English"}"#).unwrap();
+        std::fs::create_dir_all(pack.join("lang")).unwrap();
+        std::fs::write(
+            pack.join("pack.json"),
+            r#"{"id":"test.bad","name":"bad","version":"1","format":1,"description":"bad"}"#,
+        )
+        .unwrap();
+        std::fs::write(pack.join("lang/en_us.json"), [0xff, 0xfe]).unwrap();
+
+        let mut manager = ResourcePackManager::discover(&builtin, &user);
+        manager.apply_enabled_order(["test.bad"]).unwrap();
+        let mut catalog =
+            TranslationCatalog::from_resource_packs_mut(&mut manager, Language::English);
+        assert_eq!(catalog.translate("hello"), "English");
+        let count = manager.diagnostics().len();
+        assert!(count >= 1);
+        manager.resolve_locale(Language::English.code());
+        assert_eq!(manager.diagnostics().len(), count);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

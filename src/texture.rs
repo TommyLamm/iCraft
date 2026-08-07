@@ -1612,7 +1612,7 @@ fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourceP
     let mut misses = 0usize;
     for tile in PACK_TILES {
         let loaded = manager
-            .resolve_asset(tile.path)
+            .resolve_texture(tile.path)
             .and_then(|bytes| image::load_from_memory(&bytes).ok());
         if loaded.is_some() {
             pack_hits += 1;
@@ -1642,7 +1642,7 @@ fn compose_enderman_eyes(img: &mut RgbaImage) {
 }
 
 fn compose_enderman_eyes_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
-    let Some(bytes) = manager.resolve_asset("entity/enderman/enderman_eyes.png") else {
+    let Some(bytes) = manager.resolve_texture("entity/enderman/enderman_eyes.png") else {
         return;
     };
     let Ok(source) = image::load_from_memory(&bytes) else {
