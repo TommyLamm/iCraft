@@ -202,6 +202,11 @@ impl ResourcePackManager {
         manager
     }
 
+    /// Convenience form for callers using the normal built-in/user roots.
+    pub fn discover_default_with_override(override_path: Option<PathBuf>) -> Self {
+        Self::discover_with_override("assets", "resourcepacks", override_path)
+    }
+
     pub fn reload(&mut self) -> Result<(), PackError> {
         self.packs.clear();
         self.enabled_order.clear();
@@ -649,13 +654,7 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
     }
     let eocd = find_zip_end(&bytes)
         .ok_or_else(|| PackError::Archive("ZIP end record is missing".into()))?;
-    if (eocd >= 20 && read_u32(&bytes, eocd - 20) == Some(0x0706_4b50))
-        || bytes.get(..eocd).is_some_and(|prefix| {
-            prefix
-                .windows(4)
-                .any(|window| window == [0x50, 0x4b, 0x06, 0x06])
-        })
-    {
+    if eocd >= 20 && read_u32(&bytes, eocd - 20) == Some(0x0706_4b50) {
         return Err(PackError::Archive(
             "ZIP64 archives are not supported".into(),
         ));
@@ -741,8 +740,8 @@ fn load_zip_pack(path: &Path) -> Result<LoadedPack, PackError> {
                 "ZIP64 archives are not supported".into(),
             ));
         }
-        let raw_name =
-            String::from_utf8_lossy(&bytes[cursor + 46..cursor + 46 + name_len]).to_string();
+        let raw_name = String::from_utf8(bytes[cursor + 46..cursor + 46 + name_len].to_vec())
+            .map_err(|_| PackError::UnsafePath("ZIP filename is not valid UTF-8".into()))?;
         let relative = normalize_logical_path(&raw_name)?;
         let external_attributes = read_u32(&bytes, cursor + 38).unwrap_or_default();
         let unix_mode = external_attributes >> 16;
@@ -952,6 +951,9 @@ fn font_bytes_are_decodable(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"wOFF")
         || bytes.starts_with(b"wOF2")
         || bytes.starts_with(&[0, 1, 0, 0])
+        || serde_json::from_slice::<serde_json::Value>(bytes)
+            .map(|value| value.is_object())
+            .unwrap_or(false)
 }
 
 pub(crate) fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
