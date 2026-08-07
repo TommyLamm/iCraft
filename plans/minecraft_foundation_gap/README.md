@@ -63,7 +63,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | P2 | 載具／導航／釣魚 | 完全缺失 | 船、礦車、騎乘、地圖／指南針、釣魚 | 13 |
 | P2 | 紅石自動化 | 有線路和元件，但容器類輸出是固定假資料 | Hopper、容器比較器、真正發射器／投擲器 | 14 |
 | P3 | 模式／規則／指令 | 只有 Survival/Creative 與固定世界建立選項 | Adventure/Spectator/Hardcore、gamerule、管理指令 | 15 |
-| P3 | 多人／獨立伺服器 | listen-server；新系統尚無權威協議 | 每玩家狀態、容器交易、獨立無 GPU server | 16 |
+| P3 | 多人／獨立伺服器 | listen-server + dedicated/runtime 基礎；`State` 權威尚未遷移 | 每玩家狀態、容器交易、獨立無 GPU server 的共同權威核心 | 16、18 |
 | P3 | 資源包／語言／無障礙 | 硬編碼資產疊加；英／德設定；無專用 Accessibility | 可選資源包、結構化 locale、字幕與 UI 縮放 | 17 |
 
 ## 4. 執行包索引
@@ -88,8 +88,9 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 13 | [載具、騎乘、導航與釣魚](13_transport_mounts_navigation_and_fishing.md) | 已完成 |
 | 14 | [紅石容器自動化](14_redstone_container_automation.md) | 已實作（headless 通過；實機驗收待執行） |
 | 15 | [遊戲模式、規則、指令與世界建立](15_game_modes_world_rules_commands_and_creation.md) | 已完成（headless 通過；Host+Join GPU 實機待執行） |
-| 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已完成（headless dedicated/runtime 通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
+| 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已實作基礎；核心權威遷移缺口轉 18（headless dedicated/runtime 短跑通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
 | 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 待執行 |
+| 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | 待 Plan15–17 實作包完成後執行 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
