@@ -89,6 +89,15 @@ fn frame_delta(last_render_time: Instant, now: Instant) -> f32 {
     now.duration_since(last_render_time).as_secs_f32()
 }
 
+fn next_game_mode_command(mode: crate::inventory::GameMode) -> &'static str {
+    match mode {
+        crate::inventory::GameMode::Creative => "survival",
+        crate::inventory::GameMode::Survival => "adventure",
+        crate::inventory::GameMode::Adventure => "spectator",
+        crate::inventory::GameMode::Spectator => "creative",
+    }
+}
+
 pub struct App {
     runtime: Option<Runtime>,
     window: Option<Arc<Window>>,
@@ -677,13 +686,11 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
         } else if code == controls.hotbar_9 {
             state.inventory.selected = 8;
         } else if code == controls.gamemode && !event.repeat {
-            let game_mode = match state.game_mode {
-                crate::inventory::GameMode::Creative => crate::inventory::GameMode::Survival,
-                crate::inventory::GameMode::Survival => crate::inventory::GameMode::Adventure,
-                crate::inventory::GameMode::Adventure => crate::inventory::GameMode::Spectator,
-                crate::inventory::GameMode::Spectator => crate::inventory::GameMode::Creative,
-            };
-            state.set_game_mode(game_mode);
+            state.chat_input = format!("/gamemode {}", next_game_mode_command(state.game_mode));
+            // Reuse the same authority, cheats/operator, and Hardcore checks
+            // as a typed management command. The dead-player gate above keeps
+            // this shortcut unavailable on the Hardcore death screen.
+            state.submit_chat();
         }
     }
     false
@@ -692,6 +699,16 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_mode_shortcut_cycles_through_typed_commands() {
+        use crate::inventory::GameMode;
+
+        assert_eq!(next_game_mode_command(GameMode::Creative), "survival");
+        assert_eq!(next_game_mode_command(GameMode::Survival), "adventure");
+        assert_eq!(next_game_mode_command(GameMode::Adventure), "spectator");
+        assert_eq!(next_game_mode_command(GameMode::Spectator), "creative");
+    }
 
     #[test]
     fn wheel_target_keeps_creative_catalog_separate_from_hotbar() {
