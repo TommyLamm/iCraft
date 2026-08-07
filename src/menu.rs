@@ -14,6 +14,10 @@ use winit::event::ElementState;
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen, Window};
 
+#[path = "server_address_book.rs"]
+mod server_address_book;
+pub use server_address_book::{AddressBookError, ServerAddressBook, ServerPingResult};
+
 const UI_VERTEX_CAPACITY: usize = 65_536;
 const SETTINGS_FILE: &str = "settings.txt";
 const CONTROLS_FILE: &str = "controls.config";
@@ -746,62 +750,6 @@ pub enum MultiplayerRole {
     },
 }
 
-/// Addresses shown by the multiplayer screen.  Keeping the address book
-/// independent from the winit menu state lets headless clients persist a
-/// useful recent-server list and record the result of a server-list ping.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerAddressBook {
-    addresses: Vec<String>,
-    recent_results: Vec<ServerPingResult>,
-    capacity: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerPingResult {
-    pub address: String,
-    pub version: String,
-    pub motd: String,
-    pub online_players: u16,
-    pub max_players: u16,
-    pub error: Option<String>,
-}
-
-impl ServerAddressBook {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            addresses: Vec::new(),
-            recent_results: Vec::new(),
-            capacity: capacity.max(1),
-        }
-    }
-
-    pub fn addresses(&self) -> &[String] {
-        &self.addresses
-    }
-
-    pub fn recent_results(&self) -> &[ServerPingResult] {
-        &self.recent_results
-    }
-
-    pub fn remember(&mut self, address: impl Into<String>) {
-        let address = address.into();
-        if address.trim().is_empty() {
-            return;
-        }
-        self.addresses.retain(|existing| existing != &address);
-        self.addresses.insert(0, address);
-        self.addresses.truncate(self.capacity);
-    }
-
-    pub fn record_ping(&mut self, result: ServerPingResult) {
-        self.remember(result.address.clone());
-        self.recent_results
-            .retain(|existing| existing.address != result.address);
-        self.recent_results.insert(0, result);
-        self.recent_results.truncate(self.capacity);
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct WorldLaunch {
     pub world_dir: PathBuf,
@@ -1295,6 +1243,34 @@ fn back_transition(
     (screen, None, None)
 }
 
+fn multiplayer_focus_count(mode: MultiplayerMode, recent_count: usize) -> usize {
+    if mode == MultiplayerMode::Join {
+        8 + recent_count.min(3)
+    } else {
+        5
+    }
+}
+
+fn multiplayer_focus_rects(mode: MultiplayerMode, recent_count: usize) -> Vec<[f32; 4]> {
+    let mut rects = vec![[-0.52, -0.02, 0.45, 0.58], [0.02, 0.52, 0.45, 0.58]];
+    if mode == MultiplayerMode::Host {
+        rects.push([-0.52, 0.52, 0.17, 0.30]);
+    } else {
+        rects.extend([
+            [-0.56, -0.02, 0.17, 0.30],
+            [-0.56, -0.02, -0.04, 0.09],
+            [-0.56, -0.02, -0.25, -0.12],
+        ]);
+        for index in 0..recent_count.min(3) {
+            let top = 0.34 - index as f32 * 0.10;
+            rects.push([0.04, 0.56, top - 0.08, top]);
+        }
+        rects.push([0.04, 0.56, -0.24, -0.11]);
+    }
+    rects.extend([[-0.52, -0.02, -0.58, -0.45], [0.02, 0.52, -0.58, -0.45]]);
+    rects
+}
+
 pub enum MenuAction {
     None,
     Launch(WorldLaunch, GameSettings),
@@ -1340,6 +1316,7 @@ pub struct Menu {
     active_field: Option<TextField>,
     rebinding: Option<ControlAction>,
     message: Option<String>,
+    server_address_book: ServerAddressBook,
     pub settings: GameSettings,
     resource_packs: ResourcePackManager,
     catalog: TranslationCatalog,
@@ -1523,6 +1500,13 @@ impl Menu {
         let catalog =
             TranslationCatalog::from_resource_packs_mut(&mut resource_packs, settings.language);
         let font_source = resource_packs.resolve_font_source("font/ui.json");
+        let server_address_book = match ServerAddressBook::load_default() {
+            Ok(book) => book,
+            Err(error) => {
+                eprintln!("[Menu] failed to load server address book: {error}");
+                ServerAddressBook::default()
+            }
+        };
         Self {
             window,
             surface,
@@ -1559,6 +1543,7 @@ impl Menu {
             active_field: None,
             rebinding: None,
             message: None,
+            server_address_book,
             settings,
             resource_packs,
             catalog,
@@ -1730,13 +1715,10 @@ impl Menu {
             MenuScreen::Controls => 10,
             MenuScreen::Accessibility => 11,
             MenuScreen::ResourcePacks => self.resource_packs.available().len() + 3,
-            MenuScreen::Multiplayer => {
-                if self.multiplayer_mode == MultiplayerMode::Join {
-                    7
-                } else {
-                    5
-                }
-            }
+            MenuScreen::Multiplayer => multiplayer_focus_count(
+                self.multiplayer_mode,
+                self.server_address_book.addresses().len(),
+            ),
             MenuScreen::Worlds => (self.worlds.len().saturating_sub(self.world_scroll)).min(5) + 6,
             MenuScreen::CreateWorld => 11,
             MenuScreen::ConfirmDelete => 2,
@@ -1816,20 +1798,10 @@ impl Menu {
                 ]);
                 rects
             }
-            MenuScreen::Multiplayer => {
-                let mut rects = vec![[-0.52, -0.02, 0.45, 0.58], [0.02, 0.52, 0.45, 0.58]];
-                if self.multiplayer_mode == MultiplayerMode::Host {
-                    rects.push([-0.52, 0.52, 0.17, 0.30]);
-                } else {
-                    rects.extend([
-                        [-0.52, 0.52, 0.17, 0.30],
-                        [-0.52, 0.52, -0.04, 0.09],
-                        [-0.52, 0.52, -0.25, -0.12],
-                    ]);
-                }
-                rects.extend([[-0.52, -0.02, -0.58, -0.45], [0.02, 0.52, -0.58, -0.45]]);
-                rects
-            }
+            MenuScreen::Multiplayer => multiplayer_focus_rects(
+                self.multiplayer_mode,
+                self.server_address_book.addresses().len(),
+            ),
             MenuScreen::Worlds => {
                 let visible = (self.worlds.len().saturating_sub(self.world_scroll)).min(5);
                 let mut rects = (0..visible)
@@ -1902,17 +1874,25 @@ impl Menu {
                 {
                     self.active_field = Some(TextField::HostPort);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
-                    && hit(x, y, -0.52, 0.52, 0.17, 0.30)
+                    && hit(x, y, -0.56, -0.02, 0.17, 0.30)
                 {
                     self.active_field = Some(TextField::ServerAddress);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
-                    && hit(x, y, -0.52, 0.52, -0.04, 0.09)
+                    && hit(x, y, -0.56, -0.02, -0.04, 0.09)
                 {
                     self.active_field = Some(TextField::JoinPort);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
-                    && hit(x, y, -0.52, 0.52, -0.25, -0.12)
+                    && hit(x, y, -0.56, -0.02, -0.25, -0.12)
                 {
                     self.active_field = Some(TextField::Username);
+                } else if self.multiplayer_mode == MultiplayerMode::Join
+                    && self.select_recent_server(x, y)
+                {
+                    self.active_field = None;
+                } else if self.multiplayer_mode == MultiplayerMode::Join
+                    && hit(x, y, 0.04, 0.56, -0.24, -0.11)
+                {
+                    self.ping_selected_server();
                 } else if hit(x, y, -0.52, -0.02, -0.58, -0.45) {
                     let role = match self.multiplayer_mode {
                         MultiplayerMode::Host => self
@@ -2129,6 +2109,64 @@ impl Menu {
         self.settings.mp_join_port = self.join_port.clone();
         self.settings.mp_username = self.username.clone();
         self.settings.save();
+        if let Err(error) = self.server_address_book.save_default() {
+            eprintln!("[Menu] failed to save server address book: {error}");
+        }
+    }
+
+    fn join_target(&self) -> Option<String> {
+        let address = self.server_address.trim();
+        let port = self.join_port.trim().parse::<u16>().ok()?;
+        if address.is_empty() || port == 0 {
+            return None;
+        }
+        if address.starts_with('[') {
+            Some(format!("{address}:{port}"))
+        } else if address.matches(':').count() > 1 {
+            Some(format!("[{address}]:{port}"))
+        } else {
+            Some(format!("{address}:{port}"))
+        }
+    }
+
+    fn select_recent_server(&mut self, x: f32, y: f32) -> bool {
+        if !hit(x, y, 0.04, 0.56, -0.50, 0.34) {
+            return false;
+        }
+        let index = ((0.34 - y) / 0.10).floor() as usize;
+        let Some(target) = self.server_address_book.addresses().get(index).cloned() else {
+            return false;
+        };
+        if let Some((host, port)) = split_host_port(&target) {
+            self.server_address = host;
+            self.join_port = port;
+            self.sync_and_save_multiplayer_settings();
+            self.message = Some(format!("SELECTED {target}"));
+            true
+        } else {
+            self.message = Some("INVALID SAVED SERVER ADDRESS".to_string());
+            true
+        }
+    }
+
+    fn ping_selected_server(&mut self) {
+        let Some(target) = self.join_target() else {
+            self.message = Some(self.tr("menu.enter_valid_multiplayer"));
+            return;
+        };
+        let result = self
+            .server_address_book
+            .ping(target.clone(), std::time::Duration::from_secs(2));
+        if let Err(error) = self.server_address_book.save_default() {
+            eprintln!("[Menu] failed to save server address book after ping: {error}");
+        }
+        self.message = Some(match result.error {
+            Some(error) => format!("PING FAILED: {error}"),
+            None => format!(
+                "PING {} {}/{}",
+                result.version, result.online_players, result.max_players
+            ),
+        });
     }
 
     fn back(&mut self) {
@@ -2548,8 +2586,8 @@ impl Menu {
                     vertices,
                     "SERVER ADDRESS",
                     &self.server_address,
-                    -0.52,
-                    0.52,
+                    -0.56,
+                    -0.02,
                     0.17,
                     0.30,
                     self.active_field == Some(TextField::ServerAddress),
@@ -2559,8 +2597,8 @@ impl Menu {
                     vertices,
                     "PORT",
                     &self.join_port,
-                    -0.52,
-                    0.52,
+                    -0.56,
+                    -0.02,
                     -0.04,
                     0.09,
                     self.active_field == Some(TextField::JoinPort),
@@ -2570,12 +2608,82 @@ impl Menu {
                     vertices,
                     "USERNAME",
                     &self.username,
-                    -0.52,
-                    0.52,
+                    -0.56,
+                    -0.02,
                     -0.25,
                     -0.12,
                     self.active_field == Some(TextField::Username),
                     aspect,
+                );
+                for (index, address) in self
+                    .server_address_book
+                    .addresses()
+                    .iter()
+                    .take(3)
+                    .enumerate()
+                {
+                    let top = 0.34 - index as f32 * 0.10;
+                    let hover = hit(
+                        self.mouse_ndc[0],
+                        self.mouse_ndc[1],
+                        0.04,
+                        0.56,
+                        top - 0.08,
+                        top,
+                    );
+                    let label = self
+                        .server_address_book
+                        .result_for(address)
+                        .map(|result| {
+                            let state = result
+                                .error
+                                .as_deref()
+                                .map(|error| format!("ERR {error}"))
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "{} {}/{}",
+                                        result.version, result.online_players, result.max_players
+                                    )
+                                });
+                            format!("{} {state}", address)
+                        })
+                        .unwrap_or_else(|| address.clone());
+                    draw_button(vertices, 0.04, 0.56, top - 0.08, top, hover);
+                    draw_centered_text_in(
+                        vertices,
+                        &label.chars().take(34).collect::<String>(),
+                        0.04,
+                        0.56,
+                        top - 0.054,
+                        0.0043,
+                        aspect,
+                        [1.0; 4],
+                    );
+                }
+                draw_button(
+                    vertices,
+                    0.04,
+                    0.56,
+                    -0.24,
+                    -0.11,
+                    hit(
+                        self.mouse_ndc[0],
+                        self.mouse_ndc[1],
+                        0.04,
+                        0.56,
+                        -0.24,
+                        -0.11,
+                    ),
+                );
+                draw_centered_text_in(
+                    vertices,
+                    "PING SERVER",
+                    0.04,
+                    0.56,
+                    -0.204,
+                    0.0058,
+                    aspect,
+                    [1.0; 4],
                 );
             }
         }
@@ -3513,6 +3621,25 @@ fn hash_seed(value: &str) -> u32 {
     })
 }
 
+fn split_host_port(target: &str) -> Option<(String, String)> {
+    let target = target.trim();
+    if let Some(rest) = target.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:")?;
+        if host.is_empty() || port.parse::<u16>().ok().filter(|port| *port > 0).is_none() {
+            return None;
+        }
+        return Some((host.to_string(), port.to_string()));
+    }
+    let (host, port) = target.rsplit_once(':')?;
+    if host.is_empty()
+        || host.contains(':')
+        || port.parse::<u16>().ok().filter(|port| *port > 0).is_none()
+    {
+        return None;
+    }
+    Some((host.to_string(), port.to_string()))
+}
+
 fn relative_time(timestamp: u64) -> String {
     let days = unix_now().saturating_sub(timestamp) / 86_400;
     match days {
@@ -3887,6 +4014,33 @@ mod tests {
         assert_eq!(book.addresses().len(), 2);
         assert_eq!(book.addresses()[0], "127.0.0.1:25565");
         assert_eq!(book.recent_results()[0].motd, "Local");
+    }
+
+    #[test]
+    fn multiplayer_focus_activation_covers_saved_servers_and_actions() {
+        assert_eq!(multiplayer_focus_count(MultiplayerMode::Host, 99), 5);
+        assert_eq!(multiplayer_focus_count(MultiplayerMode::Join, 0), 8);
+        assert_eq!(multiplayer_focus_count(MultiplayerMode::Join, 99), 11);
+        let rects = multiplayer_focus_rects(MultiplayerMode::Join, 2);
+        assert_eq!(rects.len(), 10);
+        assert_eq!(rects[0], [-0.52, -0.02, 0.45, 0.58]);
+        assert_eq!(rects[5], [0.04, 0.56, 0.26, 0.34]);
+        assert_eq!(rects[7], [0.04, 0.56, -0.24, -0.11]);
+        assert_eq!(rects[8], [-0.52, -0.02, -0.58, -0.45]);
+        assert_eq!(rects[9], [0.02, 0.52, -0.58, -0.45]);
+    }
+
+    #[test]
+    fn saved_server_addresses_split_for_join_form() {
+        assert_eq!(
+            split_host_port("example.test:25565"),
+            Some(("example.test".into(), "25565".into()))
+        );
+        assert_eq!(
+            split_host_port("[::1]:25565"),
+            Some(("::1".into(), "25565".into()))
+        );
+        assert!(split_host_port("not-an-address").is_none());
     }
 
     #[test]
