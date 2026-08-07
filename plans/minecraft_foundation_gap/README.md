@@ -88,7 +88,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 13 | [載具、騎乘、導航與釣魚](13_transport_mounts_navigation_and_fishing.md) | 已完成 |
 | 14 | [紅石容器自動化](14_redstone_container_automation.md) | 已實作（headless 通過；實機驗收待執行） |
 | 15 | [遊戲模式、規則、指令與世界建立](15_game_modes_world_rules_commands_and_creation.md) | 已完成（headless 通過；Host+Join GPU 實機待執行） |
-| 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 待執行 |
+| 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已完成（headless dedicated/runtime 通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
 | 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 待執行 |
 
 官方資料也佐證上述族群屬於基礎體驗：

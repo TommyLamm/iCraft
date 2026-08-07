@@ -7,13 +7,17 @@
 
 ## System overview
 
-`iCraft` is a single-binary Rust voxel game:
+`iCraft` is a Rust voxel game plus a headless dedicated-server binary:
 
 - `winit` owns the desktop event loop and input.
 - `wgpu` renders the menu, terrain, entities, particles, and immediate-mode UI.
 - The main thread owns authoritative gameplay `State`.
 - Rayon workers generate/load chunks and build terrain meshes.
 - Dedicated Tokio threads run TCP host/client networking.
+- `src/lib.rs` exposes the simulation/network contract to `icraft-server`.
+- `server_runtime.rs` owns fixed ticks, authenticated sessions, world mutation,
+  interest sets, persistence, and server metrics without constructing a GPU,
+  window, or audio device.
 - A background save worker handles autosaves and chunk-unload writes.
 - Terrain, the texture atlas, and missing audio assets can be generated
   procedurally. On startup the atlas is overlaid with the Stay True resource
@@ -21,9 +25,9 @@
   with vanilla 1.21.5 fallback textures under `assets/vanilla/textures` for
   everything the pack does not override.
 
-There is no database or separate dedicated-server binary. Multiplayer uses a
-listen-server model: the host runs the authoritative world simulation, while
-joining clients render a synchronized local copy.
+There is no database. Multiplayer supports both the existing listen-server
+model and `icraft-server`: the host/runtime owns authoritative simulation,
+while joining clients render a synchronized local copy.
 
 ## Entrypoints and ownership
 
@@ -35,6 +39,11 @@ src/main.rs
         -> update(dt): networking + simulation + streaming
         -> render(): visibility + GPU passes + UI
 ```
+
+`src/bin/icraft-server.rs` loads `server.properties`, starts
+`server_runtime::ServerRuntime`, and runs the same network authority without
+the desktop composition root. Ctrl-C and console `save`/`stop` synchronously
+flush level and per-player files.
 
 - `main` declares modules and starts `EventLoop::run_app`.
 - `App` owns the `Menu`/`Game` runtime transition, frame timing, OS events,
@@ -62,7 +71,7 @@ the primary Vulkan path has caused a verified NVIDIA driver crash.
 4. Builds initial terrain meshes and starts background services.
 5. Streams the remaining render distance incrementally.
 
-Joining clients wait for a successful protocol-v13 login before using the host's
+Joining clients wait for a successful protocol-v14 login before using the host's
 seed and synchronized world state.
 
 ### Per-frame update
@@ -178,9 +187,15 @@ Food items define `FoodProperties` (hunger, saturation, eating duration ticks, a
 - Player poses are sequenced, timestamped, coalesced, and rendered from a
   bounded interpolation buffer.
 - Reliable queues carry login, chat, chunk, block, container transactions (open/click/close/slot update), and time/weather state.
+- `GameplayRequest`/`GameplayResponse` is the common request/ACK envelope for
+  block, container, item-use, combat, sleep, trade, mount, and command
+  operations. It carries request ID, client sequence, authenticated session,
+  dimension/revision and bounded rejection reasons; the server keeps a bounded
+  idempotency cache and per-session request rate limiter.
+- `ServerListPingRequest`/`ServerListPingResponse` reports protocol version,
+  MOTD, and online/max player counts.
 
-Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v13. Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta. `WorldRulesSync` carries the host's serialized `WorldRules` snapshot to clients; clients apply it for display/runtime policy and cannot submit rule mutations.
-Trading and Raid operations use `OpenTradeWindow`, `ExecuteTradeRequest`, `ExecuteTradeResult`, `CloseTradeWindow`, and `RaidStatusSync` packets over protocol v12.
+Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v14. Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta. `WorldRulesSync` carries the host's serialized `WorldRules` snapshot to clients; clients apply it for display/runtime policy and cannot submit rule mutations. Trading and raid packets remain versioned under the same protocol.
 `ContainerSessionManager` and `MerchantSessionManager` track player ID, dimension, villager ID, and active trade offers.
 `PoiManager` (`src/village/poi.rs`) indexes Bed and JobSite POIs by chunk with max-distance spatial hashing, maintaining spatial village clusters for villager assignment and bed count tracking.
 `RaidManager` (`src/village/raid.rs`) tracks active village raids, wave progression (Pillager/Ravager counts), Bad Omen triggers, and raid victory/defeat states.
@@ -227,6 +242,8 @@ options and validates world copy/backup/delete paths beneath the canonical
 | `saves/<world>/world.meta` | World-list name, seed, game mode, difficulty, world type, structure/bonus/cheat flags, Hardcore flag, and last-played time. |
 | `saves/<world>/level.dat` | Bincode `LevelData`: seed, game time, world spawn coordinates, dimension, yaw, format version, world type/structure flags, Hardcore flag, and the serialized `WorldRules` snapshot. |
 | `saves/<world>/player.dat` | Bincode player, inventory/item metadata (including Adventure break/place masks), game mode, XP, spawn point, spawn dimension, unlocked_recipes, advancement progress, and the persistent death marker used by Hardcore. |
+| `world/players/<username>.dat` | Dedicated-runtime per-player atomic save: the complete `PlayerData` payload plus active effects. Username is sanitized and duplicate logins are rejected. |
+| `server.properties` | MOTD, bind/port, player cap, difficulty, online-mode placeholder, whitelist/operators, view/simulation distance, PvP, world path, and seed. |
 | `saves/<world>/dimension.dat` | Active dimension; missing legacy files default to Overworld. |
 | `saves/<world>/entities.dat` | Persistent Overworld living/persistent/dropped entities. |
 | `saves/<world>/regions/` | Overworld region data. |
@@ -257,7 +274,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Entities and AI | `entity.rs`, `spawning.rs`, `ai/{mod, goal, brain, navigation}.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
 | Container & automation system | `block_entity.rs` (ContainerAccess, Chest/Furnace/Hopper/Dispenser/Dropper/Observer entities), `container_sessions.rs` (atomic UI transactions), `inventory.rs` (ContainerInventory/ItemStack), `world_tick.rs` (bounded hopper transfers), `redstone.rs` (comparators/observers/actions), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (host furnace/dispense loop and revision-gated replication) |
 | Transport, mounts, navigation & fishing | `vehicle.rs` (MountManager, BoatState), `rail.rs` (MinecartState, RailShape), `navigation.rs` (Compass, Clock, MapData), `fishing.rs` (FishingManager, loot rolling) |
-| Networking | `network/{protocol,transport,server,client}.rs` |
+| Networking and dedicated authority | `network/{protocol,transport,server,client}.rs`, `server_runtime.rs`, `bin/icraft-server.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
 | Modes, rules, commands | `game_rules.rs`, `commands/`, `state.rs`, `menu.rs` |
 | Performance instrumentation | `perf.rs`, `performance/` |
@@ -285,7 +302,7 @@ placement, fluid tick, light propagation, world mutation validation) now use
 `dimension.height()` / `WorldHeight::contains_y` instead of hardcoded
 `0..CHUNK_HEIGHT`.
 
-Network protocol v12: `ChunkData` packet carries explicit `min_section_y: i8`
+Network protocol v14: `ChunkData` packet carries explicit `min_section_y: i8`
 and `section_count: u16`; block-entity variants and container updates carry
 stable revisions. Save format v3: `ChunkSaveData::data_version = 3` with
 height-aware flat arrays, compressed block entities, and redstone metadata.
@@ -352,9 +369,10 @@ The terrain generator uses continuous 2D climate noise and 3D density sampling e
 
 ## Verification
 
-Behavioral tests are mostly inline `#[cfg(test)]` tests. The package has no
-`src/lib.rs`, so `tests/passive_mob_tests.rs` cannot directly exercise internal
-modules and remains a placeholder.
+Behavioral tests are mostly inline `#[cfg(test)]` tests. The library target
+now exposes the headless authority and protocol to multiplayer-core tests;
+those tests do not construct a wgpu device/window/audio graph. The passive-mob
+placeholder remains unrelated to the dedicated binary.
 
 The performance plans 01–14 remain `Partial` until their fixed-scene GPU/window
 and PGO artifacts exist; this status is not a claim that their runtime repair
@@ -375,6 +393,8 @@ Use:
 
 ```text
 cargo test
+cargo test --release --lib server_runtime network::protocol
+cargo run --bin icraft-server -- --once --world /tmp/icraft-world
 cargo check --release
 cargo run
 ```

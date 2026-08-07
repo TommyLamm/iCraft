@@ -9,7 +9,8 @@ use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::time::{self, Instant};
 
 use super::protocol::{
-    Action, EntityStateWire, LightningStrike, Packet, PlayerEffectWire, PlayerId, PROTOCOL_VERSION,
+    Action, EntityStateWire, GameplayRequest, GameplayResponse, LightningStrike, Packet,
+    PlayerEffectWire, PlayerId, RejectReason, PROTOCOL_VERSION,
 };
 use super::transport::Connection;
 
@@ -69,10 +70,14 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
 const RELIABLE_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Copy)]
-struct ServerConfig {
-    catchup_queue_capacity: usize,
-    catchup_drain_delay: Duration,
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    pub catchup_queue_capacity: usize,
+    pub catchup_drain_delay: Duration,
+    pub max_players: usize,
+    pub motd: String,
+    pub whitelist: HashSet<String>,
+    pub request_rate_per_second: u32,
 }
 
 impl Default for ServerConfig {
@@ -80,6 +85,10 @@ impl Default for ServerConfig {
         Self {
             catchup_queue_capacity: MAX_CATCHUP_QUEUE_DEPTH,
             catchup_drain_delay: Duration::ZERO,
+            max_players: 20,
+            motd: "iCraft server".to_string(),
+            whitelist: HashSet::new(),
+            request_rate_per_second: 120,
         }
     }
 }
@@ -109,6 +118,10 @@ pub enum ServerToHost {
     ClientAction {
         id: PlayerId,
         action: Action,
+    },
+    GameplayRequest {
+        id: PlayerId,
+        request: GameplayRequest,
     },
     ClientBlockChange {
         id: PlayerId,
@@ -340,6 +353,10 @@ pub enum HostToServer {
         player_id: PlayerId,
         is_sleeping: bool,
     },
+    SendGameplayResponse {
+        to: PlayerId,
+        response: GameplayResponse,
+    },
     Stop,
 }
 
@@ -353,6 +370,35 @@ struct ClientSession {
     state_mailbox: Arc<StateMailbox>,
     catchup_mailbox: Arc<CatchupMailbox>,
     cancel_tx: watch::Sender<bool>,
+}
+
+struct RequestRateLimiter {
+    window_started: Instant,
+    count: u32,
+    limit: u32,
+}
+
+impl RequestRateLimiter {
+    fn new(limit: u32) -> Self {
+        Self {
+            window_started: Instant::now(),
+            count: 0,
+            limit: limit.max(1),
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.window_started) >= Duration::from_secs(1) {
+            self.window_started = now;
+            self.count = 0;
+        }
+        if self.count >= self.limit {
+            return false;
+        }
+        self.count += 1;
+        true
+    }
 }
 
 type Sessions = Arc<Mutex<HashMap<PlayerId, ClientSession>>>;
@@ -635,11 +681,15 @@ impl NetworkServer {
             ServerConfig {
                 catchup_queue_capacity: catchup_queue_capacity.max(1),
                 catchup_drain_delay,
+                // Stress tests intentionally exercise rosters larger than the
+                // production default player cap.
+                max_players: 128,
+                ..ServerConfig::default()
             },
         )
     }
 
-    fn spawn_with_config(
+    pub fn spawn_with_config(
         bind_addr: String,
         seed: u64,
         gamemode: u8,
@@ -701,7 +751,7 @@ impl NetworkServer {
                             let server_to_host = self.server_to_host.clone();
                             let seed = self.seed;
                             let gamemode = self.gamemode;
-                            let config = self.config;
+                            let config = self.config.clone();
                             tokio::spawn(async move {
                                 Self::run_client(
                                     Connection::new(stream),
@@ -779,6 +829,24 @@ impl NetworkServer {
                 }
                 username
             }
+            Ok(Ok(Packet::ServerListPingRequest { protocol_version })) => {
+                let online_players = sessions.lock().await.len().min(u16::MAX as usize) as u16;
+                let _ = connection
+                    .send(&Packet::ServerListPingResponse {
+                        protocol_version: PROTOCOL_VERSION,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        motd: config.motd.clone(),
+                        online_players,
+                        max_players: config.max_players.min(u16::MAX as usize) as u16,
+                    })
+                    .await;
+                if protocol_version != PROTOCOL_VERSION {
+                    eprintln!(
+                        "[NetworkServer] server-list ping version mismatch: client {protocol_version}, server {PROTOCOL_VERSION}"
+                    );
+                }
+                return;
+            }
             Ok(Ok(packet)) => {
                 eprintln!("[NetworkServer] Handshake rejected: expected Packet::Handshake, got {packet:?}");
                 let _ = connection
@@ -798,6 +866,58 @@ impl NetworkServer {
                 return;
             }
         };
+
+        // Keep the login identifier bounded before using it in session maps and
+        // persistence paths, while accepting existing clients whose display
+        // names are a little longer than the vanilla 16-character limit.
+        if handshake.is_empty() || handshake.len() > 32 || !handshake.is_ascii() {
+            let _ = connection
+                .send(&Packet::Disconnect {
+                    protocol_version: PROTOCOL_VERSION,
+                    reason: "invalid username".into(),
+                })
+                .await;
+            return;
+        }
+        let normalized_username = handshake.to_ascii_lowercase();
+        {
+            let sessions_guard = sessions.lock().await;
+            if sessions_guard.len() >= config.max_players.max(1) {
+                let _ = connection
+                    .send(&Packet::Disconnect {
+                        protocol_version: PROTOCOL_VERSION,
+                        reason: "server is full".into(),
+                    })
+                    .await;
+                return;
+            }
+            if !config.whitelist.is_empty()
+                && !config
+                    .whitelist
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&normalized_username))
+            {
+                let _ = connection
+                    .send(&Packet::Disconnect {
+                        protocol_version: PROTOCOL_VERSION,
+                        reason: "not whitelisted".into(),
+                    })
+                    .await;
+                return;
+            }
+            if sessions_guard
+                .values()
+                .any(|session| session.username.eq_ignore_ascii_case(&normalized_username))
+            {
+                let _ = connection
+                    .send(&Packet::Disconnect {
+                        protocol_version: PROTOCOL_VERSION,
+                        reason: "duplicate login".into(),
+                    })
+                    .await;
+                return;
+            }
+        }
 
         let id = next_player_id.fetch_add(1, Ordering::Relaxed);
         if connection
@@ -894,6 +1014,8 @@ impl NetworkServer {
             }
         });
 
+        let mut request_rate = RequestRateLimiter::new(config.request_rate_per_second);
+
         sessions.lock().await.insert(
             id,
             ClientSession {
@@ -972,6 +1094,44 @@ impl NetworkServer {
                         Ok(Ok(Packet::PlayerAction { action, .. })) => {
                             if server_to_host.send(ServerToHost::ClientAction { id, action }).is_err() {
                                 disconnect_reason = "host channel closed (ClientAction)".into();
+                                break;
+                            }
+                        }
+                        Ok(Ok(Packet::GameplayRequest { mut request, .. })) => {
+                            if !request_rate.allow() {
+                                let response = GameplayResponse {
+                                    request_id: request.request_id,
+                                    server_sequence: 0,
+                                    outcome: crate::network::protocol::GameplayOutcome::Rejected {
+                                        reason: RejectReason::RateLimited,
+                                    },
+                                };
+                                if !Self::send_to(
+                                    &sessions,
+                                    id,
+                                    Packet::GameplayResponse {
+                                        protocol_version: PROTOCOL_VERSION,
+                                        response,
+                                    },
+                                )
+                                .await
+                                .is_empty()
+                                {
+                                    disconnect_reason = "request rate limit response failed".into();
+                                    break;
+                                }
+                                continue;
+                            }
+                            if request.encoded_len() > crate::network::protocol::MAX_REQUEST_BYTES {
+                                disconnect_reason = "gameplay request exceeds maximum size".into();
+                                break;
+                            }
+                            request.session_id = id;
+                            if server_to_host
+                                .send(ServerToHost::GameplayRequest { id, request })
+                                .is_err()
+                            {
+                                disconnect_reason = "host channel closed (GameplayRequest)".into();
                                 break;
                             }
                         }
@@ -1414,6 +1574,13 @@ impl NetworkServer {
             HostToServer::BroadcastPlayerPosition { .. } => {
                 unreachable!("player positions use the latest-wins pose channel")
             }
+            HostToServer::SendGameplayResponse { to, response } => {
+                let packet = Packet::GameplayResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    response,
+                };
+                (packet, Some(to))
+            }
             HostToServer::BroadcastEntityState { .. }
             | HostToServer::BroadcastPlayerHealth { .. }
             | HostToServer::BroadcastPlayerEffect { .. } => {
@@ -1683,7 +1850,15 @@ mod tests {
 
             let (host_tx, host_rx) = std_mpsc::channel();
             let (event_tx, event_rx) = std_mpsc::channel();
-            let handle = NetworkServer::spawn(addr.clone(), seed, gamemode, host_rx, event_tx);
+            let handle = NetworkServer::spawn_for_test(
+                addr.clone(),
+                seed,
+                gamemode,
+                host_rx,
+                event_tx,
+                MAX_CATCHUP_QUEUE_DEPTH,
+                Duration::ZERO,
+            );
             Self {
                 addr,
                 host_tx,
@@ -1837,6 +2012,62 @@ mod tests {
             _ => unreachable!(),
         }
 
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn gameplay_request_is_bound_to_authenticated_session() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client, id) = server.connect("steve").await;
+        let request = crate::network::protocol::GameplayRequest {
+            request_id: 123,
+            client_sequence: 1,
+            session_id: 999_999,
+            dimension: 0,
+            client_revision: 0,
+            operation: crate::network::protocol::GameplayOperation::ItemUse { item: 1, count: 1 },
+        };
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request,
+            })
+            .await
+            .unwrap();
+        let event = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            event,
+            ServerToHost::GameplayRequest { id: event_id, request }
+                if event_id == id && request.session_id == id
+        ));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn server_list_ping_reports_version_and_capacity_without_login() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let mut client = Connection::new(server.connect_stream().await);
+        client
+            .send(&Packet::ServerListPingRequest {
+                protocol_version: PROTOCOL_VERSION,
+            })
+            .await
+            .unwrap();
+        let response = time::timeout(Duration::from_secs(2), client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response,
+            Packet::ServerListPingResponse {
+                protocol_version,
+                online_players: 0,
+                max_players,
+                ..
+            } if protocol_version == PROTOCOL_VERSION && max_players > 0
+        ));
         server.stop().await;
     }
 

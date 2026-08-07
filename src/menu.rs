@@ -694,6 +694,62 @@ pub enum MultiplayerRole {
     },
 }
 
+/// Addresses shown by the multiplayer screen.  Keeping the address book
+/// independent from the winit menu state lets headless clients persist a
+/// useful recent-server list and record the result of a server-list ping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerAddressBook {
+    addresses: Vec<String>,
+    recent_results: Vec<ServerPingResult>,
+    capacity: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerPingResult {
+    pub address: String,
+    pub version: String,
+    pub motd: String,
+    pub online_players: u16,
+    pub max_players: u16,
+    pub error: Option<String>,
+}
+
+impl ServerAddressBook {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            addresses: Vec::new(),
+            recent_results: Vec::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn addresses(&self) -> &[String] {
+        &self.addresses
+    }
+
+    pub fn recent_results(&self) -> &[ServerPingResult] {
+        &self.recent_results
+    }
+
+    pub fn remember(&mut self, address: impl Into<String>) {
+        let address = address.into();
+        if address.trim().is_empty() {
+            return;
+        }
+        self.addresses.retain(|existing| existing != &address);
+        self.addresses.insert(0, address);
+        self.addresses.truncate(self.capacity);
+    }
+
+    pub fn record_ping(&mut self, result: ServerPingResult) {
+        self.remember(result.address.clone());
+        self.recent_results
+            .retain(|existing| existing.address != result.address);
+        self.recent_results.insert(0, result);
+        self.recent_results.truncate(self.capacity);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorldLaunch {
     pub world_dir: PathBuf,
@@ -3203,6 +3259,31 @@ fn hash(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(127.1, 311.7)))
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_address_book_keeps_recent_ping_results() {
+        let mut book = ServerAddressBook::new(2);
+        book.remember("127.0.0.1:25565");
+        book.record_ping(ServerPingResult {
+            address: "example.test:25565".into(),
+            version: "0.1.0".into(),
+            motd: "Welcome".into(),
+            online_players: 2,
+            max_players: 20,
+            error: None,
+        });
+        book.record_ping(ServerPingResult {
+            address: "127.0.0.1:25565".into(),
+            version: "0.1.0".into(),
+            motd: "Local".into(),
+            online_players: 1,
+            max_players: 20,
+            error: None,
+        });
+        assert_eq!(book.addresses().len(), 2);
+        assert_eq!(book.addresses()[0], "127.0.0.1:25565");
+        assert_eq!(book.recent_results()[0].motd, "Local");
+    }
 
     #[test]
     fn sanitizes_world_names_and_generates_stable_slugs() {

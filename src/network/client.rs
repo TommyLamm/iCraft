@@ -7,7 +7,8 @@ use tokio::net::TcpStream;
 use tokio::time::{self, Instant};
 
 use super::protocol::{
-    Action, EntityStateWire, LightningStrike, Packet, PlayerEffectWire, PlayerId, PROTOCOL_VERSION,
+    Action, EntityStateWire, GameplayRequest, GameplayResponse, LightningStrike, Packet,
+    PlayerEffectWire, PlayerId, PROTOCOL_VERSION,
 };
 use super::transport::Connection;
 
@@ -185,6 +186,9 @@ pub enum ClientToGame {
         player_id: PlayerId,
         is_sleeping: bool,
     },
+    GameplayResponse {
+        response: GameplayResponse,
+    },
 }
 
 #[derive(Debug)]
@@ -243,6 +247,9 @@ pub enum GameToClient {
         x: i32,
         y: i32,
         z: i32,
+    },
+    GameplayRequest {
+        request: GameplayRequest,
     },
 }
 
@@ -744,6 +751,9 @@ async fn run_client(
                     Ok(Packet::WorldRulesSync { rules, .. }) => {
                         let _ = client_to_game.send(ClientToGame::WorldRulesSync { rules });
                     }
+                    Ok(Packet::GameplayResponse { response, .. }) => {
+                        let _ = client_to_game.send(ClientToGame::GameplayResponse { response });
+                    }
                     Ok(Packet::ChatMessage { sender, message, .. }) => { let _ = client_to_game.send(ClientToGame::Chat { sender, message }); }
                     Ok(Packet::Keepalive { .. }) => {
                         if writer.send(&Packet::Keepalive { protocol_version: PROTOCOL_VERSION }).await.is_err() {
@@ -862,6 +872,22 @@ async fn run_client(
                             if writer.send(&Packet::SleepRequest { protocol_version: PROTOCOL_VERSION, x, y, z }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send SleepRequest");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                                return;
+                            }
+                        }
+                        Ok(GameToClient::GameplayRequest { request }) => {
+                            if writer
+                                .send(&Packet::GameplayRequest {
+                                    protocol_version: PROTOCOL_VERSION,
+                                    request,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                eprintln!("[NetworkClient] Disconnecting: failed to send GameplayRequest");
+                                let _ = client_to_game.send(ClientToGame::Disconnected {
+                                    reason: "connection lost".into(),
+                                });
                                 return;
                             }
                         }

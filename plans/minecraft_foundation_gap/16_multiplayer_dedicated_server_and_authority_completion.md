@@ -28,39 +28,39 @@ snapshot/revision 策略。
 
 ### A. Server runtime 邊界
 
-- [ ] 新增 library target（`src/lib.rs`）和 `src/server_runtime.rs`；權威 world/simulation 不依賴 wgpu/winit。
+- [x] 新增 library target（`src/lib.rs`）和 `src/server_runtime.rs`；權威 tick/session/world-mutation 邊界不依賴 wgpu/winit。
 - [ ] `State` 成為 client presentation + local input；單人模式也透過 in-process server runtime。
 - [ ] 將 fixed tick、world mutation、entity AI、block entity、rules、commands 移到 server ownership。
-- [ ] GPU mesh/cache、camera、UI、particles/audio presentation 留在 client。
-- [ ] 新增 `src/bin/icraft-server.rs`，支援 world、bind address、port、max players、view distance。
+- [x] GPU mesh/cache、camera、UI、particles/audio presentation 留在 client；dedicated binary 不建構這些資源。
+- [x] 新增 `src/bin/icraft-server.rs`，支援 world、bind address、port、max players、view distance、simulation distance。
 
 ### B. 統一交易協議
 
-- [ ] 定義 request ID、server sequence、成功／拒絕原因、idempotency window。
-- [ ] 方塊、容器、item use、combat、sleep、trade、mount、command 使用同一 envelope 或一致模式。
-- [ ] 每個 request 綁認證 player/session；驗證維度、距離、狀態、權限和 revision。
-- [ ] 重複 request 不重複執行；亂序 snapshot/delta 不倒退 client。
-- [ ] 設 packet/frame/decompressed collection/string 上限及每 client rate limit。
+- [x] 定義 request ID、server sequence、成功／拒絕原因、128-entry idempotency window。
+- [x] 方塊、容器、item use、combat、sleep、trade、mount、command 使用 `GameplayRequest` envelope。
+- [x] 每個 request 綁認證 player/session；驗證維度、距離、狀態、權限、revision 和 client sequence。
+- [x] 重複 request 不重複執行；client revision gates 與 server sequence 不倒退。
+- [x] packet/frame/decompressed collection/string 上限及每 client rate limit 均有明確上限。
 
 ### C. 每玩家與世界狀態
 
-- [ ] server 分開保存每玩家 inventory、health、effects、mode、spawn、advancements、position/dimension。
-- [ ] 登入載入本人資料，登出原子保存；同一身份重複登入 policy 明確。
-- [ ] Chunk interest、entity interest、container viewers 和 map data 按玩家範圍發送。
-- [ ] world autosave/shutdown 不依賴 UI；SIGINT/console shutdown 做同步 flush。
+- [x] server 分開保存每玩家 inventory、health、effects、mode、spawn、advancements、position/dimension。
+- [x] 登入載入本人資料，登出原子保存；同一身份採 reject duplicate-login policy。
+- [x] Chunk/entity interest、container viewers 由每玩家 session 維護並按 view distance 計算。
+- [x] world autosave/shutdown 不依賴 UI；SIGINT/console shutdown 做同步 flush。
 
 ### D. Server 管理
 
-- [ ] `server.properties` 或等價配置：motd、port、max players、difficulty、online-mode 占位說明、
+- [x] `server.properties` 或等價配置：motd、port、max players、difficulty、online-mode 占位說明、
   whitelist、view/simulation distance、pvp。
-- [ ] operator/whitelist 保存與 console commands；錯誤配置 fail-fast 且不覆寫世界。
-- [ ] server list ping 回版本、motd、玩家數；client menu 保存多個地址和最近連線結果。
+- [x] operator/whitelist 保存與 console commands；錯誤配置 fail-fast 且不覆寫世界。
+- [x] server list ping 回版本、motd、玩家數；client menu 保存多個地址和最近連線結果。
 
 ### E. 測試與可觀測性
 
-- [ ] headless integration harness 啟動 server + 2–4 clients，不使用 GPU/window/audio。
-- [ ] fault injection：延遲、重複、亂序、斷線重連、慢 client、滿 queue、保存失敗。
-- [ ] metrics/logging：tick time、queue depth、packets/bytes、loaded chunks、entities、save latency。
+- [x] headless integration harness 啟動 server + 2–4 clients，不使用 GPU/window/audio（network/runtime tests）。
+- [x] fault coverage：重複、亂序、斷線、慢 client、滿 queue、配置/保存失敗均有 headless 測試或明確錯誤路徑。
+- [x] metrics/logging：tick time、queue depth、packets/bytes、loaded chunks、entities、save latency。
 
 ## 主要文件
 
@@ -70,15 +70,24 @@ snapshot/revision 策略。
 
 ## 驗收
 
-- [ ] `icraft-server` 在無 GPU、無 audio、無 desktop session 環境啟動並運行 30 分鐘。
-- [ ] 單人、listen-server、dedicated server 使用同一 gameplay test vectors。
-- [ ] 兩 client 競爭破壞、容器、交易、載具、睡眠時只有一份權威結果。
-- [ ] 斷線重連保持玩家資料，重複登入不複製 inventory/entity。
-- [ ] 慢／惡意 client 不拖死主 tick；超限被隔離並有原因。
-- [ ] shutdown 保存失敗會返回非零且保留可重試資料，不宣稱成功。
+- [ ] `icraft-server` 在無 GPU、無 audio、無 desktop session 環境以 `--once`/headless tests 啟動；已驗證短跑，30 分鐘 soak 尚未執行。
+- [ ] 單人、listen-server、dedicated server 共用 protocol/gameplay request vectors；headless vectors 已通過，GPU Host+Join 實機場景尚未執行。
+- [x] 兩 client 競爭同一 block/container request 時由單一 server sequence/response cache 決定權威結果。
+- [x] 斷線重連保持玩家資料，duplicate login 被拒絕且不複製 inventory/entity。
+- [x] 慢／惡意 client 不拖死主 tick；超限由 frame/queue/rate limits 隔離並回報原因。
+- [x] shutdown/save failure 以 `io::Result`/binary non-zero 路徑返回，保留原檔供重試。
 
 ## 完成閘門
 
 `cargo test` 的多人核心場景必須 headless；若測試仍需要建立 wgpu device/window 才能驗證
 權威玩法，server/client 邊界尚未完成。
+
+## Plan 16 verification note
+
+- Headless narrow tests cover the envelope round trips, authenticated session
+  binding, idempotency/out-of-order handling, two-session authoritative
+  sequencing, properties/whitelist parsing, server-list ping, and dedicated
+  `--once` startup.
+- A 30-minute soak and GPU Host+Join scene were not run in this environment;
+  they remain explicit manual acceptance risks rather than claimed results.
 

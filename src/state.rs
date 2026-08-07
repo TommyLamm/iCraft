@@ -4207,6 +4207,16 @@ impl NetworkHandle {
                         crate::network::server::ServerToHost::ClientAction { id, action } => {
                             NetworkInbound::PlayerAction { id, action }
                         }
+                        crate::network::server::ServerToHost::GameplayRequest { id, request } => {
+                            // The dedicated headless runtime owns the unified
+                            // envelope.  The legacy listen-server bridge keeps
+                            // receiving a bounded status event until its
+                            // presentation path is migrated to that runtime.
+                            NetworkInbound::StatusUpdate(format!(
+                                "gameplay request {} received for session {id}",
+                                request.request_id
+                            ))
+                        }
                         crate::network::server::ServerToHost::ClientBlockChange {
                             id,
                             x,
@@ -4531,6 +4541,12 @@ impl NetworkHandle {
                         },
                         crate::network::client::ClientToGame::WorldRulesSync { rules } => {
                             NetworkInbound::WorldRulesSync { rules }
+                        }
+                        crate::network::client::ClientToGame::GameplayResponse { response } => {
+                            NetworkInbound::StatusUpdate(format!(
+                                "authoritative gameplay response {}",
+                                response.request_id
+                            ))
                         }
                         crate::network::client::ClientToGame::LightningStrike(strike) => {
                             NetworkInbound::LightningStrike(strike)
