@@ -5236,6 +5236,10 @@ pub struct State {
     pub is_saving: bool,
     pub save_error: Option<String>,
     pub is_sprinting: bool,
+    sprint_toggle_latched: bool,
+    sneak_toggle_latched: bool,
+    last_ctrl_pressed: bool,
+    last_shift_pressed: bool,
     pub base_fov: f32,
     pub w_click_timer: f32,
     pub last_w_pressed: bool,
@@ -5667,7 +5671,13 @@ impl State {
         let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
         let keys = KeyState::default();
 
-        let mut audio_manager = crate::audio::AudioManager::new();
+        let mut resource_pack_manager = crate::resources::ResourcePackManager::discover_default();
+        if !settings.resource_packs.is_empty() {
+            let _ = resource_pack_manager.apply_enabled_order(&settings.resource_packs);
+        }
+        let mut audio_manager =
+            crate::audio::AudioManager::new_with_resource_packs(&mut resource_pack_manager);
+        audio_manager.set_subtitles_enabled(settings.accessibility.subtitles);
         audio_manager.set_volume(settings.effective_sound_volume());
         audio_manager.set_weather_volume(settings.weather_volume);
 
@@ -5768,7 +5778,11 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let texture_atlas = crate::texture::TextureAtlas::new_procedural(&device, &queue);
+        let texture_atlas = crate::texture::TextureAtlas::new_procedural_with_manager(
+            &device,
+            &queue,
+            &mut resource_pack_manager,
+        );
 
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -6964,6 +6978,10 @@ impl State {
             is_saving: false,
             save_error: mutation_index_load_error,
             is_sprinting: false,
+            sprint_toggle_latched: false,
+            sneak_toggle_latched: false,
+            last_ctrl_pressed: false,
+            last_shift_pressed: false,
             base_fov,
             w_click_timer: 0.0,
             last_w_pressed: false,
@@ -7693,7 +7711,9 @@ impl State {
                 eprintln!("[State] Network disconnected: {reason}");
                 self.teardown_terrain_runtime("network disconnect");
                 self.network_ready = false;
-                self.network_status = Some(format!("CONNECTION LOST: {reason}"));
+                let disconnected =
+                    crate::localization::translate(self.settings.language, "disconnect.generic");
+                self.network_status = Some(format!("{disconnected}: {reason}"));
                 self.connection_lost = true;
                 self.is_chat_open = false;
                 self.chat_input.clear();
@@ -7704,7 +7724,7 @@ impl State {
                 push_chat_history(
                     &mut self.chat_messages,
                     "[Network]".into(),
-                    format!("Disconnected: {reason}"),
+                    format!("{disconnected}: {reason}"),
                 );
             }
             NetworkInbound::PlayerJoin { id, username } => {
@@ -10553,6 +10573,31 @@ impl State {
 
         let can_sprint = sprint_allowed(self.game_mode, self.player_state.hunger);
 
+        // Accessibility toggle controls are edge-triggered so holding a key
+        // does not repeatedly flip state. They only alter local input state;
+        // simulation timing, authority, and network snapshots are unchanged.
+        if self.settings.accessibility.toggle_sprint {
+            if self.keys.ctrl && !self.last_ctrl_pressed {
+                self.sprint_toggle_latched = !self.sprint_toggle_latched;
+            }
+        } else {
+            self.sprint_toggle_latched = false;
+        }
+        if self.settings.accessibility.toggle_sneak {
+            if self.keys.shift && !self.last_shift_pressed {
+                self.sneak_toggle_latched = !self.sneak_toggle_latched;
+            }
+        } else {
+            self.sneak_toggle_latched = false;
+        }
+        self.last_ctrl_pressed = self.keys.ctrl;
+        self.last_shift_pressed = self.keys.shift;
+        let sneak_input = if self.settings.accessibility.toggle_sneak {
+            self.sneak_toggle_latched
+        } else {
+            self.keys.shift
+        };
+
         // Double click W logic
         if self.keys.w && !self.last_w_pressed {
             if self.w_click_timer > 0.0 && can_sprint {
@@ -10563,12 +10608,16 @@ impl State {
         self.last_w_pressed = self.keys.w;
 
         // Ctrl key sprint check
-        if self.keys.ctrl && self.keys.w && can_sprint {
+        if ((!self.settings.accessibility.toggle_sprint && self.keys.ctrl)
+            || (self.settings.accessibility.toggle_sprint && self.sprint_toggle_latched))
+            && self.keys.w
+            && can_sprint
+        {
             self.is_sprinting = true;
         }
 
         // Cancel sprinting conditions
-        if !self.keys.w || self.keys.shift || !can_sprint {
+        if !self.keys.w || sneak_input || !can_sprint {
             self.is_sprinting = false;
         }
 
@@ -10640,7 +10689,7 @@ impl State {
         let mut movement = move_dir.normalize_or_zero() * self.potion_effects.speed_multiplier();
         let was_flying = self.player_physics.is_flying();
         if was_flying {
-            movement.y = match (self.keys.space, self.keys.shift) {
+            movement.y = match (self.keys.space, sneak_input) {
                 (true, false) => 1.0,
                 (false, true) => -1.0,
                 _ => 0.0,
@@ -10665,7 +10714,7 @@ impl State {
             dt,
             &self.chunk_manager,
             movement,
-            self.keys.shift && !was_flying,
+            sneak_input && !was_flying,
             self.is_sprinting,
         );
         self.perf_recorder.record(
@@ -17736,7 +17785,7 @@ impl State {
             )
             .length();
             let walking = speed_2d > 0.1;
-            let walk_swing = if walking {
+            let walk_swing = if walking && self.settings.accessibility.camera_bobbing {
                 (self.total_time * 8.0).sin() * 0.6
             } else {
                 0.0
@@ -18201,18 +18250,19 @@ impl State {
                 &mut ui_line_vertices,
             );
 
-            let msg = match self.player_state.death_reason {
-                Some(DamageSource::Fall) => "FELL FROM A HIGH PLACE",
-                Some(DamageSource::Void) => "FELL INTO THE VOID",
-                Some(DamageSource::Hunger) => "STARVED TO DEATH",
-                Some(DamageSource::Mob) => "WAS SLAIN BY ZOMBIE/SKELETON",
-                Some(DamageSource::Explosion) => "WAS BLOWN UP BY CREEPER",
-                Some(DamageSource::Drowning) => "DROWNED",
-                Some(DamageSource::Lightning) => "WAS STRUCK BY LIGHTNING",
-                None => "DIED",
+            let death_key = match self.player_state.death_reason {
+                Some(DamageSource::Fall) => "death.fall",
+                Some(DamageSource::Void) => "death.void",
+                Some(DamageSource::Hunger) => "death.starved",
+                Some(DamageSource::Mob) => "death.mob",
+                Some(DamageSource::Explosion) => "death.explosion",
+                Some(DamageSource::Drowning) => "death.drowned",
+                Some(DamageSource::Lightning) => "death.lightning",
+                None => "death.generic",
             };
+            let msg = crate::localization::translate(self.settings.language, death_key);
             draw_centered_text(
-                msg,
+                &msg,
                 0.15,
                 0.015,
                 0.03,
@@ -20062,7 +20112,12 @@ impl State {
 
                 // Damaged screen red flash overlay
                 if self.player_state.damaged_flash_time > 0.0 {
-                    let alpha = (self.player_state.damaged_flash_time / 0.5).min(1.0) * 0.25;
+                    let base = (self.player_state.damaged_flash_time / 0.5).min(1.0) * 0.25;
+                    let alpha = crate::accessibility::damage_overlay_alpha(
+                        base,
+                        self.settings.accessibility.damage_tilt,
+                        self.settings.accessibility.reduce_flashing,
+                    );
                     let flash_color = [1.0, 0.0, 0.0, alpha];
                     ui_vertices.push(UiVertex {
                         position: [-1.0, 1.0, 0.0],
@@ -20092,7 +20147,11 @@ impl State {
 
                 let lightning_flash = self.weather.flash_intensity();
                 if lightning_flash > 0.0 {
-                    let flash_color = [1.0, 1.0, 1.0, lightning_flash * 0.82];
+                    let flash_alpha = crate::accessibility::reduced_flash_alpha(
+                        lightning_flash * 0.82,
+                        self.settings.accessibility.reduce_flashing,
+                    );
+                    let flash_color = [1.0, 1.0, 1.0, flash_alpha];
                     for position in [
                         [-1.0, 1.0, 0.0],
                         [-1.0, -1.0, 0.0],
@@ -20611,18 +20670,20 @@ impl State {
                 .rev()
                 .take(CHAT_VISIBLE_LINES)
                 .collect();
+            let chat_scale = self.settings.accessibility.chat_scale.clamp(0.5, 2.0);
+            let chat_opacity = self.settings.accessibility.chat_opacity.clamp(0.0, 1.0);
             for (line_index, (sender, message)) in visible_messages.iter().enumerate() {
                 let line: String = format!("<{sender}> {message}")
                     .to_uppercase()
                     .chars()
                     .take(96)
                     .collect();
-                let y = -0.80 + line_index as f32 * 0.050;
-                let char_w = 0.008;
-                let char_h = 0.018;
-                let spacing = 0.002;
+                let y = -0.80 + line_index as f32 * 0.050 * chat_scale;
+                let char_w = 0.008 * chat_scale;
+                let char_h = 0.018 * chat_scale;
+                let spacing = 0.002 * chat_scale;
                 let width = line.chars().count() as f32 * (char_w + spacing) - spacing;
-                let alpha = 1.0 - line_index as f32 * 0.07;
+                let alpha = (1.0 - line_index as f32 * 0.07) * chat_opacity;
                 add_ui_quad(
                     &mut ui_vertices,
                     -0.985,
@@ -20671,12 +20732,76 @@ impl State {
                     &input.to_uppercase(),
                     -0.97,
                     -0.935,
-                    0.008,
-                    0.024,
-                    0.002,
+                    0.008 * chat_scale,
+                    0.024 * chat_scale,
+                    0.002 * chat_scale,
                     [1.0, 1.0, 1.0, 1.0],
                     &mut ui_line_vertices,
                 );
+            }
+
+            if self.settings.accessibility.subtitles {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis() as u64)
+                    .unwrap_or_default();
+                for (index, event) in self
+                    .audio_manager
+                    .drain_subtitles(now_ms)
+                    .into_iter()
+                    .rev()
+                    .take(4)
+                    .enumerate()
+                {
+                    let direction_key = match event.direction {
+                        crate::accessibility::SubtitleDirection::Left => {
+                            "hud.subtitle.direction_left"
+                        }
+                        crate::accessibility::SubtitleDirection::Right => {
+                            "hud.subtitle.direction_right"
+                        }
+                        crate::accessibility::SubtitleDirection::Front => {
+                            "hud.subtitle.direction_front"
+                        }
+                        crate::accessibility::SubtitleDirection::Back => {
+                            "hud.subtitle.direction_back"
+                        }
+                        crate::accessibility::SubtitleDirection::Center => "hud.subtitle.center",
+                    };
+                    let direction =
+                        crate::localization::translate(self.settings.language, direction_key);
+                    let sound = crate::localization::translate(self.settings.language, event.key);
+                    let text = if direction.is_empty() {
+                        format!("[{}]", sound)
+                    } else {
+                        format!("[{}] {}", direction, sound)
+                    };
+                    let subtitle_scale = self.settings.accessibility.chat_scale.clamp(0.5, 2.0);
+                    let y = 0.58 - index as f32 * 0.055 * subtitle_scale;
+                    let char_w = 0.006 * subtitle_scale;
+                    let char_h = 0.014 * subtitle_scale;
+                    let spacing = 0.002 * subtitle_scale;
+                    let width = text.chars().count() as f32 * (char_w + spacing) - spacing;
+                    let x = (0.97 - width).max(0.02);
+                    add_ui_quad(
+                        &mut ui_vertices,
+                        x - 0.012,
+                        (0.98f32).min(x + width + 0.012),
+                        y - 0.006,
+                        y + char_h + 0.006,
+                        [0.01, 0.01, 0.01, 0.82 * chat_opacity],
+                    );
+                    add_string_lines(
+                        &text,
+                        x,
+                        y,
+                        char_w,
+                        char_h,
+                        spacing,
+                        [1.0, 1.0, 1.0, chat_opacity],
+                        &mut ui_line_vertices,
+                    );
+                }
             }
 
             if let Some(boss) = crate::boss::active_boss_hud(&self.entity_manager) {
@@ -21440,7 +21565,7 @@ impl State {
             });
 
             add_string_lines(
-                "ADVANCEMENT MADE!",
+                &crate::localization::translate(self.settings.language, "advancement.toast"),
                 x0 + 0.09,
                 y1 - 0.04 * aspect,
                 0.007,

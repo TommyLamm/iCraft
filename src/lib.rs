@@ -5,6 +5,7 @@
 //! the dedicated server reuse the authoritative code without constructing a
 //! window, audio device, or GPU surface.
 
+pub mod accessibility;
 pub mod advancements;
 pub mod ai;
 pub mod audio;
@@ -23,6 +24,7 @@ pub mod culling;
 pub mod dimension;
 pub mod enchantment;
 pub mod entity;
+pub mod final_acceptance;
 pub mod fishing;
 pub mod fluid;
 pub mod game_rules;
@@ -30,6 +32,7 @@ pub mod gpu_frame_resources;
 pub mod interaction;
 pub mod inventory;
 pub mod lighting;
+pub mod localization;
 pub mod loot;
 pub mod menu;
 pub mod microbench;
@@ -43,6 +46,7 @@ pub mod player;
 pub mod rail;
 pub mod recipes;
 pub mod redstone;
+pub mod resources;
 pub mod save;
 pub mod sim_harness;
 pub mod spawning;

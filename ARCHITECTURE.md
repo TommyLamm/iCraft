@@ -20,10 +20,12 @@
   window, or audio device.
 - A background save worker handles autosaves and chunk-unload writes.
 - Terrain, the texture atlas, and missing audio assets can be generated
-  procedurally. On startup the atlas is overlaid with the Stay True resource
-  pack (`F:\Desktop\Stay True 1.21.5`, override via `ICRAFT_RESOURCE_PACK`),
-  with vanilla 1.21.5 fallback textures under `assets/vanilla/textures` for
-  everything the pack does not override.
+  procedurally. `resources.rs` discovers the built-in `assets/` pack and
+  workspace-relative `resourcepacks/` entries, validates manifests/dependency
+  order and bounded ZIP contents, and resolves selected textures, sounds,
+  language, model, and font descriptors. `ICRAFT_RESOURCE_PACK` is an explicit
+  development/test override only. Missing assets retain procedural or built-in
+  fallbacks and are diagnosed once; shader overrides are not supported.
 
 There is no database. Multiplayer supports both the existing listen-server
 model and `icraft-server`: the host/runtime owns authoritative simulation,
@@ -275,7 +277,8 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Container & automation system | `block_entity.rs` (ContainerAccess, Chest/Furnace/Hopper/Dispenser/Dropper/Observer entities), `container_sessions.rs` (atomic UI transactions), `inventory.rs` (ContainerInventory/ItemStack), `world_tick.rs` (bounded hopper transfers), `redstone.rs` (comparators/observers/actions), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (host furnace/dispense loop and revision-gated replication) |
 | Transport, mounts, navigation & fishing | `vehicle.rs` (MountManager, BoatState), `rail.rs` (MinecartState, RailShape), `navigation.rs` (Compass, Clock, MapData), `fishing.rs` (FishingManager, loot rolling) |
 | Networking and dedicated authority | `network/{protocol,transport,server,client}.rs`, `server_runtime.rs`, `bin/icraft-server.rs` |
-| Persistence and assets | `save.rs`, `texture.rs`, `audio.rs` |
+| Persistence and assets | `save.rs`, `texture.rs`, `audio.rs`, `resources.rs` |
+| Localization and accessibility | `localization.rs`, `accessibility.rs`, `menu.rs`, `state.rs` |
 | Modes, rules, commands | `game_rules.rs`, `commands/`, `state.rs`, `menu.rs` |
 | Performance instrumentation | `perf.rs`, `performance/` |
 
@@ -349,6 +352,13 @@ section_and_local_y_to_world_y(sy: i8, ly: u8) -> i32;
 - `settings.txt` and `controls.config` are working-directory-relative. Keep
   parsing defaults and sanitization backward compatible.
 
+Plan 17 settings also persist `ui_scale`, `chat_scale`, `chat_opacity`,
+`subtitles`, `high_contrast`, `reduce_flashing`, `toggle_sprint`,
+`toggle_sneak`, `camera_bobbing`, `damage_tilt`, and selected
+`resource_packs` IDs. `ResourcePackManager` keeps pack bytes in bounded maps;
+ZIPs are never extracted to disk and unsafe paths, symlinks, oversized entries,
+compression bombs, missing dependencies, and cycles are rejected.
+
 ## Overworld terrain & biomes (Plan 09)
 
 The terrain generator uses continuous 2D climate noise and 3D density sampling encapsulated in `src/worldgen/`:
@@ -388,6 +398,15 @@ atomicity, sided capability/transaction validation, comparator revision wake-up,
 observer edge/budget behavior, container revision ordering, and v3 save/snapshot
 round trips. A GPU/window Host+Join-client scene still requires manual execution
 outside the headless test environment.
+
+Plan 17 adds `final_acceptance.rs`, a deterministic headless harness for the
+foundation, progression, and social/automation scenario fixtures. Singleplayer
+assertions run in CI; listen-server and dedicated+two-client rows remain
+explicit Plan 18 hand-offs until authority unification is complete. Resource
+packs, localization, subtitles, reduced motion, and keyboard-focus behavior
+have unit coverage. Visual 4:3/16:9/21:9/high-DPI, audio-device,
+GPU-performance, 30-minute soak, and three-topology acceptance still require
+the manual steps in `plans/minecraft_foundation_gap/17_qa_checklist.md`.
 
 Use:
 

@@ -3,6 +3,15 @@
 > **整體進度**: 28 / 30 任務完成
 > **當前階段**: P3 — 進階功能
 
+### Minecraft foundation-gap route — Plan 17
+
+Plan 17 source/docs are implemented: bounded `assets/` + `resourcepacks/`
+manifests and resolver, structured `en_us`/`de_de` localization, accessibility
+settings/subtitles/focus navigation, and deterministic singleplayer acceptance
+harnesses. The listen-server and dedicated+two-client rows remain explicitly
+blocked by Plan 18 authority unification; GPU/audio/soak/manual visual evidence
+is listed in the Plan 17 QA checklist rather than inferred from test counts.
+
 ---
 
 ## 📊 總覽

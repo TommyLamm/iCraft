@@ -15,13 +15,19 @@ cargo run --release
 
 For a faster development build, omit `--release`.
 
-## Texture attribution and removal notice
+## Assets, resource packs, and languages
 
-Some of the in-game textures currently use image assets from the **Stay True
-1.21.5** resource pack. Stay True and those assets remain the property of their
-respective creator(s); this project does not claim ownership of them or imply
-any affiliation or endorsement.
+The repository ships a small, self-contained `assets/` pack with procedural
+fallbacks. Optional user packs live in the workspace-relative `resourcepacks/`
+directory and must contain a `pack.json` manifest. The menu's Resource Packs
+screen validates dependencies, ordering, archive paths, and byte budgets before
+applying a pack. Missing or invalid assets fall back to the built-in artwork
+and emit a one-time diagnostic; shader overrides and mod/Marketplace formats
+are intentionally outside this first implementation.
 
-If any of these assets infringe copyright or otherwise violate their license,
-please report the affected file to the project maintainers. The asset will be
-removed promptly.
+`assets/lang/en_us.json` is the fallback catalog and `de_de.json` is the bundled
+second language. Settings persist language, UI/chat scale, subtitles, contrast,
+reduced flashing, and input toggles in `settings.txt`.
+
+`ICRAFT_RESOURCE_PACK` is an explicit development/test override for a single
+pack location. It is never used as the default discovery path.

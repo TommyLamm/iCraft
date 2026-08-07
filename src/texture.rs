@@ -1,3 +1,4 @@
+use crate::resources::ResourcePackManager;
 use image::{Rgba, RgbaImage};
 use wgpu::{Device, Queue, Sampler, Texture, TextureView};
 
@@ -1219,9 +1220,8 @@ fn draw_melon(img: &mut RgbaImage, tx: u32, ty: u32) {
     }
 }
 
-/// A single 16x16 atlas tile replacement sourced from a Minecraft-style
-/// resource pack (Stay True first, vanilla `assets/vanilla/textures` as the
-/// fallback for everything the pack does not override).
+/// A single 16x16 atlas tile replacement sourced from an iCraft resource pack
+/// with the built-in assets as the final fallback.
 struct PackTile {
     col: u32,
     row: u32,
@@ -1311,18 +1311,15 @@ const fn pack_tile_region_tint(
     }
 }
 
-/// Default Stay True resource pack location on this machine. Override with the
-/// `ICRAFT_RESOURCE_PACK` environment variable (absolute path to the pack's
-/// `assets/minecraft/textures` directory).
-const DEFAULT_RESOURCE_PACK_TEXTURES: &str =
-    "F:/Desktop/Stay True 1.21.5/assets/minecraft/textures";
+/// User pack location is workspace-relative. `ICRAFT_RESOURCE_PACK` is an
+/// explicit development override and is never used as a default.
+const USER_RESOURCE_PACKS_DIR: &str = "resourcepacks";
 
-/// Vanilla 1.21.5 textures extracted next to the game for pack overrides that
-/// Stay True leaves untouched (most items, GUI sprites, entity skins, ...).
+/// Built-in 1.21.5-compatible texture fallback shipped with the repository.
 const VANILLA_TEXTURES_DIR: &str = "assets/vanilla/textures";
 
 /// Atlas layout: (col, row) -> resource-pack texture path. Every entry is
-/// resolved from the Stay True pack first and falls back to the extracted
+/// resolved from the selected pack stack first and falls back to the extracted
 /// vanilla tree, keeping the procedural drawing as the final fallback so the
 /// game always has a complete atlas.
 const PACK_TILES: &[PackTile] = &[
@@ -1574,7 +1571,7 @@ const PACK_TILES: &[PackTile] = &[
 fn resource_pack_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
     let pack = std::env::var("ICRAFT_RESOURCE_PACK")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_RESOURCE_PACK_TEXTURES));
+        .unwrap_or_else(|_| std::path::PathBuf::from(USER_RESOURCE_PACKS_DIR));
     let vanilla = std::path::PathBuf::from(VANILLA_TEXTURES_DIR);
     (pack, vanilla)
 }
@@ -1603,48 +1600,36 @@ fn paste_pack_tile(img: &mut RgbaImage, tile: &PackTile, src: &image::DynamicIma
     }
 }
 
-/// Overlay every mapped atlas tile with the Stay True resource pack texture,
-/// falling back to the extracted vanilla 1.21.5 tree. Tiles that resolve
-/// nowhere keep the procedural artwork generated above.
+/// Overlay every mapped atlas tile with the selected resource packs. Tiles
+/// that resolve nowhere keep the procedural artwork generated above.
 fn apply_resource_pack(img: &mut RgbaImage) {
-    let (pack_dir, vanilla_dir) = resource_pack_dirs();
+    let mut manager = ResourcePackManager::discover_default();
+    apply_resource_pack_with_manager(img, &mut manager);
+}
+
+fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
     let mut pack_hits = 0usize;
-    let mut vanilla_hits = 0usize;
     let mut misses = 0usize;
-    let mut missing = Vec::new();
     for tile in PACK_TILES {
-        let pack_path = pack_dir.join(tile.path);
-        let loaded = if pack_path.is_file() {
+        let loaded = manager
+            .resolve_asset(tile.path)
+            .and_then(|bytes| image::load_from_memory(&bytes).ok());
+        if loaded.is_some() {
             pack_hits += 1;
-            image::open(&pack_path)
         } else {
-            let vanilla_path = vanilla_dir.join(tile.path);
-            if vanilla_path.is_file() {
-                vanilla_hits += 1;
-                image::open(&vanilla_path)
-            } else {
-                misses += 1;
-                missing.push(tile.path);
-                continue;
-            }
-        };
+            misses += 1;
+        }
         match loaded {
-            Ok(src) => paste_pack_tile(img, tile, &src),
-            Err(_) => misses += 1,
+            Some(src) => paste_pack_tile(img, tile, &src),
+            None => {}
         }
     }
     eprintln!(
-        "[texture] resource-pack atlas: {} tiles from Stay True, {} vanilla fallback, {} procedural fallback (pack: {})",
-        pack_hits,
-        vanilla_hits,
-        misses,
-        pack_dir.display()
+        "[texture] resource-pack atlas: {} resolved, {} procedural fallback",
+        pack_hits, misses
     );
-    if !missing.is_empty() {
-        eprintln!(
-            "[texture] missing pack/vanilla tiles: {}",
-            missing.join(", ")
-        );
+    for diagnostic in manager.take_diagnostics() {
+        eprintln!("[texture] {}: {}", diagnostic.source, diagnostic.message);
     }
 }
 
@@ -1652,8 +1637,15 @@ fn apply_resource_pack(img: &mut RgbaImage) {
 /// pack. Composite that layer over the head crop so the compact atlas keeps
 /// the normal purple eyes instead of rendering a featureless black face.
 fn compose_enderman_eyes(img: &mut RgbaImage) {
-    let path = std::path::Path::new(VANILLA_TEXTURES_DIR).join("entity/enderman/enderman_eyes.png");
-    let Ok(source) = image::open(path) else {
+    let mut manager = ResourcePackManager::discover_default();
+    compose_enderman_eyes_with_manager(img, &mut manager);
+}
+
+fn compose_enderman_eyes_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
+    let Some(bytes) = manager.resolve_asset("entity/enderman/enderman_eyes.png") else {
+        return;
+    };
+    let Ok(source) = image::load_from_memory(&bytes) else {
         return;
     };
     let crop = image::imageops::crop_imm(&source, 8, 8, 8, 8).to_image();
@@ -1761,6 +1753,18 @@ fn make_dragon_tiles_opaque(img: &mut RgbaImage) {
 
 impl TextureAtlas {
     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
+        let mut manager = ResourcePackManager::discover_default();
+        Self::new_procedural_with_manager(device, queue, &mut manager)
+    }
+
+    /// Build the compact atlas while resolving assets through an already
+    /// configured pack manager. Keeping the manager at the call site lets the
+    /// menu/state selection apply consistently to textures and audio.
+    pub fn new_procedural_with_manager(
+        device: &Device,
+        queue: &Queue,
+        manager: &mut ResourcePackManager,
+    ) -> Self {
         let mut img = RgbaImage::new(256, 256);
         let mut seed = 12345u32;
 
@@ -2721,10 +2725,10 @@ impl TextureAtlas {
         draw_noise(&mut img, 13, 4, [36, 28, 44], 9, &mut seed); // dragon wing
         draw_noise(&mut img, 14, 14, [118, 72, 150], 14, &mut seed); // Shulker shell
 
-        // Overlay the Stay True resource pack (with a vanilla fallback) over
-        // the procedural base so every atlas tile uses real Minecraft art.
-        apply_resource_pack(&mut img);
-        compose_enderman_eyes(&mut img);
+        // Overlay selected resource packs over the procedural base. Missing
+        // assets retain the generated fallback so partial packs are safe.
+        apply_resource_pack_with_manager(&mut img, manager);
+        compose_enderman_eyes_with_manager(&mut img, manager);
         make_enderman_tiles_opaque(&mut img);
         make_dragon_tiles_opaque(&mut img);
         compose_end_portal_frame_tiles(&mut img);

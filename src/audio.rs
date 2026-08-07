@@ -1,9 +1,14 @@
+use crate::accessibility::{
+    direction_from_vector, SubtitleDirection, SubtitleEvent, SubtitleQueue,
+};
+use crate::resources::ResourcePackManager;
 use glam::Vec3;
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source, SpatialSink};
 use std::collections::HashMap;
 use std::fs::{create_dir_all, File};
 use std::io::{Cursor, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoundMaterial {
@@ -62,6 +67,29 @@ impl SoundId {
             SoundId::ShieldBreak => "shield_break.wav".to_string(),
         }
     }
+
+    pub fn subtitle_key(&self) -> &'static str {
+        match self {
+            SoundId::Jump => "sound.jump",
+            SoundId::PlayerHurt => "sound.hurt",
+            SoundId::PlayerDeath => "sound.death",
+            SoundId::Explosion => "sound.explosion",
+            SoundId::Thunder => "sound.thunder",
+            SoundId::ArrowShoot => "sound.arrow",
+            SoundId::CreeperIgnition => "sound.creeper",
+            SoundId::UiClick => "sound.ui_click",
+            SoundId::BlockBreak(_)
+            | SoundId::BlockPlace(_)
+            | SoundId::Footstep(_)
+            | SoundId::Land(_)
+            | SoundId::Rain
+            | SoundId::Note(_)
+            | SoundId::FurnaceSmelt
+            | SoundId::FurnaceLit
+            | SoundId::ShieldBlock
+            | SoundId::ShieldBreak => "sound.block",
+        }
+    }
 }
 
 pub struct AudioManager {
@@ -71,6 +99,8 @@ pub struct AudioManager {
     weather_volume: f32,
     sound_cache: HashMap<SoundId, Vec<u8>>,
     active_loops: HashMap<u64, ActiveLoop>,
+    subtitle_queue: std::cell::RefCell<SubtitleQueue>,
+    subtitles_enabled: bool,
 }
 
 struct ActiveLoop {
@@ -84,6 +114,13 @@ fn clamp_volume(volume: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+fn monotonic_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn sound_gain(base_volume: f32, weather_volume: f32, sound_id: SoundId) -> f32 {
@@ -379,6 +416,11 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
 
 impl AudioManager {
     pub fn new() -> Self {
+        let mut manager = ResourcePackManager::discover_default();
+        Self::new_with_resource_packs(&mut manager)
+    }
+
+    pub fn new_with_resource_packs(manager: &mut ResourcePackManager) -> Self {
         let (_stream, stream_handle) = match OutputStream::try_default() {
             Ok((s, h)) => (Some(s), Some(h)),
             Err(e) => {
@@ -445,7 +487,12 @@ impl AudioManager {
         for id in sound_ids {
             let filename = id.filename();
             let file_path = sound_dir.join(&filename);
-            let (loaded_bytes, synthesized) = load_or_synthesize_sound(&file_path, id);
+            let logical_path = format!("sounds/{filename}");
+            let (loaded_bytes, synthesized) = manager
+                .read_asset(&logical_path)
+                .filter(|bytes| sound_bytes_are_decodable(bytes))
+                .map(|bytes| (bytes, false))
+                .unwrap_or_else(|| load_or_synthesize_sound(&file_path, id));
 
             if synthesized {
                 // Note-block pitches are cheap procedural variants; keep them
@@ -467,6 +514,32 @@ impl AudioManager {
             weather_volume: 1.0,
             sound_cache,
             active_loops: HashMap::new(),
+            subtitle_queue: std::cell::RefCell::new(SubtitleQueue::default()),
+            subtitles_enabled: false,
+        }
+    }
+
+    pub fn set_subtitles_enabled(&mut self, enabled: bool) {
+        self.subtitles_enabled = enabled;
+        if !enabled {
+            self.subtitle_queue.borrow_mut().drain_expired(u64::MAX);
+        }
+    }
+
+    pub fn drain_subtitles(&self, now_ms: u64) -> Vec<SubtitleEvent> {
+        if !self.subtitles_enabled {
+            return Vec::new();
+        }
+        self.subtitle_queue.borrow_mut().drain_expired(now_ms)
+    }
+
+    fn enqueue_subtitle(&self, sound_id: SoundId, direction: SubtitleDirection, now_ms: u64) {
+        if self.subtitles_enabled {
+            self.subtitle_queue.borrow_mut().push(SubtitleEvent {
+                key: sound_id.subtitle_key(),
+                direction,
+                expires_at_ms: now_ms.saturating_add(2_500),
+            });
         }
     }
 
@@ -498,6 +571,7 @@ impl AudioManager {
     }
 
     pub fn play_sound(&self, sound_id: SoundId) {
+        self.enqueue_subtitle(sound_id, SubtitleDirection::Center, monotonic_millis());
         let handle = match &self.stream_handle {
             Some(h) => h,
             None => return,
@@ -518,6 +592,10 @@ impl AudioManager {
         listener_pos: Vec3,
         listener_right: Vec3,
     ) {
+        let relative = pos - listener_pos;
+        let direction =
+            direction_from_vector(relative.x, relative.z, listener_right.x, listener_right.z);
+        self.enqueue_subtitle(sound_id, direction, monotonic_millis());
         let handle = match &self.stream_handle {
             Some(h) => h,
             None => return,
@@ -672,6 +750,8 @@ mod tests {
             weather_volume: 0.5,
             sound_cache: HashMap::new(),
             active_loops: HashMap::new(),
+            subtitle_queue: std::cell::RefCell::new(SubtitleQueue::default()),
+            subtitles_enabled: false,
         };
         let (rain_sink, _rain_output) = Sink::new_idle();
         let (ordinary_sink, _ordinary_output) = Sink::new_idle();

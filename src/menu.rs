@@ -1,5 +1,6 @@
 use crate::game_rules::{WorldCreationOptions, WorldType};
 use crate::inventory::GameMode;
+use crate::{accessibility::AccessibilitySettings, resources::ResourcePackManager};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,37 +64,7 @@ impl Difficulty {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    English,
-    German,
-}
-
-impl Language {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::English => "ENGLISH",
-            Self::German => "DEUTSCH",
-        }
-    }
-
-    fn parse(value: &str) -> Self {
-        if value.trim().eq_ignore_ascii_case("deutsch")
-            || value.trim().eq_ignore_ascii_case("german")
-        {
-            Self::German
-        } else {
-            Self::English
-        }
-    }
-
-    fn toggle(self) -> Self {
-        match self {
-            Self::English => Self::German,
-            Self::German => Self::English,
-        }
-    }
-}
+pub use crate::localization::Language;
 
 #[derive(Debug, Clone)]
 pub struct ControlBindings {
@@ -177,6 +148,8 @@ pub struct GameSettings {
     pub render_scale: f32,
     pub dynamic_resolution: bool,
     pub entity_distance_scale: f32,
+    pub accessibility: AccessibilitySettings,
+    pub resource_packs: Vec<String>,
 }
 
 impl Default for GameSettings {
@@ -202,6 +175,8 @@ impl Default for GameSettings {
             render_scale: 1.0,
             dynamic_resolution: false,
             entity_distance_scale: 1.0,
+            accessibility: AccessibilitySettings::default(),
+            resource_packs: Vec::new(),
         }
     }
 }
@@ -218,6 +193,7 @@ impl GameSettings {
         settings.sanitize_view_settings();
         settings.render_distance = settings.render_distance.clamp(2, 16);
         settings.clamp_audio_volumes();
+        settings.accessibility.sanitize();
         settings
     }
 
@@ -228,6 +204,7 @@ impl GameSettings {
         settings.sanitize_view_settings();
         settings.render_distance = settings.render_distance.clamp(2, 16);
         settings.clamp_audio_volumes();
+        settings.accessibility.sanitize();
         settings
     }
 
@@ -303,6 +280,54 @@ impl GameSettings {
                         .parse::<f32>()
                         .unwrap_or(self.entity_distance_scale)
                         .clamp(0.5, 2.0)
+                }
+                "ui_scale" => {
+                    self.accessibility.ui_scale =
+                        value.parse().unwrap_or(self.accessibility.ui_scale)
+                }
+                "chat_scale" => {
+                    self.accessibility.chat_scale =
+                        value.parse().unwrap_or(self.accessibility.chat_scale)
+                }
+                "chat_opacity" => {
+                    self.accessibility.chat_opacity =
+                        value.parse().unwrap_or(self.accessibility.chat_opacity)
+                }
+                "subtitles" => {
+                    self.accessibility.subtitles = parse_bool(value, self.accessibility.subtitles)
+                }
+                "high_contrast" => {
+                    self.accessibility.high_contrast =
+                        parse_bool(value, self.accessibility.high_contrast)
+                }
+                "reduce_flashing" => {
+                    self.accessibility.reduce_flashing =
+                        parse_bool(value, self.accessibility.reduce_flashing)
+                }
+                "toggle_sprint" => {
+                    self.accessibility.toggle_sprint =
+                        parse_bool(value, self.accessibility.toggle_sprint)
+                }
+                "toggle_sneak" => {
+                    self.accessibility.toggle_sneak =
+                        parse_bool(value, self.accessibility.toggle_sneak)
+                }
+                "camera_bobbing" => {
+                    self.accessibility.camera_bobbing =
+                        parse_bool(value, self.accessibility.camera_bobbing)
+                }
+                "damage_tilt" => {
+                    self.accessibility.damage_tilt =
+                        parse_bool(value, self.accessibility.damage_tilt)
+                }
+                "resource_packs" => {
+                    self.resource_packs = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .take(32)
+                        .map(str::to_string)
+                        .collect()
                 }
                 _ => {}
             }
@@ -414,6 +439,7 @@ impl GameSettings {
         let mut settings = self.clone();
         settings.sanitize_view_settings();
         settings.clamp_audio_volumes();
+        settings.accessibility.sanitize();
         format!(
             concat!(
                 "fov:{}\n",
@@ -448,7 +474,18 @@ impl GameSettings {
                 "mp_username:{}\n",
                 "render_scale:{}\n",
                 "dynamic_resolution:{}\n",
-                "entity_distance_scale:{}\n"
+                "entity_distance_scale:{}\n",
+                "ui_scale:{}\n",
+                "chat_scale:{}\n",
+                "chat_opacity:{}\n",
+                "subtitles:{}\n",
+                "high_contrast:{}\n",
+                "reduce_flashing:{}\n",
+                "toggle_sprint:{}\n",
+                "toggle_sneak:{}\n",
+                "camera_bobbing:{}\n",
+                "damage_tilt:{}\n",
+                "resource_packs:{}\n"
             ),
             settings.fov,
             settings.sensitivity,
@@ -483,6 +520,17 @@ impl GameSettings {
             settings.render_scale,
             settings.dynamic_resolution,
             settings.entity_distance_scale,
+            settings.accessibility.ui_scale,
+            settings.accessibility.chat_scale,
+            settings.accessibility.chat_opacity,
+            settings.accessibility.subtitles,
+            settings.accessibility.high_contrast,
+            settings.accessibility.reduce_flashing,
+            settings.accessibility.toggle_sprint,
+            settings.accessibility.toggle_sneak,
+            settings.accessibility.camera_bobbing,
+            settings.accessibility.damage_tilt,
+            settings.resource_packs.join(","),
         )
     }
 
@@ -1179,6 +1227,8 @@ enum MenuScreen {
     CreateWorld,
     Options,
     Controls,
+    Accessibility,
+    ResourcePacks,
     ConfirmDelete,
 }
 
@@ -1234,7 +1284,9 @@ fn back_transition(
         MenuScreen::Main => MenuScreen::Main,
         MenuScreen::Multiplayer | MenuScreen::Worlds | MenuScreen::Options => MenuScreen::Main,
         MenuScreen::CreateWorld | MenuScreen::ConfirmDelete => MenuScreen::Worlds,
-        MenuScreen::Controls => MenuScreen::Options,
+        MenuScreen::Controls | MenuScreen::Accessibility | MenuScreen::ResourcePacks => {
+            MenuScreen::Options
+        }
     };
     (screen, None, None)
 }
@@ -1285,6 +1337,8 @@ pub struct Menu {
     rebinding: Option<ControlAction>,
     message: Option<String>,
     pub settings: GameSettings,
+    resource_packs: ResourcePackManager,
+    focus_index: usize,
     supported_present_modes: Vec<wgpu::PresentMode>,
 }
 
@@ -1444,6 +1498,10 @@ impl Menu {
             mapped_at_creation: false,
         });
 
+        let mut resource_packs = ResourcePackManager::discover_default();
+        if !settings.resource_packs.is_empty() {
+            let _ = resource_packs.apply_enabled_order(&settings.resource_packs);
+        }
         Self {
             window,
             surface,
@@ -1481,6 +1539,8 @@ impl Menu {
             rebinding: None,
             message: None,
             settings,
+            resource_packs,
+            focus_index: 0,
             supported_present_modes,
         }
     }
@@ -1496,9 +1556,10 @@ impl Menu {
     }
 
     pub fn handle_mouse_move(&mut self, x: f64, y: f64) {
+        let ui_scale = self.settings.accessibility.ui_scale.max(0.5) as f64;
         self.mouse_ndc = [
-            x as f32 / self.size.width.max(1) as f32 * 2.0 - 1.0,
-            1.0 - y as f32 / self.size.height.max(1) as f32 * 2.0,
+            (x as f32 / self.size.width.max(1) as f32 * 2.0 - 1.0) / ui_scale as f32,
+            (1.0 - y as f32 / self.size.height.max(1) as f32 * 2.0) / ui_scale as f32,
         ];
     }
 
@@ -1517,6 +1578,7 @@ impl Menu {
         physical_key: PhysicalKey,
         logical_key: &Key,
         repeat: bool,
+        shift_held: bool,
     ) -> MenuAction {
         if state != ElementState::Pressed {
             return MenuAction::None;
@@ -1602,10 +1664,187 @@ impl Menu {
             }
             return MenuAction::None;
         }
+        if matches!(logical_key, Key::Named(NamedKey::Tab)) {
+            let direction = if shift_held {
+                crate::accessibility::FocusDirection::Backward
+            } else {
+                crate::accessibility::FocusDirection::Forward
+            };
+            self.move_focus(direction);
+            return MenuAction::None;
+        }
+        if matches!(logical_key, Key::Named(NamedKey::Enter)) {
+            return self.activate_focused();
+        }
         if matches!(logical_key, Key::Named(NamedKey::Escape)) {
             self.back();
         }
         MenuAction::None
+    }
+
+    fn move_focus(&mut self, direction: crate::accessibility::FocusDirection) {
+        let mut focus = crate::accessibility::FocusNavigator::new(self.focus_count());
+        focus.set_count(self.focus_count());
+        for _ in 0..self.focus_index {
+            focus.move_by(crate::accessibility::FocusDirection::Forward);
+        }
+        focus.move_by(direction);
+        self.focus_index = focus.index();
+    }
+
+    fn activate_focused(&mut self) -> MenuAction {
+        let Some([x0, x1, y0, y1]) = self.focus_rect() else {
+            return MenuAction::None;
+        };
+        self.mouse_ndc = [(x0 + x1) * 0.5, (y0 + y1) * 0.5];
+        self.handle_click()
+    }
+
+    fn focus_count(&self) -> usize {
+        match self.screen {
+            MenuScreen::Main => 4,
+            MenuScreen::Options => 15,
+            MenuScreen::Controls => 10,
+            MenuScreen::Accessibility => 11,
+            MenuScreen::ResourcePacks => self.resource_packs.available().len() + 3,
+            MenuScreen::Multiplayer => {
+                if self.multiplayer_mode == MultiplayerMode::Join {
+                    7
+                } else {
+                    5
+                }
+            }
+            MenuScreen::Worlds => (self.worlds.len().saturating_sub(self.world_scroll)).min(5) + 6,
+            MenuScreen::CreateWorld => 11,
+            MenuScreen::ConfirmDelete => 2,
+        }
+    }
+
+    fn focus_rect(&self) -> Option<[f32; 4]> {
+        let rects = match self.screen {
+            MenuScreen::Main => vec![
+                [-0.34, 0.34, 0.21, 0.34],
+                [-0.34, 0.34, 0.03, 0.16],
+                [-0.34, 0.34, -0.15, -0.02],
+                [-0.34, 0.34, -0.33, -0.20],
+            ],
+            MenuScreen::Options => {
+                let mut rects = Vec::with_capacity(14);
+                for row in 0..6 {
+                    let top = OPTIONS_ROW_TOPS[row];
+                    rects.push([-0.82, -0.05, top - 0.13, top]);
+                }
+                for row in 0..6 {
+                    let top = OPTIONS_ROW_TOPS[row];
+                    rects.push([0.05, 0.82, top - 0.13, top]);
+                }
+                rects.push([-0.82, -0.30, -0.78, -0.64]);
+                rects.push([-0.25, 0.25, -0.78, -0.64]);
+                rects.push([0.30, 0.82, -0.78, -0.64]);
+                rects
+            }
+            MenuScreen::Controls => {
+                let mut rects = vec![[-0.48, 0.48, 0.49, 0.62]];
+                for index in 0..8 {
+                    let column = index / 4;
+                    let row = index % 4;
+                    let (x0, x1) = if column == 0 {
+                        (-0.78, -0.04)
+                    } else {
+                        (0.04, 0.78)
+                    };
+                    let top = 0.38 - row as f32 * 0.19;
+                    rects.push([x0, x1, top - 0.14, top]);
+                }
+                rects.push([-0.25, 0.25, -0.78, -0.64]);
+                rects
+            }
+            MenuScreen::Accessibility => {
+                let mut rects = Vec::with_capacity(11);
+                for index in 0..10 {
+                    let column = index / 5;
+                    let row = index % 5;
+                    let (x0, x1) = if column == 0 {
+                        (-0.82, -0.05)
+                    } else {
+                        (0.05, 0.82)
+                    };
+                    let top = 0.56 - row as f32 * 0.18;
+                    rects.push([x0, x1, top - 0.13, top]);
+                }
+                rects.push([-0.25, 0.25, -0.78, -0.64]);
+                rects
+            }
+            MenuScreen::ResourcePacks => {
+                let mut rects = self
+                    .resource_packs
+                    .available()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        let top = 0.56 - index as f32 * 0.14;
+                        [-0.78, 0.78, top - 0.11, top]
+                    })
+                    .collect::<Vec<_>>();
+                rects.extend([
+                    [-0.78, -0.28, -0.78, -0.64],
+                    [-0.22, 0.22, -0.78, -0.64],
+                    [0.28, 0.78, -0.78, -0.64],
+                ]);
+                rects
+            }
+            MenuScreen::Multiplayer => {
+                let mut rects = vec![[-0.52, -0.02, 0.45, 0.58], [0.02, 0.52, 0.45, 0.58]];
+                if self.multiplayer_mode == MultiplayerMode::Host {
+                    rects.push([-0.52, 0.52, 0.17, 0.30]);
+                } else {
+                    rects.extend([
+                        [-0.52, 0.52, 0.17, 0.30],
+                        [-0.52, 0.52, -0.04, 0.09],
+                        [-0.52, 0.52, -0.25, -0.12],
+                    ]);
+                }
+                rects.extend([[-0.52, -0.02, -0.58, -0.45], [0.02, 0.52, -0.58, -0.45]]);
+                rects
+            }
+            MenuScreen::Worlds => {
+                let visible = (self.worlds.len().saturating_sub(self.world_scroll)).min(5);
+                let mut rects = (0..visible)
+                    .map(|index| {
+                        let top = 0.58 - index as f32 * 0.19;
+                        [-0.72, 0.72, top - 0.15, top]
+                    })
+                    .collect::<Vec<_>>();
+                rects.extend([
+                    [-0.72, -0.27, -0.64, -0.51],
+                    [-0.23, 0.23, -0.64, -0.51],
+                    [0.27, 0.72, -0.64, -0.51],
+                    [-0.72, -0.27, -0.84, -0.72],
+                    [-0.23, 0.23, -0.84, -0.72],
+                    [0.27, 0.72, -0.84, -0.72],
+                ]);
+                rects
+            }
+            MenuScreen::CreateWorld => vec![
+                [-0.52, 0.52, 0.34, 0.47],
+                [-0.52, 0.52, 0.13, 0.26],
+                [-0.52, 0.52, -0.08, 0.05],
+                [-0.52, 0.52, -0.29, -0.16],
+                [-0.52, 0.52, -0.42, -0.30],
+                [-0.52, -0.02, -0.54, -0.43],
+                [0.02, 0.52, -0.54, -0.43],
+                [-0.52, -0.02, -0.69, -0.58],
+                [0.02, 0.52, -0.69, -0.58],
+                [-0.52, -0.02, -0.84, -0.71],
+                [0.02, 0.52, -0.84, -0.71],
+            ],
+            MenuScreen::ConfirmDelete => {
+                vec![[-0.48, -0.02, -0.16, -0.02], [0.02, 0.48, -0.16, -0.02]]
+            }
+        };
+        rects
+            .get(self.focus_index.min(rects.len().saturating_sub(1)))
+            .copied()
     }
 
     pub fn handle_click(&mut self) -> MenuAction {
@@ -1676,7 +1915,8 @@ impl Menu {
                         }
                     };
                     let Some(role) = role else {
-                        self.message = Some("ENTER VALID MULTIPLAYER SETTINGS".to_string());
+                        self.message =
+                            Some(tr(self.settings.language, "menu.enter_valid_multiplayer"));
                         return MenuAction::None;
                     };
                     let is_client = matches!(role, MultiplayerRole::Client { .. });
@@ -1734,7 +1974,8 @@ impl Menu {
                         match copy_world(&directory, &destination) {
                             Ok(()) => {
                                 self.worlds = discover_worlds();
-                                self.message = Some("WORLD COPIED".to_string());
+                                self.message =
+                                    Some(tr(self.settings.language, "menu.world_copied"));
                             }
                             Err(error) => self.message = Some(format!("COPY FAILED: {error}")),
                         }
@@ -1749,7 +1990,8 @@ impl Menu {
                         match backup_world(&directory, &destination) {
                             Ok(()) => {
                                 self.worlds = discover_worlds();
-                                self.message = Some("WORLD BACKED UP".to_string());
+                                self.message =
+                                    Some(tr(self.settings.language, "menu.world_backed_up"));
                             }
                             Err(error) => self.message = Some(format!("BACKUP FAILED: {error}")),
                         }
@@ -1833,6 +2075,8 @@ impl Menu {
                     self.back();
                 }
             }
+            MenuScreen::Accessibility => self.handle_accessibility_click(x, y),
+            MenuScreen::ResourcePacks => self.handle_resource_pack_click(x, y),
             MenuScreen::ConfirmDelete => {
                 if hit(x, y, -0.48, -0.02, -0.16, -0.02) {
                     if let Some(directory) = self.selected_world.as_deref() {
@@ -1855,6 +2099,7 @@ impl Menu {
                 }
             }
         }
+        self.focus_index = self.focus_index.min(self.focus_count().saturating_sub(1));
         MenuAction::None
     }
 
@@ -2026,11 +2271,22 @@ impl Menu {
             }
             (_, true, Some(4)) => self.settings.language = self.settings.language.toggle(),
             (_, true, Some(5)) => {
-                self.screen = MenuScreen::Controls;
+                self.screen = MenuScreen::Accessibility;
+                return;
+            }
+            _ if hit(x, y, -0.82, -0.30, -0.78, -0.64) => {
+                self.screen = MenuScreen::ResourcePacks;
+                self.focus_index = 0;
                 return;
             }
             _ if hit(x, y, -0.25, 0.25, -0.78, -0.64) => {
+                self.screen = MenuScreen::Controls;
+                self.focus_index = 0;
+                return;
+            }
+            _ if hit(x, y, 0.30, 0.82, -0.78, -0.64) => {
                 self.screen = MenuScreen::Main;
+                self.focus_index = 0;
                 return;
             }
             _ => return,
@@ -2052,7 +2308,12 @@ impl Menu {
     }
 
     pub fn update(&mut self, dt: f32) {
-        self.elapsed += dt.min(0.1);
+        let motion_scale = if self.settings.accessibility.reduce_flashing {
+            0.25
+        } else {
+            1.0
+        };
+        self.elapsed += dt.min(0.1) * motion_scale;
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -2111,6 +2372,7 @@ impl Menu {
         let aspect = self.size.height.max(1) as f32 / self.size.width.max(1) as f32;
         let hovered = |x0, x1, y0, y1| hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, y0, y1);
         draw_rect(vertices, -1.0, 1.0, -1.0, 1.0, [0.02, 0.03, 0.04, 0.30]);
+        let ui_start = vertices.len();
         match self.screen {
             MenuScreen::Main => {
                 draw_logo(vertices, aspect);
@@ -2148,7 +2410,7 @@ impl Menu {
                 );
                 draw_centered_text(
                     vertices,
-                    tr(self.settings.language, "SINGLEPLAYER"),
+                    &tr(self.settings.language, "menu.singleplayer"),
                     0.248,
                     0.010,
                     aspect,
@@ -2157,7 +2419,7 @@ impl Menu {
                 draw_centered_text(vertices, "MULTIPLAYER", 0.068, 0.010, aspect, [1.0; 4]);
                 draw_centered_text(
                     vertices,
-                    tr(self.settings.language, "OPTIONS"),
+                    &tr(self.settings.language, "menu.options"),
                     -0.112,
                     0.010,
                     aspect,
@@ -2165,7 +2427,7 @@ impl Menu {
                 );
                 draw_centered_text(
                     vertices,
-                    tr(self.settings.language, "QUIT GAME"),
+                    &tr(self.settings.language, "menu.quit_game"),
                     -0.292,
                     0.010,
                     aspect,
@@ -2186,7 +2448,12 @@ impl Menu {
             MenuScreen::CreateWorld => self.draw_create(vertices, aspect),
             MenuScreen::Options => self.draw_options(vertices, aspect),
             MenuScreen::Controls => self.draw_controls(vertices, aspect),
+            MenuScreen::Accessibility => self.draw_accessibility(vertices, aspect),
+            MenuScreen::ResourcePacks => self.draw_resource_packs(vertices, aspect),
             MenuScreen::ConfirmDelete => self.draw_delete_confirmation(vertices, aspect),
+        }
+        if let Some([x0, x1, y0, y1]) = self.focus_rect() {
+            draw_focus_ring(vertices, x0, x1, y0, y1);
         }
         if let Some(message) = &self.message {
             draw_centered_text(
@@ -2197,6 +2464,24 @@ impl Menu {
                 aspect,
                 [1.0, 0.35, 0.25, 1.0],
             );
+        }
+        let ui_scale = self.settings.accessibility.ui_scale.clamp(0.75, 2.0);
+        for vertex in vertices.iter_mut().skip(ui_start) {
+            vertex.position[0] = (vertex.position[0] * ui_scale).clamp(-1.0, 1.0);
+            vertex.position[1] = (vertex.position[1] * ui_scale).clamp(-1.0, 1.0);
+            if self.settings.accessibility.high_contrast {
+                let is_focus =
+                    vertex.color[0] > 0.9 && vertex.color[1] > 0.6 && vertex.color[2] < 0.35;
+                if !is_focus {
+                    let luminance = vertex.color[0] * 0.2126
+                        + vertex.color[1] * 0.7152
+                        + vertex.color[2] * 0.0722;
+                    let value = if luminance > 0.45 { 1.0 } else { 0.02 };
+                    vertex.color[0] = value;
+                    vertex.color[1] = value;
+                    vertex.color[2] = value;
+                }
+            }
         }
     }
 
@@ -2287,7 +2572,7 @@ impl Menu {
         panel(vertices, -0.82, 0.82, -0.9, 0.82);
         draw_centered_text(
             vertices,
-            tr(self.settings.language, "SELECT WORLD"),
+            &tr(self.settings.language, "menu.select_world"),
             0.72,
             0.012,
             aspect,
@@ -2662,7 +2947,7 @@ impl Menu {
         panel(vertices, -0.9, 0.9, -0.88, 0.82);
         draw_centered_text(
             vertices,
-            tr(self.settings.language, "OPTIONS"),
+            &tr(self.settings.language, "menu.options"),
             0.72,
             0.012,
             aspect,
@@ -2688,7 +2973,7 @@ impl Menu {
                 percent(self.settings.weather_volume)
             ),
             format!("LANGUAGE: < {} >", self.settings.language.as_str()),
-            "CONTROLS...".to_string(),
+            crate::localization::translate(self.settings.language, "menu.accessibility"),
         ];
         for (row, label) in left.iter().enumerate() {
             let top = OPTIONS_ROW_TOPS[row];
@@ -2746,6 +3031,152 @@ impl Menu {
                 [1.0; 4],
             );
         }
+        for (x0, x1, label) in [
+            (-0.82, -0.30, "RESOURCE PACKS"),
+            (-0.25, 0.25, "CONTROLS"),
+            (0.30, 0.82, "DONE"),
+        ] {
+            draw_button(
+                vertices,
+                x0,
+                x1,
+                -0.78,
+                -0.64,
+                hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.78, -0.64),
+            );
+            draw_centered_text_in(vertices, label, x0, x1, -0.738, 0.006, aspect, [1.0; 4]);
+        }
+    }
+
+    fn handle_accessibility_click(&mut self, x: f32, y: f32) {
+        let column = if x < 0.0 { 0 } else { 1 };
+        let row = ((0.56 - y) / 0.18).floor() as i32;
+        if (0..5).contains(&row) && x.abs() <= 0.84 {
+            let index = column * 5 + row as usize;
+            let setting = crate::accessibility::AccessibilityRow::ALL[index];
+            let delta = if x < -0.42 || (x > 0.05 && x < 0.42) {
+                -1
+            } else {
+                1
+            };
+            match setting {
+                crate::accessibility::AccessibilityRow::UiScale => {
+                    self.settings.accessibility.cycle_ui_scale(delta)
+                }
+                crate::accessibility::AccessibilityRow::ChatScale => {
+                    self.settings.accessibility.cycle_chat_scale(delta)
+                }
+                crate::accessibility::AccessibilityRow::ChatOpacity => {
+                    self.settings.accessibility.cycle_chat_opacity(delta)
+                }
+                _ => self.settings.accessibility.toggle(setting),
+            }
+            self.settings.save();
+        } else if hit(x, y, -0.25, 0.25, -0.78, -0.64) {
+            self.screen = MenuScreen::Options;
+            self.focus_index = 0;
+        }
+    }
+
+    fn handle_resource_pack_click(&mut self, x: f32, y: f32) {
+        let available = self.resource_packs.available();
+        let row = ((0.56 - y) / 0.14).floor() as usize;
+        if y <= 0.56 && y >= 0.56 - available.len() as f32 * 0.14 {
+            if let Some(summary) = available.get(row) {
+                let mut selected = self.resource_packs.enabled_order().to_vec();
+                if let Some(position) = selected.iter().position(|id| id == &summary.manifest.id) {
+                    selected.remove(position);
+                } else {
+                    selected.push(summary.manifest.id.clone());
+                }
+                if let Err(error) = self.resource_packs.apply_enabled_order(&selected) {
+                    self.message = Some(format!("PACK REJECTED: {error}"));
+                }
+            }
+        } else if hit(x, y, -0.78, -0.28, -0.78, -0.64) {
+            self.settings.resource_packs = self.resource_packs.enabled_order().to_vec();
+            self.settings.save();
+            self.message = Some("PACKS APPLIED FOR NEXT WORLD".to_string());
+        } else if hit(x, y, -0.22, 0.22, -0.78, -0.64) {
+            if let Err(error) = self.resource_packs.reload() {
+                self.message = Some(format!("PACK RELOAD FAILED: {error}"));
+            } else if !self.settings.resource_packs.is_empty() {
+                let _ = self
+                    .resource_packs
+                    .apply_enabled_order(&self.settings.resource_packs);
+            }
+        } else if hit(x, y, 0.28, 0.78, -0.78, -0.64) {
+            self.screen = MenuScreen::Options;
+            self.focus_index = 0;
+        }
+    }
+
+    fn draw_accessibility(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
+        panel(vertices, -0.90, 0.90, -0.88, 0.82);
+        draw_centered_text(
+            vertices,
+            &tr(self.settings.language, "menu.accessibility"),
+            0.72,
+            0.012,
+            aspect,
+            [1.0; 4],
+        );
+        let rows = crate::accessibility::AccessibilityRow::ALL;
+        for (index, setting) in rows.into_iter().enumerate() {
+            let column = index / 5;
+            let row = index % 5;
+            let (x0, x1) = if column == 0 {
+                (-0.82, -0.05)
+            } else {
+                (0.05, 0.82)
+            };
+            let top = 0.56 - row as f32 * 0.18;
+            let value = match setting {
+                crate::accessibility::AccessibilityRow::UiScale => {
+                    format!("UI SCALE: < {:.2}x >", self.settings.accessibility.ui_scale)
+                }
+                crate::accessibility::AccessibilityRow::ChatScale => {
+                    format!(
+                        "CHAT SCALE: < {:.2}x >",
+                        self.settings.accessibility.chat_scale
+                    )
+                }
+                crate::accessibility::AccessibilityRow::ChatOpacity => format!(
+                    "CHAT OPACITY: < {}% >",
+                    percent(self.settings.accessibility.chat_opacity)
+                ),
+                _ => format!(
+                    "{}: < {} >",
+                    accessibility_label(self.settings.language, setting),
+                    on_off(self.settings.accessibility.bool_value(setting))
+                ),
+            };
+            draw_button(
+                vertices,
+                x0,
+                x1,
+                top - 0.13,
+                top,
+                hit(
+                    self.mouse_ndc[0],
+                    self.mouse_ndc[1],
+                    x0,
+                    x1,
+                    top - 0.13,
+                    top,
+                ),
+            );
+            draw_centered_text_in(
+                vertices,
+                &value,
+                x0,
+                x1,
+                top - 0.092,
+                0.0055,
+                aspect,
+                [1.0; 4],
+            );
+        }
         draw_button(
             vertices,
             -0.25,
@@ -2761,7 +3192,97 @@ impl Menu {
                 -0.64,
             ),
         );
-        draw_centered_text(vertices, "DONE", -0.738, 0.008, aspect, [1.0; 4]);
+        draw_centered_text(
+            vertices,
+            &tr(self.settings.language, "menu.done"),
+            -0.738,
+            0.008,
+            aspect,
+            [1.0; 4],
+        );
+    }
+
+    fn draw_resource_packs(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
+        panel(vertices, -0.86, 0.86, -0.88, 0.82);
+        draw_centered_text(
+            vertices,
+            &tr(self.settings.language, "menu.resource_packs"),
+            0.72,
+            0.012,
+            aspect,
+            [1.0; 4],
+        );
+        let available = self.resource_packs.available();
+        if available.is_empty() {
+            draw_centered_text(
+                vertices,
+                "NO USER PACKS FOUND",
+                0.22,
+                0.007,
+                aspect,
+                [0.8; 4],
+            );
+        }
+        for (index, summary) in available.iter().enumerate() {
+            let top = 0.56 - index as f32 * 0.14;
+            let selected = summary.enabled;
+            draw_button_state(
+                vertices,
+                -0.78,
+                0.78,
+                top - 0.11,
+                top,
+                hit(
+                    self.mouse_ndc[0],
+                    self.mouse_ndc[1],
+                    -0.78,
+                    0.78,
+                    top - 0.11,
+                    top,
+                ),
+                selected,
+            );
+            let marker = if selected { "[X]" } else { "[ ]" };
+            let label = format!(
+                "{marker} {}  {}",
+                summary.manifest.name, summary.manifest.version
+            );
+            draw_text(
+                vertices,
+                &label,
+                -0.72,
+                top - 0.082,
+                0.0058,
+                aspect,
+                [1.0; 4],
+            );
+        }
+        for (x0, x1, label) in [
+            (-0.78, -0.28, "APPLY"),
+            (-0.22, 0.22, "RELOAD"),
+            (0.28, 0.78, "BACK"),
+        ] {
+            draw_button(
+                vertices,
+                x0,
+                x1,
+                -0.78,
+                -0.64,
+                hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.78, -0.64),
+            );
+            draw_centered_text_in(vertices, label, x0, x1, -0.738, 0.006, aspect, [1.0; 4]);
+        }
+        if !self.resource_packs.diagnostics().is_empty() {
+            draw_text(
+                vertices,
+                "PACK DIAGNOSTICS AVAILABLE",
+                -0.72,
+                -0.58,
+                0.0052,
+                aspect,
+                [1.0, 0.65, 0.25, 1.0],
+            );
+        }
     }
 
     fn draw_controls(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
@@ -2987,17 +3508,24 @@ fn on_off(value: bool) -> &'static str {
     }
 }
 
-fn tr(language: Language, english: &'static str) -> &'static str {
-    if language == Language::English {
-        return english;
-    }
-    match english {
-        "SINGLEPLAYER" => "EINZELSPIELER",
-        "OPTIONS" => "OPTIONEN",
-        "QUIT GAME" => "SPIEL BEENDEN",
-        "SELECT WORLD" => "WELT AUSWAHLEN",
-        _ => english,
-    }
+fn accessibility_label(language: Language, row: crate::accessibility::AccessibilityRow) -> String {
+    let key = match row {
+        crate::accessibility::AccessibilityRow::UiScale => "menu.ui_scale",
+        crate::accessibility::AccessibilityRow::ChatScale => "menu.chat_scale",
+        crate::accessibility::AccessibilityRow::ChatOpacity => "menu.chat_opacity",
+        crate::accessibility::AccessibilityRow::Subtitles => "menu.subtitles",
+        crate::accessibility::AccessibilityRow::HighContrast => "menu.high_contrast",
+        crate::accessibility::AccessibilityRow::ReduceFlashing => "menu.reduce_flashing",
+        crate::accessibility::AccessibilityRow::ToggleSprint => "menu.toggle_sprint",
+        crate::accessibility::AccessibilityRow::ToggleSneak => "menu.toggle_sneak",
+        crate::accessibility::AccessibilityRow::CameraBobbing => "menu.camera_bobbing",
+        crate::accessibility::AccessibilityRow::DamageTilt => "menu.damage_tilt",
+    };
+    crate::localization::translate(language, key)
+}
+
+fn tr(language: Language, key: &str) -> String {
+    crate::localization::translate(language, key)
 }
 
 fn hit(x: f32, y: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> bool {
@@ -3008,6 +3536,29 @@ fn draw_rect(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32, c
     for position in [[x0, y1], [x0, y0], [x1, y0], [x0, y1], [x1, y0], [x1, y1]] {
         vertices.push(UiVertex { position, color });
     }
+}
+
+fn draw_focus_ring(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32) {
+    let color = [1.0, 0.78, 0.18, 1.0];
+    let thickness = 0.008;
+    draw_rect(
+        vertices,
+        x0 - thickness,
+        x1 + thickness,
+        y1,
+        y1 + thickness,
+        color,
+    );
+    draw_rect(
+        vertices,
+        x0 - thickness,
+        x1 + thickness,
+        y0 - thickness,
+        y0,
+        color,
+    );
+    draw_rect(vertices, x0 - thickness, x0, y0, y1, color);
+    draw_rect(vertices, x1, x1 + thickness, y0, y1, color);
 }
 
 fn panel(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32) {

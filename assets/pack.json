@@ -1,0 +1,8 @@
+{
+  "id": "icraft.builtin",
+  "name": "iCraft Built-in",
+  "version": "1.0.0",
+  "format": 1,
+  "description": "Procedural and vanilla-compatible assets shipped with iCraft.",
+  "dependencies": []
+}

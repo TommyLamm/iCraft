@@ -284,6 +284,7 @@ impl ApplicationHandler for App {
                         event.physical_key,
                         &event.logical_key,
                         event.repeat,
+                        shift_held,
                     ),
                     Some(Runtime::Game(state)) => {
                         return_to_menu = handle_game_keyboard(state, &event, shift_held);
