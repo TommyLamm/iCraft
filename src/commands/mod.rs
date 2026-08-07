@@ -151,7 +151,7 @@ fn parse_coordinate(token: &str, pos: usize) -> Result<i32, CommandError> {
     let value = token
         .parse::<i32>()
         .map_err(|_| CommandError::new(pos, "coordinate must be an integer"))?;
-    if value.abs() > MAX_COORDINATE {
+    if value < -MAX_COORDINATE || value > MAX_COORDINATE {
         return Err(CommandError::new(
             pos,
             "coordinate is outside the world border",
@@ -431,6 +431,20 @@ mod tests {
         assert!(parse("tp 1 NaN 3").is_err());
         assert!(parse("give @s stone 0").is_err());
         assert!(parse(&format!("help {}", "x".repeat(MAX_COMMAND_BYTES))).is_err());
+    }
+
+    #[test]
+    fn coordinate_bounds_reject_extreme_i32_without_overflow() {
+        assert!(parse_coordinate(&i32::MIN.to_string(), 0).is_err());
+        assert!(parse_coordinate(&i32::MAX.to_string(), 0).is_err());
+        assert_eq!(
+            parse_coordinate(&(-MAX_COORDINATE).to_string(), 0),
+            Ok(-MAX_COORDINATE)
+        );
+        assert_eq!(
+            parse_coordinate(&MAX_COORDINATE.to_string(), 0),
+            Ok(MAX_COORDINATE)
+        );
     }
 
     #[test]
