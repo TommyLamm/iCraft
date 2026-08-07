@@ -6,19 +6,19 @@
 //! deliberately synchronous at the authority boundary; the existing Tokio
 //! network thread only transports packets into the bounded event channel.
 
+use crate::authority::contract::{AuthorityTopology, SessionContract};
+use crate::authority::{AuthorityConfig, AuthorityCore};
 use crate::dimension::Dimension;
-use crate::entity::EntityManager;
 use crate::game_rules::WorldRules;
 use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
     GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, PlayerEffectWire,
-    RejectReason, ServerSequence, MAX_REQUEST_BYTES,
 };
 use crate::network::server::{HostToServer, NetworkServer, ServerConfig, ServerToHost};
 use crate::save::{LevelData, PlayerData, SaveManager};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -29,7 +29,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
-const PLAYER_RESPONSE_CACHE_CAPACITY: usize = 128;
 const MAX_INBOUND_EVENTS_PER_TICK: usize = 512;
 const WORLD_BOUND: f32 = 30_000_000.0;
 const PLAYER_REACH: f32 = 8.0;
@@ -320,7 +319,6 @@ pub struct PlayerSessionState {
     pub interest_chunks: HashSet<(i32, i32)>,
     pub entity_interest: HashSet<u64>,
     pub effects: Vec<PlayerEffectWire>,
-    response_cache: VecDeque<GameplayResponse>,
 }
 
 impl PlayerSessionState {
@@ -335,22 +333,7 @@ impl PlayerSessionState {
             interest_chunks: HashSet::new(),
             entity_interest: HashSet::new(),
             effects: Vec::new(),
-            response_cache: VecDeque::with_capacity(PLAYER_RESPONSE_CACHE_CAPACITY),
         }
-    }
-
-    fn cached_response(&self, request_id: u128) -> Option<GameplayResponse> {
-        self.response_cache
-            .iter()
-            .find(|response| response.request_id == request_id)
-            .cloned()
-    }
-
-    fn cache_response(&mut self, response: GameplayResponse) {
-        if self.response_cache.len() >= PLAYER_RESPONSE_CACHE_CAPACITY {
-            self.response_cache.pop_front();
-        }
-        self.response_cache.push_back(response);
     }
 }
 
@@ -362,32 +345,17 @@ struct PlayerFile {
     effects: Vec<PlayerEffectWire>,
 }
 
-/// A small block store used by the headless authority.  The renderer's
-/// ChunkManager remains a client concern; persistence and authoritative
-/// mutation are still owned here and can be upgraded to region streaming
-/// without changing the request/session API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BlockCell {
-    block: u32,
-    state: u8,
-    revision: u64,
-}
-
 pub struct ServerRuntime {
     pub properties: ServerProperties,
     pub level: LevelData,
     pub metrics: ServerMetrics,
     pub players: HashMap<u64, PlayerSessionState>,
-    pub entities: EntityManager,
-    pub world_rules: WorldRules,
+    /// Shared headless authority used by dedicated, listen and in-process
+    /// callers.  Runtime transport/session/save code never mirrors world
+    /// mutation in a second map.
+    pub authority: AuthorityCore,
     world_dir: PathBuf,
     save_manager: SaveManager,
-    blocks: HashMap<(i32, i32, i32), BlockCell>,
-    containers:
-        HashMap<(Dimension, i32, i32, i32), Vec<Option<crate::network::protocol::ItemWire>>>,
-    container_viewers: HashMap<(Dimension, i32, i32, i32), HashSet<u64>>,
-    loaded_chunks: HashSet<(Dimension, i32, i32)>,
-    next_server_sequence: ServerSequence,
     host_tx: Sender<HostToServer>,
     host_rx: Receiver<ServerToHost>,
     network_thread: Option<JoinHandle<()>>,
@@ -428,20 +396,26 @@ impl ServerRuntime {
             server_to_host,
             network_config,
         );
+        let mut authority = AuthorityCore::new(
+            AuthorityConfig {
+                seed: level.seed,
+                dimension: level.spawn_dimension,
+                world_type: crate::game_rules::WorldType::Default,
+                generate_structures: false,
+                rules: level.rules,
+                render_distance: properties.simulation_distance as i32,
+            },
+            AuthorityTopology::Dedicated,
+        );
+        authority.world.time = level.time;
         let mut runtime = Self {
-            world_rules: level.rules.clone(),
             properties,
             level,
             metrics: ServerMetrics::default(),
             players: HashMap::new(),
-            entities: EntityManager::new(),
+            authority,
             world_dir,
             save_manager,
-            blocks: HashMap::new(),
-            containers: HashMap::new(),
-            container_viewers: HashMap::new(),
-            loaded_chunks: HashSet::new(),
-            next_server_sequence: 0,
             host_tx,
             host_rx,
             network_thread: Some(network_thread),
@@ -469,13 +443,13 @@ impl ServerRuntime {
             self.metrics.queue_depth = self.metrics.queue_depth.saturating_sub(1);
             self.handle_event(event)?;
         }
-        self.level.time = self.level.time.wrapping_add(1);
+        let snapshot = self.authority.tick();
+        self.level.time = snapshot.tick;
         self.metrics.ticks = self.metrics.ticks.wrapping_add(1);
         self.metrics.players_online = self.players.len();
-        self.metrics.loaded_chunks = self.loaded_chunks.len();
-        self.metrics.entities = self.entities.entities.len();
+        self.metrics.loaded_chunks = self.authority.world.chunks.chunks.len();
+        self.metrics.entities = self.authority.world.entities.entities.len();
         self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(processed.max(0));
-        self.entities.sync_positions();
         if self.metrics.ticks % AUTOSAVE_INTERVAL_TICKS == 0 {
             self.save_all()?;
         }
@@ -620,7 +594,8 @@ impl ServerRuntime {
         match event {
             ServerToHost::ClientJoined { id, username } => self.handle_join(id, username),
             ServerToHost::ClientLeft { id } => self.handle_leave(id),
-            ServerToHost::GameplayRequest { id, request } => {
+            ServerToHost::GameplayRequest { id, mut request } => {
+                request.session_id = id;
                 let response = self.handle_gameplay_request(request)?;
                 self.send_response(id, response);
                 Ok(())
@@ -686,13 +661,26 @@ impl ServerRuntime {
             | ServerToHost::ContainerOpenRequest { id, .. }
             | ServerToHost::ContainerClickRequest { id, .. }
             | ServerToHost::ContainerClose { id, .. } => {
+                // Legacy packets are intentionally routed through the same
+                // envelope gate.  The protocol owner supplies richer adapters
+                // for slot/coordinate payloads; until then this branch emits
+                // an explicit unsupported response instead of accepting a
+                // fabricated zero-coordinate mutation.
                 let request = GameplayRequest {
-                    request_id: self.next_server_sequence as u128,
-                    client_sequence: self.next_server_sequence,
+                    request_id: self.authority.current_revision() as u128 + 1,
+                    client_sequence: self
+                        .authority
+                        .session(id)
+                        .map(|session| session.last_client_sequence + 1)
+                        .unwrap_or(1),
                     session_id: id,
-                    dimension: 0,
-                    client_revision: self.next_server_sequence,
-                    operation: GameplayOperation::Sleep { x: 0, y: 0, z: 0 },
+                    dimension: self
+                        .authority
+                        .session(id)
+                        .map(|session| session.dimension)
+                        .unwrap_or(0),
+                    client_revision: self.authority.current_revision(),
+                    operation: GameplayOperation::ItemUse { item: 0, count: 0 },
                 };
                 let response = self.handle_gameplay_request(request)?;
                 self.send_response(id, response);
@@ -720,10 +708,28 @@ impl ServerRuntime {
         session.effects = effects;
         self.update_interest(&mut session);
         let dimension = session.dimension as u8;
+        let authority_session = SessionContract::new(
+            id,
+            session.username.clone(),
+            dimension,
+            session.data.position,
+            self.properties
+                .operators
+                .contains(&session.username.to_ascii_lowercase()),
+            self.level.cheats_enabled,
+        );
+        self.authority
+            .register_session(authority_session)
+            .map_err(|reason| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("session rejected: {reason:?}"),
+                )
+            })?;
         self.players.insert(id, session);
         self.host_tx
             .send(HostToServer::SendWorldRules {
-                rules: self.world_rules.clone(),
+                rules: self.authority.world.rules,
                 to: id,
             })
             .ok();
@@ -740,9 +746,9 @@ impl ServerRuntime {
                 to: id,
                 response: GameplayResponse {
                     request_id: 0,
-                    server_sequence: self.next_server_sequence,
+                    server_sequence: self.authority.world.revisions.allocate(),
                     outcome: GameplayOutcome::Accepted {
-                        revision: self.next_server_sequence,
+                        revision: self.authority.current_revision(),
                     },
                 },
             })
@@ -757,6 +763,7 @@ impl ServerRuntime {
         if let Some(session) = self.players.remove(&id) {
             self.save_player(&session)?;
         }
+        self.authority.remove_session(id);
         self.metrics.players_online = self.players.len();
         Ok(())
     }
@@ -788,8 +795,14 @@ impl ServerRuntime {
         let position = session.data.position;
         let dimension = session.dimension;
         let _ = session;
+        if let Some(authority_session) = self.authority.session_mut(id) {
+            authority_session.position = position;
+            authority_session.dimension = dimension as u8;
+        }
         let interest = self.interest_chunks_for(dimension, position);
         let entity_interest = self
+            .authority
+            .world
             .entities
             .query_radius(
                 Vec3::from_array(position),
@@ -832,29 +845,35 @@ impl ServerRuntime {
         if !within_reach(session, x, y, z) || !self.valid_coordinate(x, y, z) {
             return Ok(());
         }
-        let sequence = self.next_sequence();
-        self.blocks.insert(
-            (x, y, z),
-            BlockCell {
-                block,
-                state,
-                revision: sequence,
-            },
-        );
-        self.loaded_chunks
-            .insert((Dimension::Overworld, x.div_euclid(16), z.div_euclid(16)));
-        self.host_tx
-            .send(HostToServer::BroadcastBlockChange {
-                dimension: Dimension::Overworld as u8,
-                revision: sequence,
-                x,
-                y,
-                z,
-                block,
-                state,
-            })
-            .ok();
-        self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
+        let dimension = session.dimension;
+        let _ = session;
+        let request = GameplayRequest {
+            request_id: self.authority.current_revision() as u128 + 1,
+            client_sequence: self
+                .authority
+                .session(id)
+                .map(|authority_session| authority_session.last_client_sequence + 1)
+                .unwrap_or(1),
+            session_id: id,
+            dimension: dimension as u8,
+            client_revision: self.authority.current_revision(),
+            operation: GameplayOperation::BlockUse { x, y, z, block },
+        };
+        let response = self.handle_gameplay_request(request)?;
+        if let GameplayOutcome::Accepted { revision } = response.outcome {
+            self.host_tx
+                .send(HostToServer::BroadcastBlockChange {
+                    dimension: dimension as u8,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                })
+                .ok();
+            self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
+        }
         Ok(())
     }
 
@@ -864,115 +883,50 @@ impl ServerRuntime {
     ) -> io::Result<GameplayResponse> {
         let request_id = request.request_id;
         let id = request.session_id;
-        let Some(session) = self.players.get(&id) else {
-            self.metrics.requests_rejected = self.metrics.requests_rejected.saturating_add(1);
-            return Ok(rejected(
-                request_id,
-                self.next_sequence(),
-                RejectReason::Unauthorized,
-            ));
-        };
-        if let Some(cached) = session.cached_response(request_id) {
+        let duplicate = self
+            .authority
+            .session(id)
+            .and_then(|session| session.cached_response(request_id))
+            .is_some();
+        let operation = request.operation.clone();
+        let response = self.authority.submit_request(request.clone());
+        if duplicate {
             self.metrics.duplicate_requests = self.metrics.duplicate_requests.saturating_add(1);
-            return Ok(cached);
+            return Ok(response);
         }
-        let session_dimension = session.dimension;
-        let last_client_sequence = session.last_client_sequence;
-        let session_position = session.data.position;
-        let _ = session;
-
-        let reject = |reason: RejectReason, runtime: &mut Self| {
-            runtime.metrics.requests_rejected = runtime.metrics.requests_rejected.saturating_add(1);
-            let response = rejected(request_id, runtime.next_sequence(), reason);
-            if let Some(session) = runtime.players.get_mut(&id) {
-                session.cache_response(response.clone());
+        match &response.outcome {
+            GameplayOutcome::Accepted { revision } => {
+                self.metrics.requests_accepted = self.metrics.requests_accepted.saturating_add(1);
+                if let Some(session) = self.players.get_mut(&id) {
+                    session.last_client_sequence = request.client_sequence;
+                    session.dimension = self
+                        .authority
+                        .session(id)
+                        .and_then(|authority_session| {
+                            Dimension::from_wire(authority_session.dimension)
+                        })
+                        .unwrap_or(session.dimension);
+                }
+                if let GameplayOperation::BlockUse { x, y, z, block } = operation {
+                    self.host_tx
+                        .send(HostToServer::BroadcastBlockChange {
+                            dimension: self
+                                .authority
+                                .session(id)
+                                .map(|session| session.dimension)
+                                .unwrap_or(0),
+                            revision: *revision,
+                            x,
+                            y,
+                            z,
+                            block,
+                            state: self.authority.world.get_block_state(x, y, z),
+                        })
+                        .ok();
+                }
             }
-            response
-        };
-        if request.validate_bounds().is_err() || request.encoded_len() > MAX_REQUEST_BYTES {
-            return Ok(reject(RejectReason::Malformed, self));
-        }
-        if request.client_sequence <= last_client_sequence {
-            return Ok(reject(RejectReason::OutOfOrder, self));
-        }
-        if request.dimension != session_dimension as u8 {
-            return Ok(reject(RejectReason::InvalidDimension, self));
-        }
-        let is_operator = self
-            .players
-            .get(&id)
-            .map(|session| {
-                self.properties
-                    .operators
-                    .contains(&session.username.to_ascii_lowercase())
-            })
-            .unwrap_or(false);
-        if matches!(&request.operation, GameplayOperation::Command { .. })
-            && !self.level.cheats_enabled
-            && !is_operator
-        {
-            return Ok(reject(RejectReason::PermissionDenied, self));
-        }
-        if let Some((x, y, z)) = operation_position(&request.operation) {
-            let position = Vec3::from_array(session_position);
-            if position.distance_squared(Vec3::new(x as f32, y as f32, z as f32))
-                > PLAYER_REACH * PLAYER_REACH
-            {
-                return Ok(reject(RejectReason::TooFar, self));
-            }
-        }
-        let sequence = self.next_sequence();
-        let response = GameplayResponse {
-            request_id,
-            server_sequence: sequence,
-            outcome: GameplayOutcome::Accepted { revision: sequence },
-        };
-        if let Some(session) = self.players.get_mut(&id) {
-            session.last_client_sequence = request.client_sequence;
-            session.cache_response(response.clone());
-        }
-        self.metrics.requests_accepted = self.metrics.requests_accepted.saturating_add(1);
-        if let GameplayOperation::Container {
-            action,
-            x,
-            y,
-            z,
-            slot,
-        } = &request.operation
-        {
-            let key = (session_dimension, *x, *y, *z);
-            self.containers.entry(key).or_insert_with(|| vec![None; 54]);
-            if *action == 0 {
-                self.container_viewers.entry(key).or_default().remove(&id);
-            } else {
-                self.container_viewers.entry(key).or_default().insert(id);
-            }
-            let _ = slot;
-        }
-        if let GameplayOperation::BlockUse { x, y, z, block } = &request.operation {
-            let (x, y, z, block) = (*x, *y, *z, *block);
-            if self.valid_coordinate(x, y, z) {
-                self.blocks.insert(
-                    (x, y, z),
-                    BlockCell {
-                        block,
-                        state: 0,
-                        revision: sequence,
-                    },
-                );
-                self.loaded_chunks
-                    .insert((session_dimension, x.div_euclid(16), z.div_euclid(16)));
-                self.host_tx
-                    .send(HostToServer::BroadcastBlockChange {
-                        dimension: session_dimension as u8,
-                        revision: sequence,
-                        x,
-                        y,
-                        z,
-                        block,
-                        state: 0,
-                    })
-                    .ok();
+            GameplayOutcome::Rejected { .. } => {
+                self.metrics.requests_rejected = self.metrics.requests_rejected.saturating_add(1);
             }
         }
         Ok(response)
@@ -986,23 +940,15 @@ impl ServerRuntime {
         self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
     }
 
-    fn next_sequence(&mut self) -> ServerSequence {
-        self.next_server_sequence = self.next_server_sequence.wrapping_add(1);
-        self.next_server_sequence
-    }
-
     fn valid_coordinate(&self, x: i32, y: i32, z: i32) -> bool {
-        self.level.spawn_dimension.height().contains_y(y)
-            && (x as f32).abs() <= WORLD_BOUND
-            && (z as f32).abs() <= WORLD_BOUND
+        self.authority.world.valid_coordinate(x, y, z)
     }
 
     fn ensure_spawn_chunk(&mut self) {
-        self.loaded_chunks.insert((
-            self.level.spawn_dimension,
+        self.authority.world.ensure_chunk(
             self.level.spawn_x.div_euclid(16),
             self.level.spawn_z.div_euclid(16),
-        ));
+        );
     }
 
     fn update_interest(&mut self, session: &mut PlayerSessionState) {
@@ -1011,6 +957,8 @@ impl ServerRuntime {
         let center = Vec3::from_array(session.data.position);
         let radius = f32::from(self.properties.view_distance) * 16.0;
         session.entity_interest = self
+            .authority
+            .world
             .entities
             .query_radius(center, radius)
             .map(|entity| entity.id)
@@ -1022,6 +970,7 @@ impl ServerRuntime {
         dimension: Dimension,
         position: [f32; 3],
     ) -> HashSet<(i32, i32)> {
+        let _ = dimension;
         let cx = (position[0] / 16.0).floor() as i32;
         let cz = (position[2] / 16.0).floor() as i32;
         let mut interest_chunks = HashSet::new();
@@ -1031,7 +980,6 @@ impl ServerRuntime {
                 if dx * dx + dz * dz <= radius * radius {
                     let key = (cx + dx, cz + dz);
                     interest_chunks.insert(key);
-                    self.loaded_chunks.insert((dimension, key.0, key.1));
                 }
             }
         }
@@ -1090,27 +1038,10 @@ fn default_player_data() -> PlayerData {
     )
 }
 
-fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> {
-    match operation {
-        GameplayOperation::BlockUse { x, y, z, .. }
-        | GameplayOperation::Container { x, y, z, .. }
-        | GameplayOperation::Sleep { x, y, z } => Some((*x, *y, *z)),
-        _ => None,
-    }
-}
-
 fn within_reach(session: &PlayerSessionState, x: i32, y: i32, z: i32) -> bool {
     let position = Vec3::from_array(session.data.position);
     position.distance_squared(Vec3::new(x as f32, y as f32, z as f32))
         <= PLAYER_REACH * PLAYER_REACH
-}
-
-fn rejected(request_id: u128, sequence: ServerSequence, reason: RejectReason) -> GameplayResponse {
-    GameplayResponse {
-        request_id,
-        server_sequence: sequence,
-        outcome: GameplayOutcome::Rejected { reason },
-    }
 }
 
 fn load_level(world_dir: &Path) -> Option<LevelData> {
@@ -1148,6 +1079,7 @@ impl Drop for ServerRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::protocol::RejectReason;
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -1281,7 +1213,7 @@ mod tests {
         assert!(matches!(first.outcome, GameplayOutcome::Accepted { .. }));
         assert!(matches!(second.outcome, GameplayOutcome::Accepted { .. }));
         assert!(second.server_sequence > first.server_sequence);
-        assert_eq!(runtime.blocks.get(&(8, 80, 8)).unwrap().block, 2);
+        assert_eq!(runtime.authority.world.get_block(8, 80, 8).to_wire(), 2);
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
     }

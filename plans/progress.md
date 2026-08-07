@@ -3,14 +3,17 @@
 > **整體進度**: 28 / 30 任務完成
 > **當前階段**: P3 — 進階功能
 
-### Minecraft foundation-gap route — Plan 17
+### Minecraft foundation-gap route — Plan 18 Phase 0/A foundation
 
 Plan 17 source/docs are implemented: bounded `assets/` + `resourcepacks/`
 manifests and resolver, structured `en_us`/`de_de` localization, accessibility
 settings/subtitles/focus navigation, and deterministic singleplayer acceptance
-harnesses. The listen-server and dedicated+two-client rows remain explicitly
-blocked by Plan 18 authority unification; GPU/audio/soak/manual visual evidence
-is listed in the Plan 17 QA checklist rather than inferred from test counts.
+harnesses. Plan 18 now has a Phase 0/A foundation: `AuthorityCore`,
+`ServerWorld`, revision/session contracts, deterministic headless vectors, and
+the Singleplayer/Host `AuthorityBoundary` bridge. The State renderer cutover,
+listen/dedicated end-to-end rows, persistence/interest/management, soak, and
+GPU/audio/manual visual evidence remain open; no checkbox is inferred from
+compile or unit-test counts.
 
 ---
 

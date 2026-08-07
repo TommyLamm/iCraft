@@ -11,13 +11,17 @@
 
 - `winit` owns the desktop event loop and input.
 - `wgpu` renders the menu, terrain, entities, particles, and immediate-mode UI.
-- The main thread owns authoritative gameplay `State`.
+- `authority::AuthorityCore` owns the GPU-independent gameplay contract; the
+  desktop `State` remains the presentation/input composition root while its
+  Singleplayer/Host cutover is in progress.
 - Rayon workers generate/load chunks and build terrain meshes.
 - Dedicated Tokio threads run TCP host/client networking.
 - `src/lib.rs` exposes the simulation/network contract to `icraft-server`.
-- `server_runtime.rs` owns fixed ticks, authenticated sessions, world mutation,
-  interest sets, persistence, and server metrics without constructing a GPU,
-  window, or audio device.
+- `authority::{AuthorityCore, contract}` and `server_world.rs` own the
+  headless fixed tick, authenticated request sequencing, world mutations,
+  rules, commands, entities, block entities, and automation. `server_runtime.rs`
+  owns transport/session scheduling, save and metrics boundaries without
+  constructing a GPU, window, or audio device.
 - A background save worker handles autosaves and chunk-unload writes.
 - Terrain, the texture atlas, and missing audio assets can be generated
   procedurally. `resources.rs` discovers the built-in `assets/` pack and
@@ -57,6 +61,14 @@ flush level and per-player files.
   entities, dimensions, weather, redstone, advancements, audio, networking
   bridges, and in-game UI.
 
+`AuthorityBoundary` is the in-process bridge used by Singleplayer and the
+listen-server host. It registers a local pseudo-session and submits the same
+`GameplayRequest`/fixed-tick path as `AuthorityCore` in the dedicated binary.
+The renderer still keeps a projection in `State`; the complete renderer cutover
+(including removal of the legacy local simulation path) remains an explicit
+Plan 18 Phase A follow-up. This bridge is not evidence that Phase A has passed
+its completion gate.
+
 On Windows, menu and game GPU initialization intentionally select DX12 because
 the primary Vulkan path has caused a verified NVIDIA driver crash.
 
@@ -78,11 +90,14 @@ seed and synchronized world state.
 
 ### Per-frame update
 
-`State::update` drains network events first, then advances the major systems:
+`State::update` drains network events first, then advances the major systems
+while the authority cutover is staged:
 
-1. Autosave and fixed/budgeted simulation work.
-2. Host-only redstone, hopper transfers, furnace ticking, brewing, effects,
-   advancements, particles, and weather.
+1. Autosave and fixed/budgeted presentation work.
+2. Authoritative headless ticks are scheduled by `AuthorityCore`/`ServerRuntime`;
+   the renderer-side redstone, hopper, furnace, brewing, effects,
+   advancements, particles, and weather path remains a temporary migration
+   seam for the GPU composition root.
 3. Player input/physics, damage/survival state, interactions, and chunk
    streaming.
 4. Projectiles, hostile/passive mobs, bosses, dropped items, and entity cleanup.
@@ -141,8 +156,16 @@ particles/effects, mining overlay, UI, and present.
 
 ## World mutation rules
 
-`ChunkManager::chunks` is authoritative world state. Terrain meshes, visibility
-sets, GPU allocations, and particle vertices are derived caches.
+`ServerWorld::chunks` is authoritative for the headless authority path. The
+renderer `ChunkManager::chunks` is a presentation projection while Plan 18's
+State cutover is staged; terrain meshes, visibility sets, GPU allocations, and
+particle vertices are always derived caches.
+
+`AuthorityCore` owns one `ServerWorld`, a deterministic 20 Hz tick, sorted
+session/entity iteration, `RevisionClock`, bounded response cache, and the
+`SessionContract` dimension/position/permission gates. `ServerRuntime` submits
+authenticated envelopes and schedules/saves/metrics the core; it does not
+mutate a second authoritative block or entity map.
 
 For authoritative block mutations:
 
@@ -157,7 +180,11 @@ world_mutation::apply_batch / BlockMutationRequest
   -> broadcast authoritative BlockChange & BlockEntityDelta when hosting
 ```
 
-`ChunkManager::chunks` is authoritative world state, including per-chunk `block_entities` keyed by `(u8, i16, u8)` local coordinates. Terrain meshes, visibility sets, GPU allocations, and particle vertices are derived caches.
+`ServerWorld::chunks` is authoritative world state, including per-chunk
+`block_entities` keyed by `(u8, i16, u8)` local coordinates. The renderer
+`ChunkManager::chunks` carries a projection for mesh and UI consumption; it is
+not a second authority. Terrain meshes, visibility sets, GPU allocations, and
+particle vertices are derived caches.
 `chunk_manager::mark_block_mesh_dependencies` is the shared mesh dependency rule.
 Redstone returns `BlockMutation` records and side-effect actions applied via host transaction handlers.
 
@@ -181,6 +208,22 @@ woken by container revision notifications rather than a world-wide per-tick scan
 Food items define `FoodProperties` (hunger, saturation, eating duration ticks, always_edible, return_item). Hold-to-eat right click state machine tracks continuous usage duration, supporting item/slot/death cancellation and triggering `AdvancementTrigger::EatFood` on completion.
 
 ## Multiplayer authority
+
+The shared headless authority lives in `authority::AuthorityCore` and
+`ServerWorld`:
+
+- Singleplayer and listen-server hosts use `AuthorityBoundary` in-process;
+  dedicated mode constructs the same `AuthorityCore` without `State`.
+- `SessionContract` validates authenticated identity, dimension, reach,
+  permissions, client sequence/revision, and the bounded response cache.
+- `RevisionClock` and sorted fixed-tick iteration provide one deterministic
+  mutation/revision contract across all three topologies.
+- `ServerRuntime` is transport/session/scheduling/save/metrics glue. It does
+  not maintain a parallel authoritative block/entity map.
+
+The State renderer projection and legacy local simulation are still being
+removed in the remaining Plan 18 Phase A cutover; until that work lands, GPU
+manual acceptance must not be inferred from headless authority tests.
 
 `src/network/` contains a versioned bincode protocol over length-prefixed TCP:
 
@@ -267,7 +310,8 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Area | Primary files |
 | --- | --- |
 | App lifecycle and menu | `main.rs`, `app.rs`, `menu.rs` |
-| Composition, simulation, UI, GPU submission | `state.rs` |
+| Composition, presentation/input, UI, GPU submission | `state.rs` |
+| Headless authority, fixed tick, sessions, revisions | `authority/{mod,contract}.rs`, `server_world.rs` |
 | World/chunks/generation & structures | `world.rs`, `chunk_manager.rs`, `dimension.rs`, `worldgen/{mod, climate, density, surface, carver, ore, feature}.rs`, `structure/{types, placement, gen/*, manager, locate}.rs`, `loot.rs` |
 | Lighting, fluids, block targeting | `lighting.rs`, `fluid.rs`, `interaction.rs` |
 | Terrain scheduling/rendering | `chunk_schedule.rs`, `chunk_render.rs`, `culling.rs`, `shader.wgsl` |
@@ -276,7 +320,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | Entities and AI | `entity.rs`, `spawning.rs`, `ai/{mod, goal, brain, navigation}.rs`, `mob.rs`, `passive_mob.rs`, `boss.rs`, `mob_renderer.rs` |
 | Container & automation system | `block_entity.rs` (ContainerAccess, Chest/Furnace/Hopper/Dispenser/Dropper/Observer entities), `container_sessions.rs` (atomic UI transactions), `inventory.rs` (ContainerInventory/ItemStack), `world_tick.rs` (bounded hopper transfers), `redstone.rs` (comparators/observers/actions), `recipes.rs` (CraftingRecipe, SmeltingRecipe, FuelDefinition, RecipeManager), `state.rs` (host furnace/dispense loop and revision-gated replication) |
 | Transport, mounts, navigation & fishing | `vehicle.rs` (MountManager, BoatState), `rail.rs` (MinecartState, RailShape), `navigation.rs` (Compass, Clock, MapData), `fishing.rs` (FishingManager, loot rolling) |
-| Networking and dedicated authority | `network/{protocol,transport,server,client}.rs`, `server_runtime.rs`, `bin/icraft-server.rs` |
+| Networking and dedicated runtime | `network/{protocol,transport,server,client}.rs`, `server_runtime.rs`, `bin/icraft-server.rs` |
 | Persistence and assets | `save.rs`, `texture.rs`, `audio.rs`, `resources.rs` |
 | Localization and accessibility | `localization.rs`, `accessibility.rs`, `menu.rs`, `state.rs` |
 | Modes, rules, commands | `game_rules.rs`, `commands/`, `state.rs`, `menu.rs` |
@@ -322,8 +366,9 @@ section_and_local_y_to_world_y(sy: i8, ly: u8) -> i32;
 
 ## Architectural invariants and hotspots
 
-- `State` is intentionally central but mixes simulation, GPU setup, networking,
-  UI, and interactions; preserve ordering and authority boundaries.
+- `State` is intentionally central for presentation/input but still mixes the
+  legacy renderer simulation with GPU setup, networking, UI, and interactions
+  during the Plan 18 cutover; preserve ordering and authority boundaries.
 - Chunk and entity collections are authoritative; meshes and render data are
   disposable caches.
 - Background chunk/mesh results carry generation/revision identity. Discard

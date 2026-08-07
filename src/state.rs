@@ -1,3 +1,5 @@
+use crate::authority::contract::AuthorityTopology;
+use crate::authority::{AuthorityBoundary, AuthorityConfig};
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk_manager::{
     mark_block_mesh_dependencies, mark_section_mesh_dependencies, surrounding_chunk_coords,
@@ -3704,6 +3706,10 @@ enum NetworkInbound {
         id: crate::network::protocol::PlayerId,
         action: crate::network::protocol::Action,
     },
+    GameplayRequest {
+        id: crate::network::protocol::PlayerId,
+        request: crate::network::protocol::GameplayRequest,
+    },
     ClientBlockChange {
         id: crate::network::protocol::PlayerId,
         x: i32,
@@ -3837,6 +3843,9 @@ enum NetworkInbound {
         message: String,
     },
     StatusUpdate(String),
+    GameplayResponse {
+        response: crate::network::protocol::GameplayResponse,
+    },
     ContainerOpenRequest {
         id: crate::network::protocol::PlayerId,
         dimension: u8,
@@ -3920,6 +3929,8 @@ impl NetworkInbound {
         let inline = std::mem::size_of_val(self);
         let heap = match self {
             Self::Disconnected(reason) | Self::StatusUpdate(reason) => reason.len(),
+            Self::GameplayRequest { request, .. } => request.encoded_len(),
+            Self::GameplayResponse { response } => std::mem::size_of_val(response),
             Self::PlayerJoin { username, .. } => username.len(),
             Self::ChunkData {
                 blocks,
@@ -4208,14 +4219,7 @@ impl NetworkHandle {
                             NetworkInbound::PlayerAction { id, action }
                         }
                         crate::network::server::ServerToHost::GameplayRequest { id, request } => {
-                            // The dedicated headless runtime owns the unified
-                            // envelope.  The legacy listen-server bridge keeps
-                            // receiving a bounded status event until its
-                            // presentation path is migrated to that runtime.
-                            NetworkInbound::StatusUpdate(format!(
-                                "gameplay request {} received for session {id}",
-                                request.request_id
-                            ))
+                            NetworkInbound::GameplayRequest { id, request }
                         }
                         crate::network::server::ServerToHost::ClientBlockChange {
                             id,
@@ -4543,10 +4547,7 @@ impl NetworkHandle {
                             NetworkInbound::WorldRulesSync { rules }
                         }
                         crate::network::client::ClientToGame::GameplayResponse { response } => {
-                            NetworkInbound::StatusUpdate(format!(
-                                "authoritative gameplay response {}",
-                                response.request_id
-                            ))
+                            NetworkInbound::GameplayResponse { response }
                         }
                         crate::network::client::ClientToGame::LightningStrike(strike) => {
                             NetworkInbound::LightningStrike(strike)
@@ -4621,6 +4622,18 @@ impl NetworkHandle {
                     })
                     .collect()
             }
+        }
+    }
+
+    fn send_gameplay_response(
+        &self,
+        to: crate::network::protocol::PlayerId,
+        response: crate::network::protocol::GameplayResponse,
+    ) {
+        if let NetworkHandle::Host { host_to_server, .. } = self {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::SendGameplayResponse { to, response },
+            );
         }
     }
 
@@ -5312,6 +5325,15 @@ pub struct State {
     pub advancement_manager: crate::advancements::AdvancementManager,
     pub advancement_gui: crate::advancements::AdvancementGui,
     pub role: MultiplayerRole,
+    /// Singleplayer and listen-host presentation roots submit to this
+    /// in-process authority.  Dedicated mode never constructs `State` and
+    /// therefore never allocates this GPU-side boundary.
+    pub authority_boundary: Option<AuthorityBoundary>,
+    /// Monotonic envelope ids for commands issued by the in-process local
+    /// presentation root. They are kept outside the renderer simulation so
+    /// retries use the same AuthorityCore idempotency contract.
+    authority_request_id: u128,
+    authority_client_sequence: u64,
     pub network: NetworkHandle,
     network_staging: NetworkStaging,
     network_ready: bool,
@@ -5334,6 +5356,7 @@ pub struct State {
     client_player_health_sequence: u64,
     client_player_effect_sequence: u64,
     pub network_status: Option<String>,
+    pub last_gameplay_response: Option<crate::network::protocol::GameplayResponse>,
     pub chat_messages: std::collections::VecDeque<(String, String)>,
     pub chat_input: String,
     pub is_chat_open: bool,
@@ -6850,6 +6873,45 @@ impl State {
         };
 
         let (gpu_completion_tx, gpu_completion_rx) = std::sync::mpsc::channel();
+        let authority_boundary = match &role {
+            MultiplayerRole::Singleplayer => Some(AuthorityBoundary::new(
+                AuthorityConfig {
+                    seed: world_seed,
+                    dimension: current_dimension,
+                    world_type,
+                    generate_structures,
+                    rules: world_rules,
+                    render_distance: settings.render_distance as i32,
+                },
+                AuthorityTopology::Singleplayer,
+                // Keep the host's local session disjoint from authenticated
+                // network player ids allocated by the listen transport.
+                u64::MAX,
+                "local",
+                player_physics.position.to_array(),
+                cheats_enabled,
+                cheats_enabled,
+            )),
+            MultiplayerRole::Host { .. } => Some(AuthorityBoundary::new(
+                AuthorityConfig {
+                    seed: world_seed,
+                    dimension: current_dimension,
+                    world_type,
+                    generate_structures,
+                    rules: world_rules,
+                    render_distance: settings.render_distance as i32,
+                },
+                AuthorityTopology::ListenServer,
+                // Keep the host's local session disjoint from authenticated
+                // network player ids allocated by the listen transport.
+                u64::MAX,
+                "host",
+                player_physics.position.to_array(),
+                true,
+                cheats_enabled,
+            )),
+            MultiplayerRole::Client { .. } => None,
+        };
         let mut state = Self {
             window,
             surface,
@@ -7056,6 +7118,9 @@ impl State {
             advancement_manager,
             advancement_gui,
             role,
+            authority_boundary,
+            authority_request_id: 1,
+            authority_client_sequence: 1,
             network,
             network_staging: NetworkStaging::default(),
             network_ready: !is_client,
@@ -7069,6 +7134,7 @@ impl State {
             client_player_health_sequence: 0,
             client_player_effect_sequence: 0,
             network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
+            last_gameplay_response: None,
             chat_messages: std::collections::VecDeque::new(),
             chat_input: String::new(),
             is_chat_open: false,
@@ -7142,6 +7208,69 @@ impl State {
 
     pub fn is_authoritative(&self) -> bool {
         !matches!(self.role, MultiplayerRole::Client { .. })
+    }
+
+    /// Return the authority topology without exposing transport internals to
+    /// presentation/input callers.
+    pub fn authority_topology(&self) -> Option<AuthorityTopology> {
+        self.authority_boundary
+            .as_ref()
+            .map(|boundary| boundary.topology)
+    }
+
+    /// Advance the in-process authority by one fixed 20 Hz tick.  Dedicated
+    /// mode has no `State`, while a network client correctly returns `None`.
+    pub fn tick_authority_boundary(
+        &mut self,
+    ) -> Option<crate::authority::contract::AuthoritySnapshot> {
+        let boundary = self.authority_boundary.as_mut()?;
+        boundary.set_position(self.player_physics.position.to_array());
+        let snapshot = boundary.tick();
+        self.world_time.ticks = snapshot.tick;
+        self.world_rules = boundary.core.world.rules;
+        Some(snapshot)
+    }
+
+    pub fn submit_authority_request(
+        &mut self,
+        request: crate::network::protocol::GameplayRequest,
+    ) -> Option<crate::network::protocol::GameplayResponse> {
+        self.authority_boundary
+            .as_mut()
+            .map(|boundary| boundary.submit(request))
+    }
+
+    /// Route the command domains already understood by `ServerWorld` through
+    /// the in-process authority. Unsupported legacy command domains continue
+    /// through the existing presentation adapter until the remaining Phase A
+    /// cutover lands; they must never be reported as an authority ACK here.
+    fn submit_local_authority_command(
+        &mut self,
+        command: &str,
+    ) -> Option<crate::network::protocol::GameplayResponse> {
+        let boundary = self.authority_boundary.as_mut()?;
+        let request = crate::network::protocol::GameplayRequest {
+            request_id: self.authority_request_id,
+            client_sequence: self.authority_client_sequence,
+            session_id: boundary.session_id,
+            dimension: self.current_dimension as u8,
+            client_revision: boundary.core.current_revision(),
+            operation: crate::network::protocol::GameplayOperation::Command {
+                command: command.to_string(),
+            },
+        };
+        self.authority_request_id = self.authority_request_id.wrapping_add(1);
+        self.authority_client_sequence = self.authority_client_sequence.saturating_add(1);
+        let response = boundary.submit(request);
+        self.last_gameplay_response = Some(response.clone());
+        if matches!(
+            response.outcome,
+            crate::network::protocol::GameplayOutcome::Accepted { .. }
+        ) {
+            self.world_rules = boundary.core.world.rules;
+            self.world_time.ticks = boundary.core.world.time;
+        }
+        Some(response)
     }
 
     fn can_place_block_at(&self, x: i32, y: i32, z: i32, block: BlockType) -> bool {
@@ -7669,6 +7798,26 @@ impl State {
             NetworkInbound::StatusUpdate(msg) => {
                 self.network_status = Some(msg);
             }
+            NetworkInbound::GameplayResponse { response } => {
+                self.last_gameplay_response = Some(response);
+            }
+            NetworkInbound::GameplayRequest { id, mut request } => {
+                request.session_id = id;
+                let request_id = request.request_id;
+                let response = self
+                    .authority_boundary
+                    .as_mut()
+                    .map(|boundary| boundary.submit_for_session(id, request))
+                    .unwrap_or(crate::network::protocol::GameplayResponse {
+                        request_id,
+                        server_sequence: 0,
+                        outcome: crate::network::protocol::GameplayOutcome::Rejected {
+                            reason: crate::network::protocol::RejectReason::Unauthorized,
+                        },
+                    });
+                self.last_gameplay_response = Some(response.clone());
+                self.network.send_gameplay_response(id, response);
+            }
             NetworkInbound::Connected {
                 player_id,
                 seed,
@@ -7728,6 +7877,16 @@ impl State {
                 );
             }
             NetworkInbound::PlayerJoin { id, username } => {
+                if let Some(boundary) = self.authority_boundary.as_mut() {
+                    boundary.register_session(
+                        id,
+                        username.clone(),
+                        self.current_dimension as u8,
+                        self.player_physics.position.to_array(),
+                        false,
+                        self.cheats_enabled,
+                    );
+                }
                 if self.local_player_id != Some(id) {
                     if let Some(remote) = self.remote_players.get_mut(&id) {
                         remote.username = username.clone();
@@ -7764,6 +7923,9 @@ impl State {
                 }
             }
             NetworkInbound::PlayerLeave(id) => {
+                if let Some(boundary) = self.authority_boundary.as_mut() {
+                    boundary.core.remove_session(id);
+                }
                 self.pending_player_catchups.remove(&id);
                 self.remote_player_health.remove(&id);
                 self.remote_player_effects.remove(&id);
@@ -7793,6 +7955,9 @@ impl State {
                 yaw,
                 pitch,
             } => {
+                if let Some(boundary) = self.authority_boundary.as_mut() {
+                    boundary.set_session_position(id, [x, y, z]);
+                }
                 if self.local_player_id == Some(id) {
                     let authoritative = Vec3::new(x, y, z);
                     if self.player_physics.position.distance(authoritative)
@@ -8915,6 +9080,9 @@ impl State {
         }
         self.player_physics.set_no_clip(policy.can_phase);
         self.game_mode = game_mode;
+        if let Some(boundary) = self.authority_boundary.as_mut() {
+            boundary.set_game_mode(game_mode);
+        }
         if game_mode == GameMode::Spectator {
             self.inventory.is_open = false;
             self.active_station = None;
@@ -8928,6 +9096,9 @@ impl State {
 
     pub fn set_world_rules(&mut self, rules: crate::game_rules::WorldRules) {
         self.world_rules = rules.normalized();
+        if let Some(boundary) = self.authority_boundary.as_mut() {
+            boundary.set_rules(self.world_rules);
+        }
         self.player_physics
             .set_no_clip(self.game_mode_policy().can_phase);
     }
@@ -9016,6 +9187,36 @@ impl State {
         };
 
         use crate::commands::{Command, CommandTarget, TimeCommand, WeatherCommand};
+
+        // GameRule mutations and time changes are already implemented by the
+        // headless core. Route those domains through the same envelope used by
+        // dedicated/listen runtime; read-only rule queries and the remaining
+        // legacy command domains stay on the presentation adapter for now.
+        if self.authority_boundary.is_some()
+            && matches!(
+                &command,
+                Command::GameRule { value: Some(_), .. } | Command::Time(_)
+            )
+        {
+            let response = self.submit_local_authority_command(input);
+            let feedback = match response.as_ref().map(|response| &response.outcome) {
+                Some(crate::network::protocol::GameplayOutcome::Accepted { .. }) => {
+                    if matches!(&command, Command::GameRule { .. }) {
+                        self.broadcast_world_rules();
+                        "Game rule updated by authority.".to_string()
+                    } else {
+                        self.broadcast_time_sync();
+                        format!("Time is now {}.", self.world_time.ticks)
+                    }
+                }
+                Some(crate::network::protocol::GameplayOutcome::Rejected { reason }) => {
+                    format!("Command rejected: {reason:?}.")
+                }
+                None => "Command authority is unavailable.".to_string(),
+            };
+            push_chat_history(&mut self.chat_messages, "Command".to_string(), feedback);
+            return;
+        }
 
         let target_is_local = |target: Option<&CommandTarget>| {
             target.is_none()
