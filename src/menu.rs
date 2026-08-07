@@ -1,8 +1,9 @@
 use crate::game_rules::{WorldCreationOptions, WorldType};
 use crate::inventory::GameMode;
 use crate::{
-    accessibility::AccessibilitySettings, localization::TranslationCatalog,
-    resources::ResourcePackManager,
+    accessibility::AccessibilitySettings,
+    localization::TranslationCatalog,
+    resources::{FontSource, ResourcePackManager},
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1342,6 +1343,7 @@ pub struct Menu {
     pub settings: GameSettings,
     resource_packs: ResourcePackManager,
     catalog: TranslationCatalog,
+    font_source: FontSource,
     focus_index: usize,
     supported_present_modes: Vec<wgpu::PresentMode>,
 }
@@ -1352,6 +1354,7 @@ impl Menu {
             &mut self.resource_packs,
             self.settings.language,
         );
+        self.font_source = self.resource_packs.resolve_font_source("font/ui.json");
     }
 
     fn tr(&self, key: &str) -> String {
@@ -1519,6 +1522,7 @@ impl Menu {
         }
         let catalog =
             TranslationCatalog::from_resource_packs_mut(&mut resource_packs, settings.language);
+        let font_source = resource_packs.resolve_font_source("font/ui.json");
         Self {
             window,
             surface,
@@ -1558,6 +1562,7 @@ impl Menu {
             settings,
             resource_packs,
             catalog,
+            font_source,
             focus_index: 0,
             supported_present_modes,
         }
@@ -3270,7 +3275,7 @@ impl Menu {
                 "{marker} {}  {}",
                 summary.manifest.name, summary.manifest.version
             );
-            draw_text(
+            draw_text_with_font(
                 vertices,
                 &label,
                 -0.72,
@@ -3278,6 +3283,7 @@ impl Menu {
                 0.0058,
                 aspect,
                 [1.0; 4],
+                &self.font_source,
             );
         }
         for (x0, x1, label) in [
@@ -3295,15 +3301,18 @@ impl Menu {
             );
             draw_centered_text_in(vertices, label, x0, x1, -0.738, 0.006, aspect, [1.0; 4]);
         }
-        if !self.resource_packs.diagnostics().is_empty() {
-            draw_text(
+        for (index, diagnostic) in self.resource_packs.diagnostics().iter().take(3).enumerate() {
+            let detail = format!("PACK: {} — {}", diagnostic.source, diagnostic.message);
+            let detail = detail.chars().take(108).collect::<String>();
+            draw_text_with_font(
                 vertices,
-                "PACK DIAGNOSTICS AVAILABLE",
-                -0.72,
-                -0.58,
-                0.0052,
+                &detail,
+                -0.82,
+                -0.56 - index as f32 * 0.045,
+                0.0035,
                 aspect,
                 [1.0, 0.65, 0.25, 1.0],
+                &self.font_source,
             );
         }
     }
@@ -3712,10 +3721,32 @@ fn draw_text(
     aspect: f32,
     color: [f32; 4],
 ) {
+    draw_text_with_font(
+        vertices,
+        text,
+        x,
+        y,
+        pixel,
+        aspect,
+        color,
+        &FontSource::BuiltIn,
+    );
+}
+
+fn draw_text_with_font(
+    vertices: &mut Vec<UiVertex>,
+    text: &str,
+    x: f32,
+    y: f32,
+    pixel: f32,
+    aspect: f32,
+    color: [f32; 4],
+    font: &FontSource,
+) {
     let pixel_x = pixel * aspect;
     let mut cursor = x;
     for ch in text.to_ascii_uppercase().chars() {
-        let rows = glyph(ch);
+        let rows = font.glyph_override(ch).unwrap_or_else(|| glyph(ch));
         for (row, bits) in rows.into_iter().enumerate() {
             for column in 0..5 {
                 if bits & (1 << (4 - column)) != 0 {

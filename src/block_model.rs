@@ -6,9 +6,96 @@
 
 use crate::chunk_render::TerrainVertex;
 use crate::redstone::Direction;
+use crate::resources::ResourcePackManager;
 use crate::world::{BlockState, BlockType, RenderType};
+use serde::Deserialize;
+use std::collections::HashMap;
 
 const SIXTEENTH: f32 = 1.0 / 16.0;
+
+/// Parsed, bounded subset of an item/block model descriptor.  The existing
+/// procedural meshes remain the built-in fallback; a pack can override the
+/// atlas tile without asking the world/state layer to understand JSON.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelDescriptor {
+    pub parent: Option<String>,
+    pub atlas_tile: Option<(u32, u32)>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawModelDescriptor {
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    atlas_tile: Option<[u32; 2]>,
+}
+
+/// Resource-backed block/item model registry used by mesh consumers that have
+/// a selected `ResourcePackManager`.  A registry is deliberately immutable
+/// after construction so background mesh jobs can share it safely.
+#[derive(Debug, Clone, Default)]
+pub struct ModelRegistry {
+    descriptors: HashMap<String, ModelDescriptor>,
+}
+
+impl ModelRegistry {
+    pub fn from_resource_packs<'a, I>(manager: &mut ResourcePackManager, model_paths: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut registry = Self::default();
+        for path in model_paths {
+            let bytes = manager.resolve_model(path);
+            let parsed = bytes.as_deref().and_then(parse_model_descriptor);
+            if bytes.is_some() && parsed.is_none() {
+                manager.record_asset_diagnostic(
+                    path,
+                    "model",
+                    "model descriptor is unsupported; using procedural model fallback",
+                );
+            }
+            let descriptor = parsed.unwrap_or_default();
+            if let Ok(path) = normalize_model_path(path) {
+                registry.descriptors.insert(path, descriptor);
+            }
+        }
+        registry
+    }
+
+    pub fn descriptor(&self, path: &str) -> Option<&ModelDescriptor> {
+        let path = normalize_model_path(path).ok()?;
+        self.descriptors.get(&path)
+    }
+
+    pub fn atlas_tile_for(&self, path: &str, fallback: (u32, u32)) -> (u32, u32) {
+        self.descriptor(path)
+            .and_then(|descriptor| descriptor.atlas_tile)
+            .unwrap_or(fallback)
+    }
+}
+
+fn normalize_model_path(path: &str) -> Result<String, ()> {
+    let path = path.replace('\\', "/");
+    if path.is_empty() || path.starts_with('/') || path.contains("..") || path.contains(':') {
+        return Err(());
+    }
+    Ok(path)
+}
+
+fn parse_model_descriptor(bytes: &[u8]) -> Option<ModelDescriptor> {
+    let raw = serde_json::from_slice::<RawModelDescriptor>(bytes).ok()?;
+    if raw.parent.as_ref().is_some_and(|parent| parent.len() > 256) {
+        return None;
+    }
+    let atlas_tile = raw.atlas_tile.map(|tile| (tile[0], tile[1]));
+    if atlas_tile.is_some_and(|(x, y)| x >= 16 || y >= 16) {
+        return None;
+    }
+    Some(ModelDescriptor {
+        parent: raw.parent,
+        atlas_tile,
+    })
+}
 
 fn push_quad(
     vertices: &mut Vec<TerrainVertex>,
@@ -133,6 +220,78 @@ pub fn append_custom_block_mesh<F>(
 where
     F: Fn(i32, i32, i32) -> BlockType,
 {
+    append_custom_block_mesh_impl(
+        block,
+        state_raw,
+        origin,
+        sky_light,
+        block_light,
+        region_coord,
+        opaque_vertices,
+        opaque_indices,
+        trans_vertices,
+        trans_indices,
+        None,
+        get_neighbor,
+    )
+}
+
+/// Render a non-full block while applying the descriptor selected by a
+/// resource-pack model registry.  Callers that do not have a registry should
+/// use `append_custom_block_mesh`, which retains the procedural tile mapping.
+pub fn append_custom_block_mesh_with_registry<F>(
+    block: BlockType,
+    state_raw: u8,
+    origin: [f32; 3],
+    sky_light: u8,
+    block_light: u8,
+    region_coord: (i32, i32),
+    opaque_vertices: &mut Vec<TerrainVertex>,
+    opaque_indices: &mut Vec<u32>,
+    trans_vertices: &mut Vec<TerrainVertex>,
+    trans_indices: &mut Vec<u32>,
+    model_path: &str,
+    registry: &ModelRegistry,
+    get_neighbor: F,
+) -> bool
+where
+    F: Fn(i32, i32, i32) -> BlockType,
+{
+    let fallback = block.get_face_tex_index(0);
+    let tile = registry.atlas_tile_for(model_path, fallback);
+    append_custom_block_mesh_impl(
+        block,
+        state_raw,
+        origin,
+        sky_light,
+        block_light,
+        region_coord,
+        opaque_vertices,
+        opaque_indices,
+        trans_vertices,
+        trans_indices,
+        Some(tile),
+        get_neighbor,
+    )
+}
+
+fn append_custom_block_mesh_impl<F>(
+    block: BlockType,
+    state_raw: u8,
+    origin: [f32; 3],
+    sky_light: u8,
+    block_light: u8,
+    region_coord: (i32, i32),
+    opaque_vertices: &mut Vec<TerrainVertex>,
+    opaque_indices: &mut Vec<u32>,
+    trans_vertices: &mut Vec<TerrainVertex>,
+    trans_indices: &mut Vec<u32>,
+    atlas_tile_override: Option<(u32, u32)>,
+    get_neighbor: F,
+) -> bool
+where
+    F: Fn(i32, i32, i32) -> BlockType,
+{
     let wx = origin[0] as i32;
     let wy = origin[1] as i32;
     let wz = origin[2] as i32;
@@ -144,7 +303,7 @@ where
         (opaque_vertices, opaque_indices)
     };
 
-    let tile = block.get_face_tex_index(0);
+    let tile = atlas_tile_override.unwrap_or_else(|| block.get_face_tex_index(0));
 
     match block {
         BlockType::OakSlab | BlockType::CobblestoneSlab => {
@@ -623,5 +782,78 @@ where
         }
 
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("icraft_model_{label}_{stamp}_{id}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn selected_model_descriptor_reaches_mesh_consumer() {
+        let root = temp_dir("selected");
+        fs::write(
+            root.join("pack.json"),
+            br#"{"id":"icraft.builtin","name":"builtin","version":"1","format":1,"description":""}"#,
+        )
+        .unwrap();
+        let user = root.join("resourcepacks");
+        let pack = user.join("models");
+        fs::create_dir_all(pack.join("models")).unwrap();
+        fs::write(
+            pack.join("pack.json"),
+            br#"{"id":"models.pack","name":"models","version":"1","format":1,"description":""}"#,
+        )
+        .unwrap();
+        fs::write(
+            pack.join("models/block.json"),
+            br#"{"parent":"builtin","atlas_tile":[15,14]}"#,
+        )
+        .unwrap();
+        let mut manager = ResourcePackManager::discover(&root, &user);
+        manager.apply_enabled_order(["models.pack"]).unwrap();
+        let registry = ModelRegistry::from_resource_packs(&mut manager, ["models/block.json"]);
+        assert_eq!(
+            registry.descriptor("models/block.json").unwrap().atlas_tile,
+            Some((15, 14))
+        );
+
+        let mut opaque_vertices = Vec::new();
+        let mut opaque_indices = Vec::new();
+        let mut trans_vertices = Vec::new();
+        let mut trans_indices = Vec::new();
+        assert!(append_custom_block_mesh_with_registry(
+            BlockType::OakSlab,
+            0,
+            [0.0, 0.0, 0.0],
+            15,
+            0,
+            (0, 0),
+            &mut opaque_vertices,
+            &mut opaque_indices,
+            &mut trans_vertices,
+            &mut trans_indices,
+            "models/block.json",
+            &registry,
+            |_, _, _| BlockType::Air,
+        ));
+        assert_eq!(opaque_vertices[0].atlas_tile, [15, 14]);
+        let _ = fs::remove_dir_all(root);
     }
 }

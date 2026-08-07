@@ -1311,11 +1311,8 @@ const fn pack_tile_region_tint(
     }
 }
 
-/// User pack location is workspace-relative. `ICRAFT_RESOURCE_PACK` is an
-/// explicit development override and is never used as a default.
-const USER_RESOURCE_PACKS_DIR: &str = "resourcepacks";
-
 /// Built-in 1.21.5-compatible texture fallback shipped with the repository.
+#[cfg(test)]
 const VANILLA_TEXTURES_DIR: &str = "assets/vanilla/textures";
 
 /// Atlas layout: (col, row) -> resource-pack texture path. Every entry is
@@ -1568,14 +1565,6 @@ const PACK_TILES: &[PackTile] = &[
     pack_tile(15, 15, "block/end_portal_frame_top.png"),
 ];
 
-fn resource_pack_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
-    let pack = std::env::var("ICRAFT_RESOURCE_PACK")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(USER_RESOURCE_PACKS_DIR));
-    let vanilla = std::path::PathBuf::from(VANILLA_TEXTURES_DIR);
-    (pack, vanilla)
-}
-
 /// Paste one 16x16 tile from a source image, cropping and nearest-neighbor
 /// scaling it first when a region is specified.
 fn paste_pack_tile(img: &mut RgbaImage, tile: &PackTile, src: &image::DynamicImage) {
@@ -1598,13 +1587,6 @@ fn paste_pack_tile(img: &mut RgbaImage, tile: &PackTile, src: &image::DynamicIma
         }
         img.put_pixel(ox + dx, oy + dy, px);
     }
-}
-
-/// Overlay every mapped atlas tile with the selected resource packs. Tiles
-/// that resolve nowhere keep the procedural artwork generated above.
-fn apply_resource_pack(img: &mut RgbaImage) {
-    let mut manager = ResourcePackManager::discover_default();
-    apply_resource_pack_with_manager(img, &mut manager);
 }
 
 fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
@@ -1631,14 +1613,6 @@ fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourceP
     for diagnostic in manager.take_diagnostics() {
         eprintln!("[texture] {}: {}", diagnostic.source, diagnostic.message);
     }
-}
-
-/// Enderman eyes are a separate emissive texture in the vanilla resource
-/// pack. Composite that layer over the head crop so the compact atlas keeps
-/// the normal purple eyes instead of rendering a featureless black face.
-fn compose_enderman_eyes(img: &mut RgbaImage) {
-    let mut manager = ResourcePackManager::discover_default();
-    compose_enderman_eyes_with_manager(img, &mut manager);
 }
 
 fn compose_enderman_eyes_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
@@ -2020,24 +1994,13 @@ impl TextureAtlas {
         draw_hunger(&mut img, 4, 8, 0.5); // Half Hunger
         draw_hunger(&mut img, 5, 8, 0.0); // Empty Hunger
 
-        // Row 15: Crack overlays (cols 0..10)
-        // Prefer the resource pack's 10-stage destroy PNGs, then the extracted
-        // vanilla tree, then the legacy assets folder; fall back to the
-        // procedural crack generator when nothing is available.
-        let (pack_dir, vanilla_dir) = resource_pack_dirs();
+        // Row 15: Crack overlays (cols 0..10). Resolve through the same
+        // selected manager as every other atlas tile so directory and ZIP
+        // packs, dependency order, and explicit overrides all apply.
         for stage in 0..10u32 {
-            let candidates = [
-                pack_dir.join(format!("block/destroy_stage_{}.png", stage)),
-                vanilla_dir.join(format!("block/destroy_stage_{}.png", stage)),
-                std::path::PathBuf::from(format!(
-                    "assets/textures/destroy_stages/destroy_stage_{}.png",
-                    stage
-                )),
-            ];
-            let loaded = candidates
-                .iter()
-                .find(|path| path.is_file())
-                .and_then(|path| image::open(path).ok());
+            let loaded = manager
+                .resolve_texture(&format!("block/destroy_stage_{stage}.png"))
+                .and_then(|bytes| image::load_from_memory(&bytes).ok());
             if let Some(loaded_img) = loaded {
                 let stage_img = loaded_img.to_rgba8();
                 let sw = stage_img.width();
@@ -2881,14 +2844,16 @@ mod tests {
 
     #[test]
     fn resource_pack_atlas_applies_real_textures() {
-        let (pack_dir, vanilla_dir) = resource_pack_dirs();
-        if !pack_dir.is_dir() && !vanilla_dir.is_dir() {
+        let mut manager = ResourcePackManager::discover_default();
+        if manager.read_asset("block/stone.png").is_none()
+            && !std::path::Path::new(VANILLA_TEXTURES_DIR).is_dir()
+        {
             eprintln!("resource pack and vanilla textures unavailable; skipping");
             return;
         }
         let mut img = RgbaImage::new(256, 256);
-        apply_resource_pack(&mut img);
-        compose_enderman_eyes(&mut img);
+        apply_resource_pack_with_manager(&mut img, &mut manager);
+        compose_enderman_eyes_with_manager(&mut img, &mut manager);
         make_enderman_tiles_opaque(&mut img);
         make_dragon_tiles_opaque(&mut img);
         compose_end_portal_frame_tiles(&mut img);
