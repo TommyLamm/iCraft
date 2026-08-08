@@ -7,24 +7,29 @@
 //! network thread only transports packets into the bounded event channel.
 
 use crate::authority::contract::{AuthorityTopology, SessionContract};
+use crate::authority::interest::{
+    InterestKind, InterestSet, RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
+};
 use crate::authority::{AuthorityConfig, AuthorityCore};
 use crate::dimension::Dimension;
 use crate::game_rules::WorldRules;
 use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, PlayerEffectWire,
+    ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
+    PlayerEffectWire, RejectReason,
 };
 use crate::network::server::{HostToServer, NetworkServer, ServerConfig, ServerToHost};
-use crate::save::{LevelData, PlayerData, SaveManager};
+use crate::save::{
+    ChunkSaveData, EntitySaveData, LevelData, MutationRevisionIndex, PlayerData, SaveManager,
+};
 use glam::Vec3;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -32,8 +37,9 @@ const TICK_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_INBOUND_EVENTS_PER_TICK: usize = 512;
 const WORLD_BOUND: f32 = 30_000_000.0;
 const PLAYER_REACH: f32 = 8.0;
-const PLAYER_SAVE_VERSION: u16 = 1;
 const AUTOSAVE_INTERVAL_TICKS: u64 = 6_000;
+const HOST_COMMAND_QUEUE_CAPACITY: usize = 1_024;
+const HOST_EVENT_QUEUE_CAPACITY: usize = 1_024;
 
 #[derive(Debug)]
 pub enum ServerConfigError {
@@ -299,6 +305,7 @@ pub struct ServerMetrics {
     pub inbound_bytes: u64,
     pub outbound_bytes: u64,
     pub queue_depth: usize,
+    pub queue_full: u64,
     pub requests_accepted: u64,
     pub requests_rejected: u64,
     pub duplicate_requests: u64,
@@ -316,33 +323,41 @@ pub struct PlayerSessionState {
     pub data: PlayerData,
     pub dimension: Dimension,
     pub last_client_sequence: u64,
+    pub interest: InterestSet,
+    /// Compatibility projections retained for existing presentation bridges;
+    /// all routing decisions use `interest` as the source of truth.
     pub interest_chunks: HashSet<(i32, i32)>,
+    pub simulation_chunks: HashSet<(i32, i32)>,
     pub entity_interest: HashSet<u64>,
+    pub simulation_entity_interest: HashSet<u64>,
+    pub container_viewers: BTreeSet<(i32, i32, i32)>,
     pub effects: Vec<PlayerEffectWire>,
 }
 
 impl PlayerSessionState {
-    fn new(id: u64, username: String, data: PlayerData) -> Self {
-        let dimension = data.spawn_dimension.unwrap_or_default();
+    fn new(
+        id: u64,
+        username: String,
+        data: PlayerData,
+        dimension: Dimension,
+        view_distance: u8,
+        simulation_distance: u8,
+    ) -> Self {
         Self {
             id,
             username,
             data,
             dimension,
             last_client_sequence: 0,
+            interest: InterestSet::new(dimension, view_distance, simulation_distance),
             interest_chunks: HashSet::new(),
+            simulation_chunks: HashSet::new(),
             entity_interest: HashSet::new(),
+            simulation_entity_interest: HashSet::new(),
+            container_viewers: BTreeSet::new(),
             effects: Vec::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlayerFile {
-    version: u16,
-    data: PlayerData,
-    #[serde(default)]
-    effects: Vec<PlayerEffectWire>,
 }
 
 pub struct ServerRuntime {
@@ -354,9 +369,18 @@ pub struct ServerRuntime {
     /// callers.  Runtime transport/session/save code never mirrors world
     /// mutation in a second map.
     pub authority: AuthorityCore,
+    /// Interest-routed deltas are retained until the transport owner drains
+    /// them. This keeps routing deterministic even when a network queue is
+    /// backpressured, without mirroring world state in the renderer.
+    routed_updates: Vec<RoutedInterestUpdate>,
+    /// Revisions already projected by an immediate request ACK.  The next
+    /// fixed snapshot contains those pending mutations as well; this bounded
+    /// set prevents duplicate block/container deltas without dropping later
+    /// automation mutations.
+    routed_mutations: BTreeSet<u64>,
     world_dir: PathBuf,
     save_manager: SaveManager,
-    host_tx: Sender<HostToServer>,
+    host_tx: SyncSender<HostToServer>,
     host_rx: Receiver<ServerToHost>,
     network_thread: Option<JoinHandle<()>>,
     stopped: bool,
@@ -373,16 +397,29 @@ impl ServerRuntime {
             )));
         }
         let save_manager = SaveManager::new(&world_dir);
-        let level = load_level(&world_dir).unwrap_or_else(|| LevelData {
-            seed: properties.seed as u32,
-            rules: WorldRules {
-                pvp: properties.pvp,
-                ..WorldRules::default()
-            },
-            ..LevelData::default()
-        });
-        let (host_tx, host_rx_network) = mpsc::channel();
-        let (server_to_host, host_rx) = mpsc::channel();
+        let mut level = save_manager
+            .load_level()
+            .map_err(ServerConfigError::Io)?
+            .unwrap_or_else(|| LevelData {
+                seed: properties.seed as u32,
+                rules: WorldRules {
+                    pvp: properties.pvp,
+                    ..WorldRules::default()
+                },
+                ..LevelData::default()
+            });
+        // `server.properties` is the live authority configuration.  A saved
+        // level may carry an older rule snapshot, but connection/runtime
+        // policy must still apply the operator's pvp and difficulty settings
+        // before constructing the shared headless core.
+        level.rules.pvp = properties.pvp;
+        if properties.difficulty.eq_ignore_ascii_case("peaceful") {
+            level.rules.do_mob_spawning = false;
+            level.rules.pvp = false;
+        }
+        level.rules = level.rules.normalized();
+        let (host_tx, host_rx_network) = mpsc::sync_channel(HOST_COMMAND_QUEUE_CAPACITY);
+        let (server_to_host, host_rx) = mpsc::sync_channel(HOST_EVENT_QUEUE_CAPACITY);
         let mut network_config = ServerConfig::default();
         network_config.max_players = properties.max_players;
         network_config.motd = properties.motd.clone();
@@ -419,8 +456,11 @@ impl ServerRuntime {
             host_tx,
             host_rx,
             network_thread: Some(network_thread),
+            routed_updates: Vec::new(),
+            routed_mutations: BTreeSet::new(),
             stopped: false,
         };
+        runtime.restore_authority_state()?;
         runtime.ensure_spawn_chunk();
         Ok(runtime)
     }
@@ -444,6 +484,7 @@ impl ServerRuntime {
             self.handle_event(event)?;
         }
         let snapshot = self.authority.tick();
+        self.route_authority_snapshot(&snapshot);
         self.level.time = snapshot.tick;
         self.metrics.ticks = self.metrics.ticks.wrapping_add(1);
         self.metrics.players_online = self.players.len();
@@ -484,18 +525,64 @@ impl ServerRuntime {
         }
         let save_result = self.save_all();
         self.stopped = true;
-        let _ = self.host_tx.send(HostToServer::Stop);
+        let _ = self.host_tx.try_send(HostToServer::Stop);
         if let Some(handle) = self.network_thread.take() {
             let _ = handle.join();
         }
         save_result
     }
 
+    fn restore_authority_state(&mut self) -> io::Result<()> {
+        let dimension = self.authority.world.dimension;
+        let revision_index = self.save_manager.load_mutation_revision_index();
+        for chunk in self.save_manager.load_saved_chunks_in(dimension)? {
+            self.authority.world.restore_saved_chunk(&chunk);
+        }
+        for ((_cx, _cz), revision) in revision_index.entries_in(dimension) {
+            self.authority.world.revisions.observe(revision);
+        }
+        let entities = self.save_manager.load_entities_in_checked(dimension)?;
+        if !entities.is_empty() {
+            self.authority.world.restore_saved_entities(&entities);
+        }
+        Ok(())
+    }
+
+    fn save_authority_state(&mut self) -> io::Result<()> {
+        let dimension = self.authority.world.dimension;
+        let mut coordinates: Vec<_> = self.authority.world.chunks.chunks.keys().copied().collect();
+        coordinates.sort_unstable();
+        for (cx, cz) in coordinates {
+            let Some(chunk) = self.authority.world.chunks.chunks.get(&(cx, cz)) else {
+                continue;
+            };
+            let revision = self.authority.world.chunk_revision(cx, cz);
+            let mut data = ChunkSaveData::from_chunk(chunk);
+            data.mutation_revision = revision;
+            self.save_manager
+                .save_chunk_in(dimension, cx, cz, data)
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+        }
+
+        let entities: Vec<_> = self
+            .authority
+            .world
+            .entities
+            .entities
+            .iter()
+            .map(EntitySaveData::from)
+            .collect();
+        self.save_manager.save_entities_in(dimension, &entities)?;
+        let revisions: MutationRevisionIndex = self.authority.world.mutation_revision_index();
+        self.save_manager.save_mutation_revision_index(&revisions)?;
+        self.save_manager.save_current_dimension(dimension)?;
+        Ok(())
+    }
+
     pub fn save_all(&mut self) -> io::Result<()> {
         let started = Instant::now();
-        let level_bytes = bincode::serialize(&self.level)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
-        atomic_write(&self.world_dir.join("level.dat"), &level_bytes)?;
+        self.save_manager.save_level(&self.level)?;
+        self.save_authority_state()?;
         let mut names: Vec<_> = self.players.values().collect();
         names.sort_by_key(|session| session.id);
         for session in names {
@@ -524,6 +611,34 @@ impl ServerRuntime {
     ) -> Option<GameplayResponse> {
         request.session_id = session_id;
         self.handle_gameplay_request(request).ok()
+    }
+
+    /// Headless/in-process login seam. The network transport calls the same
+    /// private handler, while tests and listen-server bridges can exercise the
+    /// exact persistence and interest policy without a GPU or socket client.
+    pub fn login_session(&mut self, id: u64, username: impl Into<String>) -> io::Result<()> {
+        self.handle_join(id, username.into())
+    }
+
+    pub fn logout_session(&mut self, id: u64) -> io::Result<()> {
+        self.handle_leave(id)
+    }
+
+    pub fn set_session_dimension(&mut self, id: u64, dimension: Dimension) -> bool {
+        self.authority.world.close_container_viewers(id);
+        let Some(session) = self.players.get_mut(&id) else {
+            return false;
+        };
+        session.dimension = dimension;
+        session.interest.open_containers.clear();
+        session.container_viewers.clear();
+        if let Some(authority_session) = self.authority.session_mut(id) {
+            authority_session.dimension = dimension as u8;
+        }
+        let position = session.data.position;
+        let _ = session;
+        self.update_interest_for(id, dimension, position);
+        true
     }
 
     pub fn metrics(&self) -> &ServerMetrics {
@@ -592,7 +707,15 @@ impl ServerRuntime {
 
     fn handle_event(&mut self, event: ServerToHost) -> io::Result<()> {
         match event {
-            ServerToHost::ClientJoined { id, username } => self.handle_join(id, username),
+            ServerToHost::ClientJoined { id, username } => {
+                if let Err(error) = self.handle_join(id, username) {
+                    let _ = self.enqueue_host(HostToServer::DisconnectClient {
+                        to: id,
+                        reason: format!("authority login rejected: {error}"),
+                    });
+                }
+                Ok(())
+            }
             ServerToHost::ClientLeft { id } => self.handle_leave(id),
             ServerToHost::GameplayRequest { id, mut request } => {
                 request.session_id = id;
@@ -619,24 +742,25 @@ impl ServerRuntime {
                 state,
             } => self.handle_block_change(id, x, y, z, block, state),
             ServerToHost::ClientAction { id, action } => {
-                self.host_tx
-                    .send(HostToServer::BroadcastPlayerAction { id, action })
-                    .ok();
+                self.enqueue_host(HostToServer::BroadcastPlayerAction { id, action });
                 Ok(())
             }
             ServerToHost::ChatFromClient { id, message } => {
-                if let Some(session) = self.players.get(&id) {
-                    self.host_tx
-                        .send(HostToServer::BroadcastChat {
-                            sender: session.username.clone(),
-                            message: message.chars().take(256).collect(),
-                        })
-                        .ok();
+                if let Some(sender) = self
+                    .players
+                    .get(&id)
+                    .map(|session| session.username.clone())
+                {
+                    self.enqueue_host(HostToServer::BroadcastChat {
+                        sender,
+                        message: message.chars().take(256).collect(),
+                    });
                 }
                 Ok(())
             }
             ServerToHost::ClientRespawnRequest { id } => {
-                if let Some(session) = self.players.get_mut(&id) {
+                self.authority.world.close_container_viewers(id);
+                let respawn = if let Some(session) = self.players.get_mut(&id) {
                     session.data.position = [
                         self.level.spawn_x as f32,
                         self.level.spawn_y as f32,
@@ -644,28 +768,99 @@ impl ServerRuntime {
                     ];
                     session.data.is_dead = false;
                     session.dimension = self.level.spawn_dimension;
-                    self.host_tx
-                        .send(HostToServer::SendPlayerRespawnResult {
-                            to: id,
-                            position: session.data.position,
-                            dimension: session.dimension as u8,
-                        })
-                        .ok();
+                    session.interest.open_containers.clear();
+                    session.container_viewers.clear();
+                    Some((session.data.position, session.dimension))
+                } else {
+                    None
+                };
+                if let Some((respawn_position, dimension)) = respawn {
+                    self.enqueue_host(HostToServer::SendPlayerRespawnResult {
+                        to: id,
+                        position: respawn_position,
+                        dimension: dimension as u8,
+                    });
+                    self.update_interest_for(id, dimension, respawn_position);
                 }
                 Ok(())
             }
             ServerToHost::ClientBlockAction { id, x, y, z, .. } => {
                 self.handle_block_change(id, x, y, z, 0, 0)
             }
-            ServerToHost::ClientSleepRequest { id, .. }
-            | ServerToHost::ContainerOpenRequest { id, .. }
-            | ServerToHost::ContainerClickRequest { id, .. }
-            | ServerToHost::ContainerClose { id, .. } => {
-                // Legacy packets are intentionally routed through the same
-                // envelope gate.  The protocol owner supplies richer adapters
-                // for slot/coordinate payloads; until then this branch emits
-                // an explicit unsupported response instead of accepting a
-                // fabricated zero-coordinate mutation.
+            ServerToHost::ClientSleepRequest {
+                id,
+                bed_x,
+                bed_y,
+                bed_z,
+            } => {
+                let Some(request) = self.legacy_request(
+                    id,
+                    self.authority.current_revision(),
+                    GameplayOperation::Sleep {
+                        x: bed_x,
+                        y: bed_y,
+                        z: bed_z,
+                    },
+                ) else {
+                    return Ok(());
+                };
+                let response = self.handle_gameplay_request(request)?;
+                self.send_response(id, response);
+                Ok(())
+            }
+            ServerToHost::ContainerOpenRequest {
+                id,
+                dimension,
+                x,
+                y,
+                z,
+            } => {
+                let Some(request) = self.legacy_request(
+                    id,
+                    self.authority.current_revision(),
+                    GameplayOperation::Container {
+                        action: ContainerAction::Open.to_wire(),
+                        x,
+                        y,
+                        z,
+                        slot: 0,
+                    },
+                ) else {
+                    return Ok(());
+                };
+                if request.dimension != dimension {
+                    self.send_legacy_rejection(
+                        id,
+                        request.request_id,
+                        RejectReason::InvalidDimension,
+                    );
+                } else {
+                    let response = self.handle_gameplay_request(request)?;
+                    self.send_response(id, response);
+                }
+                Ok(())
+            }
+            ServerToHost::ContainerClickRequest {
+                id,
+                dimension,
+                revision,
+                slot_index,
+                is_left,
+                dragged,
+            } => {
+                let Some((x, y, z)) = self
+                    .players
+                    .get(&id)
+                    .and_then(|session| session.interest.open_containers.iter().next())
+                    .copied()
+                else {
+                    self.send_legacy_rejection(
+                        id,
+                        self.authority.current_revision() as u128 + 1,
+                        RejectReason::InvalidState,
+                    );
+                    return Ok(());
+                };
                 let request = GameplayRequest {
                     request_id: self.authority.current_revision() as u128 + 1,
                     client_sequence: self
@@ -674,16 +869,51 @@ impl ServerRuntime {
                         .map(|session| session.last_client_sequence + 1)
                         .unwrap_or(1),
                     session_id: id,
-                    dimension: self
-                        .authority
-                        .session(id)
-                        .map(|session| session.dimension)
-                        .unwrap_or(0),
-                    client_revision: self.authority.current_revision(),
-                    operation: GameplayOperation::ItemUse { item: 0, count: 0 },
+                    dimension,
+                    client_revision: revision,
+                    operation: GameplayOperation::ContainerClick {
+                        x,
+                        y,
+                        z,
+                        slot: slot_index,
+                        is_left,
+                        dragged,
+                    },
                 };
                 let response = self.handle_gameplay_request(request)?;
                 self.send_response(id, response);
+                Ok(())
+            }
+            ServerToHost::ContainerClose {
+                id,
+                dimension,
+                x,
+                y,
+                z,
+            } => {
+                let Some(request) = self.legacy_request(
+                    id,
+                    self.authority.current_revision(),
+                    GameplayOperation::Container {
+                        action: ContainerAction::Close.to_wire(),
+                        x,
+                        y,
+                        z,
+                        slot: 0,
+                    },
+                ) else {
+                    return Ok(());
+                };
+                if request.dimension != dimension {
+                    self.send_legacy_rejection(
+                        id,
+                        request.request_id,
+                        RejectReason::InvalidDimension,
+                    );
+                } else {
+                    let response = self.handle_gameplay_request(request)?;
+                    self.send_response(id, response);
+                }
                 Ok(())
             }
             ServerToHost::CatchupAccepted { .. }
@@ -699,12 +929,30 @@ impl ServerRuntime {
             .values()
             .any(|session| session.username.eq_ignore_ascii_case(&username))
         {
-            return Ok(());
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("duplicate player identity: {username}"),
+            ));
         }
-        let (data, effects) = self
-            .load_player(&username)
-            .unwrap_or_else(|| (default_player_data(), Vec::new()));
-        let mut session = PlayerSessionState::new(id, username, data);
+        let saved_player = self.save_manager.load_dedicated_player(&username)?;
+        let (data, current_dimension, effects) = saved_player
+            .map(|file| (file.data, file.current_dimension, file.effects))
+            .unwrap_or_else(|| {
+                let data = default_player_data();
+                (
+                    data.clone(),
+                    data.spawn_dimension.unwrap_or(self.level.spawn_dimension),
+                    Vec::new(),
+                )
+            });
+        let mut session = PlayerSessionState::new(
+            id,
+            username,
+            data,
+            current_dimension,
+            self.properties.view_distance,
+            self.properties.simulation_distance,
+        );
         session.effects = effects;
         self.update_interest(&mut session);
         let dimension = session.dimension as u8;
@@ -719,7 +967,7 @@ impl ServerRuntime {
             self.level.cheats_enabled,
         );
         self.authority
-            .register_session(authority_session)
+            .register_session_with_limit(authority_session, self.properties.max_players)
             .map_err(|reason| {
                 io::Error::new(
                     io::ErrorKind::AlreadyExists,
@@ -727,32 +975,56 @@ impl ServerRuntime {
                 )
             })?;
         self.players.insert(id, session);
-        self.host_tx
-            .send(HostToServer::SendWorldRules {
-                rules: self.authority.world.rules,
-                to: id,
+        let (chunks, entities) = self
+            .players
+            .get(&id)
+            .map(|session| {
+                (
+                    session.interest.chunks.iter().copied().collect::<Vec<_>>(),
+                    session
+                        .interest
+                        .simulation_entities
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                )
             })
-            .ok();
-        self.host_tx
-            .send(HostToServer::SendTimeSync {
-                ticks: self.level.time,
-                weather: 0,
-                weather_remaining_ticks: 0.0,
-                to: id,
-            })
-            .ok();
-        self.host_tx
-            .send(HostToServer::SendGameplayResponse {
-                to: id,
-                response: GameplayResponse {
-                    request_id: 0,
-                    server_sequence: self.authority.world.revisions.allocate(),
-                    outcome: GameplayOutcome::Accepted {
-                        revision: self.authority.current_revision(),
-                    },
+            .unwrap_or_default();
+        for chunk in chunks {
+            self.queue_interest_update(
+                current_dimension,
+                self.authority.current_revision(),
+                InterestKind::Chunk(chunk),
+            );
+        }
+        for entity in entities {
+            self.queue_interest_update(
+                current_dimension,
+                self.authority.current_revision(),
+                InterestKind::Entity(entity),
+            );
+        }
+        self.enqueue_host(HostToServer::SendWorldRules {
+            rules: self.authority.world.rules,
+            to: id,
+        });
+        self.enqueue_host(HostToServer::SendTimeSync {
+            ticks: self.level.time,
+            weather: 0,
+            weather_remaining_ticks: 0.0,
+            to: id,
+        });
+        let join_sequence = self.authority.world.revisions.allocate();
+        self.enqueue_host(HostToServer::SendGameplayResponse {
+            to: id,
+            response: GameplayResponse {
+                request_id: 0,
+                server_sequence: join_sequence,
+                outcome: GameplayOutcome::Accepted {
+                    revision: self.authority.current_revision(),
                 },
-            })
-            .ok();
+            },
+        });
         self.metrics.players_online = self.players.len();
         self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(3);
         eprintln!("[ServerRuntime] player joined id={id} dimension={dimension}");
@@ -763,6 +1035,7 @@ impl ServerRuntime {
         if let Some(session) = self.players.remove(&id) {
             self.save_player(&session)?;
         }
+        self.authority.world.close_container_viewers(id);
         self.authority.remove_session(id);
         self.metrics.players_online = self.players.len();
         Ok(())
@@ -799,33 +1072,17 @@ impl ServerRuntime {
             authority_session.position = position;
             authority_session.dimension = dimension as u8;
         }
-        let interest = self.interest_chunks_for(dimension, position);
-        let entity_interest = self
-            .authority
-            .world
-            .entities
-            .query_radius(
-                Vec3::from_array(position),
-                f32::from(self.properties.view_distance) * 16.0,
-            )
-            .map(|entity| entity.id)
-            .collect();
-        if let Some(session) = self.players.get_mut(&id) {
-            session.interest_chunks = interest;
-            session.entity_interest = entity_interest;
-        }
-        self.host_tx
-            .send(HostToServer::BroadcastPlayerPosition {
-                id,
-                sequence,
-                sender_time_millis,
-                x,
-                y,
-                z,
-                yaw,
-                pitch,
-            })
-            .ok();
+        self.update_interest_for(id, dimension, position);
+        self.enqueue_host(HostToServer::BroadcastPlayerPosition {
+            id,
+            sequence,
+            sender_time_millis,
+            x,
+            y,
+            z,
+            yaw,
+            pitch,
+        });
         self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
         Ok(())
     }
@@ -837,7 +1094,7 @@ impl ServerRuntime {
         y: i32,
         z: i32,
         block: u32,
-        state: u8,
+        _state: u8,
     ) -> io::Result<()> {
         let Some(session) = self.players.get(&id) else {
             return Ok(());
@@ -859,21 +1116,7 @@ impl ServerRuntime {
             client_revision: self.authority.current_revision(),
             operation: GameplayOperation::BlockUse { x, y, z, block },
         };
-        let response = self.handle_gameplay_request(request)?;
-        if let GameplayOutcome::Accepted { revision } = response.outcome {
-            self.host_tx
-                .send(HostToServer::BroadcastBlockChange {
-                    dimension: dimension as u8,
-                    revision,
-                    x,
-                    y,
-                    z,
-                    block,
-                    state,
-                })
-                .ok();
-            self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
-        }
+        let _response = self.handle_gameplay_request(request)?;
         Ok(())
     }
 
@@ -907,22 +1150,50 @@ impl ServerRuntime {
                         })
                         .unwrap_or(session.dimension);
                 }
-                if let GameplayOperation::BlockUse { x, y, z, block } = operation {
-                    self.host_tx
-                        .send(HostToServer::BroadcastBlockChange {
-                            dimension: self
-                                .authority
-                                .session(id)
-                                .map(|session| session.dimension)
-                                .unwrap_or(0),
-                            revision: *revision,
+                match operation {
+                    GameplayOperation::BlockUse { x, y, z, block } => {
+                        let dimension = self
+                            .authority
+                            .session(id)
+                            .and_then(|session| Dimension::from_wire(session.dimension))
+                            .unwrap_or(self.authority.world.dimension);
+                        let state = self.authority.world.get_block_state(x, y, z);
+                        self.queue_block_change(dimension, *revision, x, y, z, block, state);
+                        self.routed_mutations.insert(*revision);
+                    }
+                    GameplayOperation::Container {
+                        x,
+                        y,
+                        z,
+                        action,
+                        slot,
+                    } => {
+                        let action = ContainerAction::from_wire(action)
+                            .expect("authority accepted only a typed container action");
+                        self.route_container_result(id, *revision, x, y, z, slot, action, None);
+                        self.routed_mutations.insert(*revision);
+                    }
+                    GameplayOperation::ContainerClick {
+                        x,
+                        y,
+                        z,
+                        slot,
+                        dragged,
+                        is_left: _,
+                    } => {
+                        self.route_container_result(
+                            id,
+                            *revision,
                             x,
                             y,
                             z,
-                            block,
-                            state: self.authority.world.get_block_state(x, y, z),
-                        })
-                        .ok();
+                            slot,
+                            ContainerAction::Click,
+                            dragged.as_ref(),
+                        );
+                        self.routed_mutations.insert(*revision);
+                    }
+                    _ => {}
                 }
             }
             GameplayOutcome::Rejected { .. } => {
@@ -932,12 +1203,390 @@ impl ServerRuntime {
         Ok(response)
     }
 
+    fn route_container_result(
+        &mut self,
+        id: u64,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot: u16,
+        action: ContainerAction,
+        dragged: Option<&crate::network::protocol::ItemWire>,
+    ) {
+        let position = (x, y, z);
+        if let Some(session) = self.players.get_mut(&id) {
+            match action {
+                ContainerAction::Close => {
+                    session.interest.open_containers.remove(&position);
+                    session.container_viewers.remove(&position);
+                }
+                ContainerAction::Open | ContainerAction::Click => {
+                    session.interest.open_containers.insert(position);
+                    session.container_viewers.insert(position);
+                }
+            }
+        }
+        let dimension = self
+            .authority
+            .session(id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+            .unwrap_or(self.authority.world.dimension);
+        self.queue_interest_update(dimension, revision, InterestKind::BlockEntity(position));
+        let container_targets =
+            self.queue_interest_update(dimension, revision, InterestKind::Container(position));
+        match action {
+            ContainerAction::Open => {
+                let slots = self
+                    .authority
+                    .world
+                    .container_slots_wire(position)
+                    .unwrap_or_default();
+                self.enqueue_host(HostToServer::SendContainerOpenResult {
+                    to: id,
+                    dimension: dimension as u8,
+                    success: true,
+                    x,
+                    y,
+                    z,
+                    slots,
+                    revision,
+                });
+            }
+            ContainerAction::Click => {
+                let slot_value = self
+                    .authority
+                    .world
+                    .container_slot_wire(position, slot)
+                    .flatten();
+                self.enqueue_host(HostToServer::SendContainerClickResult {
+                    to: id,
+                    dimension: dimension as u8,
+                    success: true,
+                    slot_index: slot,
+                    slot: slot_value,
+                    dragged: dragged.copied(),
+                });
+                for target in container_targets {
+                    if target != id {
+                        self.enqueue_host(HostToServer::SendContainerSlotUpdate {
+                            to: target,
+                            dimension: dimension as u8,
+                            revision,
+                            x,
+                            y,
+                            z,
+                            slot_index: slot,
+                            slot: slot_value,
+                        });
+                    }
+                }
+            }
+            ContainerAction::Close => {}
+        }
+    }
+
     fn send_response(&mut self, to: u64, response: GameplayResponse) {
-        self.host_tx
-            .send(HostToServer::SendGameplayResponse { to, response })
-            .ok();
-        self.metrics.outbound_packets = self.metrics.outbound_packets.saturating_add(1);
-        self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
+        if self.enqueue_host(HostToServer::SendGameplayResponse { to, response }) {
+            self.metrics.outbound_packets = self.metrics.outbound_packets.saturating_add(1);
+            self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
+        }
+    }
+
+    fn enqueue_host(&mut self, event: HostToServer) -> bool {
+        match self.host_tx.try_send(event) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.metrics.queue_full = self.metrics.queue_full.saturating_add(1);
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    fn legacy_request(
+        &self,
+        id: u64,
+        client_revision: u64,
+        operation: GameplayOperation,
+    ) -> Option<GameplayRequest> {
+        let session = self.authority.session(id)?;
+        Some(GameplayRequest {
+            request_id: self.authority.current_revision() as u128 + 1,
+            client_sequence: session.last_client_sequence.saturating_add(1).max(1),
+            session_id: id,
+            dimension: session.dimension,
+            client_revision,
+            operation,
+        })
+    }
+
+    fn send_legacy_rejection(&mut self, to: u64, request_id: u128, reason: RejectReason) {
+        let response = GameplayResponse {
+            request_id,
+            server_sequence: self.authority.world.revisions.allocate(),
+            outcome: GameplayOutcome::Rejected { reason },
+        };
+        self.send_response(to, response);
+    }
+
+    pub fn drain_routed_updates(&mut self) -> Vec<RoutedInterestUpdate> {
+        std::mem::take(&mut self.routed_updates)
+    }
+
+    fn queue_interest_update(
+        &mut self,
+        dimension: Dimension,
+        revision: u64,
+        kind: InterestKind,
+    ) -> Vec<u64> {
+        let mut targets: Vec<_> = self
+            .players
+            .values()
+            .filter(|session| match kind {
+                InterestKind::Container(position) => {
+                    session.interest.wants_container(dimension, position)
+                }
+                _ => session.interest.wants(dimension, kind),
+            })
+            .map(|session| session.id)
+            .collect();
+        targets.sort_unstable();
+        for target in &targets {
+            if self.routed_updates.len() >= MAX_INTEREST_UPDATES_PER_TICK {
+                break;
+            }
+            self.routed_updates.push(RoutedInterestUpdate {
+                target: *target,
+                dimension,
+                revision,
+                kind,
+            });
+        }
+        targets
+    }
+
+    fn queue_block_change(
+        &mut self,
+        dimension: Dimension,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        state: u8,
+    ) {
+        let targets =
+            self.queue_interest_update(dimension, revision, InterestKind::Block((x, y, z)));
+        // The legacy network command is a broadcast. It is safe only when
+        // every connected session is in the same dimension and has this block
+        // in its view; otherwise the routed update remains queued for the
+        // targeted transport adapter instead of leaking across dimensions.
+        if !targets.is_empty() && targets.len() == self.players.len() {
+            self.enqueue_host(HostToServer::BroadcastBlockChange {
+                dimension: dimension as u8,
+                revision,
+                x,
+                y,
+                z,
+                block,
+                state,
+            });
+        }
+    }
+
+    /// Project every fixed-tick authority mutation through the authenticated
+    /// interest sets.  This is the only runtime fanout path for automation,
+    /// entity AI and block-entity/container deltas; presentation roots never
+    /// replay these mutations locally.
+    fn route_authority_snapshot(
+        &mut self,
+        snapshot: &crate::authority::contract::AuthoritySnapshot,
+    ) {
+        let dimension = self.authority.world.dimension;
+        for mutation in &snapshot.mutations {
+            if !self.routed_mutations.insert(mutation.revision) {
+                continue;
+            }
+            let (x, y, z) = mutation.position;
+            self.queue_block_change(
+                dimension,
+                mutation.revision,
+                x,
+                y,
+                z,
+                mutation.block,
+                mutation.state,
+            );
+
+            let entity = self.authority.world.get_block_entity(x, y, z).cloned();
+            let block_entity_targets = self.queue_interest_update(
+                dimension,
+                mutation.revision,
+                InterestKind::BlockEntity(mutation.position),
+            );
+            for target in block_entity_targets {
+                self.enqueue_host(HostToServer::SendBlockEntityDelta {
+                    to: target,
+                    dimension: dimension as u8,
+                    revision: mutation.revision,
+                    x,
+                    y,
+                    z,
+                    entity: entity.clone(),
+                });
+            }
+
+            // Container viewers receive concrete slot deltas, not merely an
+            // opaque block-entity notification.  Sending the bounded slot
+            // vector is deterministic for automation and avoids leaking a
+            // private inventory to players who only have chunk interest.
+            let container_targets = self.queue_interest_update(
+                dimension,
+                mutation.revision,
+                InterestKind::Container(mutation.position),
+            );
+            if !container_targets.is_empty() {
+                if let Some(slots) = self.authority.world.container_slots_wire(mutation.position) {
+                    for (slot_index, slot) in slots.into_iter().enumerate() {
+                        let slot_index = slot_index.min(u16::MAX as usize) as u16;
+                        for target in &container_targets {
+                            self.enqueue_host(HostToServer::SendContainerSlotUpdate {
+                                to: *target,
+                                dimension: dimension as u8,
+                                revision: mutation.revision,
+                                x,
+                                y,
+                                z,
+                                slot_index,
+                                slot,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        while self.routed_mutations.len() > 2_048 {
+            let Some(oldest) = self.routed_mutations.iter().next().copied() else {
+                break;
+            };
+            self.routed_mutations.remove(&oldest);
+        }
+
+        // Entity AI runs inside AuthorityCore::tick.  Emit state only to
+        // sessions whose simulation-distance set contains that entity.
+        let mut entities: Vec<_> = self
+            .authority
+            .world
+            .entities
+            .entities
+            .iter()
+            .map(|entity| {
+                let animation_state = u8::from(entity.on_ground)
+                    | (u8::from(entity.target_player) << 1)
+                    | (u8::from(entity.is_ignited) << 2)
+                    | (u8::from(entity.fire_aspect_timer > 0.0) << 3);
+                (
+                    entity.id,
+                    crate::network::protocol::EntityStateWire {
+                        entity_id: entity.id,
+                        entity_type: entity.entity_type.to_wire(),
+                        position: entity.position.to_array(),
+                        velocity: entity.velocity.to_array(),
+                        yaw: entity.yaw,
+                        pitch: entity.pitch,
+                        health: entity.health,
+                        animation_state,
+                    },
+                )
+            })
+            .collect();
+        entities.sort_by_key(|(id, _)| *id);
+        for (entity_id, state) in entities {
+            let targets = self.queue_interest_update(
+                dimension,
+                snapshot.revision,
+                InterestKind::Entity(entity_id),
+            );
+            for target in targets {
+                self.enqueue_host(HostToServer::SendEntityState {
+                    to: target,
+                    dimension: dimension as u8,
+                    sequence: snapshot.tick,
+                    state,
+                });
+            }
+        }
+    }
+
+    fn update_interest(&mut self, session: &mut PlayerSessionState) {
+        session
+            .interest
+            .update_position(session.dimension, session.data.position);
+        let center = Vec3::from_array(session.data.position);
+        let radius = f32::from(session.interest.view_distance) * 16.0;
+        let entities: Vec<_> = self
+            .authority
+            .world
+            .entities
+            .query_radius(center, radius)
+            .map(|entity| entity.id)
+            .collect();
+        let simulation_entities: Vec<_> = self
+            .authority
+            .world
+            .entities
+            .query_radius(
+                center,
+                f32::from(session.interest.simulation_distance) * 16.0,
+            )
+            .map(|entity| entity.id)
+            .collect();
+        session.interest.update_entities(entities);
+        session
+            .interest
+            .update_simulation_entities(simulation_entities);
+        session.interest_chunks = session.interest.chunks.clone();
+        session.simulation_chunks = session.interest.simulation_chunks.clone();
+        session.entity_interest = session.interest.entities.clone();
+        session.simulation_entity_interest = session.interest.simulation_entities.clone();
+        session.container_viewers = session.interest.open_containers.clone();
+    }
+
+    fn update_interest_for(&mut self, id: u64, dimension: Dimension, position: [f32; 3]) {
+        let entities: Vec<_> = self
+            .authority
+            .world
+            .entities
+            .query_radius(
+                Vec3::from_array(position),
+                f32::from(self.properties.view_distance) * 16.0,
+            )
+            .map(|entity| entity.id)
+            .collect();
+        let simulation_entities: Vec<_> = self
+            .authority
+            .world
+            .entities
+            .query_radius(
+                Vec3::from_array(position),
+                f32::from(self.properties.simulation_distance) * 16.0,
+            )
+            .map(|entity| entity.id)
+            .collect();
+        if let Some(session) = self.players.get_mut(&id) {
+            session.dimension = dimension;
+            session.interest.update_position(dimension, position);
+            session.interest.update_entities(entities);
+            session
+                .interest
+                .update_simulation_entities(simulation_entities);
+            session.interest_chunks = session.interest.chunks.clone();
+            session.simulation_chunks = session.interest.simulation_chunks.clone();
+            session.entity_interest = session.interest.entities.clone();
+            session.simulation_entity_interest = session.interest.simulation_entities.clone();
+            session.container_viewers = session.interest.open_containers.clone();
+        }
     }
 
     fn valid_coordinate(&self, x: i32, y: i32, z: i32) -> bool {
@@ -951,70 +1600,13 @@ impl ServerRuntime {
         );
     }
 
-    fn update_interest(&mut self, session: &mut PlayerSessionState) {
-        session.interest_chunks =
-            self.interest_chunks_for(session.dimension, session.data.position);
-        let center = Vec3::from_array(session.data.position);
-        let radius = f32::from(self.properties.view_distance) * 16.0;
-        session.entity_interest = self
-            .authority
-            .world
-            .entities
-            .query_radius(center, radius)
-            .map(|entity| entity.id)
-            .collect();
-    }
-
-    fn interest_chunks_for(
-        &mut self,
-        dimension: Dimension,
-        position: [f32; 3],
-    ) -> HashSet<(i32, i32)> {
-        let _ = dimension;
-        let cx = (position[0] / 16.0).floor() as i32;
-        let cz = (position[2] / 16.0).floor() as i32;
-        let mut interest_chunks = HashSet::new();
-        let radius = i32::from(self.properties.view_distance);
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                if dx * dx + dz * dz <= radius * radius {
-                    let key = (cx + dx, cz + dz);
-                    interest_chunks.insert(key);
-                }
-            }
-        }
-        interest_chunks
-    }
-
-    fn player_path(&self, username: &str) -> PathBuf {
-        let safe: String = username
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        self.world_dir.join("players").join(format!("{safe}.dat"))
-    }
-
-    fn load_player(&self, username: &str) -> Option<(PlayerData, Vec<PlayerEffectWire>)> {
-        let bytes = fs::read(self.player_path(username)).ok()?;
-        let file: PlayerFile = bincode::deserialize(&bytes).ok()?;
-        (file.version == PLAYER_SAVE_VERSION).then_some((file.data, file.effects))
-    }
-
     fn save_player(&self, session: &PlayerSessionState) -> io::Result<()> {
-        let path = self.player_path(&session.username);
-        let bytes = bincode::serialize(&PlayerFile {
-            version: PLAYER_SAVE_VERSION,
-            data: session.data.clone(),
-            effects: session.effects.clone(),
-        })
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
-        atomic_write(&path, &bytes)
+        self.save_manager.save_dedicated_player(
+            &session.username,
+            session.dimension,
+            &session.data,
+            &session.effects,
+        )
     }
 }
 
@@ -1042,11 +1634,6 @@ fn within_reach(session: &PlayerSessionState, x: i32, y: i32, z: i32) -> bool {
     let position = Vec3::from_array(session.data.position);
     position.distance_squared(Vec3::new(x as f32, y as f32, z as f32))
         <= PLAYER_REACH * PLAYER_REACH
-}
-
-fn load_level(world_dir: &Path) -> Option<LevelData> {
-    let bytes = fs::read(world_dir.join("level.dat")).ok()?;
-    bincode::deserialize(&bytes).ok()
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -1248,8 +1835,10 @@ mod tests {
         let blocking_file = world_dir.with_extension("blocked");
         fs::write(&blocking_file, b"not a directory").unwrap();
         runtime.world_dir = blocking_file.clone();
+        runtime.save_manager.world_dir = blocking_file.clone();
         assert!(runtime.save_all().is_err());
         runtime.world_dir = world_dir.clone();
+        runtime.save_manager.world_dir = world_dir.clone();
         assert!(runtime.save_all().is_ok());
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&world_dir);

@@ -1298,6 +1298,7 @@ pub struct Menu {
     /// after a refresh.
     selected_world: Option<PathBuf>,
     world_scroll: usize,
+    resource_pack_scroll: usize,
     create_name: String,
     create_seed: String,
     create_mode: GameMode,
@@ -1332,6 +1333,20 @@ impl Menu {
             self.settings.language,
         );
         self.font_source = self.resource_packs.resolve_font_source("font/ui.json");
+    }
+
+    fn activate_field(&mut self, field: TextField) {
+        self.active_field = Some(field);
+        // Keep keyboard focus and the text caret on the same logical control
+        // when a field is entered with the mouse.  This makes Tab/Shift+Tab
+        // continue from the clicked field instead of from a stale ring.
+        self.focus_index = match field {
+            TextField::WorldName => 0,
+            TextField::Seed => 1,
+            TextField::HostPort | TextField::ServerAddress => 2,
+            TextField::JoinPort => 3,
+            TextField::Username => 4,
+        };
     }
 
     fn tr(&self, key: &str) -> String {
@@ -1525,6 +1540,7 @@ impl Menu {
             worlds: discover_worlds(),
             selected_world: None,
             world_scroll: 0,
+            resource_pack_scroll: 0,
             create_name: "NEW WORLD".to_string(),
             create_seed: String::new(),
             create_mode: GameMode::Survival,
@@ -1572,12 +1588,24 @@ impl Menu {
     }
 
     pub fn handle_scroll(&mut self, direction: i32) {
-        if self.screen != MenuScreen::Worlds || self.worlds.len() <= 5 {
-            return;
+        match self.screen {
+            MenuScreen::Worlds if self.worlds.len() > 5 => {
+                let max_scroll = self.worlds.len() - 5;
+                self.world_scroll =
+                    (self.world_scroll as i32 + direction).clamp(0, max_scroll as i32) as usize;
+            }
+            MenuScreen::ResourcePacks => {
+                let count = self.resource_packs.available().len();
+                if count > 5 {
+                    let max_scroll = count - 5;
+                    self.resource_pack_scroll = (self.resource_pack_scroll as i32 + direction)
+                        .clamp(0, max_scroll as i32)
+                        as usize;
+                    self.ensure_focus_visible();
+                }
+            }
+            _ => {}
         }
-        let max_scroll = self.worlds.len() - 5;
-        self.world_scroll =
-            (self.world_scroll as i32 + direction).clamp(0, max_scroll as i32) as usize;
     }
 
     pub fn handle_key(
@@ -1624,6 +1652,19 @@ impl Menu {
                     }
                 },
                 Key::Named(NamedKey::Enter) => self.active_field = None,
+                Key::Named(NamedKey::Tab) => {
+                    // Commit the current text field before moving focus.  Tab
+                    // must remain usable from text input rather than being
+                    // swallowed by the character-edit branch; the entered
+                    // text stays in its backing string for the next field.
+                    self.active_field = None;
+                    let direction = if shift_held {
+                        crate::accessibility::FocusDirection::Backward
+                    } else {
+                        crate::accessibility::FocusDirection::Forward
+                    };
+                    self.move_focus(direction);
+                }
                 Key::Character(text) if !repeat => {
                     for ch in text.chars() {
                         match field {
@@ -1681,6 +1722,14 @@ impl Menu {
             self.move_focus(direction);
             return MenuAction::None;
         }
+        if matches!(logical_key, Key::Named(NamedKey::ArrowDown)) {
+            self.move_focus(crate::accessibility::FocusDirection::Forward);
+            return MenuAction::None;
+        }
+        if matches!(logical_key, Key::Named(NamedKey::ArrowUp)) {
+            self.move_focus(crate::accessibility::FocusDirection::Backward);
+            return MenuAction::None;
+        }
         if matches!(logical_key, Key::Named(NamedKey::Enter)) {
             return self.activate_focused();
         }
@@ -1698,6 +1747,37 @@ impl Menu {
         }
         focus.move_by(direction);
         self.focus_index = focus.index();
+        self.ensure_focus_visible();
+    }
+
+    fn ensure_focus_visible(&mut self) {
+        match self.screen {
+            MenuScreen::Worlds => {
+                let count = self.worlds.len();
+                if count == 0 || self.focus_index >= count {
+                    return;
+                }
+                if self.focus_index < self.world_scroll {
+                    self.world_scroll = self.focus_index;
+                } else if self.focus_index >= self.world_scroll + 5 {
+                    self.world_scroll = self.focus_index.saturating_sub(4);
+                }
+                self.world_scroll = self.world_scroll.min(count.saturating_sub(5));
+            }
+            MenuScreen::ResourcePacks => {
+                let count = self.resource_packs.available().len();
+                if count == 0 || self.focus_index >= count {
+                    return;
+                }
+                if self.focus_index < self.resource_pack_scroll {
+                    self.resource_pack_scroll = self.focus_index;
+                } else if self.focus_index >= self.resource_pack_scroll + 5 {
+                    self.resource_pack_scroll = self.focus_index.saturating_sub(4);
+                }
+                self.resource_pack_scroll = self.resource_pack_scroll.min(count.saturating_sub(5));
+            }
+            _ => {}
+        }
     }
 
     fn activate_focused(&mut self) -> MenuAction {
@@ -1719,7 +1799,7 @@ impl Menu {
                 self.multiplayer_mode,
                 self.server_address_book.addresses().len(),
             ),
-            MenuScreen::Worlds => (self.worlds.len().saturating_sub(self.world_scroll)).min(5) + 6,
+            MenuScreen::Worlds => self.worlds.len() + 6,
             MenuScreen::CreateWorld => 11,
             MenuScreen::ConfirmDelete => 2,
         }
@@ -1787,7 +1867,8 @@ impl Menu {
                     .iter()
                     .enumerate()
                     .map(|(index, _)| {
-                        let top = 0.56 - index as f32 * 0.14;
+                        let visible_index = index as isize - self.resource_pack_scroll as isize;
+                        let top = 0.56 - visible_index as f32 * 0.14;
                         [-0.78, 0.78, top - 0.11, top]
                     })
                     .collect::<Vec<_>>();
@@ -1803,10 +1884,10 @@ impl Menu {
                 self.server_address_book.addresses().len(),
             ),
             MenuScreen::Worlds => {
-                let visible = (self.worlds.len().saturating_sub(self.world_scroll)).min(5);
-                let mut rects = (0..visible)
+                let mut rects = (0..self.worlds.len())
                     .map(|index| {
-                        let top = 0.58 - index as f32 * 0.19;
+                        let visible_index = index as isize - self.world_scroll as isize;
+                        let top = 0.58 - visible_index as f32 * 0.19;
                         [-0.72, 0.72, top - 0.15, top]
                     })
                     .collect::<Vec<_>>();
@@ -1872,19 +1953,19 @@ impl Menu {
                 } else if self.multiplayer_mode == MultiplayerMode::Host
                     && hit(x, y, -0.52, 0.52, 0.17, 0.30)
                 {
-                    self.active_field = Some(TextField::HostPort);
+                    self.activate_field(TextField::HostPort);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
                     && hit(x, y, -0.56, -0.02, 0.17, 0.30)
                 {
-                    self.active_field = Some(TextField::ServerAddress);
+                    self.activate_field(TextField::ServerAddress);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
                     && hit(x, y, -0.56, -0.02, -0.04, 0.09)
                 {
-                    self.active_field = Some(TextField::JoinPort);
+                    self.activate_field(TextField::JoinPort);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
                     && hit(x, y, -0.56, -0.02, -0.25, -0.12)
                 {
-                    self.active_field = Some(TextField::Username);
+                    self.activate_field(TextField::Username);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
                     && self.select_recent_server(x, y)
                 {
@@ -2002,9 +2083,9 @@ impl Menu {
             }
             MenuScreen::CreateWorld => {
                 if hit(x, y, -0.52, 0.52, 0.34, 0.47) {
-                    self.active_field = Some(TextField::WorldName);
+                    self.activate_field(TextField::WorldName);
                 } else if hit(x, y, -0.52, 0.52, 0.13, 0.26) {
-                    self.active_field = Some(TextField::Seed);
+                    self.activate_field(TextField::Seed);
                 } else if hit(x, y, -0.52, 0.52, -0.08, 0.05) {
                     self.create_mode = match self.create_mode {
                         GameMode::Survival => GameMode::Creative,
@@ -2337,6 +2418,9 @@ impl Menu {
             }
             _ if hit(x, y, -0.82, -0.30, -0.78, -0.64) => {
                 self.screen = MenuScreen::ResourcePacks;
+                self.resource_pack_scroll = self
+                    .resource_pack_scroll
+                    .min(self.resource_packs.available().len().saturating_sub(5));
                 self.focus_index = 0;
                 return;
             }
@@ -2526,10 +2610,16 @@ impl Menu {
                 [1.0, 0.35, 0.25, 1.0],
             );
         }
-        let ui_scale = self.settings.accessibility.ui_scale.clamp(0.75, 2.0);
+        let requested_scale = self.settings.accessibility.ui_scale.clamp(0.75, 2.0);
+        let max_abs = vertices
+            .iter()
+            .skip(ui_start)
+            .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()])
+            .fold(0.0, f32::max);
+        let ui_scale = crate::accessibility::fit_ui_scale(requested_scale, max_abs);
         for vertex in vertices.iter_mut().skip(ui_start) {
-            vertex.position[0] = (vertex.position[0] * ui_scale).clamp(-1.0, 1.0);
-            vertex.position[1] = (vertex.position[1] * ui_scale).clamp(-1.0, 1.0);
+            vertex.position[0] *= ui_scale;
+            vertex.position[1] *= ui_scale;
             if self.settings.accessibility.high_contrast {
                 let is_focus =
                     vertex.color[0] > 0.9 && vertex.color[1] > 0.6 && vertex.color[2] < 0.35;
@@ -3211,9 +3301,14 @@ impl Menu {
 
     fn handle_resource_pack_click(&mut self, x: f32, y: f32) {
         let available = self.resource_packs.available();
+        let visible_count = available
+            .len()
+            .saturating_sub(self.resource_pack_scroll)
+            .min(5);
         let row = ((0.56 - y) / 0.14).floor() as usize;
-        if y <= 0.56 && y >= 0.56 - available.len() as f32 * 0.14 {
-            if let Some(summary) = available.get(row) {
+        if row < visible_count && y <= 0.56 && y >= 0.56 - visible_count as f32 * 0.14 {
+            let index = self.resource_pack_scroll + row;
+            if let Some(summary) = available.get(index) {
                 let mut selected = self.resource_packs.enabled_order().to_vec();
                 if let Some(position) = selected.iter().position(|id| id == &summary.manifest.id) {
                     selected.remove(position);
@@ -3359,8 +3454,9 @@ impl Menu {
                 [0.8; 4],
             );
         }
-        for (index, summary) in available.iter().enumerate() {
-            let top = 0.56 - index as f32 * 0.14;
+        let start = self.resource_pack_scroll.min(available.len());
+        for (visible_index, summary) in available.iter().skip(start).take(5).enumerate() {
+            let top = 0.56 - visible_index as f32 * 0.14;
             let selected = summary.enabled;
             draw_button_state(
                 vertices,
@@ -4304,5 +4400,46 @@ key_pause = ESC
         assert_eq!(cycle_fps_cap(60, 1), 144);
         assert_eq!(cycle_fps_cap(144, 1), 0);
         assert_eq!(fps_cap_label(0), "UNCAPPED");
+    }
+
+    #[test]
+    fn accessibility_settings_survive_restart_and_resource_pack_ids_round_trip() {
+        let mut settings = GameSettings::default();
+        settings.accessibility.ui_scale = 1.75;
+        settings.accessibility.chat_scale = 1.5;
+        settings.accessibility.chat_opacity = 0.25;
+        settings.accessibility.subtitles = true;
+        settings.accessibility.high_contrast = true;
+        settings.accessibility.reduce_flashing = true;
+        settings.accessibility.toggle_sprint = true;
+        settings.accessibility.toggle_sneak = true;
+        settings.accessibility.camera_bobbing = false;
+        settings.accessibility.damage_tilt = false;
+        settings.resource_packs = vec!["demo.base".to_string(), "demo.hud".to_string()];
+
+        let loaded = GameSettings::from_file_contents(&settings.to_file_contents());
+        assert_eq!(loaded.accessibility, settings.accessibility);
+        assert_eq!(loaded.resource_packs, settings.resource_packs);
+    }
+
+    #[test]
+    fn focus_layout_rects_remain_inside_ndc_at_common_aspects() {
+        let rects = [
+            [-0.90, 0.90, -0.88, 0.82],   // accessibility
+            [-0.86, 0.86, -0.88, 0.82],   // resource packs/worlds
+            [-0.64, 0.64, -0.92, 0.78],   // create world
+            [-0.48, 0.48, -0.84, 0.72],   // controls/confirm delete
+            [-0.99, 0.99, -0.97, -0.875], // chat input
+        ];
+        for aspect in [4.0f32 / 3.0, 16.0 / 9.0, 21.0 / 9.0] {
+            assert!(aspect.is_finite() && aspect > 0.0);
+            for [x0, x1, y0, y1] in rects {
+                assert!(x0 < x1 && y0 < y1);
+                assert!((-1.0..=1.0).contains(&x0));
+                assert!((-1.0..=1.0).contains(&x1));
+                assert!((-1.0..=1.0).contains(&y0));
+                assert!((-1.0..=1.0).contains(&y1));
+            }
+        }
     }
 }

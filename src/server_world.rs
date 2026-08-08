@@ -11,8 +11,11 @@ use crate::commands::{self, Command, TimeCommand};
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::EntityManager;
 use crate::game_rules::{WorldRules, WorldType};
-use crate::network::protocol::{GameplayOperation, GameplayRequest, PlayerId, RejectReason};
+use crate::network::protocol::{
+    ContainerAction, GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
+};
 use crate::redstone::RedstoneSystem;
+use crate::save::{ChunkSaveData, EntitySaveData, MutationRevisionIndex};
 use crate::world::BlockType;
 use glam::Vec3;
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,6 +56,7 @@ pub struct ServerWorld {
     pub container_viewers: BTreeMap<(i32, i32, i32), BTreeSet<PlayerId>>,
     pub sleeping_players: BTreeSet<PlayerId>,
     block_revisions: BTreeMap<(i32, i32, i32), u64>,
+    chunk_revisions: BTreeMap<(i32, i32), u64>,
     pub last_snapshot: AuthoritySnapshot,
 }
 
@@ -80,6 +84,7 @@ impl ServerWorld {
             container_viewers: BTreeMap::new(),
             sleeping_players: BTreeSet::new(),
             block_revisions: BTreeMap::new(),
+            chunk_revisions: BTreeMap::new(),
             last_snapshot: AuthoritySnapshot::empty(),
         };
         world.ensure_chunk(0, 0);
@@ -117,6 +122,113 @@ impl ServerWorld {
         self.chunks.get_block_entity(x, y, z)
     }
 
+    /// Return a serializable view of a container slot for the transport
+    /// adapter. `None` is a valid empty slot; an out-of-range slot returns
+    /// `None` as well and is rejected by dispatch before this helper is used.
+    pub fn container_slot_wire(
+        &self,
+        position: (i32, i32, i32),
+        slot: u16,
+    ) -> Option<Option<ItemWire>> {
+        let entity = self.get_block_entity(position.0, position.1, position.2)?;
+        let access = ContainerAccess::for_entity(entity)?;
+        if usize::from(slot) >= access.slot_count {
+            return None;
+        }
+        let stack = match entity {
+            BlockEntity::Chest(chest) => chest.inventory.slots[usize::from(slot)],
+            BlockEntity::Furnace(furnace) => furnace.slots[usize::from(slot)],
+            BlockEntity::Hopper(hopper) => hopper.slots[usize::from(slot)],
+            BlockEntity::Dispenser(dispenser) => dispenser.slots[usize::from(slot)],
+            BlockEntity::Dropper(dropper) => dropper.slots[usize::from(slot)],
+            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => None,
+        };
+        Some(stack.as_ref().map(ItemWire::from_stack))
+    }
+
+    pub fn container_slots_wire(&self, position: (i32, i32, i32)) -> Option<Vec<Option<ItemWire>>> {
+        let entity = self.get_block_entity(position.0, position.1, position.2)?;
+        let count = ContainerAccess::for_entity(entity)?.slot_count;
+        (0..count)
+            .map(|slot| self.container_slot_wire(position, slot as u16))
+            .collect()
+    }
+
+    /// Highest authoritative mutation revision recorded in a chunk. This is
+    /// persisted alongside the chunk payload so an unload/reload cannot make
+    /// a stale client delta appear newer than the saved world.
+    pub fn chunk_revision(&self, chunk_x: i32, chunk_z: i32) -> u64 {
+        self.chunk_revisions
+            .get(&(chunk_x, chunk_z))
+            .copied()
+            .unwrap_or_else(|| {
+                self.block_revisions
+                    .iter()
+                    .filter(|((x, _y, z), _)| {
+                        x.div_euclid(16) == chunk_x && z.div_euclid(16) == chunk_z
+                    })
+                    .map(|(_, revision)| *revision)
+                    .max()
+                    .unwrap_or(0)
+            })
+    }
+
+    /// Build the bounded per-chunk revision index consumed by SaveManager.
+    pub fn mutation_revision_index(&self) -> MutationRevisionIndex {
+        let mut index = MutationRevisionIndex::default();
+        for (&(chunk_x, chunk_z), &revision) in &self.chunk_revisions {
+            let _ = index.ensure_at_least(self.dimension, chunk_x, chunk_z, revision);
+        }
+        for (&(x, _y, z), &revision) in &self.block_revisions {
+            let _ =
+                index.ensure_at_least(self.dimension, x.div_euclid(16), z.div_euclid(16), revision);
+        }
+        index
+    }
+
+    /// Restore a persisted chunk into the authoritative map. Existing
+    /// generated terrain is replaced by the saved payload, while the world
+    /// revision clock observes the payload revision before accepting requests.
+    pub fn restore_saved_chunk(&mut self, data: &ChunkSaveData) {
+        self.ensure_chunk(data.chunk_x, data.chunk_z);
+        if let Some(chunk) = self.chunks.chunks.get_mut(&(data.chunk_x, data.chunk_z)) {
+            data.restore_to_chunk(chunk);
+        }
+        self.chunk_revisions
+            .insert((data.chunk_x, data.chunk_z), data.mutation_revision);
+        self.revisions.observe(data.mutation_revision);
+    }
+
+    /// Restore persistent entities once during authority startup. Entity IDs
+    /// are reallocated by EntityManager; gameplay state, ownership and item
+    /// metadata remain in the serialized EntitySaveData payload.
+    pub fn restore_saved_entities(&mut self, data: &[EntitySaveData]) {
+        self.entities = EntityManager::new();
+        for entity in data {
+            self.entities.add_restored_entity(entity);
+        }
+    }
+
+    /// Remove a player's container viewer registrations on logout, dimension
+    /// change, or a failed reconnect. Empty viewer sets are pruned so they do
+    /// not keep routing slots to a departed identity.
+    pub fn close_container_viewers(&mut self, player_id: PlayerId) {
+        self.container_viewers.retain(|_, viewers| {
+            viewers.remove(&player_id);
+            !viewers.is_empty()
+        });
+    }
+
+    pub fn container_viewers_at(
+        &self,
+        position: (i32, i32, i32),
+    ) -> impl Iterator<Item = &PlayerId> {
+        self.container_viewers
+            .get(&position)
+            .into_iter()
+            .flat_map(|viewers| viewers.iter())
+    }
+
     /// Apply a real voxel mutation and return the revision-bearing event.
     pub fn set_block(
         &mut self,
@@ -146,6 +258,8 @@ impl ServerWorld {
         }
         let revision = self.revisions.allocate();
         self.block_revisions.insert((x, y, z), revision);
+        self.chunk_revisions
+            .insert((x.div_euclid(16), z.div_euclid(16)), revision);
         Ok(Some(WorldMutation {
             dimension: self.dimension as u8,
             position: (x, y, z),
@@ -233,7 +347,27 @@ impl ServerWorld {
                 y,
                 z,
                 slot,
-            } => self.dispatch_container(*action, *x, *y, *z, *slot, player_id),
+            } => {
+                let action = ContainerAction::from_wire(*action)
+                    .ok_or_else(|| WorldDispatchError::new(RejectReason::InvalidState))?;
+                self.dispatch_container(action, *x, *y, *z, *slot, player_id, None)
+            }
+            GameplayOperation::ContainerClick {
+                x,
+                y,
+                z,
+                slot,
+                is_left: _,
+                dragged,
+            } => self.dispatch_container(
+                ContainerAction::Click,
+                *x,
+                *y,
+                *z,
+                *slot,
+                player_id,
+                dragged.as_ref(),
+            ),
             GameplayOperation::Sleep { x, y, z } => {
                 if self.get_block(*x, *y, *z) != BlockType::Bed {
                     return Err(WorldDispatchError::new(RejectReason::InvalidState));
@@ -258,12 +392,13 @@ impl ServerWorld {
 
     fn dispatch_container(
         &mut self,
-        action: u8,
+        action: ContainerAction,
         x: i32,
         y: i32,
         z: i32,
         slot: u16,
         player_id: PlayerId,
+        dragged: Option<&ItemWire>,
     ) -> Result<Option<WorldMutation>, WorldDispatchError> {
         let Some(entity) = self.chunks.get_block_entity(x, y, z) else {
             return Err(WorldDispatchError::new(RejectReason::InvalidState));
@@ -271,26 +406,132 @@ impl ServerWorld {
         let Some(access) = ContainerAccess::for_entity(entity) else {
             return Err(WorldDispatchError::new(RejectReason::InvalidState));
         };
-        if action > 1 {
-            // The current envelope does not carry a slot payload.  Refuse a
-            // click rather than acknowledging a bookkeeping-only operation.
-            return Err(WorldDispatchError::new(RejectReason::Unsupported));
-        }
-        if usize::from(slot) >= access.slot_count && slot != 0 {
+        if usize::from(slot) >= access.slot_count {
             return Err(WorldDispatchError::new(RejectReason::InvalidState));
         }
-        if action == 0 {
-            self.container_viewers
-                .entry((x, y, z))
-                .or_default()
-                .remove(&player_id);
-        } else {
-            self.container_viewers
-                .entry((x, y, z))
-                .or_default()
-                .insert(player_id);
+        let position = (x, y, z);
+        match action {
+            ContainerAction::Open => {
+                self.container_viewers
+                    .entry(position)
+                    .or_default()
+                    .insert(player_id);
+            }
+            ContainerAction::Close => {
+                self.container_viewers
+                    .entry(position)
+                    .or_default()
+                    .remove(&player_id);
+                if self
+                    .container_viewers
+                    .get(&position)
+                    .is_some_and(BTreeSet::is_empty)
+                {
+                    self.container_viewers.remove(&position);
+                }
+            }
+            ContainerAction::Click => {
+                let is_viewer = self
+                    .container_viewers
+                    .get(&position)
+                    .is_some_and(|viewers| viewers.contains(&player_id));
+                if !is_viewer {
+                    return Err(WorldDispatchError::new(RejectReason::PermissionDenied));
+                }
+                if let Some(dragged) = dragged {
+                    self.replace_container_slot(position, slot, dragged)?;
+                } else {
+                    self.extract_container_slot(position, slot)?;
+                }
+            }
         }
         Ok(Some(self.touch_revision(x, y, z)))
+    }
+
+    /// The compact gameplay envelope carries a slot but no cursor payload.
+    /// A click therefore performs the deterministic server-side primitive of
+    /// extracting one item; the resulting slot is returned through the
+    /// `SendContainerClickResult` adapter. Rich cursor/drag payloads remain a
+    /// protocol extension, never a renderer-side mutation.
+    fn extract_container_slot(
+        &mut self,
+        position: (i32, i32, i32),
+        slot: u16,
+    ) -> Result<(), WorldDispatchError> {
+        let slot = usize::from(slot);
+        let Some(entity) = self
+            .chunks
+            .get_block_entity_mut(position.0, position.1, position.2)
+        else {
+            return Err(WorldDispatchError::new(RejectReason::InvalidState));
+        };
+        let stack = match entity {
+            BlockEntity::Chest(chest) => &mut chest.inventory.slots[slot],
+            BlockEntity::Furnace(furnace) => &mut furnace.slots[slot],
+            BlockEntity::Hopper(hopper) => &mut hopper.slots[slot],
+            BlockEntity::Dispenser(dispenser) => &mut dispenser.slots[slot],
+            BlockEntity::Dropper(dropper) => &mut dropper.slots[slot],
+            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {
+                return Err(WorldDispatchError::new(RejectReason::InvalidState));
+            }
+        };
+        let Some(existing) = stack.as_mut() else {
+            return Err(WorldDispatchError::new(RejectReason::InvalidState));
+        };
+        existing.count = existing.count.saturating_sub(1);
+        if existing.count == 0 {
+            *stack = None;
+        }
+        match entity {
+            BlockEntity::Chest(chest) => chest.revision = chest.revision.wrapping_add(1),
+            BlockEntity::Furnace(furnace) => furnace.revision = furnace.revision.wrapping_add(1),
+            BlockEntity::Hopper(hopper) => hopper.revision = hopper.revision.wrapping_add(1),
+            BlockEntity::Dispenser(dispenser) => {
+                dispenser.revision = dispenser.revision.wrapping_add(1)
+            }
+            BlockEntity::Dropper(dropper) => dropper.revision = dropper.revision.wrapping_add(1),
+            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {}
+        }
+        Ok(())
+    }
+
+    fn replace_container_slot(
+        &mut self,
+        position: (i32, i32, i32),
+        slot: u16,
+        wire: &ItemWire,
+    ) -> Result<(), WorldDispatchError> {
+        let Some(value) = wire.to_stack() else {
+            return Err(WorldDispatchError::new(RejectReason::InvalidState));
+        };
+        let slot = usize::from(slot);
+        let Some(entity) = self
+            .chunks
+            .get_block_entity_mut(position.0, position.1, position.2)
+        else {
+            return Err(WorldDispatchError::new(RejectReason::InvalidState));
+        };
+        match entity {
+            BlockEntity::Chest(chest) => chest.inventory.slots[slot] = Some(value),
+            BlockEntity::Furnace(furnace) => furnace.slots[slot] = Some(value),
+            BlockEntity::Hopper(hopper) => hopper.slots[slot] = Some(value),
+            BlockEntity::Dispenser(dispenser) => dispenser.slots[slot] = Some(value),
+            BlockEntity::Dropper(dropper) => dropper.slots[slot] = Some(value),
+            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {
+                return Err(WorldDispatchError::new(RejectReason::InvalidState));
+            }
+        }
+        match entity {
+            BlockEntity::Chest(chest) => chest.revision = chest.revision.wrapping_add(1),
+            BlockEntity::Furnace(furnace) => furnace.revision = furnace.revision.wrapping_add(1),
+            BlockEntity::Hopper(hopper) => hopper.revision = hopper.revision.wrapping_add(1),
+            BlockEntity::Dispenser(dispenser) => {
+                dispenser.revision = dispenser.revision.wrapping_add(1)
+            }
+            BlockEntity::Dropper(dropper) => dropper.revision = dropper.revision.wrapping_add(1),
+            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {}
+        }
+        Ok(())
     }
 
     fn dispatch_command(&mut self, input: &str, _operator: bool) -> Result<(), WorldDispatchError> {
@@ -343,6 +584,8 @@ impl ServerWorld {
     fn touch_revision(&mut self, x: i32, y: i32, z: i32) -> WorldMutation {
         let revision = self.revisions.allocate();
         self.block_revisions.insert((x, y, z), revision);
+        self.chunk_revisions
+            .insert((x.div_euclid(16), z.div_euclid(16)), revision);
         WorldMutation {
             dimension: self.dimension as u8,
             position: (x, y, z),
@@ -585,7 +828,8 @@ fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> 
     match operation {
         GameplayOperation::BlockUse { x, y, z, .. }
         | GameplayOperation::Sleep { x, y, z }
-        | GameplayOperation::Container { x, y, z, .. } => Some((*x, *y, *z)),
+        | GameplayOperation::Container { x, y, z, .. }
+        | GameplayOperation::ContainerClick { x, y, z, .. } => Some((*x, *y, *z)),
         _ => None,
     }
 }

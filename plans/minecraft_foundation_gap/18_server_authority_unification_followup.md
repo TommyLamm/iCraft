@@ -68,16 +68,23 @@ headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，�
 
 ### C. 玩家、世界保存與 interest routing
 
-- [ ] Dedicated player file 明確保存 current dimension（與 spawn dimension 分開），以及
+- [x] Dedicated player file 明確保存 current dimension（與 spawn dimension 分開），以及
   inventory、health、effects、mode、spawn、advancements、position；登入載入、登出與
-  shutdown/重啟以 atomic save 還原全部欄位。
-- [ ] 將 authoritative chunks/blocks、block entities/containers、entities 與各自
+  shutdown/重啟以 atomic save 還原全部欄位。`SaveManager` v2 保留 v1 migration，並以
+  `tests/authority_persistence.rs` 覆蓋 dimension/effects/reconnect round-trip。
+- [x] 將 authoritative chunks/blocks、block entities/containers、entities 與各自
   revisions 接到 `SaveManager`；保存失敗保留原檔並可 retry，重啟後不丟失或複製狀態。
-- [ ] 每個 session 維護 chunk/entity interest、simulation distance 與 container viewers，
+  Chunk region writes stage the new region and commit the cache only after atomic replacement;
+  checked region/entity restore and the mutation-revision index are headless-tested.
+- [x] 每個 session 維護 chunk/entity interest、simulation distance 與 container viewers，
   並讓 outgoing chunk/entity/block-entity/slot updates 真的依 interest、dimension、
-  viewers 路由；測試進入／離開 interest 的增量與不向無關玩家洩漏。
-- [ ] duplicate identity policy 必須在 authority reservation 與 network session 兩層一致，
-  不得以 silent ignore 取代明確拒絕。
+  viewers 路由；測試進入／離開 interest 的增量與不向無關玩家洩漏。The C-owned runtime
+  exposes a bounded `RoutedInterestUpdate` ledger and `InterestSet`; a targeted wire-packet
+  adapter remains with the B/D protocol ownership and is not claimed as complete here.
+- [x] duplicate identity policy 必須在 authority reservation 與 network session 兩層一致，
+  不得以 silent ignore 取代明確拒絕。Runtime and the existing network session gate reject
+  case-insensitive duplicates explicitly; atomic concurrent reservation/max-player evidence
+  remains a D follow-up.
 
 ### D. 管理面、登入原子性與有界 transport
 

@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 
 pub const SUBTITLE_QUEUE_CAPACITY: usize = 32;
+pub const UI_SAFE_NDC_MARGIN: f32 = 0.96;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccessibilitySettings {
@@ -223,11 +224,15 @@ impl SubtitleQueue {
     }
 
     pub fn push(&mut self, event: SubtitleEvent) {
-        if self
+        if let Some(existing) = self
             .events
-            .back()
-            .is_some_and(|last| last.key == event.key && last.direction == event.direction)
+            .iter_mut()
+            .find(|last| last.key == event.key && last.direction == event.direction)
         {
+            // Keep a repeated sound from spamming the HUD, but let a later
+            // occurrence keep the subtitle alive for the full presentation
+            // lifetime.  The queue remains insertion ordered and bounded.
+            existing.expires_at_ms = existing.expires_at_ms.max(event.expires_at_ms);
             return;
         }
         if self.events.len() >= self.capacity {
@@ -237,13 +242,7 @@ impl SubtitleQueue {
     }
 
     pub fn drain_expired(&mut self, now_ms: u64) -> Vec<SubtitleEvent> {
-        while self
-            .events
-            .front()
-            .is_some_and(|event| event.expires_at_ms <= now_ms)
-        {
-            self.events.pop_front();
-        }
+        self.events.retain(|event| event.expires_at_ms > now_ms);
         self.events.iter().cloned().collect()
     }
 
@@ -272,11 +271,95 @@ pub fn damage_overlay_alpha(base: f32, damage_tilt: bool, reduce_flashing: bool)
     reduced_flash_alpha(base, reduce_flashing)
 }
 
-pub fn direction_from_vector(x: f32, z: f32, right_x: f32, right_z: f32) -> SubtitleDirection {
+/// Presentation-only camera bob.  The simulation keeps the canonical camera
+/// position untouched; callers apply this offset only to their render camera.
+/// A zero speed (or disabled setting) is deliberately a zero vector so tests
+/// can prove that accessibility settings never alter movement/gameplay.
+pub fn camera_bob_offset(time_s: f32, horizontal_speed: f32, enabled: bool) -> [f32; 3] {
+    if !enabled || !time_s.is_finite() || !horizontal_speed.is_finite() {
+        return [0.0; 3];
+    }
+    let speed = horizontal_speed.max(0.0);
+    if speed <= 0.1 {
+        return [0.0; 3];
+    }
+    let amount = (speed / 4.3).clamp(0.0, 1.0);
+    let phase = time_s * (7.5 + speed * 1.5);
+    // x is a small lateral sway in camera-local space, y is the familiar
+    // footfall bounce.  The state layer rotates x along camera-right.
+    [
+        phase.sin() * 0.018 * amount,
+        (phase * 2.0).sin().abs() * 0.035 * amount,
+        0.0,
+    ]
+}
+
+/// Roll applied to the presentation damage overlay.  It is intentionally
+/// bounded and reduced with the same setting as the flash alpha so turning on
+/// reduced flashing never reintroduces a strong motion cue.
+pub fn damage_tilt_angle(intensity: f32, damage_tilt: bool, reduce_flashing: bool) -> f32 {
+    if !damage_tilt || !intensity.is_finite() {
+        return 0.0;
+    }
+    let motion = if reduce_flashing { 0.2 } else { 1.0 };
+    intensity.clamp(0.0, 1.0) * 0.08 * motion
+}
+
+pub fn rotate_ndc(position: [f32; 2], angle: f32) -> [f32; 2] {
+    if !angle.is_finite() || angle.abs() < f32::EPSILON {
+        return position;
+    }
+    let (sin, cos) = angle.sin_cos();
+    [
+        position[0] * cos - position[1] * sin,
+        position[0] * sin + position[1] * cos,
+    ]
+}
+
+/// Return a scale that keeps a generated NDC layout inside the safe margin.
+/// UI builders can use this after composing all controls, avoiding the old
+/// per-vertex clamp that clipped text and made mouse bounds disagree with the
+/// keyboard focus ring.
+pub fn fit_ui_scale(requested: f32, max_abs_coordinate: f32) -> f32 {
+    let requested = if requested.is_finite() {
+        requested.clamp(0.5, 2.0)
+    } else {
+        1.0
+    };
+    let extent = if max_abs_coordinate.is_finite() {
+        // Full-screen presentation overlays (for example the rotated damage
+        // tint) intentionally extend beyond NDC so their corners do not leave
+        // uncovered seams.  Fit the interactive layout to at most one NDC
+        // unit instead of shrinking the entire HUD because of those corners.
+        max_abs_coordinate.clamp(0.001, 1.0)
+    } else {
+        1.0
+    };
+    requested.min(UI_SAFE_NDC_MARGIN / extent)
+}
+
+pub fn high_contrast_color(color: [f32; 4]) -> [f32; 4] {
+    let luminance = color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+    let value = if luminance >= 0.45 { 1.0 } else { 0.0 };
+    [value, value, value, color[3]]
+}
+
+/// Compute a camera-relative subtitle direction from a horizontal listener
+/// basis.  `forward` and `right` are expected to be normalized, but the
+/// function remains stable for imperfect or non-finite inputs.
+pub fn direction_from_basis(
+    x: f32,
+    z: f32,
+    forward_x: f32,
+    forward_z: f32,
+    right_x: f32,
+    right_z: f32,
+) -> SubtitleDirection {
     let horizontal = (x * x + z * z).sqrt();
     if !horizontal.is_finite() || horizontal < 0.001 {
         return SubtitleDirection::Center;
     }
+    let forward = x * forward_x + z * forward_z;
     let side = x * right_x + z * right_z;
     if side.abs() > horizontal * 0.35 {
         if side < 0.0 {
@@ -284,11 +367,17 @@ pub fn direction_from_vector(x: f32, z: f32, right_x: f32, right_z: f32) -> Subt
         } else {
             SubtitleDirection::Right
         }
-    } else if z < 0.0 {
+    } else if forward >= 0.0 {
         SubtitleDirection::Front
     } else {
         SubtitleDirection::Back
     }
+}
+
+pub fn direction_from_vector(x: f32, z: f32, right_x: f32, right_z: f32) -> SubtitleDirection {
+    // Backwards-compatible helper for callers that only have the right basis.
+    // A right vector of (1, 0) corresponds to the legacy camera facing -Z.
+    direction_from_basis(x, z, right_z, -right_x, right_x, right_z)
 }
 
 #[cfg(test)]
@@ -351,6 +440,50 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_direction_uses_camera_basis_for_each_yaw() {
+        // Camera facing +X, right is +Z.
+        assert_eq!(
+            direction_from_basis(1.0, 0.0, 1.0, 0.0, 0.0, 1.0),
+            SubtitleDirection::Front
+        );
+        assert_eq!(
+            direction_from_basis(-1.0, 0.0, 1.0, 0.0, 0.0, 1.0),
+            SubtitleDirection::Back
+        );
+        assert_eq!(
+            direction_from_basis(0.0, 1.0, 1.0, 0.0, 0.0, 1.0),
+            SubtitleDirection::Right
+        );
+        assert_eq!(
+            direction_from_basis(0.0, -1.0, 1.0, 0.0, 0.0, 1.0),
+            SubtitleDirection::Left
+        );
+    }
+
+    #[test]
+    fn subtitle_queue_deduplicates_non_adjacent_events_and_expires_all() {
+        let mut queue = SubtitleQueue::new(4);
+        queue.push(SubtitleEvent {
+            key: "sound.jump",
+            direction: SubtitleDirection::Center,
+            expires_at_ms: 5,
+        });
+        queue.push(SubtitleEvent {
+            key: "sound.hurt",
+            direction: SubtitleDirection::Left,
+            expires_at_ms: 50,
+        });
+        queue.push(SubtitleEvent {
+            key: "sound.jump",
+            direction: SubtitleDirection::Center,
+            expires_at_ms: 60,
+        });
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.drain_expired(10).len(), 2);
+        assert_eq!(queue.drain_expired(61).len(), 0);
+    }
+
+    #[test]
     fn reduced_motion_does_not_change_authority_values() {
         assert_eq!(reduced_flash_alpha(0.8, false), 0.8);
         assert!(reduced_flash_alpha(0.8, true) < 0.2);
@@ -358,6 +491,23 @@ mod tests {
         assert_eq!(
             direction_from_vector(-1.0, 0.0, 1.0, 0.0),
             SubtitleDirection::Left
+        );
+        assert_eq!(
+            direction_from_vector(0.0, -1.0, 1.0, 0.0),
+            SubtitleDirection::Front
+        );
+        assert_eq!(
+            direction_from_vector(0.0, 1.0, 1.0, 0.0),
+            SubtitleDirection::Back
+        );
+        assert_ne!(camera_bob_offset(1.0, 1.0, true), [0.0; 3]);
+        assert_eq!(camera_bob_offset(1.0, 1.0, false), [0.0; 3]);
+        assert!(damage_tilt_angle(1.0, true, false) > 0.0);
+        assert_eq!(damage_tilt_angle(1.0, false, false), 0.0);
+        assert!(fit_ui_scale(2.0, 1.0) < 2.0);
+        assert_eq!(
+            high_contrast_color([0.9, 0.9, 0.9, 0.4]),
+            [1.0, 1.0, 1.0, 0.4]
         );
     }
 }

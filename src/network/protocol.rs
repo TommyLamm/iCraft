@@ -21,6 +21,36 @@ pub const MAX_REQUEST_BYTES: usize = 16 * 1024;
 pub const MAX_REQUEST_STRING_BYTES: usize = 256;
 pub const MAX_COMMAND_BYTES: usize = 2 * 1024;
 
+/// Stable wire mapping for container interactions.  The gameplay envelope
+/// keeps the historical `u8` field for backwards-compatible bincode/TCP
+/// decoding, while authority code must convert through this type instead of
+/// treating every non-zero action as "open".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContainerAction {
+    Open,
+    Click,
+    Close,
+}
+
+impl ContainerAction {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Open),
+            1 => Some(Self::Click),
+            2 => Some(Self::Close),
+            _ => None,
+        }
+    }
+
+    pub const fn to_wire(self) -> u8 {
+        match self {
+            Self::Open => 0,
+            Self::Click => 1,
+            Self::Close => 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameplayOperation {
     BlockUse {
@@ -35,6 +65,18 @@ pub enum GameplayOperation {
         y: i32,
         z: i32,
         slot: u16,
+    },
+    /// Payload-preserving click envelope used by legacy packet adapters.  The
+    /// historical `Container` variant remains byte-compatible for open/close
+    /// requests; clicks carry their cursor/drag intent here instead of
+    /// silently discarding it at the transport boundary.
+    ContainerClick {
+        x: i32,
+        y: i32,
+        z: i32,
+        slot: u16,
+        is_left: bool,
+        dragged: Option<ItemWire>,
     },
     ItemUse {
         item: u32,
@@ -114,6 +156,11 @@ impl GameplayRequest {
         }
         if self.dimension > 2 {
             return Err(RejectReason::InvalidDimension);
+        }
+        if let GameplayOperation::Container { action, .. } = &self.operation {
+            if ContainerAction::from_wire(*action).is_none() {
+                return Err(RejectReason::InvalidState);
+            }
         }
         Ok(())
     }

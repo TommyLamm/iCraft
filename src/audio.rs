@@ -1,6 +1,4 @@
-use crate::accessibility::{
-    direction_from_vector, SubtitleDirection, SubtitleEvent, SubtitleQueue,
-};
+use crate::accessibility::{direction_from_basis, SubtitleDirection, SubtitleEvent, SubtitleQueue};
 use crate::resources::ResourcePackManager;
 use glam::Vec3;
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source, SpatialSink};
@@ -574,8 +572,15 @@ impl AudioManager {
         listener_right: Vec3,
     ) {
         let relative = pos - listener_pos;
-        let direction =
-            direction_from_vector(relative.x, relative.z, listener_right.x, listener_right.z);
+        // The existing spatial-audio API carries the listener-right basis.
+        // Derive the horizontal forward basis from it so subtitle direction
+        // follows camera yaw instead of assuming world -Z.  This is valid for
+        // the normalized right vectors produced by State and mob audio paths.
+        let right = listener_right.normalize_or_zero();
+        let forward = Vec3::new(right.z, 0.0, -right.x);
+        let direction = direction_from_basis(
+            relative.x, relative.z, forward.x, forward.z, right.x, right.z,
+        );
         self.enqueue_subtitle(sound_id, direction, monotonic_millis());
         let handle = match &self.stream_handle {
             Some(h) => h,

@@ -1,4 +1,5 @@
 use crate::inventory::{CreativeDragOrigin, GameMode, Inventory, Item, ItemStack};
+use crate::network::protocol::PlayerEffectWire;
 use crate::world::{BlockType, Chunk};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -13,6 +14,9 @@ use std::sync::{Arc, Condvar, Mutex};
 
 const PLAYER_SAVE_MAGIC: &[u8; 8] = b"ICRPLR01";
 const PLAYER_SAVE_VERSION: u16 = 1;
+/// Version of the dedicated-runtime per-player file. Version 2 adds the
+/// current dimension alongside the existing spawn dimension in `PlayerData`.
+pub const DEDICATED_PLAYER_SAVE_VERSION: u16 = 2;
 pub const SAVE_QUEUE_CAPACITY: usize = 128;
 pub const NETWORK_SNAPSHOT_QUEUE_CAPACITY: usize = 8;
 /// Hard admission limit for distinct mutated chunk coordinates.
@@ -866,6 +870,26 @@ impl PlayerData {
             hero_of_the_village_timer: state.hero_of_the_village_timer,
         }
     }
+}
+
+/// Dedicated-runtime player payload.  The current dimension is deliberately
+/// outside `PlayerData`: `spawn_dimension` describes the respawn anchor and
+/// must not be overwritten when a player logs out in another dimension.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DedicatedPlayerFile {
+    pub version: u16,
+    pub current_dimension: crate::dimension::Dimension,
+    pub data: PlayerData,
+    #[serde(default)]
+    pub effects: Vec<PlayerEffectWire>,
+}
+
+#[derive(Deserialize)]
+struct LegacyDedicatedPlayerFile {
+    version: u16,
+    data: PlayerData,
+    #[serde(default)]
+    effects: Vec<PlayerEffectWire>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2403,6 +2427,190 @@ impl SaveManager {
         atomic_write(path, &bytes)
     }
 
+    /// Checked entity load used by the authority runtime.  The historical
+    /// `load_entities_in` API intentionally degrades corrupt optional entity
+    /// files to an empty list for renderer callers; dedicated authority must
+    /// instead surface the error so the caller can retry without losing state.
+    pub fn load_entities_in_checked(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> io::Result<Vec<EntitySaveData>> {
+        let path = self.entities_file_path(dimension);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(&path)?;
+        bincode::deserialize(&bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("entity save decode failed for {}: {error}", path.display()),
+            )
+        })
+    }
+
+    /// Return the sanitized, bounded path for a dedicated player identity.
+    /// The same normalization is used for save and load, preventing path
+    /// traversal and making reconnect independent of display-name casing.
+    pub fn dedicated_player_file_path(&self, username: &str) -> PathBuf {
+        let safe: String = username
+            .chars()
+            .take(32)
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.world_dir.join("players").join(format!("{safe}.dat"))
+    }
+
+    /// Atomically save a dedicated player payload.  A failed replacement does
+    /// not touch the previous file, so the caller can retry with the same
+    /// snapshot after reporting the error to the session manager.
+    pub fn save_dedicated_player(
+        &self,
+        username: &str,
+        current_dimension: crate::dimension::Dimension,
+        data: &PlayerData,
+        effects: &[PlayerEffectWire],
+    ) -> io::Result<()> {
+        let file = DedicatedPlayerFile {
+            version: DEDICATED_PLAYER_SAVE_VERSION,
+            current_dimension,
+            data: data.clone(),
+            effects: effects.to_vec(),
+        };
+        let bytes = bincode::serialize(&file).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("player save encode failed: {error}"),
+            )
+        })?;
+        atomic_write(self.dedicated_player_file_path(username), &bytes)
+    }
+
+    /// Load a dedicated player payload, migrating the version-1 runtime file
+    /// (which did not store current dimension) to the explicit Overworld or
+    /// saved spawn dimension default.
+    pub fn load_dedicated_player(&self, username: &str) -> io::Result<Option<DedicatedPlayerFile>> {
+        let path = self.dedicated_player_file_path(username);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)?;
+        if let Ok(file) = bincode::deserialize::<DedicatedPlayerFile>(&bytes) {
+            if file.version != DEDICATED_PLAYER_SAVE_VERSION {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported dedicated player save version {}", file.version),
+                ));
+            }
+            return Ok(Some(file));
+        }
+
+        let legacy: LegacyDedicatedPlayerFile = bincode::deserialize(&bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "dedicated player save decode failed for {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+        if legacy.version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported dedicated player save version {}",
+                    legacy.version
+                ),
+            ));
+        }
+        Ok(Some(DedicatedPlayerFile {
+            version: DEDICATED_PLAYER_SAVE_VERSION,
+            current_dimension: legacy.data.spawn_dimension.unwrap_or_default(),
+            data: legacy.data,
+            effects: legacy.effects,
+        }))
+    }
+
+    /// Enumerate all readable chunk payloads for a dimension. Region files are
+    /// scanned in a deterministic order and bounded to avoid turning a
+    /// malformed save directory into an unbounded allocation.
+    pub fn load_saved_chunks_in(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> io::Result<Vec<ChunkSaveData>> {
+        const MAX_REGION_FILES: usize = 65_536;
+        const MAX_CHUNKS: usize = 1_000_000;
+        let directory = self.region_dir(dimension);
+        if !directory.exists() {
+            return Ok(Vec::new());
+        }
+        let mut region_paths = Vec::new();
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("r.") || !name.ends_with(".bin") {
+                continue;
+            }
+            let pieces: Vec<_> = name[2..name.len() - 4].split('.').collect();
+            if pieces.len() != 2 {
+                continue;
+            }
+            let (Ok(rx), Ok(rz)) = (pieces[0].parse::<i32>(), pieces[1].parse::<i32>()) else {
+                continue;
+            };
+            region_paths.push((rx, rz, path));
+        }
+        if region_paths.len() > MAX_REGION_FILES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "too many region files in authoritative save",
+            ));
+        }
+        region_paths.sort_by_key(|(rx, rz, _)| (*rx, *rz));
+        let mut chunks = Vec::new();
+        for (rx, rz, path) in region_paths {
+            let bytes = fs::read(&path)?;
+            let region: RegionData = bincode::deserialize(&bytes).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("region decode failed for {}: {error}", path.display()),
+                )
+            })?;
+            let mut entries: Vec<_> = region.chunks.into_iter().collect();
+            entries.sort_by_key(|((lx, lz), _)| (*lx, *lz));
+            for ((lx, lz), chunk_bytes) in entries {
+                if chunks.len() >= MAX_CHUNKS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "too many saved chunks in authoritative world",
+                    ));
+                }
+                let mut data = deserialize_chunk_save_data(&chunk_bytes).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("chunk decode failed in {}", path.display()),
+                    )
+                })?;
+                data.chunk_x = rx.saturating_mul(32).saturating_add(i32::from(lx));
+                data.chunk_z = rz.saturating_mul(32).saturating_add(i32::from(lz));
+                chunks.push(data);
+            }
+        }
+        chunks.sort_by_key(|data| (data.chunk_x, data.chunk_z));
+        Ok(chunks)
+    }
+
     pub fn load_entities_in(&self, dimension: crate::dimension::Dimension) -> Vec<EntitySaveData> {
         let path = self.entities_file_path(dimension);
         if !path.exists() {
@@ -2490,9 +2698,8 @@ impl SaveManager {
                 .region_dir(dimension)
                 .join(format!("r.{}.{}.bin", rx, rz));
             let representative = (snaps[0].chunk_x, snaps[0].chunk_z);
-            let region =
+            let mut region =
                 self.load_region_for_write(&region_file, representative.0, representative.1)?;
-            self.region_cache.insert((dimension, rx, rz), region);
 
             let mut serialized_chunks = Vec::with_capacity(snaps.len());
             for snap in &snaps {
@@ -2504,23 +2711,19 @@ impl SaveManager {
                 serialized_chunks.push(((lx, lz), serialized_chunk));
             }
 
-            let region = self
-                .region_cache
-                .entry((dimension, rx, rz))
-                .or_insert_with(|| RegionData {
-                    chunks: HashMap::new(),
-                });
-
             for (coord, serialized_chunk) in serialized_chunks {
                 region.chunks.insert(coord, serialized_chunk);
             }
 
-            let serialized_region = bincode::serialize(region)
+            let serialized_region = bincode::serialize(&region)
                 .map_err(|error| SaveError::Serialization(error.to_string()))?;
 
             backup_region_file_if_needed(&region_file);
             atomic_write(&region_file, &serialized_region)
                 .map_err(|error| SaveError::io("atomic region replacement", &region_file, error))?;
+            // Commit the cache only after the atomic replacement succeeds so
+            // a failed save leaves the previous snapshot available for retry.
+            self.region_cache.insert((dimension, rx, rz), region);
             self.touch_region((dimension, rx, rz));
             self.evict_lru_regions();
         }
@@ -2548,27 +2751,22 @@ impl SaveManager {
             .region_dir(dimension)
             .join(format!("r.{}.{}.bin", rx, rz));
 
-        let region = self.load_region_for_write(&region_file, cx, cz)?;
-        self.region_cache.insert((dimension, rx, rz), region);
-
-        let region = self
-            .region_cache
-            .entry((dimension, rx, rz))
-            .or_insert_with(|| RegionData {
-                chunks: HashMap::new(),
-            });
+        let mut region = self.load_region_for_write(&region_file, cx, cz)?;
 
         let serialized_chunk = bincode::serialize(&data)
             .map_err(|error| SaveError::Serialization(error.to_string()))?;
 
         region.chunks.insert((lx, lz), serialized_chunk);
 
-        let serialized_region = bincode::serialize(region)
+        let serialized_region = bincode::serialize(&region)
             .map_err(|error| SaveError::Serialization(error.to_string()))?;
 
         backup_region_file_if_needed(&region_file);
         atomic_write(&region_file, &serialized_region)
             .map_err(|error| SaveError::io("atomic region replacement", &region_file, error))?;
+        // Do not poison the in-memory cache if replacement fails; callers can
+        // retry the same revision without losing the old on-disk snapshot.
+        self.region_cache.insert((dimension, rx, rz), region);
         self.touch_region((dimension, rx, rz));
         self.evict_lru_regions();
         Ok(())
@@ -2666,6 +2864,34 @@ impl SaveManager {
         atomic_write(&player_file, &serialized_player)?;
 
         Ok(())
+    }
+
+    pub fn save_level(&self, level: &LevelData) -> io::Result<()> {
+        let serialized = bincode::serialize(level)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        atomic_write(self.world_dir.join("level.dat"), &serialized)
+    }
+
+    pub fn load_level(&self) -> io::Result<Option<LevelData>> {
+        let path = self.world_dir.join("level.dat");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)?;
+        match bincode::deserialize::<LevelData>(&bytes) {
+            Ok(level) => Ok(Some(level)),
+            Err(current_error) => bincode::deserialize::<LegacyLevelData>(&bytes)
+                .map(LevelData::from)
+                .map(Some)
+                .map_err(|legacy_error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "level decode failed (current: {current_error}; legacy: {legacy_error})"
+                        ),
+                    )
+                }),
+        }
     }
 
     pub fn load_player_and_level(&self) -> io::Result<(LevelData, PlayerData)> {

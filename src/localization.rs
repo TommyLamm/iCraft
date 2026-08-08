@@ -1,6 +1,8 @@
 //! Structured, parameter-aware UI text with a deterministic English fallback.
 
+use crate::entity::EntityType;
 use crate::resources::ResourcePackManager;
+use crate::{inventory::Item, world::BlockType};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -102,6 +104,7 @@ pub const REQUIRED_KEYS: &[&str] = &[
 
 #[derive(Debug, Clone)]
 pub struct TranslationCatalog {
+    language: Language,
     english: HashMap<String, String>,
     active: HashMap<String, String>,
     missing: HashSet<String>,
@@ -120,6 +123,7 @@ impl TranslationCatalog {
         let english = parse_map(english_json).unwrap_or_default();
         let active = parse_map(active_json).unwrap_or_default();
         Self {
+            language,
             english,
             active: if language == Language::English && active.is_empty() {
                 parse_map(english_json).unwrap_or_default()
@@ -170,6 +174,37 @@ impl TranslationCatalog {
         }
         self.missing.insert(key.to_string());
         value
+    }
+
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
+    /// Resolve a localized name and retain the engine's built-in display name
+    /// when a selected pack does not provide that logical key.  Resource packs
+    /// can therefore override item/block/entity labels without requiring every
+    /// built-in key to be duplicated in the pack.
+    fn named(&self, namespace: &str, display_name: &str) -> String {
+        let key = format!("{namespace}.{}", key_component(display_name));
+        let value = self.lookup(&key);
+        if value == key {
+            display_name.to_string()
+        } else {
+            value
+        }
+    }
+
+    pub fn item_name(&self, item: Item) -> String {
+        self.named("item", item.properties().name)
+    }
+
+    pub fn block_name(&self, block: BlockType) -> String {
+        self.named("block", block.properties().name)
+    }
+
+    pub fn entity_name(&self, entity: EntityType) -> String {
+        let display_name = entity_debug_name(entity);
+        self.named("entity", &display_name)
     }
 
     /// Read a translated value without mutating missing-key diagnostics. UI
@@ -231,6 +266,38 @@ impl TranslationCatalog {
 
 fn parse_map(json: &str) -> Result<HashMap<String, String>, serde_json::Error> {
     serde_json::from_str(json)
+}
+
+fn key_component(value: &str) -> String {
+    let mut key = String::with_capacity(value.len());
+    let mut previous_separator = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase()
+                && !key.is_empty()
+                && !previous_separator
+                && key
+                    .as_bytes()
+                    .last()
+                    .is_some_and(|byte| byte.is_ascii_lowercase())
+            {
+                key.push('_');
+            }
+            key.push(ch.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator {
+            key.push('_');
+            previous_separator = true;
+        }
+    }
+    while key.ends_with('_') {
+        key.pop();
+    }
+    key
+}
+
+fn entity_debug_name(entity: EntityType) -> String {
+    format!("{entity:?}")
 }
 
 pub fn translate(language: Language, key: &str) -> String {
@@ -379,5 +446,35 @@ mod tests {
         manager.resolve_locale(Language::English.code());
         assert_eq!(manager.diagnostics().len(), count);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn selected_pack_can_override_item_block_and_entity_names() {
+        let catalog = TranslationCatalog::from_json(
+            Language::German,
+            r#"{
+                "item.diamond":"Diamond (built-in)",
+                "block.stone":"Stone (built-in)",
+                "entity.zombie":"Zombie (built-in)"
+            }"#,
+            r#"{
+                "item.diamond":"Diamant",
+                "block.stone":"Stein",
+                "entity.zombie":"Zombie",
+                "entity.ender_dragon":"Enderdrache"
+            }"#,
+        );
+        assert_eq!(catalog.item_name(Item::Diamond), "Diamant");
+        assert_eq!(catalog.block_name(BlockType::Stone), "Stein");
+        assert_eq!(catalog.entity_name(EntityType::Zombie), "Zombie");
+        assert_eq!(catalog.entity_name(EntityType::EnderDragon), "Enderdrache");
+    }
+
+    #[test]
+    fn missing_named_keys_use_builtin_display_names() {
+        let catalog = TranslationCatalog::from_json(Language::English, "{}", "{}");
+        assert_eq!(catalog.item_name(Item::Diamond), "Diamond");
+        assert_eq!(catalog.block_name(BlockType::Stone), "Stone");
+        assert_eq!(catalog.entity_name(EntityType::Zombie), "Zombie");
     }
 }

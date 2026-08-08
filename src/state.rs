@@ -2553,6 +2553,9 @@ impl State {
             self.apply_block_changes(&changes);
         }
         if events.dragon_completion.is_some() {
+            self.end_flash_time = 0.45;
+            self.audio_manager
+                .play_sound(crate::audio::SoundId::Explosion);
             self.player_state.add_experience(120);
             if authoritative {
                 self.apply_block_changes(&[
@@ -5242,6 +5245,11 @@ pub struct State {
     torch_smoke_timer: f32,
     total_time: f32,
     pub audio_manager: crate::audio::AudioManager,
+    /// Selected resource packs are retained by the presentation root so all
+    /// runtime text can be rebuilt in place when the language changes. This
+    /// never rebuilds chunks/world authority or alters simulation state.
+    resource_pack_manager: crate::resources::ResourcePackManager,
+    pub translation_catalog: crate::localization::TranslationCatalog,
     pub footstep_accumulator: f32,
     pub was_on_ground: bool,
     pub water_tick_timer: f32,
@@ -5314,6 +5322,8 @@ pub struct State {
     pub recipe_book_search: String,
     pub weather: crate::weather::WeatherSystem,
     pub settings: GameSettings,
+    /// Presentation-only timer for the End/dragon completion flash.
+    pub end_flash_time: f32,
     pub world_seed: u32,
     pub world_spawn: (i32, i32, i32),
     pub difficulty: Difficulty,
@@ -5523,6 +5533,40 @@ fn creative_scroll_track_rect(aspect: f32) -> InventoryUiRect {
 }
 
 impl State {
+    fn sync_translation_catalog(&mut self) {
+        if self.translation_catalog.language() != self.settings.language {
+            self.translation_catalog =
+                crate::localization::TranslationCatalog::from_resource_packs_mut(
+                    &mut self.resource_pack_manager,
+                    self.settings.language,
+                );
+        }
+    }
+
+    /// Switch locale while the current world, input state and selected pack
+    /// order stay alive.  Rebuilding this bounded catalog is presentation-only.
+    pub fn set_language(&mut self, language: crate::localization::Language) {
+        self.settings.language = language;
+        self.sync_translation_catalog();
+        self.settings.save();
+    }
+
+    pub fn translate(&self, key: &str) -> String {
+        self.translation_catalog.lookup(key)
+    }
+
+    pub fn localized_item_name(&self, item: crate::inventory::Item) -> String {
+        self.translation_catalog.item_name(item)
+    }
+
+    pub fn localized_block_name(&self, block: crate::world::BlockType) -> String {
+        self.translation_catalog.block_name(block)
+    }
+
+    pub fn localized_entity_name(&self, entity: crate::entity::EntityType) -> String {
+        self.translation_catalog.entity_name(entity)
+    }
+
     fn create_depth_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
@@ -5708,6 +5752,10 @@ impl State {
         if !settings.resource_packs.is_empty() {
             let _ = resource_pack_manager.apply_enabled_order(&settings.resource_packs);
         }
+        let translation_catalog = crate::localization::TranslationCatalog::from_resource_packs_mut(
+            &mut resource_pack_manager,
+            settings.language,
+        );
         let mut audio_manager =
             crate::audio::AudioManager::new_with_resource_packs(&mut resource_pack_manager);
         audio_manager.set_subtitles_enabled(settings.accessibility.subtitles);
@@ -7047,6 +7095,8 @@ impl State {
             torch_smoke_timer: 0.0,
             total_time: 0.0,
             audio_manager,
+            resource_pack_manager,
+            translation_catalog,
             footstep_accumulator: 0.0,
             was_on_ground: false,
             water_tick_timer: 0.0,
@@ -7130,6 +7180,7 @@ impl State {
             world_seed,
             world_spawn,
             settings,
+            end_flash_time: 0.0,
             current_dimension,
             portal_contact_time: 0.0,
             portal_cooldown: 0.0,
@@ -7314,6 +7365,134 @@ impl State {
         self.project_authority_mutations(&pending);
         self.last_gameplay_response = Some(response.clone());
         Some(response)
+    }
+
+    /// Submit a local input envelope through the same authority path used by
+    /// a listen/dedicated transport.  Presentation code must not mutate the
+    /// renderer cache first and then ask the core for an ACK: a rejected or
+    /// stale request is intentionally a no-op on the client.
+    fn submit_local_authority_operation(
+        &mut self,
+        operation: crate::network::protocol::GameplayOperation,
+    ) -> Option<crate::network::protocol::GameplayResponse> {
+        self.submit_authority_request(crate::network::protocol::GameplayRequest {
+            request_id: self.authority_request_id,
+            client_sequence: self.authority_client_sequence,
+            session_id: 0,
+            dimension: self.current_dimension as u8,
+            client_revision: self
+                .authority_boundary
+                .as_ref()
+                .map(|boundary| boundary.core.current_revision())
+                .unwrap_or_default(),
+            operation,
+        })
+    }
+
+    fn project_authority_container(&mut self, position: (i32, i32, i32)) -> bool {
+        let Some(slots) = self
+            .authority_boundary
+            .as_ref()
+            .and_then(|boundary| boundary.core.world.container_slots_wire(position))
+        else {
+            return false;
+        };
+        let stacks = slots
+            .iter()
+            .map(|slot| slot.as_ref().and_then(|wire| wire.to_stack()))
+            .collect::<Vec<_>>();
+        if !crate::container_sessions::ContainerSessionManager::set_container_slots(
+            &mut self.chunk_manager,
+            position.0,
+            position.1,
+            position.2,
+            &stacks,
+        ) {
+            return false;
+        }
+        if let Some(revision) = self
+            .authority_boundary
+            .as_ref()
+            .and_then(|boundary| boundary.core.world.get_block_entity(
+                position.0,
+                position.1,
+                position.2,
+            ))
+            .map(crate::block_entity::BlockEntity::revision)
+        {
+            if let Some(entity) = self
+                .chunk_manager
+                .get_block_entity_mut(position.0, position.1, position.2)
+            {
+                entity.set_revision(revision);
+            }
+        }
+        self.container_target = Some(position);
+        self.container_is_double = stacks.len() > 27;
+        self.open_inventory();
+        true
+    }
+
+    fn submit_local_authority_container_action(
+        &mut self,
+        position: (i32, i32, i32),
+        action: crate::network::protocol::ContainerAction,
+        slot: u16,
+        is_left: bool,
+    ) -> bool {
+        let operation = match action {
+            crate::network::protocol::ContainerAction::Open
+            | crate::network::protocol::ContainerAction::Close => {
+                crate::network::protocol::GameplayOperation::Container {
+                    action: action.to_wire(),
+                    x: position.0,
+                    y: position.1,
+                    z: position.2,
+                    slot,
+                }
+            }
+            crate::network::protocol::ContainerAction::Click => {
+                crate::network::protocol::GameplayOperation::ContainerClick {
+                    x: position.0,
+                    y: position.1,
+                    z: position.2,
+                    slot,
+                    is_left,
+                    dragged: self
+                        .inventory
+                        .dragged
+                        .as_ref()
+                        .map(crate::network::protocol::ItemWire::from_stack),
+                }
+            }
+        };
+        let Some(response) = self.submit_local_authority_operation(operation) else {
+            return false;
+        };
+        if !matches!(
+            response.outcome,
+            crate::network::protocol::GameplayOutcome::Accepted { .. }
+        ) {
+            return false;
+        }
+        match action {
+            crate::network::protocol::ContainerAction::Open
+            | crate::network::protocol::ContainerAction::Click => {
+                let projected = self.project_authority_container(position);
+                if projected && matches!(action, crate::network::protocol::ContainerAction::Click) {
+                    self.inventory.dragged = None;
+                }
+                projected
+            }
+            crate::network::protocol::ContainerAction::Close => {
+                self.container_target = None;
+                self.container_is_double = false;
+                self.inventory.is_open = false;
+                self.active_station = None;
+                self.sync_cursor_mode();
+                true
+            }
+        }
     }
 
     fn submit_local_authority_block_use(
@@ -8057,8 +8236,7 @@ impl State {
                 eprintln!("[State] Network disconnected: {reason}");
                 self.teardown_terrain_runtime("network disconnect");
                 self.network_ready = false;
-                let disconnected =
-                    crate::localization::translate(self.settings.language, "disconnect.generic");
+                let disconnected = self.translate("disconnect.generic");
                 self.network_status = Some(format!("{disconnected}: {reason}"));
                 self.connection_lost = true;
                 self.is_chat_open = false;
@@ -9385,9 +9563,10 @@ impl State {
         let command = match crate::commands::parse(input) {
             Ok(command) => command,
             Err(error) => {
+                let command_label = self.translate("command.feedback");
                 push_chat_history(
                     &mut self.chat_messages,
-                    "Command".to_string(),
+                    command_label,
                     format!("at {}: {}", error.position, error.message),
                 );
                 return;
@@ -9424,7 +9603,8 @@ impl State {
                 }
                 None => "Command authority is unavailable.".to_string(),
             };
-            push_chat_history(&mut self.chat_messages, "Command".to_string(), feedback);
+            let command_label = self.translate("command.feedback");
+            push_chat_history(&mut self.chat_messages, command_label, feedback);
             return;
         }
 
@@ -9562,7 +9742,10 @@ impl State {
                     let received = remainder
                         .as_ref()
                         .map_or(count, |remaining| count - remaining.count);
-                    feedback = Some(format!("Gave {received} {:?}.", item));
+                    feedback = Some(format!(
+                        "Gave {received} {}.",
+                        self.localized_item_name(item)
+                    ));
                 }
             }
             Command::Kill(target) => {
@@ -9652,7 +9835,8 @@ impl State {
         }
 
         if let Some(feedback) = feedback {
-            push_chat_history(&mut self.chat_messages, "Command".to_string(), feedback);
+            let command_label = self.translate("command.feedback");
+            push_chat_history(&mut self.chat_messages, command_label, feedback);
         }
     }
 
@@ -10770,7 +10954,9 @@ impl State {
         }
 
         // Tick item usage state machine
-        if self.inventory.is_open
+        if has_authority_boundary {
+            self.player_state.using_item = None;
+        } else if self.inventory.is_open
             || self.is_paused
             || self.is_chat_open
             || self.player_state.is_dead
@@ -10970,7 +11156,11 @@ impl State {
             self.brewing.update(dt);
         }
         self.update_furnaces(dt);
-        let effect_health = self.potion_effects.update(dt);
+        let effect_health = if has_authority_boundary {
+            0.0
+        } else {
+            self.potion_effects.update(dt)
+        };
         if authoritative && effect_health > 0.0 {
             self.player_state.health =
                 (self.player_state.health + effect_health).min(self.player_state.max_health);
@@ -11538,6 +11728,7 @@ impl State {
         }
 
         self.total_time += dt;
+        self.end_flash_time = (self.end_flash_time - dt.max(0.0)).max(0.0);
 
         if authoritative {
             let hostile_mobs_started = Instant::now();
@@ -12497,6 +12688,27 @@ impl State {
         } else {
             self.camera.position = interp_player_pos + Vec3::new(0.0, eye_height, 0.0);
         }
+        // Keep gameplay/raycast camera coordinates canonical, and apply bob
+        // only to a render copy.  This makes camera bob observable while
+        // preserving movement, mining and authority calculations exactly.
+        let horizontal_speed = Vec3::new(
+            self.player_physics.velocity.x,
+            0.0,
+            self.player_physics.velocity.z,
+        )
+        .length();
+        let bob = crate::accessibility::camera_bob_offset(
+            self.total_time,
+            horizontal_speed,
+            self.settings.accessibility.camera_bobbing && !self.third_person,
+        );
+        let camera_right = Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos());
+        let presentation_camera = Camera::new(
+            self.camera.position + camera_right * bob[0] + Vec3::Y * bob[1],
+            self.camera.yaw,
+            self.camera.pitch,
+            self.camera.fov,
+        );
         let is_underwater = self.chunk_manager.get_block(
             self.camera.position.x.floor() as i32,
             self.camera.position.y.floor() as i32,
@@ -12504,7 +12716,7 @@ impl State {
         ) == BlockType::Water;
 
         self.camera_uniform.update_view_proj(
-            &self.camera,
+            &presentation_camera,
             self.config.width as f32 / self.config.height as f32,
             self.chunk_manager.render_distance as u32,
             &self.world_time,
@@ -12608,6 +12820,9 @@ impl State {
     }
 
     pub fn update(&mut self, dt: f32) {
+        self.sync_translation_catalog();
+        self.audio_manager
+            .set_subtitles_enabled(self.settings.accessibility.subtitles);
         // Frame instrumentation starts before network ingestion and fixed ticks
         // so catch-up simulation and terrain integration remain in this frame's
         // aggregate and per-category samples.
@@ -14919,8 +15134,11 @@ impl State {
     }
 
     pub fn handle_primary_press(&mut self) -> bool {
-        let melee_consumed =
-            self.is_authoritative() && self.authority_boundary.is_none() && self.try_melee_attack();
+        let melee_consumed = if self.authority_boundary.is_some() {
+            self.submit_local_authority_combat()
+        } else {
+            self.is_authoritative() && self.try_melee_attack()
+        };
         let decision = primary_press_decision(self.game_mode, melee_consumed);
         if decision.instant_break {
             self.handle_click(true);
@@ -14928,8 +15146,35 @@ impl State {
         decision.keep_held_mining
     }
 
+    /// Combat is a typed authority operation even when the current core does
+    /// not yet implement the entity mutation.  A rejected operation consumes
+    /// the input and never falls through to renderer-side health mutation.
+    fn submit_local_authority_combat(&mut self) -> bool {
+        let direction = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        )
+        .normalize_or_zero();
+        let Some(entity_id) = closest_melee_target(
+            &self.entity_manager,
+            self.camera.position,
+            direction,
+            MELEE_REACH,
+        ) else {
+            return false;
+        };
+        let _ = self.submit_local_authority_operation(
+            crate::network::protocol::GameplayOperation::Combat {
+                target: entity_id,
+                action: 0,
+            },
+        );
+        true
+    }
+
     fn try_melee_attack(&mut self) -> bool {
-        if !self.is_authoritative() {
+        if !self.is_authoritative() || self.authority_boundary.is_some() {
             return false;
         }
 
@@ -15057,6 +15302,19 @@ impl State {
         let offhand_stack = self.inventory.offhand;
         let offhand_item = offhand_stack.map(|s| s.item).unwrap_or(Item::Air);
 
+        if self.authority_boundary.is_some()
+            && main_item != Item::Air
+            && !main_item.properties().is_block
+        {
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::ItemUse {
+                    item: main_item as u32,
+                    count: main_stack.map(|stack| stack.count.min(u16::MAX as u32) as u16).unwrap_or(0),
+                },
+            );
+            return;
+        }
+
         // Mainhand Shield
         if main_item == Item::Shield && self.player_state.shield_disable_ticks == 0 {
             self.player_state.using_item = Some(crate::player::UsingItemState {
@@ -15139,6 +15397,20 @@ impl State {
 
         // If mainhand didn't start an item use action, check Offhand item
         if self.player_state.using_item.is_none() {
+            if self.authority_boundary.is_some()
+                && offhand_item != Item::Air
+                && !offhand_item.properties().is_block
+            {
+                let _ = self.submit_local_authority_operation(
+                    crate::network::protocol::GameplayOperation::ItemUse {
+                        item: offhand_item as u32,
+                        count: offhand_stack
+                            .map(|stack| stack.count.min(u16::MAX as u32) as u16)
+                            .unwrap_or(0),
+                    },
+                );
+                return;
+            }
             if offhand_item == Item::Shield && self.player_state.shield_disable_ticks == 0 {
                 self.player_state.using_item = Some(crate::player::UsingItemState {
                     hand: crate::player::Hand::OffHand,
@@ -15192,6 +15464,10 @@ impl State {
     }
 
     pub fn handle_secondary_release(&mut self) {
+        if self.authority_boundary.is_some() {
+            self.player_state.using_item = None;
+            return;
+        }
         let Some(using) = self.player_state.using_item.take() else {
             return;
         };
@@ -18030,6 +18306,7 @@ impl State {
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        self.sync_translation_catalog();
         let allocs_before = crate::perf::thread_alloc_count();
         let output = self.surface.get_current_texture()?;
         let view = output
@@ -18582,6 +18859,7 @@ impl State {
                 );
             }
 
+            self.apply_ui_accessibility(&mut ui_vertices, &mut ui_line_vertices, &mut []);
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
@@ -18688,6 +18966,7 @@ impl State {
                 [1.0, 1.0, 1.0, 1.0],
             );
 
+            self.apply_ui_accessibility(&mut ui_vertices, &mut ui_line_vertices, &mut []);
             let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
             let ui_line_vert_len = ui_line_vertices.len().min(UI_LINE_VERTEX_CAPACITY);
             let upload_started = Instant::now();
@@ -18855,7 +19134,7 @@ impl State {
                 Some(DamageSource::Lightning) => "death.lightning",
                 None => "death.generic",
             };
-            let msg = crate::localization::translate(self.settings.language, death_key);
+            let msg = self.translate(death_key);
             draw_centered_text(
                 &msg,
                 0.15,
@@ -18875,6 +19154,7 @@ impl State {
                 &mut ui_line_vertices,
             );
 
+            self.apply_ui_accessibility(&mut ui_vertices, &mut ui_line_vertices, &mut []);
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
@@ -19203,6 +19483,7 @@ impl State {
             );
 
             // Cap the sizes to the preallocated buffers (4096 vertices)
+            self.apply_ui_accessibility(&mut ui_vertices, &mut ui_line_vertices, &mut []);
             let ui_vert_len = ui_vertices.len().min(4096);
             let ui_line_vert_len = ui_line_vertices.len().min(4096);
 
@@ -19868,7 +20149,11 @@ impl State {
                                 [0.25, 0.35, 0.25, 0.8],
                             );
                         }
-                        let text = format!("{:?} -> {:?}", r.input, r.output.item);
+                        let text = format!(
+                            "{} -> {}",
+                            self.localized_item_name(r.input),
+                            self.localized_item_name(r.output.item)
+                        );
                         add_string_lines(
                             &text,
                             -0.82,
@@ -20209,7 +20494,7 @@ impl State {
                             } else if let Some(potion) = stack.potion {
                                 potion.display_name().to_string()
                             } else {
-                                stack.item.properties().name.to_string()
+                                self.localized_item_name(stack.item)
                             };
                             let tw = name.len() as f32 * 0.014 + 0.02;
                             let th = 0.035 * aspect;
@@ -20632,7 +20917,21 @@ impl State {
                 let selected_item = self.inventory.hotbar[self.inventory.selected]
                     .map(|s| s.item)
                     .unwrap_or(crate::inventory::Item::Air);
-                let selected_text = format!("{:?}", selected_item).to_uppercase();
+                let selected_text = if let Some(target) = self.mining_target {
+                    let block = self.chunk_manager.get_block(
+                        target.x as i32,
+                        target.y as i32,
+                        target.z as i32,
+                    );
+                    format!(
+                        "{} / {}",
+                        self.localized_block_name(block),
+                        self.localized_item_name(selected_item)
+                    )
+                } else {
+                    self.localized_item_name(selected_item)
+                }
+                .to_uppercase();
                 let char_w = 0.010;
                 let char_h = 0.020;
                 let spacing = 0.004;
@@ -20714,30 +21013,25 @@ impl State {
                         self.settings.accessibility.reduce_flashing,
                     );
                     let flash_color = [1.0, 0.0, 0.0, alpha];
-                    ui_vertices.push(UiVertex {
-                        position: [-1.0, 1.0, 0.0],
-                        color: flash_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [-1.0, -1.0, 0.0],
-                        color: flash_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [1.0, -1.0, 0.0],
-                        color: flash_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [-1.0, 1.0, 0.0],
-                        color: flash_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [1.0, -1.0, 0.0],
-                        color: flash_color,
-                    });
-                    ui_vertices.push(UiVertex {
-                        position: [1.0, 1.0, 0.0],
-                        color: flash_color,
-                    });
+                    let tilt = crate::accessibility::damage_tilt_angle(
+                        base / 0.25,
+                        self.settings.accessibility.damage_tilt,
+                        self.settings.accessibility.reduce_flashing,
+                    );
+                    for position in [
+                        [-1.0, 1.0],
+                        [-1.0, -1.0],
+                        [1.0, -1.0],
+                        [-1.0, 1.0],
+                        [1.0, -1.0],
+                        [1.0, 1.0],
+                    ] {
+                        let rotated = crate::accessibility::rotate_ndc(position, tilt);
+                        ui_vertices.push(UiVertex {
+                            position: [rotated[0], rotated[1], 0.0],
+                            color: flash_color,
+                        });
+                    }
                 }
 
                 let lightning_flash = self.weather.flash_intensity();
@@ -20747,6 +21041,31 @@ impl State {
                         self.settings.accessibility.reduce_flashing,
                     );
                     let flash_color = [1.0, 1.0, 1.0, flash_alpha];
+                    for position in [
+                        [-1.0, 1.0, 0.0],
+                        [-1.0, -1.0, 0.0],
+                        [1.0, -1.0, 0.0],
+                        [-1.0, 1.0, 0.0],
+                        [1.0, -1.0, 0.0],
+                        [1.0, 1.0, 0.0],
+                    ] {
+                        ui_vertices.push(UiVertex {
+                            position,
+                            color: flash_color,
+                        });
+                    }
+                }
+
+                // Dragon completion has a short presentation flash analogous
+                // to the End portal effect.  It is driven by a transient
+                // State timer only; no tick, damage or authority value uses
+                // this field.
+                if self.end_flash_time > 0.0 {
+                    let alpha = crate::accessibility::reduced_flash_alpha(
+                        (self.end_flash_time / 0.45).clamp(0.0, 1.0) * 0.55,
+                        self.settings.accessibility.reduce_flashing,
+                    );
+                    let flash_color = [0.72, 0.52, 1.0, alpha];
                     for position in [
                         [-1.0, 1.0, 0.0],
                         [-1.0, -1.0, 0.0],
@@ -21363,9 +21682,8 @@ impl State {
                         }
                         crate::accessibility::SubtitleDirection::Center => "hud.subtitle.center",
                     };
-                    let direction =
-                        crate::localization::translate(self.settings.language, direction_key);
-                    let sound = crate::localization::translate(self.settings.language, event.key);
+                    let direction = self.translate(direction_key);
+                    let sound = self.translate(event.key);
                     let text = if direction.is_empty() {
                         format!("[{}]", sound)
                     } else {
@@ -21415,9 +21733,16 @@ impl State {
                 );
                 let char_w = 0.010;
                 let spacing = 0.003;
-                let width = boss.title.len() as f32 * (char_w + spacing) - spacing;
+                let boss_title = if boss.title.eq_ignore_ascii_case("ENDER DRAGON") {
+                    self.localized_entity_name(crate::entity::EntityType::EnderDragon)
+                } else if boss.title.eq_ignore_ascii_case("WITHER") {
+                    self.localized_entity_name(crate::entity::EntityType::Wither)
+                } else {
+                    boss.title.to_string()
+                };
+                let width = boss_title.chars().count() as f32 * (char_w + spacing) - spacing;
                 add_string_lines(
-                    boss.title,
+                    &boss_title,
                     -width / 2.0,
                     0.895,
                     char_w,
@@ -21433,6 +21758,44 @@ impl State {
                 &mut ui_line_vertices,
                 &mut ui_textured_vertices,
             );
+
+            // Apply presentation settings after composing every HUD branch so
+            // chat, subtitles, death, advancement and save/disconnect screens
+            // share the same scale/contrast contract.  The fitted scale keeps
+            // the full layout inside NDC instead of clamping individual glyph
+            // vertices (which used to clip text at high DPI/UI scale).
+            let requested_scale = self.settings.accessibility.ui_scale;
+            let max_abs = ui_vertices
+                .iter()
+                .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()])
+                .chain(
+                    ui_line_vertices
+                        .iter()
+                        .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()]),
+                )
+                .fold(0.0, f32::max);
+            let layout_scale = crate::accessibility::fit_ui_scale(requested_scale, max_abs);
+            for vertex in ui_vertices.iter_mut() {
+                vertex.position[0] *= layout_scale;
+                vertex.position[1] *= layout_scale;
+                if self.settings.accessibility.high_contrast {
+                    vertex.color = crate::accessibility::high_contrast_color(vertex.color);
+                }
+            }
+            for vertex in ui_line_vertices.iter_mut() {
+                vertex.position[0] *= layout_scale;
+                vertex.position[1] *= layout_scale;
+                if self.settings.accessibility.high_contrast {
+                    vertex.color = crate::accessibility::high_contrast_color(vertex.color);
+                }
+            }
+            for vertex in ui_textured_vertices.iter_mut() {
+                vertex.position[0] *= layout_scale;
+                vertex.position[1] *= layout_scale;
+                if self.settings.accessibility.high_contrast {
+                    vertex.color = crate::accessibility::high_contrast_color(vertex.color);
+                }
+            }
 
             // Write Buffers
             let ui_vert_len = ui_vertices.len().min(UI_VERTEX_CAPACITY);
@@ -21942,6 +22305,46 @@ impl State {
         Ok(())
     }
 
+    fn apply_ui_accessibility(
+        &self,
+        ui_vertices: &mut [UiVertex],
+        ui_line_vertices: &mut [UiVertex],
+        ui_textured_vertices: &mut [TexturedUiVertex],
+    ) {
+        let max_abs = ui_vertices
+            .iter()
+            .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()])
+            .chain(
+                ui_line_vertices
+                    .iter()
+                    .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()]),
+            )
+            .fold(0.0, f32::max);
+        let layout_scale =
+            crate::accessibility::fit_ui_scale(self.settings.accessibility.ui_scale, max_abs);
+        for vertex in ui_vertices.iter_mut() {
+            vertex.position[0] *= layout_scale;
+            vertex.position[1] *= layout_scale;
+            if self.settings.accessibility.high_contrast {
+                vertex.color = crate::accessibility::high_contrast_color(vertex.color);
+            }
+        }
+        for vertex in ui_line_vertices.iter_mut() {
+            vertex.position[0] *= layout_scale;
+            vertex.position[1] *= layout_scale;
+            if self.settings.accessibility.high_contrast {
+                vertex.color = crate::accessibility::high_contrast_color(vertex.color);
+            }
+        }
+        for vertex in ui_textured_vertices.iter_mut() {
+            vertex.position[0] *= layout_scale;
+            vertex.position[1] *= layout_scale;
+            if self.settings.accessibility.high_contrast {
+                vertex.color = crate::accessibility::high_contrast_color(vertex.color);
+            }
+        }
+    }
+
     fn record_frame_perf_sample(&mut self) {
         let mut cpu_scopes = std::collections::BTreeMap::new();
         for summary in &self.perf_summaries {
@@ -22160,7 +22563,7 @@ impl State {
             });
 
             add_string_lines(
-                &crate::localization::translate(self.settings.language, "advancement.toast"),
+                &self.translate("advancement.toast"),
                 x0 + 0.09,
                 y1 - 0.04 * aspect,
                 0.007,

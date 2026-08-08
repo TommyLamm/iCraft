@@ -482,14 +482,18 @@ fn prepare_gameplay_request(
     *next_request_id = (*next_request_id)
         .max(request.request_id.saturating_add(1))
         .max(1);
-    if request.client_sequence <= *last_client_sequence {
+    if request.client_sequence == 0 {
         request.client_sequence = (*last_client_sequence).wrapping_add(1).max(1);
     }
-    *last_client_sequence = request.client_sequence;
-    if request.client_revision < *last_client_revision {
-        request.client_revision = *last_client_revision;
+    if request.client_sequence > *last_client_sequence {
+        *last_client_sequence = request.client_sequence;
     }
-    *last_client_revision = (*last_client_revision).max(request.client_revision);
+    // Explicit stale sequence/revision values are authoritative client input:
+    // preserve them so the server can return OutOfOrder/InvalidRevision rather
+    // than silently turning a replay into a fresh mutation.
+    if request.client_revision > *last_client_revision {
+        *last_client_revision = request.client_revision;
+    }
     request.session_id = player_id;
     request
 }
@@ -1006,18 +1010,36 @@ async fn run_client(
                                 return;
                             }
                         }
-                        Ok(GameToClient::ContainerClickRequest { dimension, revision, slot_index, is_left: _is_left, dragged }) => {
-                            let (x, y, z) = active_container
-                                .filter(|(active_dimension, ..)| *active_dimension == dimension)
-                                .map_or((0, 0, 0), |(_, x, y, z)| (x, y, z));
-                            let request = legacy_gameplay_request(
+                        Ok(GameToClient::ContainerClickRequest { dimension, revision, slot_index, is_left, dragged }) => {
+                            let Some((active_dimension, x, y, z)) = active_container else {
+                                // Never fabricate a zero-coordinate click: a
+                                // client may only mutate the container it
+                                // explicitly opened.
+                                continue;
+                            };
+                            if active_dimension != dimension {
+                                continue;
+                            }
+                            let operation = if dragged.is_some() || !is_left {
+                                crate::network::protocol::GameplayOperation::ContainerClick {
+                                    x,
+                                    y,
+                                    z,
+                                    slot: slot_index,
+                                    is_left,
+                                    dragged,
+                                }
+                            } else {
                                 crate::network::protocol::GameplayOperation::Container {
                                     action: 1,
                                     x,
                                     y,
                                     z,
                                     slot: slot_index,
-                                },
+                                }
+                            };
+                            let request = legacy_gameplay_request(
+                                operation,
                                 dimension,
                                 revision,
                                 player_id,
@@ -1025,7 +1047,6 @@ async fn run_client(
                                 &mut last_client_sequence,
                                 &mut last_client_revision,
                             );
-                            let _ = dragged;
                             if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
                                 eprintln!("[NetworkClient] Disconnecting: failed to send legacy ContainerClick envelope");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });

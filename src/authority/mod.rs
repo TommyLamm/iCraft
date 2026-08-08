@@ -1,6 +1,7 @@
 //! GPU-independent authoritative simulation.
 
 pub mod contract;
+pub mod interest;
 
 use crate::dimension::Dimension;
 use crate::game_rules::{WorldRules, WorldType};
@@ -147,6 +148,43 @@ impl AuthorityBoundary {
         }
     }
 
+    /// Atomically update the in-process session's dimension.  Presentation
+    /// roots use this seam before rebuilding their local render cache so a
+    /// portal transfer cannot leave the authority session in the old world.
+    pub fn set_dimension(&mut self, dimension: u8) -> bool {
+        let Some(crate::dimension::Dimension::Overworld
+            | crate::dimension::Dimension::Nether
+            | crate::dimension::Dimension::End) =
+            crate::dimension::Dimension::from_wire(dimension)
+        else {
+            return false;
+        };
+        let revision = self.core.current_revision();
+        let Some(session) = self.core.session_mut(self.session_id) else {
+            return false;
+        };
+        session.dimension = dimension;
+        session.last_revision = revision;
+        true
+    }
+
+    pub fn set_session_dimension(&mut self, id: PlayerId, dimension: u8) -> bool {
+        let Some(crate::dimension::Dimension::Overworld
+            | crate::dimension::Dimension::Nether
+            | crate::dimension::Dimension::End) =
+            crate::dimension::Dimension::from_wire(dimension)
+        else {
+            return false;
+        };
+        let revision = self.core.current_revision();
+        let Some(session) = self.core.session_mut(id) else {
+            return false;
+        };
+        session.dimension = dimension;
+        session.last_revision = revision;
+        true
+    }
+
     pub fn set_game_mode(&mut self, game_mode: crate::inventory::GameMode) {
         if let Some(session) = self.core.session_mut(self.session_id) {
             session.game_mode = game_mode;
@@ -197,7 +235,28 @@ impl AuthorityCore {
     }
 
     pub fn register_session(&mut self, session: SessionContract) -> Result<(), RejectReason> {
+        self.register_session_with_limit(session, usize::MAX)
+    }
+
+    /// Atomically reserve an authenticated identity and player slot. The
+    /// caller performs persistence/network setup only after this succeeds;
+    /// `remove_session` is the rollback operation for a later setup failure.
+    pub fn register_session_with_limit(
+        &mut self,
+        session: SessionContract,
+        max_players: usize,
+    ) -> Result<(), RejectReason> {
+        if self.sessions.len() >= max_players.max(1) {
+            return Err(RejectReason::QueueFull);
+        }
         if self.sessions.contains_key(&session.id) {
+            return Err(RejectReason::Duplicate);
+        }
+        if self
+            .sessions
+            .values()
+            .any(|existing| existing.username.eq_ignore_ascii_case(&session.username))
+        {
             return Err(RejectReason::Duplicate);
         }
         self.sessions.insert(session.id, session);
@@ -261,8 +320,8 @@ impl AuthorityCore {
         let Some(session_dimension) = Dimension::from_wire(request.dimension) else {
             return self.reject_for_session(id, request_id, RejectReason::InvalidDimension, None);
         };
-        if request.validate_bounds().is_err() {
-            return self.reject_for_session(id, request_id, RejectReason::Malformed, None);
+        if let Err(reason) = request.validate_bounds() {
+            return self.reject_for_session(id, request_id, reason, None);
         }
         if session.dimension != request.dimension {
             return self.reject_for_session(id, request_id, RejectReason::InvalidDimension, None);
@@ -273,11 +332,15 @@ impl AuthorityCore {
         if request.client_revision > self.current_revision() {
             return self.reject_for_session(id, request_id, RejectReason::InvalidRevision, None);
         }
+        if request.client_revision < session.last_revision {
+            return self.reject_for_session(id, request_id, RejectReason::InvalidRevision, None);
+        }
         if session.game_mode == crate::inventory::GameMode::Spectator
             && matches!(
                 &request.operation,
                 crate::network::protocol::GameplayOperation::BlockUse { .. }
                     | crate::network::protocol::GameplayOperation::Container { .. }
+                    | crate::network::protocol::GameplayOperation::ContainerClick { .. }
                     | crate::network::protocol::GameplayOperation::ItemUse { .. }
                     | crate::network::protocol::GameplayOperation::Combat { .. }
                     | crate::network::protocol::GameplayOperation::Trade { .. }

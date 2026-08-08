@@ -188,7 +188,7 @@ pub fn common_gameplay_vectors() -> Vec<GameplayRequest> {
             dimension: 0,
             client_revision: 1,
             operation: GameplayOperation::Container {
-                action: 1,
+                action: 0,
                 x: 8,
                 y: 80,
                 z: 8,
@@ -209,6 +209,44 @@ pub fn common_gameplay_vectors() -> Vec<GameplayRequest> {
             session_id: 7,
             dimension: 0,
             client_revision: 3,
+            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+        },
+        GameplayRequest {
+            request_id: 0x1005,
+            client_sequence: 5,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 4,
+            operation: GameplayOperation::Combat {
+                target: 42,
+                action: 0,
+            },
+        },
+        GameplayRequest {
+            request_id: 0x1006,
+            client_sequence: 6,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 5,
+            operation: GameplayOperation::Trade {
+                villager_id: 42,
+                offer_index: 0,
+            },
+        },
+        GameplayRequest {
+            request_id: 0x1007,
+            client_sequence: 7,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 6,
+            operation: GameplayOperation::Mount { entity_id: 42 },
+        },
+        GameplayRequest {
+            request_id: 0x1008,
+            client_sequence: 8,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 7,
             operation: GameplayOperation::Command {
                 command: "/gamerule doDaylightCycle false".into(),
             },
@@ -248,8 +286,8 @@ mod tests {
             .cached_response(RESPONSE_CACHE_CAPACITY as u128)
             .is_some());
         let vectors = common_gameplay_vectors();
-        assert_eq!(vectors.len(), 4);
+        assert_eq!(vectors.len(), 8);
         assert_eq!(vectors[0].request_id, 0x1001);
-        assert_eq!(vectors[3].client_sequence, 4);
+        assert_eq!(vectors[7].client_sequence, 8);
     }
 }

@@ -210,7 +210,26 @@ pub enum HostToServer {
         block: u32,
         state: u8,
     },
+    SendBlockChange {
+        to: PlayerId,
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        state: u8,
+    },
     BroadcastBlockEntityDelta {
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
+    },
+    SendBlockEntityDelta {
+        to: PlayerId,
         dimension: u8,
         revision: u64,
         x: i32,
@@ -243,12 +262,22 @@ pub enum HostToServer {
         to: PlayerId,
         reason: String,
     },
+    DisconnectClient {
+        to: PlayerId,
+        reason: String,
+    },
     BroadcastEntitySpawn {
         dimension: u8,
         sequence: u64,
         state: EntityStateWire,
     },
     BroadcastEntityState {
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    SendEntityState {
+        to: PlayerId,
         dimension: u8,
         sequence: u64,
         state: EntityStateWire,
@@ -336,6 +365,16 @@ pub enum HostToServer {
         dragged: Option<crate::network::protocol::ItemWire>,
     },
     BroadcastContainerSlotUpdate {
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot_index: u16,
+        slot: Option<crate::network::protocol::ItemWire>,
+    },
+    SendContainerSlotUpdate {
+        to: PlayerId,
         dimension: u8,
         revision: u64,
         x: i32,
@@ -472,6 +511,26 @@ impl RequestRateLimiter {
 }
 
 type Sessions = Arc<Mutex<HashMap<PlayerId, ClientSession>>>;
+
+/// Host event transport is bounded in production (`SyncSender`) while tests
+/// may use the legacy unbounded sender.  The trait keeps NetworkServer's
+/// protocol logic independent of that queue choice and makes `try_send`
+/// semantics explicit for bounded channels.
+pub trait HostEventSender: Clone + Send + Sync + 'static {
+    fn send(&self, event: ServerToHost) -> Result<(), ()>;
+}
+
+impl HostEventSender for std_mpsc::Sender<ServerToHost> {
+    fn send(&self, event: ServerToHost) -> Result<(), ()> {
+        std_mpsc::Sender::send(self, event).map_err(|_| ())
+    }
+}
+
+impl HostEventSender for std_mpsc::SyncSender<ServerToHost> {
+    fn send(&self, event: ServerToHost) -> Result<(), ()> {
+        self.try_send(event).map_err(|_| ())
+    }
+}
 
 struct PoseMailbox {
     pending: Mutex<HashMap<PlayerId, Packet>>,
@@ -705,22 +764,22 @@ async fn queue_initial_roster(
     Ok(())
 }
 
-pub struct NetworkServer {
+pub struct NetworkServer<S: HostEventSender = std_mpsc::Sender<ServerToHost>> {
     seed: u64,
     gamemode: u8,
     next_player_id: Arc<AtomicU64>,
     sessions: Sessions,
-    server_to_host: std_mpsc::Sender<ServerToHost>,
+    server_to_host: S,
     config: ServerConfig,
 }
 
-impl NetworkServer {
+impl<S: HostEventSender> NetworkServer<S> {
     pub fn spawn(
         bind_addr: String,
         seed: u64,
         gamemode: u8,
         host_to_server: std_mpsc::Receiver<HostToServer>,
-        server_to_host: std_mpsc::Sender<ServerToHost>,
+        server_to_host: S,
     ) -> JoinHandle<()> {
         Self::spawn_with_config(
             bind_addr,
@@ -738,7 +797,7 @@ impl NetworkServer {
         seed: u64,
         gamemode: u8,
         host_to_server: std_mpsc::Receiver<HostToServer>,
-        server_to_host: std_mpsc::Sender<ServerToHost>,
+        server_to_host: S,
         catchup_queue_capacity: usize,
         catchup_drain_delay: Duration,
     ) -> JoinHandle<()> {
@@ -764,7 +823,7 @@ impl NetworkServer {
         seed: u64,
         gamemode: u8,
         host_to_server: std_mpsc::Receiver<HostToServer>,
-        server_to_host: std_mpsc::Sender<ServerToHost>,
+        server_to_host: S,
         config: ServerConfig,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
@@ -919,7 +978,7 @@ impl NetworkServer {
         id: PlayerId,
         mut request: GameplayRequest,
         request_rate: &mut RequestRateLimiter,
-        server_to_host: &std_mpsc::Sender<ServerToHost>,
+        server_to_host: &S,
     ) -> Result<(), String> {
         let mut immediate_response = None;
         let mut forward = None;
@@ -989,7 +1048,7 @@ impl NetworkServer {
         gamemode: u8,
         next_player_id: Arc<AtomicU64>,
         sessions: Sessions,
-        server_to_host: std_mpsc::Sender<ServerToHost>,
+        server_to_host: S,
         config: ServerConfig,
     ) {
         let handshake = match time::timeout(CLIENT_TIMEOUT, connection.recv()).await {
@@ -1103,23 +1162,6 @@ impl NetworkServer {
         }
 
         let id = next_player_id.fetch_add(1, Ordering::Relaxed);
-        if connection
-            .send(&Packet::LoginSuccess {
-                protocol_version: PROTOCOL_VERSION,
-                player_id: id,
-                seed,
-                gamemode,
-            })
-            .await
-            .is_err()
-        {
-            eprintln!(
-                "[NetworkServer] Failed to send LoginSuccess to '{handshake}' (Player ID: {id})"
-            );
-            return;
-        }
-
-        eprintln!("[NetworkServer] Sent LoginSuccess to '{handshake}' (Player ID: {id})");
 
         let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
         let roster_tx = out_tx.clone();
@@ -1199,19 +1241,65 @@ impl NetworkServer {
 
         let mut request_rate = RequestRateLimiter::new(config.request_rate_per_second);
 
-        sessions.lock().await.insert(
-            id,
-            ClientSession {
-                id,
-                username: handshake.clone(),
-                out_tx,
-                pose_mailbox: Arc::clone(&pose_mailbox),
-                state_mailbox: Arc::clone(&state_mailbox),
-                catchup_mailbox: Arc::clone(&catchup_mailbox),
-                cancel_tx,
-                gameplay: GameplaySessionState::default(),
+        // Re-check and reserve the authenticated identity while inserting the
+        // transport session.  The handshake preflight above is only an early
+        // rejection; this lock closes the concurrent duplicate/max-player
+        // race before LoginSuccess is allowed onto the wire.
+        let reservation_error = {
+            let mut sessions_guard = sessions.lock().await;
+            if sessions_guard.len() >= config.max_players.max(1) {
+                Some("server is full")
+            } else if sessions_guard
+                .values()
+                .any(|session| session.username.eq_ignore_ascii_case(&normalized_username))
+            {
+                Some("duplicate login")
+            } else {
+                sessions_guard.insert(
+                    id,
+                    ClientSession {
+                        id,
+                        username: handshake.clone(),
+                        out_tx: out_tx.clone(),
+                        pose_mailbox: Arc::clone(&pose_mailbox),
+                        state_mailbox: Arc::clone(&state_mailbox),
+                        catchup_mailbox: Arc::clone(&catchup_mailbox),
+                        cancel_tx: cancel_tx.clone(),
+                        gameplay: GameplaySessionState::default(),
+                    },
+                );
+                None
+            }
+        };
+        if let Some(reason) = reservation_error {
+            let _ = reliable_send(
+                &roster_tx,
+                Packet::Disconnect {
+                    protocol_version: PROTOCOL_VERSION,
+                    reason: reason.into(),
+                },
+            )
+            .await;
+            send_task.abort();
+            return;
+        }
+
+        if !reliable_send(
+            &roster_tx,
+            Packet::LoginSuccess {
+                protocol_version: PROTOCOL_VERSION,
+                player_id: id,
+                seed,
+                gamemode,
             },
-        );
+        )
+        .await
+        {
+            sessions.lock().await.remove(&id);
+            send_task.abort();
+            return;
+        }
+        eprintln!("[NetworkServer] Sent LoginSuccess to '{handshake}' (Player ID: {id})");
         let mut roster: Vec<(PlayerId, String)> = sessions
             .lock()
             .await
@@ -1462,8 +1550,8 @@ impl NetworkServer {
                             dimension,
                             revision,
                             slot_index,
-                            is_left: _is_left,
-                            dragged: _dragged,
+                            is_left,
+                            dragged,
                             ..
                         })) => {
                             let request = {
@@ -1472,26 +1560,42 @@ impl NetworkServer {
                                     disconnect_reason = "authenticated session disappeared".into();
                                     break;
                                 };
-                                let (_active_dimension, x, y, z) = session
-                                    .gameplay
-                                    .active_container
-                                    .unwrap_or((dimension, 0, 0, 0));
-                                Self::legacy_gameplay_request(
-                                    session,
-                                    dimension,
-                                    revision,
-                                    GameplayOperation::Container {
-                                        // The legacy boolean selects click
-                                        // semantics, while the envelope action
-                                        // identifies the container operation.
-                                        // Both left and right clicks are action 1.
-                                        action: 1,
-                                        x,
-                                        y,
-                                        z,
-                                        slot: slot_index,
-                                    },
-                                )
+                                match session.gameplay.active_container {
+                                    Some((active_dimension, x, y, z))
+                                        if active_dimension == dimension => {
+                                            let operation = if dragged.is_some() || !is_left {
+                                                GameplayOperation::ContainerClick {
+                                                    x,
+                                                    y,
+                                                    z,
+                                                    slot: slot_index,
+                                                    is_left,
+                                                    dragged,
+                                                }
+                                            } else {
+                                                GameplayOperation::Container {
+                                                    // The legacy boolean selects click
+                                                    // semantics, while the envelope action
+                                                    // identifies the container operation.
+                                                    action: 1,
+                                                    x,
+                                                    y,
+                                                    z,
+                                                    slot: slot_index,
+                                                }
+                                            };
+                                            Some(Self::legacy_gameplay_request(
+                                                session,
+                                                dimension,
+                                                revision,
+                                                operation,
+                                            ))
+                                        }
+                                    _ => None,
+                                }
+                            };
+                            let Some(request) = request else {
+                                continue;
                             };
                             if let Err(reason) = Self::route_gameplay_request(
                                 &sessions,
@@ -1587,11 +1691,7 @@ impl NetworkServer {
         send_task.abort();
     }
 
-    async fn remove_client(
-        id: PlayerId,
-        sessions: &Sessions,
-        server_to_host: &std_mpsc::Sender<ServerToHost>,
-    ) {
+    async fn remove_client(id: PlayerId, sessions: &Sessions, server_to_host: &S) {
         let removed = sessions.lock().await.remove(&id);
         let Some(session) = removed else {
             return;
@@ -1708,6 +1808,20 @@ impl NetworkServer {
             return;
         }
 
+        if let HostToServer::DisconnectClient { to, reason } = &command {
+            let failed = Self::send_to(
+                &self.sessions,
+                *to,
+                Packet::Disconnect {
+                    protocol_version: PROTOCOL_VERSION,
+                    reason: reason.clone(),
+                },
+            )
+            .await;
+            Self::evict_slow_clients(&self.sessions, &self.server_to_host, failed).await;
+            return;
+        }
+
         if let HostToServer::BroadcastPlayerPosition {
             id,
             sequence,
@@ -1719,7 +1833,7 @@ impl NetworkServer {
             pitch,
         } = &command
         {
-            Self::broadcast_pose(
+            Self::broadcast_pose_inner(
                 &self.sessions,
                 Packet::PlayerPosition {
                     protocol_version: PROTOCOL_VERSION,
@@ -1734,6 +1848,28 @@ impl NetworkServer {
                 },
             )
             .await;
+            return;
+        }
+
+        if let HostToServer::SendEntityState {
+            to,
+            dimension,
+            sequence,
+            state,
+        } = &command
+        {
+            let failed = Self::send_to(
+                &self.sessions,
+                *to,
+                Packet::EntityState {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension: *dimension,
+                    sequence: *sequence,
+                    state: *state,
+                },
+            )
+            .await;
+            Self::evict_slow_clients(&self.sessions, &self.server_to_host, failed).await;
             return;
         }
 
@@ -1822,6 +1958,28 @@ impl NetworkServer {
                 },
                 None,
             ),
+            HostToServer::SendBlockChange {
+                to,
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                block,
+                state,
+            } => (
+                Packet::BlockChange {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                },
+                Some(to),
+            ),
             HostToServer::BroadcastBlockEntityDelta {
                 dimension,
                 revision,
@@ -1907,6 +2065,26 @@ impl NetworkServer {
                 },
                 None,
             ),
+            HostToServer::SendBlockEntityDelta {
+                to,
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                entity,
+            } => (
+                Packet::BlockEntityDelta {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    entity,
+                },
+                Some(to),
+            ),
             HostToServer::SendWorldRules { rules, to } => (
                 Packet::WorldRulesSync {
                     protocol_version: PROTOCOL_VERSION,
@@ -1947,6 +2125,7 @@ impl NetworkServer {
                 (packet, Some(to))
             }
             HostToServer::BroadcastEntityState { .. }
+            | HostToServer::SendEntityState { .. }
             | HostToServer::BroadcastPlayerHealth { .. }
             | HostToServer::BroadcastPlayerEffect { .. } => {
                 unreachable!("state packets use the latest-wins state channel")
@@ -1980,6 +2159,9 @@ impl NetworkServer {
             }
             HostToServer::DisconnectCatchupClient { .. } => {
                 unreachable!("catch-up disconnects are handled before packet mapping")
+            }
+            HostToServer::DisconnectClient { .. } => {
+                unreachable!("targeted disconnects are handled before packet mapping")
             }
             HostToServer::Stop => return,
             HostToServer::SendContainerOpenResult {
@@ -2042,6 +2224,28 @@ impl NetworkServer {
                     slot,
                 };
                 (packet, None)
+            }
+            HostToServer::SendContainerSlotUpdate {
+                to,
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                slot_index,
+                slot,
+            } => {
+                let packet = Packet::ContainerSlotUpdate {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    slot_index,
+                    slot,
+                };
+                (packet, Some(to))
             }
             HostToServer::SendPlayerRespawnResult {
                 to,
@@ -2121,11 +2325,7 @@ impl NetworkServer {
         failed
     }
 
-    async fn evict_slow_clients(
-        sessions: &Sessions,
-        server_to_host: &std_mpsc::Sender<ServerToHost>,
-        initial: Vec<PlayerId>,
-    ) {
+    async fn evict_slow_clients(sessions: &Sessions, server_to_host: &S, initial: Vec<PlayerId>) {
         let mut pending = initial;
         let mut handled = HashSet::new();
         while let Some(id) = pending.pop() {
@@ -2154,7 +2354,7 @@ impl NetworkServer {
         }
     }
 
-    async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
+    async fn broadcast_pose_inner(sessions: &Sessions, packet: Packet) {
         let player_id = match &packet {
             Packet::PlayerPosition { id, .. } => *id,
             _ => return,
@@ -2192,6 +2392,14 @@ impl NetworkServer {
         for tx in senders {
             best_effort_send(&tx, packet.clone());
         }
+    }
+}
+
+impl NetworkServer<std_mpsc::Sender<ServerToHost>> {
+    /// Compatibility entry point for headless tests that exercise pose
+    /// coalescing without constructing a full server transport.
+    async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
+        Self::broadcast_pose_inner(sessions, packet).await;
     }
 }
 

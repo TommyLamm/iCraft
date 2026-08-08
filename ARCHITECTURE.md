@@ -68,9 +68,13 @@ Accepted request mutations and fixed-tick snapshots are projected one-way into
 `State` for lighting, mesh invalidation, block-entity UI, and local input
 feedback. Boundary worlds disable the renderer's legacy redstone, fluid,
 random-tick, furnace, mob, vehicle, village, and dropped-entity authority
-paths; unsupported presentation interactions are rejected by the core. Player
-health/effects persistence, interest routing, and full network migration remain
-Plan 18 B–E work.
+paths; unsupported presentation interactions are rejected by the core. `SaveManager`
+v2 now owns dedicated player current-dimension/effects files, checked authority
+chunk/entity restore, and atomic region-cache commit/retry semantics. The runtime
+maintains dimension-aware view/simulation/container interest and exposes a bounded
+`RoutedInterestUpdate` ledger for the transport owner. Targeted wire-packet encoding
+and concurrent login reservation remain Plan 18 B/D follow-up work; this ledger must
+not be presented as a completed network E2E migration.
 
 On Windows, menu and game GPU initialization intentionally select DX12 because
 the primary Vulkan path has caused a verified NVIDIA driver crash.
@@ -220,13 +224,22 @@ The shared headless authority lives in `authority::AuthorityCore` and
   permissions, client sequence/revision, and the bounded response cache.
 - `RevisionClock` and sorted fixed-tick iteration provide one deterministic
   mutation/revision contract across all three topologies.
+- `SaveManager` persists dedicated player payloads (current dimension separate
+  from spawn dimension), authoritative chunk/block-entity/entity snapshots, and
+  a dimension-scoped mutation-revision index. Region caches are committed only
+  after an atomic replacement succeeds, preserving the previous snapshot for a
+  retry on failure.
+- `InterestSet` tracks per-session view/simulation chunks, simulation entities,
+  and open container viewers. `ServerRuntime::drain_routed_updates` exposes the
+  bounded, dimension-checked routing ledger; the network packet adapter remains
+  a separate Plan 18 B/D seam.
 - `ServerRuntime` is transport/session/scheduling/save/metrics glue. It does
   not maintain a parallel authoritative block/entity map.
 
-The Phase A boundary cutover is covered by headless authority/projection seams.
-GPU Host+Join, persistence/interest integration, and the remaining B–E
-acceptance evidence are still manual or follow-up work; headless tests must
-not be presented as a GPU/manual pass.
+The Phase A boundary cutover and Phase C persistence/interest seams are covered by
+headless authority/projection tests. GPU Host+Join, targeted wire-packet delivery,
+concurrent login reservation, and the remaining B–E acceptance evidence are still
+manual or follow-up work; headless tests must not be presented as a GPU/manual pass.
 
 `src/network/` contains a versioned bincode protocol over length-prefixed TCP:
 
@@ -290,16 +303,18 @@ options and validates world copy/backup/delete paths beneath the canonical
 | `saves/<world>/world.meta` | World-list name, seed, game mode, difficulty, world type, structure/bonus/cheat flags, Hardcore flag, and last-played time. |
 | `saves/<world>/level.dat` | Bincode `LevelData`: seed, game time, world spawn coordinates, dimension, yaw, format version, world type/structure flags, Hardcore flag, and the serialized `WorldRules` snapshot. |
 | `saves/<world>/player.dat` | Bincode player, inventory/item metadata (including Adventure break/place masks), game mode, XP, spawn point, spawn dimension, unlocked_recipes, advancement progress, and the persistent death marker used by Hardcore. |
-| `world/players/<username>.dat` | Dedicated-runtime per-player atomic save: the complete `PlayerData` payload plus active effects. Username is sanitized and duplicate logins are rejected. |
+| `world/players/<username>.dat` | Dedicated-runtime v2 per-player atomic save: current dimension plus the complete `PlayerData` payload (including separate spawn dimension) and active effects. Version-1 files migrate using the saved spawn dimension; username is sanitized and duplicate logins are explicitly rejected. |
 | `server.properties` | MOTD, bind/port, player cap, difficulty, online-mode placeholder, whitelist/operators, view/simulation distance, PvP, world path, and seed. |
 | `saves/<world>/dimension.dat` | Active dimension; missing legacy files default to Overworld. |
 | `saves/<world>/entities.dat` | Persistent Overworld living/persistent/dropped entities. |
-| `saves/<world>/regions/` | Overworld region data. |
+| `saves/<world>/regions/` | Overworld region data; authoritative chunk payloads include block entities and per-chunk mutation revisions. Failed replacements leave the prior region/cache snapshot available for retry. |
 | `saves/<world>/regions/` (block_entities) | Per-chunk `BlockEntity` data (chest/furnace inventories and progress, hopper 5-slot transfer state, dispenser/dropper 9-slot inventories, observer baseline/pulse state, sign text) serialized via `ChunkSaveData`; legacy block-entity decoding and serde defaults preserve older saves. |
 | `saves/<world>/dimensions/{nether,end}/` | Dimension-specific entities and regions. |
 
-`SaveManager` owns serialization, legacy-player upgrades, atomic sidecar writes,
-compressed chunk data, region caching, and dimension-aware paths. Five-minute
+`SaveManager` owns serialization, legacy-player upgrades, dedicated player files,
+atomic sidecar writes, compressed chunk data, region caching, and dimension-aware
+paths. It also exposes checked authority restore and a bounded mutation-revision
+index for `ServerRuntime`. Five-minute
 autosaves and unload saves use a bounded latest-wins queue with per-Chunk
 dirty/in-flight/persisted revisions. Worker ACKs carry real save errors; failed
 snapshots remain retryable. Window close and “Save and Quit” flush synchronously,
@@ -314,7 +329,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | --- | --- |
 | App lifecycle and menu | `main.rs`, `app.rs`, `menu.rs` |
 | Composition, presentation/input, UI, GPU submission | `state.rs` |
-| Headless authority, fixed tick, sessions, revisions | `authority/{mod,contract}.rs`, `server_world.rs` |
+| Headless authority, fixed tick, sessions, revisions, interest routing | `authority/{mod,contract,interest}.rs`, `server_world.rs`, `server_runtime.rs` |
 | World/chunks/generation & structures | `world.rs`, `chunk_manager.rs`, `dimension.rs`, `worldgen/{mod, climate, density, surface, carver, ore, feature}.rs`, `structure/{types, placement, gen/*, manager, locate}.rs`, `loot.rs` |
 | Lighting, fluids, block targeting | `lighting.rs`, `fluid.rs`, `interaction.rs` |
 | Terrain scheduling/rendering | `chunk_schedule.rs`, `chunk_render.rs`, `culling.rs`, `shader.wgsl` |
