@@ -2291,6 +2291,7 @@ fn append_end_portal_frame_mesh(
     sky_light: u8,
     block_light: u8,
     region_coord: (i32, i32),
+    registry: Option<&crate::block_model::ModelRegistry>,
 ) {
     for (face_idx, (_, corner_data)) in BLOCK_FACES.iter().enumerate() {
         let multiplier_code = match face_idx {
@@ -2314,12 +2315,16 @@ fn append_end_portal_frame_mesh(
             ];
             local_uvs[corner_idx] = *uv;
         }
+        let fallback_tile = block.get_face_tex_index(face_idx);
+        let atlas_tile = registry.map_or(fallback_tile, |registry| {
+            registry.atlas_tile_for_block(block, fallback_tile)
+        });
         push_terrain_quad(
             vertices,
             indices,
             positions,
             local_uvs,
-            block.get_face_tex_index(face_idx),
+            atlas_tile,
             light_level,
             [1.0; 4],
             region_coord,
@@ -2332,6 +2337,7 @@ fn append_end_portal_surface(
     indices: &mut Vec<u32>,
     origin: [f32; 3],
     region_coord: (i32, i32),
+    registry: Option<&crate::block_model::ModelRegistry>,
 ) {
     let y = origin[1] + END_PORTAL_SURFACE_HEIGHT;
     let positions = [
@@ -2341,7 +2347,10 @@ fn append_end_portal_surface(
         [origin[0], y, origin[2]],
     ];
     let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-    let tile = BlockType::EndPortal.get_face_tex_index(4);
+    let fallback_tile = BlockType::EndPortal.get_face_tex_index(4);
+    let tile = registry.map_or(fallback_tile, |registry| {
+        registry.atlas_tile_for_block(BlockType::EndPortal, fallback_tile)
+    });
     let light_level = 15.0 * 16.0 + 15.0;
     push_terrain_quad(
         vertices,
@@ -4165,9 +4174,13 @@ impl Chunk {
                     }
 
                     let torch_atlas_tile = match block {
-                        BlockType::Torch => Some(TORCH_ATLAS_TILE),
+                        BlockType::Torch => Some(registry.map_or(TORCH_ATLAS_TILE, |registry| {
+                            registry.atlas_tile_for_block(block, TORCH_ATLAS_TILE)
+                        })),
                         BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
-                            Some(REDSTONE_TORCH_ATLAS_TILE)
+                            Some(registry.map_or(REDSTONE_TORCH_ATLAS_TILE, |registry| {
+                                registry.atlas_tile_for_block(block, REDSTONE_TORCH_ATLAS_TILE)
+                            }))
                         }
                         _ => None,
                     };
@@ -4193,7 +4206,9 @@ impl Chunk {
                             state,
                             voxel.sky,
                             voxel.block_light,
-                            (9, 14),
+                            registry.map_or((9, 14), |registry| {
+                                registry.atlas_tile_for_block(block, (9, 14))
+                            }),
                             region_coord,
                         );
                         continue;
@@ -4208,7 +4223,9 @@ impl Chunk {
                             state,
                             voxel.sky,
                             voxel.block_light,
-                            (10, 14),
+                            registry.map_or((10, 14), |registry| {
+                                registry.atlas_tile_for_block(block, (10, 14))
+                            }),
                             region_coord,
                         );
                         continue;
@@ -4221,7 +4238,9 @@ impl Chunk {
                             [world_x as f32, world_y as f32, world_z as f32],
                             voxel.sky,
                             voxel.block_light,
-                            (11, 12),
+                            registry.map_or((11, 12), |registry| {
+                                registry.atlas_tile_for_block(block, (11, 12))
+                            }),
                             region_coord,
                         );
                         continue;
@@ -4239,6 +4258,7 @@ impl Chunk {
                             voxel.sky,
                             voxel.block_light,
                             region_coord,
+                            registry,
                         );
                         continue;
                     }
@@ -4249,6 +4269,7 @@ impl Chunk {
                             &mut trans_indices,
                             [world_x as f32, world_y as f32, world_z as f32],
                             region_coord,
+                            registry,
                         );
                         continue;
                     }
