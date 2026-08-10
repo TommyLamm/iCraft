@@ -608,7 +608,14 @@ impl ServerWorld {
             GameplayOperation::ItemUse { .. }
             | GameplayOperation::Combat { .. }
             | GameplayOperation::Trade { .. }
-            | GameplayOperation::Mount { .. } => {
+            | GameplayOperation::Mount { .. }
+            | GameplayOperation::Fishing { .. }
+            | GameplayOperation::FurnaceTakeOutput { .. }
+            | GameplayOperation::Craft { .. }
+            | GameplayOperation::Enchant { .. }
+            | GameplayOperation::Brew { .. }
+            | GameplayOperation::Anvil { .. }
+            | GameplayOperation::UseState { .. } => {
                 Err(WorldDispatchError::new(RejectReason::Unsupported))
             }
         }

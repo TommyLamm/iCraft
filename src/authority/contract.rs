@@ -7,11 +7,12 @@
 use crate::inventory::GameMode;
 use crate::network::protocol::{
     GameplayOperation, GameplayRequest, GameplayResponse, ItemWire, PlayerId, RejectReason,
+    SessionSlotWire, SlotRefWire,
 };
 use std::collections::VecDeque;
 
 /// Bump this when the authoritative request/session semantics change.
-pub const AUTHORITY_CONTRACT_VERSION: u16 = 1;
+pub const AUTHORITY_CONTRACT_VERSION: u16 = 2;
 pub const FIXED_TICK_HZ: u32 = 20;
 pub const RESPONSE_CACHE_CAPACITY: usize = 128;
 
@@ -99,7 +100,42 @@ impl SessionInventorySlot {
     }
 }
 
+impl From<SessionSlotWire> for SessionInventorySlot {
+    fn from(slot: SessionSlotWire) -> Self {
+        Self::from_wire(slot.item, slot.can_break, slot.can_place_on)
+    }
+}
+
+impl From<SessionInventorySlot> for SessionSlotWire {
+    fn from(slot: SessionInventorySlot) -> Self {
+        Self::new(slot.item, slot.can_break, slot.can_place_on)
+    }
+}
+
 pub const SESSION_INVENTORY_SLOTS: usize = 41;
+
+/// Fixed-width fishing projection kept inside the authority session. Position
+/// and velocity are milliblocks so the contract remains `Eq` and deterministic
+/// across in-process and serialized topologies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionFishingHookState {
+    pub entity_id: u64,
+    pub position_milli: [i32; 3],
+    pub velocity_milli: [i32; 3],
+    pub stage: u8,
+    pub wait_ticks_remaining: u32,
+    pub bite_ticks_remaining: u32,
+}
+
+/// A bounded in-flight brew transaction. It stores only exact session slot
+/// references and fixed-size bottle inputs, never an attacker-controlled Vec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionBrewState {
+    pub station: [i32; 3],
+    pub ingredient: SlotRefWire,
+    pub bottles: [Option<SlotRefWire>; 3],
+    pub remaining_ticks: u16,
+}
 
 /// Gameplay state that must not be duplicated in a renderer root.  Keep this
 /// compact and integer-based so snapshots remain deterministic and cheap to
@@ -111,8 +147,19 @@ pub struct SessionGameplayState {
     pub hunger_milli: u32,
     pub saturation_milli: u32,
     pub is_dead: bool,
+    pub death_source: Option<u8>,
+    pub invulnerability_ticks: u16,
+    pub experience: u32,
+    pub experience_level: u32,
+    pub selected_hotbar_slot: u8,
     pub inventory: [Option<SessionInventorySlot>; SESSION_INVENTORY_SLOTS],
     pub mounted_entity: Option<u64>,
+    pub attack_cooldown_ticks: u16,
+    pub shield_active: bool,
+    pub shield_cooldown_ticks: u16,
+    pub enchant_seed: u64,
+    pub fishing_hook: Option<SessionFishingHookState>,
+    pub brew: Option<SessionBrewState>,
     pub revision: u64,
 }
 
@@ -124,14 +171,151 @@ impl Default for SessionGameplayState {
             hunger_milli: 20_000,
             saturation_milli: 5_000,
             is_dead: false,
+            death_source: None,
+            invulnerability_ticks: 0,
+            experience: 0,
+            experience_level: 0,
+            selected_hotbar_slot: 0,
             inventory: [None; SESSION_INVENTORY_SLOTS],
             mounted_entity: None,
+            attack_cooldown_ticks: 5,
+            shield_active: false,
+            shield_cooldown_ticks: 0,
+            enchant_seed: 0,
+            fishing_hook: None,
+            brew: None,
             revision: 0,
         }
     }
 }
 
 impl SessionGameplayState {
+    /// Execute a small session transaction against a copy and publish it only
+    /// on success. Domain implementations can compose several slot/XP debits
+    /// without writing bespoke rollback code.
+    pub fn transact(&mut self, mutation: impl FnOnce(&mut Self) -> bool) -> bool {
+        let mut candidate = *self;
+        if !mutation(&mut candidate) {
+            return false;
+        }
+        *self = candidate;
+        true
+    }
+
+    pub fn slot(&self, index: u8) -> Option<Option<SessionInventorySlot>> {
+        self.inventory.get(usize::from(index)).copied()
+    }
+
+    pub fn slot_matches(&self, source: SlotRefWire) -> bool {
+        let Some(Some(current)) = self.slot(source.index) else {
+            return false;
+        };
+        current == SessionInventorySlot::from(source.expected)
+            && source.count > 0
+            && source.count <= current.item.count
+    }
+
+    /// Debit an exact rich stack reference. Failure leaves all gameplay fields
+    /// untouched, so callers can safely compose this through `transact`.
+    pub fn consume_slot_exact(&mut self, source: SlotRefWire) -> bool {
+        self.consume_slots_exact(&[source])
+    }
+
+    /// Atomically debit a bounded set of exact rich slot references. Repeated
+    /// indices are aggregated against the original expected stack, which lets
+    /// a crafting grid consume several cells from one inventory stack without
+    /// weakening stale-request detection.
+    pub fn consume_slots_exact(&mut self, sources: &[SlotRefWire]) -> bool {
+        self.transact(|candidate| {
+            let mut totals = [0u32; SESSION_INVENTORY_SLOTS];
+            let mut expected = [None; SESSION_INVENTORY_SLOTS];
+            for source in sources {
+                if !candidate.slot_matches(*source) {
+                    return false;
+                }
+                let index = usize::from(source.index);
+                if expected[index].is_some_and(|slot| slot != source.expected) {
+                    return false;
+                }
+                expected[index] = Some(source.expected);
+                let Some(total) = totals[index].checked_add(u32::from(source.count)) else {
+                    return false;
+                };
+                if total > u32::from(source.expected.item.count) {
+                    return false;
+                }
+                totals[index] = total;
+            }
+
+            for (index, total) in totals.into_iter().enumerate() {
+                if total == 0 {
+                    continue;
+                }
+                let slot = &mut candidate.inventory[index];
+                let entry = slot.as_mut().expect("slot matches guarantee an entry");
+                entry.item.count -= total as u16;
+                if entry.item.count == 0 {
+                    *slot = None;
+                }
+            }
+            true
+        })
+    }
+
+    /// Compare-and-replace a rich inventory slot. Both the expected source and
+    /// replacement must be fully bounded by the protocol contract.
+    pub fn replace_slot_exact(
+        &mut self,
+        source: SlotRefWire,
+        replacement: Option<SessionSlotWire>,
+    ) -> bool {
+        self.transact(|candidate| {
+            if !candidate.slot_matches(source)
+                || replacement
+                    .as_ref()
+                    .is_some_and(|slot| slot.validate_bounds().is_err())
+            {
+                return false;
+            }
+            candidate.inventory[usize::from(source.index)] =
+                replacement.map(SessionInventorySlot::from);
+            true
+        })
+    }
+
+    pub fn experience_to_next_level(&self) -> u32 {
+        7u32.saturating_add(self.experience_level.saturating_mul(2))
+    }
+
+    /// Grant raw XP using the same level curve as PlayerState. Overflow aborts
+    /// the cloned transaction instead of partially advancing a level.
+    pub fn grant_experience(&mut self, amount: u32) -> bool {
+        self.transact(|candidate| {
+            let Some(total) = candidate.experience.checked_add(amount) else {
+                return false;
+            };
+            candidate.experience = total;
+            while candidate.experience >= candidate.experience_to_next_level() {
+                candidate.experience -= candidate.experience_to_next_level();
+                let Some(level) = candidate.experience_level.checked_add(1) else {
+                    return false;
+                };
+                candidate.experience_level = level;
+            }
+            true
+        })
+    }
+
+    pub fn spend_levels(&mut self, levels: u32) -> bool {
+        self.transact(|candidate| {
+            let Some(level) = candidate.experience_level.checked_sub(levels) else {
+                return false;
+            };
+            candidate.experience_level = level;
+            true
+        })
+    }
+
     pub fn count_item(&self, item: u32) -> u32 {
         self.inventory
             .iter()
@@ -247,6 +431,10 @@ pub struct SessionContract {
     pub username: String,
     pub dimension: u8,
     pub position: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub spawn_point: Option<[i32; 3]>,
+    pub spawn_dimension: Option<u8>,
     pub game_mode: GameMode,
     pub operator: bool,
     pub cheats_enabled: bool,
@@ -270,6 +458,10 @@ impl SessionContract {
             username: username.into(),
             dimension,
             position,
+            yaw: 0.0,
+            pitch: 0.0,
+            spawn_point: None,
+            spawn_dimension: None,
             game_mode: GameMode::Survival,
             operator,
             cheats_enabled,
@@ -494,5 +686,80 @@ mod tests {
         different.durability = 5;
         assert!(gameplay.add_slot(SessionInventorySlot::from_wire(different, 0x55, 0xaa,)));
         assert_eq!(gameplay.inventory[2].unwrap().item.durability, 5);
+    }
+
+    #[test]
+    fn gameplay_exact_slot_helpers_are_atomic() {
+        let mut gameplay = SessionGameplayState::default();
+        let mut item = ItemWire::empty();
+        item.item = crate::inventory::Item::IronIngot as u32;
+        item.count = 8;
+        let expected = SessionSlotWire::new(item, 0x55, 0xaa);
+        gameplay.inventory[4] = Some(expected.into());
+        let source = SlotRefWire {
+            index: 4,
+            count: 3,
+            expected,
+        };
+        assert!(gameplay.slot_matches(source));
+        assert!(gameplay.consume_slot_exact(source));
+        assert_eq!(gameplay.inventory[4].unwrap().item.count, 5);
+
+        let after_success = gameplay;
+        assert!(!gameplay.consume_slot_exact(source));
+        assert_eq!(gameplay, after_success);
+
+        let exact_remaining = SlotRefWire {
+            count: 2,
+            expected: SessionSlotWire::new(ItemWire { count: 5, ..item }, 0x55, 0xaa),
+            ..source
+        };
+        assert!(gameplay.consume_slots_exact(&[
+            exact_remaining,
+            SlotRefWire {
+                count: 3,
+                ..exact_remaining
+            },
+        ]));
+        assert_eq!(gameplay.slot(4), Some(None));
+        assert_eq!(gameplay.slot(SESSION_INVENTORY_SLOTS as u8), None);
+
+        let mut replacement_gameplay = SessionGameplayState::default();
+        replacement_gameplay.inventory[4] = Some(expected.into());
+        assert!(replacement_gameplay.replace_slot_exact(source, None));
+        assert_eq!(replacement_gameplay.slot(4), Some(None));
+    }
+
+    #[test]
+    fn gameplay_xp_helpers_and_extended_defaults_are_stable() {
+        let mut gameplay = SessionGameplayState::default();
+        assert_eq!(gameplay.experience_to_next_level(), 7);
+        assert!(gameplay.grant_experience(16));
+        assert_eq!(gameplay.experience, 0);
+        assert_eq!(gameplay.experience_level, 2);
+        assert!(gameplay.spend_levels(1));
+        assert_eq!(gameplay.experience_level, 1);
+
+        let before_failed_spend = gameplay;
+        assert!(!gameplay.spend_levels(2));
+        assert_eq!(gameplay, before_failed_spend);
+
+        gameplay.experience = u32::MAX;
+        let before_overflow = gameplay;
+        assert!(!gameplay.grant_experience(1));
+        assert_eq!(gameplay, before_overflow);
+
+        let session = SessionContract::new(7, "alex", 0, [1.0, 64.0, 2.0], false, false);
+        assert_eq!(session.yaw, 0.0);
+        assert_eq!(session.pitch, 0.0);
+        assert_eq!(session.spawn_point, None);
+        assert_eq!(session.spawn_dimension, None);
+        assert_eq!(session.gameplay.selected_hotbar_slot, 0);
+        assert_eq!(session.gameplay.death_source, None);
+        assert_eq!(session.gameplay.invulnerability_ticks, 0);
+        assert_eq!(session.gameplay.attack_cooldown_ticks, 5);
+        assert!(!session.gameplay.shield_active);
+        assert_eq!(session.gameplay.fishing_hook, None);
+        assert_eq!(session.gameplay.brew, None);
     }
 }
