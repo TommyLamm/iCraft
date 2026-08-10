@@ -38,8 +38,9 @@ suite. Do not mark a row complete without a dated run, platform, and artifact.
 
 ## Runtime, persistence, and performance
 
-- [ ] Run the singleplayer foundation/progression/social scenarios from
-  `cargo test --release --lib final_acceptance`; retain the test log.
+- [x] 2026-08-10, Windows x86_64: ran the singleplayer
+  foundation/progression/social scenarios in debug and release; see
+  `19_acceptance_report.md` for commands, assertion rows and results.
 - [ ] Run a fixed-view GPU scene for at least 30 minutes with the selected pack,
   subtitles, chat, and accessibility toggles. Record FPS, frame time, memory,
   and any device loss; compare with the approved performance artifact.

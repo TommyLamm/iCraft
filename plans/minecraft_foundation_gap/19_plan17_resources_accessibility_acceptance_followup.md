@@ -132,7 +132,7 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
 
 ## 驗收與完成閘門
 
-- [ ] Foundation、Progression、SocialAutomation 每一步都是可觀察 gameplay 操作，singleplayer
+- [x] Foundation、Progression、SocialAutomation 每一步都是可觀察 gameplay 操作，singleplayer
   三場景均通過，並在保存後重載重跑關鍵 assertions。
 - [ ] B 的五類 asset consumer 實際使用 selected pack；locale 即時切換、fallback、diagnostics、
   env override、manifest/dependency/ZIP security tests 全通過。
@@ -142,7 +142,7 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
   `[ ]` 並標明 blocker。
 - [ ] Listen-server 與 dedicated+2 clients 三場景只有在 Plan 18 authority unification 完成後才可
   由同一 assertion suite 宣稱通過；在此之前標記 `blocked by Plan 18`。
-- [ ] `cargo fmt --all -- --check`、`cargo test --release`、`cargo check --release`、
+- [x] `cargo fmt --all -- --check`、`cargo test --release`、`cargo check --release`、
   `git diff --check` 及 Plan 17/19 targeted tests 通過。
 
 ### 與 Plan 18 的並行邊界

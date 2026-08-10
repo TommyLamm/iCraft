@@ -462,10 +462,12 @@ observer edge/budget behavior, container revision ordering, and v3 save/snapshot
 round trips. A GPU/window Host+Join-client scene still requires manual execution
 outside the headless test environment.
 
-Plan 17 adds `final_acceptance.rs`, a deterministic headless harness for the
-foundation, progression, and social/automation scenario fixtures. Singleplayer
-assertions run in CI; listen-server and dedicated+two-client rows remain
-explicit Plan 18 hand-offs until authority unification is complete. Resource
+Plan 17/19 adds `final_acceptance.rs`, a deterministic headless harness for real
+foundation, progression, and social/automation workflows, including inventory,
+block-entity and save/reload assertions. Singleplayer runs in CI. A separate
+Plan18 harness now runs a real dedicated authority with two TCP clients for
+block/container/revision/interest/reconnect coverage; the complete three-scenario
+listen/dedicated rows remain explicit Plan18 hand-offs. Resource
 packs, localization, subtitles, reduced motion, and keyboard-focus behavior
 have unit coverage. Visual 4:3/16:9/21:9/high-DPI, audio-device,
 GPU-performance, 30-minute soak, and three-topology acceptance still require

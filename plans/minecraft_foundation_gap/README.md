@@ -91,7 +91,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已實作基礎；核心權威遷移缺口轉 18（headless dedicated/runtime 短跑通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
 | 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 已實作基礎；真 E2E、consumer 接線與 Accessibility presentation 缺口轉 Plan19（GPU、30 分鐘 soak、三拓撲實機待執行；權威缺口轉 Plan18） |
 | 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | A–D foundation 與真 TCP 雙客戶端 headless harness 已通過；仍需 State gameplay mutation 最終收斂、完整 fault/metrics matrix、30 分鐘 soak 與 GPU Host+Join 實機驗收 |
-| 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | 待 Plan17 基礎完成後執行；A 網路拓撲依賴 Plan18，B/C 可並行 |
+| 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow 與 B/C 自動化基礎已通過；完整網路三場景、通用 model/font consumer、GPU/DPI/音效 artifact 與 soak 仍待完成 |
 | 20 | [Plan01–17 回歸硬化](20_plan01_17_regression_hardening.md) | 已完成；debug/release 結構 seed、Plan15 legacy metadata／備份與 `mob_griefing` consumer 語義均有回歸測試 |
 
 官方資料也佐證上述族群屬於基礎體驗：

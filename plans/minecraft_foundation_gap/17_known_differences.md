@@ -5,11 +5,15 @@
 - Listen-server and dedicated + two-client acceptance is intentionally blocked
   by the authority-unification work tracked in Plan 18. The Plan 17 harness
   reports those topology rows as blocked rather than claiming a pass.
-- The headless scenario fixtures exercise deterministic world, progression, and
-  social/automation seams; they do not construct a window, GPU, audio device,
-  real save/restart cycle, or TCP session.
+- The headless singleplayer scenarios execute gameplay workflows and save/reload
+  seams, but do not construct a window, GPU or audio device. A separate Plan18
+  harness starts a real dedicated runtime and two TCP clients and verifies
+  authority save/restart; it does not yet execute all three Plan19 scenarios.
 - Resource-pack application is selected at menu time and consumed when a world
   state is created. A live world does not hot-swap GPU atlas resources.
+- Model descriptors currently reach a tested registry/mesh seam rather than
+  every main-world mesh call, and the selected font source is not yet the
+  universal HUD font. These keep Plan19 B open despite the resolver tests.
 
 ## Content differences
 
