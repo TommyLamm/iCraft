@@ -9,13 +9,32 @@ use crate::network::protocol::{
     GameplayOutcome, GameplayRequest, GameplayResponse, PlayerId, RejectReason,
 };
 use crate::server_world::ServerWorld;
-use contract::{AuthoritySnapshot, AuthorityTopology, SessionContract, WorldMutation};
+use contract::{
+    AuthoritySnapshot, AuthorityTopology, SessionContract, SessionGameplayState,
+    SessionGameplayUpdate, WorldMutation,
+};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 pub use contract::{
     common_gameplay_vectors, RevisionClock, AUTHORITY_CONTRACT_VERSION, FIXED_TICK_HZ,
     RESPONSE_CACHE_CAPACITY,
 };
+
+// Dimension is a wire-ordered enum and is used as the deterministic key for
+// parked authoritative worlds.  Keep this local to the authority module so
+// the renderer-facing dimension type does not need a broader API change.
+impl Ord for Dimension {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (*self as u8).cmp(&(*other as u8))
+    }
+}
+
+impl PartialOrd for Dimension {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AuthorityConfig {
@@ -48,6 +67,11 @@ impl Default for AuthorityConfig {
 pub struct AuthorityCore {
     pub topology: AuthorityTopology,
     pub world: ServerWorld,
+    /// Immutable world-creation inputs used when a dimension has not been
+    /// visited yet.  Each dimension then owns an independent parked world so
+    /// switching cannot reinterpret one dimension's chunks as another's.
+    config: AuthorityConfig,
+    parked_worlds: BTreeMap<Dimension, ServerWorld>,
     sessions: BTreeMap<PlayerId, SessionContract>,
     last_snapshot: AuthoritySnapshot,
     /// Mutations emitted between fixed ticks (for example an authenticated
@@ -160,13 +184,8 @@ impl AuthorityBoundary {
         else {
             return false;
         };
-        let revision = self.core.current_revision();
-        let Some(session) = self.core.session_mut(self.session_id) else {
-            return false;
-        };
-        session.dimension = dimension;
-        session.last_revision = revision;
-        true
+        let target = crate::dimension::Dimension::from_wire(dimension).expect("validated above");
+        self.core.set_session_dimension(self.session_id, target)
     }
 
     pub fn set_session_dimension(&mut self, id: PlayerId, dimension: u8) -> bool {
@@ -178,13 +197,52 @@ impl AuthorityBoundary {
         else {
             return false;
         };
-        let revision = self.core.current_revision();
-        let Some(session) = self.core.session_mut(id) else {
-            return false;
-        };
-        session.dimension = dimension;
-        session.last_revision = revision;
-        true
+        let target = crate::dimension::Dimension::from_wire(dimension).expect("validated above");
+        self.core.set_session_dimension(id, target)
+    }
+
+    pub fn session_gameplay(&self, id: PlayerId) -> Option<SessionGameplayUpdate> {
+        self.core.session_gameplay(id)
+    }
+
+    pub fn set_session_gameplay(&mut self, id: PlayerId, gameplay: SessionGameplayState) -> bool {
+        self.core.set_session_gameplay(id, gameplay)
+    }
+
+    pub fn sync_villager(
+        &mut self,
+        villager_id: u64,
+        position: [f32; 3],
+        profession: crate::village::poi::VillagerProfession,
+        level: crate::village::trade::VillagerLevel,
+        offers: Vec<crate::village::trade::TradeOffer>,
+    ) -> bool {
+        self.core
+            .world
+            .ensure_villager(villager_id, position, profession, level, offers)
+    }
+
+    pub fn sync_vehicle(
+        &mut self,
+        vehicle_id: u64,
+        entity_type: crate::entity::EntityType,
+        position: [f32; 3],
+    ) -> bool {
+        self.core
+            .world
+            .ensure_vehicle(vehicle_id, entity_type, position)
+    }
+
+    pub fn sync_entity(
+        &mut self,
+        entity_id: u64,
+        entity_type: crate::entity::EntityType,
+        position: [f32; 3],
+        health: f32,
+    ) -> bool {
+        self.core
+            .world
+            .ensure_entity(entity_id, entity_type, position, health)
     }
 
     pub fn set_game_mode(&mut self, game_mode: crate::inventory::GameMode) {
@@ -222,18 +280,50 @@ impl AuthorityCore {
     pub fn new(config: AuthorityConfig, topology: AuthorityTopology) -> Self {
         Self {
             topology,
-            world: ServerWorld::new(
-                config.seed,
-                config.dimension,
-                config.world_type,
-                config.generate_structures,
-                config.rules,
-                config.render_distance,
-            ),
+            world: Self::new_world(config, config.dimension),
+            config,
+            parked_worlds: BTreeMap::new(),
             sessions: BTreeMap::new(),
             last_snapshot: AuthoritySnapshot::empty(),
             pending_mutations: Vec::new(),
         }
+    }
+
+    fn new_world(config: AuthorityConfig, dimension: Dimension) -> ServerWorld {
+        ServerWorld::new(
+            config.seed,
+            dimension,
+            config.world_type,
+            config.generate_structures,
+            config.rules,
+            config.render_distance,
+        )
+    }
+
+    /// Activate a dimension without aliasing chunk/entity state between
+    /// dimensions.  The active world is parked by its dimension and a target
+    /// world is either restored or created from the immutable config.
+    pub fn set_session_dimension(&mut self, id: PlayerId, target: Dimension) -> bool {
+        if !self.sessions.contains_key(&id) {
+            return false;
+        }
+        if self.world.dimension != target {
+            let current = self.world.dimension;
+            let next = self
+                .parked_worlds
+                .remove(&target)
+                .unwrap_or_else(|| Self::new_world(self.config, target));
+            let previous = std::mem::replace(&mut self.world, next);
+            self.parked_worlds.insert(current, previous);
+        }
+        let revision = self.current_revision();
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        session.dimension = target as u8;
+        session.last_revision = revision;
+        session.gameplay.revision = revision;
+        true
     }
 
     pub fn register_session(&mut self, session: SessionContract) -> Result<(), RejectReason> {
@@ -306,6 +396,15 @@ impl AuthorityCore {
             snapshot.revision = self.world.revisions.current();
             snapshot.checksum = self.world.checksum(&snapshot.mutations);
         }
+        snapshot.session_updates = self
+            .sessions
+            .values()
+            .map(|session| SessionGameplayUpdate {
+                player_id: session.id,
+                dimension: session.dimension,
+                state: session.gameplay,
+            })
+            .collect();
         self.last_snapshot = snapshot.clone();
         snapshot
     }
@@ -362,6 +461,7 @@ impl AuthorityCore {
 
         let result = self
             .dispatch_session_command(&request, id)
+            .or_else(|| self.dispatch_session_gameplay(&request, id))
             .unwrap_or_else(|| {
                 self.world
                     .dispatch(&request, id, operator)
@@ -394,11 +494,140 @@ impl AuthorityCore {
                 session.last_client_sequence = request.client_sequence;
                 if let GameplayOutcome::Accepted { revision } = response.outcome {
                     session.last_revision = revision;
+                    session.gameplay.revision = revision;
                 }
                 session.cache_response(response.clone());
             }
         }
         response
+    }
+
+    /// Dispatch player gameplay against the authenticated session and the
+    /// headless world.  Renderer roots never perform these mutations after an
+    /// authority boundary exists; an unsupported/invalid domain is rejected
+    /// before it can fall back to local simulation.
+    fn dispatch_session_gameplay(
+        &mut self,
+        request: &GameplayRequest,
+        session_id: PlayerId,
+    ) -> Option<Result<Option<WorldMutation>, RejectReason>> {
+        use crate::inventory::GameMode;
+        use crate::network::protocol::GameplayOperation;
+
+        match &request.operation {
+            GameplayOperation::ItemUse { item, count } => {
+                let Some(item_kind) = crate::inventory::Item::from_u32(*item) else {
+                    return Some(Err(RejectReason::InvalidState));
+                };
+                if *count == 0 {
+                    return Some(Err(RejectReason::InvalidState));
+                }
+                let Some(food) = item_kind.food_properties() else {
+                    return Some(Err(RejectReason::Unsupported));
+                };
+                let Some(session) = self.sessions.get_mut(&session_id) else {
+                    return Some(Err(RejectReason::Unauthorized));
+                };
+                let original_gameplay = session.gameplay;
+                let hunger = session.gameplay.hunger_milli as f32 / 1000.0;
+                if hunger >= 20.0 && !food.always_edible && session.game_mode != GameMode::Creative
+                {
+                    return Some(Err(RejectReason::InvalidState));
+                }
+                session.gameplay.hunger_milli =
+                    ((hunger + food.hunger).min(20.0) * 1000.0).round() as u32;
+                session.gameplay.saturation_milli =
+                    ((session.gameplay.saturation_milli as f32 / 1000.0 + food.saturation)
+                        .min(session.gameplay.hunger_milli as f32 / 1000.0)
+                        * 1000.0)
+                        .round() as u32;
+                if session.game_mode != GameMode::Creative
+                    && !session.gameplay.remove_item(*item, u32::from(*count))
+                {
+                    session.gameplay = original_gameplay;
+                    return Some(Err(RejectReason::InvalidState));
+                }
+                Some(Ok(None))
+            }
+            GameplayOperation::Combat { target, action } => {
+                if *target == 0 && (*action & 0x80) != 0 {
+                    let amount_milli = u32::from(*action & 0x7f).saturating_mul(100);
+                    let Some(session) = self.sessions.get_mut(&session_id) else {
+                        return Some(Err(RejectReason::Unauthorized));
+                    };
+                    if session.gameplay.is_dead || amount_milli == 0 {
+                        return Some(Err(RejectReason::InvalidState));
+                    }
+                    session.gameplay.health_milli =
+                        session.gameplay.health_milli.saturating_sub(amount_milli);
+                    if session.gameplay.health_milli == 0 {
+                        session.gameplay.is_dead = true;
+                    }
+                    return Some(Ok(None));
+                }
+                if *action != 0 {
+                    return Some(Err(RejectReason::Unsupported));
+                }
+                let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
+                    return Some(Err(RejectReason::Unauthorized));
+                };
+                Some(self.world.apply_combat(*target, position).map(|_| None))
+            }
+            GameplayOperation::Trade {
+                villager_id,
+                offer_index,
+            } => {
+                let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
+                    return Some(Err(RejectReason::Unauthorized));
+                };
+                let Some(mut gameplay) = self.sessions.get(&session_id).map(|s| s.gameplay) else {
+                    return Some(Err(RejectReason::Unauthorized));
+                };
+                let result = self
+                    .world
+                    .apply_trade(&mut gameplay, *villager_id, *offer_index, position)
+                    .map(|_| {
+                        if let Some(session) = self.sessions.get_mut(&session_id) {
+                            session.gameplay = gameplay;
+                        }
+                        None
+                    });
+                Some(result)
+            }
+            GameplayOperation::Mount { entity_id } => {
+                let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
+                    return Some(Err(RejectReason::Unauthorized));
+                };
+                Some(
+                    self.world
+                        .apply_mount(session_id, *entity_id, position)
+                        .map(|mounted| {
+                            if let Some(session) = self.sessions.get_mut(&session_id) {
+                                session.gameplay.mounted_entity = mounted;
+                            }
+                            None
+                        }),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    pub fn session_gameplay(&self, id: PlayerId) -> Option<SessionGameplayUpdate> {
+        let session = self.sessions.get(&id)?;
+        Some(SessionGameplayUpdate {
+            player_id: id,
+            dimension: session.dimension,
+            state: session.gameplay,
+        })
+    }
+
+    pub fn set_session_gameplay(&mut self, id: PlayerId, gameplay: SessionGameplayState) -> bool {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        session.gameplay = gameplay;
+        true
     }
 
     /// Commands that mutate authenticated session state (rather than world
@@ -414,6 +643,23 @@ impl AuthorityCore {
         else {
             return None;
         };
+        if command.trim().eq_ignore_ascii_case("/respawn") {
+            let Some(session) = self.sessions.get_mut(&session_id) else {
+                return Some(Err(RejectReason::Unauthorized));
+            };
+            if self.world.rules.hardcore && session.gameplay.is_dead {
+                session.gameplay.is_dead = false;
+                session.gameplay.health_milli = session.gameplay.max_health_milli;
+                session.game_mode = crate::inventory::GameMode::Spectator;
+            } else {
+                session.gameplay.is_dead = false;
+                session.gameplay.health_milli = session.gameplay.max_health_milli;
+                session.gameplay.hunger_milli = 20_000;
+                session.gameplay.saturation_milli = 5_000;
+                session.gameplay.mounted_entity = None;
+            }
+            return Some(Ok(None));
+        }
         let parsed = match crate::commands::parse(command) {
             Ok(parsed) => parsed,
             Err(_) => return Some(Err(RejectReason::InvalidState)),
@@ -508,7 +754,11 @@ impl AuthorityCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authority::contract::{SessionGameplayState, SessionInventorySlot};
+    use crate::entity::EntityType;
+    use crate::inventory::Item;
     use crate::network::protocol::{GameplayOperation, GameplayOutcome};
+    use crate::world::BlockType;
     use contract::SessionContract;
 
     fn core(topology: AuthorityTopology) -> AuthorityCore {
@@ -611,5 +861,336 @@ mod tests {
         }
         assert_eq!(snapshots[0], snapshots[1]);
         assert_eq!(snapshots[1], snapshots[2]);
+    }
+
+    #[test]
+    fn item_use_mutates_session_inventory_and_revision() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.hunger_milli = 10_000;
+        let mut wire = crate::network::protocol::ItemWire::empty();
+        wire.item = Item::Bread as u32;
+        wire.count = 2;
+        gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(wire, 0, 0));
+        core.set_session_gameplay(7, gameplay);
+        let response = core.submit_request(GameplayRequest {
+            request_id: 30,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::ItemUse {
+                item: Item::Bread as u32,
+                count: 1,
+            },
+        });
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        let state = core.session(7).unwrap().gameplay;
+        assert_eq!(state.count_item(Item::Bread as u32), 1);
+        assert!(state.hunger_milli > 10_000);
+        assert!(state.revision > 0);
+    }
+
+    #[test]
+    fn unsupported_tool_item_use_does_not_consume_inventory() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut gameplay = SessionGameplayState::default();
+        let mut wire = crate::network::protocol::ItemWire::empty();
+        wire.item = Item::DiamondSword as u32;
+        wire.count = 1;
+        gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(wire, 0, 0));
+        core.set_session_gameplay(7, gameplay);
+        let response = core.submit_request(GameplayRequest {
+            request_id: 34,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::ItemUse {
+                item: Item::DiamondSword as u32,
+                count: 1,
+            },
+        });
+        assert!(matches!(
+            response.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        ));
+        assert_eq!(
+            core.session(7)
+                .unwrap()
+                .gameplay
+                .count_item(Item::DiamondSword as u32),
+            1
+        );
+    }
+
+    #[test]
+    fn self_damage_combat_updates_session_health_and_death() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        let response = core.submit_request(GameplayRequest {
+            request_id: 35,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::Combat {
+                target: 0,
+                action: 0x80 | 127,
+            },
+        });
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        let state = core.session(7).unwrap().gameplay;
+        assert_eq!(state.health_milli, 7_300);
+        let response = core.submit_request(GameplayRequest {
+            request_id: 36,
+            client_sequence: 2,
+            session_id: 7,
+            dimension: 0,
+            client_revision: core.current_revision(),
+            operation: GameplayOperation::Combat {
+                target: 0,
+                action: 0x80 | 127,
+            },
+        });
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        let state = core.session(7).unwrap().gameplay;
+        assert!(state.is_dead);
+        assert_eq!(state.health_milli, 0);
+    }
+
+    #[test]
+    fn respawn_command_restores_authority_health_after_death() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        for (request_id, sequence) in [(38, 1), (39, 2)] {
+            let response = core.submit_request(GameplayRequest {
+                request_id,
+                client_sequence: sequence,
+                session_id: 7,
+                dimension: 0,
+                client_revision: core.current_revision(),
+                operation: GameplayOperation::Combat {
+                    target: 0,
+                    action: 0x80 | 127,
+                },
+            });
+            assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        }
+        assert!(core.session(7).unwrap().gameplay.is_dead);
+        let response = core.submit_request(GameplayRequest {
+            request_id: 40,
+            client_sequence: 3,
+            session_id: 7,
+            dimension: 0,
+            client_revision: core.current_revision(),
+            operation: GameplayOperation::Command {
+                command: "/respawn".to_string(),
+            },
+        });
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        let state = core.session(7).unwrap().gameplay;
+        assert!(!state.is_dead);
+        assert_eq!(state.health_milli, state.max_health_milli);
+    }
+
+    #[test]
+    fn dimension_transfer_updates_session_and_world_contract() {
+        let mut boundary = AuthorityBoundary::new(
+            AuthorityConfig::default(),
+            AuthorityTopology::Singleplayer,
+            7,
+            "alex",
+            [8.0, 80.0, 8.0],
+            true,
+            true,
+        );
+        assert!(boundary.set_dimension(crate::dimension::Dimension::Nether as u8));
+        assert_eq!(boundary.core.session(7).unwrap().dimension, 1);
+        assert_eq!(
+            boundary.core.world.dimension,
+            crate::dimension::Dimension::Nether
+        );
+        assert_eq!(
+            boundary.core.world.chunks.dimension,
+            crate::dimension::Dimension::Nether
+        );
+    }
+
+    #[test]
+    fn dimension_worlds_are_parked_without_chunk_aliasing() {
+        let mut boundary = AuthorityBoundary::new(
+            AuthorityConfig::default(),
+            AuthorityTopology::Singleplayer,
+            7,
+            "alex",
+            [8.0, 80.0, 8.0],
+            true,
+            true,
+        );
+        let marker = BlockType::Glass;
+        boundary
+            .core
+            .world
+            .set_block(1_234, 100, -2_345, marker, 0)
+            .unwrap();
+        assert_eq!(boundary.core.world.get_block(1_234, 100, -2_345), marker);
+
+        assert!(boundary.set_dimension(crate::dimension::Dimension::Nether as u8));
+        assert_ne!(boundary.core.world.get_block(1_234, 100, -2_345), marker);
+        assert!(boundary.core.world.valid_coordinate(1_234, 127, -2_345));
+        assert!(!boundary.core.world.valid_coordinate(1_234, 128, -2_345));
+        boundary.set_position([154.25, 67.0, -293.5]);
+        assert_eq!(
+            boundary.core.session(7).unwrap().position,
+            [154.25, 67.0, -293.5]
+        );
+
+        assert!(boundary.set_dimension(crate::dimension::Dimension::Overworld as u8));
+        assert_eq!(boundary.core.world.get_block(1_234, 100, -2_345), marker);
+        assert_eq!(boundary.core.session(7).unwrap().dimension, 0);
+    }
+
+    #[test]
+    fn authority_boundary_does_not_reingest_presentation_inventory() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        let mut gameplay = SessionGameplayState::default();
+        let mut wire = crate::network::protocol::ItemWire::empty();
+        wire.item = Item::Bread as u32;
+        wire.count = 2;
+        gameplay.hunger_milli = 10_000;
+        gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(wire, 0, 0));
+        core.set_session_gameplay(7, gameplay);
+        let response = core.submit_request(GameplayRequest {
+            request_id: 37,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::ItemUse {
+                item: Item::Bread as u32,
+                count: 1,
+            },
+        });
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert_eq!(
+            core.session(7)
+                .unwrap()
+                .gameplay
+                .count_item(Item::Bread as u32),
+            1
+        );
+    }
+
+    #[test]
+    fn combat_mutates_headless_entity_without_state_fallback() {
+        let mut core = core(AuthorityTopology::Dedicated);
+        let target = core
+            .world
+            .entities
+            .spawn(EntityType::Zombie, glam::Vec3::new(9.0, 80.0, 8.0));
+        let before = core.world.entities.get_by_id(target).unwrap().health;
+        let response = core.submit_request(GameplayRequest {
+            request_id: 31,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::Combat { target, action: 0 },
+        });
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(core.world.entities.get_by_id(target).unwrap().health < before);
+    }
+
+    #[test]
+    fn trade_conserves_items_and_mount_projects_session_state() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        let villager = 900;
+        let mut sell = crate::inventory::ItemStack::new(Item::Emerald, 1);
+        sell.durability = 9;
+        sell.enchantments
+            .add_or_upgrade(crate::enchantment::Enchantment::Fortune(2));
+        sell.custom_name.set("trade emerald");
+        sell.can_break = 0x11;
+        sell.can_place_on = 0x22;
+        let offers = vec![crate::village::trade::TradeOffer::new(
+            crate::inventory::ItemStack::new(Item::Wheat, 2),
+            Some(crate::inventory::ItemStack::new(Item::Carrot, 1)),
+            sell,
+            4,
+            1,
+        )];
+        assert!(core.world.ensure_villager(
+            villager,
+            [9.0, 80.0, 8.0],
+            crate::village::poi::VillagerProfession::Farmer,
+            crate::village::trade::VillagerLevel::Novice,
+            offers,
+        ));
+        let mut gameplay = SessionGameplayState::default();
+        let mut wheat = crate::network::protocol::ItemWire::empty();
+        wheat.item = Item::Wheat as u32;
+        wheat.count = 2;
+        gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(wheat, 0, 0));
+        let mut carrot = crate::network::protocol::ItemWire::empty();
+        carrot.item = Item::Carrot as u32;
+        carrot.count = 1;
+        gameplay.inventory[1] = Some(SessionInventorySlot::from_wire(carrot, 0, 0));
+        core.set_session_gameplay(7, gameplay);
+        let response = core.submit_request(GameplayRequest {
+            request_id: 32,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::Trade {
+                villager_id: villager,
+                offer_index: 0,
+            },
+        });
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        let state = core.session(7).unwrap().gameplay;
+        assert_eq!(state.count_item(Item::Wheat as u32), 0);
+        assert_eq!(state.count_item(Item::Carrot as u32), 0);
+        assert_eq!(state.count_item(Item::Emerald as u32), 1);
+        let emerald = state
+            .inventory
+            .iter()
+            .flatten()
+            .find(|slot| slot.item.item == Item::Emerald as u32)
+            .unwrap();
+        assert_eq!(emerald.item.durability, 9);
+        let expected_name = sell.custom_name.as_str().as_bytes();
+        assert_eq!(
+            &emerald.item.custom_name[..expected_name.len()],
+            expected_name
+        );
+        assert_eq!(emerald.can_break, 0x11);
+        assert_eq!(emerald.can_place_on, 0x22);
+
+        let vehicle = 901;
+        assert!(core
+            .world
+            .ensure_vehicle(vehicle, EntityType::Boat, [9.0, 80.0, 8.0],));
+        let response = core.submit_request(GameplayRequest {
+            request_id: 33,
+            client_sequence: 2,
+            session_id: 7,
+            dimension: 0,
+            client_revision: core.current_revision(),
+            operation: GameplayOperation::Mount { entity_id: vehicle },
+        });
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert_eq!(
+            core.session(7).unwrap().gameplay.mounted_entity,
+            Some(vehicle)
+        );
+        assert!(core
+            .world
+            .entities
+            .get_by_id(vehicle)
+            .unwrap()
+            .passengers
+            .contains(&7));
     }
 }

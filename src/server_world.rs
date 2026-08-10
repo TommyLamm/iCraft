@@ -4,12 +4,14 @@
 //! CPU voxel/entity primitives (which are also used by headless tests) and
 //! never imports wgpu, winit, audio, camera, or UI modules.
 
-use crate::authority::contract::{AuthoritySnapshot, RevisionClock, WorldMutation};
+use crate::authority::contract::{
+    AuthoritySnapshot, RevisionClock, SessionGameplayState, SessionInventorySlot, WorldMutation,
+};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
 use crate::commands::{self, Command, TimeCommand};
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
-use crate::entity::EntityManager;
+use crate::entity::{EntityManager, EntityType};
 use crate::game_rules::{WorldRules, WorldType};
 use crate::network::protocol::{
     ContainerAction, GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
@@ -323,6 +325,228 @@ impl ServerWorld {
             return Err(RejectReason::PermissionDenied);
         }
         Ok(())
+    }
+
+    /// Apply one authenticated melee hit to a living world entity.  The
+    /// session/player state is owned by AuthorityCore; this method only
+    /// mutates the headless entity and therefore cannot create a renderer-side
+    /// second authority.
+    pub fn apply_combat(
+        &mut self,
+        target: u64,
+        attacker_position: [f32; 3],
+    ) -> Result<(), RejectReason> {
+        let Some(entity) = self.entities.get_by_id_mut(target) else {
+            return Err(RejectReason::InvalidState);
+        };
+        if !entity.entity_type.is_living() || entity.health <= 0.0 {
+            return Err(RejectReason::InvalidState);
+        }
+        let distance = entity
+            .position
+            .distance_squared(Vec3::from_array(attacker_position));
+        if !distance.is_finite() || distance > 8.0 * 8.0 {
+            return Err(RejectReason::TooFar);
+        }
+        entity.health = (entity.health - 1.0).max(0.0);
+        if entity.health <= 0.0 {
+            entity.action_cooldown = 0.0;
+        }
+        Ok(())
+    }
+
+    /// Seed a session-facing villager into the headless world when the local
+    /// presentation loaded a persisted entity before the in-process authority
+    /// was created.  Existing IDs/types are never overwritten, preserving
+    /// duplicate-identity and deterministic trade semantics.
+    pub fn ensure_villager(
+        &mut self,
+        villager_id: u64,
+        position: [f32; 3],
+        profession: crate::village::poi::VillagerProfession,
+        level: crate::village::trade::VillagerLevel,
+        offers: Vec<crate::village::trade::TradeOffer>,
+    ) -> bool {
+        if let Some(entity) = self.entities.get_by_id(villager_id) {
+            return entity.entity_type == EntityType::Villager;
+        }
+        let mut entity = crate::entity::Entity::new(
+            villager_id,
+            EntityType::Villager,
+            Vec3::from_array(position),
+        );
+        entity.profession = profession;
+        entity.villager_level = level;
+        entity.offers = offers;
+        self.entities.entities.push(entity);
+        self.entities.rebuild_indexes();
+        true
+    }
+
+    pub fn ensure_vehicle(
+        &mut self,
+        vehicle_id: u64,
+        entity_type: EntityType,
+        position: [f32; 3],
+    ) -> bool {
+        if !matches!(
+            entity_type,
+            EntityType::Boat | EntityType::Minecart | EntityType::Horse
+        ) {
+            return false;
+        }
+        if let Some(entity) = self.entities.get_by_id(vehicle_id) {
+            return entity.entity_type == entity_type;
+        }
+        self.entities.entities.push(crate::entity::Entity::new(
+            vehicle_id,
+            entity_type,
+            Vec3::from_array(position),
+        ));
+        self.entities.rebuild_indexes();
+        true
+    }
+
+    pub fn ensure_entity(
+        &mut self,
+        entity_id: u64,
+        entity_type: EntityType,
+        position: [f32; 3],
+        health: f32,
+    ) -> bool {
+        if let Some(entity) = self.entities.get_by_id(entity_id) {
+            return entity.entity_type == entity_type;
+        }
+        let mut entity =
+            crate::entity::Entity::new(entity_id, entity_type, Vec3::from_array(position));
+        entity.health = health.clamp(0.0, entity.max_health);
+        self.entities.entities.push(entity);
+        self.entities.rebuild_indexes();
+        true
+    }
+
+    /// Execute a villager offer atomically against a session's compact
+    /// inventory.  Costs are checked before either item is removed and the
+    /// complete state is restored if the sell stack cannot fit.
+    pub fn apply_trade(
+        &mut self,
+        gameplay: &mut SessionGameplayState,
+        villager_id: u64,
+        offer_index: u16,
+        player_position: [f32; 3],
+    ) -> Result<(), RejectReason> {
+        let Some(villager) = self.entities.get_by_id(villager_id) else {
+            return Err(RejectReason::InvalidState);
+        };
+        if villager.entity_type != EntityType::Villager || villager.health <= 0.0 {
+            return Err(RejectReason::InvalidState);
+        }
+        if villager
+            .position
+            .distance_squared(Vec3::from_array(player_position))
+            > 8.0 * 8.0
+        {
+            return Err(RejectReason::TooFar);
+        }
+        let Some(offer) = villager.offers.get(usize::from(offer_index)).cloned() else {
+            return Err(RejectReason::InvalidState);
+        };
+        if offer.is_out_of_stock() {
+            return Err(RejectReason::InvalidState);
+        }
+        let cost_a = offer.effective_cost_a(0.0);
+        let cost_b = offer.buy_b.map(|stack| stack.count).unwrap_or(0);
+        let buy_a = offer.buy_a.item.to_u32();
+        let buy_b = offer.buy_b.map(|stack| stack.item.to_u32());
+        if gameplay.count_item(buy_a) < cost_a
+            || buy_b.is_some_and(|item| gameplay.count_item(item) < cost_b)
+        {
+            return Err(RejectReason::InvalidState);
+        }
+        let original = *gameplay;
+        let _ = gameplay.remove_item(buy_a, cost_a);
+        if let Some(item) = buy_b {
+            if !gameplay.remove_item(item, cost_b) {
+                *gameplay = original;
+                return Err(RejectReason::InvalidState);
+            }
+        }
+        let sell = SessionInventorySlot::from_wire(
+            crate::network::protocol::ItemWire::from_stack(&offer.sell),
+            offer.sell.can_break,
+            offer.sell.can_place_on,
+        );
+        if !gameplay.add_slot(sell) {
+            *gameplay = original;
+            return Err(RejectReason::InvalidState);
+        }
+        let Some(villager) = self.entities.get_by_id_mut(villager_id) else {
+            *gameplay = original;
+            return Err(RejectReason::InvalidState);
+        };
+        let Some(offer) = villager.offers.get_mut(usize::from(offer_index)) else {
+            *gameplay = original;
+            return Err(RejectReason::InvalidState);
+        };
+        offer.uses = offer.uses.saturating_add(1);
+        villager.villager_xp = villager.villager_xp.saturating_add(offer.xp_reward);
+        Ok(())
+    }
+
+    /// Mount or dismount a player in the headless entity graph.  Entity
+    /// passenger lists are authoritative; presentation roots only project the
+    /// resulting `mounted_entity` session value.
+    pub fn apply_mount(
+        &mut self,
+        player_id: PlayerId,
+        entity_id: u64,
+        player_position: [f32; 3],
+    ) -> Result<Option<u64>, RejectReason> {
+        if entity_id == 0 {
+            for entity in &mut self.entities.entities {
+                entity
+                    .passengers
+                    .retain(|passenger| *passenger != player_id);
+            }
+            return Ok(None);
+        }
+        let Some(vehicle) = self.entities.get_by_id(entity_id) else {
+            return Err(RejectReason::InvalidState);
+        };
+        if !matches!(
+            vehicle.entity_type,
+            EntityType::Boat | EntityType::Minecart | EntityType::Horse
+        ) {
+            return Err(RejectReason::InvalidState);
+        }
+        if vehicle
+            .position
+            .distance_squared(Vec3::from_array(player_position))
+            > 8.0 * 8.0
+        {
+            return Err(RejectReason::TooFar);
+        }
+        if vehicle.passengers.contains(&player_id) {
+            return Ok(Some(entity_id));
+        }
+        let capacity = if vehicle.entity_type == EntityType::Boat {
+            2
+        } else {
+            1
+        };
+        if vehicle.passengers.len() >= capacity {
+            return Err(RejectReason::InvalidState);
+        }
+        for entity in &mut self.entities.entities {
+            entity
+                .passengers
+                .retain(|passenger| *passenger != player_id);
+        }
+        let Some(vehicle) = self.entities.get_by_id_mut(entity_id) else {
+            return Err(RejectReason::InvalidState);
+        };
+        vehicle.passengers.push(player_id);
+        Ok(Some(entity_id))
     }
 
     /// Dispatch a request after session/sequence/revision validation.
@@ -686,6 +910,7 @@ impl ServerWorld {
             revision: self.revisions.current(),
             checksum,
             mutations,
+            session_updates: Vec::new(),
         };
         self.last_snapshot = snapshot.clone();
         snapshot
@@ -900,7 +1125,10 @@ mod tests {
             session_id: 7,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+            operation: GameplayOperation::Combat {
+                target: 42,
+                action: 1,
+            },
         };
         assert!(matches!(
             core.submit_request(request).outcome,
@@ -908,5 +1136,76 @@ mod tests {
                 reason: RejectReason::Unsupported
             }
         ));
+    }
+
+    #[test]
+    fn mount_requires_range_and_updates_authoritative_passengers() {
+        let mut world = ServerWorld::new(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            WorldRules::default(),
+            2,
+        );
+        assert!(world.ensure_vehicle(11, EntityType::Boat, [9.0, 80.0, 8.0]));
+        assert_eq!(world.apply_mount(7, 11, [8.0, 80.0, 8.0]), Ok(Some(11)));
+        assert!(world
+            .entities
+            .get_by_id(11)
+            .unwrap()
+            .passengers
+            .contains(&7));
+        assert!(world.ensure_vehicle(12, EntityType::Boat, [100.0, 80.0, 8.0]));
+        assert_eq!(
+            world.apply_mount(7, 12, [8.0, 80.0, 8.0]),
+            Err(RejectReason::TooFar)
+        );
+        assert!(world
+            .entities
+            .get_by_id(11)
+            .unwrap()
+            .passengers
+            .contains(&7));
+    }
+
+    #[test]
+    fn trade_second_cost_failure_rolls_back_first_cost() {
+        let mut world = ServerWorld::new(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            WorldRules::default(),
+            2,
+        );
+        assert!(world.ensure_villager(
+            21,
+            [9.0, 80.0, 8.0],
+            crate::village::poi::VillagerProfession::Farmer,
+            crate::village::trade::VillagerLevel::Novice,
+            vec![crate::village::trade::TradeOffer::new(
+                crate::inventory::ItemStack::new(crate::inventory::Item::Wheat, 2),
+                Some(crate::inventory::ItemStack::new(
+                    crate::inventory::Item::Carrot,
+                    1
+                )),
+                crate::inventory::ItemStack::new(crate::inventory::Item::Emerald, 1),
+                4,
+                1,
+            )],
+        ));
+        let mut gameplay = SessionGameplayState::default();
+        let mut wheat = crate::network::protocol::ItemWire::empty();
+        wheat.item = crate::inventory::Item::Wheat as u32;
+        wheat.count = 2;
+        gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(wheat, 0, 0));
+        let before = gameplay;
+        assert_eq!(
+            world.apply_trade(&mut gameplay, 21, 0, [8.0, 80.0, 8.0]),
+            Err(RejectReason::InvalidState)
+        );
+        assert_eq!(gameplay, before);
+        assert_eq!(world.entities.get_by_id(21).unwrap().offers[0].uses, 0);
     }
 }

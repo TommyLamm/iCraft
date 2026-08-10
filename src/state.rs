@@ -2305,6 +2305,11 @@ impl State {
         if target == self.current_dimension {
             return;
         }
+        if let Some(boundary) = self.authority_boundary.as_mut() {
+            if !boundary.set_dimension(target as u8) {
+                return;
+            }
+        }
         self.close_inventory();
         self.player_physics.set_flying(false);
         self.jump_taps.reset();
@@ -2418,6 +2423,9 @@ impl State {
             crate::dimension::Dimension::Overworld | crate::dimension::Dimension::Nether
         ) {
             destination = self.build_linked_nether_portal(cx, cz, destination.y as i32);
+        }
+        if let Some(boundary) = self.authority_boundary.as_mut() {
+            boundary.set_position(destination.to_array());
         }
         self.player_physics.position = destination;
         self.prev_player_position = destination;
@@ -7253,6 +7261,7 @@ impl State {
         // particular Spectator noclip/flight) before the first simulation tick.
         let initial_mode = state.game_mode;
         state.set_game_mode(initial_mode);
+        state.sync_authority_gameplay_from_local();
 
         let initial_authority_mutations = state
             .authority_boundary
@@ -7309,9 +7318,124 @@ impl State {
             (snapshot, rules)
         };
         self.project_authority_mutations(&snapshot.mutations);
+        self.project_authority_sessions(&snapshot.session_updates);
         self.world_time.ticks = snapshot.tick;
         self.world_rules = rules;
         Some(snapshot)
+    }
+
+    fn session_slot_from_stack(
+        stack: Option<crate::inventory::ItemStack>,
+    ) -> Option<crate::authority::contract::SessionInventorySlot> {
+        let stack = stack?;
+        if stack.count == 0 || stack.count > u32::from(u16::MAX) {
+            return None;
+        }
+        Some(crate::authority::contract::SessionInventorySlot::from_wire(
+            crate::network::protocol::ItemWire::from_stack(&stack),
+            stack.can_break,
+            stack.can_place_on,
+        ))
+    }
+
+    fn stack_from_session_slot(
+        slot: crate::authority::contract::SessionInventorySlot,
+    ) -> Option<crate::inventory::ItemStack> {
+        let mut stack = slot.item.to_stack()?;
+        stack.can_break = slot.can_break;
+        stack.can_place_on = slot.can_place_on;
+        Some(stack)
+    }
+
+    fn authority_gameplay_from_local(&self) -> crate::authority::contract::SessionGameplayState {
+        use crate::authority::contract::{SessionGameplayState, SESSION_INVENTORY_SLOTS};
+        let mut state = SessionGameplayState::default();
+        state.health_milli = (self.player_state.health.max(0.0) * 1000.0).round() as u32;
+        state.max_health_milli = (self.player_state.max_health.max(0.0) * 1000.0).round() as u32;
+        state.hunger_milli = (self.player_state.hunger.clamp(0.0, 20.0) * 1000.0).round() as u32;
+        state.saturation_milli =
+            (self.player_state.saturation.clamp(0.0, 20.0) * 1000.0).round() as u32;
+        state.is_dead = self.player_state.is_dead;
+        let mut index = 0;
+        for stack in self
+            .inventory
+            .hotbar
+            .iter()
+            .chain(self.inventory.main.iter())
+            .chain(self.inventory.armor.iter())
+        {
+            if index >= SESSION_INVENTORY_SLOTS - 1 {
+                break;
+            }
+            state.inventory[index] = Self::session_slot_from_stack(*stack);
+            index += 1;
+        }
+        state.inventory[index] = Self::session_slot_from_stack(self.inventory.offhand);
+        state.mounted_entity = self.mount_manager.get_vehicle(0);
+        state
+    }
+
+    fn sync_authority_gameplay_from_local(&mut self) {
+        let gameplay = self.authority_gameplay_from_local();
+        let Some(boundary) = self.authority_boundary.as_mut() else {
+            return;
+        };
+        let _ = boundary.set_session_gameplay(boundary.session_id, gameplay);
+    }
+
+    fn project_authority_sessions(
+        &mut self,
+        updates: &[crate::authority::contract::SessionGameplayUpdate],
+    ) {
+        let Some(session_id) = self
+            .authority_boundary
+            .as_ref()
+            .map(|boundary| boundary.session_id)
+        else {
+            return;
+        };
+        let Some(update) = updates.iter().find(|update| update.player_id == session_id) else {
+            return;
+        };
+        self.project_authority_session(update);
+    }
+
+    fn project_authority_session(
+        &mut self,
+        update: &crate::authority::contract::SessionGameplayUpdate,
+    ) {
+        let gameplay = update.state;
+        self.player_state.health = gameplay.health_milli as f32 / 1000.0;
+        self.player_state.max_health = gameplay.max_health_milli as f32 / 1000.0;
+        self.player_state.hunger = gameplay.hunger_milli as f32 / 1000.0;
+        self.player_state.saturation = gameplay.saturation_milli as f32 / 1000.0;
+        self.player_state.is_dead = gameplay.is_dead;
+        let mut index = 0;
+        for slot in self
+            .inventory
+            .hotbar
+            .iter_mut()
+            .chain(self.inventory.main.iter_mut())
+            .chain(self.inventory.armor.iter_mut())
+        {
+            *slot = gameplay.inventory[index].and_then(Self::stack_from_session_slot);
+            index += 1;
+        }
+        self.inventory.offhand = gameplay.inventory[index].and_then(Self::stack_from_session_slot);
+        self.mount_manager.dismount(0);
+        if let Some(vehicle_id) = gameplay.mounted_entity {
+            if let Some(vehicle) = self.entity_manager.get_by_id(vehicle_id) {
+                let capacity = if vehicle.entity_type == crate::entity::EntityType::Boat {
+                    2
+                } else {
+                    1
+                };
+                let _ = self.mount_manager.mount(vehicle_id, 0, capacity);
+            }
+        }
+        if let Some(dimension) = crate::dimension::Dimension::from_wire(update.dimension) {
+            self.current_dimension = dimension;
+        }
     }
 
     /// Apply authority output to the renderer-owned cache.  This is a one-way
@@ -7350,7 +7474,7 @@ impl State {
         &mut self,
         mut request: crate::network::protocol::GameplayRequest,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        let (response, pending) = {
+        let (response, pending, session_update) = {
             let boundary = self.authority_boundary.as_mut()?;
             request.request_id = self.authority_request_id;
             request.client_sequence = self.authority_client_sequence;
@@ -7358,11 +7482,15 @@ impl State {
             request.client_revision = boundary.core.current_revision();
             let response = boundary.submit(request);
             let pending = boundary.take_pending_mutations();
-            (response, pending)
+            let session_update = boundary.session_gameplay(boundary.session_id);
+            (response, pending, session_update)
         };
         self.authority_request_id = self.authority_request_id.wrapping_add(1);
         self.authority_client_sequence = self.authority_client_sequence.saturating_add(1);
         self.project_authority_mutations(&pending);
+        if let Some(update) = session_update {
+            self.project_authority_session(&update);
+        }
         self.last_gameplay_response = Some(response.clone());
         Some(response)
     }
@@ -12333,6 +12461,26 @@ impl State {
     }
 
     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
+        if self.authority_boundary.is_some() {
+            let vehicle_data = self
+                .entity_manager
+                .get_by_id(vehicle_id)
+                .map(|entity| (entity.entity_type, entity.position.to_array()));
+            if let Some((entity_type, position)) = vehicle_data {
+                if let Some(boundary) = self.authority_boundary.as_mut() {
+                    let _ = boundary.sync_vehicle(vehicle_id, entity_type, position);
+                }
+            }
+            let response = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::Mount {
+                    entity_id: vehicle_id,
+                },
+            );
+            return matches!(
+                response.map(|response| response.outcome),
+                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
+            );
+        }
         let capacity = if let Some(idx) = self.entity_manager.id_to_index.get(&vehicle_id).copied()
         {
             match self.entity_manager.entities[idx].entity_type {
@@ -12348,6 +12496,12 @@ impl State {
     }
 
     pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
+        if self.authority_boundary.is_some() {
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::Mount { entity_id: 0 },
+            );
+            return;
+        }
         let vehicle_pos = if let Some(vid) = self.mount_manager.get_vehicle(passenger_id) {
             self.entity_manager.get_by_id(vid).map(|e| e.position)
         } else {
@@ -12367,6 +12521,15 @@ impl State {
     }
 
     pub fn use_fishing_rod(&mut self) {
+        if self.authority_boundary.is_some() {
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::ItemUse {
+                    item: Item::FishingRod as u32,
+                    count: 1,
+                },
+            );
+            return;
+        }
         let p_id = 0u64; // local player
         if self.fishing_manager.get_hook(p_id).is_some() {
             let mut rng_val = (self.total_time * 1000.0) as u32;
@@ -12386,6 +12549,12 @@ impl State {
     }
 
     pub fn check_claim_furnace_xp(&mut self, slot: SlotType) {
+        if self.authority_boundary.is_some() {
+            // Furnace XP has no typed gameplay envelope yet.  Reject the
+            // input explicitly instead of mutating a renderer-side furnace or
+            // player experience behind the authority boundary.
+            return;
+        }
         if let SlotType::ContainerSlot(2) = slot {
             if let Some(pos) = self.container_target {
                 let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
@@ -14851,6 +15020,20 @@ impl State {
         attacker_pos: Option<[f32; 3]>,
         attacker_item: Option<Item>,
     ) {
+        if self.authority_boundary.is_some() {
+            // Encode a bounded tenth-heart damage amount in the typed Combat
+            // envelope.  The authority owns health/death; this root only
+            // projects the accepted session update and never drops items or
+            // mutates health locally.
+            let quantized = (amount.clamp(0.1, 12.7) * 10.0).round() as u8;
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::Combat {
+                    target: 0,
+                    action: 0x80 | quantized.min(0x7f),
+                },
+            );
+            return;
+        }
         if !self.is_authoritative() || !self.game_mode_policy().can_take_damage {
             return;
         }
@@ -15008,17 +15191,7 @@ impl State {
 
     pub fn respawn(&mut self) {
         if self.authority_boundary.is_some() {
-            // Keep respawn presentation-only until the authority session
-            // contract carries player health/death state; never repair voxels
-            // directly from this GPU root.
-            self.player_physics.position = Vec3::new(
-                self.world_spawn.0 as f32 + 0.5,
-                self.world_spawn.1 as f32,
-                self.world_spawn.2 as f32 + 0.5,
-            );
-            self.player_physics.velocity = Vec3::ZERO;
-            self.player_state.reset_for_respawn();
-            self.sync_cursor_mode();
+            let _ = self.submit_local_authority_command("/respawn");
             return;
         }
         if self.world_rules.hardcore && self.player_state.is_dead {
@@ -15157,6 +15330,18 @@ impl State {
         ) else {
             return false;
         };
+        let entity_data = self.entity_manager.get_by_id(entity_id).map(|entity| {
+            (
+                entity.entity_type,
+                entity.position.to_array(),
+                entity.health,
+            )
+        });
+        if let Some((entity_type, position, health)) = entity_data {
+            if let Some(boundary) = self.authority_boundary.as_mut() {
+                let _ = boundary.sync_entity(entity_id, entity_type, position, health);
+            }
+        }
         let _ = self.submit_local_authority_operation(
             crate::network::protocol::GameplayOperation::Combat {
                 target: entity_id,
@@ -15302,9 +15487,7 @@ impl State {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::ItemUse {
                     item: main_item as u32,
-                    count: main_stack
-                        .map(|stack| stack.count.min(u16::MAX as u32) as u16)
-                        .unwrap_or(0),
+                    count: 1,
                 },
             );
             return;
@@ -15399,9 +15582,7 @@ impl State {
                 let _ = self.submit_local_authority_operation(
                     crate::network::protocol::GameplayOperation::ItemUse {
                         item: offhand_item as u32,
-                        count: offhand_stack
-                            .map(|stack| stack.count.min(u16::MAX as u32) as u16)
-                            .unwrap_or(0),
+                        count: 1,
                     },
                 );
                 return;
@@ -16798,7 +16979,7 @@ impl State {
                         .map(|boundary| boundary.core.current_revision())
                         .unwrap_or_default(),
                     operation: crate::network::protocol::GameplayOperation::Container {
-                        action: 1,
+                        action: crate::network::protocol::ContainerAction::Open.to_wire(),
                         x: clicked.0,
                         y: clicked.1,
                         z: clicked.2,
@@ -16809,7 +16990,7 @@ impl State {
                 response.as_ref().map(|response| &response.outcome),
                 Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
             ) {
-                self.open_chest(clicked);
+                let _ = self.project_authority_container(clicked);
             }
             return;
         }
@@ -17113,6 +17294,9 @@ impl State {
     }
 
     pub fn set_item_at_slot(&mut self, slot: SlotType, stack: Option<ItemStack>) {
+        if self.authority_boundary.is_some() && !matches!(slot, SlotType::ContainerSlot(_)) {
+            return;
+        }
         match slot {
             SlotType::Creative(item) => self.inventory.write_creative_slot(item, stack),
             SlotType::Hotbar(i) => self.inventory.hotbar[i] = stack,
@@ -17202,6 +17386,9 @@ impl State {
 
     pub fn handle_swap_offhand_pressed(&mut self) {
         if !self.is_chat_open && !self.is_paused && !self.player_state.is_dead {
+            if self.authority_boundary.is_some() {
+                return;
+            }
             self.inventory.swap_offhand();
             self.audio_manager
                 .play_sound(crate::audio::SoundId::UiClick);
@@ -17214,6 +17401,47 @@ impl State {
     }
 
     pub fn handle_inventory_click(&mut self, is_left: bool) {
+        if self.authority_boundary.is_some() {
+            let mouse_x = self.mouse_ndc[0];
+            let mouse_y = self.mouse_ndc[1];
+            if self.active_station == Some(StationKind::Merchant) && is_left {
+                let mut offer_y = 0.28;
+                for idx in 0..self.active_merchant_offers.len() {
+                    if mouse_x >= -0.35
+                        && mouse_x <= 0.35
+                        && mouse_y >= offer_y - 0.04
+                        && mouse_y <= offer_y + 0.03
+                    {
+                        let _ = self.execute_active_merchant_trade(idx);
+                        return;
+                    }
+                    offer_y -= 0.09;
+                    if offer_y < -0.30 {
+                        break;
+                    }
+                }
+            }
+            let clicked_slot =
+                self.get_inventory_slots()
+                    .into_iter()
+                    .find(|&(_, x0, x1, y0, y1)| {
+                        mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
+                    });
+            if let Some((SlotType::ContainerSlot(slot), _, _, _, _)) = clicked_slot {
+                if let Some(position) = self.container_target {
+                    let _ = self.submit_local_authority_container_action(
+                        position,
+                        crate::network::protocol::ContainerAction::Click,
+                        slot as u16,
+                        is_left,
+                    );
+                }
+            }
+            // Crafting, enchanting, brewing, anvil and player inventory
+            // actions have no typed authority operation yet.  Explicitly
+            // reject them rather than mutating a second local inventory.
+            return;
+        }
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
         let creative_catalog = self.is_creative_catalog_open();
@@ -17837,6 +18065,11 @@ impl State {
         true
     }
     fn open_chest(&mut self, pos: (i32, i32, i32)) {
+        if self.authority_boundary.is_some() {
+            // Authority-boundary callers must use project_authority_container
+            // after an accepted Container::Open response.
+            return;
+        }
         if !self.game_mode_policy().can_use_containers {
             return;
         }
@@ -17970,6 +18203,38 @@ impl State {
         };
         if offer_index >= self.active_merchant_offers.len() {
             return false;
+        }
+        if self.authority_boundary.is_some() {
+            let villager_data = self.entity_manager.get_by_id(villager_id).map(|entity| {
+                (
+                    entity.position.to_array(),
+                    entity.profession,
+                    entity.villager_level,
+                    self.active_merchant_offers.clone(),
+                )
+            });
+            if let Some((position, profession, level, offers)) = villager_data {
+                if let Some(boundary) = self.authority_boundary.as_mut() {
+                    let _ =
+                        boundary.sync_villager(villager_id, position, profession, level, offers);
+                }
+            }
+            let response = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::Trade {
+                    villager_id,
+                    offer_index: offer_index as u16,
+                },
+            );
+            let accepted = matches!(
+                response.map(|response| response.outcome),
+                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
+            );
+            if accepted {
+                if let Some(offer) = self.active_merchant_offers.get_mut(offer_index) {
+                    offer.uses = offer.uses.saturating_add(1);
+                }
+            }
+            return accepted;
         }
 
         let discount = if self.player_state.hero_of_the_village_timer > 0.0 {
@@ -18109,6 +18374,36 @@ impl State {
     }
 
     pub fn close_inventory(&mut self) -> bool {
+        if self.authority_boundary.is_some() {
+            let accepted = if let Some(pos) = self.container_target {
+                self.submit_local_authority_container_action(
+                    pos,
+                    crate::network::protocol::ContainerAction::Close,
+                    0,
+                    true,
+                )
+            } else {
+                self.inventory.is_open = false;
+                self.inventory.is_table_open = false;
+                self.active_station = None;
+                self.sync_cursor_mode();
+                true
+            };
+            if accepted {
+                self.inventory.dragged = None;
+                self.inventory.creative_drag_origin = None;
+                self.inventory.craft_input.fill(None);
+                self.inventory.craft_output = None;
+                self.enchanting.input = None;
+                self.enchanting.lapis = None;
+                self.brewing.bottles.fill(None);
+                self.brewing.ingredient = None;
+                self.anvil.left = None;
+                self.anvil.right = None;
+                self.anvil.output = None;
+            }
+            return accepted;
+        }
         if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
             if let Some(pos) = self.container_target {
                 if let crate::state::NetworkHandle::Client { game_to_client, .. } = &self.network {
@@ -24403,5 +24698,31 @@ mod reach_tests {
         // add_stack with full inventory returns remainder
         let remainder = inv.add_stack(ItemStack::new(Item::Dirt, 64));
         assert_eq!(remainder, Some(ItemStack::new(Item::Dirt, 64)));
+    }
+}
+
+#[cfg(test)]
+mod authority_projection_tests {
+    use super::*;
+
+    #[test]
+    fn session_inventory_projection_preserves_rich_stack_metadata() {
+        let mut stack = ItemStack::new(Item::DiamondPickaxe, 1);
+        stack.durability = 37;
+        stack
+            .enchantments
+            .add_or_upgrade(crate::enchantment::Enchantment::Efficiency(3));
+        stack.custom_name.set("authority pick");
+        stack.can_break = 0x1234;
+        stack.can_place_on = 0x5678;
+        let slot = State::session_slot_from_stack(Some(stack)).expect("slot");
+        let roundtrip = State::stack_from_session_slot(slot).expect("stack");
+        assert_eq!(roundtrip.item, stack.item);
+        assert_eq!(roundtrip.count, stack.count);
+        assert_eq!(roundtrip.durability, stack.durability);
+        assert_eq!(roundtrip.enchantments, stack.enchantments);
+        assert_eq!(roundtrip.custom_name, stack.custom_name);
+        assert_eq!(roundtrip.can_break, stack.can_break);
+        assert_eq!(roundtrip.can_place_on, stack.can_place_on);
     }
 }

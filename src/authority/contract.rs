@@ -6,7 +6,7 @@
 
 use crate::inventory::GameMode;
 use crate::network::protocol::{
-    GameplayOperation, GameplayRequest, GameplayResponse, PlayerId, RejectReason,
+    GameplayOperation, GameplayRequest, GameplayResponse, ItemWire, PlayerId, RejectReason,
 };
 use std::collections::VecDeque;
 
@@ -68,6 +68,178 @@ impl RevisionClock {
     }
 }
 
+/// Compact, transport-independent inventory entry owned by an authenticated
+/// authority session.  ItemWire keeps durability, enchantments, potion and
+/// custom-name metadata; the two Adventure permission masks are carried beside
+/// it so authority projection cannot silently change stack identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionInventorySlot {
+    pub item: ItemWire,
+    pub can_break: u128,
+    pub can_place_on: u128,
+}
+
+impl SessionInventorySlot {
+    pub const fn from_wire(item: ItemWire, can_break: u128, can_place_on: u128) -> Self {
+        Self {
+            item,
+            can_break,
+            can_place_on,
+        }
+    }
+
+    pub fn same_identity(self, other: Self) -> bool {
+        self.item.item == other.item.item
+            && self.item.durability == other.item.durability
+            && self.item.enchantments == other.item.enchantments
+            && self.item.potion == other.item.potion
+            && self.item.custom_name == other.item.custom_name
+            && self.can_break == other.can_break
+            && self.can_place_on == other.can_place_on
+    }
+}
+
+pub const SESSION_INVENTORY_SLOTS: usize = 41;
+
+/// Gameplay state that must not be duplicated in a renderer root.  Keep this
+/// compact and integer-based so snapshots remain deterministic and cheap to
+/// compare across Singleplayer, listen and dedicated topologies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionGameplayState {
+    pub health_milli: u32,
+    pub max_health_milli: u32,
+    pub hunger_milli: u32,
+    pub saturation_milli: u32,
+    pub is_dead: bool,
+    pub inventory: [Option<SessionInventorySlot>; SESSION_INVENTORY_SLOTS],
+    pub mounted_entity: Option<u64>,
+    pub revision: u64,
+}
+
+impl Default for SessionGameplayState {
+    fn default() -> Self {
+        Self {
+            health_milli: 20_000,
+            max_health_milli: 20_000,
+            hunger_milli: 20_000,
+            saturation_milli: 5_000,
+            is_dead: false,
+            inventory: [None; SESSION_INVENTORY_SLOTS],
+            mounted_entity: None,
+            revision: 0,
+        }
+    }
+}
+
+impl SessionGameplayState {
+    pub fn count_item(&self, item: u32) -> u32 {
+        self.inventory
+            .iter()
+            .flatten()
+            .filter(|slot| slot.item.item == item)
+            .map(|slot| u32::from(slot.item.count))
+            .sum()
+    }
+
+    /// Remove exactly `count` items while compacting across the fixed slots.
+    /// Returning false leaves the state untouched, which makes trade retries
+    /// atomic when a second cost item is unavailable.
+    pub fn remove_item(&mut self, item: u32, count: u32) -> bool {
+        if count == 0 || self.count_item(item) < count {
+            return false;
+        }
+        let mut remaining = count;
+        for slot in &mut self.inventory {
+            let Some(entry) = slot.as_mut() else {
+                continue;
+            };
+            if entry.item.item != item {
+                continue;
+            }
+            let removed = u32::from(entry.item.count).min(remaining);
+            entry.item.count = (u32::from(entry.item.count) - removed) as u16;
+            remaining -= removed;
+            if entry.item.count == 0 {
+                *slot = None;
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        true
+    }
+
+    pub fn add_item(&mut self, item: u32, count: u32) -> bool {
+        if count == 0 {
+            return true;
+        }
+        if count > u32::from(u16::MAX) {
+            return false;
+        }
+        self.add_slot(SessionInventorySlot::from_wire(
+            ItemWire {
+                item,
+                count: count as u16,
+                durability: 0,
+                enchantments: [0; 6],
+                potion: None,
+                custom_name: [0; 24],
+            },
+            0,
+            0,
+        ))
+    }
+
+    pub fn add_slot(&mut self, slot: SessionInventorySlot) -> bool {
+        let count = u32::from(slot.item.count);
+        if count == 0 {
+            return true;
+        }
+        let Some(item) = crate::inventory::Item::from_u32(slot.item.item) else {
+            return false;
+        };
+        let max_stack = item.properties().max_stack.min(u32::from(u16::MAX));
+        let backup = *self;
+        let mut remaining = count;
+        while remaining > 0 {
+            let mut progressed = false;
+            if let Some(entry) = self.inventory.iter_mut().flatten().find(|entry| {
+                (**entry).same_identity(slot)
+                    && u32::from(entry.item.count) < max_stack
+                    && entry.item.count > 0
+            }) {
+                let room = max_stack - u32::from(entry.item.count);
+                let moved = room.min(remaining);
+                entry.item.count = entry.item.count.saturating_add(moved as u16);
+                remaining -= moved;
+                progressed = true;
+            } else if let Some(target) = self.inventory.iter_mut().find(|slot| slot.is_none()) {
+                let moved = max_stack.min(remaining) as u16;
+                let mut placed = slot;
+                placed.item.count = moved;
+                *target = Some(placed);
+                remaining -= u32::from(moved);
+                progressed = true;
+            }
+            if !progressed {
+                *self = backup;
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Projection of a session's gameplay state carried by the fixed-tick
+/// authority snapshot.  Renderer roots apply it; they never settle gameplay
+/// locally after an authority boundary exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionGameplayUpdate {
+    pub player_id: PlayerId,
+    pub dimension: u8,
+    pub state: SessionGameplayState,
+}
+
 /// Transport-independent authenticated session state used by AuthorityCore.
 #[derive(Debug, Clone)]
 pub struct SessionContract {
@@ -80,6 +252,7 @@ pub struct SessionContract {
     pub cheats_enabled: bool,
     pub last_client_sequence: u64,
     pub last_revision: u64,
+    pub gameplay: SessionGameplayState,
     response_cache: VecDeque<GameplayResponse>,
 }
 
@@ -102,6 +275,7 @@ impl SessionContract {
             cheats_enabled,
             last_client_sequence: 0,
             last_revision: 0,
+            gameplay: SessionGameplayState::default(),
             response_cache: VecDeque::with_capacity(RESPONSE_CACHE_CAPACITY),
         }
     }
@@ -151,6 +325,7 @@ pub struct AuthoritySnapshot {
     pub revision: u64,
     pub checksum: u64,
     pub mutations: Vec<WorldMutation>,
+    pub session_updates: Vec<SessionGameplayUpdate>,
 }
 
 impl AuthoritySnapshot {
@@ -160,6 +335,7 @@ impl AuthoritySnapshot {
             revision: 0,
             checksum: 0,
             mutations: Vec::new(),
+            session_updates: Vec::new(),
         }
     }
 }
@@ -289,5 +465,31 @@ mod tests {
         assert_eq!(vectors.len(), 8);
         assert_eq!(vectors[0].request_id, 0x1001);
         assert_eq!(vectors[7].client_sequence, 8);
+    }
+
+    #[test]
+    fn gameplay_slots_preserve_metadata_and_stack_limits() {
+        let mut gameplay = SessionGameplayState::default();
+        let mut first = ItemWire::empty();
+        first.item = crate::inventory::Item::Stone as u32;
+        first.count = 63;
+        first.durability = 4;
+        first.enchantments[0] = 1;
+        let rich = SessionInventorySlot::from_wire(first, 0x55, 0xaa);
+        assert!(gameplay.add_slot(rich));
+
+        let mut second = first;
+        second.count = 2;
+        assert!(gameplay.add_slot(SessionInventorySlot::from_wire(second, 0x55, 0xaa,)));
+        assert_eq!(gameplay.inventory[0].unwrap().item.count, 64);
+        assert_eq!(gameplay.inventory[1].unwrap().item.count, 1);
+        assert_eq!(gameplay.inventory[0].unwrap().can_break, 0x55);
+        assert_eq!(gameplay.inventory[0].unwrap().can_place_on, 0xaa);
+
+        let mut different = first;
+        different.count = 1;
+        different.durability = 5;
+        assert!(gameplay.add_slot(SessionInventorySlot::from_wire(different, 0x55, 0xaa,)));
+        assert_eq!(gameplay.inventory[2].unwrap().item.durability, 5);
     }
 }
