@@ -71,9 +71,13 @@ pub struct AuthorityCore {
     /// visited yet.  Each dimension then owns an independent parked world so
     /// switching cannot reinterpret one dimension's chunks as another's.
     config: AuthorityConfig,
-    parked_worlds: BTreeMap<Dimension, ServerWorld>,
+    /// All non-active dimensions.  The active compatibility world above is
+    /// moved in and out of this map for each routed operation/tick, so no
+    /// dimension has a shadow or aliased chunk/entity collection.
+    worlds: BTreeMap<Dimension, ServerWorld>,
     sessions: BTreeMap<PlayerId, SessionContract>,
     last_snapshot: AuthoritySnapshot,
+    fixed_tick: u64,
     /// Mutations emitted between fixed ticks (for example an authenticated
     /// player request).  Presentation roots drain these through the same
     /// snapshot projection as tick-driven automation.
@@ -252,7 +256,7 @@ impl AuthorityBoundary {
     }
 
     pub fn set_rules(&mut self, rules: WorldRules) {
-        self.core.world.rules = rules.normalized();
+        self.core.set_rules(rules);
     }
 
     pub fn take_pending_mutations(&mut self) -> Vec<WorldMutation> {
@@ -282,9 +286,10 @@ impl AuthorityCore {
             topology,
             world: Self::new_world(config, config.dimension),
             config,
-            parked_worlds: BTreeMap::new(),
+            worlds: BTreeMap::new(),
             sessions: BTreeMap::new(),
             last_snapshot: AuthoritySnapshot::empty(),
+            fixed_tick: 0,
             pending_mutations: Vec::new(),
         }
     }
@@ -300,22 +305,103 @@ impl AuthorityCore {
         )
     }
 
-    /// Activate a dimension without aliasing chunk/entity state between
-    /// dimensions.  The active world is parked by its dimension and a target
-    /// world is either restored or created from the immutable config.
+    fn ensure_dimension(&mut self, target: Dimension) {
+        if self.world.dimension == target || self.worlds.contains_key(&target) {
+            return;
+        }
+        self.worlds
+            .insert(target, Self::new_world(self.config, target));
+    }
+
+    /// Move the compatibility `world` view to a dimension without aliasing
+    /// chunk/entity state.  The previous active world is retained in the map.
+    pub fn activate_dimension(&mut self, target: Dimension) {
+        if self.world.dimension == target {
+            return;
+        }
+        let current = self.world.dimension;
+        let next = self
+            .worlds
+            .remove(&target)
+            .unwrap_or_else(|| Self::new_world(self.config, target));
+        let previous = std::mem::replace(&mut self.world, next);
+        self.worlds.insert(current, previous);
+    }
+
+    pub fn active_dimension(&self) -> Dimension {
+        self.world.dimension
+    }
+
+    /// Read a dimension without changing the active compatibility view.
+    pub fn world_ref(&self, dimension: Dimension) -> Option<&ServerWorld> {
+        if self.world.dimension == dimension {
+            Some(&self.world)
+        } else {
+            self.worlds.get(&dimension)
+        }
+    }
+
+    /// Mutably access a loaded dimension without changing the active view.
+    /// Callers that need to create a missing dimension should use
+    /// `with_world`, which restores the previous active view automatically.
+    pub fn world_mut(&mut self, dimension: Dimension) -> Option<&mut ServerWorld> {
+        if self.world.dimension == dimension {
+            Some(&mut self.world)
+        } else {
+            self.worlds.get_mut(&dimension)
+        }
+    }
+
+    /// Execute a bounded operation against one dimension and restore the
+    /// caller's active compatibility view before returning.
+    pub fn with_world<R>(
+        &mut self,
+        dimension: Dimension,
+        operation: impl FnOnce(&mut ServerWorld) -> R,
+    ) -> R {
+        let active = self.world.dimension;
+        self.ensure_dimension(dimension);
+        self.activate_dimension(dimension);
+        let result = operation(&mut self.world);
+        self.activate_dimension(active);
+        result
+    }
+
+    /// Return every dimension with an authoritative world, including the
+    /// active compatibility world.  Ordering is stable for deterministic tick
+    /// and persistence traversal.
+    pub fn dimensions(&self) -> Vec<Dimension> {
+        let mut dimensions: Vec<_> = self.worlds.keys().copied().collect();
+        dimensions.push(self.world.dimension);
+        dimensions.sort_unstable();
+        dimensions.dedup();
+        dimensions
+    }
+
+    /// Revision for one dimension's independent namespace. Request gates and
+    /// ACKs use this value for the session's dimension; the aggregate snapshot
+    /// revision is only a compatibility summary and must not be used for a
+    /// cross-dimension stale check.
+    pub fn revision_for_dimension(&self, dimension: Dimension) -> u64 {
+        if self.world.dimension == dimension {
+            self.world.revisions.current()
+        } else {
+            self.worlds
+                .get(&dimension)
+                .map(|world| world.revisions.current())
+                .unwrap_or(0)
+        }
+    }
+
+    /// Activate the session's target dimension while preserving the boundary
+    /// compatibility contract.  Gameplay requests use `activate_dimension`
+    /// directly and therefore do not need to switch another session's world.
     pub fn set_session_dimension(&mut self, id: PlayerId, target: Dimension) -> bool {
         if !self.sessions.contains_key(&id) {
             return false;
         }
-        if self.world.dimension != target {
-            let current = self.world.dimension;
-            let next = self
-                .parked_worlds
-                .remove(&target)
-                .unwrap_or_else(|| Self::new_world(self.config, target));
-            let previous = std::mem::replace(&mut self.world, next);
-            self.parked_worlds.insert(current, previous);
-        }
+        self.ensure_dimension(target);
+        self.activate_dimension(target);
         let revision = self.current_revision();
         let Some(session) = self.sessions.get_mut(&id) else {
             return false;
@@ -324,6 +410,15 @@ impl AuthorityCore {
         session.last_revision = revision;
         session.gameplay.revision = revision;
         true
+    }
+
+    pub fn set_rules(&mut self, rules: WorldRules) {
+        let rules = rules.normalized();
+        self.config.rules = rules;
+        self.world.rules = rules;
+        for world in self.worlds.values_mut() {
+            world.rules = rules;
+        }
     }
 
     pub fn register_session(&mut self, session: SessionContract) -> Result<(), RejectReason> {
@@ -351,6 +446,10 @@ impl AuthorityCore {
         {
             return Err(RejectReason::Duplicate);
         }
+        let Some(dimension) = Dimension::from_wire(session.dimension) else {
+            return Err(RejectReason::InvalidDimension);
+        };
+        self.ensure_dimension(dimension);
         self.sessions.insert(session.id, session);
         Ok(())
     }
@@ -375,36 +474,85 @@ impl AuthorityCore {
         &self.last_snapshot
     }
 
+    /// Active-world compatibility revision. Use `revision_for_dimension` for
+    /// request/client gates when a session may be in another dimension.
     pub fn current_revision(&self) -> u64 {
         self.world.revisions.current()
     }
 
-    /// Execute one fixed tick.  Sessions are sorted by their BTreeMap key so
-    /// entity AI and automation do not depend on transport arrival order.
+    /// Revision for one dimension's independent namespace. Request gates and
+    /// ACKs use this value for the session's dimension; the aggregate snapshot
+    /// revision is only a compatibility summary and must not be used for a
+    /// cross-dimension stale check.
+    /// Execute one fixed tick for every loaded dimension. Sessions are sorted
+    /// by their BTreeMap key within each dimension, so AI/automation and
+    /// mutation order do not depend on transport arrival order. Revisions are
+    /// dimension-scoped; `(WorldMutation.dimension, revision)` is the stable
+    /// routing/persistence identity.
     pub fn tick(&mut self) -> AuthoritySnapshot {
-        let players: Vec<(PlayerId, [f32; 3])> = self
-            .sessions
-            .values()
-            .map(|session| (session.id, session.position))
-            .collect();
-        let mut snapshot = self.world.tick(&players);
-        if !self.pending_mutations.is_empty() {
-            let mut pending = std::mem::take(&mut self.pending_mutations);
-            pending.append(&mut snapshot.mutations);
-            pending.sort_by_key(|mutation| mutation.revision);
-            snapshot.mutations = pending;
-            snapshot.revision = self.world.revisions.current();
-            snapshot.checksum = self.world.checksum(&snapshot.mutations);
+        self.fixed_tick = self.fixed_tick.wrapping_add(1).max(1);
+        let active_before_tick = self.world.dimension;
+        let dimensions = self.dimensions();
+        let mut mutations_by_dimension: BTreeMap<Dimension, Vec<WorldMutation>> = BTreeMap::new();
+
+        for dimension in dimensions.iter().copied() {
+            self.activate_dimension(dimension);
+            let players: Vec<(PlayerId, [f32; 3])> = self
+                .sessions
+                .values()
+                .filter(|session| session.dimension == dimension as u8)
+                .map(|session| (session.id, session.position))
+                .collect();
+            let world_snapshot = self.world.tick(&players);
+            mutations_by_dimension.insert(dimension, world_snapshot.mutations);
         }
-        snapshot.session_updates = self
-            .sessions
-            .values()
-            .map(|session| SessionGameplayUpdate {
-                player_id: session.id,
-                dimension: session.dimension,
-                state: session.gameplay,
-            })
-            .collect();
+
+        for mutation in std::mem::take(&mut self.pending_mutations) {
+            if let Some(dimension) = Dimension::from_wire(mutation.dimension) {
+                mutations_by_dimension
+                    .entry(dimension)
+                    .or_default()
+                    .push(mutation);
+            }
+        }
+
+        let mut mutations = Vec::new();
+        for dimension in dimensions.iter().copied() {
+            let entries = mutations_by_dimension.entry(dimension).or_default();
+            entries.sort_by_key(|mutation| (mutation.revision, mutation.position));
+            mutations.extend(entries.iter().copied());
+        }
+
+        let mut checksums = Vec::with_capacity(dimensions.len());
+        let mut revision = 0;
+        for dimension in dimensions.iter().copied() {
+            self.activate_dimension(dimension);
+            let entries = mutations_by_dimension
+                .get(&dimension)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            revision = revision.max(self.world.revisions.current());
+            checksums.push((dimension, self.world.checksum(entries)));
+        }
+        // Keep the public active-world compatibility view stable for State,
+        // ServerRuntime metrics, and save callers after the multi-world pass.
+        self.activate_dimension(active_before_tick);
+
+        let snapshot = AuthoritySnapshot {
+            tick: self.fixed_tick,
+            revision,
+            checksum: aggregate_dimension_checksums(&checksums),
+            mutations,
+            session_updates: self
+                .sessions
+                .values()
+                .map(|session| SessionGameplayUpdate {
+                    player_id: session.id,
+                    dimension: session.dimension,
+                    state: session.gameplay,
+                })
+                .collect(),
+        };
         self.last_snapshot = snapshot.clone();
         snapshot
     }
@@ -412,10 +560,15 @@ impl AuthorityCore {
     pub fn submit_request(&mut self, request: GameplayRequest) -> GameplayResponse {
         let request_id = request.request_id;
         let id = request.session_id;
-        let Some(session) = self.sessions.get(&id) else {
+        let Some(session_dimension_wire) = self.sessions.get(&id).map(|session| session.dimension)
+        else {
             return self.rejected(request_id, RejectReason::Unauthorized);
         };
-        if let Some(cached) = session.cached_response(request_id) {
+        if let Some(cached) = self
+            .sessions
+            .get(&id)
+            .and_then(|session| session.cached_response(request_id))
+        {
             return cached;
         }
         let Some(session_dimension) = Dimension::from_wire(request.dimension) else {
@@ -424,9 +577,14 @@ impl AuthorityCore {
         if let Err(reason) = request.validate_bounds() {
             return self.reject_for_session(id, request_id, reason, None);
         }
-        if session.dimension != request.dimension {
+        if session_dimension_wire != request.dimension {
             return self.reject_for_session(id, request_id, RejectReason::InvalidDimension, None);
         }
+        self.ensure_dimension(session_dimension);
+        self.activate_dimension(session_dimension);
+        let Some(session) = self.sessions.get(&id) else {
+            return self.rejected(request_id, RejectReason::Unauthorized);
+        };
         if let Err(reason) = session.validate_sequence(&request) {
             return self.reject_for_session(id, request_id, reason, None);
         }
@@ -630,6 +788,31 @@ impl AuthorityCore {
         true
     }
 
+    /// Reset a dead session through the same authority semantics used by the
+    /// `/respawn` command.  Runtime transport adapters call this lifecycle seam
+    /// directly because a client must not need operator permission to respawn.
+    pub fn respawn_session(&mut self, id: PlayerId) -> bool {
+        if !self.sessions.contains_key(&id) {
+            return false;
+        }
+        let hardcore = self.world.rules.hardcore;
+        let revision = self.world.revisions.allocate();
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        session.gameplay.is_dead = false;
+        session.gameplay.health_milli = session.gameplay.max_health_milli;
+        session.gameplay.hunger_milli = 20_000;
+        session.gameplay.saturation_milli = 5_000;
+        session.gameplay.mounted_entity = None;
+        if hardcore {
+            session.game_mode = crate::inventory::GameMode::Spectator;
+        }
+        session.last_revision = revision;
+        session.gameplay.revision = revision;
+        true
+    }
+
     /// Commands that mutate authenticated session state (rather than world
     /// voxels) still execute in the same core.  `State` only projects the
     /// resulting session snapshot and never edits its local player position or
@@ -644,21 +827,11 @@ impl AuthorityCore {
             return None;
         };
         if command.trim().eq_ignore_ascii_case("/respawn") {
-            let Some(session) = self.sessions.get_mut(&session_id) else {
-                return Some(Err(RejectReason::Unauthorized));
-            };
-            if self.world.rules.hardcore && session.gameplay.is_dead {
-                session.gameplay.is_dead = false;
-                session.gameplay.health_milli = session.gameplay.max_health_milli;
-                session.game_mode = crate::inventory::GameMode::Spectator;
+            return Some(if self.respawn_session(session_id) {
+                Ok(None)
             } else {
-                session.gameplay.is_dead = false;
-                session.gameplay.health_milli = session.gameplay.max_health_milli;
-                session.gameplay.hunger_milli = 20_000;
-                session.gameplay.saturation_milli = 5_000;
-                session.gameplay.mounted_entity = None;
-            }
-            return Some(Ok(None));
+                Err(RejectReason::Unauthorized)
+            });
         }
         let parsed = match crate::commands::parse(command) {
             Ok(parsed) => parsed,
@@ -749,6 +922,19 @@ impl AuthorityCore {
     pub fn take_pending_mutations(&mut self) -> Vec<WorldMutation> {
         std::mem::take(&mut self.pending_mutations)
     }
+}
+
+fn aggregate_dimension_checksums(checksums: &[(Dimension, u64)]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for (dimension, checksum) in checksums {
+        hash ^= u64::from(*dimension as u8);
+        hash = hash.wrapping_mul(0x100000001b3);
+        for byte in checksum.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -1049,6 +1235,115 @@ mod tests {
         assert!(boundary.set_dimension(crate::dimension::Dimension::Overworld as u8));
         assert_eq!(boundary.core.world.get_block(1_234, 100, -2_345), marker);
         assert_eq!(boundary.core.session(7).unwrap().dimension, 0);
+    }
+
+    #[test]
+    fn sessions_in_multiple_dimensions_tick_and_dispatch_independently() {
+        let mut core = AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated);
+        core.register_session(SessionContract::new(
+            7,
+            "alex",
+            Dimension::Overworld as u8,
+            [8.0, 80.0, 8.0],
+            true,
+            true,
+        ))
+        .unwrap();
+        core.register_session(SessionContract::new(
+            8,
+            "sam",
+            Dimension::Nether as u8,
+            [8.0, 80.0, 8.0],
+            true,
+            true,
+        ))
+        .unwrap();
+
+        let overworld = core.submit_request(GameplayRequest {
+            request_id: 101,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: Dimension::Overworld as u8,
+            client_revision: core.revision_for_dimension(Dimension::Overworld),
+            operation: GameplayOperation::BlockUse {
+                x: 8,
+                y: 80,
+                z: 8,
+                block: BlockType::Glass.to_wire(),
+            },
+        });
+        let nether = core.submit_request(GameplayRequest {
+            request_id: 102,
+            client_sequence: 1,
+            session_id: 8,
+            dimension: Dimension::Nether as u8,
+            client_revision: core.revision_for_dimension(Dimension::Nether),
+            operation: GameplayOperation::BlockUse {
+                x: 8,
+                y: 80,
+                z: 8,
+                block: BlockType::Obsidian.to_wire(),
+            },
+        });
+        assert!(matches!(
+            overworld.outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        assert!(matches!(nether.outcome, GameplayOutcome::Accepted { .. }));
+        assert_eq!(overworld.server_sequence, nether.server_sequence);
+
+        core.activate_dimension(Dimension::Overworld);
+        let snapshot = core.tick();
+        assert_eq!(snapshot.tick, 1);
+        assert_eq!(core.world.dimension, Dimension::Overworld);
+        assert!(snapshot
+            .mutations
+            .iter()
+            .any(|mutation| mutation.dimension == Dimension::Overworld as u8
+                && mutation.block == BlockType::Glass.to_wire()));
+        assert!(snapshot
+            .mutations
+            .iter()
+            .any(|mutation| mutation.dimension == Dimension::Nether as u8
+                && mutation.block == BlockType::Obsidian.to_wire()));
+        assert!(snapshot
+            .session_updates
+            .iter()
+            .any(|update| update.player_id == 7 && update.dimension == Dimension::Overworld as u8));
+        assert!(snapshot
+            .session_updates
+            .iter()
+            .any(|update| update.player_id == 8 && update.dimension == Dimension::Nether as u8));
+
+        core.activate_dimension(Dimension::Overworld);
+        assert_eq!(core.world.time, 1);
+        assert_eq!(core.world.get_block(8, 80, 8), BlockType::Glass);
+        let overworld_revision = core.revision_for_dimension(Dimension::Overworld);
+        core.activate_dimension(Dimension::Nether);
+        assert_eq!(core.world.time, 1);
+        assert_eq!(core.world.get_block(8, 80, 8), BlockType::Obsidian);
+        let nether_revision = core.revision_for_dimension(Dimension::Nether);
+        assert_eq!(overworld_revision, nether_revision);
+
+        // An active Nether compatibility view must not make a valid Overworld
+        // request fail its dimension gate; routing selects the session world.
+        let routed_again = core.submit_request(GameplayRequest {
+            request_id: 103,
+            client_sequence: 2,
+            session_id: 7,
+            dimension: Dimension::Overworld as u8,
+            client_revision: overworld_revision,
+            operation: GameplayOperation::BlockUse {
+                x: 9,
+                y: 80,
+                z: 8,
+                block: BlockType::Glass.to_wire(),
+            },
+        });
+        assert!(matches!(
+            routed_again.outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
     }
 
     #[test]

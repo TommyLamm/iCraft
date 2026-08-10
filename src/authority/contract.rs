@@ -307,8 +307,9 @@ impl SessionContract {
     }
 }
 
-/// A concrete mutation emitted by the authority.  Consumers can persist or
-/// replicate this value without inspecting renderer chunks.
+/// A concrete mutation emitted by the authority. Consumers can persist or
+/// replicate this value without inspecting renderer chunks. `revision` is
+/// scoped by `dimension`; the pair is the stable identity across worlds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldMutation {
     pub dimension: u8,
@@ -318,7 +319,9 @@ pub struct WorldMutation {
     pub revision: u64,
 }
 
-/// Deterministic result of exactly one fixed tick.
+/// Deterministic result of exactly one fixed tick across all loaded worlds.
+/// `revision` is the maximum per-dimension revision for compatibility only;
+/// clients must gate deltas using each mutation's `(dimension, revision)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthoritySnapshot {
     pub tick: u64,

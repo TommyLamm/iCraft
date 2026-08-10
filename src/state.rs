@@ -7310,11 +7310,16 @@ impl State {
     pub fn tick_authority_boundary(
         &mut self,
     ) -> Option<crate::authority::contract::AuthoritySnapshot> {
+        let current_dimension = self.current_dimension;
         let (snapshot, rules) = {
             let boundary = self.authority_boundary.as_mut()?;
             boundary.set_position(self.player_physics.position.to_array());
             let snapshot = boundary.tick();
-            let rules = boundary.core.world.rules;
+            let rules = boundary
+                .core
+                .world_ref(current_dimension)
+                .map(|world| world.rules)
+                .unwrap_or(boundary.core.world.rules);
             (snapshot, rules)
         };
         self.project_authority_mutations(&snapshot.mutations);
@@ -7474,12 +7479,13 @@ impl State {
         &mut self,
         mut request: crate::network::protocol::GameplayRequest,
     ) -> Option<crate::network::protocol::GameplayResponse> {
+        let current_dimension = self.current_dimension;
         let (response, pending, session_update) = {
             let boundary = self.authority_boundary.as_mut()?;
             request.request_id = self.authority_request_id;
             request.client_sequence = self.authority_client_sequence;
             request.session_id = boundary.session_id;
-            request.client_revision = boundary.core.current_revision();
+            request.client_revision = boundary.core.revision_for_dimension(current_dimension);
             let response = boundary.submit(request);
             let pending = boundary.take_pending_mutations();
             let session_update = boundary.session_gameplay(boundary.session_id);
@@ -7503,6 +7509,7 @@ impl State {
         &mut self,
         operation: crate::network::protocol::GameplayOperation,
     ) -> Option<crate::network::protocol::GameplayResponse> {
+        let current_dimension = self.current_dimension;
         self.submit_authority_request(crate::network::protocol::GameplayRequest {
             request_id: self.authority_request_id,
             client_sequence: self.authority_client_sequence,
@@ -7511,18 +7518,20 @@ impl State {
             client_revision: self
                 .authority_boundary
                 .as_ref()
-                .map(|boundary| boundary.core.current_revision())
+                .map(|boundary| boundary.core.revision_for_dimension(current_dimension))
                 .unwrap_or_default(),
             operation,
         })
     }
 
     fn project_authority_container(&mut self, position: (i32, i32, i32)) -> bool {
-        let Some(slots) = self
-            .authority_boundary
-            .as_ref()
-            .and_then(|boundary| boundary.core.world.container_slots_wire(position))
-        else {
+        let current_dimension = self.current_dimension;
+        let Some(slots) = self.authority_boundary.as_ref().and_then(|boundary| {
+            boundary
+                .core
+                .world_ref(current_dimension)
+                .and_then(|world| world.container_slots_wire(position))
+        }) else {
             return false;
         };
         let stacks = slots
@@ -7631,6 +7640,7 @@ impl State {
         z: i32,
         block: BlockType,
     ) -> Option<crate::network::protocol::GameplayResponse> {
+        let current_dimension = self.current_dimension;
         let (response, pending, rules, time) = {
             let boundary = self.authority_boundary.as_mut()?;
             let request = crate::network::protocol::GameplayRequest {
@@ -7638,7 +7648,7 @@ impl State {
                 client_sequence: self.authority_client_sequence,
                 session_id: boundary.session_id,
                 dimension: self.current_dimension as u8,
-                client_revision: boundary.core.current_revision(),
+                client_revision: boundary.core.revision_for_dimension(current_dimension),
                 operation: crate::network::protocol::GameplayOperation::BlockUse {
                     x,
                     y,
@@ -7648,8 +7658,11 @@ impl State {
             };
             let response = boundary.submit(request);
             let pending = boundary.take_pending_mutations();
-            let rules = boundary.core.world.rules;
-            let time = boundary.core.world.time;
+            let (rules, time) = boundary
+                .core
+                .world_ref(current_dimension)
+                .map(|world| (world.rules, world.time))
+                .unwrap_or((boundary.core.world.rules, boundary.core.world.time));
             (response, pending, rules, time)
         };
         self.authority_request_id = self.authority_request_id.wrapping_add(1);
@@ -7674,8 +7687,14 @@ impl State {
         z: i32,
         block: u32,
     ) -> Option<crate::network::protocol::GameplayResponse> {
+        let current_dimension = self.current_dimension;
         let (response, pending) = {
             let boundary = self.authority_boundary.as_mut()?;
+            let dimension = boundary
+                .core
+                .session(session_id)
+                .and_then(|session| crate::dimension::Dimension::from_wire(session.dimension))
+                .unwrap_or(current_dimension);
             let sequence = boundary
                 .core
                 .session(session_id)
@@ -7685,8 +7704,8 @@ impl State {
                 request_id: self.authority_request_id,
                 client_sequence: sequence,
                 session_id,
-                dimension: self.current_dimension as u8,
-                client_revision: boundary.core.current_revision(),
+                dimension: dimension as u8,
+                client_revision: boundary.core.revision_for_dimension(dimension),
                 operation: crate::network::protocol::GameplayOperation::BlockUse { x, y, z, block },
             };
             let response = boundary.submit_for_session(session_id, request);
@@ -7708,13 +7727,26 @@ impl State {
         z: i32,
         block: u32,
     ) {
+        let current_dimension = self.current_dimension;
         let requested_block = match action {
             crate::network::protocol::Action::Break => BlockType::Air.to_wire(),
             crate::network::protocol::Action::Place => block,
             crate::network::protocol::Action::Use => self
                 .authority_boundary
                 .as_ref()
-                .map(|boundary| boundary.core.world.get_block(x, y, z).to_wire())
+                .and_then(|boundary| {
+                    let dimension = boundary
+                        .core
+                        .session(requester_id)
+                        .and_then(|session| {
+                            crate::dimension::Dimension::from_wire(session.dimension)
+                        })
+                        .unwrap_or(current_dimension);
+                    boundary
+                        .core
+                        .world_ref(dimension)
+                        .map(|world| world.get_block(x, y, z).to_wire())
+                })
                 .unwrap_or(BlockType::Air.to_wire()),
         };
         let response =
@@ -7734,6 +7766,7 @@ impl State {
         &mut self,
         command: &str,
     ) -> Option<crate::network::protocol::GameplayResponse> {
+        let current_dimension = self.current_dimension;
         let (response, pending, rules, time, session) = {
             let boundary = self.authority_boundary.as_mut()?;
             let request = crate::network::protocol::GameplayRequest {
@@ -7741,15 +7774,18 @@ impl State {
                 client_sequence: self.authority_client_sequence,
                 session_id: boundary.session_id,
                 dimension: self.current_dimension as u8,
-                client_revision: boundary.core.current_revision(),
+                client_revision: boundary.core.revision_for_dimension(current_dimension),
                 operation: crate::network::protocol::GameplayOperation::Command {
                     command: command.to_string(),
                 },
             };
             let response = boundary.submit(request);
             let pending = boundary.take_pending_mutations();
-            let rules = boundary.core.world.rules;
-            let time = boundary.core.world.time;
+            let (rules, time) = boundary
+                .core
+                .world_ref(current_dimension)
+                .map(|world| (world.rules, world.time))
+                .unwrap_or((boundary.core.world.rules, boundary.core.world.time));
             let session = boundary.core.session(boundary.session_id).cloned();
             (response, pending, rules, time, session)
         };
@@ -16976,7 +17012,9 @@ impl State {
                     client_revision: self
                         .authority_boundary
                         .as_ref()
-                        .map(|boundary| boundary.core.current_revision())
+                        .map(|boundary| {
+                            boundary.core.revision_for_dimension(self.current_dimension)
+                        })
                         .unwrap_or_default(),
                     operation: crate::network::protocol::GameplayOperation::Container {
                         action: crate::network::protocol::ContainerAction::Open.to_wire(),
@@ -17003,7 +17041,7 @@ impl State {
                 client_revision: self
                     .authority_boundary
                     .as_ref()
-                    .map(|boundary| boundary.core.current_revision())
+                    .map(|boundary| boundary.core.revision_for_dimension(self.current_dimension))
                     .unwrap_or_default(),
                 operation: crate::network::protocol::GameplayOperation::Sleep {
                     x: clicked.0,

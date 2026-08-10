@@ -167,9 +167,13 @@ renderer `ChunkManager::chunks` is a one-way presentation projection; terrain
 meshes, visibility sets, GPU allocations, and particle vertices are always
 derived caches.
 
-`AuthorityCore` owns one `ServerWorld`, a deterministic 20 Hz tick, sorted
-session/entity iteration, `RevisionClock`, bounded response cache, and the
-`SessionContract` dimension/position/permission gates. `ServerRuntime` submits
+`AuthorityCore` owns an active compatibility `ServerWorld` plus a
+dimension-keyed map of independent headless worlds, a deterministic 20 Hz tick,
+sorted session/entity iteration, per-dimension `RevisionClock`s, bounded response
+cache, and the `SessionContract` dimension/position/permission gates. Requests
+route by the authenticated session dimension; `world_ref`/`world_mut` read a
+dimension without switching the compatibility view and `with_world` restores the
+caller's active view after a bounded operation. `ServerRuntime` submits
 authenticated envelopes and schedules/saves/metrics the core; it does not
 mutate a second authoritative block or entity map.
 
@@ -222,13 +226,15 @@ The shared headless authority lives in `authority::AuthorityCore` and
   dedicated mode constructs the same `AuthorityCore` without `State`.
 - `SessionContract` validates authenticated identity, dimension, reach,
   permissions, client sequence/revision, and the bounded response cache.
-- `RevisionClock` and sorted fixed-tick iteration provide one deterministic
-  mutation/revision contract across all three topologies.
+- Each loaded dimension ticks in stable wire order with its own revision/time
+  namespace; snapshots aggregate mutations/checksums deterministically while
+  clients gate deltas by `(dimension, revision)`, never by the aggregate max.
 - `SaveManager` persists dedicated player payloads (current dimension separate
   from spawn dimension), authoritative chunk/block-entity/entity snapshots, and
-  a dimension-scoped mutation-revision index. Region caches are committed only
-  after an atomic replacement succeeds, preserving the previous snapshot for a
-  retry on failure.
+  a dimension-scoped mutation-revision index. `ServerRuntime` traverses all
+  loaded dimensions, merges the revision index once, and restores the active
+  compatibility dimension. Region caches are committed only after an atomic
+  replacement succeeds, preserving the previous snapshot for a retry on failure.
 - `InterestSet` tracks per-session view/simulation chunks, simulation entities,
   and open container viewers. `ServerRuntime::drain_routed_updates` exposes the
   bounded, dimension-checked routing ledger; the network packet adapter remains
@@ -237,9 +243,12 @@ The shared headless authority lives in `authority::AuthorityCore` and
   not maintain a parallel authoritative block/entity map.
 
 The Phase A boundary cutover and Phase C persistence/interest seams are covered by
-headless authority/projection tests. GPU Host+Join, targeted wire-packet delivery,
-concurrent login reservation, and the remaining B–E acceptance evidence are still
-manual or follow-up work; headless tests must not be presented as a GPU/manual pass.
+headless authority/projection tests, including simultaneous Overworld/Nether
+sessions and active-view restoration. Atomic concurrent login, bounded transport,
+fault injection and metrics have automated evidence; GPU Host+Join, complete
+multi-dimension reconnect/failure matrices, full difficulty consumers and the
+remaining topology acceptance are still manual or follow-up work. Headless tests
+must not be presented as a GPU/manual pass.
 
 `src/network/` contains a versioned bincode protocol over length-prefixed TCP:
 
@@ -472,6 +481,9 @@ packs, localization, subtitles, reduced motion, and keyboard-focus behavior
 have unit coverage. Visual 4:3/16:9/21:9/high-DPI, audio-device,
 GPU-performance, 30-minute soak, and three-topology acceptance still require
 the manual steps in `plans/minecraft_foundation_gap/17_qa_checklist.md`.
+Plan21 Phase A additionally keeps simultaneous dimension worlds and per-session
+interest/revision routing isolated in headless tests; its fishing/furnace and
+listen-State follow-up phases remain unchecked.
 
 Use:
 

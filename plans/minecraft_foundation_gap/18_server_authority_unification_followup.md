@@ -21,6 +21,11 @@ Gameplay request/response 型別、properties/ping 基礎、每玩家檔案與�
 headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，以及 B–E 對整合程度的
 過度宣稱，均在本計劃完成後才可關閉。
 
+目前僅將由既有 commits 與自動化測試證明的 B 前三項、D address/login/transport
+子集及 E fault/metrics 子集勾選；這不等於整個 Plan18 完成。非 Peaceful difficulty
+consumer、三拓撲共同 vectors、State 完整 cutover、30 分鐘 soak 與 GPU Host+Join
+仍保持未驗證。
+
 ## 已知缺口（不可在本計劃開始前視為通過）
 
 - `State::new` 仍建立 wgpu；Singleplayer 沒有 in-process `ServerRuntime`，Host 仍有
@@ -54,13 +59,13 @@ headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，�
 
 ### B. 完整 Gameplay envelope 與 legacy migration
 
-- [ ] 為 `BlockUse`、`Container`、`ItemUse`、`Combat`、`Sleep`、`Trade`、`Mount`、
+- [x] 為 `BlockUse`、`Container`、`ItemUse`、`Combat`、`Sleep`、`Trade`、`Mount`、
   `Command` 逐一實作真正的 authority mutation、前置驗證、成功 revision、拒絕原因與
   response cache；任何未支援操作必須回 `Unsupported`／`InvalidState`，不可回空成功。
-- [ ] 驗證 authenticated session、dimension、距離、狀態、權限、client sequence、
+- [x] 驗證 authenticated session、dimension、距離、狀態、權限、client sequence、
   client revision；保留具體 `RejectReason`（不可把所有 bounds error 摺成 `Malformed`）。
   server sequence、client revision gate 與 128-entry idempotency window 必須單調且可測。
-- [ ] 將舊的 `BlockChange`、`BlockActionRequest`、Sleep、Container open/click/close
+- [x] 將舊的 `BlockChange`、`BlockActionRequest`、Sleep、Container open/click/close
   入口改成只做一次 envelope adapter，保留原座標、slot、dimension、revision；完成 client
   遷移後移除重複 authority path。不得把 envelope 在 State 端降級成 StatusUpdate。
 - [ ] 讓 local/listen/dedicated 使用相同 request/ACK/snapshot vectors，並測試 duplicate、
@@ -90,11 +95,13 @@ headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，�
 
 - [ ] `server.properties` 的 difficulty、PvP、view/simulation distance、motd、whitelist、
   operators、world path/seed 均要實際套用；錯誤配置 fail-fast 且不建立／覆寫世界。
-- [ ] 將 `ServerAddressBook` 接入 Menu：多個地址、最近 ping 結果、錯誤與版本/MOTD/玩家數
+  目前 PvP、distance、motd、名單、路徑與 seed 已接線，Peaceful 會關閉 mob spawning/PvP；
+  Easy/Normal/Hard 尚未有 headless gameplay difficulty consumer，因此本項保持未勾選。
+- [x] 將 `ServerAddressBook` 接入 Menu：多個地址、最近 ping 結果、錯誤與版本/MOTD/玩家數
   持久化，並以 server-list ping request/response 更新 UI；加入 round-trip/menu tests。
-- [ ] login 在送出 LoginSuccess 前以 atomic reservation 同時檢查 duplicate identity 與
+- [x] login 在送出 LoginSuccess 前以 atomic reservation 同時檢查 duplicate identity 與
   `max_players`；並發登入測試不得超 cap、不得產生兩份玩家狀態。
-- [ ] host inbound queue、每 client outbound queue、frame/packet/collection/string limits
+- [x] host inbound queue、每 client outbound queue、frame/packet/collection/string limits
   均有實際上限；滿 queue 要 deterministic backpressure 或 `QueueFull` response，不可只靠
   無界 channel 與每 tick 處理上限。保留 per-client rate limit。
 
@@ -103,10 +110,10 @@ headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，�
 - [x] 新增 headless integration harness，啟動 `ServerRuntime`／dedicated server 與 2–4 個
   clients（不建立 wgpu、window、audio），執行 A–C 的共同 gameplay vectors；至少覆蓋
   login、block/container、player save/reconnect、interest 與 revision gates。
-- [ ] 建立可重現 fault injection：duplicate/out-of-order/stale request、斷線重連、慢 client、
+- [x] 建立可重現 fault injection：duplicate/out-of-order/stale request、斷線重連、慢 client、
   滿 queue、rate/size limit、bind/config failure、save failure、並發 duplicate login/max
   players；每項都要有明確 reject、disconnect 或 retry assertion。
-- [ ] metrics/logging 真實更新並可在測試讀取：tick time、inbound/outbound packets 與 bytes、
+- [x] metrics/logging 真實更新並可在測試讀取：tick time、inbound/outbound packets 與 bytes、
   queue depth、loaded chunks、entities、players、save latency、reject/duplicate counters。
 - [ ] headless `--once` 與短跑先納入 CI；完成後再執行 30 分鐘 dedicated soak。GPU Host+Join、
   窗口／音效與跨比例人工 QA 另列證據，不以 headless 結果代替。
