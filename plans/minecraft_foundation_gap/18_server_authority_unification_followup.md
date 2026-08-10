@@ -33,8 +33,8 @@ headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，�
   replication 尚未由 dedicated runtime 完整保存／路由。
 - `ServerAddressBook` 尚未接到 Menu 的持久化與 server-list ping；login/max-player
   檢查需要 atomic reservation；runtime host inbound channel 需要明確有界。
-- 現有 runtime 與 NetworkServer 測試分離，尚無同時啟動 authority runtime 與 2–4 clients
-  的整合 harness；30 分鐘 soak 與 GPU Host+Join 仍是人工 QA。
+- `tests/headless_server_authority.rs` 已同時啟動 authority runtime 與 2 個真 TCP clients；較完整
+  fault matrix、30 分鐘 soak 與 GPU Host+Join 仍待補證據。
 
 ## 實作步驟
 
@@ -100,7 +100,7 @@ headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，�
 
 ### E. Headless harness、fault injection、metrics 與人工 QA
 
-- [ ] 新增 headless integration harness，啟動 `ServerRuntime`／dedicated server 與 2–4 個
+- [x] 新增 headless integration harness，啟動 `ServerRuntime`／dedicated server 與 2–4 個
   clients（不建立 wgpu、window、audio），執行 A–C 的共同 gameplay vectors；至少覆蓋
   login、block/container、player save/reconnect、interest 與 revision gates。
 - [ ] 建立可重現 fault injection：duplicate/out-of-order/stale request、斷線重連、慢 client、
