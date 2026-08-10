@@ -48,6 +48,7 @@ pub fn update_passive_mobs(
     dt: f32,
     time: f32,
     authoritative: bool,
+    mob_griefing: bool,
 ) -> Vec<(i32, i32, i32)> {
     if !authoritative {
         return Vec::new();
@@ -121,7 +122,7 @@ pub fn update_passive_mobs(
                     let sx = pos.x.floor() as i32;
                     let sy = (pos.y - 0.5).floor() as i32;
                     let sz = pos.z.floor() as i32;
-                    if authoritative
+                    if mob_griefing
                         && chunk_manager.get_block(sx, sy, sz) == crate::world::BlockType::Grass
                     {
                         chunk_manager.set_block(sx, sy, sz, crate::world::BlockType::Dirt);
@@ -470,5 +471,41 @@ mod tests {
             .collect();
         assert_eq!(indexed, oracle);
         assert!(indexed.contains(&near));
+    }
+
+    #[test]
+    fn disabled_mob_griefing_keeps_sheep_ai_without_eating_grass() {
+        let mut entities = EntityManager::new();
+        let sheep_id = entities.spawn(EntityType::Sheep, Vec3::new(2.5, 1.5, 2.5));
+        let sheep = entities.get_by_id_mut(sheep_id).unwrap();
+        sheep.grass_eat_timer = 0.1;
+        sheep.has_wool = false;
+
+        let mut chunks = ChunkManager::new(1);
+        chunks.chunks.insert((0, 0), crate::world::Chunk::new(0, 0));
+        chunks.set_block(2, 1, 2, crate::world::BlockType::Grass);
+        let mut dirty_meshes = std::collections::HashSet::new();
+        let physics = PlayerPhysics::new(Vec3::ZERO);
+        let mut inventory = Inventory::new();
+
+        let changes = update_passive_mobs(
+            &mut entities,
+            &mut chunks,
+            &mut dirty_meshes,
+            &physics,
+            &mut inventory,
+            GameMode::Survival,
+            0.2,
+            1.0,
+            true,
+            false,
+        );
+
+        let sheep = entities.get_by_id(sheep_id).unwrap();
+        assert_eq!(sheep.grass_eat_timer, 0.0);
+        assert!(sheep.has_wool, "grazing AI should still finish");
+        assert!(changes.is_empty());
+        assert!(dirty_meshes.is_empty());
+        assert_eq!(chunks.get_block(2, 1, 2), crate::world::BlockType::Grass);
     }
 }

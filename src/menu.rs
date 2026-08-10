@@ -994,17 +994,22 @@ fn legacy_metadata(directory: &Path) -> Option<WorldMetadata> {
         .unwrap_or("WORLD")
         .replace('_', " ")
         .to_ascii_uppercase();
+    let hardcore = level.hardcore || level.rules.hardcore;
     Some(WorldMetadata {
         name,
         seed: level.seed,
         game_mode: player.game_mode,
-        difficulty: Difficulty::Normal,
+        difficulty: if hardcore {
+            Difficulty::Hard
+        } else {
+            Difficulty::Normal
+        },
         last_played: modified,
-        world_type: WorldType::Default,
-        generate_structures: true,
-        bonus_chest: false,
-        cheats_enabled: false,
-        hardcore: false,
+        world_type: level.world_type,
+        generate_structures: level.generate_structures,
+        bonus_chest: level.bonus_chest,
+        cheats_enabled: level.cheats_enabled,
+        hardcore,
         version: level.version,
         needs_upgrade: level.version < CURRENT_WORLD_FORMAT_VERSION,
     })
@@ -4086,6 +4091,69 @@ fn hash(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(127.1, 311.7)))
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_metadata_preserves_saved_hardcore_and_creation_options() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        for (case, level_hardcore, rules_hardcore) in
+            [("level", true, false), ("rules", false, true)]
+        {
+            let world_dir = Path::new(SAVES_DIR).join(format!(
+                "icraft_legacy_metadata_{}_{}_{}",
+                std::process::id(),
+                unique,
+                case
+            ));
+            let backup_dir = world_dir.with_extension("backup");
+            fs::create_dir_all(&world_dir).expect("temporary world should be created");
+
+            let mut level = crate::save::LevelData::default();
+            level.seed = 0xA11C_E55;
+            level.version = CURRENT_WORLD_FORMAT_VERSION;
+            level.hardcore = level_hardcore;
+            level.rules.hardcore = rules_hardcore;
+            level.world_type = WorldType::Superflat;
+            level.generate_structures = false;
+            level.bonus_chest = true;
+            level.cheats_enabled = true;
+            let player = crate::save::PlayerData::from_state(
+                glam::Vec3::ZERO,
+                glam::Vec3::ZERO,
+                0.0,
+                0.0,
+                &crate::player::PlayerState::new(),
+                GameMode::Adventure,
+                &crate::inventory::Inventory::new(),
+                crate::advancements::AdvancementProgressData::default(),
+            );
+            crate::save::SaveManager::new(&world_dir)
+                .save_player_and_level(&level, &player)
+                .expect("legacy fixtures should save");
+
+            let assert_metadata = |metadata: WorldMetadata| {
+                assert_eq!(metadata.seed, level.seed);
+                assert_eq!(metadata.game_mode, GameMode::Adventure);
+                assert_eq!(metadata.difficulty, Difficulty::Hard);
+                assert!(metadata.hardcore);
+                assert_eq!(metadata.world_type, WorldType::Superflat);
+                assert!(!metadata.generate_structures);
+                assert!(metadata.bonus_chest);
+                assert!(metadata.cheats_enabled);
+            };
+            assert_metadata(legacy_metadata(&world_dir).expect("legacy metadata should load"));
+
+            backup_world(&world_dir, &backup_dir).expect("legacy world backup should succeed");
+            assert_metadata(
+                legacy_metadata(&backup_dir).expect("backup metadata should retain legacy rules"),
+            );
+
+            fs::remove_dir_all(&world_dir).expect("temporary world should be removable");
+            fs::remove_dir_all(&backup_dir).expect("temporary backup should be removable");
+        }
+    }
 
     #[test]
     fn server_address_book_keeps_recent_ping_results() {

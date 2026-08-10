@@ -7413,11 +7413,12 @@ impl State {
         if let Some(revision) = self
             .authority_boundary
             .as_ref()
-            .and_then(|boundary| boundary.core.world.get_block_entity(
-                position.0,
-                position.1,
-                position.2,
-            ))
+            .and_then(|boundary| {
+                boundary
+                    .core
+                    .world
+                    .get_block_entity(position.0, position.1, position.2)
+            })
             .map(crate::block_entity::BlockEntity::revision)
         {
             if let Some(entity) = self
@@ -11786,27 +11787,23 @@ impl State {
                 crate::weather::Weather::Rain | crate::weather::Weather::Thunder
             );
             let mut mob_dirty_meshes = std::collections::HashSet::new();
-            let exploded_blocks =
-                if self.world_rules.mob_griefing && self.game_mode_policy().can_target_mobs {
-                    crate::mob::update_mobs(
-                        &mut self.entity_manager,
-                        &mut self.chunk_manager,
-                        &mut mob_dirty_meshes,
-                        &mut self.player_physics,
-                        &mut self.player_state,
-                        self.game_mode,
-                        self.world_time.sky_light_level(),
-                        is_raining,
-                        dt,
-                        &mut self.audio_manager,
-                        right,
-                        self.potion_effects.has_invisibility(),
-                        crate::enchantment::protection_multiplier(&self.inventory.armor, false),
-                        authoritative,
-                    )
-                } else {
-                    Vec::new()
-                };
+            let exploded_blocks = crate::mob::update_mobs(
+                &mut self.entity_manager,
+                &mut self.chunk_manager,
+                &mut mob_dirty_meshes,
+                &mut self.player_physics,
+                &mut self.player_state,
+                self.game_mode,
+                self.world_time.sky_light_level(),
+                is_raining,
+                dt,
+                &mut self.audio_manager,
+                right,
+                self.potion_effects.has_invisibility(),
+                crate::enchantment::protection_multiplier(&self.inventory.armor, false),
+                authoritative,
+                self.world_rules.mob_griefing,
+            );
             self.invalidate_chunk_meshes(mob_dirty_meshes, DependencyReason::Mob);
             for (x, y, z) in exploded_blocks {
                 self.broadcast_block_change(x, y, z, BlockType::Air);
@@ -11819,22 +11816,18 @@ impl State {
             // Update passive mobs
             let passive_mobs_started = Instant::now();
             let mut passive_dirty_meshes = std::collections::HashSet::new();
-            let grazed_blocks =
-                if self.game_mode_policy().can_target_mobs && self.world_rules.mob_griefing {
-                    crate::passive_mob::update_passive_mobs(
-                        &mut self.entity_manager,
-                        &mut self.chunk_manager,
-                        &mut passive_dirty_meshes,
-                        &self.player_physics,
-                        &mut self.inventory,
-                        self.game_mode,
-                        dt,
-                        self.total_time,
-                        authoritative,
-                    )
-                } else {
-                    Vec::new()
-                };
+            let grazed_blocks = crate::passive_mob::update_passive_mobs(
+                &mut self.entity_manager,
+                &mut self.chunk_manager,
+                &mut passive_dirty_meshes,
+                &self.player_physics,
+                &mut self.inventory,
+                self.game_mode,
+                dt,
+                self.total_time,
+                authoritative,
+                self.world_rules.mob_griefing,
+            );
             self.invalidate_chunk_meshes(passive_dirty_meshes, DependencyReason::Mob);
             for (x, y, z) in grazed_blocks {
                 self.broadcast_block_change(x, y, z, BlockType::Dirt);
@@ -15309,7 +15302,9 @@ impl State {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::ItemUse {
                     item: main_item as u32,
-                    count: main_stack.map(|stack| stack.count.min(u16::MAX as u32) as u16).unwrap_or(0),
+                    count: main_stack
+                        .map(|stack| stack.count.min(u16::MAX as u32) as u16)
+                        .unwrap_or(0),
                 },
             );
             return;

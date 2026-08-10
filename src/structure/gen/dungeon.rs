@@ -86,7 +86,7 @@ pub fn generate_dungeon(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
             custom_name: None,
             inventory: ContainerInventory::new(),
             loot_table: Some(LootTableId::Dungeon.as_str().to_string()),
-            loot_seed: Some(seed as u64 ^ (cx as u64 * 31 + cz as u64)),
+            loot_seed: Some((seed as u64) ^ (cx as u64).wrapping_mul(31).wrapping_add(cz as u64)),
             revision: 0,
         });
         blocks.push(BlockPlacement {
@@ -111,5 +111,32 @@ pub fn generate_dungeon(origin_x: i32, origin_y: i32, origin_z: i32, seed: u32) 
         origin_z,
         bounding_box,
         pieces: vec![piece],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chest_loot_seeds(start: &StructureStart) -> Vec<u64> {
+        start
+            .pieces
+            .iter()
+            .flat_map(|piece| piece.blocks.iter())
+            .filter_map(|placement| match placement.block_entity.as_ref() {
+                Some(BlockEntity::Chest(chest)) => chest.loot_seed,
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn negative_coordinates_have_deterministic_non_panicking_loot_seeds() {
+        let first = generate_dungeon(-511, 20, -1025, 42);
+        let second = generate_dungeon(-511, 20, -1025, 42);
+
+        let first_seeds = chest_loot_seeds(&first);
+        assert!(!first_seeds.is_empty());
+        assert_eq!(first_seeds, chest_loot_seeds(&second));
     }
 }

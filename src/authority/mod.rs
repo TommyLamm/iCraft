@@ -152,10 +152,11 @@ impl AuthorityBoundary {
     /// roots use this seam before rebuilding their local render cache so a
     /// portal transfer cannot leave the authority session in the old world.
     pub fn set_dimension(&mut self, dimension: u8) -> bool {
-        let Some(crate::dimension::Dimension::Overworld
+        let Some(
+            crate::dimension::Dimension::Overworld
             | crate::dimension::Dimension::Nether
-            | crate::dimension::Dimension::End) =
-            crate::dimension::Dimension::from_wire(dimension)
+            | crate::dimension::Dimension::End,
+        ) = crate::dimension::Dimension::from_wire(dimension)
         else {
             return false;
         };
@@ -169,10 +170,11 @@ impl AuthorityBoundary {
     }
 
     pub fn set_session_dimension(&mut self, id: PlayerId, dimension: u8) -> bool {
-        let Some(crate::dimension::Dimension::Overworld
+        let Some(
+            crate::dimension::Dimension::Overworld
             | crate::dimension::Dimension::Nether
-            | crate::dimension::Dimension::End) =
-            crate::dimension::Dimension::from_wire(dimension)
+            | crate::dimension::Dimension::End,
+        ) = crate::dimension::Dimension::from_wire(dimension)
         else {
             return false;
         };

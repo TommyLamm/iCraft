@@ -296,6 +296,7 @@ pub fn update_mobs(
     player_invisible: bool,
     damage_multiplier: f32,
     is_host: bool,
+    mob_griefing: bool,
 ) -> Vec<(i32, i32, i32)> {
     if !is_host {
         return Vec::new();
@@ -622,7 +623,7 @@ pub fn update_mobs(
             dirty_meshes,
             player_physics,
             player_state,
-            is_host,
+            is_host && mob_griefing,
             game_mode,
             damage_multiplier,
         ));
@@ -943,6 +944,7 @@ mod tests {
                 false,
                 1.0,
                 true,
+                true,
             );
             player_physics.velocity
         }
@@ -983,6 +985,7 @@ mod tests {
             false,
             1.0,
             true,
+            true,
         );
 
         for entity in &entity_manager.entities {
@@ -993,6 +996,54 @@ mod tests {
             );
             assert!(!entity.is_ignited, "Creeper ignited in Creative mode!");
         }
+    }
+
+    #[test]
+    fn disabled_mob_griefing_keeps_creeper_ai_without_breaking_blocks() {
+        let mut entity_manager = EntityManager::new();
+        let creeper_id = entity_manager.spawn(EntityType::Creeper, Vec3::new(2.0, 2.0, 0.0));
+        let creeper = entity_manager.get_by_id_mut(creeper_id).unwrap();
+        creeper.is_ignited = true;
+        creeper.action_cooldown = 0.1;
+
+        let mut chunk_manager = ChunkManager::new(1);
+        chunk_manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        chunk_manager.set_block(3, 1, 0, crate::world::BlockType::Stone);
+        let mut chunk_meshes = std::collections::HashSet::new();
+        let mut player_physics = PlayerPhysics::new(Vec3::new(2.0, 2.0, 0.0));
+        let mut player_state = PlayerState::new();
+        let mut audio_manager = crate::audio::AudioManager::new();
+
+        let removed = update_mobs(
+            &mut entity_manager,
+            &mut chunk_manager,
+            &mut chunk_meshes,
+            &mut player_physics,
+            &mut player_state,
+            GameMode::Survival,
+            0,
+            false,
+            0.2,
+            &mut audio_manager,
+            Vec3::X,
+            false,
+            1.0,
+            true,
+            false,
+        );
+
+        assert!(removed.is_empty());
+        assert!(chunk_meshes.is_empty());
+        assert_eq!(
+            chunk_manager.get_block(3, 1, 0),
+            crate::world::BlockType::Stone
+        );
+        assert!(
+            entity_manager.get_by_id(creeper_id).is_none(),
+            "creeper fuse and removal should still advance"
+        );
     }
 
     #[test]
@@ -1021,6 +1072,7 @@ mod tests {
             Vec3::X,
             false,
             1.0,
+            true,
             true,
         );
 
@@ -1079,6 +1131,7 @@ mod tests {
             Vec3::X,
             false,
             1.0,
+            true,
             true,
         );
 
