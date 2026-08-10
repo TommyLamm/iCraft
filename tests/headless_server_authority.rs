@@ -343,7 +343,10 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         &mut bob,
         "two authenticated clients",
         |runtime, alice, bob| {
-            alice.player_id().is_some() && bob.player_id().is_some() && runtime.players.len() == 2
+            alice.player_id().is_some()
+                && bob.player_id().is_some()
+                && runtime.players.len() == 2
+                && runtime.metrics.queue_depth == 0
         },
     );
     let alice_id = alice.player_id().expect("alice authenticated");
@@ -351,6 +354,23 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert_ne!(alice_id, bob_id);
     assert_eq!(alice.connected.map(|value| value.1), Some(0xC0FF_EE11));
     assert_eq!(bob.connected.map(|value| value.1), Some(0xC0FF_EE11));
+    assert!(runtime.metrics.ticks > 0);
+    assert!(runtime.metrics.last_tick_time_us > 0);
+    assert!(runtime.metrics.max_tick_time_us >= runtime.metrics.last_tick_time_us);
+    assert_eq!(runtime.metrics.players_online, 2);
+    assert_eq!(
+        runtime.metrics.loaded_chunks,
+        runtime.authority.world.chunks.chunks.len()
+    );
+    assert_eq!(
+        runtime.metrics.entities,
+        runtime.authority.world.entities.entities.len()
+    );
+    assert!(runtime.metrics.inbound_packets >= 2);
+    assert!(runtime.metrics.outbound_packets >= 2);
+    assert!(runtime.metrics.inbound_bytes >= runtime.metrics.inbound_packets.saturating_mul(4));
+    assert!(runtime.metrics.outbound_bytes >= runtime.metrics.outbound_packets.saturating_mul(4));
+    assert_eq!(runtime.metrics.queue_depth, 0);
 
     alice.send(GameToClient::SendPosition {
         sequence: 1,
@@ -448,18 +468,12 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         alice.take_response(BLOCK_REQUEST).is_none(),
         "the client response gate must suppress a replayed cached response"
     );
+    assert_eq!(runtime.metrics.requests_accepted, accepted_before_replay);
+    assert_eq!(runtime.metrics.requests_rejected, rejected_before_replay);
     assert_eq!(
-        (
-            runtime.metrics.requests_accepted,
-            runtime.metrics.requests_rejected,
-            runtime.metrics.duplicate_requests,
-        ),
-        (
-            accepted_before_replay,
-            rejected_before_replay,
-            duplicate_before_replay,
-        ),
-        "the transport replay cache must prevent a second authority dispatch"
+        runtime.metrics.duplicate_requests,
+        duplicate_before_replay + 1,
+        "the replay is observed once while the authority still executes only once"
     );
     assert_eq!(
         runtime
@@ -504,6 +518,14 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         }
     );
     assert_eq!(runtime.metrics.requests_accepted, accepted_before_replay);
+    assert_eq!(
+        runtime.metrics.requests_rejected,
+        rejected_before_replay + 2
+    );
+    assert_eq!(
+        runtime.metrics.duplicate_requests,
+        duplicate_before_replay + 1
+    );
 
     bob.send(GameToClient::SendPosition {
         sequence: 2,
@@ -664,9 +686,14 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         &mut alice,
         &mut bob,
         "disconnect persistence",
-        |runtime, _, _| runtime.players.is_empty(),
+        |runtime, _, _| runtime.players.is_empty() && runtime.metrics.queue_depth == 0,
     );
+    let saves_before_shutdown = runtime.metrics.saves;
     runtime.shutdown().expect("save and stop first runtime");
+    assert_eq!(runtime.metrics.saves, saves_before_shutdown + 1);
+    assert!(runtime.metrics.last_save_latency_ms >= 1);
+    assert_eq!(runtime.metrics.players_online, 0);
+    assert_eq!(runtime.metrics.queue_depth, 0);
     drop(runtime);
 
     let mut restarted =

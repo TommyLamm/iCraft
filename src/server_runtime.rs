@@ -18,7 +18,9 @@ use crate::network::protocol::{
     ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
     PlayerEffectWire, RejectReason,
 };
-use crate::network::server::{HostToServer, NetworkServer, ServerConfig, ServerToHost};
+use crate::network::server::{
+    HostToServer, MeteredHostEventSender, NetworkMetrics, NetworkServer, ServerConfig, ServerToHost,
+};
 use crate::save::{
     ChunkSaveData, EntitySaveData, LevelData, MutationRevisionIndex, PlayerData, SaveManager,
 };
@@ -300,6 +302,8 @@ where
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerMetrics {
     pub ticks: u64,
+    pub last_tick_time_us: u64,
+    pub max_tick_time_us: u64,
     pub inbound_packets: u64,
     pub outbound_packets: u64,
     pub inbound_bytes: u64,
@@ -383,6 +387,9 @@ pub struct ServerRuntime {
     host_tx: SyncSender<HostToServer>,
     host_rx: Receiver<ServerToHost>,
     network_thread: Option<JoinHandle<()>>,
+    network_metrics: NetworkMetrics,
+    observed_transport_rejections: u64,
+    observed_transport_duplicates: u64,
     stopped: bool,
 }
 
@@ -419,19 +426,23 @@ impl ServerRuntime {
         }
         level.rules = level.rules.normalized();
         let (host_tx, host_rx_network) = mpsc::sync_channel(HOST_COMMAND_QUEUE_CAPACITY);
-        let (server_to_host, host_rx) = mpsc::sync_channel(HOST_EVENT_QUEUE_CAPACITY);
+        let (server_to_host_tx, host_rx) = mpsc::sync_channel(HOST_EVENT_QUEUE_CAPACITY);
+        let network_metrics = NetworkMetrics::default();
+        let server_to_host =
+            MeteredHostEventSender::new(server_to_host_tx, network_metrics.clone());
         let mut network_config = ServerConfig::default();
         network_config.max_players = properties.max_players;
         network_config.motd = properties.motd.clone();
         network_config.whitelist = properties.whitelist.clone();
         let bind_addr = format!("{}:{}", properties.bind, properties.port);
-        let network_thread = NetworkServer::spawn_with_config(
+        let network_thread = NetworkServer::spawn_with_config_and_metrics(
             bind_addr,
             properties.seed,
             gamemode_wire(&level),
             host_rx_network,
             server_to_host,
             network_config,
+            network_metrics.clone(),
         );
         let mut authority = AuthorityCore::new(
             AuthorityConfig {
@@ -456,6 +467,9 @@ impl ServerRuntime {
             host_tx,
             host_rx,
             network_thread: Some(network_thread),
+            network_metrics,
+            observed_transport_rejections: 0,
+            observed_transport_duplicates: 0,
             routed_updates: Vec::new(),
             routed_mutations: BTreeSet::new(),
             stopped: false,
@@ -475,12 +489,13 @@ impl ServerRuntime {
         let mut processed = 0;
         while processed < MAX_INBOUND_EVENTS_PER_TICK {
             let event = match self.host_rx.try_recv() {
-                Ok(event) => event,
+                Ok(event) => {
+                    self.network_metrics.dequeue();
+                    event
+                }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             };
             processed += 1;
-            self.metrics.inbound_packets = self.metrics.inbound_packets.saturating_add(1);
-            self.metrics.queue_depth = self.metrics.queue_depth.saturating_sub(1);
             self.handle_event(event)?;
         }
         let snapshot = self.authority.tick();
@@ -490,12 +505,19 @@ impl ServerRuntime {
         self.metrics.players_online = self.players.len();
         self.metrics.loaded_chunks = self.authority.world.chunks.chunks.len();
         self.metrics.entities = self.authority.world.entities.entities.len();
-        self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(processed.max(0));
         if self.metrics.ticks % AUTOSAVE_INTERVAL_TICKS == 0 {
             self.save_all()?;
         }
-        if started.elapsed() > TICK_INTERVAL {
-            eprintln!("[ServerRuntime] tick over budget: {:?}", started.elapsed());
+        let elapsed = started.elapsed();
+        let elapsed_us = elapsed.as_micros().min(u64::MAX as u128) as u64;
+        self.metrics.last_tick_time_us = elapsed_us.max(1);
+        self.metrics.max_tick_time_us = self
+            .metrics
+            .max_tick_time_us
+            .max(self.metrics.last_tick_time_us);
+        self.sync_network_metrics();
+        if elapsed > TICK_INTERVAL {
+            eprintln!("[ServerRuntime] tick over budget: {elapsed:?}");
         }
         Ok(())
     }
@@ -524,11 +546,12 @@ impl ServerRuntime {
             return Ok(());
         }
         let save_result = self.save_all();
+        self.enqueue_stop();
         self.stopped = true;
-        let _ = self.host_tx.try_send(HostToServer::Stop);
         if let Some(handle) = self.network_thread.take() {
             let _ = handle.join();
         }
+        self.sync_network_metrics();
         save_result
     }
 
@@ -589,8 +612,8 @@ impl ServerRuntime {
             self.save_player(session)?;
         }
         self.metrics.saves = self.metrics.saves.saturating_add(1);
-        self.metrics.last_save_latency_ms =
-            started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let latency_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        self.metrics.last_save_latency_ms = (latency_us.saturating_add(999) / 1_000).max(1);
         Ok(())
     }
 
@@ -1026,7 +1049,6 @@ impl ServerRuntime {
             },
         });
         self.metrics.players_online = self.players.len();
-        self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(3);
         eprintln!("[ServerRuntime] player joined id={id} dimension={dimension}");
         Ok(())
     }
@@ -1083,7 +1105,6 @@ impl ServerRuntime {
             yaw,
             pitch,
         });
-        self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
         Ok(())
     }
 
@@ -1287,21 +1308,71 @@ impl ServerRuntime {
     }
 
     fn send_response(&mut self, to: u64, response: GameplayResponse) {
-        if self.enqueue_host(HostToServer::SendGameplayResponse { to, response }) {
-            self.metrics.outbound_packets = self.metrics.outbound_packets.saturating_add(1);
-            self.metrics.queue_depth = self.metrics.queue_depth.saturating_add(1);
-        }
+        self.enqueue_host(HostToServer::SendGameplayResponse { to, response });
     }
 
     fn enqueue_host(&mut self, event: HostToServer) -> bool {
+        // Reserve the gauge before publishing so the network thread cannot
+        // receive and decrement the command before its enqueue is visible.
+        self.network_metrics.enqueue();
         match self.host_tx.try_send(event) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
-                self.metrics.queue_full = self.metrics.queue_full.saturating_add(1);
+                self.network_metrics.dequeue();
+                self.network_metrics.record_queue_full();
                 false
             }
-            Err(TrySendError::Disconnected(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.network_metrics.dequeue();
+                false
+            }
         }
+    }
+
+    fn enqueue_stop(&mut self) {
+        self.network_metrics.enqueue();
+        match self.host_tx.try_send(HostToServer::Stop) {
+            Ok(()) => {}
+            Err(TrySendError::Full(stop)) => {
+                self.network_metrics.record_queue_full();
+                // A full command queue must not turn shutdown into a detached
+                // network thread. `send` unblocks as soon as the live server
+                // consumes one command; the pre-counted Stop remains part of
+                // the aggregate backlog while the producer is waiting.
+                if self.host_tx.send(stop).is_err() {
+                    self.network_metrics.dequeue();
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => self.network_metrics.dequeue(),
+        }
+    }
+
+    fn sync_network_metrics(&mut self) {
+        let snapshot = self.network_metrics.snapshot();
+        self.metrics.inbound_packets = snapshot.inbound_packets;
+        self.metrics.inbound_bytes = snapshot.inbound_bytes;
+        self.metrics.outbound_packets = snapshot.outbound_packets;
+        self.metrics.outbound_bytes = snapshot.outbound_bytes;
+        self.metrics.queue_depth = snapshot.queue_depth;
+        self.metrics.queue_full = snapshot.queue_full;
+
+        let new_rejections = snapshot
+            .rejected_requests
+            .saturating_sub(self.observed_transport_rejections);
+        self.metrics.requests_rejected = self
+            .metrics
+            .requests_rejected
+            .saturating_add(new_rejections);
+        self.observed_transport_rejections = snapshot.rejected_requests;
+
+        let new_duplicates = snapshot
+            .duplicate_requests
+            .saturating_sub(self.observed_transport_duplicates);
+        self.metrics.duplicate_requests = self
+            .metrics
+            .duplicate_requests
+            .saturating_add(new_duplicates);
+        self.observed_transport_duplicates = snapshot.duplicate_requests;
     }
 
     fn legacy_request(
@@ -1836,10 +1907,14 @@ mod tests {
         fs::write(&blocking_file, b"not a directory").unwrap();
         runtime.world_dir = blocking_file.clone();
         runtime.save_manager.world_dir = blocking_file.clone();
+        let saves_before_failure = runtime.metrics.saves;
         assert!(runtime.save_all().is_err());
+        assert_eq!(runtime.metrics.saves, saves_before_failure);
         runtime.world_dir = world_dir.clone();
         runtime.save_manager.world_dir = world_dir.clone();
         assert!(runtime.save_all().is_ok());
+        assert_eq!(runtime.metrics.saves, saves_before_failure + 1);
+        assert!(runtime.metrics.last_save_latency_ms >= 1);
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&world_dir);
         let _ = fs::remove_file(blocking_file);

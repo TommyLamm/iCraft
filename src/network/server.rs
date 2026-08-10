@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, Notify};
 use tokio::time::{self, Instant};
 
 use super::protocol::{
@@ -14,13 +14,143 @@ use super::protocol::{
 };
 use super::transport::Connection;
 
+#[derive(Clone, Default)]
+pub(crate) struct NetworkMetrics {
+    inner: Arc<NetworkMetricsInner>,
+}
+
+#[derive(Default)]
+struct NetworkMetricsInner {
+    inbound_packets: AtomicU64,
+    inbound_bytes: AtomicU64,
+    outbound_packets: AtomicU64,
+    outbound_bytes: AtomicU64,
+    queue_depth: AtomicUsize,
+    queue_full: AtomicU64,
+    rejected_requests: AtomicU64,
+    duplicate_requests: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NetworkMetricsSnapshot {
+    pub inbound_packets: u64,
+    pub inbound_bytes: u64,
+    pub outbound_packets: u64,
+    pub outbound_bytes: u64,
+    pub queue_depth: usize,
+    pub queue_full: u64,
+    pub rejected_requests: u64,
+    pub duplicate_requests: u64,
+}
+
+impl NetworkMetrics {
+    fn add(counter: &AtomicU64, amount: u64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(amount))
+        });
+    }
+
+    fn record_inbound(&self, packet: &Packet) {
+        Self::add(&self.inner.inbound_packets, 1);
+        Self::add(&self.inner.inbound_bytes, packet_bytes(packet));
+    }
+
+    fn record_outbound(&self, packet: &Packet) {
+        Self::add(&self.inner.outbound_packets, 1);
+        Self::add(&self.inner.outbound_bytes, packet_bytes(packet));
+    }
+
+    pub(crate) fn enqueue(&self) {
+        let _ =
+            self.inner
+                .queue_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    Some(value.saturating_add(1))
+                });
+    }
+
+    pub(crate) fn dequeue(&self) {
+        let _ =
+            self.inner
+                .queue_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    Some(value.saturating_sub(1))
+                });
+    }
+
+    pub(crate) fn record_queue_full(&self) {
+        Self::add(&self.inner.queue_full, 1);
+    }
+
+    fn record_rejected_request(&self) {
+        Self::add(&self.inner.rejected_requests, 1);
+    }
+
+    fn record_duplicate_request(&self) {
+        Self::add(&self.inner.duplicate_requests, 1);
+    }
+
+    pub(crate) fn snapshot(&self) -> NetworkMetricsSnapshot {
+        NetworkMetricsSnapshot {
+            inbound_packets: self.inner.inbound_packets.load(Ordering::Relaxed),
+            inbound_bytes: self.inner.inbound_bytes.load(Ordering::Relaxed),
+            outbound_packets: self.inner.outbound_packets.load(Ordering::Relaxed),
+            outbound_bytes: self.inner.outbound_bytes.load(Ordering::Relaxed),
+            queue_depth: self.inner.queue_depth.load(Ordering::Relaxed),
+            queue_full: self.inner.queue_full.load(Ordering::Relaxed),
+            rejected_requests: self.inner.rejected_requests.load(Ordering::Relaxed),
+            duplicate_requests: self.inner.duplicate_requests.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct TrackedPacket {
+    packet: Option<Packet>,
+    metrics: NetworkMetrics,
+}
+
+impl TrackedPacket {
+    fn new(packet: Packet, metrics: &NetworkMetrics) -> Self {
+        metrics.enqueue();
+        Self {
+            packet: Some(packet),
+            metrics: metrics.clone(),
+        }
+    }
+
+    fn packet(&self) -> &Packet {
+        self.packet
+            .as_ref()
+            .expect("queued packet is present until it leaves its backlog")
+    }
+
+    fn into_packet(mut self) -> Packet {
+        self.metrics.dequeue();
+        self.packet
+            .take()
+            .expect("queued packet is consumed exactly once")
+    }
+}
+
+impl Drop for TrackedPacket {
+    fn drop(&mut self) {
+        if self.packet.is_some() {
+            self.metrics.dequeue();
+        }
+    }
+}
+
 enum QueuedPacket {
-    Reliable(Packet),
-    Outbound(Packet),
+    Reliable(TrackedPacket),
+    ReliableWithAck(TrackedPacket, oneshot::Sender<bool>),
+    Outbound(TrackedPacket),
 }
 
 fn packet_bytes(packet: &Packet) -> u64 {
-    packet.encode().len() as u64
+    // `ConnectionWriter` emits a four-byte big-endian frame length before the
+    // bincode payload. Count the bytes that actually cross TCP, not just the
+    // serialized message body.
+    (packet.encode().len() as u64).saturating_add(4)
 }
 
 fn queue_stats() -> Arc<crate::perf::SharedQueueStats> {
@@ -33,13 +163,17 @@ fn queue_now_ms() -> u64 {
         .map_or(0, |d| d.as_millis().min(u64::MAX as u128) as u64)
 }
 
-async fn reliable_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet) -> bool {
+async fn reliable_send(
+    tx: &mpsc::Sender<QueuedPacket>,
+    packet: Packet,
+    metrics: &NetworkMetrics,
+) -> bool {
     let bytes = packet_bytes(&packet);
     let stats = crate::perf::queue_stats(crate::perf::QueueCategory::Reliable);
     match time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.reserve()).await {
         Ok(Ok(permit)) => {
             stats.enqueue(bytes, queue_now_ms());
-            permit.send(QueuedPacket::Reliable(packet));
+            permit.send(QueuedPacket::Reliable(TrackedPacket::new(packet, metrics)));
             true
         }
         Ok(Err(_)) => {
@@ -49,19 +183,68 @@ async fn reliable_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet) -> bool 
         Err(_) => {
             stats.retry();
             stats.drop_item();
+            metrics.record_queue_full();
             false
         }
     }
 }
-fn best_effort_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet) {
+
+async fn reliable_send_and_wait(
+    tx: &mpsc::Sender<QueuedPacket>,
+    packet: Packet,
+    metrics: &NetworkMetrics,
+) -> bool {
+    let bytes = packet_bytes(&packet);
+    let stats = crate::perf::queue_stats(crate::perf::QueueCategory::Reliable);
+    let permit = match time::timeout(RELIABLE_ENQUEUE_TIMEOUT, tx.reserve()).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            stats.drop_item();
+            return false;
+        }
+        Err(_) => {
+            stats.retry();
+            stats.drop_item();
+            metrics.record_queue_full();
+            return false;
+        }
+    };
+    let (completion_tx, completion_rx) = oneshot::channel();
+    stats.enqueue(bytes, queue_now_ms());
+    permit.send(QueuedPacket::ReliableWithAck(
+        TrackedPacket::new(packet, metrics),
+        completion_tx,
+    ));
+    matches!(
+        time::timeout(CLIENT_TIMEOUT, completion_rx).await,
+        Ok(Ok(true))
+    )
+}
+fn best_effort_send(tx: &mpsc::Sender<QueuedPacket>, packet: Packet, metrics: &NetworkMetrics) {
     let bytes = packet_bytes(&packet);
     match tx.try_reserve() {
         Ok(permit) => {
             queue_stats().enqueue(bytes, queue_now_ms());
-            permit.send(QueuedPacket::Outbound(packet));
+            permit.send(QueuedPacket::Outbound(TrackedPacket::new(packet, metrics)));
         }
-        Err(_) => queue_stats().drop_item(),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            queue_stats().drop_item();
+            metrics.record_queue_full();
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => queue_stats().drop_item(),
     }
+}
+
+async fn send_connection_packet(
+    connection: &mut Connection,
+    packet: Packet,
+    metrics: &NetworkMetrics,
+) -> std::io::Result<()> {
+    let result = connection.send(&packet).await;
+    if result.is_ok() {
+        metrics.record_outbound(&packet);
+    }
+    result
 }
 
 const CLIENT_QUEUE_CAPACITY: usize = 64;
@@ -410,6 +593,7 @@ struct ClientSession {
     catchup_mailbox: Arc<CatchupMailbox>,
     cancel_tx: watch::Sender<bool>,
     gameplay: GameplaySessionState,
+    metrics: NetworkMetrics,
 }
 
 /// Transport-side state for the authoritative gameplay envelope.  The
@@ -532,28 +716,71 @@ impl HostEventSender for std_mpsc::SyncSender<ServerToHost> {
     }
 }
 
-struct PoseMailbox {
-    pending: Mutex<HashMap<PlayerId, Packet>>,
-    notify: Notify,
-    stats: Arc<crate::perf::SharedQueueStats>,
+/// Production host-event boundary with exact backlog and saturation accounting.
+/// The runtime decrements the same gauge only after `Receiver::try_recv` takes
+/// ownership, so the snapshot is a queue gauge rather than a processed-event
+/// estimate.
+#[derive(Clone)]
+pub(crate) struct MeteredHostEventSender {
+    sender: std_mpsc::SyncSender<ServerToHost>,
+    metrics: NetworkMetrics,
 }
 
-impl Default for PoseMailbox {
-    fn default() -> Self {
-        Self {
-            pending: Mutex::new(HashMap::new()),
-            notify: Notify::new(),
-            stats: crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+impl MeteredHostEventSender {
+    pub(crate) fn new(sender: std_mpsc::SyncSender<ServerToHost>, metrics: NetworkMetrics) -> Self {
+        Self { sender, metrics }
+    }
+}
+
+impl HostEventSender for MeteredHostEventSender {
+    fn send(&self, event: ServerToHost) -> Result<(), ()> {
+        // Increment before publishing: a consumer on another thread may take
+        // the event as soon as `try_send` succeeds. Failed publication rolls
+        // the reservation back, keeping the gauge race-free.
+        self.metrics.enqueue();
+        match self.sender.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(std_mpsc::TrySendError::Full(_)) => {
+                self.metrics.dequeue();
+                self.metrics.record_queue_full();
+                Err(())
+            }
+            Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                self.metrics.dequeue();
+                Err(())
+            }
         }
     }
 }
 
+struct PoseMailbox {
+    pending: Mutex<HashMap<PlayerId, TrackedPacket>>,
+    notify: Notify,
+    stats: Arc<crate::perf::SharedQueueStats>,
+    metrics: NetworkMetrics,
+}
+
+impl Default for PoseMailbox {
+    fn default() -> Self {
+        Self::with_metrics(NetworkMetrics::default())
+    }
+}
+
 impl PoseMailbox {
+    fn with_metrics(metrics: NetworkMetrics) -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            notify: Notify::new(),
+            stats: crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+            metrics,
+        }
+    }
+
     async fn replace(&self, player_id: PlayerId, packet: Packet) {
         let bytes = packet_bytes(&packet);
         let mut pending = self.pending.lock().await;
-        if let Some(old) = pending.insert(player_id, packet) {
-            self.stats.dequeue(packet_bytes(&old));
+        if let Some(old) = pending.insert(player_id, TrackedPacket::new(packet, &self.metrics)) {
+            self.stats.dequeue(packet_bytes(old.packet()));
         }
         self.stats.enqueue(bytes, queue_now_ms());
         drop(pending);
@@ -566,7 +793,7 @@ impl PoseMailbox {
             .lock()
             .await
             .drain()
-            .map(|(_, packet)| packet)
+            .map(|(_, packet)| packet.into_packet())
             .collect();
         for packet in &packets {
             self.stats.dequeue(packet_bytes(packet));
@@ -587,22 +814,28 @@ enum StateMailboxKey {
 }
 
 struct StateMailbox {
-    pending: Mutex<HashMap<StateMailboxKey, Packet>>,
+    pending: Mutex<HashMap<StateMailboxKey, TrackedPacket>>,
     notify: Notify,
     stats: Arc<crate::perf::SharedQueueStats>,
+    metrics: NetworkMetrics,
 }
 
 impl Default for StateMailbox {
     fn default() -> Self {
-        Self {
-            pending: Mutex::new(HashMap::new()),
-            notify: Notify::new(),
-            stats: crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-        }
+        Self::with_metrics(NetworkMetrics::default())
     }
 }
 
 impl StateMailbox {
+    fn with_metrics(metrics: NetworkMetrics) -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            notify: Notify::new(),
+            stats: crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+            metrics,
+        }
+    }
+
     async fn replace(&self, packet: Packet) {
         let (key, sequence) = match &packet {
             Packet::EntityState {
@@ -621,18 +854,20 @@ impl StateMailbox {
             _ => return,
         };
         let mut pending = self.pending.lock().await;
-        let existing_sequence = pending.get(&key).and_then(|existing| match existing {
-            Packet::EntityState { sequence, .. }
-            | Packet::PlayerHealth { sequence, .. }
-            | Packet::PlayerEffect { sequence, .. } => Some(*sequence),
-            _ => None,
-        });
+        let existing_sequence = pending
+            .get(&key)
+            .and_then(|existing| match existing.packet() {
+                Packet::EntityState { sequence, .. }
+                | Packet::PlayerHealth { sequence, .. }
+                | Packet::PlayerEffect { sequence, .. } => Some(*sequence),
+                _ => None,
+            });
         if existing_sequence.is_some_and(|existing| existing > sequence) {
             return;
         }
         let bytes = packet_bytes(&packet);
-        if let Some(old) = pending.insert(key, packet) {
-            self.stats.dequeue(packet_bytes(&old));
+        if let Some(old) = pending.insert(key, TrackedPacket::new(packet, &self.metrics)) {
+            self.stats.dequeue(packet_bytes(old.packet()));
         }
         self.stats.enqueue(bytes, queue_now_ms());
         drop(pending);
@@ -642,29 +877,38 @@ impl StateMailbox {
     async fn drain(&self) -> Vec<Packet> {
         let mut packets: Vec<_> = self.pending.lock().await.drain().collect();
         for (_, packet) in &packets {
-            self.stats.dequeue(packet_bytes(packet));
+            self.stats.dequeue(packet_bytes(packet.packet()));
         }
         packets.sort_by_key(|(key, _)| *key);
-        packets.into_iter().map(|(_, packet)| packet).collect()
+        packets
+            .into_iter()
+            .map(|(_, packet)| packet.into_packet())
+            .collect()
     }
 }
 
 struct CatchupMailbox {
     capacity: usize,
-    pending: Mutex<VecDeque<Packet>>,
+    pending: Mutex<VecDeque<TrackedPacket>>,
     notify: Notify,
     full_count: AtomicU64,
     stats: Arc<crate::perf::SharedQueueStats>,
+    metrics: NetworkMetrics,
 }
 
 impl CatchupMailbox {
     fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_metrics(capacity, NetworkMetrics::default())
+    }
+
+    fn with_capacity_and_metrics(capacity: usize, metrics: NetworkMetrics) -> Self {
         Self {
             capacity: capacity.max(1),
             pending: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
             full_count: AtomicU64::new(0),
             stats: crate::perf::queue_stats(crate::perf::QueueCategory::CatchUp),
+            metrics,
         }
     }
 
@@ -683,7 +927,7 @@ impl CatchupMailbox {
         let incoming_bytes = packet_bytes(&packet);
         if let Some(existing) = guard.iter_mut().find(|candidate| {
             matches!(
-                candidate,
+                candidate.packet(),
                 Packet::ChunkData {
                     dimension,
                     cx,
@@ -692,13 +936,13 @@ impl CatchupMailbox {
                 } if (*dimension, *cx, *cz) == (key.0, key.1, key.2)
             )
         }) {
-            let old_bytes = packet_bytes(existing);
-            let existing_revision = match existing {
+            let old_bytes = packet_bytes(existing.packet());
+            let existing_revision = match existing.packet() {
                 Packet::ChunkData { revision, .. } => *revision,
                 _ => 0,
             };
             if key.3 >= existing_revision {
-                *existing = packet;
+                *existing = TrackedPacket::new(packet, &self.metrics);
                 self.stats.dequeue(old_bytes);
                 self.stats.enqueue(incoming_bytes, queue_now_ms());
             }
@@ -708,10 +952,11 @@ impl CatchupMailbox {
         if guard.len() >= self.capacity {
             let count = self.full_count.fetch_add(1, Ordering::Relaxed) + 1;
             self.stats.drop_item();
+            self.metrics.record_queue_full();
             return Err(count);
         }
         let bytes = packet_bytes(&packet);
-        guard.push_back(packet);
+        guard.push_back(TrackedPacket::new(packet, &self.metrics));
         self.stats.enqueue(bytes, queue_now_ms());
         self.notify.notify_one();
         Ok(())
@@ -721,12 +966,12 @@ impl CatchupMailbox {
         let mut guard = self.pending.lock().await;
         let packet = guard.pop_front();
         if let Some(packet) = &packet {
-            self.stats.dequeue(packet_bytes(packet));
+            self.stats.dequeue(packet_bytes(packet.packet()));
         }
         if !guard.is_empty() {
             self.notify.notify_one();
         }
-        packet
+        packet.map(TrackedPacket::into_packet)
     }
 
     #[allow(dead_code)]
@@ -744,7 +989,8 @@ impl Default for CatchupMailbox {
 async fn queue_initial_roster(
     tx: &mpsc::Sender<QueuedPacket>,
     roster: impl IntoIterator<Item = (PlayerId, String)>,
-) -> Result<(), mpsc::error::SendError<QueuedPacket>> {
+    metrics: &NetworkMetrics,
+) -> Result<(), ()> {
     for (id, username) in roster {
         let packet = Packet::PlayerJoin {
             protocol_version: PROTOCOL_VERSION,
@@ -754,12 +1000,10 @@ async fn queue_initial_roster(
         let bytes = packet_bytes(&packet);
         let permit = match tx.reserve().await {
             Ok(permit) => permit,
-            Err(_) => {
-                return Err(mpsc::error::SendError(QueuedPacket::Outbound(packet)));
-            }
+            Err(_) => return Err(()),
         };
         queue_stats().enqueue(bytes, queue_now_ms());
-        permit.send(QueuedPacket::Outbound(packet));
+        permit.send(QueuedPacket::Outbound(TrackedPacket::new(packet, metrics)));
     }
     Ok(())
 }
@@ -771,6 +1015,7 @@ pub struct NetworkServer<S: HostEventSender = std_mpsc::Sender<ServerToHost>> {
     sessions: Sessions,
     server_to_host: S,
     config: ServerConfig,
+    metrics: NetworkMetrics,
 }
 
 impl<S: HostEventSender> NetworkServer<S> {
@@ -826,6 +1071,26 @@ impl<S: HostEventSender> NetworkServer<S> {
         server_to_host: S,
         config: ServerConfig,
     ) -> JoinHandle<()> {
+        Self::spawn_with_config_and_metrics(
+            bind_addr,
+            seed,
+            gamemode,
+            host_to_server,
+            server_to_host,
+            config,
+            NetworkMetrics::default(),
+        )
+    }
+
+    pub(crate) fn spawn_with_config_and_metrics(
+        bind_addr: String,
+        seed: u64,
+        gamemode: u8,
+        host_to_server: std_mpsc::Receiver<HostToServer>,
+        server_to_host: S,
+        config: ServerConfig,
+        metrics: NetworkMetrics,
+    ) -> JoinHandle<()> {
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Runtime::new() {
                 Ok(runtime) => runtime,
@@ -858,6 +1123,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                     sessions: Arc::new(Mutex::new(HashMap::new())),
                     server_to_host,
                     config,
+                    metrics,
                 };
                 server.run(listener, host_to_server).await;
             });
@@ -881,6 +1147,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                             let seed = self.seed;
                             let gamemode = self.gamemode;
                             let config = self.config.clone();
+                            let metrics = self.metrics.clone();
                             tokio::spawn(async move {
                                 Self::run_client(
                                     Connection::new(stream),
@@ -890,6 +1157,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                                     sessions,
                                     server_to_host,
                                     config,
+                                    metrics,
                                 )
                                 .await;
                             });
@@ -905,14 +1173,17 @@ impl<S: HostEventSender> NetworkServer<S> {
                         match host_to_server.try_recv() {
                             Ok(HostToServer::Stop) => {
                                 queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
+                                self.metrics.dequeue();
                                 return
                             }
                             Ok(command @ HostToServer::BroadcastPlayerPosition { id, .. }) => {
                                 queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
+                                self.metrics.dequeue();
                                 latest_positions.insert(id, command);
                             }
                             Ok(command) => {
                                 queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
+                                self.metrics.dequeue();
                                 self.handle_host_command(command).await
                             }
                             Err(std_mpsc::TryRecvError::Empty) => break,
@@ -991,20 +1262,26 @@ impl<S: HostEventSender> NetworkServer<S> {
             let state = &mut session.gameplay;
 
             if let Some(cached) = state.cached_response(request.request_id) {
+                session.metrics.record_duplicate_request();
                 immediate_response = Some(cached);
             } else if state.in_flight.contains(&request.request_id) {
                 // The first copy is still being processed by the authority;
                 // retransmission remains idempotent and needs no second event.
+                session.metrics.record_duplicate_request();
                 return Ok(());
             } else if let Err(reason) = request.validate_bounds() {
+                session.metrics.record_rejected_request();
                 immediate_response = Some(state.rejection(request.request_id, reason));
             } else if request.client_sequence <= state.last_client_sequence {
+                session.metrics.record_rejected_request();
                 immediate_response =
                     Some(state.rejection(request.request_id, RejectReason::OutOfOrder));
             } else if request.client_revision < state.last_client_revision {
+                session.metrics.record_rejected_request();
                 immediate_response =
                     Some(state.rejection(request.request_id, RejectReason::InvalidRevision));
             } else if !request_rate.allow() {
+                session.metrics.record_rejected_request();
                 immediate_response =
                     Some(state.rejection(request.request_id, RejectReason::RateLimited));
             } else {
@@ -1050,8 +1327,13 @@ impl<S: HostEventSender> NetworkServer<S> {
         sessions: Sessions,
         server_to_host: S,
         config: ServerConfig,
+        metrics: NetworkMetrics,
     ) {
-        let handshake = match time::timeout(CLIENT_TIMEOUT, connection.recv()).await {
+        let handshake_result = time::timeout(CLIENT_TIMEOUT, connection.recv()).await;
+        if let Ok(Ok(packet)) = &handshake_result {
+            metrics.record_inbound(packet);
+        }
+        let handshake = match handshake_result {
             Ok(Ok(Packet::Handshake {
                 protocol_version,
                 username,
@@ -1059,13 +1341,16 @@ impl<S: HostEventSender> NetworkServer<S> {
                 eprintln!("[NetworkServer] Received Handshake: username='{username}', protocol_version={protocol_version}");
                 if protocol_version != PROTOCOL_VERSION {
                     eprintln!("[NetworkServer] Handshake rejected: version mismatch (expected {PROTOCOL_VERSION}, got {protocol_version})");
-                    let _ = connection
-                        .send(&Packet::Disconnect {
+                    let _ = send_connection_packet(
+                        &mut connection,
+                        Packet::Disconnect {
                             protocol_version: PROTOCOL_VERSION,
                             reason: format!(
                                 "protocol version mismatch: server {PROTOCOL_VERSION}, client {protocol_version}"
                             ),
-                        })
+                        },
+                        &metrics,
+                    )
                         .await;
                     return;
                 }
@@ -1073,15 +1358,18 @@ impl<S: HostEventSender> NetworkServer<S> {
             }
             Ok(Ok(Packet::ServerListPingRequest { protocol_version })) => {
                 let online_players = sessions.lock().await.len().min(u16::MAX as usize) as u16;
-                let _ = connection
-                    .send(&Packet::ServerListPingResponse {
+                let _ = send_connection_packet(
+                    &mut connection,
+                    Packet::ServerListPingResponse {
                         protocol_version: PROTOCOL_VERSION,
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         motd: config.motd.clone(),
                         online_players,
                         max_players: config.max_players.min(u16::MAX as usize) as u16,
-                    })
-                    .await;
+                    },
+                    &metrics,
+                )
+                .await;
                 if protocol_version != PROTOCOL_VERSION {
                     eprintln!(
                         "[NetworkServer] server-list ping version mismatch: client {protocol_version}, server {PROTOCOL_VERSION}"
@@ -1091,12 +1379,15 @@ impl<S: HostEventSender> NetworkServer<S> {
             }
             Ok(Ok(packet)) => {
                 eprintln!("[NetworkServer] Handshake rejected: expected Packet::Handshake, got {packet:?}");
-                let _ = connection
-                    .send(&Packet::Disconnect {
+                let _ = send_connection_packet(
+                    &mut connection,
+                    Packet::Disconnect {
                         protocol_version: PROTOCOL_VERSION,
                         reason: "expected handshake".into(),
-                    })
-                    .await;
+                    },
+                    &metrics,
+                )
+                .await;
                 return;
             }
             Ok(Err(err)) => {
@@ -1113,24 +1404,30 @@ impl<S: HostEventSender> NetworkServer<S> {
         // persistence paths, while accepting existing clients whose display
         // names are a little longer than the vanilla 16-character limit.
         if handshake.is_empty() || handshake.len() > 32 || !handshake.is_ascii() {
-            let _ = connection
-                .send(&Packet::Disconnect {
+            let _ = send_connection_packet(
+                &mut connection,
+                Packet::Disconnect {
                     protocol_version: PROTOCOL_VERSION,
                     reason: "invalid username".into(),
-                })
-                .await;
+                },
+                &metrics,
+            )
+            .await;
             return;
         }
         let normalized_username = handshake.to_ascii_lowercase();
         {
             let sessions_guard = sessions.lock().await;
             if sessions_guard.len() >= config.max_players.max(1) {
-                let _ = connection
-                    .send(&Packet::Disconnect {
+                let _ = send_connection_packet(
+                    &mut connection,
+                    Packet::Disconnect {
                         protocol_version: PROTOCOL_VERSION,
                         reason: "server is full".into(),
-                    })
-                    .await;
+                    },
+                    &metrics,
+                )
+                .await;
                 return;
             }
             if !config.whitelist.is_empty()
@@ -1139,24 +1436,30 @@ impl<S: HostEventSender> NetworkServer<S> {
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(&normalized_username))
             {
-                let _ = connection
-                    .send(&Packet::Disconnect {
+                let _ = send_connection_packet(
+                    &mut connection,
+                    Packet::Disconnect {
                         protocol_version: PROTOCOL_VERSION,
                         reason: "not whitelisted".into(),
-                    })
-                    .await;
+                    },
+                    &metrics,
+                )
+                .await;
                 return;
             }
             if sessions_guard
                 .values()
                 .any(|session| session.username.eq_ignore_ascii_case(&normalized_username))
             {
-                let _ = connection
-                    .send(&Packet::Disconnect {
+                let _ = send_connection_packet(
+                    &mut connection,
+                    Packet::Disconnect {
                         protocol_version: PROTOCOL_VERSION,
                         reason: "duplicate login".into(),
-                    })
-                    .await;
+                    },
+                    &metrics,
+                )
+                .await;
                 return;
             }
         }
@@ -1165,15 +1468,18 @@ impl<S: HostEventSender> NetworkServer<S> {
 
         let (out_tx, mut out_rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
         let roster_tx = out_tx.clone();
-        let pose_mailbox = Arc::new(PoseMailbox::default());
-        let state_mailbox = Arc::new(StateMailbox::default());
-        let catchup_mailbox =
-            Arc::new(CatchupMailbox::with_capacity(config.catchup_queue_capacity));
+        let pose_mailbox = Arc::new(PoseMailbox::with_metrics(metrics.clone()));
+        let state_mailbox = Arc::new(StateMailbox::with_metrics(metrics.clone()));
+        let catchup_mailbox = Arc::new(CatchupMailbox::with_capacity_and_metrics(
+            config.catchup_queue_capacity,
+            metrics.clone(),
+        ));
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let (mut reader, mut writer) = connection.into_split();
         let writer_pose_mailbox = Arc::clone(&pose_mailbox);
         let writer_state_mailbox = Arc::clone(&state_mailbox);
         let writer_catchup_mailbox = Arc::clone(&catchup_mailbox);
+        let writer_metrics = metrics.clone();
         let mut send_task = tokio::spawn(async move {
             let mut keepalive =
                 time::interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
@@ -1184,15 +1490,26 @@ impl<S: HostEventSender> NetworkServer<S> {
                     queued = out_rx.recv() => {
                         match queued {
                             Some(queued) => {
-                                let (packet, stats) = match queued {
-                                    QueuedPacket::Reliable(packet) => (packet, crate::perf::QueueCategory::Reliable),
-                                    QueuedPacket::Outbound(packet) => (packet, crate::perf::QueueCategory::Outbound),
+                                let (packet, stats, completion) = match queued {
+                                    QueuedPacket::Reliable(packet) => (packet, crate::perf::QueueCategory::Reliable, None),
+                                    QueuedPacket::ReliableWithAck(packet, completion) => (
+                                        packet,
+                                        crate::perf::QueueCategory::Reliable,
+                                        Some(completion),
+                                    ),
+                                    QueuedPacket::Outbound(packet) => (packet, crate::perf::QueueCategory::Outbound, None),
                                 };
+                                let packet = packet.into_packet();
                                 crate::perf::queue_stats(stats).dequeue(packet_bytes(&packet));
-                                if writer.send(&packet).await.is_err() {
+                                let sent = writer.send(&packet).await.is_ok();
+                                if let Some(completion) = completion {
+                                    let _ = completion.send(sent);
+                                }
+                                if !sent {
                                     eprintln!("[NetworkServer] Send task: writer send failed for queued packet");
                                     break;
                                 }
+                                writer_metrics.record_outbound(&packet);
                             }
                             None => {
                                 eprintln!("[NetworkServer] Send task: out_rx closed (session removed)");
@@ -1206,6 +1523,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 eprintln!("[NetworkServer] Send task: writer send failed for pose");
                                 return;
                             }
+                            writer_metrics.record_outbound(&packet);
                         }
                     }
                     _ = writer_state_mailbox.notify.notified() => {
@@ -1214,6 +1532,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 eprintln!("[NetworkServer] Send task: writer send failed for state");
                                 return;
                             }
+                            writer_metrics.record_outbound(&packet);
                         }
                     }
                     _ = writer_catchup_mailbox.notify.notified() => {
@@ -1225,15 +1544,18 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 eprintln!("[NetworkServer] Send task: writer send failed for catchup chunk");
                                 return;
                             }
+                            writer_metrics.record_outbound(&packet);
                         }
                     }
                     _ = keepalive.tick() => {
-                        if writer.send(&Packet::Keepalive {
+                        let packet = Packet::Keepalive {
                             protocol_version: PROTOCOL_VERSION,
-                        }).await.is_err() {
+                        };
+                        if writer.send(&packet).await.is_err() {
                             eprintln!("[NetworkServer] Send task: keepalive send failed");
                             break;
                         }
+                        writer_metrics.record_outbound(&packet);
                     }
                 }
             }
@@ -1266,18 +1588,20 @@ impl<S: HostEventSender> NetworkServer<S> {
                         catchup_mailbox: Arc::clone(&catchup_mailbox),
                         cancel_tx: cancel_tx.clone(),
                         gameplay: GameplaySessionState::default(),
+                        metrics: metrics.clone(),
                     },
                 );
                 None
             }
         };
         if let Some(reason) = reservation_error {
-            let _ = reliable_send(
+            let _ = reliable_send_and_wait(
                 &roster_tx,
                 Packet::Disconnect {
                     protocol_version: PROTOCOL_VERSION,
                     reason: reason.into(),
                 },
+                &metrics,
             )
             .await;
             send_task.abort();
@@ -1292,6 +1616,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                 seed,
                 gamemode,
             },
+            &metrics,
         )
         .await
         {
@@ -1309,7 +1634,11 @@ impl<S: HostEventSender> NetworkServer<S> {
             .collect();
         roster.sort_by_key(|(existing_id, _)| *existing_id);
         if !matches!(
-            time::timeout(CLIENT_TIMEOUT, queue_initial_roster(&roster_tx, roster)).await,
+            time::timeout(
+                CLIENT_TIMEOUT,
+                queue_initial_roster(&roster_tx, roster, &metrics),
+            )
+            .await,
             Ok(Ok(()))
         ) {
             sessions.lock().await.remove(&id);
@@ -1334,6 +1663,12 @@ impl<S: HostEventSender> NetworkServer<S> {
         loop {
             tokio::select! {
                 incoming = time::timeout(CLIENT_TIMEOUT, reader.recv()) => {
+                    let incoming = incoming.map(|result| {
+                        result.map(|packet| {
+                            metrics.record_inbound(&packet);
+                            packet
+                        })
+                    });
                     match incoming {
                         Ok(Ok(packet)) if packet.protocol_version() != PROTOCOL_VERSION => {
                             disconnect_reason = format!("protocol version mismatch (got {}, expected {})", packet.protocol_version(), PROTOCOL_VERSION);
@@ -2284,16 +2619,16 @@ impl<S: HostEventSender> NetworkServer<S> {
     }
 
     async fn send_to(sessions: &Sessions, id: PlayerId, packet: Packet) -> Vec<PlayerId> {
-        let tx = sessions
+        let target = sessions
             .lock()
             .await
             .get(&id)
-            .map(|session| session.out_tx.clone());
-        if let Some(tx) = tx {
+            .map(|session| (session.out_tx.clone(), session.metrics.clone()));
+        if let Some((tx, metrics)) = target {
             // Targeted catch-up data is reliable. Bound the wait so a client
             // that has stopped draining its queue is disconnected instead of
             // stalling the host command loop forever.
-            if !reliable_send(&tx, packet).await {
+            if !reliable_send(&tx, packet, &metrics).await {
                 return vec![id];
             }
         }
@@ -2305,13 +2640,13 @@ impl<S: HostEventSender> NetworkServer<S> {
             .lock()
             .await
             .values()
-            .map(|session| (session.id, session.out_tx.clone()))
+            .map(|session| (session.id, session.out_tx.clone(), session.metrics.clone()))
             .collect();
         let mut sends = tokio::task::JoinSet::new();
-        for (id, tx) in senders {
+        for (id, tx, metrics) in senders {
             let packet = packet.clone();
             sends.spawn(async move {
-                let delivered = reliable_send(&tx, packet).await;
+                let delivered = reliable_send(&tx, packet, &metrics).await;
                 (!delivered).then_some(id)
             });
         }
@@ -2387,10 +2722,10 @@ impl<S: HostEventSender> NetworkServer<S> {
             .lock()
             .await
             .values()
-            .map(|session| session.out_tx.clone())
+            .map(|session| (session.out_tx.clone(), session.metrics.clone()))
             .collect();
-        for tx in senders {
-            best_effort_send(&tx, packet.clone());
+        for (tx, metrics) in senders {
+            best_effort_send(&tx, packet.clone(), &metrics);
         }
     }
 }
@@ -2413,30 +2748,48 @@ mod tests {
         host_tx: std_mpsc::Sender<HostToServer>,
         event_rx: std_mpsc::Receiver<ServerToHost>,
         handle: JoinHandle<()>,
+        metrics: NetworkMetrics,
     }
 
     impl TestServer {
         fn start(seed: u64, gamemode: u8) -> Self {
+            Self::start_with_config(
+                seed,
+                gamemode,
+                ServerConfig {
+                    catchup_queue_capacity: MAX_CATCHUP_QUEUE_DEPTH,
+                    catchup_drain_delay: Duration::ZERO,
+                    // Stress tests intentionally exercise rosters larger than
+                    // the production default player cap.
+                    max_players: 128,
+                    ..ServerConfig::default()
+                },
+            )
+        }
+
+        fn start_with_config(seed: u64, gamemode: u8, config: ServerConfig) -> Self {
             let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
             let addr = reserved.local_addr().unwrap().to_string();
             drop(reserved);
 
             let (host_tx, host_rx) = std_mpsc::channel();
             let (event_tx, event_rx) = std_mpsc::channel();
-            let handle = NetworkServer::spawn_for_test(
+            let metrics = NetworkMetrics::default();
+            let handle = NetworkServer::spawn_with_config_and_metrics(
                 addr.clone(),
                 seed,
                 gamemode,
                 host_rx,
                 event_tx,
-                MAX_CATCHUP_QUEUE_DEPTH,
-                Duration::ZERO,
+                config,
+                metrics.clone(),
             );
             Self {
                 addr,
                 host_tx,
                 event_rx,
                 handle,
+                metrics,
             }
         }
 
@@ -2512,7 +2865,8 @@ mod tests {
             }
         }
 
-        async fn stop(self) {
+        async fn stop(self) -> NetworkMetricsSnapshot {
+            let metrics = self.metrics.clone();
             let _ = self.host_tx.send(HostToServer::Stop);
             time::timeout(
                 Duration::from_secs(2),
@@ -2523,6 +2877,7 @@ mod tests {
             .await
             .expect("server thread did not stop")
             .unwrap();
+            metrics.snapshot()
         }
     }
 
@@ -2566,6 +2921,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn metered_host_event_queue_counts_success_full_and_receive_once() {
+        let (tx, rx) = std_mpsc::sync_channel(1);
+        let metrics = NetworkMetrics::default();
+        let sender = MeteredHostEventSender::new(tx, metrics.clone());
+        assert!(sender
+            .send(ServerToHost::Disconnected {
+                reason: "first".into(),
+            })
+            .is_ok());
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+        assert!(sender
+            .send(ServerToHost::Disconnected {
+                reason: "full".into(),
+            })
+            .is_err());
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+        assert_eq!(metrics.snapshot().queue_full, 1);
+
+        let _ = rx.try_recv().expect("runtime takes one metered event");
+        metrics.dequeue();
+        assert_eq!(metrics.snapshot().queue_depth, 0);
+    }
+
     #[tokio::test]
     async fn connect_and_login() {
         let server = TestServer::start(0xCAFE_BABE, 1);
@@ -2585,7 +2964,93 @@ mod tests {
             _ => unreachable!(),
         }
 
-        server.stop().await;
+        let shutdown_metrics = server.stop().await;
+        assert_eq!(shutdown_metrics.queue_depth, 0);
+    }
+
+    #[tokio::test]
+    async fn transport_metrics_count_exact_successful_tcp_frames() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let handshake = Packet::Handshake {
+            protocol_version: PROTOCOL_VERSION,
+            username: "wire-metrics".into(),
+        };
+        let (_client, id) = server.connect("wire-metrics").await;
+        let login = Packet::LoginSuccess {
+            protocol_version: PROTOCOL_VERSION,
+            player_id: id,
+            seed: 0xCAFE_BABE,
+            gamemode: 1,
+        };
+
+        let metrics = server.metrics.snapshot();
+        assert_eq!(metrics.inbound_packets, 1);
+        assert_eq!(metrics.inbound_bytes, packet_bytes(&handshake));
+        assert_eq!(metrics.outbound_packets, 1);
+        assert_eq!(metrics.outbound_bytes, packet_bytes(&login));
+        assert_eq!(metrics.queue_depth, 0);
+
+        let shutdown_metrics = server.stop().await;
+        assert_eq!(shutdown_metrics.queue_depth, 0);
+    }
+
+    #[tokio::test]
+    async fn queue_metrics_track_backlog_replacement_drain_and_saturation() {
+        let metrics = NetworkMetrics::default();
+        let (tx, mut rx) = mpsc::channel(1);
+        best_effort_send(
+            &tx,
+            Packet::Keepalive {
+                protocol_version: PROTOCOL_VERSION,
+            },
+            &metrics,
+        );
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+
+        best_effort_send(
+            &tx,
+            Packet::Keepalive {
+                protocol_version: PROTOCOL_VERSION,
+            },
+            &metrics,
+        );
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+        assert_eq!(metrics.snapshot().queue_full, 1);
+
+        let packet = rx.recv().await.unwrap();
+        match packet {
+            QueuedPacket::Reliable(packet) | QueuedPacket::Outbound(packet) => {
+                let _ = packet.into_packet();
+            }
+            QueuedPacket::ReliableWithAck(packet, completion) => {
+                let _ = completion.send(true);
+                let _ = packet.into_packet();
+            }
+        }
+        assert_eq!(metrics.snapshot().queue_depth, 0);
+
+        let mailbox = PoseMailbox::with_metrics(metrics.clone());
+        for sequence in [1, 2] {
+            mailbox
+                .replace(
+                    7,
+                    Packet::PlayerPosition {
+                        protocol_version: PROTOCOL_VERSION,
+                        id: 7,
+                        sequence,
+                        sender_time_millis: u64::from(sequence),
+                        x: 0.0,
+                        y: 64.0,
+                        z: 0.0,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    },
+                )
+                .await;
+            assert_eq!(metrics.snapshot().queue_depth, 1);
+        }
+        assert_eq!(mailbox.drain().await.len(), 1);
+        assert_eq!(metrics.snapshot().queue_depth, 0);
     }
 
     #[tokio::test]
@@ -2789,7 +3254,161 @@ mod tests {
                         }
                     )
         ));
+        let metrics = server.metrics.snapshot();
+        assert_eq!(metrics.duplicate_requests, 1);
+        assert_eq!(metrics.rejected_requests, 3);
         server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn request_rate_limit_rejects_without_forwarding_the_second_request() {
+        let server = TestServer::start_with_config(
+            0xCAFE_BABE,
+            1,
+            ServerConfig {
+                request_rate_per_second: 1,
+                ..ServerConfig::default()
+            },
+        );
+        let (mut client, id) = server.connect("rate-limited").await;
+        let request = GameplayRequest {
+            request_id: 900,
+            client_sequence: 1,
+            session_id: id,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+        };
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: request.clone(),
+            })
+            .await
+            .unwrap();
+        let first = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(
+            matches!(first, ServerToHost::GameplayRequest { request, .. } if request.request_id == 900)
+        );
+
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: GameplayRequest {
+                    request_id: 901,
+                    client_sequence: 2,
+                    ..request
+                },
+            })
+            .await
+            .unwrap();
+        let rejected = recv_matching(&mut client, |packet| {
+            matches!(packet, Packet::GameplayResponse { .. })
+        })
+        .await;
+        assert!(matches!(
+            rejected,
+            Packet::GameplayResponse { response, .. }
+                if response.request_id == 901
+                    && matches!(
+                        response.outcome,
+                        crate::network::protocol::GameplayOutcome::Rejected {
+                            reason: RejectReason::RateLimited
+                        }
+                    )
+        ));
+        assert_eq!(server.metrics.snapshot().rejected_requests, 1);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_logins_reserve_max_player_slot_atomically() {
+        let server = TestServer::start_with_config(
+            0xCAFE_BABE,
+            1,
+            ServerConfig {
+                max_players: 1,
+                ..ServerConfig::default()
+            },
+        );
+        let mut first = Connection::new(server.connect_stream().await);
+        let mut second = Connection::new(server.connect_stream().await);
+        let first_handshake = Packet::Handshake {
+            protocol_version: PROTOCOL_VERSION,
+            username: "slot-a".into(),
+        };
+        let second_handshake = Packet::Handshake {
+            protocol_version: PROTOCOL_VERSION,
+            username: "slot-b".into(),
+        };
+        let (first_sent, second_sent) =
+            tokio::join!(first.send(&first_handshake), second.send(&second_handshake));
+        first_sent.unwrap();
+        second_sent.unwrap();
+        let (first_reply, second_reply) = tokio::join!(first.recv(), second.recv());
+        let replies = [first_reply.unwrap(), second_reply.unwrap()];
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|packet| matches!(packet, Packet::LoginSuccess { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|packet| matches!(packet, Packet::Disconnect { reason, .. } if reason == "server is full"))
+                .count(),
+            1
+        );
+        let shutdown_metrics = server.stop().await;
+        assert_eq!(shutdown_metrics.queue_depth, 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_case_insensitive_duplicate_login_is_atomic() {
+        let server = TestServer::start_with_config(
+            0xCAFE_BABE,
+            1,
+            ServerConfig {
+                max_players: 2,
+                ..ServerConfig::default()
+            },
+        );
+        let mut first = Connection::new(server.connect_stream().await);
+        let mut second = Connection::new(server.connect_stream().await);
+        let first_handshake = Packet::Handshake {
+            protocol_version: PROTOCOL_VERSION,
+            username: "Alex".into(),
+        };
+        let second_handshake = Packet::Handshake {
+            protocol_version: PROTOCOL_VERSION,
+            username: "aLEX".into(),
+        };
+        let (first_sent, second_sent) =
+            tokio::join!(first.send(&first_handshake), second.send(&second_handshake));
+        first_sent.unwrap();
+        second_sent.unwrap();
+        let (first_reply, second_reply) = tokio::join!(first.recv(), second.recv());
+        let replies = [first_reply.unwrap(), second_reply.unwrap()];
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|packet| matches!(packet, Packet::LoginSuccess { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|packet| matches!(packet, Packet::Disconnect { reason, .. } if reason == "duplicate login"))
+                .count(),
+            1
+        );
+        let shutdown_metrics = server.stop().await;
+        assert_eq!(shutdown_metrics.queue_depth, 0);
     }
 
     #[tokio::test]
@@ -3106,7 +3725,8 @@ mod tests {
     async fn unsent_pose_updates_are_latest_wins_per_player() {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let (out_tx, _out_rx) = mpsc::channel(1);
-        let pose_mailbox = Arc::new(PoseMailbox::default());
+        let metrics = NetworkMetrics::default();
+        let pose_mailbox = Arc::new(PoseMailbox::with_metrics(metrics.clone()));
         sessions.lock().await.insert(
             1,
             ClientSession {
@@ -3118,6 +3738,7 @@ mod tests {
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
                 gameplay: GameplaySessionState::default(),
+                metrics,
             },
         );
 
@@ -3167,10 +3788,14 @@ mod tests {
     async fn reliable_join_and_leave_wait_for_bounded_queue_capacity() {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let (observer_out_tx, mut observer_out_rx) = mpsc::channel(1);
+        let metrics = NetworkMetrics::default();
         observer_out_tx
-            .try_send(QueuedPacket::Outbound(Packet::Keepalive {
-                protocol_version: PROTOCOL_VERSION,
-            }))
+            .try_send(QueuedPacket::Outbound(TrackedPacket::new(
+                Packet::Keepalive {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+                &metrics,
+            )))
             .unwrap();
         sessions.lock().await.insert(
             1,
@@ -3183,6 +3808,7 @@ mod tests {
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
                 gameplay: GameplaySessionState::default(),
+                metrics: metrics.clone(),
             },
         );
 
@@ -3198,6 +3824,7 @@ mod tests {
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx: watch::channel(false).0,
                 gameplay: GameplaySessionState::default(),
+                metrics: metrics.clone(),
             },
         );
 
@@ -3209,12 +3836,19 @@ mod tests {
             sessions: Arc::clone(&sessions),
             server_to_host: event_tx.clone(),
             config: ServerConfig::default(),
+            metrics: metrics.clone(),
         };
 
         let observer = tokio::spawn(async move {
             time::sleep(Duration::from_millis(25)).await;
             let unwrap_packet = |queued| match queued {
-                QueuedPacket::Reliable(packet) | QueuedPacket::Outbound(packet) => packet,
+                QueuedPacket::Reliable(packet) | QueuedPacket::Outbound(packet) => {
+                    packet.into_packet()
+                }
+                QueuedPacket::ReliableWithAck(packet, completion) => {
+                    let _ = completion.send(true);
+                    packet.into_packet()
+                }
             };
             let queued = unwrap_packet(observer_out_rx.recv().await.unwrap());
             let joined = unwrap_packet(observer_out_rx.recv().await.unwrap());
@@ -3256,10 +3890,14 @@ mod tests {
     async fn full_reliable_queue_evicts_slow_client_without_ghost_session() {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let (out_tx, _out_rx) = mpsc::channel(1);
+        let metrics = NetworkMetrics::default();
         out_tx
-            .try_send(QueuedPacket::Outbound(Packet::Keepalive {
-                protocol_version: PROTOCOL_VERSION,
-            }))
+            .try_send(QueuedPacket::Outbound(TrackedPacket::new(
+                Packet::Keepalive {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+                &metrics,
+            )))
             .unwrap();
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         sessions.lock().await.insert(
@@ -3273,6 +3911,7 @@ mod tests {
                 catchup_mailbox: Arc::new(CatchupMailbox::default()),
                 cancel_tx,
                 gameplay: GameplaySessionState::default(),
+                metrics: metrics.clone(),
             },
         );
 
@@ -3284,6 +3923,7 @@ mod tests {
             sessions: Arc::clone(&sessions),
             server_to_host: event_tx,
             config: ServerConfig::default(),
+            metrics: metrics.clone(),
         };
 
         time::timeout(
@@ -3306,6 +3946,9 @@ mod tests {
             event_rx.recv_timeout(Duration::from_millis(100)),
             Ok(ServerToHost::ClientLeft { id: 1 })
         ));
+        assert!(metrics.snapshot().queue_full >= 1);
+        drop(_out_rx);
+        assert_eq!(metrics.snapshot().queue_depth, 0);
     }
 
     #[tokio::test]
@@ -3327,6 +3970,7 @@ mod tests {
                 task_sessions,
                 task_event_tx,
                 ServerConfig::default(),
+                NetworkMetrics::default(),
             )
             .await;
         });
@@ -3689,6 +4333,7 @@ mod tests {
                 sessions,
                 event_tx,
                 ServerConfig::default(),
+                NetworkMetrics::default(),
             )
             .await;
         });
@@ -3883,8 +4528,9 @@ mod tests {
 
     #[tokio::test]
     async fn slow_client_backpressure_does_not_starve_other_mailboxes() {
-        let slow = CatchupMailbox::with_capacity(1);
-        let fast = CatchupMailbox::with_capacity(1);
+        let metrics = NetworkMetrics::default();
+        let slow = CatchupMailbox::with_capacity_and_metrics(1, metrics.clone());
+        let fast = CatchupMailbox::with_capacity_and_metrics(1, metrics.clone());
         let packet = |cx, value| Packet::ChunkData {
             protocol_version: PROTOCOL_VERSION,
             dimension: 0,
@@ -3900,9 +4546,15 @@ mod tests {
 
         slow.replace(packet(0, 1)).await.unwrap();
         assert_eq!(slow.replace(packet(1, 2)).await, Err(1));
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+        assert_eq!(metrics.snapshot().queue_full, 1);
         fast.replace(packet(2, 3)).await.unwrap();
+        assert_eq!(metrics.snapshot().queue_depth, 2);
         assert_eq!(fast.pop().await, Some(packet(2, 3)));
         assert_eq!(slow.len().await, 1);
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+        drop(slow);
+        assert_eq!(metrics.snapshot().queue_depth, 0);
     }
 
     #[tokio::test]
