@@ -5257,6 +5257,13 @@ pub struct State {
     /// runtime text can be rebuilt in place when the language changes. This
     /// never rebuilds chunks/world authority or alters simulation state.
     resource_pack_manager: crate::resources::ResourcePackManager,
+    /// Immutable descriptors selected from the same ordered resource packs as
+    /// the atlas.  Terrain workers clone this handle instead of consulting a
+    /// process-global/default model table.
+    model_registry: Arc<crate::block_model::ModelRegistry>,
+    /// Presentation font selected from the same ordered resource packs.  The
+    /// built-in line font remains the fallback when no bitmap override exists.
+    font_source: crate::resources::FontSource,
     pub translation_catalog: crate::localization::TranslationCatalog,
     pub footstep_accumulator: f32,
     pub was_on_ground: bool,
@@ -5764,6 +5771,11 @@ impl State {
             &mut resource_pack_manager,
             settings.language,
         );
+        let model_registry = Arc::new(crate::block_model::ModelRegistry::from_resource_packs(
+            &mut resource_pack_manager,
+            crate::block_model::all_model_paths(),
+        ));
+        let font_source = resource_pack_manager.resolve_font_source("font/ui.json");
         let mut audio_manager =
             crate::audio::AudioManager::new_with_resource_packs(&mut resource_pack_manager);
         audio_manager.set_subtitles_enabled(settings.accessibility.subtitles);
@@ -7104,6 +7116,8 @@ impl State {
             total_time: 0.0,
             audio_manager,
             resource_pack_manager,
+            model_registry,
+            font_source,
             translation_catalog,
             footstep_accumulator: 0.0,
             was_on_ground: false,
@@ -10794,8 +10808,13 @@ impl State {
         self.section_scheduler.mark_in_flight(work);
         let sender = self.terrain_worker_tx.clone();
         let generation = self.terrain_generation;
+        let model_registry = Arc::clone(&self.model_registry);
         rayon::spawn(move || {
-            let bundle = Chunk::generate_section_mesh_bundle_from_halo(work.identity, &snapshot);
+            let bundle = Chunk::generate_section_mesh_bundle_from_halo_with_registry(
+                work.identity,
+                &snapshot,
+                &model_registry,
+            );
             let _ = sender.send(TerrainWorkerResult::SectionMeshed(SectionMeshResult {
                 generation,
                 bundle,
@@ -18635,6 +18654,27 @@ impl State {
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.sync_translation_catalog();
+        let font_source = &self.font_source;
+        let add_string_lines = |s: &str,
+                                start_x: f32,
+                                y: f32,
+                                char_w: f32,
+                                char_h: f32,
+                                spacing: f32,
+                                color: [f32; 4],
+                                vertices: &mut Vec<UiVertex>| {
+            add_string_lines_with_source(
+                font_source,
+                s,
+                start_x,
+                y,
+                char_w,
+                char_h,
+                spacing,
+                color,
+                vertices,
+            );
+        };
         let allocs_before = crate::perf::thread_alloc_count();
         let output = self.surface.get_current_texture()?;
         let view = output
@@ -22821,6 +22861,27 @@ impl State {
         ui_line_vertices: &mut Vec<UiVertex>,
         ui_textured_vertices: &mut Vec<TexturedUiVertex>,
     ) {
+        let font_source = &self.font_source;
+        let add_string_lines = |s: &str,
+                                start_x: f32,
+                                y: f32,
+                                char_w: f32,
+                                char_h: f32,
+                                spacing: f32,
+                                color: [f32; 4],
+                                vertices: &mut Vec<UiVertex>| {
+            add_string_lines_with_source(
+                font_source,
+                s,
+                start_x,
+                y,
+                char_w,
+                char_h,
+                spacing,
+                color,
+                vertices,
+            );
+        };
         let (screen_w, screen_h) = (self.config.width as f32, self.config.height as f32);
         let aspect = screen_w / screen_h.max(1.0);
 
@@ -23209,7 +23270,8 @@ fn add_ui_border(
     }
 }
 
-fn add_char_lines(
+fn add_char_lines_with_source(
+    font_source: &crate::resources::FontSource,
     c: char,
     x: f32,
     y: f32,
@@ -23218,6 +23280,7 @@ fn add_char_lines(
     color: [f32; 4],
     vertices: &mut Vec<UiVertex>,
 ) {
+    let character = c.to_ascii_uppercase();
     let x0 = x;
     let x1 = x + w;
     let xm = x + w * 0.5;
@@ -23236,7 +23299,22 @@ fn add_char_lines(
         });
     };
 
-    match c.to_ascii_uppercase() {
+    if let Some(rows) = font_source.glyph_override(character) {
+        let cell_w = w / 5.0;
+        let cell_h = h / 7.0;
+        for (row, mask) in rows.into_iter().enumerate() {
+            let center_y = y + h - (row as f32 + 0.5) * cell_h;
+            for column in 0..5 {
+                if mask & (1 << (4 - column)) != 0 {
+                    let cell_x = x + column as f32 * cell_w;
+                    add_line(cell_x, center_y, cell_x + cell_w, center_y);
+                }
+            }
+        }
+        return;
+    }
+
+    match character {
         'R' => {
             add_line(x0, y0, x0, y1);
             add_line(x0, y1, x1, y1);
@@ -23471,7 +23549,8 @@ fn add_char_lines(
     }
 }
 
-fn add_string_lines(
+fn add_string_lines_with_source(
+    font_source: &crate::resources::FontSource,
     s: &str,
     start_x: f32,
     y: f32,
@@ -23483,7 +23562,8 @@ fn add_string_lines(
 ) {
     let mut current_x = start_x;
     for c in s.chars() {
-        add_char_lines(
+        add_char_lines_with_source(
+            font_source,
             c.to_ascii_uppercase(),
             current_x,
             y,
@@ -23494,6 +23574,54 @@ fn add_string_lines(
         );
         current_x += char_w + spacing;
     }
+}
+
+/// Built-in compatibility helper used by unit tests and non-State callers.
+/// State's render paths install their selected `FontSource` through the local
+/// closures at the render boundary above.
+fn add_char_lines(
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+    vertices: &mut Vec<UiVertex>,
+) {
+    add_char_lines_with_source(
+        &crate::resources::FontSource::BuiltIn,
+        c,
+        x,
+        y,
+        w,
+        h,
+        color,
+        vertices,
+    );
+}
+
+/// Built-in compatibility helper used by unit tests and non-State callers.
+fn add_string_lines(
+    s: &str,
+    start_x: f32,
+    y: f32,
+    char_w: f32,
+    char_h: f32,
+    spacing: f32,
+    color: [f32; 4],
+    vertices: &mut Vec<UiVertex>,
+) {
+    add_string_lines_with_source(
+        &crate::resources::FontSource::BuiltIn,
+        s,
+        start_x,
+        y,
+        char_w,
+        char_h,
+        spacing,
+        color,
+        vertices,
+    );
 }
 
 fn weather_tile_uv(column: u32, row: u32) -> [f32; 4] {
@@ -24201,6 +24329,32 @@ mod debug_tests {
             add_char_lines(character, 0.0, 0.0, 0.1, 0.2, [1.0; 4], &mut vertices);
             assert!(vertices.len() > before, "missing glyph for {character}");
         }
+    }
+
+    #[test]
+    fn state_text_helper_uses_bitmap_override_and_builtin_fallback() {
+        let source = crate::resources::FontSource::Bitmap(
+            [('A', [0b1_1111, 0, 0, 0, 0, 0, 0])].into_iter().collect(),
+        );
+        let mut overridden = Vec::new();
+        add_string_lines_with_source(
+            &source,
+            "A",
+            0.0,
+            0.0,
+            0.1,
+            0.2,
+            0.0,
+            [1.0; 4],
+            &mut overridden,
+        );
+        // Five lit cells are five line-list segments (ten vertices).
+        assert_eq!(overridden.len(), 10);
+
+        let mut fallback = Vec::new();
+        add_string_lines("A", 0.0, 0.0, 0.1, 0.2, 0.0, [1.0; 4], &mut fallback);
+        // Built-in A remains the existing four-segment glyph.
+        assert_eq!(fallback.len(), 8);
     }
 
     #[test]
