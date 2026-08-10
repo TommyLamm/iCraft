@@ -45,7 +45,11 @@ impl ModelRegistry {
     {
         let mut registry = Self::default();
         for path in model_paths {
-            let bytes = manager.resolve_model(path);
+            // A complete registry probes every known block path.  Missing
+            // descriptors are normal for packs that only override a subset
+            // of blocks, so use the quiet read path and diagnose only assets
+            // that are present but malformed/unsupported.
+            let bytes = manager.read_asset(path);
             let parsed = bytes.as_deref().and_then(parse_model_descriptor);
             if bytes.is_some() && parsed.is_none() {
                 manager.record_asset_diagnostic(
@@ -72,7 +76,148 @@ impl ModelRegistry {
             .and_then(|descriptor| descriptor.atlas_tile)
             .unwrap_or(fallback)
     }
+
+    pub fn atlas_tile_for_block(&self, block: BlockType, fallback: (u32, u32)) -> (u32, u32) {
+        self.atlas_tile_for(model_path_for_block(block), fallback)
+    }
 }
+
+/// Canonical resource path for a block model descriptor.
+///
+/// The table is intentionally explicit and follows the wire enum order, so
+/// model lookup is stable even when a pack does not provide every descriptor.
+pub fn model_path_for_block(block: BlockType) -> &'static str {
+    MODEL_PATHS[block as usize]
+}
+
+/// Every canonical block model path, in [`BlockType`] discriminant order.
+pub fn all_model_paths() -> impl Iterator<Item = &'static str> {
+    MODEL_PATHS.iter().copied()
+}
+
+const MODEL_PATHS: [&str; BlockType::Observer as usize + 1] = [
+    "models/block/air.json",
+    "models/block/grass_block.json",
+    "models/block/dirt.json",
+    "models/block/stone.json",
+    "models/block/sand.json",
+    "models/block/gravel.json",
+    "models/block/oak_log.json",
+    "models/block/oak_planks.json",
+    "models/block/oak_leaves.json",
+    "models/block/cobblestone.json",
+    "models/block/bedrock.json",
+    "models/block/water.json",
+    "models/block/coal_ore.json",
+    "models/block/iron_ore.json",
+    "models/block/gold_ore.json",
+    "models/block/diamond_ore.json",
+    "models/block/redstone_ore.json",
+    "models/block/glass.json",
+    "models/block/brick.json",
+    "models/block/stone_brick.json",
+    "models/block/snow.json",
+    "models/block/ice.json",
+    "models/block/clay.json",
+    "models/block/sandstone.json",
+    "models/block/obsidian.json",
+    "models/block/crafting_table.json",
+    "models/block/furnace.json",
+    "models/block/chest.json",
+    "models/block/tnt.json",
+    "models/block/bookshelf.json",
+    "models/block/torch.json",
+    "models/block/lava.json",
+    "models/block/birch_log.json",
+    "models/block/birch_planks.json",
+    "models/block/birch_leaves.json",
+    "models/block/spruce_log.json",
+    "models/block/spruce_planks.json",
+    "models/block/spruce_leaves.json",
+    "models/block/tall_grass.json",
+    "models/block/dandelion.json",
+    "models/block/poppy.json",
+    "models/block/cactus.json",
+    "models/block/sugar_cane.json",
+    "models/block/pumpkin.json",
+    "models/block/melon.json",
+    "models/block/enchanting_table.json",
+    "models/block/brewing_stand.json",
+    "models/block/anvil.json",
+    "models/block/redstone_wire.json",
+    "models/block/redstone_torch.json",
+    "models/block/redstone_torch_off.json",
+    "models/block/repeater.json",
+    "models/block/repeater_powered.json",
+    "models/block/comparator.json",
+    "models/block/comparator_powered.json",
+    "models/block/stone_button.json",
+    "models/block/stone_button_pressed.json",
+    "models/block/lever.json",
+    "models/block/lever_on.json",
+    "models/block/pressure_plate.json",
+    "models/block/pressure_plate_powered.json",
+    "models/block/piston.json",
+    "models/block/piston_extended.json",
+    "models/block/sticky_piston.json",
+    "models/block/sticky_piston_extended.json",
+    "models/block/redstone_lamp.json",
+    "models/block/redstone_lamp_lit.json",
+    "models/block/oak_door.json",
+    "models/block/oak_door_open.json",
+    "models/block/oak_trapdoor.json",
+    "models/block/oak_trapdoor_open.json",
+    "models/block/dispenser.json",
+    "models/block/dropper.json",
+    "models/block/note_block.json",
+    "models/block/fire.json",
+    "models/block/snow_layer.json",
+    "models/block/netherrack.json",
+    "models/block/soul_sand.json",
+    "models/block/glowstone.json",
+    "models/block/nether_portal.json",
+    "models/block/end_stone.json",
+    "models/block/end_portal_frame.json",
+    "models/block/end_portal_frame_filled.json",
+    "models/block/end_portal.json",
+    "models/block/purpur.json",
+    "models/block/dragon_egg.json",
+    "models/block/wither_skeleton_skull.json",
+    "models/block/nether_brick.json",
+    "models/block/end_city_chest.json",
+    "models/block/bed.json",
+    "models/block/furnace_lit.json",
+    "models/block/farmland.json",
+    "models/block/wheat_crop.json",
+    "models/block/carrot_crop.json",
+    "models/block/potato_crop.json",
+    "models/block/oak_slab.json",
+    "models/block/cobblestone_slab.json",
+    "models/block/oak_stair.json",
+    "models/block/cobblestone_stair.json",
+    "models/block/oak_fence.json",
+    "models/block/oak_fence_gate.json",
+    "models/block/cobblestone_wall.json",
+    "models/block/glass_pane.json",
+    "models/block/oak_ladder.json",
+    "models/block/oak_sign.json",
+    "models/block/oak_sapling.json",
+    "models/block/birch_sapling.json",
+    "models/block/spruce_sapling.json",
+    "models/block/spawner.json",
+    "models/block/mossy_cobblestone.json",
+    "models/block/dirt_path.json",
+    "models/block/nether_wart_crop.json",
+    "models/block/end_stone_brick.json",
+    "models/block/respawn_anchor.json",
+    "models/block/end_gateway.json",
+    "models/block/rail.json",
+    "models/block/powered_rail.json",
+    "models/block/detector_rail.json",
+    "models/block/activator_rail.json",
+    "models/block/hopper.json",
+    "models/block/observer.json",
+];
 
 fn normalize_model_path(path: &str) -> Result<String, ()> {
     let path = path.replace('\\', "/");
@@ -854,6 +999,49 @@ mod tests {
             |_, _, _| BlockType::Air,
         ));
         assert_eq!(opaque_vertices[0].atlas_tile, [15, 14]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn canonical_block_model_paths_cover_every_wire_variant() {
+        let paths: Vec<_> = all_model_paths().collect();
+        assert_eq!(paths.len(), BlockType::Observer as usize + 1);
+        assert_eq!(
+            model_path_for_block(BlockType::Stone),
+            "models/block/stone.json"
+        );
+        assert_eq!(
+            model_path_for_block(BlockType::Grass),
+            "models/block/grass_block.json"
+        );
+        assert_eq!(
+            model_path_for_block(BlockType::OakSlab),
+            "models/block/oak_slab.json"
+        );
+        assert!(paths.windows(2).all(|pair| pair[0] != pair[1]));
+        assert!(paths.iter().all(|path| path.starts_with("models/block/")));
+    }
+
+    #[test]
+    fn missing_descriptors_are_quiet_when_building_complete_registry() {
+        let root = temp_dir("missing");
+        fs::write(
+            root.join("pack.json"),
+            br#"{"id":"icraft.builtin","name":"builtin","version":"1","format":1,"description":""}"#,
+        )
+        .unwrap();
+        let user = root.join("resourcepacks");
+        fs::create_dir_all(&user).unwrap();
+        let mut manager = ResourcePackManager::discover(&root, &user);
+        let before = manager.diagnostics().len();
+        let registry = ModelRegistry::from_resource_packs(&mut manager, all_model_paths());
+        assert_eq!(
+            registry
+                .descriptor(model_path_for_block(BlockType::Stone))
+                .and_then(|descriptor| descriptor.atlas_tile),
+            None
+        );
+        assert_eq!(manager.diagnostics().len(), before);
         let _ = fs::remove_dir_all(root);
     }
 }

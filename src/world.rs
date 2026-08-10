@@ -4078,6 +4078,18 @@ impl Chunk {
     where
         F: Fn(i32, i32, i32) -> MeshVoxel,
     {
+        Self::mesh_l0_volume_with_registry(origin, extent, get_voxel, None)
+    }
+
+    fn mesh_l0_volume_with_registry<F>(
+        origin: [i32; 3],
+        extent: [usize; 3],
+        get_voxel: F,
+        registry: Option<&crate::block_model::ModelRegistry>,
+    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
+    where
+        F: Fn(i32, i32, i32) -> MeshVoxel,
+    {
         let get_block_at = |x: i32, y: i32, z: i32| {
             let v = get_voxel(x, y, z);
             (
@@ -4117,19 +4129,38 @@ impl Chunk {
                     let world_y = origin[1] + y as i32;
                     let world_z = origin[2] + z as i32;
 
-                    if crate::block_model::append_custom_block_mesh(
-                        block,
-                        voxel.state,
-                        [world_x as f32, world_y as f32, world_z as f32],
-                        voxel.sky,
-                        voxel.block_light,
-                        region_coord,
-                        &mut opaque_vertices,
-                        &mut opaque_indices,
-                        &mut trans_vertices,
-                        &mut trans_indices,
-                        |nx, ny, nz| get_block_at(nx, ny, nz).0,
-                    ) {
+                    let custom_mesh = if let Some(registry) = registry {
+                        crate::block_model::append_custom_block_mesh_with_registry(
+                            block,
+                            voxel.state,
+                            [world_x as f32, world_y as f32, world_z as f32],
+                            voxel.sky,
+                            voxel.block_light,
+                            region_coord,
+                            &mut opaque_vertices,
+                            &mut opaque_indices,
+                            &mut trans_vertices,
+                            &mut trans_indices,
+                            crate::block_model::model_path_for_block(block),
+                            registry,
+                            |nx, ny, nz| get_block_at(nx, ny, nz).0,
+                        )
+                    } else {
+                        crate::block_model::append_custom_block_mesh(
+                            block,
+                            voxel.state,
+                            [world_x as f32, world_y as f32, world_z as f32],
+                            voxel.sky,
+                            voxel.block_light,
+                            region_coord,
+                            &mut opaque_vertices,
+                            &mut opaque_indices,
+                            &mut trans_vertices,
+                            &mut trans_indices,
+                            |nx, ny, nz| get_block_at(nx, ny, nz).0,
+                        )
+                    };
+                    if custom_mesh {
                         continue;
                     }
 
@@ -4227,7 +4258,10 @@ impl Chunk {
                         let block_val = voxel.block_light;
                         let light_val = sky_val as f32 + block_val as f32 * 16.0 + 1.0 * 256.0;
 
-                        let atlas_tile = block.get_face_tex_index(0);
+                        let fallback_tile = block.get_face_tex_index(0);
+                        let atlas_tile = registry.map_or(fallback_tile, |registry| {
+                            registry.atlas_tile_for_block(block, fallback_tile)
+                        });
 
                         let wx = world_x as f32;
                         let wy = world_y as f32;
@@ -4312,7 +4346,10 @@ impl Chunk {
                                 (&mut opaque_vertices, &mut opaque_indices)
                             };
 
-                            let atlas_tile = block.get_face_tex_index(face_idx);
+                            let fallback_tile = block.get_face_tex_index(face_idx);
+                            let atlas_tile = registry.map_or(fallback_tile, |registry| {
+                                registry.atlas_tile_for_block(block, fallback_tile)
+                            });
 
                             let multiplier_code = match face_idx {
                                 4 => 0.0, // Top
@@ -4457,7 +4494,10 @@ impl Chunk {
                             ));
                         }
 
-                        let (tile_x, tile_y) = block.get_face_tex_index(face_idx);
+                        let fallback_tile = block.get_face_tex_index(face_idx);
+                        let (tile_x, tile_y) = registry.map_or(fallback_tile, |registry| {
+                            registry.atlas_tile_for_block(block, fallback_tile)
+                        });
                         mask[v * u_len + u] = Some(GreedyFace {
                             block,
                             atlas_tile: (tile_x, tile_y),
@@ -4569,6 +4609,31 @@ impl Chunk {
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
     {
+        self.generate_mesh_inner(get_block_at, None)
+    }
+
+    /// Generates a complete chunk mesh using immutable resource-pack model
+    /// descriptors. The legacy entry point above intentionally retains the
+    /// procedural atlas mapping for callers without a selected pack.
+    pub fn generate_mesh_with_registry<F>(
+        &self,
+        get_block_at: F,
+        registry: &crate::block_model::ModelRegistry,
+    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
+    {
+        self.generate_mesh_inner(get_block_at, Some(registry))
+    }
+
+    fn generate_mesh_inner<F>(
+        &self,
+        get_block_at: F,
+        registry: Option<&crate::block_model::ModelRegistry>,
+    ) -> (Vec<TerrainVertex>, Vec<u32>, Vec<TerrainVertex>, Vec<u32>)
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
+    {
         let min_y = self.min_section_y as i32 * 16;
         let total_height = self.sections.len() * 16;
         let origin = [
@@ -4577,7 +4642,7 @@ impl Chunk {
             self.chunk_z * CHUNK_DEPTH as i32,
         ];
         let max_y = min_y + total_height as i32;
-        Self::mesh_l0_volume(
+        Self::mesh_l0_volume_with_registry(
             origin,
             [CHUNK_WIDTH, total_height, CHUNK_DEPTH],
             |x, y, z| {
@@ -4603,6 +4668,7 @@ impl Chunk {
                     raw_fluid: level | if falling { 8 } else { 0 },
                 }
             },
+            registry,
         )
     }
 
@@ -4610,10 +4676,33 @@ impl Chunk {
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
     {
+        self.generate_mesh_bundle_inner(get_block_at, None)
+    }
+
+    /// Builds all chunk LODs while applying the selected model registry.
+    pub fn generate_mesh_bundle_with_registry<F>(
+        &self,
+        get_block_at: F,
+        registry: &crate::block_model::ModelRegistry,
+    ) -> ChunkMeshBundle
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
+    {
+        self.generate_mesh_bundle_inner(get_block_at, Some(registry))
+    }
+
+    fn generate_mesh_bundle_inner<F>(
+        &self,
+        get_block_at: F,
+        registry: Option<&crate::block_model::ModelRegistry>,
+    ) -> ChunkMeshBundle
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
+    {
         let region_coord = crate::chunk_render::chunk_to_region_coord(self.chunk_x, self.chunk_z);
-        let (o0, oi0, t0, ti0) = self.generate_mesh(get_block_at);
-        let l1 = self.generate_surface_mesh(get_block_at, 1);
-        let l2 = self.generate_surface_mesh(get_block_at, 4);
+        let (o0, oi0, t0, ti0) = self.generate_mesh_inner(get_block_at, registry);
+        let l1 = self.generate_surface_mesh_with_registry(get_block_at, 1, registry);
+        let l2 = self.generate_surface_mesh_with_registry(get_block_at, 4, registry);
         let mut section_connectivity =
             vec![crate::culling::SectionConnectivity::FULL; self.sections.len()];
         for sec_idx in 0..self.sections.len() {
@@ -4640,6 +4729,42 @@ impl Chunk {
         revision: u64,
         lifetime: u64,
         get_block_at: F,
+    ) -> crate::chunk_render::SectionMeshBundle
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
+    {
+        self.generate_section_mesh_bundle_inner(key, revision, lifetime, get_block_at, None)
+    }
+
+    /// Generates one section and its coarse LODs using immutable model-pack
+    /// descriptors. The halo remains captured exactly once before dispatch.
+    pub fn generate_section_mesh_bundle_with_registry<F>(
+        &self,
+        key: SectionKey,
+        revision: u64,
+        lifetime: u64,
+        get_block_at: F,
+        registry: &crate::block_model::ModelRegistry,
+    ) -> crate::chunk_render::SectionMeshBundle
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
+    {
+        self.generate_section_mesh_bundle_inner(
+            key,
+            revision,
+            lifetime,
+            get_block_at,
+            Some(registry),
+        )
+    }
+
+    fn generate_section_mesh_bundle_inner<F>(
+        &self,
+        key: SectionKey,
+        revision: u64,
+        lifetime: u64,
+        get_block_at: F,
+        registry: Option<&crate::block_model::ModelRegistry>,
     ) -> crate::chunk_render::SectionMeshBundle
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
@@ -4678,9 +4803,10 @@ impl Chunk {
                 }
             }
         });
-        Self::generate_section_mesh_bundle_from_halo(
+        Self::generate_section_mesh_bundle_from_halo_inner(
             SectionIdentity::new(key, revision, lifetime),
             &halo,
+            registry,
         )
     }
 
@@ -4690,6 +4816,23 @@ impl Chunk {
     pub fn generate_section_mesh_bundle_from_halo(
         identity: SectionIdentity,
         halo: &SectionHaloSnapshot,
+    ) -> crate::chunk_render::SectionMeshBundle {
+        Self::generate_section_mesh_bundle_from_halo_inner(identity, halo, None)
+    }
+
+    /// Worker-safe section mesh entry point with an immutable model registry.
+    pub fn generate_section_mesh_bundle_from_halo_with_registry(
+        identity: SectionIdentity,
+        halo: &SectionHaloSnapshot,
+        registry: &crate::block_model::ModelRegistry,
+    ) -> crate::chunk_render::SectionMeshBundle {
+        Self::generate_section_mesh_bundle_from_halo_inner(identity, halo, Some(registry))
+    }
+
+    fn generate_section_mesh_bundle_from_halo_inner(
+        identity: SectionIdentity,
+        halo: &SectionHaloSnapshot,
+        registry: Option<&crate::block_model::ModelRegistry>,
     ) -> crate::chunk_render::SectionMeshBundle {
         let key = identity.key;
         debug_assert_eq!(halo.key, key);
@@ -4713,15 +4856,16 @@ impl Chunk {
             key.min_world_y(),
             key.cz * CHUNK_DEPTH as i32,
         ];
-        let (o, oi, t, ti) = Self::mesh_l0_volume(
+        let (o, oi, t, ti) = Self::mesh_l0_volume_with_registry(
             origin,
             [CHUNK_WIDTH, SECTION_SIZE, CHUNK_DEPTH],
             section_voxel,
+            registry,
         );
         let region_coord = crate::chunk_render::chunk_to_region_coord(key.cx, key.cz);
         let l0 = ChunkLodMeshData::from_parts(o, oi, t, ti, region_coord);
-        let l1 = Self::mesh_section_lod_from_halo(key, halo, 2);
-        let l2 = Self::mesh_section_lod_from_halo(key, halo, 4);
+        let l1 = Self::mesh_section_lod_from_halo_with_registry(key, halo, 2, registry);
+        let l2 = Self::mesh_section_lod_from_halo_with_registry(key, halo, 4, registry);
         let levels = [l0, l1, l2];
         let bounds = levels
             .iter()
@@ -4739,6 +4883,15 @@ impl Chunk {
         key: SectionKey,
         halo: &SectionHaloSnapshot,
         step: usize,
+    ) -> ChunkLodMeshData {
+        Self::mesh_section_lod_from_halo_with_registry(key, halo, step, None)
+    }
+
+    fn mesh_section_lod_from_halo_with_registry(
+        key: SectionKey,
+        halo: &SectionHaloSnapshot,
+        step: usize,
+        registry: Option<&crate::block_model::ModelRegistry>,
     ) -> ChunkLodMeshData {
         debug_assert!(step > 1 && SECTION_SIZE % step == 0);
         let mut coarse = [MeshVoxel::default(); SECTION_VOLUME];
@@ -4804,7 +4957,12 @@ impl Chunk {
             }
         };
         let (opaque, opaque_indices, transparent, transparent_indices) =
-            Self::mesh_l0_volume(origin, [CHUNK_WIDTH, SECTION_SIZE, CHUNK_DEPTH], voxel);
+            Self::mesh_l0_volume_with_registry(
+                origin,
+                [CHUNK_WIDTH, SECTION_SIZE, CHUNK_DEPTH],
+                voxel,
+                registry,
+            );
         ChunkLodMeshData::from_parts(
             opaque,
             opaque_indices,
@@ -4815,6 +4973,18 @@ impl Chunk {
     }
 
     fn generate_surface_mesh<F>(&self, get_block_at: F, step: usize) -> ChunkLodMeshData
+    where
+        F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
+    {
+        self.generate_surface_mesh_with_registry(get_block_at, step, None)
+    }
+
+    fn generate_surface_mesh_with_registry<F>(
+        &self,
+        get_block_at: F,
+        step: usize,
+        registry: Option<&crate::block_model::ModelRegistry>,
+    ) -> ChunkLodMeshData
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool) + Copy,
     {
@@ -4859,10 +5029,14 @@ impl Chunk {
                 let world_x = self.chunk_x * CHUNK_WIDTH as i32 + x as i32;
                 let world_z = self.chunk_z * CHUNK_DEPTH as i32 + z as i32;
                 let (_, sky, block_light, _, _) = get_block_at(world_x, y + 1, world_z);
+                let fallback_tile = block.get_face_tex_index(4);
+                let top_tile = registry.map_or(fallback_tile, |registry| {
+                    registry.atlas_tile_for_block(block, fallback_tile)
+                });
                 cells[gz * grid_width + gx] = Some(SurfaceCell {
                     height: y,
                     block,
-                    top_tile: block.get_face_tex_index(4),
+                    top_tile,
                     light_level: sky as u16 + block_light as u16 * 16,
                 });
             }
@@ -5038,7 +5212,10 @@ impl Chunk {
                             ]
                         }
                     };
-                    let side_tile = cell.block.get_face_tex_index(face_idx);
+                    let fallback_tile = cell.block.get_face_tex_index(face_idx);
+                    let side_tile = registry.map_or(fallback_tile, |registry| {
+                        registry.atlas_tile_for_block(cell.block, fallback_tile)
+                    });
                     let (vertices, indices) =
                         if cell.block.properties().render_type == RenderType::Translucent {
                             (&mut trans_vertices, &mut trans_indices)
@@ -5199,6 +5376,60 @@ pub fn find_safe_spawn_position(
 mod tests {
     use super::*;
     use glam::Vec3;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_MODEL_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn model_temp_dir(label: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let id = NEXT_MODEL_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("icraft_world_model_{label}_{stamp}_{id}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn selected_world_model_registry() -> (std::path::PathBuf, crate::block_model::ModelRegistry) {
+        let root = model_temp_dir("selected");
+        fs::write(
+            root.join("pack.json"),
+            br#"{"id":"icraft.builtin","name":"builtin","version":"1","format":1,"description":""}"#,
+        )
+        .unwrap();
+        let user = root.join("resourcepacks");
+        let pack = user.join("mesh.pack");
+        fs::create_dir_all(pack.join("models/block")).unwrap();
+        fs::write(
+            pack.join("pack.json"),
+            br#"{"id":"mesh.pack","name":"mesh","version":"1","format":1,"description":""}"#,
+        )
+        .unwrap();
+        fs::write(
+            pack.join("models/block/stone.json"),
+            br#"{"parent":"builtin","atlas_tile":[13,13]}"#,
+        )
+        .unwrap();
+        fs::write(
+            pack.join("models/block/oak_slab.json"),
+            br#"{"parent":"builtin","atlas_tile":[12,12]}"#,
+        )
+        .unwrap();
+
+        let mut manager = crate::resources::ResourcePackManager::discover(&root, &user);
+        manager.apply_enabled_order(["mesh.pack"]).unwrap();
+        let registry = crate::block_model::ModelRegistry::from_resource_packs(
+            &mut manager,
+            [
+                crate::block_model::model_path_for_block(BlockType::Stone),
+                crate::block_model::model_path_for_block(BlockType::OakSlab),
+            ],
+        );
+        (root, registry)
+    }
 
     #[test]
     fn end_portal_frames_use_distinct_top_side_and_filled_top_tiles() {
@@ -5245,6 +5476,83 @@ mod tests {
             ..MeshVoxel::default()
         });
         assert!(!ov.is_empty() || !tv.is_empty());
+    }
+
+    #[test]
+    fn production_mesh_entries_apply_selected_tiles_and_keep_default_fallback() {
+        let (root, registry) = selected_world_model_registry();
+        let mut chunk = empty_test_chunk();
+        chunk.set_block_local(8, 1, 8, BlockType::OakSlab);
+        chunk.set_block_local(9, 1, 8, BlockType::Stone);
+        chunk.heightmap[8][8] = 1;
+        chunk.heightmap[9][8] = 1;
+
+        let selected = chunk
+            .generate_mesh_with_registry(|x, y, z| test_chunk_lookup(&chunk, x, y, z), &registry);
+        assert!(selected
+            .0
+            .iter()
+            .any(|vertex| vertex.atlas_tile == [12, 12]));
+        assert!(selected
+            .0
+            .iter()
+            .any(|vertex| vertex.atlas_tile == [13, 13]));
+
+        let selected_bundle = chunk.generate_mesh_bundle_with_registry(
+            |x, y, z| test_chunk_lookup(&chunk, x, y, z),
+            &registry,
+        );
+        assert!(selected_bundle.levels[0]
+            .opaque
+            .vertices
+            .iter()
+            .any(|vertex| vertex.atlas_tile == [13, 13]));
+        assert!(selected_bundle.levels[1]
+            .opaque
+            .vertices
+            .iter()
+            .any(|vertex| vertex.atlas_tile == [13, 13]));
+        assert!(selected_bundle.levels[2]
+            .opaque
+            .vertices
+            .iter()
+            .any(|vertex| vertex.atlas_tile == [12, 12]));
+
+        let key = SectionKey::new(0, 0, 0);
+        let halo = SectionHaloSnapshot::from_chunk(key, |x, y, z| MeshVoxel {
+            block: if (x, y, z) == (8, 1, 8) {
+                BlockType::OakSlab
+            } else if (x, y, z) == (9, 1, 8) {
+                BlockType::Stone
+            } else {
+                BlockType::Air
+            },
+            sky: 15,
+            ..MeshVoxel::default()
+        });
+        let section = Chunk::generate_section_mesh_bundle_from_halo_with_registry(
+            SectionIdentity::new(key, 7, 3),
+            &halo,
+            &registry,
+        );
+        assert!(section.levels[0]
+            .opaque
+            .vertices
+            .iter()
+            .any(|vertex| vertex.atlas_tile == [12, 12]));
+        assert!(section.levels[0]
+            .opaque
+            .vertices
+            .iter()
+            .any(|vertex| vertex.atlas_tile == [13, 13]));
+
+        let fallback = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+        assert!(fallback.0.iter().any(|vertex| vertex.atlas_tile == [3, 0]));
+        assert!(!fallback
+            .0
+            .iter()
+            .any(|vertex| vertex.atlas_tile == [12, 12]));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
