@@ -11,9 +11,11 @@
   authority save/restart; it does not yet execute all three Plan19 scenarios.
 - Resource-pack application is selected at menu time and consumed when a world
   state is created. A live world does not hot-swap GPU atlas resources.
-- Model descriptors currently reach a tested registry/mesh seam rather than
-  every main-world mesh call, and the selected font source is not yet the
-  universal HUD font. These keep Plan19 B open despite the resolver tests.
+- Selected model descriptors now flow through the background main-world L0/L1/L2
+  meshing entries, including greedy, non-full, special and portal geometry. The
+  selected bitmap font reaches Menu plus State HUD/chat/death/inventory/debug/
+  subtitle/boss/advancement text, with procedural/built-in fallback. A live world
+  still does not hot-swap GPU atlas/model/font resources after pack order changes.
 
 ## Content differences
 

@@ -91,7 +91,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已實作基礎；核心權威遷移缺口轉 18（headless dedicated/runtime 短跑通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
 | 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 已實作基礎；真 E2E、consumer 接線與 Accessibility presentation 缺口轉 Plan19（GPU、30 分鐘 soak、三拓撲實機待執行；權威缺口轉 Plan18） |
 | 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | authority/network/persistence/management foundation、真 TCP 雙客戶端 harness、fault/metrics 已通過；仍需 State 共用 in-process runtime、三拓撲 vectors、完整 difficulty consumer、30 分鐘 soak 與 GPU Host+Join |
-| 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow 與 B/C 自動化基礎已通過；完整網路三場景、通用 model/font consumer、GPU/DPI/音效 artifact 與 soak 仍待完成 |
+| 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow、selected-pack texture/sound/lang/model/font consumers 與 C 自動化基礎已通過；完整網路三場景、GPU/DPI/音效 artifact 與 soak 仍待完成 |
 | 20 | [Plan01–17 回歸硬化](20_plan01_17_regression_hardening.md) | 已完成；debug/release 結構 seed、Plan15 legacy metadata／備份與 `mob_griefing` consumer 語義均有回歸測試 |
 | 21 | [多維度權威拓撲與 Plan18 既有缺口](21_multidimension_authority_topology_followup.md) | Phase A 多維度 headless authority、session routing、interest/persistence foundation 已通過窄測；玩法 B、listen State/C 與完整 reconnect/GPU/soak 驗收仍待後續 |
 

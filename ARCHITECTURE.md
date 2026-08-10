@@ -27,9 +27,11 @@
   procedurally. `resources.rs` discovers the built-in `assets/` pack and
   workspace-relative `resourcepacks/` entries, validates manifests/dependency
   order and bounded ZIP contents, and resolves selected textures, sounds,
-  language, model, and font descriptors. `ICRAFT_RESOURCE_PACK` is an explicit
-  development/test override only. Missing assets retain procedural or built-in
-  fallbacks and are diagnosed once; shader overrides are not supported.
+  language, model, and font descriptors. Selected model descriptors are captured
+  in an immutable registry shared by background L0/L1/L2 mesh jobs; selected
+  bitmap glyphs feed Menu and State text renderers. `ICRAFT_RESOURCE_PACK` is an
+  explicit development/test override only. Missing assets retain procedural or
+  built-in fallbacks and are diagnosed once; shader overrides are not supported.
 
 There is no database. Multiplayer supports both the existing listen-server
 model and `icraft-server`: the host/runtime owns authoritative simulation,

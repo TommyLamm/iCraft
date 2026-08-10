@@ -134,7 +134,7 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
 
 - [x] Foundation、Progression、SocialAutomation 每一步都是可觀察 gameplay 操作，singleplayer
   三場景均通過，並在保存後重載重跑關鍵 assertions。
-- [ ] B 的五類 asset consumer 實際使用 selected pack；locale 即時切換、fallback、diagnostics、
+- [x] B 的五類 asset consumer 實際使用 selected pack；locale 即時切換、fallback、diagnostics、
   env override、manifest/dependency/ZIP security tests 全通過。
 - [ ] C 的 direction、flash、camera/tilt、HUD/menu scale/contrast、dynamic-list keyboard/layout
   tests 全通過，並附 4:3、16:9、21:9、DPI 的人工 artifact。
