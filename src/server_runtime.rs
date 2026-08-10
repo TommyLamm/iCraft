@@ -7,8 +7,8 @@
 //! network thread only transports packets into the bounded event channel.
 
 use crate::authority::contract::{
-    AuthorityTopology, SessionContract, SessionGameplayState, SessionInventorySlot,
-    SESSION_INVENTORY_SLOTS,
+    AuthoritySnapshot, AuthorityTopology, SessionContract, SessionGameplayState,
+    SessionInventorySlot, SESSION_INVENTORY_SLOTS,
 };
 use crate::authority::interest::{
     InterestKind, InterestSet, RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
@@ -28,7 +28,7 @@ use crate::save::{
     ChunkSaveData, EntitySaveData, LevelData, MutationRevisionIndex, PlayerData, SaveManager,
 };
 use glam::Vec3;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -45,6 +45,157 @@ const PLAYER_REACH: f32 = 8.0;
 const AUTOSAVE_INTERVAL_TICKS: u64 = 6_000;
 const HOST_COMMAND_QUEUE_CAPACITY: usize = 1_024;
 const HOST_EVENT_QUEUE_CAPACITY: usize = 1_024;
+const MAX_PRESENTATION_EVENTS_PER_TICK: usize = 1_024;
+
+/// Socket ownership for an embedded authority runtime. `Disabled` creates no
+/// host-command channel or network thread; local inputs still use the same
+/// bounded FIFO and fixed-tick budget as a listen server's remote inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportMode {
+    Disabled,
+    Listen,
+}
+
+/// Persistent identity used to bootstrap an in-process presentation client.
+/// Callers should reserve an ID that cannot collide with their listen
+/// transport's remotely allocated IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSessionProfile {
+    pub id: u64,
+    pub username: String,
+    pub storage: LocalSessionStorage,
+}
+
+/// Player persistence policy is explicit because an existing singleplayer
+/// world stores its player in `player.dat`, while authenticated remote players
+/// are isolated under `players/<name>.dat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalSessionStorage {
+    WorldPlayer,
+    Named,
+}
+
+impl LocalSessionProfile {
+    /// Existing singleplayer/listen-host worlds default to the legacy world
+    /// player payload and `dimension.dat`.
+    pub fn new(id: u64, username: impl Into<String>) -> Self {
+        Self {
+            id,
+            username: username.into(),
+            storage: LocalSessionStorage::WorldPlayer,
+        }
+    }
+
+    pub fn named(id: u64, username: impl Into<String>) -> Self {
+        Self {
+            id,
+            username: username.into(),
+            storage: LocalSessionStorage::Named,
+        }
+    }
+}
+
+/// Composition choices for a headless runtime embedded by singleplayer or a
+/// listen host. This does not imply that the desktop `State` has been cut over
+/// to consume the runtime output yet.
+#[derive(Debug, Clone)]
+pub struct EmbeddedRuntimeOptions {
+    pub topology: AuthorityTopology,
+    pub transport: TransportMode,
+    pub local_session: Option<LocalSessionProfile>,
+}
+
+impl EmbeddedRuntimeOptions {
+    pub fn singleplayer(local_session: LocalSessionProfile) -> Self {
+        Self {
+            topology: AuthorityTopology::Singleplayer,
+            transport: TransportMode::Disabled,
+            local_session: Some(local_session),
+        }
+    }
+
+    pub fn listen(local_session: LocalSessionProfile) -> Self {
+        Self {
+            topology: AuthorityTopology::ListenServer,
+            transport: TransportMode::Listen,
+            local_session: Some(local_session),
+        }
+    }
+}
+
+/// Cloneable producer for the runtime's single bounded input FIFO. In listen
+/// mode this sender and the socket transport publish into the same receiver,
+/// so neither source can synchronously overtake events already in the queue.
+#[derive(Clone)]
+pub struct RuntimeInput {
+    sender: SyncSender<ServerToHost>,
+    metrics: NetworkMetrics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeInputError {
+    Full,
+    Disconnected,
+}
+
+impl fmt::Display for RuntimeInputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full => f.write_str("runtime input queue is full"),
+            Self::Disconnected => f.write_str("runtime input queue is disconnected"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeInputError {}
+
+impl RuntimeInput {
+    pub fn try_send(&self, event: ServerToHost) -> Result<(), RuntimeInputError> {
+        self.metrics.enqueue();
+        match self.sender.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                self.metrics.dequeue();
+                self.metrics.record_queue_full();
+                Err(RuntimeInputError::Full)
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.metrics.dequeue();
+                Err(RuntimeInputError::Disconnected)
+            }
+        }
+    }
+
+    pub fn submit_request(
+        &self,
+        session_id: u64,
+        mut request: GameplayRequest,
+    ) -> Result<(), RuntimeInputError> {
+        request.session_id = session_id;
+        self.try_send(ServerToHost::GameplayRequest {
+            id: session_id,
+            request,
+        })
+    }
+}
+
+/// Target-aware events intended for an in-process presentation consumer.
+/// World and per-session gameplay changes remain in `snapshot`, including its
+/// bounded `session_updates`; this lane only diverts responses that would
+/// otherwise be addressed to a nonexistent socket session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimePresentationEvent {
+    GameplayResponse {
+        target: u64,
+        response: GameplayResponse,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTickOutput {
+    pub snapshot: AuthoritySnapshot,
+    pub presentation_events: Vec<RuntimePresentationEvent>,
+}
 
 #[derive(Debug)]
 pub enum ServerConfigError {
@@ -327,6 +478,7 @@ pub struct ServerMetrics {
 pub struct PlayerSessionState {
     pub id: u64,
     pub username: String,
+    pub storage: LocalSessionStorage,
     pub data: PlayerData,
     pub dimension: Dimension,
     pub last_client_sequence: u64,
@@ -345,6 +497,7 @@ impl PlayerSessionState {
     fn new(
         id: u64,
         username: String,
+        storage: LocalSessionStorage,
         data: PlayerData,
         dimension: Dimension,
         view_distance: u8,
@@ -353,6 +506,7 @@ impl PlayerSessionState {
         Self {
             id,
             username,
+            storage,
             data,
             dimension,
             last_client_sequence: 0,
@@ -389,10 +543,13 @@ pub struct ServerRuntime {
     routed_mutations: BTreeSet<(Dimension, u64)>,
     world_dir: PathBuf,
     save_manager: SaveManager,
-    host_tx: SyncSender<HostToServer>,
+    host_tx: Option<SyncSender<HostToServer>>,
     host_rx: Receiver<ServerToHost>,
     network_thread: Option<JoinHandle<()>>,
     network_metrics: NetworkMetrics,
+    transport_mode: TransportMode,
+    local_session_id: Option<u64>,
+    presentation_events: VecDeque<RuntimePresentationEvent>,
     observed_transport_rejections: u64,
     observed_transport_duplicates: u64,
     stopped: bool,
@@ -400,6 +557,31 @@ pub struct ServerRuntime {
 
 impl ServerRuntime {
     pub fn new(properties: ServerProperties) -> Result<Self, ServerConfigError> {
+        let (runtime, _input) = Self::construct(
+            properties,
+            EmbeddedRuntimeOptions {
+                topology: AuthorityTopology::Dedicated,
+                transport: TransportMode::Listen,
+                local_session: None,
+            },
+        )?;
+        Ok(runtime)
+    }
+
+    /// Construct a runtime for an in-process presentation root. The returned
+    /// input is the only local producer; in listen mode the network transport
+    /// clones the same bounded receiver-facing channel.
+    pub fn new_embedded(
+        properties: ServerProperties,
+        options: EmbeddedRuntimeOptions,
+    ) -> Result<(Self, RuntimeInput), ServerConfigError> {
+        Self::construct(properties, options)
+    }
+
+    fn construct(
+        properties: ServerProperties,
+        options: EmbeddedRuntimeOptions,
+    ) -> Result<(Self, RuntimeInput), ServerConfigError> {
         properties.validate()?;
         let world_dir = properties.world_dir.clone();
         if world_dir.exists() && !world_dir.is_dir() {
@@ -430,25 +612,19 @@ impl ServerRuntime {
             level.rules.pvp = false;
         }
         level.rules = level.rules.normalized();
-        let (host_tx, host_rx_network) = mpsc::sync_channel(HOST_COMMAND_QUEUE_CAPACITY);
         let (server_to_host_tx, host_rx) = mpsc::sync_channel(HOST_EVENT_QUEUE_CAPACITY);
         let network_metrics = NetworkMetrics::default();
-        let server_to_host =
-            MeteredHostEventSender::new(server_to_host_tx, network_metrics.clone());
-        let mut network_config = ServerConfig::default();
-        network_config.max_players = properties.max_players;
-        network_config.motd = properties.motd.clone();
-        network_config.whitelist = properties.whitelist.clone();
-        let bind_addr = format!("{}:{}", properties.bind, properties.port);
-        let network_thread = NetworkServer::spawn_with_config_and_metrics(
-            bind_addr,
-            properties.seed,
-            gamemode_wire(&level),
-            host_rx_network,
-            server_to_host,
-            network_config,
-            network_metrics.clone(),
-        );
+        let input = RuntimeInput {
+            sender: server_to_host_tx.clone(),
+            metrics: network_metrics.clone(),
+        };
+        let (host_tx, host_rx_network) = match options.transport {
+            TransportMode::Disabled => (None, None),
+            TransportMode::Listen => {
+                let (sender, receiver) = mpsc::sync_channel(HOST_COMMAND_QUEUE_CAPACITY);
+                (Some(sender), Some(receiver))
+            }
+        };
         let mut authority = AuthorityCore::new(
             AuthorityConfig {
                 seed: level.seed,
@@ -458,7 +634,7 @@ impl ServerRuntime {
                 rules: level.rules,
                 render_distance: properties.simulation_distance as i32,
             },
-            AuthorityTopology::Dedicated,
+            options.topology,
         );
         authority.world.time = level.time;
         let mut runtime = Self {
@@ -471,8 +647,11 @@ impl ServerRuntime {
             save_manager,
             host_tx,
             host_rx,
-            network_thread: Some(network_thread),
+            network_thread: None,
             network_metrics,
+            transport_mode: options.transport,
+            local_session_id: options.local_session.as_ref().map(|profile| profile.id),
+            presentation_events: VecDeque::with_capacity(MAX_PRESENTATION_EVENTS_PER_TICK),
             observed_transport_rejections: 0,
             observed_transport_duplicates: 0,
             routed_updates: Vec::new(),
@@ -481,14 +660,45 @@ impl ServerRuntime {
         };
         runtime.restore_authority_state()?;
         runtime.ensure_spawn_chunk();
-        Ok(runtime)
+        if let Some(profile) = options.local_session {
+            runtime.handle_join_with_storage(profile.id, profile.username, profile.storage)?;
+        }
+        if let Some(host_rx_network) = host_rx_network {
+            let server_to_host =
+                MeteredHostEventSender::new(server_to_host_tx, runtime.network_metrics.clone());
+            let mut network_config = ServerConfig::default();
+            network_config.max_players = runtime.properties.max_players;
+            network_config.motd = runtime.properties.motd.clone();
+            network_config.whitelist = runtime.properties.whitelist.clone();
+            let bind_addr = format!("{}:{}", runtime.properties.bind, runtime.properties.port);
+            runtime.network_thread = Some(NetworkServer::spawn_with_config_and_metrics(
+                bind_addr,
+                runtime.properties.seed,
+                gamemode_wire(&runtime.level),
+                host_rx_network,
+                server_to_host,
+                network_config,
+                runtime.network_metrics.clone(),
+            ));
+        }
+        Ok((runtime, input))
     }
 
     /// Process one fixed simulation tick.  No wgpu/winit/audio state is
     /// touched, making this safe for dedicated servers and headless tests.
     pub fn tick(&mut self) -> io::Result<()> {
+        self.tick_with_output().map(|_| ())
+    }
+
+    /// Process the same fixed tick as `tick`, returning an owned projection for
+    /// an embedded presentation client. Remote socket events are still handled
+    /// exclusively by `handle_event`; no transport consumer is introduced.
+    pub fn tick_with_output(&mut self) -> io::Result<RuntimeTickOutput> {
         if self.stopped {
-            return Ok(());
+            return Ok(RuntimeTickOutput {
+                snapshot: self.authority.last_snapshot().clone(),
+                presentation_events: self.presentation_events.drain(..).collect(),
+            });
         }
         let started = Instant::now();
         let mut processed = 0;
@@ -536,7 +746,10 @@ impl ServerRuntime {
         if elapsed > TICK_INTERVAL {
             eprintln!("[ServerRuntime] tick over budget: {elapsed:?}");
         }
-        Ok(())
+        Ok(RuntimeTickOutput {
+            snapshot,
+            presentation_events: self.presentation_events.drain(..).collect(),
+        })
     }
 
     pub fn run_for_ticks(&mut self, ticks: u64) -> io::Result<()> {
@@ -563,7 +776,9 @@ impl ServerRuntime {
             return Ok(());
         }
         let save_result = self.save_all();
-        self.enqueue_stop();
+        if self.host_tx.is_some() {
+            self.enqueue_stop();
+        }
         self.stopped = true;
         if let Some(handle) = self.network_thread.take() {
             let _ = handle.join();
@@ -718,6 +933,10 @@ impl ServerRuntime {
 
     pub fn metrics(&self) -> &ServerMetrics {
         &self.metrics
+    }
+
+    pub fn transport_mode(&self) -> TransportMode {
+        self.transport_mode
     }
 
     pub fn is_stopped(&self) -> bool {
@@ -1025,6 +1244,15 @@ impl ServerRuntime {
     }
 
     fn handle_join(&mut self, id: u64, username: String) -> io::Result<()> {
+        self.handle_join_with_storage(id, username, LocalSessionStorage::Named)
+    }
+
+    fn handle_join_with_storage(
+        &mut self,
+        id: u64,
+        username: String,
+        storage: LocalSessionStorage,
+    ) -> io::Result<()> {
         if self
             .players
             .values()
@@ -1035,20 +1263,28 @@ impl ServerRuntime {
                 format!("duplicate player identity: {username}"),
             ));
         }
-        let saved_player = self.save_manager.load_dedicated_player(&username)?;
-        let (data, current_dimension, effects) = saved_player
-            .map(|file| (file.data, file.current_dimension, file.effects))
-            .unwrap_or_else(|| {
-                let data = default_player_data();
-                (
-                    data.clone(),
-                    data.spawn_dimension.unwrap_or(self.level.spawn_dimension),
-                    Vec::new(),
-                )
-            });
+        let (data, current_dimension, effects) = match storage {
+            LocalSessionStorage::Named => self
+                .save_manager
+                .load_dedicated_player(&username)?
+                .map(|file| (file.data, file.current_dimension, file.effects))
+                .unwrap_or_else(|| self.default_player_payload()),
+            LocalSessionStorage::WorldPlayer => {
+                let player_path = self.world_dir.join("player.dat");
+                if player_path.exists() {
+                    let (_saved_level, data) = self.save_manager.load_player_and_level()?;
+                    // The legacy world-player format has no effect vector;
+                    // effects start empty until that schema gains one.
+                    (data, self.save_manager.load_current_dimension(), Vec::new())
+                } else {
+                    self.default_player_payload()
+                }
+            }
+        };
         let mut session = PlayerSessionState::new(
             id,
             username,
+            storage,
             data,
             current_dimension,
             self.properties.view_distance,
@@ -1124,17 +1360,23 @@ impl ServerRuntime {
             weather_remaining_ticks: 0.0,
             to: id,
         });
-        self.enqueue_host(HostToServer::SendGameplayResponse {
-            to: id,
-            response: GameplayResponse {
+        self.send_response(
+            id,
+            GameplayResponse {
                 request_id: 0,
                 server_sequence: join_sequence,
                 outcome: GameplayOutcome::Accepted { revision },
             },
-        });
+        );
         self.metrics.players_online = self.players.len();
         eprintln!("[ServerRuntime] player joined id={id} dimension={dimension}");
         Ok(())
+    }
+
+    fn default_player_payload(&self) -> (PlayerData, Dimension, Vec<PlayerEffectWire>) {
+        let data = default_player_data();
+        let dimension = data.spawn_dimension.unwrap_or(self.level.spawn_dimension);
+        (data, dimension, Vec::new())
     }
 
     fn handle_leave(&mut self, id: u64) -> io::Result<()> {
@@ -1409,14 +1651,31 @@ impl ServerRuntime {
     }
 
     fn send_response(&mut self, to: u64, response: GameplayResponse) {
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::GameplayResponse {
+                target: to,
+                response,
+            });
+            return;
+        }
         self.enqueue_host(HostToServer::SendGameplayResponse { to, response });
     }
 
+    fn push_presentation_event(&mut self, event: RuntimePresentationEvent) {
+        if self.presentation_events.len() >= MAX_PRESENTATION_EVENTS_PER_TICK {
+            self.presentation_events.pop_front();
+        }
+        self.presentation_events.push_back(event);
+    }
+
     fn enqueue_host(&mut self, event: HostToServer) -> bool {
+        let Some(host_tx) = self.host_tx.as_ref() else {
+            return false;
+        };
         // Reserve the gauge before publishing so the network thread cannot
         // receive and decrement the command before its enqueue is visible.
         self.network_metrics.enqueue();
-        match self.host_tx.try_send(event) {
+        match host_tx.try_send(event) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 self.network_metrics.dequeue();
@@ -1431,8 +1690,11 @@ impl ServerRuntime {
     }
 
     fn enqueue_stop(&mut self) {
+        let Some(host_tx) = self.host_tx.as_ref() else {
+            return;
+        };
         self.network_metrics.enqueue();
-        match self.host_tx.try_send(HostToServer::Stop) {
+        match host_tx.try_send(HostToServer::Stop) {
             Ok(()) => {}
             Err(TrySendError::Full(stop)) => {
                 self.network_metrics.record_queue_full();
@@ -1440,7 +1702,7 @@ impl ServerRuntime {
                 // network thread. `send` unblocks as soon as the live server
                 // consumes one command; the pre-counted Stop remains part of
                 // the aggregate backlog while the producer is waiting.
-                if self.host_tx.send(stop).is_err() {
+                if host_tx.send(stop).is_err() {
                     self.network_metrics.dequeue();
                 }
             }
@@ -1824,12 +2086,22 @@ impl ServerRuntime {
                 })
             })
             .unwrap_or(session.dimension);
-        self.save_manager.save_dedicated_player(
-            &session.username,
-            current_dimension,
-            &data,
-            &session.effects,
-        )
+        match session.storage {
+            LocalSessionStorage::Named => self.save_manager.save_dedicated_player(
+                &session.username,
+                current_dimension,
+                &data,
+                &session.effects,
+            ),
+            LocalSessionStorage::WorldPlayer => {
+                // `player.dat` predates the dedicated effect vector. Preserve
+                // the established file format instead of inventing a silent,
+                // incompatible sidecar during the runtime composition cutover.
+                self.save_manager
+                    .save_player_and_level(&self.level, &data)?;
+                self.save_manager.save_current_dimension(current_dimension)
+            }
+        }
     }
 }
 
