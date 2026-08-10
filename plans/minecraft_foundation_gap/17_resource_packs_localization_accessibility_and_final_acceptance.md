@@ -62,7 +62,7 @@ Accessibility 面板；最後以跨系統場景而非 enum 數量驗收整條路
 ## 驗收
 
 - [ ] 刪除／改名外部資源路徑後，乾淨 checkout 仍能以內建資產啟動。需人工 GPU/音效啟動證據。
-- [ ] 惡意 zip path、壓縮炸彈、錯誤 manifest、缺依賴、循環依賴被安全拒絕。path/manifest/dependency/cycle 自動測試通過；壓縮炸彈與 live ZIP 手測仍待 QA。
+- [x] 惡意 zip path、壓縮炸彈、錯誤 manifest、缺依賴、循環依賴被安全拒絕；17 項 resource 自動測試覆蓋 traversal、size/count/ratio、ZIP64/truncation/CRC、manifest 與 dependency 邊界，且不落地解壓。
 - [x] 所有內建 translation key 在 en_us 有值；第二語言覆蓋率達計劃門檻。
 - [ ] subtitles、reduce flashing、UI scale、鍵盤導航有自動布局／狀態測試和人工證據。狀態/queue 自動測試通過；視覺人工證據待 QA。
 - [ ] 三條端到端場景與三種網路拓撲全部通過，保存後重啟再驗一次。
