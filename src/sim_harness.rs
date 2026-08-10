@@ -210,7 +210,9 @@ impl SimHarness {
             return false;
         }
         for _ in 0..count {
-            debug_assert!(self.inventory.remove_one(item));
+            if !self.inventory.remove_one(item) {
+                return false;
+            }
         }
         true
     }
@@ -1314,6 +1316,17 @@ mod tests {
             .is_some());
         assert!(h.mine_block((4, 70, 2), None).is_none());
         assert!(h.craft_shapeless(&[Item::OakLog, Item::OakLog]).is_none());
+    }
+
+    #[test]
+    fn remove_item_count_consumes_items_in_all_profiles() {
+        let mut h = SimHarness::new();
+        assert!(h.add_stack(ItemStack::new(Item::OakLog, 3)));
+        assert_eq!(h.inventory.count_item(Item::OakLog), 3);
+        assert!(h.remove_item_count(Item::OakLog, 2));
+        assert_eq!(h.inventory.count_item(Item::OakLog), 1);
+        assert!(!h.remove_item_count(Item::OakLog, 2));
+        assert_eq!(h.inventory.count_item(Item::OakLog), 1);
     }
 
     #[test]
