@@ -2525,7 +2525,7 @@ impl Menu {
         let ui_start = vertices.len();
         match self.screen {
             MenuScreen::Main => {
-                draw_logo(vertices, aspect);
+                draw_logo(vertices, aspect, &self.font_source);
                 draw_button(
                     vertices,
                     -0.34,
@@ -2565,8 +2565,17 @@ impl Menu {
                     0.010,
                     aspect,
                     [1.0; 4],
+                    &self.font_source,
                 );
-                draw_centered_text(vertices, "MULTIPLAYER", 0.068, 0.010, aspect, [1.0; 4]);
+                draw_centered_text(
+                    vertices,
+                    "MULTIPLAYER",
+                    0.068,
+                    0.010,
+                    aspect,
+                    [1.0; 4],
+                    &self.font_source,
+                );
                 draw_centered_text(
                     vertices,
                     &self.tr("menu.options"),
@@ -2574,6 +2583,7 @@ impl Menu {
                     0.010,
                     aspect,
                     [1.0; 4],
+                    &self.font_source,
                 );
                 draw_centered_text(
                     vertices,
@@ -2582,6 +2592,7 @@ impl Menu {
                     0.010,
                     aspect,
                     [1.0; 4],
+                    &self.font_source,
                 );
                 draw_text(
                     vertices,
@@ -2591,6 +2602,7 @@ impl Menu {
                     0.006,
                     aspect,
                     [0.8, 0.84, 0.86, 1.0],
+                    &self.font_source,
                 );
             }
             MenuScreen::Multiplayer => self.draw_multiplayer(vertices, aspect),
@@ -2613,6 +2625,7 @@ impl Menu {
                 0.007,
                 aspect,
                 [1.0, 0.35, 0.25, 1.0],
+                &self.font_source,
             );
         }
         let requested_scale = self.settings.accessibility.ui_scale.clamp(0.75, 2.0);
@@ -2643,7 +2656,15 @@ impl Menu {
 
     fn draw_multiplayer(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
         panel(vertices, -0.64, 0.64, -0.72, 0.78);
-        draw_centered_text(vertices, "MULTIPLAYER", 0.67, 0.012, aspect, [1.0; 4]);
+        draw_centered_text(
+            vertices,
+            "MULTIPLAYER",
+            0.67,
+            0.012,
+            aspect,
+            [1.0; 4],
+            &self.font_source,
+        );
 
         for (x0, x1, label, selected) in [
             (
@@ -2661,7 +2682,17 @@ impl Menu {
         ] {
             let hover = hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, 0.45, 0.58);
             draw_button_state(vertices, x0, x1, 0.45, 0.58, hover, selected);
-            draw_centered_text_in(vertices, label, x0, x1, 0.488, 0.007, aspect, [1.0; 4]);
+            draw_centered_text_in(
+                vertices,
+                label,
+                x0,
+                x1,
+                0.488,
+                0.007,
+                aspect,
+                [1.0; 4],
+                &self.font_source,
+            );
         }
 
         match self.multiplayer_mode {
@@ -2675,6 +2706,7 @@ impl Menu {
                 0.30,
                 self.active_field == Some(TextField::HostPort),
                 aspect,
+                &self.font_source,
             ),
             MultiplayerMode::Join => {
                 draw_field(
@@ -2687,6 +2719,7 @@ impl Menu {
                     0.30,
                     self.active_field == Some(TextField::ServerAddress),
                     aspect,
+                    &self.font_source,
                 );
                 draw_field(
                     vertices,
@@ -2698,6 +2731,7 @@ impl Menu {
                     0.09,
                     self.active_field == Some(TextField::JoinPort),
                     aspect,
+                    &self.font_source,
                 );
                 draw_field(
                     vertices,
@@ -2709,6 +2743,7 @@ impl Menu {
                     -0.12,
                     self.active_field == Some(TextField::Username),
                     aspect,
+                    &self.font_source,
                 );
                 for (index, address) in self
                     .server_address_book
@@ -2753,6 +2788,7 @@ impl Menu {
                         0.0043,
                         aspect,
                         [1.0; 4],
+                        &self.font_source,
                     );
                 }
                 draw_button(
@@ -2779,6 +2815,7 @@ impl Menu {
                     0.0058,
                     aspect,
                     [1.0; 4],
+                    &self.font_source,
                 );
             }
         }
@@ -2790,7 +2827,17 @@ impl Menu {
         for (x0, x1, label) in [(-0.52, -0.02, confirm_label), (0.02, 0.52, "BACK")] {
             let hover = hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.58, -0.45);
             draw_button(vertices, x0, x1, -0.58, -0.45, hover);
-            draw_centered_text_in(vertices, label, x0, x1, -0.542, 0.007, aspect, [1.0; 4]);
+            draw_centered_text_in(
+                vertices,
+                label,
+                x0,
+                x1,
+                -0.542,
+                0.007,
+                aspect,
+                [1.0; 4],
+                &self.font_source,
+            );
         }
     }
 
@@ -2803,6 +2850,7 @@ impl Menu {
             0.012,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         if self.worlds.is_empty() {
             draw_centered_text(
@@ -2812,6 +2860,7 @@ impl Menu {
                 0.010,
                 aspect,
                 [0.8, 0.8, 0.8, 1.0],
+                &self.font_source,
             );
         }
         for (visible_index, world) in self
@@ -2840,6 +2889,7 @@ impl Menu {
                 0.008,
                 aspect,
                 [1.0; 4],
+                &self.font_source,
             );
             let detail = format!(
                 "{} / {} / {} / {}{} / v{}{}",
@@ -2867,6 +2917,7 @@ impl Menu {
                 0.0055,
                 aspect,
                 [0.72, 0.76, 0.78, 1.0],
+                &self.font_source,
             );
         }
         if self.worlds.len() > 5 {
@@ -2878,6 +2929,7 @@ impl Menu {
                 0.0048,
                 aspect,
                 [0.72, 0.76, 0.78, 1.0],
+                &self.font_source,
             );
         }
         for (x0, x1, label) in [
@@ -2893,7 +2945,17 @@ impl Menu {
                 -0.51,
                 hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.64, -0.51),
             );
-            draw_centered_text_in(vertices, label, x0, x1, -0.602, 0.006, aspect, [1.0; 4]);
+            draw_centered_text_in(
+                vertices,
+                label,
+                x0,
+                x1,
+                -0.602,
+                0.006,
+                aspect,
+                [1.0; 4],
+                &self.font_source,
+            );
         }
         for (x0, x1, label) in [
             (-0.72, -0.27, "COPY"),
@@ -2908,13 +2970,31 @@ impl Menu {
                 -0.72,
                 hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.84, -0.72),
             );
-            draw_centered_text_in(vertices, label, x0, x1, -0.805, 0.006, aspect, [1.0; 4]);
+            draw_centered_text_in(
+                vertices,
+                label,
+                x0,
+                x1,
+                -0.805,
+                0.006,
+                aspect,
+                [1.0; 4],
+                &self.font_source,
+            );
         }
     }
 
     fn draw_create(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
         panel(vertices, -0.64, 0.64, -0.92, 0.78);
-        draw_centered_text(vertices, "CREATE NEW WORLD", 0.67, 0.012, aspect, [1.0; 4]);
+        draw_centered_text(
+            vertices,
+            "CREATE NEW WORLD",
+            0.67,
+            0.012,
+            aspect,
+            [1.0; 4],
+            &self.font_source,
+        );
         draw_field(
             vertices,
             "WORLD NAME",
@@ -2925,6 +3005,7 @@ impl Menu {
             0.47,
             self.active_field == Some(TextField::WorldName),
             aspect,
+            &self.font_source,
         );
         let seed = if self.create_seed.is_empty() {
             "RANDOM"
@@ -2941,6 +3022,7 @@ impl Menu {
             0.26,
             self.active_field == Some(TextField::Seed),
             aspect,
+            &self.font_source,
         );
         draw_button(
             vertices,
@@ -2964,6 +3046,7 @@ impl Menu {
             0.007,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         draw_button(
             vertices,
@@ -2987,6 +3070,7 @@ impl Menu {
             0.007,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         draw_button(
             vertices,
@@ -3010,6 +3094,7 @@ impl Menu {
             0.007,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         draw_button(
             vertices,
@@ -3057,6 +3142,7 @@ impl Menu {
             0.005,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         draw_centered_text_in(
             vertices,
@@ -3070,6 +3156,7 @@ impl Menu {
             0.005,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         draw_button(
             vertices,
@@ -3113,6 +3200,7 @@ impl Menu {
             0.0048,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         draw_centered_text_in(
             vertices,
@@ -3123,6 +3211,7 @@ impl Menu {
             0.0048,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         draw_button(
             vertices,
@@ -3163,9 +3252,18 @@ impl Menu {
             0.007,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         draw_centered_text_in(
-            vertices, "CANCEL", 0.02, 0.52, -0.798, 0.007, aspect, [1.0; 4],
+            vertices,
+            "CANCEL",
+            0.02,
+            0.52,
+            -0.798,
+            0.007,
+            aspect,
+            [1.0; 4],
+            &self.font_source,
         );
     }
 
@@ -3178,6 +3276,7 @@ impl Menu {
             0.012,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         let left = [
             format!("FOV: < {:.0} >", self.settings.fov),
@@ -3227,6 +3326,7 @@ impl Menu {
                 0.0058,
                 aspect,
                 [1.0; 4],
+                &self.font_source,
             );
         }
         for (row, label) in right.iter().enumerate() {
@@ -3255,6 +3355,7 @@ impl Menu {
                 0.0058,
                 aspect,
                 [1.0; 4],
+                &self.font_source,
             );
         }
         for (x0, x1, label) in [
@@ -3270,7 +3371,17 @@ impl Menu {
                 -0.64,
                 hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.78, -0.64),
             );
-            draw_centered_text_in(vertices, label, x0, x1, -0.738, 0.006, aspect, [1.0; 4]);
+            draw_centered_text_in(
+                vertices,
+                label,
+                x0,
+                x1,
+                -0.738,
+                0.006,
+                aspect,
+                [1.0; 4],
+                &self.font_source,
+            );
         }
     }
 
@@ -3356,6 +3467,7 @@ impl Menu {
             0.012,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         let rows = crate::accessibility::AccessibilityRow::ALL;
         for (index, setting) in rows.into_iter().enumerate() {
@@ -3411,6 +3523,7 @@ impl Menu {
                 0.0055,
                 aspect,
                 [1.0; 4],
+                &self.font_source,
             );
         }
         draw_button(
@@ -3435,6 +3548,7 @@ impl Menu {
             0.008,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
     }
 
@@ -3447,6 +3561,7 @@ impl Menu {
             0.012,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         let available = self.resource_packs.available();
         if available.is_empty() {
@@ -3457,6 +3572,7 @@ impl Menu {
                 0.007,
                 aspect,
                 [0.8; 4],
+                &self.font_source,
             );
         }
         let start = self.resource_pack_scroll.min(available.len());
@@ -3508,7 +3624,17 @@ impl Menu {
                 -0.64,
                 hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.78, -0.64),
             );
-            draw_centered_text_in(vertices, label, x0, x1, -0.738, 0.006, aspect, [1.0; 4]);
+            draw_centered_text_in(
+                vertices,
+                label,
+                x0,
+                x1,
+                -0.738,
+                0.006,
+                aspect,
+                [1.0; 4],
+                &self.font_source,
+            );
         }
         for (index, diagnostic) in self.resource_packs.diagnostics().iter().take(3).enumerate() {
             let detail = format!("PACK: {} — {}", diagnostic.source, diagnostic.message);
@@ -3528,7 +3654,15 @@ impl Menu {
 
     fn draw_controls(&self, vertices: &mut Vec<UiVertex>, aspect: f32) {
         panel(vertices, -0.86, 0.86, -0.88, 0.82);
-        draw_centered_text(vertices, "CONTROLS", 0.72, 0.012, aspect, [1.0; 4]);
+        draw_centered_text(
+            vertices,
+            "CONTROLS",
+            0.72,
+            0.012,
+            aspect,
+            [1.0; 4],
+            &self.font_source,
+        );
         draw_button(
             vertices,
             -0.48,
@@ -3554,6 +3688,7 @@ impl Menu {
             0.0065,
             aspect,
             [1.0; 4],
+            &self.font_source,
         );
         let actions = [
             ControlAction::Forward,
@@ -3605,6 +3740,7 @@ impl Menu {
                 0.0065,
                 aspect,
                 [1.0; 4],
+                &self.font_source,
             );
         }
         draw_button(
@@ -3622,7 +3758,15 @@ impl Menu {
                 -0.64,
             ),
         );
-        draw_centered_text(vertices, "DONE", -0.738, 0.008, aspect, [1.0; 4]);
+        draw_centered_text(
+            vertices,
+            "DONE",
+            -0.738,
+            0.008,
+            aspect,
+            [1.0; 4],
+            &self.font_source,
+        );
     }
 
     fn control(&self, action: ControlAction) -> KeyCode {
@@ -3648,6 +3792,7 @@ impl Menu {
             0.011,
             aspect,
             [1.0, 0.45, 0.35, 1.0],
+            &self.font_source,
         );
         draw_centered_text(
             vertices,
@@ -3656,6 +3801,7 @@ impl Menu {
             0.0065,
             aspect,
             [0.85, 0.85, 0.85, 1.0],
+            &self.font_source,
         );
         draw_button(
             vertices,
@@ -3688,10 +3834,26 @@ impl Menu {
             ),
         );
         draw_centered_text_in(
-            vertices, "DELETE", -0.48, -0.02, -0.118, 0.007, aspect, [1.0; 4],
+            vertices,
+            "DELETE",
+            -0.48,
+            -0.02,
+            -0.118,
+            0.007,
+            aspect,
+            [1.0; 4],
+            &self.font_source,
         );
         draw_centered_text_in(
-            vertices, "CANCEL", 0.02, 0.48, -0.118, 0.007, aspect, [1.0; 4],
+            vertices,
+            "CANCEL",
+            0.02,
+            0.48,
+            -0.118,
+            0.007,
+            aspect,
+            [1.0; 4],
+            &self.font_source,
         );
     }
 }
@@ -3868,6 +4030,7 @@ fn draw_field(
     y1: f32,
     active: bool,
     aspect: f32,
+    font: &FontSource,
 ) {
     draw_text(
         vertices,
@@ -3877,12 +4040,23 @@ fn draw_field(
         0.006,
         aspect,
         [0.8, 0.82, 0.84, 1.0],
+        font,
     );
     draw_button_state(vertices, x0, x1, y0, y1, false, active);
-    draw_centered_text_in(vertices, value, x0, x1, y0 + 0.038, 0.008, aspect, [1.0; 4]);
+    draw_centered_text_in(
+        vertices,
+        value,
+        x0,
+        x1,
+        y0 + 0.038,
+        0.008,
+        aspect,
+        [1.0; 4],
+        font,
+    );
 }
 
-fn draw_logo(vertices: &mut Vec<UiVertex>, aspect: f32) {
+fn draw_logo(vertices: &mut Vec<UiVertex>, aspect: f32, font: &FontSource) {
     draw_centered_text(
         vertices,
         "ICRAFT",
@@ -3890,6 +4064,7 @@ fn draw_logo(vertices: &mut Vec<UiVertex>, aspect: f32) {
         0.026,
         aspect,
         [0.04, 0.045, 0.04, 1.0],
+        font,
     );
     draw_centered_text(
         vertices,
@@ -3898,6 +4073,7 @@ fn draw_logo(vertices: &mut Vec<UiVertex>, aspect: f32) {
         0.026,
         aspect,
         [0.72, 0.75, 0.70, 1.0],
+        font,
     );
     draw_centered_text(
         vertices,
@@ -3906,6 +4082,7 @@ fn draw_logo(vertices: &mut Vec<UiVertex>, aspect: f32) {
         0.007,
         aspect,
         [1.0, 0.83, 0.18, 1.0],
+        font,
     );
 }
 
@@ -3921,9 +4098,10 @@ fn draw_centered_text(
     pixel: f32,
     aspect: f32,
     color: [f32; 4],
+    font: &FontSource,
 ) {
     let x = -text_width(text, pixel, aspect) * 0.5;
-    draw_text(vertices, text, x, y, pixel, aspect, color);
+    draw_text(vertices, text, x, y, pixel, aspect, color, font);
 }
 
 fn draw_centered_text_in(
@@ -3935,9 +4113,10 @@ fn draw_centered_text_in(
     pixel: f32,
     aspect: f32,
     color: [f32; 4],
+    font: &FontSource,
 ) {
     let x = (x0 + x1 - text_width(text, pixel, aspect)) * 0.5;
-    draw_text(vertices, text, x, y, pixel, aspect, color);
+    draw_text(vertices, text, x, y, pixel, aspect, color, font);
 }
 
 fn draw_text(
@@ -3948,17 +4127,9 @@ fn draw_text(
     pixel: f32,
     aspect: f32,
     color: [f32; 4],
+    font: &FontSource,
 ) {
-    draw_text_with_font(
-        vertices,
-        text,
-        x,
-        y,
-        pixel,
-        aspect,
-        color,
-        &FontSource::BuiltIn,
-    );
+    draw_text_with_font(vertices, text, x, y, pixel, aspect, color, font);
 }
 
 fn draw_text_with_font(
@@ -4091,6 +4262,7 @@ fn hash(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(127.1, 311.7)))
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn legacy_metadata_preserves_saved_hardcore_and_creation_options() {
@@ -4509,5 +4681,63 @@ key_pause = ESC
                 assert!((-1.0..=1.0).contains(&y1));
             }
         }
+    }
+
+    fn lit_pixels(rows: [u8; 7]) -> usize {
+        rows.into_iter().map(|row| row.count_ones() as usize).sum()
+    }
+
+    #[test]
+    fn menu_text_uses_selected_font_and_builtin_fallback() {
+        let mut overrides = HashMap::new();
+        // A deliberately dense override makes it unambiguous that the
+        // ordinary menu text path selected the bitmap font.
+        overrides.insert('A', [31; 7]);
+        let bitmap = FontSource::Bitmap(overrides);
+
+        let mut custom_vertices = Vec::new();
+        draw_text(
+            &mut custom_vertices,
+            "AB",
+            0.0,
+            0.0,
+            0.01,
+            1.0,
+            [1.0; 4],
+            &bitmap,
+        );
+
+        let mut builtin_vertices = Vec::new();
+        draw_text(
+            &mut builtin_vertices,
+            "AB",
+            0.0,
+            0.0,
+            0.01,
+            1.0,
+            [1.0; 4],
+            &FontSource::BuiltIn,
+        );
+
+        // The selected bitmap overrides A, while the absent B override still
+        // falls back to the built-in glyph table.
+        assert_eq!(
+            custom_vertices.len(),
+            (lit_pixels([31; 7]) + lit_pixels(glyph('B'))) * 6
+        );
+        assert_eq!(
+            builtin_vertices.len(),
+            (lit_pixels(glyph('A')) + lit_pixels(glyph('B'))) * 6
+        );
+        assert!(custom_vertices.len() > builtin_vertices.len());
+
+        // The regular main-menu logo helper also receives the selected font;
+        // this guards against accidentally updating only the resource-pack
+        // listing path.
+        let mut custom_logo = Vec::new();
+        draw_logo(&mut custom_logo, 1.0, &bitmap);
+        let mut builtin_logo = Vec::new();
+        draw_logo(&mut builtin_logo, 1.0, &FontSource::BuiltIn);
+        assert!(custom_logo.len() > builtin_logo.len());
     }
 }
