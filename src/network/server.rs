@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
 use std::thread::JoinHandle;
@@ -51,14 +52,30 @@ impl NetworkMetrics {
         });
     }
 
+    fn subtract(counter: &AtomicU64, amount: u64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_sub(amount))
+        });
+    }
+
     fn record_inbound(&self, packet: &Packet) {
         Self::add(&self.inner.inbound_packets, 1);
         Self::add(&self.inner.inbound_bytes, packet_bytes(packet));
     }
 
-    fn record_outbound(&self, packet: &Packet) {
+    /// Reserve the outbound frame counters before a socket write begins. A
+    /// peer may observe a successful frame as soon as `write_all` completes,
+    /// so publishing after the await leaves a visibility race. The guard
+    /// rolls the reservation back when the write fails.
+    fn reserve_outbound(&self, packet: &Packet) -> OutboundMetricReservation {
+        let bytes = packet_bytes(packet);
         Self::add(&self.inner.outbound_packets, 1);
-        Self::add(&self.inner.outbound_bytes, packet_bytes(packet));
+        Self::add(&self.inner.outbound_bytes, bytes);
+        OutboundMetricReservation {
+            metrics: self.clone(),
+            bytes,
+            committed: false,
+        }
     }
 
     pub(crate) fn enqueue(&self) {
@@ -101,6 +118,27 @@ impl NetworkMetrics {
             queue_full: self.inner.queue_full.load(Ordering::Relaxed),
             rejected_requests: self.inner.rejected_requests.load(Ordering::Relaxed),
             duplicate_requests: self.inner.duplicate_requests.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct OutboundMetricReservation {
+    metrics: NetworkMetrics,
+    bytes: u64,
+    committed: bool,
+}
+
+impl OutboundMetricReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for OutboundMetricReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            NetworkMetrics::subtract(&self.metrics.inner.outbound_packets, 1);
+            NetworkMetrics::subtract(&self.metrics.inner.outbound_bytes, self.bytes);
         }
     }
 }
@@ -241,11 +279,37 @@ async fn send_connection_packet(
     packet: Packet,
     metrics: &NetworkMetrics,
 ) -> std::io::Result<()> {
-    let result = connection.send(&packet).await;
-    if result.is_ok() {
-        metrics.record_outbound(&packet);
+    send_with_outbound_metrics(&packet, metrics, || connection.send(&packet)).await
+}
+
+async fn send_writer_packet(
+    writer: &mut super::transport::ConnectionWriter,
+    packet: &Packet,
+    metrics: &NetworkMetrics,
+) -> std::io::Result<()> {
+    send_with_outbound_metrics(packet, metrics, || writer.send(packet)).await
+}
+
+async fn send_with_outbound_metrics<F, Fut>(
+    packet: &Packet,
+    metrics: &NetworkMetrics,
+    send: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    let reservation = metrics.reserve_outbound(packet);
+    match send().await {
+        Ok(()) => {
+            reservation.commit();
+            Ok(())
+        }
+        Err(error) => {
+            drop(reservation);
+            Err(error)
+        }
     }
-    result
 }
 
 const CLIENT_QUEUE_CAPACITY: usize = 64;
@@ -1545,7 +1609,9 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 };
                                 let packet = packet.into_packet();
                                 crate::perf::queue_stats(stats).dequeue(packet_bytes(&packet));
-                                let sent = writer.send(&packet).await.is_ok();
+                                let sent = send_writer_packet(&mut writer, &packet, &writer_metrics)
+                                    .await
+                                    .is_ok();
                                 if let Some(completion) = completion {
                                     let _ = completion.send(sent);
                                 }
@@ -1553,7 +1619,6 @@ impl<S: HostEventSender> NetworkServer<S> {
                                     eprintln!("[NetworkServer] Send task: writer send failed for queued packet");
                                     break;
                                 }
-                                writer_metrics.record_outbound(&packet);
                             }
                             None => {
                                 eprintln!("[NetworkServer] Send task: out_rx closed (session removed)");
@@ -1563,20 +1628,24 @@ impl<S: HostEventSender> NetworkServer<S> {
                     }
                     _ = writer_pose_mailbox.notify.notified() => {
                         for packet in writer_pose_mailbox.drain().await {
-                            if writer.send(&packet).await.is_err() {
+                            if send_writer_packet(&mut writer, &packet, &writer_metrics)
+                                .await
+                                .is_err()
+                            {
                                 eprintln!("[NetworkServer] Send task: writer send failed for pose");
                                 return;
                             }
-                            writer_metrics.record_outbound(&packet);
                         }
                     }
                     _ = writer_state_mailbox.notify.notified() => {
                         for packet in writer_state_mailbox.drain().await {
-                            if writer.send(&packet).await.is_err() {
+                            if send_writer_packet(&mut writer, &packet, &writer_metrics)
+                                .await
+                                .is_err()
+                            {
                                 eprintln!("[NetworkServer] Send task: writer send failed for state");
                                 return;
                             }
-                            writer_metrics.record_outbound(&packet);
                         }
                     }
                     _ = writer_catchup_mailbox.notify.notified() => {
@@ -1584,22 +1653,26 @@ impl<S: HostEventSender> NetworkServer<S> {
                             time::sleep(config.catchup_drain_delay).await;
                         }
                         if let Some(packet) = writer_catchup_mailbox.pop().await {
-                            if writer.send(&packet).await.is_err() {
+                            if send_writer_packet(&mut writer, &packet, &writer_metrics)
+                                .await
+                                .is_err()
+                            {
                                 eprintln!("[NetworkServer] Send task: writer send failed for catchup chunk");
                                 return;
                             }
-                            writer_metrics.record_outbound(&packet);
                         }
                     }
                     _ = keepalive.tick() => {
                         let packet = Packet::Keepalive {
                             protocol_version: PROTOCOL_VERSION,
                         };
-                        if writer.send(&packet).await.is_err() {
+                        if send_writer_packet(&mut writer, &packet, &writer_metrics)
+                            .await
+                            .is_err()
+                        {
                             eprintln!("[NetworkServer] Send task: keepalive send failed");
                             break;
                         }
-                        writer_metrics.record_outbound(&packet);
                     }
                 }
             }
@@ -3152,6 +3225,41 @@ mod tests {
 
         let shutdown_metrics = server.stop().await;
         assert_eq!(shutdown_metrics.queue_depth, 0);
+    }
+
+    #[tokio::test]
+    async fn outbound_metrics_publish_before_write_and_rollback_on_failure() {
+        let metrics = NetworkMetrics::default();
+        let packet = Packet::Keepalive {
+            protocol_version: PROTOCOL_VERSION,
+        };
+        let expected_bytes = packet_bytes(&packet);
+        let observed = metrics.clone();
+        assert!(
+            send_with_outbound_metrics(&packet, &metrics, || async move {
+                // The reservation is visible before the write future can publish
+                // the frame to its peer.
+                let snapshot = observed.snapshot();
+                assert_eq!(snapshot.outbound_packets, 1);
+                assert_eq!(snapshot.outbound_bytes, expected_bytes);
+                Ok(())
+            })
+            .await
+            .is_ok()
+        );
+        let successful = metrics.snapshot();
+        assert_eq!(successful.outbound_packets, 1);
+        assert_eq!(successful.outbound_bytes, expected_bytes);
+
+        let failed = send_with_outbound_metrics(&packet, &metrics, || async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected frame write failure",
+            ))
+        })
+        .await;
+        assert!(failed.is_err());
+        assert_eq!(metrics.snapshot(), successful);
     }
 
     #[tokio::test]

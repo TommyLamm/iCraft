@@ -5,7 +5,7 @@ use std::io;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() {
     if let Err(error) = run() {
@@ -96,13 +96,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         properties.online_mode,
     );
     let mut server = ServerRuntime::new(properties)?;
+    if let Some(seconds) = value(&args, "--duration-seconds") {
+        let duration = Duration::from_secs(seconds.parse()?);
+        let deadline = Instant::now() + duration;
+        while Instant::now() < deadline && !server.is_stopped() {
+            let started = Instant::now();
+            server.tick()?;
+            let elapsed = started.elapsed();
+            if elapsed < Duration::from_millis(50) {
+                std::thread::sleep(Duration::from_millis(50) - elapsed);
+            }
+        }
+        let result = server.shutdown();
+        print_metrics(&server);
+        return result.map_err(Into::into);
+    }
     if let Some(ticks) = value(&args, "--ticks") {
         server.run_for_ticks(ticks.parse()?)?;
-        return server.shutdown().map_err(Into::into);
+        let result = server.shutdown();
+        print_metrics(&server);
+        return result.map_err(Into::into);
     }
     if args.iter().any(|arg| arg == "--once") {
         server.tick()?;
-        return server.shutdown().map_err(Into::into);
+        let result = server.shutdown();
+        print_metrics(&server);
+        return result.map_err(Into::into);
     }
 
     let (console_tx, console_rx) = mpsc::channel::<String>();
@@ -139,8 +158,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        server.shutdown().map_err(Into::into)
+        let result = server.shutdown().map_err(Into::into);
+        print_metrics(&server);
+        result
     })
+}
+
+fn print_metrics(server: &ServerRuntime) {
+    let metrics = server.metrics();
+    eprintln!(
+        "[icraft-server] metrics ticks={} players_online={} loaded_chunks={} entities={} inbound_packets={} inbound_bytes={} outbound_packets={} outbound_bytes={} queue_depth={} queue_full={} requests_accepted={} requests_rejected={} duplicate_requests={} saves={} last_tick_us={} max_tick_us={} last_save_ms={}",
+        metrics.ticks,
+        metrics.players_online,
+        metrics.loaded_chunks,
+        metrics.entities,
+        metrics.inbound_packets,
+        metrics.inbound_bytes,
+        metrics.outbound_packets,
+        metrics.outbound_bytes,
+        metrics.queue_depth,
+        metrics.queue_full,
+        metrics.requests_accepted,
+        metrics.requests_rejected,
+        metrics.duplicate_requests,
+        metrics.saves,
+        metrics.last_tick_time_us,
+        metrics.max_tick_time_us,
+        metrics.last_save_latency_ms,
+    );
 }
 
 fn value(args: &[String], key: &str) -> Option<String> {
@@ -165,6 +210,7 @@ fn validate_args(args: &[String]) -> Result<(), io::Error> {
         "--whitelist",
         "--operators",
         "--seed",
+        "--duration-seconds",
         "--ticks",
     ];
     const SWITCH_FLAGS: &[&str] = &["--once"];
@@ -271,7 +317,7 @@ fn validate_world_path(path: &Path) -> Result<(), io::Error> {
 
 fn print_help() {
     println!(
-        "icraft-server [--config PATH] [--world PATH] [--bind IP] [--port PORT]\n  [--max-players N] [--view-distance N] [--simulation-distance N]\n  [--difficulty peaceful|easy|normal|hard] [--motd TEXT] [--pvp BOOL]\n  [--online-mode BOOL] [--whitelist USERS] [--operators USERS] [--seed N]\n  [--ticks N|--once]\n\nRuns the headless authoritative server. Ctrl-C flushes player/level saves."
+        "icraft-server [--config PATH] [--world PATH] [--bind IP] [--port PORT]\n  [--max-players N] [--view-distance N] [--simulation-distance N]\n  [--difficulty peaceful|easy|normal|hard] [--motd TEXT] [--pvp BOOL]\n  [--online-mode BOOL] [--whitelist USERS] [--operators USERS] [--seed N]\n  [--ticks N|--duration-seconds N|--once]\n\nRuns the headless authoritative server. Ctrl-C flushes player/level saves."
     );
 }
 
@@ -292,6 +338,7 @@ mod tests {
         assert!(names.contains("steve"));
         assert!(validate_args(&["--port".into()]).is_err());
         assert!(validate_args(&["--port".into(), "--once".into()]).is_err());
+        assert!(validate_args(&["--duration-seconds".into(), "1".into()]).is_ok());
         assert!(validate_args(&["--nope".into()]).is_err());
         assert!(validate_args(&["--once".into()]).is_ok());
     }

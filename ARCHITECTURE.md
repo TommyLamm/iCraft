@@ -507,9 +507,23 @@ Session snapshots are gated by dimension, sequence, and revision; a dimension
 transfer clears presentation caches before ordered ChunkData/entity deltas
 repopulate them. The listen + two-client headless vector verifies request
 delivery, interest isolation, duplicate/stale rejection, and owner-private
-session payloads. Station-specific craft/enchant/anvil progress projection,
-full Plan22 gameplay parity across all three topologies, transport metrics race,
-GPU/window artifacts, and soak remain explicit follow-up boundaries.
+session payloads. Station-specific craft/enchant/anvil progress projection and
+GPU/window artifacts remain explicit follow-up boundaries; Plan24 records the
+automated topology, transport-metrics, and dedicated-headless-soak closures.
+
+Plan24 closes the automated portions of those follow-ups. The shared
+`ServerRuntime` fixed-tick/request/ACK/snapshot vector now runs the fishing,
+workstation, brew, combat/death/respawn, stale/duplicate, dimension-transfer,
+and reconnect cases in Singleplayer, ListenServer, and Dedicated topologies;
+owner-private session projections carry the workstation results and metadata.
+Outbound network counters reserve publication before a frame write and roll
+back on write failure, with all production writer paths using the same guard;
+the TCP metrics test passed 50 isolated release runs. Debug/release suites and
+checks are green, and the dated dedicated headless 1800-second soak ended with
+zero queue depth, zero queue-full events, six saves, and no panic/error. The
+raw soak log and command/metrics record live under
+`plans/minecraft_foundation_gap/artifacts/`. GPU/window/audio/DPI and real
+Host+Join visual evidence remain manual and are intentionally not claimed.
 
 Use:
 
