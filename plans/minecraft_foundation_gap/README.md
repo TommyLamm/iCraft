@@ -89,9 +89,9 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 14 | [紅石容器自動化](14_redstone_container_automation.md) | 已實作（headless 通過；實機驗收待執行） |
 | 15 | [遊戲模式、規則、指令與世界建立](15_game_modes_world_rules_commands_and_creation.md) | 已完成（headless 通過；Host+Join GPU 實機待執行） |
 | 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已實作基礎；核心權威遷移缺口轉 18（headless dedicated/runtime 短跑通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
-| 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 已實作基礎；真 E2E、consumer 接線與 Accessibility presentation 缺口轉 Plan19（GPU、30 分鐘 soak、三拓撲實機待執行；權威缺口轉 Plan18） |
+| 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 已實作基礎；bounded visible consumer 與 locale layer 缺口轉 Plan29；真 E2E、Accessibility presentation、GPU、30 分鐘 soak、三拓撲實機仍待 |
 | 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | authority/network/persistence/management foundation、真 TCP 雙客戶端 harness、fault/metrics、三拓撲 vectors、dedicated 30 分鐘 headless soak 與 difficulty consumer 已通過；GPU Host+Join 仍待 |
-| 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow、selected-pack texture/sound/lang/model/font consumers 與 C 自動化基礎已通過；完整網路三場景、GPU/DPI/音效 artifact 與 soak 仍待完成 |
+| 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow、selected-pack texture/sound/lang/model/font consumers 與 bounded visible consumer 基礎已通過；完整網路三場景、GPU/DPI/音效 artifact 與 soak 仍待完成 |
 | 20 | [Plan01–17 回歸硬化](20_plan01_17_regression_hardening.md) | 已完成；debug/release 結構 seed、Plan15 legacy metadata／備份與 `mob_griefing` consumer 語義均有回歸測試 |
 | 21 | [多維度權威拓撲與 Plan18 既有缺口](21_multidimension_authority_topology_followup.md) | Phase A 多維度 headless authority、session routing、interest/persistence foundation、玩法域、三拓撲回歸與 reconnect/soak 自動證據已通過；listen State/C 的實機 GPU 驗收仍待後續 |
 | 22 | [Plan21 玩法權威域完成](22_authority_gameplay_domains_completion.md) | 已完成；fishing、workstation transaction、brew ready/take 與 combat/death/respawn headless authority vector 通過；GPU/transport/soak 不在本計劃 |
@@ -101,6 +101,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 26 | [容器生命週期強制關閉與箱子回饋](26_container_lifecycle_chest_feedback.md) | 已實作 v16 targeted forced-close；dimension/player/session 精確清理涵蓋超距離、非法維度、transfer、interest departure、break、logout/disconnect；雙箱 `is_open` 首末 viewer、deterministic binary mesh、ChestOpen/Close edge audio 與 client/runtime/headless tests 通過；State 直接 GPU ctor、smooth lid、audio-device、Host+Join visual、v17 epoch/reason/cursor 明確排除 |
 | 27 | [半磚 Waterlogging 權威閉環](27_slab_waterlogging_authority.md) | 已完成；OakSlab/CobblestoneSlab raw-fluid bit7、v3 save、FluidUse 原子 bucket、fixed-tick 跨 Chunk flow、v17 BlockChange/ChunkData 與 embedded/listen/dedicated headless projection 及 debug/release/check gates 通過；GPU/window/audio/DPI、完整原版 parity、30 分鐘 soak 明確不在本計劃 |
 | 28 | [權威 Dispenser／Dropper](28_authoritative_dispenser_dropper.md) | 已完成 headless/runtime 核心；紅石上升沿 deterministic action、loaded-front guard、Arrow/Potion/Bucket/Flint/普通掉物窄矩陣、Dropper merge/fallback、metadata/save/reload、全球 entity id 與 v17 EntityStateWire 及 TCP 雙客戶端／三拓撲 projection 通過；完整 vanilla 行為、cauldron/waterlogging、hopper rewrite、GPU/window/audio/manual visual 明確不在本計劃 |
+| 29 | [Locale layers 與 bounded visible labels](29_plan17_locale_visible_labels.md) | 已完成 bounded headless contract；selected EN/DE partial layers、invalid diagnostics、bounded menu/HUD/inventory/station/command consumers 與 EN/DE coverage 通過；GPU/window/audio/DPI、clean-checkout startup、三拓撲 E2E 仍不在本計劃 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
@@ -136,6 +137,16 @@ Plan28 final serial full-suite record (2026-08-12, `--test-threads=1`) is
 `git diff --check` pass. The serial setting avoids the pre-existing
 process-local save serialization-injection race; no production save behavior
 was changed for it.
+
+Plan29 final serial full-suite record (2026-08-12, `--test-threads=1`) is
+1,532 passed, 0 failed, and 6 ignored in both debug and release (library
+688/3 ignored, client binary 819/3 ignored, server binary 2, integrations
+3/3/3/2/1/6/5, doc-tests 0). The targeted localization/resource/menu lanes
+reported 10, 18, and 30 tests respectively; the state-only filter matched 0
+pure tests and is not GPU evidence. `cargo check --all-targets`,
+`cargo check --release --locked`, `cargo fmt --all -- --check`, and
+`git diff --check` pass. This closes only the bounded headless locale/visible
+consumer contract; manual presentation and topology evidence remain open.
 
 ## 5. 執行規則
 

@@ -10327,17 +10327,11 @@ impl State {
 
         if message.starts_with('/') {
             if !self.is_authoritative() {
-                push_chat_history(
-                    &mut self.chat_messages,
-                    "System".to_string(),
-                    "Commands can only be run by the host.".to_string(),
-                );
+                let status = self.translate("command.host_only");
+                push_chat_history(&mut self.chat_messages, "System".to_string(), status);
             } else if !self.cheats_enabled && !matches!(self.role, MultiplayerRole::Host { .. }) {
-                push_chat_history(
-                    &mut self.chat_messages,
-                    "System".to_string(),
-                    "Commands are disabled for this world.".to_string(),
-                );
+                let status = self.translate("command.disabled");
+                push_chat_history(&mut self.chat_messages, "System".to_string(), status);
             } else {
                 self.execute_command_line(&message);
             }
@@ -10389,18 +10383,24 @@ impl State {
                 Some(crate::network::protocol::GameplayOutcome::Accepted { .. }) => {
                     if matches!(&command, Command::GameRule { .. }) {
                         self.broadcast_world_rules();
-                        "Game rule updated by authority.".to_string()
+                        self.translate("command.game_rule_updated_authority")
                     } else if matches!(&command, Command::Time(_)) {
                         self.broadcast_time_sync();
-                        format!("Time is now {}.", self.world_time.ticks)
+                        let ticks = self.world_time.ticks.to_string();
+                        self.translation_catalog
+                            .format_lookup("command.time_now", &[("ticks", &ticks)])
                     } else {
-                        format!("{} accepted by authority.", command.name())
+                        let name = command.name();
+                        self.translation_catalog
+                            .format_lookup("command.accepted", &[("name", &name)])
                     }
                 }
                 Some(crate::network::protocol::GameplayOutcome::Rejected { reason }) => {
-                    format!("Command rejected: {reason:?}.")
+                    let reason = format!("{reason:?}");
+                    self.translation_catalog
+                        .format_lookup("command.rejected", &[("reason", &reason)])
                 }
-                None => "Command queued for the next authority tick.".to_string(),
+                None => self.translate("command.queued"),
             };
             let command_label = self.translate("command.feedback");
             push_chat_history(&mut self.chat_messages, command_label, feedback);
@@ -10428,16 +10428,19 @@ impl State {
             }
             Command::GameMode { mode, target } => {
                 if !target_is_local(target.as_ref()) {
-                    feedback = Some("Only the local player can be targeted in this client.".into());
+                    feedback = Some(self.translate("command.only_local_player"));
                 } else if self.world_rules.hardcore
                     && self.player_state.is_dead
                     && mode == GameMode::Survival
                 {
-                    feedback =
-                        Some("Hardcore players cannot return to Survival after death.".into());
+                    feedback = Some(self.translate("command.hardcore_survival"));
                 } else {
                     self.set_game_mode(mode);
-                    feedback = Some(format!("Game mode set to {mode:?}."));
+                    let mode = format!("{mode:?}");
+                    feedback = Some(
+                        self.translation_catalog
+                            .format_lookup("command.gamemode_set", &[("mode", &mode)]),
+                    );
                 }
             }
             Command::Difficulty(difficulty) => {
@@ -10446,7 +10449,11 @@ impl State {
                 } else {
                     difficulty
                 };
-                feedback = Some(format!("Difficulty set to {:?}.", self.difficulty));
+                let difficulty = format!("{:?}", self.difficulty);
+                feedback = Some(
+                    self.translation_catalog
+                        .format_lookup("command.difficulty_set", &[("difficulty", &difficulty)]),
+                );
             }
             Command::GameRule { rule, value } => {
                 if let Some(value) = value {
@@ -10469,10 +10476,16 @@ impl State {
                     };
                     if changed {
                         self.set_world_rules(self.world_rules);
-                        feedback = Some(format!("Game rule {rule} updated."));
+                        feedback = Some(
+                            self.translation_catalog
+                                .format_lookup("command.gamerule_updated", &[("rule", &rule)]),
+                        );
                         self.broadcast_world_rules();
                     } else {
-                        feedback = Some(format!("Unknown or invalid game rule: {rule}."));
+                        feedback = Some(
+                            self.translation_catalog
+                                .format_lookup("command.gamerule_invalid", &[("rule", &rule)]),
+                        );
                     }
                 } else if let Some(current) = self.world_rules.value(&rule) {
                     feedback = Some(format!("{rule} = {current}"));
@@ -10496,7 +10509,11 @@ impl State {
                     }
                 }
                 self.broadcast_time_sync();
-                feedback = Some(format!("Time is now {}.", self.world_time.ticks));
+                let ticks = self.world_time.ticks.to_string();
+                feedback = Some(
+                    self.translation_catalog
+                        .format_lookup("command.time_set", &[("ticks", &ticks)]),
+                );
             }
             Command::Weather(weather) => {
                 let (kind, duration) = match weather {
@@ -10508,11 +10525,15 @@ impl State {
                 };
                 self.weather.set_weather(kind, duration);
                 self.broadcast_time_sync();
-                feedback = Some(format!("Weather set to {:?}.", kind));
+                let weather = format!("{kind:?}");
+                feedback = Some(
+                    self.translation_catalog
+                        .format_lookup("command.weather_set", &[("weather", &weather)]),
+                );
             }
             Command::Teleport { target, position } => {
                 if !target_is_single_local(&target) {
-                    feedback = Some("Only the local player can be targeted in this client.".into());
+                    feedback = Some(self.translate("command.only_local_player"));
                 } else if self.current_dimension.height().contains_y(position[1]) {
                     self.player_physics.position = Vec3::new(
                         position[0] as f32 + 0.5,
@@ -10521,12 +10542,16 @@ impl State {
                     );
                     self.player_physics.velocity = Vec3::ZERO;
                     self.camera.position = self.player_physics.position + Vec3::Y * 1.6;
-                    feedback = Some(format!(
-                        "Teleported to {}, {}, {}.",
-                        position[0], position[1], position[2]
-                    ));
+                    let x = position[0].to_string();
+                    let y = position[1].to_string();
+                    let z = position[2].to_string();
+                    feedback =
+                        Some(self.translation_catalog.format_lookup(
+                            "command.teleported",
+                            &[("x", &x), ("y", &y), ("z", &z)],
+                        ));
                 } else {
-                    feedback = Some("Teleport destination is outside this dimension.".into());
+                    feedback = Some(self.translate("command.teleport_outside"));
                 }
             }
             Command::Give {
@@ -10535,30 +10560,33 @@ impl State {
                 count,
             } => {
                 if !target_is_single_local(&target) {
-                    feedback = Some("Only the local player can be targeted in this client.".into());
+                    feedback = Some(self.translate("command.only_local_player"));
                 } else {
                     let remainder = self.inventory.add_stack(ItemStack::new(item, count));
                     let received = remainder
                         .as_ref()
                         .map_or(count, |remaining| count - remaining.count);
-                    feedback = Some(format!(
-                        "Gave {received} {}.",
-                        self.localized_item_name(item)
-                    ));
+                    let received = received.to_string();
+                    let item = self.localized_item_name(item);
+                    feedback =
+                        Some(self.translation_catalog.format_lookup(
+                            "command.gave",
+                            &[("count", &received), ("item", &item)],
+                        ));
                 }
             }
             Command::Kill(target) => {
                 if !target_is_local(target.as_ref()) {
-                    feedback = Some("Only the local player can be targeted in this client.".into());
+                    feedback = Some(self.translate("command.only_local_player"));
                 } else {
                     self.player_state.invulnerable_time = 0.0;
                     self.take_damage(1.0e9, DamageSource::Void);
-                    feedback = Some("Killed the local player.".into());
+                    feedback = Some(self.translate("command.killed"));
                 }
             }
             Command::SpawnPoint { target, position } => {
                 if !target_is_single_local(&target) {
-                    feedback = Some("Only the local player can be targeted in this client.".into());
+                    feedback = Some(self.translate("command.only_local_player"));
                 } else {
                     let position = position.unwrap_or([
                         self.player_physics.position.x.floor() as i32,
@@ -10567,9 +10595,12 @@ impl State {
                     ]);
                     self.player_state.spawn_point = Some(position);
                     self.player_state.spawn_dimension = Some(self.current_dimension);
-                    feedback = Some(format!(
-                        "Spawn point set to {}, {}, {}.",
-                        position[0], position[1], position[2]
+                    let x = position[0].to_string();
+                    let y = position[1].to_string();
+                    let z = position[2].to_string();
+                    feedback = Some(self.translation_catalog.format_lookup(
+                        "command.spawn_point_set",
+                        &[("x", &x), ("y", &y), ("z", &z)],
                     ));
                 }
             }
@@ -10584,12 +10615,15 @@ impl State {
                     .contains_y(position[1])
                 {
                     self.world_spawn = (position[0], position[1], position[2]);
-                    feedback = Some(format!(
-                        "World spawn set to {}, {}, {}.",
-                        position[0], position[1], position[2]
+                    let x = position[0].to_string();
+                    let y = position[1].to_string();
+                    let z = position[2].to_string();
+                    feedback = Some(self.translation_catalog.format_lookup(
+                        "command.world_spawn_set",
+                        &[("x", &x), ("y", &y), ("z", &z)],
                     ));
                 } else {
-                    feedback = Some("World spawn is outside the Overworld height range.".into());
+                    feedback = Some(self.translate("command.world_spawn_outside"));
                 }
             }
             Command::Locate(structure) => {
@@ -10618,18 +10652,44 @@ impl State {
                             self.current_dimension,
                         ) {
                             Some((x, y, z)) => {
-                                Some(format!("Nearest {structure} is at {x}, {y}, {z}."))
+                                let x = x.to_string();
+                                let y = y.to_string();
+                                let z = z.to_string();
+                                Some(self.translation_catalog.format_lookup(
+                                    "command.nearest_structure",
+                                    &[("structure", &structure), ("x", &x), ("y", &y), ("z", &z)],
+                                ))
                             }
-                            None => Some(format!("No {structure} was found nearby.")),
+                            None => Some(self.translation_catalog.format_lookup(
+                                "command.no_structure",
+                                &[("structure", &structure)],
+                            )),
                         }
                     }
-                    None => Some(format!("Unknown structure: {structure}.")),
+                    None => {
+                        Some(self.translation_catalog.format_lookup(
+                            "command.unknown_structure",
+                            &[("structure", &structure)],
+                        ))
+                    }
                 };
             }
-            Command::Seed => feedback = Some(format!("Seed: {}.", self.world_seed)),
+            Command::Seed => {
+                let seed = self.world_seed.to_string();
+                feedback = Some(
+                    self.translation_catalog
+                        .format_lookup("command.seed", &[("seed", &seed)]),
+                )
+            }
             Command::SaveAll => match self.save_synchronously() {
-                Ok(()) => feedback = Some("Saved the world.".into()),
-                Err(error) => feedback = Some(format!("Save failed: {error}")),
+                Ok(()) => feedback = Some(self.translate("command.saved")),
+                Err(error) => {
+                    let reason = error.to_string();
+                    feedback = Some(
+                        self.translation_catalog
+                            .format_lookup("command.save_failed", &[("reason", &reason)]),
+                    )
+                }
             },
         }
 
@@ -20058,8 +20118,9 @@ impl State {
                 };
 
             if let Some(error) = &self.save_error {
+                let save_failed = self.translate("hud.save_failed");
                 draw_centered_text(
-                    "SAVE FAILED",
+                    &save_failed,
                     0.38,
                     0.03,
                     0.06,
@@ -20077,8 +20138,9 @@ impl State {
                     [1.0, 0.8, 0.7, 1.0],
                     &mut ui_line_vertices,
                 );
+                let retry = self.translate("hud.retry");
                 draw_centered_text(
-                    "RETRY",
+                    &retry,
                     0.05,
                     0.025,
                     0.05,
@@ -20086,8 +20148,9 @@ impl State {
                     [1.0, 1.0, 1.0, 1.0],
                     &mut ui_line_vertices,
                 );
+                let quit_without_saving = self.translate("hud.quit_without_saving");
                 draw_centered_text(
-                    "QUIT WITHOUT SAVING",
+                    &quit_without_saving,
                     -0.13,
                     0.018,
                     0.036,
@@ -20096,8 +20159,9 @@ impl State {
                     &mut ui_line_vertices,
                 );
             } else {
+                let saving_world = self.translate("hud.saving_world");
                 draw_centered_text(
-                    "SAVING WORLD...",
+                    &saving_world,
                     0.0,
                     0.03,
                     0.06,
@@ -20188,8 +20252,9 @@ impl State {
                         &mut ui_line_vertices,
                     );
                 };
+            let connection_lost = self.translate("hud.connection_lost");
             draw_centered(
-                "CONNECTION LOST",
+                &connection_lost,
                 0.26,
                 0.030,
                 0.060,
@@ -20198,6 +20263,9 @@ impl State {
             );
             if let Some(status) = &self.network_status {
                 let reason: String = status
+                    // `network_status` is an internal protocol/status string;
+                    // keep its stable prefix independent from the localized
+                    // heading rendered above.
                     .strip_prefix("CONNECTION LOST: ")
                     .unwrap_or(status)
                     .chars()
@@ -20205,8 +20273,9 @@ impl State {
                     .collect();
                 draw_centered(&reason, 0.12, 0.012, 0.024, 0.005, [0.92, 0.92, 0.92, 1.0]);
             }
+            let return_to_menu = self.translate("hud.return_to_menu");
             draw_centered(
-                "RETURN TO MENU",
+                &return_to_menu,
                 -0.07,
                 0.020,
                 0.040,
@@ -20362,8 +20431,9 @@ impl State {
                     add_string_lines(&upper, start_x, y, char_w, char_h, spacing, color, vertices);
                 };
 
+            let you_died = self.translate("hud.you_died");
             draw_centered_text(
-                "YOU DIED!",
+                &you_died,
                 0.30,
                 0.04,
                 0.08,
@@ -20392,8 +20462,9 @@ impl State {
                 [1.0, 1.0, 1.0, 1.0],
                 &mut ui_line_vertices,
             );
+            let respawn = self.translate("hud.respawn");
             draw_centered_text(
-                "RESPAWN",
+                &respawn,
                 -0.06,
                 0.02,
                 0.04,
@@ -20621,8 +20692,9 @@ impl State {
             // Render Text Labels
             let text_color = [1.0, 1.0, 1.0, 1.0];
             // "GAME PAUSED"
+            let game_paused = self.translate("hud.game_paused");
             draw_centered_text(
-                "GAME PAUSED",
+                &game_paused,
                 0.40,
                 0.03,
                 0.06,
@@ -20642,8 +20714,9 @@ impl State {
                 );
             }
             // "RESUME"
+            let resume = self.translate("hud.resume");
             draw_centered_text(
-                "RESUME",
+                &resume,
                 0.28,
                 0.02,
                 0.04,
@@ -20653,7 +20726,10 @@ impl State {
             );
 
             // "FOV < value >"
-            let fov_text = format!("FOV < {:.0} >", self.base_fov);
+            let fov_value = format!("{:.0}", self.base_fov);
+            let fov_text = self
+                .translation_catalog
+                .format_lookup("hud.fov", &[("value", &fov_value)]);
             draw_centered_text(
                 &fov_text,
                 0.14,
@@ -20666,7 +20742,10 @@ impl State {
 
             // "SENS < value >"
             let sens_val = (self.sensitivity / 0.002 * 100.0).round();
-            let sens_text = format!("SENS < {:.0} >", sens_val);
+            let sens_value = format!("{sens_val:.0}");
+            let sens_text = self
+                .translation_catalog
+                .format_lookup("hud.sensitivity", &[("value", &sens_value)]);
             draw_centered_text(
                 &sens_text,
                 0.00,
@@ -20678,7 +20757,10 @@ impl State {
             );
 
             // "RENDER DISTANCE < value >"
-            let rd_text = format!("RENDER DISTANCE < {} >", self.chunk_manager.render_distance);
+            let rd_value = self.chunk_manager.render_distance.to_string();
+            let rd_text = self
+                .translation_catalog
+                .format_lookup("hud.render_distance", &[("value", &rd_value)]);
             draw_centered_text(
                 &rd_text,
                 -0.14,
@@ -20690,10 +20772,10 @@ impl State {
             );
 
             // "MASTER VOLUME < value >"
-            let vol_text = format!(
-                "MASTER VOLUME < {:.0}% >",
-                self.settings.master_volume * 100.0
-            );
+            let vol_value = format!("{:.0}", self.settings.master_volume * 100.0);
+            let vol_text = self
+                .translation_catalog
+                .format_lookup("hud.master_volume", &[("value", &vol_value)]);
             draw_centered_text(
                 &vol_text,
                 -0.28,
@@ -20705,10 +20787,10 @@ impl State {
             );
 
             // "WEATHER VOLUME < value >"
-            let weather_vol_text = format!(
-                "WEATHER VOLUME < {:.0}% >",
-                self.settings.weather_volume * 100.0
-            );
+            let weather_value = format!("{:.0}", self.settings.weather_volume * 100.0);
+            let weather_vol_text = self
+                .translation_catalog
+                .format_lookup("hud.weather_volume", &[("value", &weather_value)]);
             draw_centered_text(
                 &weather_vol_text,
                 -0.42,
@@ -20720,8 +20802,9 @@ impl State {
             );
 
             // "SAVE AND QUIT"
+            let save_and_quit = self.translate("hud.save_and_quit");
             draw_centered_text(
-                "SAVE AND QUIT",
+                &save_and_quit,
                 -0.56,
                 0.02,
                 0.04,
@@ -21190,8 +21273,9 @@ impl State {
 
                 // 4. Draw texts (Labels)
                 if creative_catalog {
+                    let creative_inventory = self.translate("inventory.creative");
                     add_string_lines(
-                        "CREATIVE INVENTORY",
+                        &creative_inventory,
                         -0.45,
                         0.70,
                         0.010,
@@ -21200,8 +21284,9 @@ impl State {
                         [1.0, 1.0, 1.0, 1.0],
                         &mut ui_line_vertices,
                     );
+                    let hotbar = self.translate("inventory.hotbar");
                     add_string_lines(
-                        "HOTBAR",
+                        &hotbar,
                         -0.45,
                         -0.67,
                         0.008,
@@ -21211,8 +21296,9 @@ impl State {
                         &mut ui_line_vertices,
                     );
                 } else {
+                    let inventory = self.translate("inventory.inventory");
                     add_string_lines(
-                        "INVENTORY",
+                        &inventory,
                         -0.40,
                         -0.70 + 3.0 * (slot_h + gap) + 0.02,
                         0.008,
@@ -21232,8 +21318,9 @@ impl State {
                         } else {
                             -0.05 + 2.0 * (slot_h + gap) + 0.02
                         };
+                        let crafting = self.translate("inventory.crafting");
                         add_string_lines(
-                            "CRAFTING",
+                            &crafting,
                             craft_lbl_x,
                             craft_lbl_y,
                             0.008,
@@ -21246,8 +21333,9 @@ impl State {
                     if let Some(pos) = self.container_target {
                         let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
                         if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                            let furnace = self.translate("inventory.furnace");
                             add_string_lines(
-                                "FURNACE",
+                                &furnace,
                                 -0.15,
                                 0.26,
                                 0.010,
@@ -21348,8 +21436,9 @@ impl State {
                         [0.15, 0.45, 0.2, 0.9]
                     },
                 );
+                let book = self.translate("inventory.book");
                 add_string_lines(
-                    "BOOK",
+                    &book,
                     -0.44,
                     0.40,
                     0.007,
@@ -21369,8 +21458,9 @@ impl State {
                         0.45,
                         [0.12, 0.12, 0.12, 0.95],
                     );
+                    let recipes = self.translate("inventory.recipes");
                     add_string_lines(
-                        "RECIPES",
+                        &recipes,
                         -0.82,
                         0.40,
                         0.008,
@@ -21421,8 +21511,9 @@ impl State {
 
                 match self.active_station {
                     Some(StationKind::Enchanting) => {
+                        let enchanting = self.translate("station.enchanting");
                         add_string_lines(
-                            "ENCHANTING",
+                            &enchanting,
                             -0.18,
                             0.37,
                             0.012,
@@ -21431,9 +21522,11 @@ impl State {
                             [0.75, 0.45, 1.0, 1.0],
                             &mut ui_line_vertices,
                         );
-                        let level_text = format!(
-                            "LEVEL {}  BOOKSHELVES {}",
-                            self.player_state.experience_level, self.enchanting.bookshelves
+                        let level = self.player_state.experience_level.to_string();
+                        let bookshelves = self.enchanting.bookshelves.to_string();
+                        let level_text = self.translation_catalog.format_lookup(
+                            "station.level_bookshelves",
+                            &[("level", &level), ("bookshelves", &bookshelves)],
                         );
                         add_string_lines(
                             &level_text,
@@ -21468,15 +21561,19 @@ impl State {
                                 option.enchantments.entries.iter().flatten().next().copied();
                             let label = enchantment
                                 .map(|e| {
-                                    format!(
-                                        "{} {}  COST {} + {} LAPIS",
-                                        e.short_name(),
-                                        e.level(),
-                                        option.cost,
-                                        option.lapis_cost
+                                    let enchantment = format!("{} {}", e.short_name(), e.level());
+                                    let cost = option.cost.to_string();
+                                    let lapis = option.lapis_cost.to_string();
+                                    self.translation_catalog.format_lookup(
+                                        "station.cost_lapis",
+                                        &[
+                                            ("enchantment", &enchantment),
+                                            ("cost", &cost),
+                                            ("lapis", &lapis),
+                                        ],
                                     )
                                 })
-                                .unwrap_or_else(|| "NO ENCHANTMENT".to_string());
+                                .unwrap_or_else(|| self.translate("station.no_enchantment"));
                             add_string_lines(
                                 &label,
                                 0.04,
@@ -21490,8 +21587,9 @@ impl State {
                         }
                     }
                     Some(StationKind::Brewing) => {
+                        let brewing_stand = self.translate("station.brewing_stand");
                         add_string_lines(
-                            "BREWING STAND",
+                            &brewing_stand,
                             -0.18,
                             0.37,
                             0.012,
@@ -21518,9 +21616,11 @@ impl State {
                             [0.85, 0.45, 0.1, 1.0],
                         );
                         let status = if self.brewing.can_brew() {
-                            format!("BREWING {:.0} PCT", progress * 100.0)
+                            let value = format!("{:.0}", progress * 100.0);
+                            self.translation_catalog
+                                .format_lookup("station.brewing_progress", &[("value", &value)])
                         } else {
-                            "ADD BOTTLES AND INGREDIENT".to_string()
+                            self.translate("station.add_bottles_ingredient")
                         };
                         add_string_lines(
                             &status,
@@ -21534,8 +21634,9 @@ impl State {
                         );
                     }
                     Some(StationKind::Anvil) => {
+                        let anvil = self.translate("station.anvil");
                         add_string_lines(
-                            "ANVIL",
+                            &anvil,
                             -0.20,
                             0.37,
                             0.012,
@@ -21553,12 +21654,12 @@ impl State {
                             [0.04, 0.04, 0.04, 0.95],
                         );
                         let rename = if self.anvil.rename.is_empty() {
-                            "TYPE A NAME"
+                            self.translate("station.type_a_name")
                         } else {
-                            &self.anvil.rename
+                            self.anvil.rename.clone()
                         };
                         add_string_lines(
-                            rename,
+                            &rename,
                             -0.18,
                             0.27,
                             0.009,
@@ -21567,7 +21668,10 @@ impl State {
                             [1.0, 1.0, 1.0, 1.0],
                             &mut ui_line_vertices,
                         );
-                        let cost = format!("COST {} LEVELS", self.anvil.cost);
+                        let cost_value = self.anvil.cost.to_string();
+                        let cost = self
+                            .translation_catalog
+                            .format_lookup("station.cost_levels", &[("cost", &cost_value)]);
                         add_string_lines(
                             &cost,
                             0.20,
@@ -21580,10 +21684,11 @@ impl State {
                         );
                     }
                     Some(StationKind::Merchant) => {
-                        let title = format!(
-                            "VILLAGER TRADING ({}) - LEVEL {}",
-                            self.active_merchant_profession.display_name(),
-                            self.active_merchant_level as u8,
+                        let profession = self.active_merchant_profession.display_name().to_string();
+                        let level = (self.active_merchant_level as u8).to_string();
+                        let title = self.translation_catalog.format_lookup(
+                            "station.villager_trading",
+                            &[("profession", &profession), ("level", &level)],
                         );
                         add_string_lines(
                             &title,
@@ -21608,13 +21713,20 @@ impl State {
                                 && mouse_y >= offer_y - 0.04
                                 && mouse_y <= offer_y + 0.03;
                             let cost_a = offer.effective_cost_a(discount);
-                            let text = format!(
-                                "[TRADE {}] {} {:?} -> {} {:?}",
-                                idx + 1,
-                                cost_a,
-                                offer.buy_a.item,
-                                offer.sell.count,
-                                offer.sell.item,
+                            let index = (idx + 1).to_string();
+                            let buy_count = cost_a.to_string();
+                            let buy_item = format!("{:?}", offer.buy_a.item);
+                            let sell_count = offer.sell.count.to_string();
+                            let sell_item = format!("{:?}", offer.sell.item);
+                            let text = self.translation_catalog.format_lookup(
+                                "station.trade",
+                                &[
+                                    ("index", &index),
+                                    ("buy_count", &buy_count),
+                                    ("buy_item", &buy_item),
+                                    ("sell_count", &sell_count),
+                                    ("sell_item", &sell_item),
+                                ],
                             );
 
                             add_ui_quad(

@@ -509,6 +509,78 @@ impl ResourcePackManager {
         })
     }
 
+    /// Resolve every valid locale layer from highest to lowest priority.
+    ///
+    /// The normal asset resolver intentionally returns the first valid
+    /// candidate, because textures/models/sounds are whole-asset overrides.
+    /// Locale files are maps, however, so callers need all valid layers in
+    /// order to merge a partial selected pack with the built-in catalog.  The
+    /// existing `resolve_locale` method keeps its first-valid semantics.
+    pub fn resolve_locale_layers(&mut self, language: &str) -> Vec<Vec<u8>> {
+        let language = match normalize_locale_code(language) {
+            Some(language) => language,
+            None => {
+                self.record_asset_diagnostic(
+                    language,
+                    "locale",
+                    "invalid locale code; using built-in fallback",
+                );
+                return Vec::new();
+            }
+        };
+        let relative = format!("lang/{language}.json");
+        let normalized = match normalize_logical_path(&relative) {
+            Ok(path) => path,
+            Err(error) => {
+                self.record_asset_diagnostic(&relative, "locale", &error.to_string());
+                return Vec::new();
+            }
+        };
+
+        let mut candidates = Vec::new();
+        for id in self.enabled_order.iter().rev() {
+            if let Some(pack) = self.packs.iter().find(|pack| pack.manifest.id == *id) {
+                if let Some(bytes) = lookup_asset(pack, &normalized) {
+                    candidates.push(bytes.to_vec());
+                }
+            }
+        }
+        if let Some(pack) = self
+            .packs
+            .iter()
+            .find(|pack| pack.manifest.id == BUILTIN_PACK_ID)
+        {
+            if let Some(bytes) = lookup_asset(pack, &normalized) {
+                candidates.push(bytes.to_vec());
+            }
+        }
+
+        let mut layers = Vec::new();
+        for bytes in candidates {
+            let valid = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| serde_json::from_str::<HashMap<String, String>>(text).ok())
+                .is_some();
+            if valid {
+                layers.push(bytes);
+            } else {
+                self.record_asset_diagnostic(
+                    &normalized,
+                    "locale",
+                    "invalid locale asset; using built-in/lower-priority fallback",
+                );
+            }
+        }
+        if layers.is_empty() {
+            self.record_asset_diagnostic(
+                &normalized,
+                "locale",
+                "locale asset missing or invalid; using built-in fallback",
+            );
+        }
+        layers
+    }
+
     /// Record a consumer-side validation failure once for a logical asset.
     /// This is used by audio after a decoder-specific check and keeps the
     /// diagnostic key independent of the selected pack's physical path.
@@ -1347,6 +1419,61 @@ mod tests {
             .apply_enabled_order(["test.theme", "test.base"])
             .unwrap();
         assert_eq!(manager.enabled_order(), ["test.base", "test.theme"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn locale_layers_are_high_to_low_and_skip_invalid_entries_once() {
+        let root = temp_dir("locale_layers");
+        write_pack(&root, BUILTIN_PACK_ID, &[]);
+        fs::create_dir_all(root.join("lang")).unwrap();
+        fs::write(
+            root.join("lang/en_us.json"),
+            br#"{"base":"builtin","builtin_only":"yes"}"#,
+        )
+        .unwrap();
+
+        let user = root.join("resourcepacks");
+        let low = user.join("low");
+        write_pack(&low, "pack.low", &[]);
+        fs::create_dir_all(low.join("lang")).unwrap();
+        fs::write(
+            low.join("lang/en_us.json"),
+            br#"{"base":"low","low_only":"yes"}"#,
+        )
+        .unwrap();
+
+        let bad = user.join("bad");
+        write_pack(&bad, "pack.bad", &["pack.low"]);
+        fs::create_dir_all(bad.join("lang")).unwrap();
+        fs::write(bad.join("lang/en_us.json"), [0xff, 0xfe]).unwrap();
+
+        let high = user.join("high");
+        write_pack(&high, "pack.high", &["pack.bad"]);
+        fs::create_dir_all(high.join("lang")).unwrap();
+        fs::write(
+            high.join("lang/en_us.json"),
+            br#"{"base":"high","high_only":"yes"}"#,
+        )
+        .unwrap();
+
+        let mut manager = ResourcePackManager::discover(&root, &user);
+        manager
+            .apply_enabled_order(["pack.low", "pack.bad", "pack.high"])
+            .unwrap();
+        let layers = manager.resolve_locale_layers("en_us");
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0], br#"{"base":"high","high_only":"yes"}"#);
+        assert_eq!(layers[1], br#"{"base":"low","low_only":"yes"}"#);
+        assert_eq!(layers[2], br#"{"base":"builtin","builtin_only":"yes"}"#);
+        assert_eq!(
+            manager
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.source == "lang/en_us.json")
+                .count(),
+            1
+        );
         let _ = fs::remove_dir_all(root);
     }
 

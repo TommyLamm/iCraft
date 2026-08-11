@@ -27,8 +27,11 @@
   procedurally. `resources.rs` discovers the built-in `assets/` pack and
   workspace-relative `resourcepacks/` entries, validates manifests/dependency
   order and bounded ZIP contents, and resolves selected textures, sounds,
-  language, model, and font descriptors. Selected model descriptors are captured
-  in an immutable registry shared by background L0/L1/L2 mesh jobs; selected
+  language, model, and font descriptors. Locale resolution exposes both the
+  legacy first-valid language payload and a high-to-low validated layer list;
+  `TranslationCatalog` merges layers low-to-high with English fallback. Selected
+  model descriptors are captured in an immutable registry shared by background
+  L0/L1/L2 mesh jobs; selected
   bitmap glyphs feed Menu and State text renderers. `ICRAFT_RESOURCE_PACK` is an
   explicit development/test override only. Missing assets retain procedural or
   built-in fallbacks and are diagnosed once; shader overrides are not supported.
@@ -520,7 +523,10 @@ Plan18 harness now runs a real dedicated authority with two TCP clients for
 block/container/revision/interest/reconnect coverage; the complete three-scenario
 listen/dedicated rows remain explicit Plan18 hand-offs. Resource
 packs, localization, subtitles, reduced motion, and keyboard-focus behavior
-have unit coverage. Visual 4:3/16:9/21:9/high-DPI, audio-device,
+have unit coverage. Plan29 additionally covers partial EN/DE locale layers and a
+bounded `VISIBLE_REQUIRED_KEYS` contract for stable menu/HUD/inventory/station/
+command labels; parser/debug/raw-input literals remain explicit non-goals. Visual
+4:3/16:9/21:9/high-DPI, audio-device,
 GPU-performance, 30-minute soak, and three-topology acceptance still require
 the manual steps in `plans/minecraft_foundation_gap/17_qa_checklist.md`.
 Plan21 Phase A additionally keeps simultaneous dimension worlds and per-session
@@ -620,6 +626,24 @@ ignored benchmark/crash-child tests; `cargo check --all-targets` and
 `cargo check --release --locked` pass. The serial test setting isolates an
 existing process-local save-failure injection race; it does not change
 production save behavior.
+
+Plan29 closes the narrow Plan17 locale/consumer gap. `ResourcePackManager` retains
+the existing first-valid `resolve_locale` API and adds validated high-to-low locale
+layers; malformed layers are skipped with one deduplicated diagnostic. The catalog
+merges lower layers first, then selected-pack overrides, and falls back to merged
+English for missing active-language keys. `VISIBLE_REQUIRED_KEYS` bounds the
+player-visible contract to stable menu/world/create/options/accessibility/resource
+pack/controls/delete labels, save/connection/death/pause HUD, inventory/stations,
+and command prefix/status templates. Unit coverage exercises partial layers,
+invalid diagnostics, selected-pack sentinels, EN/DE key coverage, and language
+switch formatting. This is headless evidence only; GPU/window/audio/DPI, clean
+checkout startup, visual artifacts, and three-topology E2E remain Plan17/19 or QA
+gates. Final serial debug and release suites each pass 1,532 tests (688 library,
+819 client binary, 2 server binary, 23 integration, zero doc-tests) with six
+ignored tests; resource/localization/menu targeted lanes pass 18/10/30 and the
+state-only filter matches zero pure tests. `cargo check --all-targets`,
+`cargo check --release --locked`, `cargo fmt --all -- --check`, and
+`git diff --check` pass.
 
 Use:
 

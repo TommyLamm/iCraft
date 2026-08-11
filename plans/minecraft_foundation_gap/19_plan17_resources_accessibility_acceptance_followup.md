@@ -56,11 +56,14 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
 
 - `ResourcePackManager` 必須成為 texture、item/block model descriptor、sound、font、lang 的
   唯一解析入口；每個 consumer 都要有覆蓋測試，並保留 built-in fallback。
-- 將 `TranslationCatalog::from_resource_packs` 接到 menu、HUD、chat、death、command、
-  disconnect、advancement 與 item/block/entity name 的實際渲染路徑；不要讓 static built-in
-  `translate` 繞過已選 pack。
-- 語言切換要即時更新 menu/HUD/chat 並保留輸入、世界與選取 pack；至少測試參數化消息、最小
-  plural、UTF-8、German→English missing-key fallback。
+- 將 `TranslationCatalog::from_resource_packs` 接到 bounded `VISIBLE_REQUIRED_KEYS` 的
+  menu/world/create/options/accessibility/resource-pack/controls/delete、save/connection/
+  death/pause HUD、inventory/station 與 command prefix/stable status 實際渲染路徑；不要讓
+  static built-in `translate` 繞過已選 pack。Plan 29 明確不宣稱 parser grammar/help、debug、
+  branding、raw input、動態 item/entity names 或 source-wide zero-literal。
+- 語言切換要即時更新 bounded menu/HUD labels 並保留輸入、世界與選取 pack；至少測試參數化
+  消息、最小 plural、UTF-8、German→English missing-key fallback，以及 selected EN/DE
+  partial layers 對 lower/builtin sentinel 的保留。
 - `ICRAFT_RESOURCE_PACK` 只能是明確設定的開發／測試 override，需在 runtime resolver 中有
   可測試的注入點；預設 discovery 不得回到任何特定外部磁碟路徑。
 
@@ -134,8 +137,9 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
 
 - [x] Foundation、Progression、SocialAutomation 每一步都是可觀察 gameplay 操作，singleplayer
   三場景均通過，並在保存後重載重跑關鍵 assertions。
-- [x] B 的五類 asset consumer 實際使用 selected pack；locale 即時切換、fallback、diagnostics、
-  env override、manifest/dependency/ZIP security tests 全通過。
+- [x] B 的五類 asset consumer 實際使用 selected pack；Plan 29 bounded visible consumers、
+  high→low locale layers、partial EN/DE merge、locale 即時切換、fallback、diagnostics、env
+  override、manifest/dependency/ZIP security tests 全通過；source-wide literal 清零仍非目標。
 - [ ] C 的 direction、flash、camera/tilt、HUD/menu scale/contrast、dynamic-list keyboard/layout
   tests 全通過，並附 4:3、16:9、21:9、DPI 的人工 artifact。
 - [ ] QA checklist 每項有日期、平台、操作步驟與 log／screenshot／performance artifact；未完成項保留

@@ -29,10 +29,18 @@ Accessibility 面板；最後以跨系統場景而非 enum 數量驗收整條路
 
 ### B. 結構化本地化
 
-- [x] 把 UI、item/block/entity、death、command、disconnect、advancement 字串換成 translation key。
+- [ ] Source-wide UI、item/block/entity、death、command、disconnect、advancement literal 清零。
+  Plan 29 改以 `VISIBLE_REQUIRED_KEYS` bounded contract 接入穩定 menu/HUD/inventory/station/
+  command status；parser grammar/help、debug、branding、raw input 與動態名稱明確不在本輪。
 - [x] 內建 `en_us` 與一個完整第二語言（可延續 `de_de`）；缺 key 回退 en_us 並記錄測試失敗清單。
 - [x] 支援參數化消息、複數的最小策略和 UTF-8；不拼接依賴英文語序的片段。
-- [x] 語言切換即時刷新 menu/HUD，不重建世界或丟失輸入。
+- [x] 語言切換即時刷新 bounded menu/HUD labels，不重建世界或丟失輸入；完整 source-wide
+  consumer 接線仍不宣稱完成。
+
+Plan 29 additionally resolves selected locale layers high→low and merges them low→high into
+the catalog, preserving lower/builtin keys when a selected EN/DE file is partial. Invalid
+layers are skipped with one deduplicated diagnostic, while the original first-valid
+`resolve_locale` behavior remains available to existing callers.
 
 ### C. 無障礙與 UI
 

@@ -102,6 +102,144 @@ pub const REQUIRED_KEYS: &[&str] = &[
     "advancement.toast",
 ];
 
+/// Stable player-facing labels covered by the catalog contract.  This list is
+/// intentionally bounded to interactive menu/HUD/inventory/station surfaces
+/// and stable command status templates; branding, diagnostics, command
+/// grammar/help, raw user input, and dynamic item/entity names remain outside
+/// the zero-literal goal.
+pub const VISIBLE_REQUIRED_KEYS: &[&str] = &[
+    "menu.singleplayer",
+    "menu.multiplayer",
+    "menu.options",
+    "menu.quit_game",
+    "menu.select_world",
+    "menu.controls",
+    "menu.accessibility",
+    "menu.resource_packs",
+    "menu.done",
+    "menu.back",
+    "menu.apply",
+    "menu.reload",
+    "menu.create_world",
+    "menu.cancel",
+    "menu.host_game",
+    "menu.join_game",
+    "menu.port",
+    "menu.server_address",
+    "menu.username",
+    "menu.ping_server",
+    "menu.connect",
+    "menu.no_worlds",
+    "menu.scroll_more_worlds",
+    "menu.play_selected",
+    "menu.create_new_world",
+    "menu.delete",
+    "menu.copy",
+    "menu.backup",
+    "menu.world_name",
+    "menu.random",
+    "menu.seed",
+    "menu.game_mode",
+    "menu.difficulty",
+    "menu.world_type",
+    "menu.structures",
+    "menu.hardcore",
+    "menu.bonus_chest",
+    "menu.cheats",
+    "menu.fov",
+    "menu.render_distance",
+    "menu.fullscreen",
+    "menu.vsync",
+    "menu.fps_cap",
+    "menu.master_volume",
+    "menu.music_volume",
+    "menu.sound_volume",
+    "menu.weather_volume",
+    "menu.no_user_packs",
+    "menu.mouse_sensitivity",
+    "menu.press_a_key",
+    "menu.delete_world",
+    "menu.delete_warning",
+    "menu.on",
+    "menu.off",
+    "menu.ui_scale_value",
+    "menu.chat_scale_value",
+    "menu.chat_opacity_value",
+    "menu.setting_value",
+    "menu.control_value",
+    "menu.control_forward",
+    "menu.control_backward",
+    "menu.control_left",
+    "menu.control_right",
+    "menu.control_jump",
+    "menu.control_sprint",
+    "menu.control_sneak",
+    "menu.control_inventory",
+    "hud.save_failed",
+    "hud.retry",
+    "hud.quit_without_saving",
+    "hud.saving_world",
+    "hud.connection_lost",
+    "hud.return_to_menu",
+    "hud.you_died",
+    "hud.respawn",
+    "hud.game_paused",
+    "hud.resume",
+    "hud.fov",
+    "hud.sensitivity",
+    "hud.render_distance",
+    "hud.master_volume",
+    "hud.weather_volume",
+    "hud.save_and_quit",
+    "inventory.creative",
+    "inventory.hotbar",
+    "inventory.inventory",
+    "inventory.crafting",
+    "inventory.furnace",
+    "inventory.book",
+    "inventory.recipes",
+    "station.enchanting",
+    "station.level_bookshelves",
+    "station.cost_lapis",
+    "station.no_enchantment",
+    "station.brewing_stand",
+    "station.brewing_progress",
+    "station.add_bottles_ingredient",
+    "station.anvil",
+    "station.type_a_name",
+    "station.cost_levels",
+    "station.villager_trading",
+    "station.trade",
+    "command.host_only",
+    "command.disabled",
+    "command.accepted",
+    "command.rejected",
+    "command.queued",
+    "command.game_rule_updated_authority",
+    "command.time_now",
+    "command.only_local_player",
+    "command.hardcore_survival",
+    "command.gamemode_set",
+    "command.difficulty_set",
+    "command.gamerule_updated",
+    "command.gamerule_invalid",
+    "command.time_set",
+    "command.weather_set",
+    "command.teleported",
+    "command.teleport_outside",
+    "command.gave",
+    "command.killed",
+    "command.spawn_point_set",
+    "command.world_spawn_set",
+    "command.world_spawn_outside",
+    "command.nearest_structure",
+    "command.no_structure",
+    "command.unknown_structure",
+    "command.seed",
+    "command.saved",
+    "command.save_failed",
+];
+
 #[derive(Debug, Clone)]
 pub struct TranslationCatalog {
     language: Language,
@@ -112,24 +250,34 @@ pub struct TranslationCatalog {
 
 impl TranslationCatalog {
     pub fn builtin(language: Language) -> Self {
-        Self::from_json(
-            language,
-            include_str!("../assets/lang/en_us.json"),
-            include_str!("../assets/lang/de_de.json"),
-        )
+        let english = include_str!("../assets/lang/en_us.json");
+        let active = match language {
+            Language::English => english,
+            Language::German => include_str!("../assets/lang/de_de.json"),
+        };
+        Self::from_json(language, english, active)
     }
 
     pub fn from_json(language: Language, english_json: &str, active_json: &str) -> Self {
         let english = parse_map(english_json).unwrap_or_default();
         let active = parse_map(active_json).unwrap_or_default();
+        Self::from_maps(language, english, active)
+    }
+
+    fn from_maps(
+        language: Language,
+        english: HashMap<String, String>,
+        active: HashMap<String, String>,
+    ) -> Self {
+        let active = if language == Language::English && active.is_empty() {
+            english.clone()
+        } else {
+            active
+        };
         Self {
             language,
             english,
-            active: if language == Language::English && active.is_empty() {
-                parse_map(english_json).unwrap_or_default()
-            } else {
-                active
-            },
+            active,
             missing: HashSet::new(),
         }
     }
@@ -144,23 +292,26 @@ impl TranslationCatalog {
 
     /// Build a catalog through validated ResourcePackManager locale bytes.
     /// Invalid UTF-8/JSON entries are skipped with one manager diagnostic and
-    /// the next lower-priority pack (usually built-in) is selected.
+    /// lower-priority layers are merged so a partial selected locale does not
+    /// hide keys supplied by another enabled pack or the built-in catalog.
     pub fn from_resource_packs_mut(manager: &mut ResourcePackManager, language: Language) -> Self {
-        let english = manager
-            .resolve_locale(Language::English.code())
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .unwrap_or_else(|| include_str!("../assets/lang/en_us.json").to_string());
-        let active = manager
-            .resolve_locale(language.code())
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .unwrap_or_else(|| {
-                if language == Language::English {
-                    english.clone()
-                } else {
-                    include_str!("../assets/lang/de_de.json").to_string()
-                }
-            });
-        Self::from_json(language, &english, &active)
+        let english_layers = manager.resolve_locale_layers(Language::English.code());
+        let english = if english_layers.is_empty() {
+            parse_map(include_str!("../assets/lang/en_us.json")).unwrap_or_default()
+        } else {
+            merge_locale_layers(english_layers)
+        };
+        let active_layers = manager.resolve_locale_layers(language.code());
+        let active = if active_layers.is_empty() {
+            if language == Language::English {
+                english.clone()
+            } else {
+                parse_map(include_str!("../assets/lang/de_de.json")).unwrap_or_default()
+            }
+        } else {
+            merge_locale_layers(active_layers)
+        };
+        Self::from_maps(language, english, active)
     }
 
     pub fn translate(&mut self, key: &str) -> String {
@@ -227,6 +378,18 @@ impl TranslationCatalog {
         value
     }
 
+    /// Format a visible UI string without mutating the missing-key diagnostic
+    /// set. Render paths are called every frame, so they use this immutable
+    /// helper while command/test paths may continue to use `format`.
+    pub fn format_lookup(&self, key: &str, arguments: &[(&str, &str)]) -> String {
+        let mut value = self.lookup(key);
+        for (name, replacement) in arguments {
+            let token = format!("{{{name}}}");
+            value = value.replace(&token, replacement);
+        }
+        value
+    }
+
     pub fn plural(&mut self, key: &str, count: u64) -> String {
         let suffix = if count == 1 { ".one" } else { ".other" };
         let plural_key = format!("{key}{suffix}");
@@ -262,10 +425,43 @@ impl TranslationCatalog {
             .map(|key| (*key).to_string())
             .collect()
     }
+
+    pub fn visible_coverage(&self) -> f32 {
+        if VISIBLE_REQUIRED_KEYS.is_empty() {
+            return 1.0;
+        }
+        VISIBLE_REQUIRED_KEYS
+            .iter()
+            .filter(|key| self.active.contains_key(**key))
+            .count() as f32
+            / VISIBLE_REQUIRED_KEYS.len() as f32
+    }
+
+    pub fn validate_visible_keys(&self) -> Vec<String> {
+        VISIBLE_REQUIRED_KEYS
+            .iter()
+            .filter(|key| !self.english.contains_key(**key))
+            .map(|key| (*key).to_string())
+            .collect()
+    }
 }
 
 fn parse_map(json: &str) -> Result<HashMap<String, String>, serde_json::Error> {
     serde_json::from_str(json)
+}
+
+fn merge_locale_layers(layers: Vec<Vec<u8>>) -> HashMap<String, String> {
+    let mut merged = HashMap::new();
+    for bytes in layers.into_iter().rev() {
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let Ok(layer) = parse_map(&text) else {
+            continue;
+        };
+        merged.extend(layer);
+    }
+    merged
 }
 
 fn key_component(value: &str) -> String {
@@ -339,6 +535,120 @@ mod tests {
         assert!(german.validate_required_keys().is_empty());
         assert!((english.coverage() - 1.0).abs() < f32::EPSILON);
         assert!((german.coverage() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn visible_keys_have_builtin_english_and_german_values() {
+        let english = TranslationCatalog::builtin(Language::English);
+        let german = TranslationCatalog::builtin(Language::German);
+        assert!(english.validate_visible_keys().is_empty());
+        assert!((english.visible_coverage() - 1.0).abs() < f32::EPSILON);
+        assert!((german.visible_coverage() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn partial_selected_locales_merge_without_swallowing_lower_layers() {
+        let root = std::env::temp_dir().join(format!(
+            "icraft_locale_layers_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let builtin = root.join("builtin");
+        let user = root.join("resourcepacks");
+        let pack = user.join("selected");
+        std::fs::create_dir_all(builtin.join("lang")).unwrap();
+        std::fs::write(
+            builtin.join("pack.json"),
+            r#"{"id":"icraft.builtin","name":"builtin","version":"1","format":1,"description":"builtin"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            builtin.join("lang/en_us.json"),
+            br#"{"hello":"Built-in","fallback":"Built-in fallback","menu.multiplayer":"Built-in multiplayer"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            builtin.join("lang/de_de.json"),
+            br#"{"hello":"Deutsch builtin","fallback":"Deutscher fallback"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(pack.join("lang")).unwrap();
+        std::fs::write(
+            pack.join("pack.json"),
+            r#"{"id":"test.selected","name":"selected","version":"1","format":1,"description":"selected"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack.join("lang/en_us.json"),
+            br#"{"hello":"Selected","menu.multiplayer":"Selected multiplayer"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack.join("lang/de_de.json"),
+            br#"{"hello":"Deutsch selected"}"#,
+        )
+        .unwrap();
+
+        let mut manager = ResourcePackManager::discover(&builtin, &user);
+        manager.apply_enabled_order(["test.selected"]).unwrap();
+        let mut catalog =
+            TranslationCatalog::from_resource_packs_mut(&mut manager, Language::German);
+        assert_eq!(catalog.translate("hello"), "Deutsch selected");
+        assert_eq!(catalog.translate("fallback"), "Deutscher fallback");
+        assert_eq!(catalog.lookup("menu.multiplayer"), "Selected multiplayer");
+
+        let english = TranslationCatalog::from_resource_packs_mut(&mut manager, Language::English);
+        assert_eq!(english.lookup("fallback"), "Built-in fallback");
+        assert_eq!(english.lookup("menu.multiplayer"), "Selected multiplayer");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn immutable_format_and_language_switch_use_catalog_values() {
+        let english = TranslationCatalog::builtin(Language::English);
+        let german = TranslationCatalog::builtin(Language::German);
+        assert_ne!(
+            english.lookup("menu.multiplayer"),
+            german.lookup("menu.multiplayer")
+        );
+        assert_eq!(
+            english.format_lookup("hud.fov", &[("value", "90")]),
+            "FOV < 90 >"
+        );
+        assert_eq!(
+            german.format_lookup("hud.fov", &[("value", "90")]),
+            "SICHTFELD < 90 >"
+        );
+        assert_eq!(
+            english.format_lookup("menu.game_mode", &[("value", "SURVIVAL")]),
+            "GAME MODE: < SURVIVAL >"
+        );
+        assert_eq!(
+            german.format_lookup("menu.world_type", &[("value", "DEFAULT")]),
+            "WELTTYP: < DEFAULT >"
+        );
+        assert_eq!(
+            english.format_lookup(
+                "station.cost_lapis",
+                &[
+                    ("enchantment", "SHARPNESS I"),
+                    ("cost", "3"),
+                    ("lapis", "2")
+                ],
+            ),
+            "SHARPNESS I  COST 3 + 2 LAPIS"
+        );
+        assert_eq!(
+            english.format_lookup("hud.master_volume", &[("value", "80")]),
+            "MASTER VOLUME < 80% >"
+        );
+        assert_eq!(
+            german.format_lookup("station.brewing_progress", &[("value", "50")]),
+            "BRAUEN 50 PROZENT"
+        );
     }
 
     #[test]

@@ -1217,21 +1217,6 @@ enum ControlAction {
     Inventory,
 }
 
-impl ControlAction {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Forward => "FORWARD",
-            Self::Backward => "BACKWARD",
-            Self::Left => "LEFT",
-            Self::Right => "RIGHT",
-            Self::Jump => "JUMP",
-            Self::Sprint => "SPRINT",
-            Self::Sneak => "SNEAK",
-            Self::Inventory => "INVENTORY",
-        }
-    }
-}
-
 fn back_transition(
     screen: MenuScreen,
     _active_field: Option<TextField>,
@@ -1356,6 +1341,10 @@ impl Menu {
 
     fn tr(&self, key: &str) -> String {
         self.catalog.lookup(key)
+    }
+
+    fn on_off_label(&self, value: bool) -> String {
+        self.tr(if value { "menu.on" } else { "menu.off" })
     }
 
     pub async fn new(window: Arc<Window>, settings: GameSettings) -> Self {
@@ -2569,7 +2558,7 @@ impl Menu {
                 );
                 draw_centered_text(
                     vertices,
-                    "MULTIPLAYER",
+                    &self.tr("menu.multiplayer"),
                     0.068,
                     0.010,
                     aspect,
@@ -2658,7 +2647,7 @@ impl Menu {
         panel(vertices, -0.64, 0.64, -0.72, 0.78);
         draw_centered_text(
             vertices,
-            "MULTIPLAYER",
+            &self.tr("menu.multiplayer"),
             0.67,
             0.012,
             aspect,
@@ -2670,13 +2659,13 @@ impl Menu {
             (
                 -0.52,
                 -0.02,
-                "HOST GAME",
+                self.tr("menu.host_game"),
                 self.multiplayer_mode == MultiplayerMode::Host,
             ),
             (
                 0.02,
                 0.52,
-                "JOIN GAME",
+                self.tr("menu.join_game"),
                 self.multiplayer_mode == MultiplayerMode::Join,
             ),
         ] {
@@ -2684,7 +2673,7 @@ impl Menu {
             draw_button_state(vertices, x0, x1, 0.45, 0.58, hover, selected);
             draw_centered_text_in(
                 vertices,
-                label,
+                &label,
                 x0,
                 x1,
                 0.488,
@@ -2698,7 +2687,7 @@ impl Menu {
         match self.multiplayer_mode {
             MultiplayerMode::Host => draw_field(
                 vertices,
-                "PORT",
+                &self.tr("menu.port"),
                 &self.host_port,
                 -0.52,
                 0.52,
@@ -2711,7 +2700,7 @@ impl Menu {
             MultiplayerMode::Join => {
                 draw_field(
                     vertices,
-                    "SERVER ADDRESS",
+                    &self.tr("menu.server_address"),
                     &self.server_address,
                     -0.56,
                     -0.02,
@@ -2723,7 +2712,7 @@ impl Menu {
                 );
                 draw_field(
                     vertices,
-                    "PORT",
+                    &self.tr("menu.port"),
                     &self.join_port,
                     -0.56,
                     -0.02,
@@ -2735,7 +2724,7 @@ impl Menu {
                 );
                 draw_field(
                     vertices,
-                    "USERNAME",
+                    &self.tr("menu.username"),
                     &self.username,
                     -0.56,
                     -0.02,
@@ -2808,7 +2797,7 @@ impl Menu {
                 );
                 draw_centered_text_in(
                     vertices,
-                    "PING SERVER",
+                    &self.tr("menu.ping_server"),
                     0.04,
                     0.56,
                     -0.204,
@@ -2821,15 +2810,18 @@ impl Menu {
         }
 
         let confirm_label = match self.multiplayer_mode {
-            MultiplayerMode::Host => "SELECT WORLD",
-            MultiplayerMode::Join => "CONNECT",
+            MultiplayerMode::Host => self.tr("menu.select_world"),
+            MultiplayerMode::Join => self.tr("menu.connect"),
         };
-        for (x0, x1, label) in [(-0.52, -0.02, confirm_label), (0.02, 0.52, "BACK")] {
+        for (x0, x1, label) in [
+            (-0.52, -0.02, confirm_label),
+            (0.02, 0.52, self.tr("menu.back")),
+        ] {
             let hover = hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.58, -0.45);
             draw_button(vertices, x0, x1, -0.58, -0.45, hover);
             draw_centered_text_in(
                 vertices,
-                label,
+                &label,
                 x0,
                 x1,
                 -0.542,
@@ -2855,7 +2847,7 @@ impl Menu {
         if self.worlds.is_empty() {
             draw_centered_text(
                 vertices,
-                "NO WORLDS YET",
+                &self.tr("menu.no_worlds"),
                 0.14,
                 0.010,
                 aspect,
@@ -2923,7 +2915,7 @@ impl Menu {
         if self.worlds.len() > 5 {
             draw_text(
                 vertices,
-                "SCROLL FOR MORE WORLDS",
+                &self.tr("menu.scroll_more_worlds"),
                 0.38,
                 -0.44,
                 0.0048,
@@ -2933,9 +2925,9 @@ impl Menu {
             );
         }
         for (x0, x1, label) in [
-            (-0.72, -0.27, "PLAY SELECTED"),
-            (-0.23, 0.23, "CREATE NEW WORLD"),
-            (0.27, 0.72, "DELETE"),
+            (-0.72, -0.27, self.tr("menu.play_selected")),
+            (-0.23, 0.23, self.tr("menu.create_new_world")),
+            (0.27, 0.72, self.tr("menu.delete")),
         ] {
             draw_button(
                 vertices,
@@ -2947,7 +2939,7 @@ impl Menu {
             );
             draw_centered_text_in(
                 vertices,
-                label,
+                &label,
                 x0,
                 x1,
                 -0.602,
@@ -2958,9 +2950,9 @@ impl Menu {
             );
         }
         for (x0, x1, label) in [
-            (-0.72, -0.27, "COPY"),
-            (-0.23, 0.23, "BACKUP"),
-            (0.27, 0.72, "BACK"),
+            (-0.72, -0.27, self.tr("menu.copy")),
+            (-0.23, 0.23, self.tr("menu.backup")),
+            (0.27, 0.72, self.tr("menu.back")),
         ] {
             draw_button(
                 vertices,
@@ -2972,7 +2964,7 @@ impl Menu {
             );
             draw_centered_text_in(
                 vertices,
-                label,
+                &label,
                 x0,
                 x1,
                 -0.805,
@@ -2988,7 +2980,7 @@ impl Menu {
         panel(vertices, -0.64, 0.64, -0.92, 0.78);
         draw_centered_text(
             vertices,
-            "CREATE NEW WORLD",
+            &self.tr("menu.create_new_world"),
             0.67,
             0.012,
             aspect,
@@ -2997,7 +2989,7 @@ impl Menu {
         );
         draw_field(
             vertices,
-            "WORLD NAME",
+            &self.tr("menu.world_name"),
             &self.create_name,
             -0.52,
             0.52,
@@ -3008,14 +3000,14 @@ impl Menu {
             &self.font_source,
         );
         let seed = if self.create_seed.is_empty() {
-            "RANDOM"
+            self.tr("menu.random")
         } else {
-            &self.create_seed
+            self.create_seed.clone()
         };
         draw_field(
             vertices,
-            "SEED",
-            seed,
+            &self.tr("menu.seed"),
+            &seed,
             -0.52,
             0.52,
             0.13,
@@ -3041,7 +3033,10 @@ impl Menu {
         );
         draw_centered_text(
             vertices,
-            &format!("GAME MODE: < {} >", game_mode_name(self.create_mode)),
+            &self.catalog.format_lookup(
+                "menu.game_mode",
+                &[("value", game_mode_name(self.create_mode))],
+            ),
             -0.042,
             0.007,
             aspect,
@@ -3065,7 +3060,10 @@ impl Menu {
         );
         draw_centered_text(
             vertices,
-            &format!("DIFFICULTY: < {} >", self.create_difficulty.as_str()),
+            &self.catalog.format_lookup(
+                "menu.difficulty",
+                &[("value", self.create_difficulty.as_str())],
+            ),
             -0.252,
             0.007,
             aspect,
@@ -3089,7 +3087,10 @@ impl Menu {
         );
         draw_centered_text(
             vertices,
-            &format!("WORLD TYPE: < {} >", self.create_world_type.as_str()),
+            &self.catalog.format_lookup(
+                "menu.world_type",
+                &[("value", self.create_world_type.as_str())],
+            ),
             -0.372,
             0.007,
             aspect,
@@ -3126,16 +3127,13 @@ impl Menu {
                 -0.43,
             ),
         );
+        let structures_value = self.on_off_label(self.create_generate_structures);
+        let structures_text = self
+            .catalog
+            .format_lookup("menu.structures", &[("value", &structures_value)]);
         draw_centered_text_in(
             vertices,
-            &format!(
-                "STRUCTURES: {}",
-                if self.create_generate_structures {
-                    "ON"
-                } else {
-                    "OFF"
-                }
-            ),
+            &structures_text,
             -0.52,
             -0.02,
             -0.505,
@@ -3144,12 +3142,13 @@ impl Menu {
             [1.0; 4],
             &self.font_source,
         );
+        let hardcore_value = self.on_off_label(self.create_hardcore);
+        let hardcore_text = self
+            .catalog
+            .format_lookup("menu.hardcore", &[("value", &hardcore_value)]);
         draw_centered_text_in(
             vertices,
-            &format!(
-                "HARDCORE: {}",
-                if self.create_hardcore { "ON" } else { "OFF" }
-            ),
+            &hardcore_text,
             0.02,
             0.52,
             -0.505,
@@ -3188,12 +3187,13 @@ impl Menu {
                 -0.58,
             ),
         );
+        let bonus_value = self.on_off_label(self.create_bonus_chest);
+        let bonus_text = self
+            .catalog
+            .format_lookup("menu.bonus_chest", &[("value", &bonus_value)]);
         draw_centered_text_in(
             vertices,
-            &format!(
-                "BONUS CHEST: {}",
-                if self.create_bonus_chest { "ON" } else { "OFF" }
-            ),
+            &bonus_text,
             -0.52,
             -0.02,
             -0.657,
@@ -3202,9 +3202,13 @@ impl Menu {
             [1.0; 4],
             &self.font_source,
         );
+        let cheats_value = self.on_off_label(self.create_cheats);
+        let cheats_text = self
+            .catalog
+            .format_lookup("menu.cheats", &[("value", &cheats_value)]);
         draw_centered_text_in(
             vertices,
-            &format!("CHEATS: {}", if self.create_cheats { "ON" } else { "OFF" }),
+            &cheats_text,
             0.02,
             0.52,
             -0.657,
@@ -3245,7 +3249,7 @@ impl Menu {
         );
         draw_centered_text_in(
             vertices,
-            "CREATE WORLD",
+            &self.tr("menu.create_world"),
             -0.52,
             -0.02,
             -0.798,
@@ -3256,7 +3260,7 @@ impl Menu {
         );
         draw_centered_text_in(
             vertices,
-            "CANCEL",
+            &self.tr("menu.cancel"),
             0.02,
             0.52,
             -0.798,
@@ -3278,26 +3282,44 @@ impl Menu {
             [1.0; 4],
             &self.font_source,
         );
+        let fov_value = format!("{:.0}", self.settings.fov);
+        let render_distance_value = self.settings.render_distance.to_string();
+        let fullscreen_value = self.on_off_label(self.settings.fullscreen);
+        let vsync_value = self.on_off_label(self.settings.vsync);
+        let fps_cap_value = fps_cap_label(self.settings.fps_cap);
+        let master_volume_value = percent(self.settings.master_volume).to_string();
+        let music_volume_value = percent(self.settings.music_volume).to_string();
+        let sound_volume_value = percent(self.settings.sound_volume).to_string();
+        let weather_volume_value = percent(self.settings.weather_volume).to_string();
         let left = [
-            format!("FOV: < {:.0} >", self.settings.fov),
-            format!("RENDER DISTANCE: < {} >", self.settings.render_distance),
-            format!("FULLSCREEN: < {} >", on_off(self.settings.fullscreen)),
-            format!("VSYNC: < {} >", on_off(self.settings.vsync)),
-            format!("DIFFICULTY: < {} >", self.settings.difficulty.as_str()),
-            format!("FPS CAP: < {} >", fps_cap_label(self.settings.fps_cap)),
+            self.catalog
+                .format_lookup("menu.fov", &[("value", &fov_value)]),
+            self.catalog
+                .format_lookup("menu.render_distance", &[("value", &render_distance_value)]),
+            self.catalog
+                .format_lookup("menu.fullscreen", &[("value", &fullscreen_value)]),
+            self.catalog
+                .format_lookup("menu.vsync", &[("value", &vsync_value)]),
+            self.catalog.format_lookup(
+                "menu.difficulty",
+                &[("value", self.settings.difficulty.as_str())],
+            ),
+            self.catalog
+                .format_lookup("menu.fps_cap", &[("value", &fps_cap_value)]),
         ];
         let right = [
-            format!(
-                "MASTER VOLUME: < {}% >",
-                percent(self.settings.master_volume)
+            self.catalog
+                .format_lookup("menu.master_volume", &[("value", &master_volume_value)]),
+            self.catalog
+                .format_lookup("menu.music_volume", &[("value", &music_volume_value)]),
+            self.catalog
+                .format_lookup("menu.sound_volume", &[("value", &sound_volume_value)]),
+            self.catalog
+                .format_lookup("menu.weather_volume", &[("value", &weather_volume_value)]),
+            self.catalog.format_lookup(
+                "menu.language",
+                &[("value", self.settings.language.as_str())],
             ),
-            format!("MUSIC VOLUME: < {}% >", percent(self.settings.music_volume)),
-            format!("SOUND VOLUME: < {}% >", percent(self.settings.sound_volume)),
-            format!(
-                "WEATHER VOLUME: < {}% >",
-                percent(self.settings.weather_volume)
-            ),
-            format!("LANGUAGE: < {} >", self.settings.language.as_str()),
             self.tr("menu.accessibility"),
         ];
         for (row, label) in left.iter().enumerate() {
@@ -3359,9 +3381,9 @@ impl Menu {
             );
         }
         for (x0, x1, label) in [
-            (-0.82, -0.30, "RESOURCE PACKS"),
-            (-0.25, 0.25, "CONTROLS"),
-            (0.30, 0.82, "DONE"),
+            (-0.82, -0.30, self.tr("menu.resource_packs")),
+            (-0.25, 0.25, self.tr("menu.controls")),
+            (0.30, 0.82, self.tr("menu.done")),
         ] {
             draw_button(
                 vertices,
@@ -3373,7 +3395,7 @@ impl Menu {
             );
             draw_centered_text_in(
                 vertices,
-                label,
+                &label,
                 x0,
                 x1,
                 -0.738,
@@ -3480,24 +3502,35 @@ impl Menu {
             };
             let top = 0.56 - row as f32 * 0.18;
             let value = match setting {
-                crate::accessibility::AccessibilityRow::UiScale => {
-                    format!("UI SCALE: < {:.2}x >", self.settings.accessibility.ui_scale)
-                }
-                crate::accessibility::AccessibilityRow::ChatScale => {
-                    format!(
-                        "CHAT SCALE: < {:.2}x >",
-                        self.settings.accessibility.chat_scale
+                crate::accessibility::AccessibilityRow::UiScale => self.catalog.format_lookup(
+                    "menu.ui_scale_value",
+                    &[(
+                        "value",
+                        &format!("{:.2}x", self.settings.accessibility.ui_scale),
+                    )],
+                ),
+                crate::accessibility::AccessibilityRow::ChatScale => self.catalog.format_lookup(
+                    "menu.chat_scale_value",
+                    &[(
+                        "value",
+                        &format!("{:.2}x", self.settings.accessibility.chat_scale),
+                    )],
+                ),
+                crate::accessibility::AccessibilityRow::ChatOpacity => self.catalog.format_lookup(
+                    "menu.chat_opacity_value",
+                    &[(
+                        "value",
+                        &format!("{}%", percent(self.settings.accessibility.chat_opacity)),
+                    )],
+                ),
+                _ => {
+                    let label = accessibility_label(&self.catalog, setting);
+                    let toggle = self.on_off_label(self.settings.accessibility.bool_value(setting));
+                    self.catalog.format_lookup(
+                        "menu.setting_value",
+                        &[("label", &label), ("value", &toggle)],
                     )
                 }
-                crate::accessibility::AccessibilityRow::ChatOpacity => format!(
-                    "CHAT OPACITY: < {}% >",
-                    percent(self.settings.accessibility.chat_opacity)
-                ),
-                _ => format!(
-                    "{}: < {} >",
-                    accessibility_label(&self.catalog, setting),
-                    on_off(self.settings.accessibility.bool_value(setting))
-                ),
             };
             draw_button(
                 vertices,
@@ -3567,7 +3600,7 @@ impl Menu {
         if available.is_empty() {
             draw_centered_text(
                 vertices,
-                "NO USER PACKS FOUND",
+                &self.tr("menu.no_user_packs"),
                 0.22,
                 0.007,
                 aspect,
@@ -3612,9 +3645,9 @@ impl Menu {
             );
         }
         for (x0, x1, label) in [
-            (-0.78, -0.28, "APPLY"),
-            (-0.22, 0.22, "RELOAD"),
-            (0.28, 0.78, "BACK"),
+            (-0.78, -0.28, self.tr("menu.apply")),
+            (-0.22, 0.22, self.tr("menu.reload")),
+            (0.28, 0.78, self.tr("menu.back")),
         ] {
             draw_button(
                 vertices,
@@ -3626,7 +3659,7 @@ impl Menu {
             );
             draw_centered_text_in(
                 vertices,
-                label,
+                &label,
                 x0,
                 x1,
                 -0.738,
@@ -3656,7 +3689,7 @@ impl Menu {
         panel(vertices, -0.86, 0.86, -0.88, 0.82);
         draw_centered_text(
             vertices,
-            "CONTROLS",
+            &self.tr("menu.controls"),
             0.72,
             0.012,
             aspect,
@@ -3680,9 +3713,12 @@ impl Menu {
         );
         draw_centered_text(
             vertices,
-            &format!(
-                "MOUSE SENSITIVITY: < {:.1} >",
-                self.settings.sensitivity * 1000.0
+            &self.catalog.format_lookup(
+                "menu.mouse_sensitivity",
+                &[(
+                    "value",
+                    &format!("{:.1}", self.settings.sensitivity * 1000.0),
+                )],
             ),
             0.528,
             0.0065,
@@ -3727,13 +3763,19 @@ impl Menu {
                 active,
             );
             let value = if active {
-                "PRESS A KEY"
+                self.tr("menu.press_a_key")
             } else {
-                key_name(self.control(action))
+                key_name(self.control(action)).to_string()
             };
             draw_centered_text_in(
                 vertices,
-                &format!("{}: {}", action.label(), value),
+                &self.catalog.format_lookup(
+                    "menu.control_value",
+                    &[
+                        ("action", &control_label(&self.catalog, action)),
+                        ("value", &value),
+                    ],
+                ),
                 x0,
                 x1,
                 top - 0.098,
@@ -3760,7 +3802,7 @@ impl Menu {
         );
         draw_centered_text(
             vertices,
-            "DONE",
+            &self.tr("menu.done"),
             -0.738,
             0.008,
             aspect,
@@ -3787,7 +3829,7 @@ impl Menu {
         panel(vertices, -0.58, 0.58, -0.32, 0.34);
         draw_centered_text(
             vertices,
-            "DELETE THIS WORLD?",
+            &self.tr("menu.delete_world"),
             0.20,
             0.011,
             aspect,
@@ -3796,7 +3838,7 @@ impl Menu {
         );
         draw_centered_text(
             vertices,
-            "THIS CANNOT BE UNDONE",
+            &self.tr("menu.delete_warning"),
             0.08,
             0.0065,
             aspect,
@@ -3835,7 +3877,7 @@ impl Menu {
         );
         draw_centered_text_in(
             vertices,
-            "DELETE",
+            &self.tr("menu.delete"),
             -0.48,
             -0.02,
             -0.118,
@@ -3846,7 +3888,7 @@ impl Menu {
         );
         draw_centered_text_in(
             vertices,
-            "CANCEL",
+            &self.tr("menu.cancel"),
             0.02,
             0.48,
             -0.118,
@@ -3922,14 +3964,6 @@ fn options_row_at(y: f32) -> Option<usize> {
         .position(|top| y <= *top && y >= *top - 0.13)
 }
 
-fn on_off(value: bool) -> &'static str {
-    if value {
-        "ON"
-    } else {
-        "OFF"
-    }
-}
-
 fn accessibility_label(
     catalog: &TranslationCatalog,
     row: crate::accessibility::AccessibilityRow,
@@ -3945,6 +3979,20 @@ fn accessibility_label(
         crate::accessibility::AccessibilityRow::ToggleSneak => "menu.toggle_sneak",
         crate::accessibility::AccessibilityRow::CameraBobbing => "menu.camera_bobbing",
         crate::accessibility::AccessibilityRow::DamageTilt => "menu.damage_tilt",
+    };
+    catalog.lookup(key)
+}
+
+fn control_label(catalog: &TranslationCatalog, action: ControlAction) -> String {
+    let key = match action {
+        ControlAction::Forward => "menu.control_forward",
+        ControlAction::Backward => "menu.control_backward",
+        ControlAction::Left => "menu.control_left",
+        ControlAction::Right => "menu.control_right",
+        ControlAction::Jump => "menu.control_jump",
+        ControlAction::Sprint => "menu.control_sprint",
+        ControlAction::Sneak => "menu.control_sneak",
+        ControlAction::Inventory => "menu.control_inventory",
     };
     catalog.lookup(key)
 }
