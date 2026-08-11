@@ -241,6 +241,13 @@ The shared headless authority lives in `authority::AuthorityCore` and
   and open container viewers. `ServerRuntime::drain_routed_updates` exposes the
   bounded, dimension-checked routing ledger; the network packet adapter remains
   a separate Plan 18 B/D seam.
+- `authority::{fishing,transactions,combat}` are the gameplay-domain seams:
+  fishing and brewing advance exactly one fixed 20 Hz step, rich workstation
+  sources are compare-and-committed atomically, and combat derives damage from
+  authenticated pose/cooldown/equipment before publishing session/entity death,
+  drops, XP, shield durability, and respawn deltas. Brew action `2` is the
+  explicit ready-output take operation in protocol v16; fixed ticks never debit
+  reserved inputs on their own.
 - `ServerRuntime` is transport/session/scheduling/save/metrics glue. It does
   not maintain a parallel authoritative block/entity map.
 
@@ -487,6 +494,12 @@ Plan21 Phase A additionally keeps simultaneous dimension worlds and per-session
 interest/revision routing isolated in headless tests, with persistence and
 topology/reconnect regression coverage. Its fishing/furnace and listen-State
 follow-up phases remain unchecked.
+Plan22 adds `tests/authority_gameplay_domains.rs`, a dedicated headless vector
+for fishing fixed-tick cast/bite/reel idempotency, furnace/craft/enchant/anvil
+transactions, explicit brew-ready take and reconnect cleanup, and combat
+shield/knockback/death/keep-inventory/respawn behavior. The vector and the
+authority domain suites pass; GPU/window, transport-topology, and 30-minute
+soak artifacts remain outside this plan.
 
 Use:
 

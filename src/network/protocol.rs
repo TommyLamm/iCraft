@@ -310,7 +310,7 @@ pub enum GameplayOperation {
         option: u8,
     },
     Brew {
-        /// 0 = start, 1 = cancel.
+        /// 0 = start, 1 = cancel, 2 = take ready output.
         action: u8,
         x: i32,
         y: i32,
@@ -458,10 +458,13 @@ impl GameplayRequest {
                 bottles,
                 ..
             } => {
-                if *action > 1 {
+                if *action > 2 {
                     return Err(RejectReason::InvalidState);
                 }
                 if *action == 0 && (ingredient.is_none() || bottles.iter().all(Option::is_none)) {
+                    return Err(RejectReason::InvalidState);
+                }
+                if *action > 0 && (ingredient.is_some() || bottles.iter().any(Option::is_some)) {
                     return Err(RejectReason::InvalidState);
                 }
                 if let Some(source) = ingredient {

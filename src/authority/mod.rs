@@ -674,13 +674,7 @@ impl AuthorityCore {
                 );
                 let context = WorkstationContext::at(pending.station, block);
                 match transactions::tick_brew(&mut candidate, context) {
-                    Ok(BrewTick::Ready) => {
-                        // Brew is settled on the exact 200th step because the
-                        // compact wire has start/cancel but no separate take.
-                        if transactions::take_brew(&mut candidate, context).is_err() {
-                            candidate.brew = None;
-                        }
-                    }
+                    Ok(BrewTick::Ready) => {}
                     Ok(BrewTick::Brewing { .. }) => {}
                     Err(_) => candidate.brew = None,
                 }
@@ -1116,6 +1110,10 @@ impl AuthorityCore {
                         transactions::cancel_brew(&mut candidate, context)
                             .map_err(map_transaction_error)?;
                     }
+                    2 if ingredient.is_none() && bottles.iter().all(Option::is_none) => {
+                        transactions::take_brew(&mut candidate, context)
+                            .map_err(map_transaction_error)?;
+                    }
                     _ => return Err(RejectReason::InvalidState),
                 }
             }
@@ -1389,9 +1387,11 @@ impl AuthorityCore {
             return false;
         };
         session.gameplay.is_dead = false;
+        session.gameplay.death_source = None;
         session.gameplay.health_milli = session.gameplay.max_health_milli;
         session.gameplay.hunger_milli = 20_000;
         session.gameplay.saturation_milli = 5_000;
+        session.gameplay.velocity_milli = [0; 3];
         session.gameplay.mounted_entity = None;
         if hardcore {
             session.game_mode = crate::inventory::GameMode::Spectator;

@@ -94,6 +94,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow、selected-pack texture/sound/lang/model/font consumers 與 C 自動化基礎已通過；完整網路三場景、GPU/DPI/音效 artifact 與 soak 仍待完成 |
 | 20 | [Plan01–17 回歸硬化](20_plan01_17_regression_hardening.md) | 已完成；debug/release 結構 seed、Plan15 legacy metadata／備份與 `mob_griefing` consumer 語義均有回歸測試 |
 | 21 | [多維度權威拓撲與 Plan18 既有缺口](21_multidimension_authority_topology_followup.md) | Phase A 多維度 headless authority、session routing、interest/persistence foundation 與 topology/persistence 回歸已通過；玩法 B、listen State/C 與完整 reconnect/GPU/soak 驗收仍待後續 |
+| 22 | [Plan21 玩法權威域完成](22_authority_gameplay_domains_completion.md) | 已完成；fishing、workstation transaction、brew ready/take 與 combat/death/respawn headless authority vector 通過；GPU/transport/soak 不在本計劃 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
