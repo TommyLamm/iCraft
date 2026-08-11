@@ -281,7 +281,11 @@ struct ReplicationGate {
     entity_sequences: HashMap<(u8, u64), u64>,
     health_sequences: HashMap<PlayerId, u64>,
     effect_sequences: HashMap<PlayerId, u64>,
-    session_revisions: HashMap<PlayerId, (u8, u64)>,
+    /// Session snapshots carry a global per-session sequence in addition to
+    /// a dimension-scoped gameplay revision.  The sequence is the ordering
+    /// authority across dimension transfers; the revision is checked only
+    /// when the dimension remains unchanged.
+    session_revisions: HashMap<PlayerId, (u8, u64, u64)>,
     block_entity_revisions: HashMap<(u8, i32, i32, i32), u64>,
     container_revisions: HashMap<(u8, i32, i32, i32), u64>,
 }
@@ -317,16 +321,25 @@ impl ReplicationGate {
         true
     }
 
-    fn accept_session(&mut self, player_id: PlayerId, dimension: u8, revision: u64) -> bool {
-        if self.session_revisions.get(&player_id).is_some_and(
-            |(latest_dimension, latest_revision)| {
-                *latest_dimension == dimension && revision <= *latest_revision
-            },
-        ) {
-            return false;
+    fn accept_session(
+        &mut self,
+        player_id: PlayerId,
+        dimension: u8,
+        sequence: u64,
+        revision: u64,
+    ) -> bool {
+        if let Some((latest_dimension, latest_sequence, latest_revision)) =
+            self.session_revisions.get(&player_id).copied()
+        {
+            if sequence <= latest_sequence {
+                return false;
+            }
+            if latest_dimension == dimension && revision <= latest_revision {
+                return false;
+            }
         }
         self.session_revisions
-            .insert(player_id, (dimension, revision));
+            .insert(player_id, (dimension, sequence, revision));
         true
     }
 
@@ -516,7 +529,8 @@ fn prepare_gameplay_request(
     }
     // Explicit stale sequence/revision values are authoritative client input:
     // preserve them so the server can return OutOfOrder/InvalidRevision rather
-    // than silently turning a replay into a fresh mutation.
+    // than silently turning a replay into a fresh mutation.  State's typed
+    // egress seam supplies the latest acknowledged revision for new inputs.
     if request.client_revision > *last_client_revision {
         *last_client_revision = request.client_revision;
     }
@@ -901,7 +915,12 @@ async fn run_client(
                         ..
                     }) => {
                         if state.validate_bounds().is_ok()
-                            && replication_gate.accept_session(player_id, dimension, state.revision)
+                            && replication_gate.accept_session(
+                                player_id,
+                                dimension,
+                                sequence,
+                                state.revision,
+                            )
                         {
                             let _ = client_to_game.send(ClientToGame::PlayerSessionUpdate {
                                 sequence,
@@ -2028,6 +2047,31 @@ mod tests {
             }
         ));
 
+        game_tx
+            .send(GameToClient::GameplayRequest {
+                request: GameplayRequest {
+                    request_id: 0,
+                    client_sequence: 0,
+                    session_id: 0,
+                    dimension: 1,
+                    client_revision: 17,
+                    operation: crate::network::protocol::GameplayOperation::ItemUse {
+                        item: crate::inventory::Item::Bread as u32,
+                        count: 1,
+                    },
+                },
+            })
+            .unwrap();
+        let typed = next_request(&server_rx);
+        assert_eq!(typed.session_id, player_id);
+        assert_eq!(typed.client_sequence, 6);
+        assert_eq!(typed.client_revision, 17);
+        assert!(matches!(
+            typed.operation,
+            crate::network::protocol::GameplayOperation::ItemUse { item, count }
+                if item == crate::inventory::Item::Bread as u32 && count == 1
+        ));
+
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
         host_tx.send(HostToServer::Stop).unwrap();
@@ -2220,10 +2264,10 @@ mod tests {
         assert!(gate.accept_entity(0, 10, 1));
         assert!(gate.accept_entity(1, 9, 1));
 
-        assert!(gate.accept_session(4, 0, 0));
-        assert!(!gate.accept_session(4, 0, 0));
-        assert!(gate.accept_session(4, 0, 1));
-        assert!(gate.accept_session(4, 1, 0));
+        assert!(gate.accept_session(4, 0, 1, 0));
+        assert!(!gate.accept_session(4, 0, 2, 0));
+        assert!(gate.accept_session(4, 0, 3, 1));
+        assert!(gate.accept_session(4, 1, 4, 0));
 
         assert!(gate.accept_health(4, 7));
         assert!(!gate.accept_health(4, 7));

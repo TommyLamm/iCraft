@@ -372,6 +372,22 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert!(runtime.metrics.outbound_bytes >= runtime.metrics.outbound_packets.saturating_mul(4));
     assert_eq!(runtime.metrics.queue_depth, 0);
 
+    // SessionGameplayUpdate is a private projection lane: the owner receives
+    // its rich gameplay snapshot during login while the other authenticated
+    // client never sees Alice's session payload.
+    assert!(alice.events.iter().any(|event| {
+        matches!(
+            event,
+            ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == alice_id
+        )
+    }));
+    assert!(!bob.events.iter().any(|event| {
+        matches!(
+            event,
+            ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == alice_id
+        )
+    }));
+
     alice.send(GameToClient::SendPosition {
         sequence: 1,
         sender_time_millis: 1,

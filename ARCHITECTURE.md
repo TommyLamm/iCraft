@@ -500,6 +500,16 @@ transactions, explicit brew-ready take and reconnect cleanup, and combat
 shield/knockback/death/keep-inventory/respawn behavior. The vector and the
 authority domain suites pass; GPU/window, transport-topology, and 30-minute
 soak artifacts remain outside this plan.
+Plan23 completes the State/NetworkClient authority cutover for Join Client
+inputs: each mutating input emits one typed `GameplayRequest`, while embedded
+and socket roots share the ACK/session/world/entity/container projection lane.
+Session snapshots are gated by dimension, sequence, and revision; a dimension
+transfer clears presentation caches before ordered ChunkData/entity deltas
+repopulate them. The listen + two-client headless vector verifies request
+delivery, interest isolation, duplicate/stale rejection, and owner-private
+session payloads. Station-specific craft/enchant/anvil progress projection,
+full Plan22 gameplay parity across all three topologies, transport metrics race,
+GPU/window artifacts, and soak remain explicit follow-up boundaries.
 
 Use:
 

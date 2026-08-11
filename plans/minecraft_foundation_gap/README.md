@@ -95,6 +95,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 20 | [Plan01–17 回歸硬化](20_plan01_17_regression_hardening.md) | 已完成；debug/release 結構 seed、Plan15 legacy metadata／備份與 `mob_griefing` consumer 語義均有回歸測試 |
 | 21 | [多維度權威拓撲與 Plan18 既有缺口](21_multidimension_authority_topology_followup.md) | Phase A 多維度 headless authority、session routing、interest/persistence foundation 與 topology/persistence 回歸已通過；玩法 B、listen State/C 與完整 reconnect/GPU/soak 驗收仍待後續 |
 | 22 | [Plan21 玩法權威域完成](22_authority_gameplay_domains_completion.md) | 已完成；fishing、workstation transaction、brew ready/take 與 combat/death/respawn headless authority vector 通過；GPU/transport/soak 不在本計劃 |
+| 23 | [State／Runtime 權威接線與三拓撲收斂](23_state_runtime_topology_completion.md) | 核心完成；Join Client typed egress、owner-private projection、listen + 2 clients headless gates 通過；station-specific progress、完整 Plan22 三拓撲對照與 manual GPU/soak 仍後續 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
@@ -154,4 +155,10 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 5. 村民交易、代表性怪物、寵物與交通形成可持續探索循環。
 6. 建築形狀、碰撞、光照、流體和紅石自動化能跨 Chunk 正確工作。
 7. 伺服器權威、存檔重載和版本遷移不產生複製、丟失或客戶端分歧。
+
+Plan23 核心接線已完成：Join Client 的 State inputs 走 typed
+`GameplayRequest`，embedded/socket 共用權威 projection，listen + 2 clients
+headless request/interest/owner-private session vector 通過。craft/enchant/anvil
+station-specific progress、完整 Plan22 三拓撲對照、transport metrics race、GPU
+與 soak 仍明確保留給後續 plan，不在本次狀態宣稱完成。
 

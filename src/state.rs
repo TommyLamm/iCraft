@@ -2304,6 +2304,13 @@ impl State {
         if target == self.current_dimension {
             return;
         }
+        if !self.is_authoritative() {
+            // Join Clients do not infer a portal transfer from their local
+            // chunk cache.  The authority changes the session dimension and
+            // the ordered PlayerSessionUpdate/ChunkData projection below
+            // rebuilds this presentation root.
+            return;
+        }
         if let Some(runtime) = self.embedded_runtime.as_mut() {
             if !runtime.set_session_dimension(target) {
                 return;
@@ -2445,6 +2452,50 @@ impl State {
                 .save_current_dimension(target);
         }
         println!("[Dimension] {} -> {}", source.name(), target.name());
+    }
+
+    /// Reset only renderer/presentation caches after an authority-owned
+    /// dimension transfer. No local world generation, save, or gameplay
+    /// mutation is allowed on this path; subsequent ChunkData/Entity events
+    /// repopulate the new dimension through the network projection lane.
+    fn reset_presented_dimension(&mut self, target: crate::dimension::Dimension) {
+        if target == self.current_dimension {
+            return;
+        }
+        self.inventory.dragged = None;
+        self.inventory.creative_drag_origin = None;
+        self.inventory.is_open = false;
+        self.inventory.is_table_open = false;
+        self.container_target = None;
+        self.container_is_double = false;
+        self.active_station = None;
+        self.sync_cursor_mode();
+
+        clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
+        self.remote_player_health.clear();
+        self.remote_player_effects.clear();
+        self.clear_replicated_entities();
+        self.fishing_manager.active_hooks.clear();
+        self.current_dimension = target;
+        let render_distance = self.chunk_manager.render_distance;
+        self.teardown_terrain_runtime("authority dimension projection");
+        self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
+        self.entity_manager = crate::entity::EntityManager::new();
+        self.mount_manager = crate::vehicle::MountManager::new();
+        self.particles = crate::particles::ParticleSystem::new();
+        self.redstone = crate::redstone::RedstoneSystem::new();
+        self.redstone_tick_timer = 0.0;
+        self.pending_chunk_payloads.clear();
+        self.pending_block_changes.clear();
+        self.client_chunk_revisions.clear();
+        self.mining_target = None;
+        self.mining_progress = 0.0;
+        self.left_mouse_pressed = false;
+        self.water_tick_timer = 0.0;
+        self.lava_tick_timer = 0.0;
+        self.lava_damage_timer = 0.0;
+        self.cactus_damage_timer = 0.0;
+        self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
     }
 
     fn update_portal_travel(&mut self, dt: f32) {
@@ -3138,7 +3189,7 @@ impl EmbeddedRuntimeBridge {
         self.input.submit_request(self.session_id, request)?;
         self.pending_request_dimensions
             .insert(request_id, dimension);
-        self.next_request_id = self.next_request_id.wrapping_add(1);
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
         self.next_client_sequence = self.next_client_sequence.saturating_add(1);
         Ok(())
     }
@@ -4946,6 +4997,21 @@ impl NetworkHandle {
         }
     }
 
+    /// Publish one already-typed gameplay operation to a joining client.
+    /// Embedded hosts use `State::submit_authority_request` so their local
+    /// producer shares the runtime FIFO; this method is deliberately a
+    /// socket-only egress seam and never mutates a presentation cache.
+    fn request_gameplay(&self, request: crate::network::protocol::GameplayRequest) {
+        if let NetworkHandle::Client { game_to_client, .. } = self {
+            let _ = crate::perf::tracked_send(
+                game_to_client,
+                crate::network::client::GameToClient::GameplayRequest { request },
+                std::mem::size_of::<crate::network::client::GameToClient>() as u64,
+                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+            );
+        }
+    }
+
     fn request_block_action(
         &self,
         action: crate::network::protocol::Action,
@@ -5588,6 +5654,10 @@ pub struct State {
     >,
     client_player_health_sequence: u64,
     client_player_effect_sequence: u64,
+    /// Private session projection ordering is independent from the legacy
+    /// health/effect lanes.  Sequence orders dimension transfers; revision
+    /// orders snapshots within a dimension.
+    client_session_projection: Option<(u8, u64, u64)>,
     pub network_status: Option<String>,
     pub last_gameplay_response: Option<crate::network::protocol::GameplayResponse>,
     pub chat_messages: std::collections::VecDeque<(String, String)>,
@@ -7378,6 +7448,7 @@ impl State {
             remote_player_effects: std::collections::HashMap::new(),
             client_player_health_sequence: 0,
             client_player_effect_sequence: 0,
+            client_session_projection: None,
             network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
             last_gameplay_response: None,
             chat_messages: std::collections::VecDeque::new(),
@@ -7791,11 +7862,75 @@ impl State {
         update: &crate::authority::contract::SessionGameplayUpdate,
     ) {
         let gameplay = update.state;
+        if !self.accept_session_projection(update.dimension, gameplay.revision, gameplay.revision) {
+            return;
+        }
+        self.project_gameplay_state(update.dimension, gameplay);
+    }
+
+    /// Shared one-way presentation projection for embedded and socket session
+    /// updates. Ordering is checked before any renderer-owned cache is touched:
+    /// sequence orders dimension transfers, while revision orders snapshots in
+    /// one dimension. The authority remains the sole writer of gameplay state.
+    fn accept_session_projection(&mut self, dimension: u8, sequence: u64, revision: u64) -> bool {
+        if let Some((latest_dimension, latest_sequence, latest_revision)) =
+            self.client_session_projection
+        {
+            if sequence <= latest_sequence {
+                return false;
+            }
+            if latest_dimension == dimension && revision <= latest_revision {
+                return false;
+            }
+        }
+        self.client_session_projection = Some((dimension, sequence, revision));
+        true
+    }
+
+    fn project_gameplay_state(
+        &mut self,
+        dimension: u8,
+        gameplay: crate::authority::contract::SessionGameplayState,
+    ) {
         self.player_state.health = gameplay.health_milli as f32 / 1000.0;
         self.player_state.max_health = gameplay.max_health_milli as f32 / 1000.0;
         self.player_state.hunger = gameplay.hunger_milli as f32 / 1000.0;
         self.player_state.saturation = gameplay.saturation_milli as f32 / 1000.0;
         self.player_state.is_dead = gameplay.is_dead;
+        self.player_state.death_reason = gameplay.death_source.and_then(DamageSource::from_wire);
+        self.player_state.invulnerable_time = gameplay.invulnerability_ticks as f32 / 20.0;
+        self.player_state.experience = gameplay.experience;
+        self.player_state.experience_level = gameplay.experience_level;
+        self.player_state.attack_cooldown_ticks = u32::from(gameplay.attack_cooldown_ticks);
+        self.player_state.attack_cooldown_max_ticks = self
+            .player_state
+            .attack_cooldown_max_ticks
+            .max(self.player_state.attack_cooldown_ticks);
+        self.player_state.shield_disable_ticks = u32::from(gameplay.shield_cooldown_ticks);
+        self.enchanting.seed = gameplay.enchant_seed.min(u64::from(u32::MAX)) as u32;
+        if gameplay.shield_active {
+            self.player_state.using_item = Some(crate::player::UsingItemState {
+                hand: crate::player::Hand::MainHand,
+                action: crate::player::ItemUseAction::Block,
+                item: Item::Shield,
+                slot: crate::player::HandSlot::MainHand(self.inventory.selected),
+                ticks_held: 0,
+                max_ticks: None,
+            });
+        } else if self
+            .player_state
+            .using_item
+            .as_ref()
+            .is_some_and(|using| using.action == crate::player::ItemUseAction::Block)
+        {
+            self.player_state.using_item = None;
+        }
+        self.player_physics.velocity = Vec3::new(
+            gameplay.velocity_milli[0] as f32 / 1000.0,
+            gameplay.velocity_milli[1] as f32 / 1000.0,
+            gameplay.velocity_milli[2] as f32 / 1000.0,
+        );
+        self.inventory.selected = usize::from(gameplay.selected_hotbar_slot.min(8));
         let mut index = 0;
         for slot in self
             .inventory
@@ -7819,8 +7954,59 @@ impl State {
                 let _ = self.mount_manager.mount(vehicle_id, 0, capacity);
             }
         }
-        if let Some(dimension) = crate::dimension::Dimension::from_wire(update.dimension) {
-            self.current_dimension = dimension;
+        if let Some(dimension) = crate::dimension::Dimension::from_wire(dimension) {
+            self.reset_presented_dimension(dimension);
+        }
+
+        let owner_id = self.local_player_id.unwrap_or(0);
+        if let Some(hook) = gameplay.fishing_hook {
+            if let Some(stage) = crate::fishing::FishingHookStage::from_wire(hook.stage) {
+                self.fishing_manager.active_hooks.insert(
+                    owner_id,
+                    crate::fishing::FishingHook {
+                        entity_id: hook.entity_id,
+                        owner_player_id: owner_id,
+                        position: hook.position_milli.map(|value| value as f32 / 1000.0),
+                        velocity: hook.velocity_milli.map(|value| value as f32 / 1000.0),
+                        stage,
+                        wait_ticks_remaining: hook.wait_ticks_remaining,
+                        bite_ticks_remaining: hook.bite_ticks_remaining,
+                    },
+                );
+            }
+        } else {
+            self.fishing_manager.active_hooks.remove(&owner_id);
+        }
+
+        if let Some(brew) = gameplay.brew {
+            self.active_station = Some(StationKind::Brewing);
+            self.container_target = Some((brew.station[0], brew.station[1], brew.station[2]));
+            self.brewing.progress = (10.0 - brew.remaining_ticks as f32 / 20.0).clamp(0.0, 10.0);
+            self.brewing.ingredient = Self::stack_from_session_slot(
+                crate::authority::contract::SessionInventorySlot::from_wire(
+                    brew.ingredient.expected.item,
+                    brew.ingredient.expected.can_break,
+                    brew.ingredient.expected.can_place_on,
+                ),
+            );
+            self.brewing.bottles = brew.bottles.map(|source| {
+                source.and_then(|source| {
+                    Self::stack_from_session_slot(
+                        crate::authority::contract::SessionInventorySlot::from_wire(
+                            source.expected.item,
+                            source.expected.can_break,
+                            source.expected.can_place_on,
+                        ),
+                    )
+                })
+            });
+        } else if self.active_station == Some(StationKind::Brewing) {
+            self.active_station = None;
+            self.container_target = None;
+        }
+        if gameplay.is_dead {
+            self.clear_movement_input();
+            self.sync_cursor_mode();
         }
     }
 
@@ -7859,15 +8045,18 @@ impl State {
         &mut self,
         request: crate::network::protocol::GameplayRequest,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        let Some(runtime) = self.embedded_runtime.as_mut() else {
+        if let Some(runtime) = self.embedded_runtime.as_mut() {
+            if let Err(error) = runtime.queue_request(request) {
+                self.save_error
+                    .get_or_insert_with(|| format!("embedded runtime input rejected: {error}"));
+            }
+            // ACKs are deliberately observed only from `tick_with_output`; a
+            // queued request has no synchronous response to project.
             return None;
-        };
-        if let Err(error) = runtime.queue_request(request) {
-            self.save_error
-                .get_or_insert_with(|| format!("embedded runtime input rejected: {error}"));
         }
-        // ACKs are deliberately observed only from `tick_with_output`; a
-        // queued request has no synchronous response to project.
+        if matches!(self.role, MultiplayerRole::Client { .. }) {
+            self.network.request_gameplay(request);
+        }
         None
     }
 
@@ -7888,6 +8077,10 @@ impl State {
                 .embedded_runtime
                 .as_ref()
                 .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
+                .or_else(|| {
+                    self.client_session_projection
+                        .map(|(_, _, revision)| revision)
+                })
                 .unwrap_or_default(),
             operation,
         })
@@ -8012,7 +8205,6 @@ impl State {
         z: i32,
         block: u32,
     ) {
-        let current_dimension = self.current_dimension;
         let requested_block = match action {
             crate::network::protocol::Action::Break => BlockType::Air.to_wire(),
             crate::network::protocol::Action::Place => block,
@@ -8616,6 +8808,7 @@ impl State {
                 self.clear_replicated_entities();
                 self.client_player_health_sequence = 0;
                 self.client_player_effect_sequence = 0;
+                self.client_session_projection = None;
                 self.network_ready = true;
                 self.network_status = None;
                 self.connection_lost = false;
@@ -8637,6 +8830,7 @@ impl State {
                 clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
                 self.container_sessions.sessions.clear();
                 self.clear_replicated_entities();
+                self.client_session_projection = None;
                 self.set_paused(true);
                 push_chat_history(
                     &mut self.chat_messages,
@@ -8988,53 +9182,16 @@ impl State {
             } => {
                 if self.local_player_id != Some(player_id)
                     || (!self.has_in_process_runtime() && self.is_authoritative())
-                    || sequence <= self.client_player_health_sequence
                 {
                     return;
                 }
-                self.client_player_health_sequence = sequence;
-                self.player_state.health = state.health_milli as f32 / 1000.0;
-                self.player_state.max_health = state.max_health_milli as f32 / 1000.0;
-                self.player_state.hunger = state.hunger_milli as f32 / 1000.0;
-                self.player_state.saturation = state.saturation_milli as f32 / 1000.0;
-                self.player_state.is_dead = state.is_dead;
-                self.player_state.experience = state.experience;
-                self.player_state.experience_level = state.experience_level;
-                self.inventory.selected = usize::from(state.selected_hotbar_slot.min(8));
-                let to_stack = |slot: Option<crate::network::protocol::SessionSlotWire>| {
-                    let slot = slot?;
-                    let mut stack = slot.item.to_stack()?;
-                    stack.can_break = slot.can_break;
-                    stack.can_place_on = slot.can_place_on;
-                    Some(stack)
-                };
-                for (target, source) in self.inventory.hotbar.iter_mut().zip(state.hotbar) {
-                    *target = to_stack(source);
-                }
-                for (target, source) in self.inventory.main.iter_mut().zip(state.main) {
-                    *target = to_stack(source);
-                }
-                for (target, source) in self.inventory.armor.iter_mut().zip(state.armor) {
-                    *target = to_stack(source);
-                }
-                self.inventory.offhand = to_stack(state.offhand);
-                if let Some(dimension) = crate::dimension::Dimension::from_wire(dimension) {
-                    self.current_dimension = dimension;
-                }
-                self.mount_manager.dismount(0);
-                if let Some(vehicle_id) = state.mounted_entity {
-                    if let Some(vehicle) = self.entity_manager.get_by_id(vehicle_id) {
-                        let capacity = if vehicle.entity_type == crate::entity::EntityType::Boat {
-                            2
-                        } else {
-                            1
-                        };
-                        let _ = self.mount_manager.mount(vehicle_id, 0, capacity);
-                    }
-                }
-                if state.is_dead {
-                    self.clear_movement_input();
-                    self.sync_cursor_mode();
+                if self.accept_session_projection(dimension, sequence, state.revision) {
+                    self.client_player_health_sequence =
+                        self.client_player_health_sequence.max(sequence);
+                    self.project_gameplay_state(
+                        dimension,
+                        crate::authority::contract::SessionGameplayState::from(state),
+                    );
                 }
             }
             NetworkInbound::TimeSync {
@@ -11413,7 +11570,7 @@ impl State {
         }
 
         // Tick item usage state machine
-        if has_in_process_runtime {
+        if has_in_process_runtime || !self.is_authoritative() {
             self.player_state.using_item = None;
         } else if self.inventory.is_open
             || self.is_paused
@@ -12682,7 +12839,7 @@ impl State {
     }
 
     pub fn update_vehicles_and_fishing(&mut self, dt: f32) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             return;
         }
         if self.is_authoritative() {
@@ -12791,7 +12948,7 @@ impl State {
     }
 
     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             let response = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Mount {
                     entity_id: vehicle_id,
@@ -12817,7 +12974,7 @@ impl State {
     }
 
     pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Mount { entity_id: 0 },
             );
@@ -12842,11 +12999,29 @@ impl State {
     }
 
     pub fn use_fishing_rod(&mut self) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
+            let action = if self.fishing_manager.get_hook(0).is_some() {
+                1
+            } else {
+                0
+            };
+            let look = self.camera.forward();
+            let look_milli = [
+                (look.x * 1000.0)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+                (look.y * 1000.0)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+                (look.z * 1000.0)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            ];
             let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::ItemUse {
-                    item: Item::FishingRod as u32,
-                    count: 1,
+                crate::network::protocol::GameplayOperation::Fishing {
+                    action,
+                    hand: 0,
+                    look_milli,
                 },
             );
             return;
@@ -12870,10 +13045,40 @@ impl State {
     }
 
     pub fn check_claim_furnace_xp(&mut self, slot: SlotType) {
-        if self.has_in_process_runtime() {
-            // Furnace XP has no typed gameplay envelope yet.  Reject the
-            // input explicitly instead of mutating a renderer-side furnace or
-            // player experience behind the authority boundary.
+        if matches!(slot, SlotType::ContainerSlot(2))
+            && (self.has_in_process_runtime() || !self.is_authoritative())
+        {
+            if let Some(pos) = self.container_target {
+                let count = self
+                    .chunk_manager
+                    .chunks
+                    .get(&(pos.0.div_euclid(16), pos.2.div_euclid(16)))
+                    .and_then(|chunk| {
+                        chunk.get_block_entity(
+                            pos.0.rem_euclid(16) as u8,
+                            pos.1 as i16,
+                            pos.2.rem_euclid(16) as u8,
+                        )
+                    })
+                    .and_then(|entity| match entity {
+                        crate::block_entity::BlockEntity::Furnace(furnace) => furnace
+                            .slots
+                            .get(2)
+                            .and_then(|stack| stack.as_ref())
+                            .map(|stack| stack.count as u16),
+                        _ => None,
+                    })
+                    .unwrap_or(1)
+                    .clamp(1, 64);
+                let _ = self.submit_local_authority_operation(
+                    crate::network::protocol::GameplayOperation::FurnaceTakeOutput {
+                        x: pos.0,
+                        y: pos.1,
+                        z: pos.2,
+                        count,
+                    },
+                );
+            }
             return;
         }
         if let SlotType::ContainerSlot(2) = slot {
@@ -12904,7 +13109,7 @@ impl State {
     }
 
     fn update_hopper_power_states(&mut self) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             return;
         }
         let mut positions = Vec::new();
@@ -13842,7 +14047,7 @@ impl State {
     }
 
     fn apply_redstone_update(&mut self, update: crate::redstone::RedstoneUpdate) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             return;
         }
         let mut dirty_chunks = std::collections::HashSet::new();
@@ -14541,7 +14746,7 @@ impl State {
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             let _ = self.submit_local_authority_block_use(
                 pos.x as i32,
                 pos.y as i32,
@@ -14558,12 +14763,6 @@ impl State {
         if old_block == BlockType::Air {
             return;
         }
-        if !self.is_authoritative() {
-            self.network
-                .request_block_change(wx, wy, wz, BlockType::Air as u32);
-            return;
-        }
-
         let old_state_raw = self.chunk_manager.get_block_state(wx, wy, wz);
         let old_state = crate::world::BlockState::decode(old_state_raw);
 
@@ -15016,7 +15215,7 @@ impl State {
     }
 
     fn update_dropped_items_and_orbs(&mut self, dt: f32) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             return;
         }
         let mut remove_ids = Vec::new();
@@ -15515,6 +15714,10 @@ impl State {
             let _ = self.submit_local_authority_command("/respawn");
             return;
         }
+        if !self.is_authoritative() {
+            self.network.send_respawn_request();
+            return;
+        }
         if self.world_rules.hardcore && self.player_state.is_dead {
             // Hardcore worlds never respawn a dead player into Survival.  The
             // permitted recovery path is a read-only Spectator observer.
@@ -15621,7 +15824,7 @@ impl State {
     }
 
     pub fn handle_primary_press(&mut self) -> bool {
-        let melee_consumed = if self.has_in_process_runtime() {
+        let melee_consumed = if self.has_in_process_runtime() || !self.is_authoritative() {
             self.submit_local_authority_combat()
         } else {
             self.is_authoritative() && self.try_melee_attack()
@@ -15789,7 +15992,12 @@ impl State {
         let offhand_stack = self.inventory.offhand;
         let offhand_item = offhand_stack.map(|s| s.item).unwrap_or(Item::Air);
 
-        if self.has_in_process_runtime()
+        if main_item == Item::FishingRod {
+            self.use_fishing_rod();
+            return;
+        }
+
+        if (self.has_in_process_runtime() || !self.is_authoritative())
             && main_item != Item::Air
             && !main_item.properties().is_block
         {
@@ -15797,6 +16005,16 @@ impl State {
                 crate::network::protocol::GameplayOperation::ItemUse {
                     item: main_item as u32,
                     count: 1,
+                },
+            );
+            return;
+        }
+
+        if !self.is_authoritative() && main_item == Item::Shield {
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::UseState {
+                    hand: 0,
+                    active: true,
                 },
             );
             return;
@@ -15884,7 +16102,7 @@ impl State {
 
         // If mainhand didn't start an item use action, check Offhand item
         if self.player_state.using_item.is_none() {
-            if self.has_in_process_runtime()
+            if (self.has_in_process_runtime() || !self.is_authoritative())
                 && offhand_item != Item::Air
                 && !offhand_item.properties().is_block
             {
@@ -15892,6 +16110,15 @@ impl State {
                     crate::network::protocol::GameplayOperation::ItemUse {
                         item: offhand_item as u32,
                         count: 1,
+                    },
+                );
+                return;
+            }
+            if !self.is_authoritative() && offhand_item == Item::Shield {
+                let _ = self.submit_local_authority_operation(
+                    crate::network::protocol::GameplayOperation::UseState {
+                        hand: 1,
+                        active: true,
                     },
                 );
                 return;
@@ -15950,6 +16177,25 @@ impl State {
 
     pub fn handle_secondary_release(&mut self) {
         if self.has_in_process_runtime() {
+            self.player_state.using_item = None;
+            return;
+        }
+        if !self.is_authoritative() {
+            let hand = if self
+                .player_state
+                .using_item
+                .is_some_and(|using| matches!(using.hand, crate::player::Hand::OffHand))
+            {
+                1
+            } else {
+                0
+            };
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::UseState {
+                    hand,
+                    active: false,
+                },
+            );
             self.player_state.using_item = None;
             return;
         }
@@ -16049,36 +16295,60 @@ impl State {
                 &self.chunk_manager,
                 target_policy,
             ) {
-                let held_wire = self.inventory.hotbar[self.inventory.selected]
-                    .as_ref()
-                    .map(crate::network::protocol::ItemWire::from_stack);
-                if is_left_click {
-                    self.network.request_block_action(
-                        crate::network::protocol::Action::Break,
+                if !is_left_click {
+                    let clicked = (
                         hit.block_pos.x as i32,
                         hit.block_pos.y as i32,
                         hit.block_pos.z as i32,
-                        BlockType::Air as u32,
-                        held_wire,
                     );
-                    self.network
-                        .send_action(crate::network::protocol::Action::Break);
+                    let clicked_block = self
+                        .chunk_manager
+                        .get_block(clicked.0, clicked.1, clicked.2);
+                    if clicked_block == BlockType::Bed {
+                        let _ = self.submit_local_authority_operation(
+                            crate::network::protocol::GameplayOperation::Sleep {
+                                x: clicked.0,
+                                y: clicked.1,
+                                z: clicked.2,
+                            },
+                        );
+                        return;
+                    }
+                    if matches!(
+                        clicked_block,
+                        BlockType::Chest
+                            | BlockType::EndCityChest
+                            | BlockType::Furnace
+                            | BlockType::FurnaceLit
+                            | BlockType::Hopper
+                            | BlockType::Dispenser
+                            | BlockType::Dropper
+                            | BlockType::CraftingTable
+                            | BlockType::EnchantingTable
+                            | BlockType::BrewingStand
+                            | BlockType::Anvil
+                    ) {
+                        // `open_chest` emits the typed Container::Open
+                        // envelope for Join Clients and never opens a local
+                        // inventory before an authority result arrives.
+                        self.open_chest(clicked);
+                        return;
+                    }
+                }
+                if is_left_click {
+                    let _ = self.submit_local_authority_block_use(
+                        hit.block_pos.x as i32,
+                        hit.block_pos.y as i32,
+                        hit.block_pos.z as i32,
+                        BlockType::Air,
+                    );
                 } else if let Some(block) = self.inventory.get_selected_block() {
                     let target = hit.block_pos + hit.normal;
                     let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
                     if !self.can_place_block_at(x, y, z, block) {
                         return;
                     }
-                    self.network.request_block_action(
-                        crate::network::protocol::Action::Place,
-                        x,
-                        y,
-                        z,
-                        block as u32,
-                        held_wire,
-                    );
-                    self.network
-                        .send_action(crate::network::protocol::Action::Place);
+                    let _ = self.submit_local_authority_block_use(x, y, z, block);
                 }
             }
             return;
@@ -17603,7 +17873,7 @@ impl State {
     }
 
     pub fn set_item_at_slot(&mut self, slot: SlotType, stack: Option<ItemStack>) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             return;
         }
         match slot {
@@ -17695,7 +17965,7 @@ impl State {
 
     pub fn handle_swap_offhand_pressed(&mut self) {
         if !self.is_chat_open && !self.is_paused && !self.player_state.is_dead {
-            if self.has_in_process_runtime() {
+            if self.has_in_process_runtime() || !self.is_authoritative() {
                 return;
             }
             self.inventory.swap_offhand();
@@ -17710,7 +17980,7 @@ impl State {
     }
 
     pub fn handle_inventory_click(&mut self, is_left: bool) {
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             let mouse_x = self.mouse_ndc[0];
             let mouse_y = self.mouse_ndc[1];
             if self.active_station == Some(StationKind::Merchant) && is_left {
@@ -18382,6 +18652,18 @@ impl State {
         if !self.game_mode_policy().can_use_containers {
             return;
         }
+        if !self.is_authoritative() {
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::Container {
+                    action: crate::network::protocol::ContainerAction::Open.to_wire(),
+                    x: pos.0,
+                    y: pos.1,
+                    z: pos.2,
+                    slot: 0,
+                },
+            );
+            return;
+        }
         let (cx, cz) = (
             pos.0.div_euclid(crate::world::CHUNK_WIDTH as i32),
             pos.2.div_euclid(crate::world::CHUNK_DEPTH as i32),
@@ -18405,19 +18687,6 @@ impl State {
                 | crate::block_entity::BlockEntity::Dispenser(_)
                 | crate::block_entity::BlockEntity::Dropper(_)
         ) {
-            return;
-        }
-        if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
-            if let crate::state::NetworkHandle::Client { game_to_client, .. } = &self.network {
-                let _ = game_to_client.tracked_send(
-                    crate::network::client::GameToClient::ContainerOpenRequest {
-                        dimension: self.current_dimension as u8,
-                        x: pos.0,
-                        y: pos.1,
-                        z: pos.2,
-                    },
-                );
-            }
             return;
         }
         self.container_target = Some(pos);
@@ -18513,7 +18782,7 @@ impl State {
         if offer_index >= self.active_merchant_offers.len() {
             return false;
         }
-        if self.has_in_process_runtime() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             let response = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Trade {
                     villager_id,
@@ -18698,6 +18967,28 @@ impl State {
                 self.anvil.output = None;
             }
             return accepted;
+        }
+        if !self.is_authoritative() {
+            if let Some(pos) = self.container_target {
+                let _ = self.submit_local_authority_operation(
+                    crate::network::protocol::GameplayOperation::Container {
+                        action: crate::network::protocol::ContainerAction::Close.to_wire(),
+                        x: pos.0,
+                        y: pos.1,
+                        z: pos.2,
+                        slot: 0,
+                    },
+                );
+            }
+            self.inventory.dragged = None;
+            self.inventory.creative_drag_origin = None;
+            self.inventory.is_open = false;
+            self.inventory.is_table_open = false;
+            self.container_target = None;
+            self.container_is_double = false;
+            self.active_station = None;
+            self.sync_cursor_mode();
+            return true;
         }
         if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
             if let Some(pos) = self.container_target {
