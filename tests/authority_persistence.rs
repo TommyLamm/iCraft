@@ -109,7 +109,9 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     runtime.login_session(1, "Alice").unwrap();
     assert!(runtime.login_session(2, "alice").is_err());
     runtime.set_session_dimension(1, Dimension::Nether);
-    runtime.players.get_mut(&1).unwrap().data.health = 6.0;
+    let mut gameplay = runtime.authority.session(1).unwrap().gameplay;
+    gameplay.health_milli = 6_000;
+    assert!(runtime.authority.set_session_gameplay(1, gameplay));
     runtime
         .players
         .get_mut(&1)

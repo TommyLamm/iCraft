@@ -527,15 +527,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         duplicate_before_replay + 1
     );
 
-    bob.send(GameToClient::SendPosition {
-        sequence: 2,
-        sender_time_millis: 2,
-        x: 10.0,
-        y: 80.0,
-        z: 8.0,
-        yaw: 0.0,
-        pitch: 0.0,
-    });
+    assert!(runtime.teleport_session(bob_id, [10.0, 80.0, 8.0]));
     drive_pair_until(
         &mut runtime,
         &mut alice,

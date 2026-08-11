@@ -47,3 +47,19 @@ git diff --check
 ```
 
 完整 release suite、GPU/多人實機、Phase B/C 與多維度 reconnect/failure matrix 仍由後續批次負責，不能在本文件勾選或宣稱已通過。
+
+## 本批次驗證紀錄（2026-08-11）
+
+除上述最低閘門外，本批次亦補跑拓撲與持久化回歸：
+
+- `cargo test --lib authority::tests`：14 passed。
+- `cargo test --lib server_world::tests`：5 passed；malformed combat action 依目前 request bounds 語義拒絕為 `InvalidState`。
+- `cargo test --lib server_runtime::tests`：13 passed。
+- `cargo test --test authority_persistence`：3 passed。
+- `cargo test --test headless_server_authority`：1 passed。
+- `cargo test --test runtime_topology_parity`：4 passed。
+- `cargo check --lib --bins`、`cargo check --release --locked`、rustfmt check 與 `git diff --check`：通過。
+
+持久化測試透過 AuthorityCore session gameplay seam 設定 health；headless 測試透過明確的 server-authorized teleport seam 建立跨維度 interest 場景，沒有放寬一般 pose 速度/順序驗證。GPU/window、30 分鐘 soak、真 transport 與 Phase B/C 仍未驗收。
+
+`cargo test --release` 額外全套執行首次為 785 passed、1 failed、3 ignored；唯一失敗是既有 `network::server::tests::transport_metrics_count_exact_successful_tcp_frames` 在跨執行緒 `record_outbound` 時序下偶發讀到 0。未修改該 metrics 路徑；isolated release 重跑 7 次為 6 passed、1 failed（第 7 次重現同一 race）。這不是本計劃 gate，列為後續 network metrics/測試穩定化計劃候選，不在此批次宣稱 release 全套通過。

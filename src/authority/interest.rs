@@ -16,7 +16,10 @@ pub type BlockPosition = (i32, i32, i32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterestKind {
     Chunk(ChunkCoord),
+    /// Entity lifecycle/visibility follows view distance.
     Entity(u64),
+    /// High-frequency state follows the smaller simulation distance.
+    EntityState(u64),
     Block(BlockPosition),
     BlockEntity(BlockPosition),
     Container(BlockPosition),
@@ -28,6 +31,21 @@ pub struct RoutedInterestUpdate {
     pub dimension: Dimension,
     pub revision: u64,
     pub kind: InterestKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterestDelta<T> {
+    pub entered: Vec<T>,
+    pub departed: Vec<T>,
+}
+
+impl<T> Default for InterestDelta<T> {
+    fn default() -> Self {
+        Self {
+            entered: Vec::new(),
+            departed: Vec::new(),
+        }
+    }
 }
 
 /// Per-session routing state. The sets are bounded by the configured view and
@@ -59,21 +77,49 @@ impl InterestSet {
         }
     }
 
-    pub fn update_position(&mut self, dimension: Dimension, position: [f32; 3]) {
+    pub fn update_position(
+        &mut self,
+        dimension: Dimension,
+        position: [f32; 3],
+    ) -> InterestDelta<ChunkCoord> {
+        let old_dimension = self.dimension;
+        let old_chunks = std::mem::take(&mut self.chunks);
         self.dimension = dimension;
+        if old_dimension != dimension {
+            self.open_containers.clear();
+        }
         self.chunks = chunks_around(position, self.view_distance);
         self.simulation_chunks = chunks_around(position, self.simulation_distance);
         self.open_containers.retain(|position| {
             let chunk = (position.0.div_euclid(16), position.2.div_euclid(16));
             self.chunks.contains(&chunk)
         });
+        let mut entered: Vec<_> = if old_dimension == dimension {
+            self.chunks.difference(&old_chunks).copied().collect()
+        } else {
+            self.chunks.iter().copied().collect()
+        };
+        let mut departed: Vec<_> = if old_dimension == dimension {
+            old_chunks.difference(&self.chunks).copied().collect()
+        } else {
+            old_chunks.iter().copied().collect()
+        };
+        entered.sort_unstable();
+        departed.sort_unstable();
+        InterestDelta { entered, departed }
     }
 
-    pub fn update_entities<I>(&mut self, entity_ids: I)
+    pub fn update_entities<I>(&mut self, entity_ids: I) -> InterestDelta<u64>
     where
         I: IntoIterator<Item = u64>,
     {
+        let old_entities = std::mem::take(&mut self.entities);
         self.entities = entity_ids.into_iter().collect();
+        let mut entered: Vec<_> = self.entities.difference(&old_entities).copied().collect();
+        let mut departed: Vec<_> = old_entities.difference(&self.entities).copied().collect();
+        entered.sort_unstable();
+        departed.sort_unstable();
+        InterestDelta { entered, departed }
     }
 
     pub fn update_simulation_entities<I>(&mut self, entity_ids: I)
@@ -89,7 +135,8 @@ impl InterestSet {
         }
         match kind {
             InterestKind::Chunk(coord) => self.chunks.contains(&coord),
-            InterestKind::Entity(id) => self.simulation_entities.contains(&id),
+            InterestKind::Entity(id) => self.entities.contains(&id),
+            InterestKind::EntityState(id) => self.simulation_entities.contains(&id),
             InterestKind::Block(position)
             | InterestKind::BlockEntity(position)
             | InterestKind::Container(position) => self
@@ -144,5 +191,24 @@ mod tests {
         interest.open_containers.insert(chest);
         assert!(interest.wants_container(Dimension::Overworld, chest));
         assert!(!interest.wants_container(Dimension::End, chest));
+    }
+
+    #[test]
+    fn interest_deltas_are_sorted_and_split_view_from_simulation() {
+        let mut interest = InterestSet::new(Dimension::Overworld, 2, 1);
+        let initial = interest.update_position(Dimension::Overworld, [0.0, 64.0, 0.0]);
+        assert!(!initial.entered.is_empty());
+        assert!(initial.entered.windows(2).all(|pair| pair[0] <= pair[1]));
+
+        let entities = interest.update_entities([9, 3]);
+        assert_eq!(entities.entered, vec![3, 9]);
+        interest.update_simulation_entities([3]);
+        assert!(interest.wants(Dimension::Overworld, InterestKind::Entity(9)));
+        assert!(!interest.wants(Dimension::Overworld, InterestKind::EntityState(9)));
+        assert!(interest.wants(Dimension::Overworld, InterestKind::EntityState(3)));
+
+        let moved = interest.update_position(Dimension::Nether, [0.0, 64.0, 0.0]);
+        assert_eq!(moved.departed.len(), initial.entered.len());
+        assert_eq!(moved.entered.len(), initial.entered.len());
     }
 }

@@ -5,8 +5,11 @@
 //! never imports wgpu, winit, audio, camera, or UI modules.
 
 use crate::authority::contract::{
-    AuthoritySnapshot, RevisionClock, SessionGameplayState, SessionInventorySlot, WorldMutation,
+    AuthoritySnapshot, RevisionClock, SessionFishingHookState, SessionGameplayState,
+    SessionInventorySlot, WorldMutation,
 };
+use crate::authority::fishing::{FishingDomainContext, FishingDomainError};
+use crate::authority::transactions::{self, WorkstationContext};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
 use crate::commands::{self, Command, TimeCommand};
@@ -219,6 +222,184 @@ impl ServerWorld {
             viewers.remove(&player_id);
             !viewers.is_empty()
         });
+    }
+
+    pub fn remove_passenger(&mut self, player_id: PlayerId) {
+        for entity in &mut self.entities.entities {
+            entity
+                .passengers
+                .retain(|passenger| *passenger != player_id);
+        }
+    }
+
+    pub fn remove_authority_entity(&mut self, entity_id: u64) {
+        let _ = self.entities.remove_by_id(entity_id);
+    }
+
+    pub fn fishing_context(
+        &self,
+        gameplay: &SessionGameplayState,
+        player_position: [f32; 3],
+        consume_durability: bool,
+    ) -> Result<FishingDomainContext, FishingDomainError> {
+        let hook = gameplay
+            .fishing_hook
+            .ok_or(FishingDomainError::NoActiveHook)?;
+        let probe = crate::authority::fishing::water_probe_position(gameplay)?;
+        let block_position = [
+            probe[0].div_euclid(1_000),
+            probe[1].div_euclid(1_000),
+            probe[2].div_euclid(1_000),
+        ];
+        let open_water = self.get_block(block_position[0], block_position[1], block_position[2])
+            == BlockType::Water;
+        Ok(FishingDomainContext {
+            world_seed: self.seed as u64 ^ (u64::from(self.dimension as u8) << 32),
+            hook_entity_id: hook.entity_id,
+            player_position_milli: position_to_milli(player_position)
+                .ok_or(FishingDomainError::InvalidContext)?,
+            open_water,
+            water_surface_y_milli: open_water
+                .then_some(block_position[1].saturating_mul(1_000).saturating_add(800)),
+            consume_durability,
+        })
+    }
+
+    pub fn sync_authority_hook(
+        &mut self,
+        previous: Option<SessionFishingHookState>,
+        current: Option<SessionFishingHookState>,
+        player_id: PlayerId,
+    ) {
+        if let Some(previous) = previous {
+            if current.map_or(true, |current| current.entity_id != previous.entity_id) {
+                let _ = self.entities.remove_by_id(previous.entity_id);
+            }
+        }
+        let Some(current) = current else {
+            return;
+        };
+        let position = milli_to_vec3(current.position_milli);
+        let velocity = milli_to_vec3(current.velocity_milli);
+        if let Some(entity) = self.entities.get_by_id_mut(current.entity_id) {
+            entity.position = position;
+            entity.velocity = velocity;
+            entity.owner_id = Some(player_id);
+        } else {
+            let mut entity =
+                crate::entity::Entity::new(current.entity_id, EntityType::FishingHook, position);
+            entity.velocity = velocity;
+            entity.owner_id = Some(player_id);
+            self.entities.entities.push(entity);
+        }
+        self.entities.rebuild_indexes();
+    }
+
+    pub fn take_furnace_output(
+        &mut self,
+        gameplay: &mut SessionGameplayState,
+        position: [i32; 3],
+        count: u16,
+    ) -> Result<WorldMutation, RejectReason> {
+        let block = self.get_block(position[0], position[1], position[2]);
+        let Some(BlockEntity::Furnace(furnace)) = self
+            .get_block_entity(position[0], position[1], position[2])
+            .cloned()
+        else {
+            return Err(RejectReason::InvalidState);
+        };
+        let mut next_furnace = furnace;
+        transactions::execute_furnace_take_output(
+            gameplay,
+            &mut next_furnace,
+            WorkstationContext::at(position, block),
+            count,
+        )
+        .map_err(|_| RejectReason::InvalidState)?;
+        self.chunks.set_block_entity(
+            position[0],
+            position[1],
+            position[2],
+            Some(BlockEntity::Furnace(next_furnace)),
+        );
+        Ok(self.touch_revision(position[0], position[1], position[2]))
+    }
+
+    pub fn bookshelf_power(&self, position: [i32; 3]) -> u8 {
+        let mut count = 0u8;
+        for y in [position[1], position[1] + 1] {
+            for dx in -2i32..=2 {
+                for dz in -2i32..=2 {
+                    if dx.abs().max(dz.abs()) != 2 {
+                        continue;
+                    }
+                    let gap = (position[0] + dx.signum(), y, position[2] + dz.signum());
+                    if self.get_block(gap.0, gap.1, gap.2) == BlockType::Air
+                        && self.get_block(position[0] + dx, y, position[2] + dz)
+                            == BlockType::Bookshelf
+                    {
+                        count = count.saturating_add(1).min(15);
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    pub fn has_line_of_sight(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        let origin = Vec3::from_array(from) + Vec3::new(0.0, 1.62, 0.0);
+        let target = Vec3::from_array(to) + Vec3::new(0.0, 0.9, 0.0);
+        !crate::culling::is_los_blocked(origin, target, |x, y, z| {
+            crate::culling::is_section_occluder(self.get_block(x, y, z))
+        })
+    }
+
+    pub fn spawn_authority_drop(
+        &mut self,
+        entity_id: u64,
+        slot: SessionInventorySlot,
+        position: [f32; 3],
+    ) -> bool {
+        if entity_id == 0 || self.entities.get_by_id(entity_id).is_some() {
+            return false;
+        }
+        let Some(mut stack) = slot.item.to_stack() else {
+            return false;
+        };
+        stack.can_break = slot.can_break;
+        stack.can_place_on = slot.can_place_on;
+        let mut entity = crate::entity::Entity::new(
+            entity_id,
+            EntityType::DroppedItem,
+            Vec3::from_array(position),
+        );
+        entity.dropped_item = Some(stack.item);
+        entity.dropped_count = stack.count;
+        entity.dropped_stack = Some(stack);
+        entity.pickup_cooldown = 0.5;
+        self.entities.entities.push(entity);
+        self.entities.rebuild_indexes();
+        true
+    }
+
+    pub fn spawn_authority_experience(
+        &mut self,
+        entity_id: u64,
+        experience: u32,
+        position: [f32; 3],
+    ) -> bool {
+        if entity_id == 0 || experience == 0 || self.entities.get_by_id(entity_id).is_some() {
+            return false;
+        }
+        let mut entity = crate::entity::Entity::new(
+            entity_id,
+            EntityType::ExperienceOrb,
+            Vec3::from_array(position),
+        );
+        entity.xp_value = experience;
+        self.entities.entities.push(entity);
+        self.entities.rebuild_indexes();
+        true
     }
 
     pub fn container_viewers_at(
@@ -477,6 +658,13 @@ impl ServerWorld {
             offer.sell.can_place_on,
         );
         if !gameplay.add_slot(sell) {
+            *gameplay = original;
+            return Err(RejectReason::InvalidState);
+        }
+        if (0..crate::authority::contract::SESSION_INVENTORY_SLOTS).any(|index| {
+            transactions::brew_locks_slot(&original, index as u8)
+                && original.inventory[index] != gameplay.inventory[index]
+        }) {
             *gameplay = original;
             return Err(RejectReason::InvalidState);
         }
@@ -972,6 +1160,12 @@ impl ServerWorld {
         player_positions.sort_by_key(|(id, _)| *id);
         let chunks = &self.chunks;
         for entity in &mut self.entities.entities {
+            if entity.entity_type == EntityType::FishingHook {
+                continue;
+            }
+            entity.action_cooldown = (entity.action_cooldown - FIXED_DT).max(0.0);
+            entity.invulnerable_time = (entity.invulnerable_time - FIXED_DT).max(0.0);
+            entity.fire_aspect_timer = (entity.fire_aspect_timer - FIXED_DT).max(0.0);
             if entity.entity_type.is_hostile() && self.rules.do_mob_spawning {
                 if let Some((_, target)) =
                     player_positions.iter().min_by(|(_, left), (_, right)| {
@@ -1061,9 +1255,36 @@ fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> 
         GameplayOperation::BlockUse { x, y, z, .. }
         | GameplayOperation::Sleep { x, y, z }
         | GameplayOperation::Container { x, y, z, .. }
-        | GameplayOperation::ContainerClick { x, y, z, .. } => Some((*x, *y, *z)),
+        | GameplayOperation::ContainerClick { x, y, z, .. }
+        | GameplayOperation::FurnaceTakeOutput { x, y, z, .. }
+        | GameplayOperation::Enchant { x, y, z, .. }
+        | GameplayOperation::Brew { x, y, z, .. }
+        | GameplayOperation::Anvil { x, y, z, .. } => Some((*x, *y, *z)),
+        GameplayOperation::Craft {
+            station: Some([x, y, z]),
+            ..
+        } => Some((*x, *y, *z)),
         _ => None,
     }
+}
+
+fn position_to_milli(position: [f32; 3]) -> Option<[i32; 3]> {
+    let mut result = [0; 3];
+    for (index, value) in position.into_iter().enumerate() {
+        if !value.is_finite() || value.abs() > 2_000_000.0 {
+            return None;
+        }
+        result[index] = (value * 1_000.0).round() as i32;
+    }
+    Some(result)
+}
+
+fn milli_to_vec3(position: [i32; 3]) -> Vec3 {
+    Vec3::new(
+        position[0] as f32 / 1_000.0,
+        position[1] as f32 / 1_000.0,
+        position[2] as f32 / 1_000.0,
+    )
 }
 
 #[cfg(test)]
@@ -1115,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_gameplay_is_explicitly_rejected() {
+    fn malformed_combat_action_is_explicitly_rejected() {
         let mut core = AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Dedicated);
         core.register_session(crate::authority::contract::SessionContract::new(
             7,
@@ -1140,7 +1361,7 @@ mod tests {
         assert!(matches!(
             core.submit_request(request).outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
     }

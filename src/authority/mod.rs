@@ -1,12 +1,15 @@
 //! GPU-independent authoritative simulation.
 
+pub mod combat;
 pub mod contract;
+pub mod fishing;
 pub mod interest;
+pub mod transactions;
 
 use crate::dimension::Dimension;
 use crate::game_rules::{WorldRules, WorldType};
 use crate::network::protocol::{
-    GameplayOutcome, GameplayRequest, GameplayResponse, PlayerId, RejectReason,
+    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, PlayerId, RejectReason,
 };
 use crate::server_world::ServerWorld;
 use contract::{
@@ -14,7 +17,10 @@ use contract::{
     SessionGameplayUpdate, WorldMutation,
 };
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+const AUTHORITY_ENTITY_ID_START: u64 = 1 << 63;
+const ATTACK_COOLDOWN_TICKS: u16 = 5;
 
 pub use contract::{
     common_gameplay_vectors, RevisionClock, AUTHORITY_CONTRACT_VERSION, FIXED_TICK_HZ,
@@ -82,6 +88,13 @@ pub struct AuthorityCore {
     /// player request).  Presentation roots drain these through the same
     /// snapshot projection as tick-driven automation.
     pending_mutations: Vec<WorldMutation>,
+    /// Session ids changed as a side effect of another player's request. They
+    /// receive the request's single authoritative revision at publication.
+    pending_session_revisions: BTreeSet<PlayerId>,
+    /// High-bit ids are reserved for authority-created hooks, drops and XP.
+    /// The allocator is shared by every loaded dimension, unlike each world's
+    /// legacy EntityManager allocator.
+    next_authority_entity_id: u64,
 }
 
 /// Presentation roots use this small in-process boundary for Singleplayer and
@@ -291,6 +304,8 @@ impl AuthorityCore {
             last_snapshot: AuthoritySnapshot::empty(),
             fixed_tick: 0,
             pending_mutations: Vec::new(),
+            pending_session_revisions: BTreeSet::new(),
+            next_authority_entity_id: AUTHORITY_ENTITY_ID_START,
         }
     }
 
@@ -378,6 +393,57 @@ impl AuthorityCore {
         dimensions
     }
 
+    fn cleanup_session_lifecycle(&mut self, id: PlayerId, dimension: Dimension) {
+        let hook = self
+            .sessions
+            .get(&id)
+            .and_then(|session| session.gameplay.fishing_hook)
+            .map(|hook| hook.entity_id);
+        if let Some(session) = self.sessions.get_mut(&id) {
+            // Brew reservations have not debited inventory yet. Clearing the
+            // reservation is therefore the lossless logout/transition path.
+            session.gameplay.fishing_hook = None;
+            session.gameplay.brew = None;
+            session.gameplay.mounted_entity = None;
+            session.gameplay.shield_active = false;
+        }
+        self.with_world(dimension, |world| {
+            world.close_container_viewers(id);
+            world.remove_passenger(id);
+            if let Some(hook) = hook {
+                world.remove_authority_entity(hook);
+            }
+        });
+    }
+
+    fn next_unique_entity_id(&self) -> u64 {
+        let mut candidate = self.next_authority_entity_id.max(AUTHORITY_ENTITY_ID_START);
+        loop {
+            let entity_exists = self
+                .world_ref(self.world.dimension)
+                .is_some_and(|world| world.entities.get_by_id(candidate).is_some())
+                || self
+                    .worlds
+                    .values()
+                    .any(|world| world.entities.get_by_id(candidate).is_some());
+            let hook_exists = self.sessions.values().any(|session| {
+                session
+                    .gameplay
+                    .fishing_hook
+                    .is_some_and(|hook| hook.entity_id == candidate)
+            });
+            if candidate != 0 && !entity_exists && !hook_exists {
+                return candidate;
+            }
+            candidate = candidate.wrapping_add(1).max(AUTHORITY_ENTITY_ID_START);
+        }
+    }
+
+    fn claim_entity_id(&mut self, id: u64) {
+        debug_assert_ne!(id, 0);
+        self.next_authority_entity_id = id.wrapping_add(1).max(AUTHORITY_ENTITY_ID_START);
+    }
+
     /// Revision for one dimension's independent namespace. Request gates and
     /// ACKs use this value for the session's dimension; the aggregate snapshot
     /// revision is only a compatibility summary and must not be used for a
@@ -397,9 +463,14 @@ impl AuthorityCore {
     /// compatibility contract.  Gameplay requests use `activate_dimension`
     /// directly and therefore do not need to switch another session's world.
     pub fn set_session_dimension(&mut self, id: PlayerId, target: Dimension) -> bool {
-        if !self.sessions.contains_key(&id) {
+        let Some(current_dimension) = self
+            .sessions
+            .get(&id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
             return false;
-        }
+        };
+        self.cleanup_session_lifecycle(id, current_dimension);
         self.ensure_dimension(target);
         self.activate_dimension(target);
         let revision = self.current_revision();
@@ -455,6 +526,13 @@ impl AuthorityCore {
     }
 
     pub fn remove_session(&mut self, id: PlayerId) -> Option<SessionContract> {
+        let dimension = self
+            .sessions
+            .get(&id)
+            .and_then(|session| Dimension::from_wire(session.dimension));
+        if let Some(dimension) = dimension {
+            self.cleanup_session_lifecycle(id, dimension);
+        }
         self.sessions.remove(&id)
     }
 
@@ -497,6 +575,7 @@ impl AuthorityCore {
 
         for dimension in dimensions.iter().copied() {
             self.activate_dimension(dimension);
+            self.tick_session_domains(dimension);
             let players: Vec<(PlayerId, [f32; 3])> = self
                 .sessions
                 .values()
@@ -557,6 +636,86 @@ impl AuthorityCore {
         snapshot
     }
 
+    fn tick_session_domains(&mut self, dimension: Dimension) {
+        use crate::authority::transactions::{self, BrewTick, WorkstationContext};
+        use crate::inventory::GameMode;
+
+        let ids: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|session| session.dimension == dimension as u8)
+            .map(|session| session.id)
+            .collect();
+        for id in ids {
+            let Some((position, game_mode, original)) = self
+                .sessions
+                .get(&id)
+                .map(|session| (session.position, session.game_mode, session.gameplay))
+            else {
+                continue;
+            };
+            let mut candidate = original;
+
+            candidate.invulnerability_ticks = candidate.invulnerability_ticks.saturating_sub(1);
+            candidate.shield_cooldown_ticks = candidate.shield_cooldown_ticks.saturating_sub(1);
+            if candidate.shield_cooldown_ticks > 0 {
+                candidate.shield_active = false;
+            }
+            candidate.attack_cooldown_ticks = candidate
+                .attack_cooldown_ticks
+                .saturating_add(1)
+                .min(ATTACK_COOLDOWN_TICKS);
+
+            if let Some(pending) = candidate.brew {
+                let block = self.world.get_block(
+                    pending.station[0],
+                    pending.station[1],
+                    pending.station[2],
+                );
+                let context = WorkstationContext::at(pending.station, block);
+                match transactions::tick_brew(&mut candidate, context) {
+                    Ok(BrewTick::Ready) => {
+                        // Brew is settled on the exact 200th step because the
+                        // compact wire has start/cancel but no separate take.
+                        if transactions::take_brew(&mut candidate, context).is_err() {
+                            candidate.brew = None;
+                        }
+                    }
+                    Ok(BrewTick::Brewing { .. }) => {}
+                    Err(_) => candidate.brew = None,
+                }
+            }
+
+            let previous_hook = original.fishing_hook;
+            if candidate.fishing_hook.is_some() {
+                match self.world.fishing_context(
+                    &candidate,
+                    position,
+                    game_mode != GameMode::Creative,
+                ) {
+                    Ok(context) => {
+                        if crate::authority::fishing::tick(&mut candidate, context).is_err() {
+                            candidate.fishing_hook = None;
+                        }
+                    }
+                    Err(_) => candidate.fishing_hook = None,
+                }
+            }
+
+            if candidate == original {
+                continue;
+            }
+            self.world
+                .sync_authority_hook(previous_hook, candidate.fishing_hook, id);
+            let revision = self.world.revisions.allocate();
+            candidate.revision = revision;
+            if let Some(session) = self.sessions.get_mut(&id) {
+                session.gameplay = candidate;
+                session.last_revision = revision;
+            }
+        }
+    }
+
     pub fn submit_request(&mut self, request: GameplayRequest) -> GameplayResponse {
         let request_id = request.request_id;
         let id = request.session_id;
@@ -604,6 +763,13 @@ impl AuthorityCore {
                     | crate::network::protocol::GameplayOperation::Combat { .. }
                     | crate::network::protocol::GameplayOperation::Trade { .. }
                     | crate::network::protocol::GameplayOperation::Mount { .. }
+                    | crate::network::protocol::GameplayOperation::Fishing { .. }
+                    | crate::network::protocol::GameplayOperation::FurnaceTakeOutput { .. }
+                    | crate::network::protocol::GameplayOperation::Craft { .. }
+                    | crate::network::protocol::GameplayOperation::Enchant { .. }
+                    | crate::network::protocol::GameplayOperation::Brew { .. }
+                    | crate::network::protocol::GameplayOperation::Anvil { .. }
+                    | crate::network::protocol::GameplayOperation::UseState { .. }
             )
         {
             return self.reject_for_session(id, request_id, RejectReason::PermissionDenied, None);
@@ -617,6 +783,7 @@ impl AuthorityCore {
             return self.reject_for_session(id, request_id, reason, None);
         }
 
+        self.pending_session_revisions.clear();
         let result = self
             .dispatch_session_command(&request, id)
             .or_else(|| self.dispatch_session_gameplay(&request, id))
@@ -657,6 +824,19 @@ impl AuthorityCore {
                 session.cache_response(response.clone());
             }
         }
+        if let GameplayOutcome::Accepted { revision } = response.outcome {
+            for changed_id in std::mem::take(&mut self.pending_session_revisions) {
+                if changed_id == id {
+                    continue;
+                }
+                if let Some(session) = self.sessions.get_mut(&changed_id) {
+                    session.last_revision = revision;
+                    session.gameplay.revision = revision;
+                }
+            }
+        } else {
+            self.pending_session_revisions.clear();
+        }
         response
     }
 
@@ -670,7 +850,6 @@ impl AuthorityCore {
         session_id: PlayerId,
     ) -> Option<Result<Option<WorldMutation>, RejectReason>> {
         use crate::inventory::GameMode;
-        use crate::network::protocol::GameplayOperation;
 
         match &request.operation {
             GameplayOperation::ItemUse { item, count } => {
@@ -683,53 +862,37 @@ impl AuthorityCore {
                 let Some(food) = item_kind.food_properties() else {
                     return Some(Err(RejectReason::Unsupported));
                 };
-                let Some(session) = self.sessions.get_mut(&session_id) else {
+                let Some(session) = self.sessions.get(&session_id) else {
                     return Some(Err(RejectReason::Unauthorized));
                 };
                 let original_gameplay = session.gameplay;
-                let hunger = session.gameplay.hunger_milli as f32 / 1000.0;
+                let mut gameplay = original_gameplay;
+                let hunger = gameplay.hunger_milli as f32 / 1000.0;
                 if hunger >= 20.0 && !food.always_edible && session.game_mode != GameMode::Creative
                 {
                     return Some(Err(RejectReason::InvalidState));
                 }
-                session.gameplay.hunger_milli =
-                    ((hunger + food.hunger).min(20.0) * 1000.0).round() as u32;
-                session.gameplay.saturation_milli =
-                    ((session.gameplay.saturation_milli as f32 / 1000.0 + food.saturation)
-                        .min(session.gameplay.hunger_milli as f32 / 1000.0)
-                        * 1000.0)
-                        .round() as u32;
+                gameplay.hunger_milli = ((hunger + food.hunger).min(20.0) * 1000.0).round() as u32;
+                gameplay.saturation_milli = ((gameplay.saturation_milli as f32 / 1000.0
+                    + food.saturation)
+                    .min(gameplay.hunger_milli as f32 / 1000.0)
+                    * 1000.0)
+                    .round() as u32;
                 if session.game_mode != GameMode::Creative
-                    && !session.gameplay.remove_item(*item, u32::from(*count))
+                    && !gameplay.remove_item(*item, u32::from(*count))
                 {
-                    session.gameplay = original_gameplay;
                     return Some(Err(RejectReason::InvalidState));
+                }
+                if !preserves_brew_locks(&original_gameplay, &gameplay) {
+                    return Some(Err(RejectReason::InvalidState));
+                }
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    session.gameplay = gameplay;
                 }
                 Some(Ok(None))
             }
             GameplayOperation::Combat { target, action } => {
-                if *target == 0 && (*action & 0x80) != 0 {
-                    let amount_milli = u32::from(*action & 0x7f).saturating_mul(100);
-                    let Some(session) = self.sessions.get_mut(&session_id) else {
-                        return Some(Err(RejectReason::Unauthorized));
-                    };
-                    if session.gameplay.is_dead || amount_milli == 0 {
-                        return Some(Err(RejectReason::InvalidState));
-                    }
-                    session.gameplay.health_milli =
-                        session.gameplay.health_milli.saturating_sub(amount_milli);
-                    if session.gameplay.health_milli == 0 {
-                        session.gameplay.is_dead = true;
-                    }
-                    return Some(Ok(None));
-                }
-                if *action != 0 {
-                    return Some(Err(RejectReason::Unsupported));
-                }
-                let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
-                    return Some(Err(RejectReason::Unauthorized));
-                };
-                Some(self.world.apply_combat(*target, position).map(|_| None))
+                Some(self.apply_authoritative_combat(request, session_id, *target, *action))
             }
             GameplayOperation::Trade {
                 villager_id,
@@ -741,16 +904,20 @@ impl AuthorityCore {
                 let Some(mut gameplay) = self.sessions.get(&session_id).map(|s| s.gameplay) else {
                     return Some(Err(RejectReason::Unauthorized));
                 };
+                let original = gameplay;
                 let result = self
                     .world
                     .apply_trade(&mut gameplay, *villager_id, *offer_index, position)
                     .map(|_| {
+                        if !preserves_brew_locks(&original, &gameplay) {
+                            return Err(RejectReason::InvalidState);
+                        }
                         if let Some(session) = self.sessions.get_mut(&session_id) {
                             session.gameplay = gameplay;
                         }
-                        None
+                        Ok(None)
                     });
-                Some(result)
+                Some(result.and_then(|result| result))
             }
             GameplayOperation::Mount { entity_id } => {
                 let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
@@ -767,7 +934,422 @@ impl AuthorityCore {
                         }),
                 )
             }
+            GameplayOperation::Fishing {
+                action,
+                hand,
+                look_milli,
+            } => Some(self.apply_fishing(session_id, *action, *hand, *look_milli)),
+            GameplayOperation::FurnaceTakeOutput { .. }
+            | GameplayOperation::Craft { .. }
+            | GameplayOperation::Enchant { .. }
+            | GameplayOperation::Brew { .. }
+            | GameplayOperation::Anvil { .. }
+            | GameplayOperation::UseState { .. } => {
+                Some(self.apply_transaction_operation(session_id, &request.operation))
+            }
             _ => None,
+        }
+    }
+
+    fn apply_fishing(
+        &mut self,
+        session_id: PlayerId,
+        action: u8,
+        hand: u8,
+        look_milli: [i16; 3],
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        use crate::authority::fishing;
+        use crate::inventory::GameMode;
+
+        let Some((position, game_mode, original)) = self
+            .sessions
+            .get(&session_id)
+            .map(|session| (session.position, session.game_mode, session.gameplay))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let mut candidate = original;
+        let previous_hook = candidate.fishing_hook;
+        match action {
+            0 => {
+                let rod_slot = held_slot_index(&candidate, hand)?;
+                if transactions::brew_locks_slot(&candidate, rod_slot) {
+                    return Err(RejectReason::InvalidState);
+                }
+                let hook_id = self.next_unique_entity_id();
+                let context = fishing::FishingDomainContext {
+                    world_seed: self.world.seed as u64
+                        ^ (u64::from(self.world.dimension as u8) << 32),
+                    hook_entity_id: hook_id,
+                    player_position_milli: position_to_milli(position)?,
+                    open_water: false,
+                    water_surface_y_milli: None,
+                    consume_durability: game_mode != GameMode::Creative,
+                };
+                fishing::cast(&mut candidate, session_id, hand, look_milli, context)
+                    .map_err(map_fishing_error)?;
+                self.claim_entity_id(hook_id);
+            }
+            1 => {
+                let rod_slot = held_slot_index(&candidate, hand)?;
+                if transactions::brew_locks_slot(&candidate, rod_slot) {
+                    return Err(RejectReason::InvalidState);
+                }
+                let context = self
+                    .world
+                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)
+                    .map_err(map_fishing_error)?;
+                fishing::reel(&mut candidate, session_id, hand, context)
+                    .map_err(map_fishing_error)?;
+            }
+            2 => {
+                let context = self
+                    .world
+                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)
+                    .map_err(map_fishing_error)?;
+                fishing::cancel(&mut candidate, hand, context).map_err(map_fishing_error)?;
+            }
+            _ => return Err(RejectReason::InvalidState),
+        }
+        self.world
+            .sync_authority_hook(previous_hook, candidate.fishing_hook, session_id);
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err(RejectReason::Unauthorized);
+        };
+        session.gameplay = candidate;
+        Ok(None)
+    }
+
+    fn apply_transaction_operation(
+        &mut self,
+        session_id: PlayerId,
+        operation: &GameplayOperation,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        use crate::authority::transactions::{self, WorkstationContext};
+        use crate::inventory::Item;
+
+        let Some(original) = self
+            .sessions
+            .get(&session_id)
+            .map(|session| session.gameplay)
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let mut candidate = original;
+        let mut mutation = None;
+        match operation {
+            GameplayOperation::FurnaceTakeOutput { x, y, z, count } => {
+                mutation = Some(self.world.take_furnace_output(
+                    &mut candidate,
+                    [*x, *y, *z],
+                    *count,
+                )?);
+            }
+            GameplayOperation::Craft {
+                grid,
+                sources,
+                station,
+            } => {
+                if sources
+                    .iter()
+                    .flatten()
+                    .any(|source| transactions::brew_locks_slot(&candidate, source.index))
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+                let context = match (*grid, *station) {
+                    (2, None) => WorkstationContext::personal_crafting(),
+                    (3, Some(position)) => WorkstationContext::at(
+                        position,
+                        self.world.get_block(position[0], position[1], position[2]),
+                    ),
+                    _ => return Err(RejectReason::InvalidState),
+                };
+                transactions::execute_craft(
+                    &mut candidate,
+                    &self.world.recipe_manager,
+                    context,
+                    *grid,
+                    *sources,
+                )
+                .map_err(map_transaction_error)?;
+            }
+            GameplayOperation::Enchant {
+                x,
+                y,
+                z,
+                source,
+                option,
+            } => {
+                if transactions::brew_locks_slot(&candidate, source.index) {
+                    return Err(RejectReason::InvalidState);
+                }
+                let position = [*x, *y, *z];
+                let context = WorkstationContext::enchanting(
+                    position,
+                    self.world.get_block(*x, *y, *z),
+                    self.world.bookshelf_power(position),
+                );
+                transactions::execute_enchant(&mut candidate, context, *source, *option)
+                    .map_err(map_transaction_error)?;
+                if !preserves_brew_locks(&original, &candidate) {
+                    return Err(RejectReason::InvalidState);
+                }
+            }
+            GameplayOperation::Brew {
+                action,
+                x,
+                y,
+                z,
+                ingredient,
+                bottles,
+            } => {
+                let position = [*x, *y, *z];
+                let context = WorkstationContext::at(position, self.world.get_block(*x, *y, *z));
+                match *action {
+                    0 => {
+                        let ingredient = ingredient.ok_or(RejectReason::InvalidState)?;
+                        transactions::start_brew(&mut candidate, context, ingredient, *bottles)
+                            .map_err(map_transaction_error)?;
+                    }
+                    1 if ingredient.is_none() && bottles.iter().all(Option::is_none) => {
+                        transactions::cancel_brew(&mut candidate, context)
+                            .map_err(map_transaction_error)?;
+                    }
+                    _ => return Err(RejectReason::InvalidState),
+                }
+            }
+            GameplayOperation::Anvil {
+                x,
+                y,
+                z,
+                left,
+                right,
+                rename,
+            } => {
+                if transactions::brew_locks_slot(&candidate, left.index)
+                    || right.is_some_and(|source| {
+                        transactions::brew_locks_slot(&candidate, source.index)
+                    })
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+                let position = [*x, *y, *z];
+                let context = WorkstationContext::at(position, self.world.get_block(*x, *y, *z));
+                transactions::execute_anvil(&mut candidate, context, *left, *right, rename)
+                    .map_err(map_transaction_error)?;
+            }
+            GameplayOperation::UseState { hand, active } => {
+                if *active {
+                    let slot = held_slot_index(&candidate, *hand)?;
+                    let held =
+                        candidate.inventory[usize::from(slot)].ok_or(RejectReason::InvalidState)?;
+                    if held.item.item != Item::Shield.to_u32()
+                        || held.item.count != 1
+                        || held.item.durability == 0
+                        || candidate.shield_cooldown_ticks > 0
+                    {
+                        return Err(RejectReason::InvalidState);
+                    }
+                }
+                candidate.shield_active = *active;
+            }
+            _ => return Err(RejectReason::Unsupported),
+        }
+        if !matches!(operation, GameplayOperation::Brew { .. })
+            && !preserves_brew_locks(&original, &candidate)
+        {
+            return Err(RejectReason::InvalidState);
+        }
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err(RejectReason::Unauthorized);
+        };
+        session.gameplay = candidate;
+        Ok(mutation)
+    }
+
+    fn apply_authoritative_combat(
+        &mut self,
+        request: &GameplayRequest,
+        session_id: PlayerId,
+        target: u64,
+        action: u8,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        use crate::authority::combat::{
+            self, AuthorityDamageInput, CombatantId, DamageEvent, EntityCombatSnapshot,
+            PlayerCombatSnapshot,
+        };
+        use crate::inventory::GameMode;
+        use crate::player::DamageSource;
+
+        if action != 0 || target == 0 || target == session_id {
+            return Err(RejectReason::InvalidState);
+        }
+        let Some(attacker) = self.sessions.get(&session_id).cloned() else {
+            return Err(RejectReason::Unauthorized);
+        };
+        if attacker.gameplay.is_dead {
+            return Err(RejectReason::InvalidState);
+        }
+        let attacker_position_milli = position_to_milli(attacker.position)?;
+        let attacker_look_milli = look_from_angles(attacker.yaw, attacker.pitch)?;
+        let profile = combat_profile(&attacker.gameplay)?;
+        let cooldown_ready = attacker.gameplay.attack_cooldown_ticks >= ATTACK_COOLDOWN_TICKS;
+
+        if let Some(target_session) = self.sessions.get(&target).cloned() {
+            if !self.world.rules.pvp
+                || target_session.dimension != attacker.dimension
+                || matches!(
+                    target_session.game_mode,
+                    GameMode::Creative | GameMode::Spectator
+                )
+            {
+                return Err(RejectReason::PermissionDenied);
+            }
+            let target_position_milli = position_to_milli(target_session.position)?;
+            let event = DamageEvent::from_authority(AuthorityDamageInput {
+                event_id: request.request_id,
+                attacker: CombatantId::Player(session_id),
+                target: CombatantId::Player(target),
+                source: DamageSource::Mob,
+                base_damage_milli: profile.base_damage_milli,
+                attacker_position_milli,
+                target_position_milli,
+                attacker_look_milli,
+                target_look_milli: look_from_angles(target_session.yaw, target_session.pitch)?,
+                cooldown_ready,
+                has_line_of_sight: self
+                    .world
+                    .has_line_of_sight(attacker.position, target_session.position),
+                attacker_used_axe: profile.used_axe,
+                knockback_milli: profile.knockback_milli,
+                fire_ticks: profile.fire_ticks,
+                looting_level: profile.looting_level,
+            })
+            .map_err(map_combat_error)?;
+            let mut target_snapshot = PlayerCombatSnapshot {
+                player_id: target,
+                gameplay: target_session.gameplay,
+                velocity_milli: target_session.gameplay.velocity_milli,
+                last_applied_event: None,
+            };
+            let outcome = combat::resolve_player_hit(&event, &mut target_snapshot)
+                .map_err(map_combat_error)?;
+            target_snapshot.gameplay.velocity_milli = target_snapshot.velocity_milli;
+            let mut attacker_gameplay = attacker.gameplay;
+            attacker_gameplay.attack_cooldown_ticks = 0;
+
+            if outcome.death.is_some() && !self.world.rules.keep_inventory {
+                target_snapshot.gameplay.inventory = [None; contract::SESSION_INVENTORY_SLOTS];
+                target_snapshot.gameplay.experience = 0;
+                target_snapshot.gameplay.experience_level = 0;
+            }
+            if outcome.death.is_some() {
+                target_snapshot.gameplay.mounted_entity = None;
+                self.world.remove_passenger(target);
+            }
+            self.sessions
+                .get_mut(&session_id)
+                .ok_or(RejectReason::Unauthorized)?
+                .gameplay = attacker_gameplay;
+            self.sessions
+                .get_mut(&target)
+                .ok_or(RejectReason::InvalidState)?
+                .gameplay = target_snapshot.gameplay;
+            self.pending_session_revisions.insert(target);
+            if !self.world.rules.keep_inventory {
+                if let Some(death) = outcome.death {
+                    self.spawn_death_outcome(target_session.position, death);
+                }
+            }
+            return Ok(None);
+        }
+
+        let Some(entity) = self.world.entities.get_by_id(target) else {
+            return Err(RejectReason::InvalidState);
+        };
+        let target_position = entity.position.to_array();
+        let mut target_snapshot = EntityCombatSnapshot {
+            entity_id: entity.id,
+            entity_type: entity.entity_type,
+            health_milli: quantize_health(entity.health),
+            max_health_milli: quantize_health(entity.max_health),
+            velocity_milli: position_to_milli(entity.velocity.to_array())?,
+            armor_points_milli: 0,
+            toughness_milli: 0,
+            enchantment_protection_factor: 0,
+            knockback_resistance_milli: 0,
+            invulnerability_ticks: (entity.invulnerable_time.max(0.0) * 20.0)
+                .round()
+                .min(u16::MAX as f32) as u16,
+            fire_ticks_remaining: (entity.fire_aspect_timer.max(0.0) * 20.0)
+                .round()
+                .min(u16::MAX as f32) as u16,
+            has_wool: entity.has_wool,
+            death_source: None,
+            death_settled: entity.player_kill_rewarded,
+            last_applied_event: None,
+        };
+        let event = DamageEvent::from_authority(AuthorityDamageInput {
+            event_id: request.request_id,
+            attacker: CombatantId::Player(session_id),
+            target: CombatantId::Entity(target),
+            source: DamageSource::Mob,
+            base_damage_milli: profile.base_damage_milli,
+            attacker_position_milli,
+            target_position_milli: position_to_milli(target_position)?,
+            attacker_look_milli,
+            target_look_milli: look_from_angles(entity.yaw, entity.pitch)?,
+            cooldown_ready,
+            has_line_of_sight: self
+                .world
+                .has_line_of_sight(attacker.position, target_position),
+            attacker_used_axe: profile.used_axe,
+            knockback_milli: profile.knockback_milli,
+            fire_ticks: profile.fire_ticks,
+            looting_level: profile.looting_level,
+        })
+        .map_err(map_combat_error)?;
+        let outcome =
+            combat::resolve_entity_hit(&event, &mut target_snapshot).map_err(map_combat_error)?;
+
+        let mut attacker_gameplay = attacker.gameplay;
+        attacker_gameplay.attack_cooldown_ticks = 0;
+        self.sessions
+            .get_mut(&session_id)
+            .ok_or(RejectReason::Unauthorized)?
+            .gameplay = attacker_gameplay;
+        if target_snapshot.health_milli == 0 {
+            let _ = self.world.entities.remove_by_id(target);
+        } else if let Some(entity) = self.world.entities.get_by_id_mut(target) {
+            entity.health = target_snapshot.health_milli as f32 / 1_000.0;
+            entity.velocity = glam::Vec3::new(
+                target_snapshot.velocity_milli[0] as f32 / 1_000.0,
+                target_snapshot.velocity_milli[1] as f32 / 1_000.0,
+                target_snapshot.velocity_milli[2] as f32 / 1_000.0,
+            );
+            entity.invulnerable_time = f32::from(target_snapshot.invulnerability_ticks) / 20.0;
+            entity.fire_aspect_timer = f32::from(target_snapshot.fire_ticks_remaining) / 20.0;
+            entity.player_kill_rewarded = target_snapshot.death_settled;
+        }
+        if let Some(death) = outcome.death {
+            self.spawn_death_outcome(target_position, death);
+        }
+        Ok(None)
+    }
+
+    fn spawn_death_outcome(&mut self, position: [f32; 3], death: combat::DeathOutcome) {
+        for slot in death.drops {
+            let id = self.next_unique_entity_id();
+            self.claim_entity_id(id);
+            let _ = self.world.spawn_authority_drop(id, slot, position);
+        }
+        if death.experience > 0 {
+            let id = self.next_unique_entity_id();
+            self.claim_entity_id(id);
+            let _ = self
+                .world
+                .spawn_authority_experience(id, death.experience, position);
         }
     }
 
@@ -792,9 +1374,15 @@ impl AuthorityCore {
     /// `/respawn` command.  Runtime transport adapters call this lifecycle seam
     /// directly because a client must not need operator permission to respawn.
     pub fn respawn_session(&mut self, id: PlayerId) -> bool {
-        if !self.sessions.contains_key(&id) {
+        let Some(dimension) = self
+            .sessions
+            .get(&id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
             return false;
-        }
+        };
+        self.cleanup_session_lifecycle(id, dimension);
+        self.activate_dimension(dimension);
         let hardcore = self.world.rules.hardcore;
         let revision = self.world.revisions.allocate();
         let Some(session) = self.sessions.get_mut(&id) else {
@@ -921,6 +1509,128 @@ impl AuthorityCore {
     /// Drain request mutations without advancing the simulation clock.
     pub fn take_pending_mutations(&mut self) -> Vec<WorldMutation> {
         std::mem::take(&mut self.pending_mutations)
+    }
+}
+
+fn held_slot_index(gameplay: &SessionGameplayState, hand: u8) -> Result<u8, RejectReason> {
+    match hand {
+        0 if gameplay.selected_hotbar_slot < 9 => Ok(gameplay.selected_hotbar_slot),
+        1 => Ok((contract::SESSION_INVENTORY_SLOTS - 1) as u8),
+        _ => Err(RejectReason::InvalidState),
+    }
+}
+
+fn preserves_brew_locks(before: &SessionGameplayState, after: &SessionGameplayState) -> bool {
+    (0..contract::SESSION_INVENTORY_SLOTS).all(|index| {
+        !transactions::brew_locks_slot(before, index as u8)
+            || before.inventory[index] == after.inventory[index]
+    })
+}
+
+fn position_to_milli(position: [f32; 3]) -> Result<[i32; 3], RejectReason> {
+    let mut result = [0; 3];
+    for (index, value) in position.into_iter().enumerate() {
+        if !value.is_finite() || value.abs() > 2_000_000.0 {
+            return Err(RejectReason::InvalidState);
+        }
+        result[index] = (value * 1_000.0).round() as i32;
+    }
+    Ok(result)
+}
+
+fn map_fishing_error(error: fishing::FishingDomainError) -> RejectReason {
+    match error {
+        fishing::FishingDomainError::HookTooFar => RejectReason::TooFar,
+        fishing::FishingDomainError::InvalidContext
+        | fishing::FishingDomainError::InvalidHand
+        | fishing::FishingDomainError::InvalidSelectedSlot
+        | fishing::FishingDomainError::MissingRod
+        | fishing::FishingDomainError::InvalidRod
+        | fishing::FishingDomainError::HookAlreadyActive
+        | fishing::FishingDomainError::NoActiveHook
+        | fishing::FishingDomainError::StaleHook
+        | fishing::FishingDomainError::CorruptHook
+        | fishing::FishingDomainError::InventoryFull
+        | fishing::FishingDomainError::ExperienceOverflow => RejectReason::InvalidState,
+    }
+}
+
+fn map_transaction_error(_error: transactions::TransactionError) -> RejectReason {
+    RejectReason::InvalidState
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CombatProfile {
+    base_damage_milli: u32,
+    used_axe: bool,
+    knockback_milli: u32,
+    fire_ticks: u16,
+    looting_level: u8,
+}
+
+fn combat_profile(gameplay: &SessionGameplayState) -> Result<CombatProfile, RejectReason> {
+    use crate::enchantment::{attack_damage_bonus, Enchantment};
+    use crate::inventory::ToolType;
+
+    let selected = usize::from(gameplay.selected_hotbar_slot);
+    if selected >= 9 {
+        return Err(RejectReason::InvalidState);
+    }
+    let stack = gameplay.inventory[selected]
+        .map(|slot| slot.item.to_stack().ok_or(RejectReason::InvalidState))
+        .transpose()?;
+    let tool = stack
+        .as_ref()
+        .and_then(|stack| stack.item.tool_properties());
+    let enchantments = stack
+        .as_ref()
+        .map(|stack| stack.enchantments)
+        .unwrap_or_default();
+    let base = tool.map(|tool| tool.damage).unwrap_or(1.0) + attack_damage_bonus(&enchantments);
+    Ok(CombatProfile {
+        base_damage_milli: (base.max(0.001) * 1_000.0).round().clamp(1.0, 100_000.0) as u32,
+        used_axe: tool.is_some_and(|tool| tool.tool_type == ToolType::Axe),
+        knockback_milli: 400 + u32::from(enchantments.level_of(Enchantment::Knockback(1))) * 500,
+        fire_ticks: u16::from(enchantments.level_of(Enchantment::FireAspect(1))) * 80,
+        looting_level: enchantments.level_of(Enchantment::Looting(1)).min(3),
+    })
+}
+
+fn look_from_angles(yaw: f32, pitch: f32) -> Result<[i16; 3], RejectReason> {
+    if !yaw.is_finite() || !pitch.is_finite() || pitch.abs() > 90.0 {
+        return Err(RejectReason::InvalidState);
+    }
+    let yaw = yaw.to_radians();
+    let pitch = pitch.to_radians();
+    let horizontal = pitch.cos();
+    let look = [
+        (-yaw.sin() * horizontal * 1_000.0).round() as i16,
+        (-pitch.sin() * 1_000.0).round() as i16,
+        (yaw.cos() * horizontal * 1_000.0).round() as i16,
+    ];
+    Ok(look)
+}
+
+fn quantize_health(health: f32) -> u32 {
+    if health.is_finite() {
+        (health.max(0.0) * 1_000.0).round().min(u32::MAX as f32) as u32
+    } else {
+        u32::MAX
+    }
+}
+
+fn map_combat_error(error: combat::CombatReject) -> RejectReason {
+    match error {
+        combat::CombatReject::OutOfRange => RejectReason::TooFar,
+        combat::CombatReject::ReplayedEvent => RejectReason::Duplicate,
+        combat::CombatReject::InvalidEvent
+        | combat::CombatReject::IdentityMismatch
+        | combat::CombatReject::Cooldown
+        | combat::CombatReject::NoLineOfSight
+        | combat::CombatReject::NotFacingTarget
+        | combat::CombatReject::TargetDead
+        | combat::CombatReject::TargetInvulnerable
+        | combat::CombatReject::InvalidTargetState => RejectReason::InvalidState,
     }
 }
 
@@ -1113,8 +1823,9 @@ mod tests {
     }
 
     #[test]
-    fn self_damage_combat_updates_session_health_and_death() {
+    fn client_cannot_submit_self_damage() {
         let mut core = core(AuthorityTopology::Singleplayer);
+        let before = core.session(7).unwrap().gameplay;
         let response = core.submit_request(GameplayRequest {
             request_id: 35,
             client_sequence: 1,
@@ -1126,47 +1837,27 @@ mod tests {
                 action: 0x80 | 127,
             },
         });
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
-        let state = core.session(7).unwrap().gameplay;
-        assert_eq!(state.health_milli, 7_300);
-        let response = core.submit_request(GameplayRequest {
-            request_id: 36,
-            client_sequence: 2,
-            session_id: 7,
-            dimension: 0,
-            client_revision: core.current_revision(),
-            operation: GameplayOperation::Combat {
-                target: 0,
-                action: 0x80 | 127,
-            },
-        });
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
-        let state = core.session(7).unwrap().gameplay;
-        assert!(state.is_dead);
-        assert_eq!(state.health_milli, 0);
+        assert!(matches!(
+            response.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::InvalidState
+            }
+        ));
+        assert_eq!(core.session(7).unwrap().gameplay, before);
     }
 
     #[test]
     fn respawn_command_restores_authority_health_after_death() {
         let mut core = core(AuthorityTopology::Singleplayer);
-        for (request_id, sequence) in [(38, 1), (39, 2)] {
-            let response = core.submit_request(GameplayRequest {
-                request_id,
-                client_sequence: sequence,
-                session_id: 7,
-                dimension: 0,
-                client_revision: core.current_revision(),
-                operation: GameplayOperation::Combat {
-                    target: 0,
-                    action: 0x80 | 127,
-                },
-            });
-            assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
-        }
+        let mut dead = core.session(7).unwrap().gameplay;
+        dead.health_milli = 0;
+        dead.is_dead = true;
+        dead.death_source = Some(crate::player::DamageSource::Mob.to_wire());
+        assert!(core.set_session_gameplay(7, dead));
         assert!(core.session(7).unwrap().gameplay.is_dead);
         let response = core.submit_request(GameplayRequest {
             request_id: 40,
-            client_sequence: 3,
+            client_sequence: 1,
             session_id: 7,
             dimension: 0,
             client_revision: core.current_revision(),
@@ -1380,10 +2071,13 @@ mod tests {
     #[test]
     fn combat_mutates_headless_entity_without_state_fallback() {
         let mut core = core(AuthorityTopology::Dedicated);
+        let mut attacker = core.session(7).unwrap().gameplay;
+        attacker.attack_cooldown_ticks = ATTACK_COOLDOWN_TICKS;
+        assert!(core.set_session_gameplay(7, attacker));
         let target = core
             .world
             .entities
-            .spawn(EntityType::Zombie, glam::Vec3::new(9.0, 80.0, 8.0));
+            .spawn(EntityType::Zombie, glam::Vec3::new(8.0, 80.0, 9.0));
         let before = core.world.entities.get_by_id(target).unwrap().health;
         let response = core.submit_request(GameplayRequest {
             request_id: 31,
@@ -1393,7 +2087,10 @@ mod tests {
             client_revision: 0,
             operation: GameplayOperation::Combat { target, action: 0 },
         });
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(
+            matches!(response.outcome, GameplayOutcome::Accepted { .. }),
+            "unexpected combat response: {response:?}"
+        );
         assert!(core.world.entities.get_by_id(target).unwrap().health < before);
     }
 

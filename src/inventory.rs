@@ -757,10 +757,13 @@ impl ItemStack {
             .map(|t| t.durability)
             .or_else(|| item.armor_properties().map(|a| a.durability))
             .or_else(|| {
-                if item == Item::Shield {
-                    Some(336)
-                } else {
-                    None
+                match item {
+                    Item::Shield => Some(336),
+                    // Fishing is durability-gated by the authority domain. New
+                    // rods therefore need a real remaining-durability value;
+                    // zero is reserved for legacy/corrupt broken rods.
+                    Item::FishingRod => Some(64),
+                    _ => None,
                 }
             })
             .unwrap_or(0);
@@ -3229,6 +3232,11 @@ impl Inventory {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn fishing_rod_starts_with_authority_durability() {
+        assert_eq!(ItemStack::new(Item::FishingRod, 1).durability, 64);
+    }
 
     #[test]
     fn test_inventory_creative_init() {

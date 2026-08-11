@@ -8,7 +8,7 @@ use tokio::time::{self, Instant};
 
 use super::protocol::{
     Action, EntityStateWire, GameplayRequest, GameplayResponse, LightningStrike, Packet,
-    PlayerEffectWire, PlayerId, PROTOCOL_VERSION,
+    PlayerEffectWire, PlayerId, SessionGameplayWire, PROTOCOL_VERSION,
 };
 use super::transport::Connection;
 
@@ -136,6 +136,12 @@ pub enum ClientToGame {
         sequence: u64,
         player_id: PlayerId,
         effects: Vec<PlayerEffectWire>,
+    },
+    PlayerSessionUpdate {
+        sequence: u64,
+        player_id: PlayerId,
+        dimension: u8,
+        state: SessionGameplayWire,
     },
     TimeSync {
         ticks: u64,
@@ -272,16 +278,20 @@ struct RevisionGate {
 
 #[derive(Default)]
 struct ReplicationGate {
-    entity_sequences: HashMap<u64, u64>,
+    entity_sequences: HashMap<(u8, u64), u64>,
     health_sequences: HashMap<PlayerId, u64>,
     effect_sequences: HashMap<PlayerId, u64>,
+    session_revisions: HashMap<PlayerId, (u8, u64)>,
     block_entity_revisions: HashMap<(u8, i32, i32, i32), u64>,
     container_revisions: HashMap<(u8, i32, i32, i32), u64>,
 }
 
 impl ReplicationGate {
-    fn accept_entity(&mut self, entity_id: u64, sequence: u64) -> bool {
-        let latest = self.entity_sequences.entry(entity_id).or_default();
+    fn accept_entity(&mut self, dimension: u8, entity_id: u64, sequence: u64) -> bool {
+        let latest = self
+            .entity_sequences
+            .entry((dimension, entity_id))
+            .or_default();
         if sequence <= *latest {
             return false;
         }
@@ -304,6 +314,19 @@ impl ReplicationGate {
             return false;
         }
         *latest = sequence;
+        true
+    }
+
+    fn accept_session(&mut self, player_id: PlayerId, dimension: u8, revision: u64) -> bool {
+        if self.session_revisions.get(&player_id).is_some_and(
+            |(latest_dimension, latest_revision)| {
+                *latest_dimension == dimension && revision <= *latest_revision
+            },
+        ) {
+            return false;
+        }
+        self.session_revisions
+            .insert(player_id, (dimension, revision));
         true
     }
 
@@ -395,8 +418,11 @@ impl RevisionGate {
         block_entities: Vec<u8>,
     ) -> Vec<ClientToGame> {
         let key = (dimension, cx, cz);
-        let current = self.applied.get(&key).copied().unwrap_or(0);
-        if revision <= current {
+        if self
+            .applied
+            .get(&key)
+            .is_some_and(|current| revision <= *current)
+        {
             return Vec::new();
         }
         self.applied.insert(key, revision);
@@ -791,7 +817,7 @@ async fn run_client(
                         state,
                         ..
                     }) => {
-                        if replication_gate.accept_entity(state.entity_id, sequence) {
+                        if replication_gate.accept_entity(dimension, state.entity_id, sequence) {
                             let _ = client_to_game.send(ClientToGame::EntitySpawn {
                                 dimension,
                                 sequence,
@@ -805,7 +831,7 @@ async fn run_client(
                         state,
                         ..
                     }) => {
-                        if replication_gate.accept_entity(state.entity_id, sequence) {
+                        if replication_gate.accept_entity(dimension, state.entity_id, sequence) {
                             let _ = client_to_game.send(ClientToGame::EntityState {
                                 dimension,
                                 sequence,
@@ -819,7 +845,7 @@ async fn run_client(
                         entity_id,
                         ..
                     }) => {
-                        if replication_gate.accept_entity(entity_id, sequence) {
+                        if replication_gate.accept_entity(dimension, entity_id, sequence) {
                             let _ = client_to_game.send(ClientToGame::EntityDespawn {
                                 dimension,
                                 sequence,
@@ -864,6 +890,24 @@ async fn run_client(
                                 sequence,
                                 player_id,
                                 effects,
+                            });
+                        }
+                    }
+                    Ok(Packet::PlayerSessionUpdate {
+                        sequence,
+                        player_id,
+                        dimension,
+                        state,
+                        ..
+                    }) => {
+                        if state.validate_bounds().is_ok()
+                            && replication_gate.accept_session(player_id, dimension, state.revision)
+                        {
+                            let _ = client_to_game.send(ClientToGame::PlayerSessionUpdate {
+                                sequence,
+                                player_id,
+                                dimension,
+                                state,
                             });
                         }
                     }
@@ -2169,11 +2213,17 @@ mod tests {
     #[test]
     fn replication_gate_rejects_stale_entity_health_and_effect_state() {
         let mut gate = ReplicationGate::default();
-        assert!(gate.accept_entity(9, 1));
-        assert!(!gate.accept_entity(9, 1));
-        assert!(!gate.accept_entity(9, 0));
-        assert!(gate.accept_entity(9, 2));
-        assert!(gate.accept_entity(10, 1));
+        assert!(gate.accept_entity(0, 9, 1));
+        assert!(!gate.accept_entity(0, 9, 1));
+        assert!(!gate.accept_entity(0, 9, 0));
+        assert!(gate.accept_entity(0, 9, 2));
+        assert!(gate.accept_entity(0, 10, 1));
+        assert!(gate.accept_entity(1, 9, 1));
+
+        assert!(gate.accept_session(4, 0, 0));
+        assert!(!gate.accept_session(4, 0, 0));
+        assert!(gate.accept_session(4, 0, 1));
+        assert!(gate.accept_session(4, 1, 0));
 
         assert!(gate.accept_health(4, 7));
         assert!(!gate.accept_health(4, 7));

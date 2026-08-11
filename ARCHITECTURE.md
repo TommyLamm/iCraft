@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-08-08
+> Last verified: 2026-08-11
 > Git baseline: tommy-dev
 >
 > This document is a concise navigation map. Source code remains authoritative.
@@ -94,7 +94,7 @@ the primary Vulkan path has caused a verified NVIDIA driver crash.
 4. Builds initial terrain meshes and starts background services.
 5. Streams the remaining render distance incrementally.
 
-Joining clients wait for a successful protocol-v14 login before using the host's
+Joining clients wait for a successful protocol-v16 login before using the host's
 seed and synchronized world state.
 
 ### Per-frame update
@@ -267,7 +267,7 @@ must not be presented as a GPU/manual pass.
 - `ServerListPingRequest`/`ServerListPingResponse` reports protocol version,
   MOTD, and online/max player counts.
 
-Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v14. Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta. `WorldRulesSync` carries the host's serialized `WorldRules` snapshot to clients; clients apply it for display/runtime policy and cannot submit rule mutations. Trading and raid packets remain versioned under the same protocol.
+Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v16. Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta. `WorldRulesSync` carries the host's serialized `WorldRules` snapshot to clients; clients apply it for display/runtime policy and cannot submit rule mutations. Trading and raid packets remain versioned under the same protocol.
 `ContainerSessionManager` and `MerchantSessionManager` track player ID, dimension, villager ID, and active trade offers.
 `PoiManager` (`src/village/poi.rs`) indexes Bed and JobSite POIs by chunk with max-distance spatial hashing, maintaining spatial village clusters for villager assignment and bed count tracking.
 `RaidManager` (`src/village/raid.rs`) tracks active village raids, wave progression (Pillager/Ravager counts), Bad Omen triggers, and raid victory/defeat states.
@@ -340,7 +340,7 @@ workstation progress, active effects, advancement UI state, and Creative flight.
 | --- | --- |
 | App lifecycle and menu | `main.rs`, `app.rs`, `menu.rs` |
 | Composition, presentation/input, UI, GPU submission | `state.rs` |
-| Headless authority, fixed tick, sessions, revisions, interest routing | `authority/{mod,contract,interest}.rs`, `server_world.rs`, `server_runtime.rs` |
+| Headless authority, fixed tick, sessions, revisions, interest routing | `authority/{mod,contract,interest,combat,fishing,transactions}.rs`, `server_world.rs`, `server_runtime.rs` |
 | World/chunks/generation & structures | `world.rs`, `chunk_manager.rs`, `dimension.rs`, `worldgen/{mod, climate, density, surface, carver, ore, feature}.rs`, `structure/{types, placement, gen/*, manager, locate}.rs`, `loot.rs` |
 | Lighting, fluids, block targeting | `lighting.rs`, `fluid.rs`, `interaction.rs` |
 | Terrain scheduling/rendering | `chunk_schedule.rs`, `chunk_render.rs`, `culling.rs`, `shader.wgsl` |
@@ -378,7 +378,7 @@ placement, fluid tick, light propagation, world mutation validation) now use
 `dimension.height()` / `WorldHeight::contains_y` instead of hardcoded
 `0..CHUNK_HEIGHT`.
 
-Network protocol v14: `ChunkData` packet carries explicit `min_section_y: i8`
+Network protocol v16: `ChunkData` packet carries explicit `min_section_y: i8`
 and `section_count: u16`; block-entity variants and container updates carry
 stable revisions. Save format v3: `ChunkSaveData::data_version = 3` with
 height-aware flat arrays, compressed block entities, and redstone metadata.
@@ -484,8 +484,9 @@ have unit coverage. Visual 4:3/16:9/21:9/high-DPI, audio-device,
 GPU-performance, 30-minute soak, and three-topology acceptance still require
 the manual steps in `plans/minecraft_foundation_gap/17_qa_checklist.md`.
 Plan21 Phase A additionally keeps simultaneous dimension worlds and per-session
-interest/revision routing isolated in headless tests; its fishing/furnace and
-listen-State follow-up phases remain unchecked.
+interest/revision routing isolated in headless tests, with persistence and
+topology/reconnect regression coverage. Its fishing/furnace and listen-State
+follow-up phases remain unchecked.
 
 Use:
 

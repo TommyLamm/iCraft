@@ -1,5 +1,4 @@
 use crate::authority::contract::AuthorityTopology;
-use crate::authority::{AuthorityBoundary, AuthorityConfig};
 use crate::camera::{Camera, CameraUniform};
 use crate::chunk_manager::{
     mark_block_mesh_dependencies, mark_section_mesh_dependencies, surrounding_chunk_coords,
@@ -2073,7 +2072,7 @@ impl State {
         }
     }
     fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             for &((x, y, z), block) in changes {
                 let _ = self.submit_local_authority_block_use(x, y, z, block);
             }
@@ -2305,8 +2304,8 @@ impl State {
         if target == self.current_dimension {
             return;
         }
-        if let Some(boundary) = self.authority_boundary.as_mut() {
-            if !boundary.set_dimension(target as u8) {
+        if let Some(runtime) = self.embedded_runtime.as_mut() {
+            if !runtime.set_session_dimension(target) {
                 return;
             }
         }
@@ -2315,19 +2314,23 @@ impl State {
         self.jump_taps.reset();
         let source = self.current_dimension;
         let tracker = self.chunk_manager.dirty_chunks.clone();
-        for ((cx, cz), revision) in tracker.dirty_revisions() {
-            if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
-                let redstone_metadata =
-                    self.redstone
-                        .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                let snapshot = crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
-                    source,
-                    chunk,
-                    redstone_metadata,
-                )
-                .with_mutation_revision(self.mutation_revisions.latest(source, cx, cz));
-                if let Err(error) = self.enqueue_chunk_save(snapshot, tracker.clone(), revision) {
-                    eprintln!("[Save] Could not queue dimension-switch chunk: {error}");
+        if !self.has_in_process_runtime() {
+            for ((cx, cz), revision) in tracker.dirty_revisions() {
+                if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
+                    let redstone_metadata =
+                        self.redstone
+                            .collect_chunk_metadata(&self.chunk_manager, cx, cz);
+                    let snapshot =
+                        crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
+                            source,
+                            chunk,
+                            redstone_metadata,
+                        )
+                        .with_mutation_revision(self.mutation_revisions.latest(source, cx, cz));
+                    if let Err(error) = self.enqueue_chunk_save(snapshot, tracker.clone(), revision)
+                    {
+                        eprintln!("[Save] Could not queue dimension-switch chunk: {error}");
+                    }
                 }
             }
         }
@@ -2340,8 +2343,10 @@ impl State {
             destination = Vec3::new(8.5, 80.0, 8.5);
         }
 
-        if let Err(error) = self.save_current_dimension_entities() {
-            eprintln!("[Save] Could not save dimension entities: {error}");
+        if !self.has_in_process_runtime() {
+            if let Err(error) = self.save_current_dimension_entities() {
+                eprintln!("[Save] Could not save dimension entities: {error}");
+            }
         }
         self.current_dimension = target;
         let render_distance = self.chunk_manager.render_distance;
@@ -2424,9 +2429,6 @@ impl State {
         ) {
             destination = self.build_linked_nether_portal(cx, cz, destination.y as i32);
         }
-        if let Some(boundary) = self.authority_boundary.as_mut() {
-            boundary.set_position(destination.to_array());
-        }
         self.player_physics.position = destination;
         self.prev_player_position = destination;
         self.player_physics.velocity = Vec3::ZERO;
@@ -2435,11 +2437,13 @@ impl State {
         self.camera.position = destination + Vec3::new(0.0, 1.6, 0.0);
         self.portal_contact_time = 0.0;
         self.portal_cooldown = 3.0;
-        let _ = self
-            .save_manager
-            .lock()
-            .unwrap()
-            .save_current_dimension(target);
+        if !self.has_in_process_runtime() {
+            let _ = self
+                .save_manager
+                .lock()
+                .unwrap()
+                .save_current_dimension(target);
+        }
         println!("[Dimension] {} -> {}", source.name(), target.name());
     }
 
@@ -3025,6 +3029,192 @@ pub enum NetworkHandle {
         game_to_client: std::sync::mpsc::Sender<crate::network::client::GameToClient>,
         thread: Option<std::thread::JoinHandle<()>>,
     },
+}
+
+/// Opaque bridge between the GPU presentation root and the shared headless
+/// runtime.  Local input is always published through `RuntimeInput`; the
+/// runtime owns authority state and only exposes results after a fixed tick.
+/// Keeping this adapter in the presentation module prevents the renderer from
+/// retaining a second `AuthorityCore` or observing mutable core internals.
+struct EmbeddedRuntimeBridge {
+    runtime: crate::server_runtime::ServerRuntime,
+    input: crate::server_runtime::RuntimeInput,
+    session_id: crate::network::protocol::PlayerId,
+    topology: AuthorityTopology,
+    next_request_id: u128,
+    next_client_sequence: u64,
+    next_pose_sender_time_millis: u64,
+    revisions: std::collections::HashMap<crate::dimension::Dimension, u64>,
+    pending_request_dimensions: std::collections::HashMap<u128, crate::dimension::Dimension>,
+}
+
+impl EmbeddedRuntimeBridge {
+    fn new(
+        role: &MultiplayerRole,
+        world_dir: std::path::PathBuf,
+        seed: u32,
+        difficulty: Difficulty,
+        render_distance: u32,
+        pvp: bool,
+    ) -> Result<Self, crate::server_runtime::ServerConfigError> {
+        let session_id = u64::MAX;
+        let (topology, options) = match role {
+            MultiplayerRole::Singleplayer => (
+                AuthorityTopology::Singleplayer,
+                crate::server_runtime::EmbeddedRuntimeOptions::singleplayer(
+                    crate::server_runtime::LocalSessionProfile::new(session_id, "local"),
+                ),
+            ),
+            MultiplayerRole::Host { .. } => (
+                AuthorityTopology::ListenServer,
+                crate::server_runtime::EmbeddedRuntimeOptions::listen(
+                    crate::server_runtime::LocalSessionProfile::new(session_id, "host"),
+                ),
+            ),
+            MultiplayerRole::Client { .. } => {
+                return Err(crate::server_runtime::ServerConfigError::Invalid {
+                    key: "embedded-runtime".into(),
+                    value: "client".into(),
+                    reason: "client presentations use NetworkClient transport".into(),
+                })
+            }
+        };
+        let mut properties = crate::server_runtime::ServerProperties::default();
+        properties.world_dir = world_dir;
+        properties.seed = u64::from(seed);
+        properties.pvp = pvp;
+        properties.view_distance = render_distance.clamp(2, 32) as u8;
+        properties.simulation_distance = render_distance.clamp(2, 32) as u8;
+        properties.difficulty = match difficulty {
+            Difficulty::Peaceful => "peaceful",
+            Difficulty::Easy => "easy",
+            Difficulty::Normal => "normal",
+            Difficulty::Hard => "hard",
+        }
+        .to_string();
+        if let MultiplayerRole::Host { port } = role {
+            properties.port = *port;
+        }
+        let (runtime, input) =
+            crate::server_runtime::ServerRuntime::new_embedded(properties, options)?;
+        Ok(Self {
+            runtime,
+            input,
+            session_id,
+            topology,
+            next_request_id: 1,
+            next_client_sequence: 1,
+            next_pose_sender_time_millis: 1,
+            revisions: std::collections::HashMap::new(),
+            pending_request_dimensions: std::collections::HashMap::new(),
+        })
+    }
+
+    fn session_id(&self) -> crate::network::protocol::PlayerId {
+        self.session_id
+    }
+
+    fn topology(&self) -> AuthorityTopology {
+        self.topology
+    }
+
+    fn revision_for_dimension(&self, dimension: crate::dimension::Dimension) -> u64 {
+        self.revisions.get(&dimension).copied().unwrap_or_default()
+    }
+
+    fn queue_request(
+        &mut self,
+        mut request: crate::network::protocol::GameplayRequest,
+    ) -> Result<(), crate::server_runtime::RuntimeInputError> {
+        request.request_id = self.next_request_id;
+        request.client_sequence = self.next_client_sequence;
+        request.session_id = self.session_id;
+        request.client_revision = self.revision_for_dimension(
+            crate::dimension::Dimension::from_wire(request.dimension).unwrap_or_default(),
+        );
+        let request_id = request.request_id;
+        let dimension =
+            crate::dimension::Dimension::from_wire(request.dimension).unwrap_or_default();
+        self.input.submit_request(self.session_id, request)?;
+        self.pending_request_dimensions
+            .insert(request_id, dimension);
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        self.next_client_sequence = self.next_client_sequence.saturating_add(1);
+        Ok(())
+    }
+
+    fn queue_position(
+        &mut self,
+        sequence: u32,
+        position: glam::Vec3,
+        yaw: f32,
+        pitch: f32,
+    ) -> Result<(), crate::server_runtime::RuntimeInputError> {
+        let sender_time_millis = self.next_pose_sender_time_millis;
+        self.next_pose_sender_time_millis = self
+            .next_pose_sender_time_millis
+            .saturating_add(50)
+            .max(sender_time_millis.saturating_add(1));
+        self.input
+            .try_send(crate::network::server::ServerToHost::ClientPosition {
+                id: self.session_id,
+                sequence,
+                sender_time_millis,
+                x: position.x,
+                y: position.y,
+                z: position.z,
+                yaw,
+                pitch,
+            })
+    }
+
+    fn tick(&mut self) -> std::io::Result<crate::server_runtime::RuntimeTickOutput> {
+        let output = self.runtime.tick_with_output()?;
+        for mutation in &output.snapshot.mutations {
+            if let Some(dimension) = crate::dimension::Dimension::from_wire(mutation.dimension) {
+                self.revisions
+                    .entry(dimension)
+                    .and_modify(|revision| *revision = (*revision).max(mutation.revision))
+                    .or_insert(mutation.revision);
+            }
+        }
+        for event in &output.presentation_events {
+            let crate::server_runtime::RuntimePresentationEvent::GameplayResponse {
+                response, ..
+            } = event
+            else {
+                continue;
+            };
+            if let crate::network::protocol::GameplayOutcome::Accepted { revision } =
+                &response.outcome
+            {
+                if let Some(dimension) =
+                    self.pending_request_dimensions.remove(&response.request_id)
+                {
+                    self.revisions
+                        .entry(dimension)
+                        .and_modify(|current| *current = (*current).max(*revision))
+                        .or_insert(*revision);
+                }
+            } else {
+                self.pending_request_dimensions.remove(&response.request_id);
+            }
+        }
+        Ok(output)
+    }
+
+    fn save_all(&mut self) -> std::io::Result<()> {
+        self.runtime.save_all()
+    }
+
+    fn shutdown(&mut self) -> std::io::Result<()> {
+        self.runtime.shutdown()
+    }
+
+    fn set_session_dimension(&mut self, dimension: crate::dimension::Dimension) -> bool {
+        self.runtime
+            .set_session_dimension(self.session_id, dimension)
+    }
 }
 
 trait TrackedNetworkSender<T> {
@@ -3811,6 +4001,12 @@ enum NetworkInbound {
         player_id: crate::network::protocol::PlayerId,
         effects: Vec<crate::network::protocol::PlayerEffectWire>,
     },
+    PlayerSessionUpdate {
+        sequence: u64,
+        player_id: crate::network::protocol::PlayerId,
+        dimension: u8,
+        state: crate::network::protocol::SessionGameplayWire,
+    },
     TimeSync {
         ticks: u64,
         weather: u8,
@@ -4550,6 +4746,17 @@ impl NetworkHandle {
                             sequence,
                             player_id,
                             effects,
+                        },
+                        crate::network::client::ClientToGame::PlayerSessionUpdate {
+                            sequence,
+                            player_id,
+                            dimension,
+                            state,
+                        } => NetworkInbound::PlayerSessionUpdate {
+                            sequence,
+                            player_id,
+                            dimension,
+                            state,
                         },
                         crate::network::client::ClientToGame::TimeSync {
                             ticks,
@@ -5356,15 +5563,10 @@ pub struct State {
     pub advancement_manager: crate::advancements::AdvancementManager,
     pub advancement_gui: crate::advancements::AdvancementGui,
     pub role: MultiplayerRole,
-    /// Singleplayer and listen-host presentation roots submit to this
-    /// in-process authority.  Dedicated mode never constructs `State` and
-    /// therefore never allocates this GPU-side boundary.
-    pub authority_boundary: Option<AuthorityBoundary>,
-    /// Monotonic envelope ids for commands issued by the in-process local
-    /// presentation root. They are kept outside the renderer simulation so
-    /// retries use the same AuthorityCore idempotency contract.
-    authority_request_id: u128,
-    authority_client_sequence: u64,
+    /// Singleplayer and listen-host presentation roots submit to this shared
+    /// fixed-tick runtime. Dedicated mode never constructs `State` and
+    /// therefore never allocates this GPU-side bridge.
+    embedded_runtime: Option<EmbeddedRuntimeBridge>,
     pub network: NetworkHandle,
     network_staging: NetworkStaging,
     network_ready: bool,
@@ -6907,29 +7109,11 @@ impl State {
         let particles = crate::particles::ParticleSystem::new();
         let weather = crate::weather::WeatherSystem::new(world_seed);
         let network = match &role {
-            MultiplayerRole::Singleplayer => NetworkHandle::None,
-            MultiplayerRole::Host { port } => {
-                let (host_to_server, host_commands) = std::sync::mpsc::channel();
-                let (server_events, server_to_host) = std::sync::mpsc::channel();
-                let gamemode = match game_mode {
-                    GameMode::Creative => 0,
-                    GameMode::Survival => 1,
-                    GameMode::Adventure => 2,
-                    GameMode::Spectator => 3,
-                };
-                let thread = crate::network::server::NetworkServer::spawn(
-                    format!("0.0.0.0:{port}"),
-                    u64::from(world_seed),
-                    gamemode,
-                    host_commands,
-                    server_events,
-                );
-                NetworkHandle::Host {
-                    server_to_host,
-                    host_to_server,
-                    thread: Some(thread),
-                }
-            }
+            // Embedded Singleplayer and listen-host sessions use the
+            // ServerRuntime transport.  Keeping NetworkHandle::None here is
+            // intentional: a second GPU-owned NetworkServer would create a
+            // second scheduling/authority path for host input.
+            MultiplayerRole::Singleplayer | MultiplayerRole::Host { .. } => NetworkHandle::None,
             MultiplayerRole::Client {
                 server_addr,
                 port,
@@ -6952,54 +7136,24 @@ impl State {
         };
 
         let (gpu_completion_tx, gpu_completion_rx) = std::sync::mpsc::channel();
-        let mut authority_boundary = match &role {
-            MultiplayerRole::Singleplayer => Some(AuthorityBoundary::new(
-                AuthorityConfig {
-                    seed: world_seed,
-                    dimension: current_dimension,
-                    world_type,
-                    generate_structures,
-                    rules: world_rules,
-                    render_distance: settings.render_distance as i32,
-                },
-                AuthorityTopology::Singleplayer,
-                // Keep the host's local session disjoint from authenticated
-                // network player ids allocated by the listen transport.
-                u64::MAX,
-                "local",
-                player_physics.position.to_array(),
-                cheats_enabled,
-                cheats_enabled,
-            )),
-            MultiplayerRole::Host { .. } => Some(AuthorityBoundary::new(
-                AuthorityConfig {
-                    seed: world_seed,
-                    dimension: current_dimension,
-                    world_type,
-                    generate_structures,
-                    rules: world_rules,
-                    render_distance: settings.render_distance as i32,
-                },
-                AuthorityTopology::ListenServer,
-                // Keep the host's local session disjoint from authenticated
-                // network player ids allocated by the listen transport.
-                u64::MAX,
-                "host",
-                player_physics.position.to_array(),
-                true,
-                cheats_enabled,
-            )),
-            MultiplayerRole::Client { .. } => None,
+        let embedded_runtime = if in_process_authority {
+            Some(
+                EmbeddedRuntimeBridge::new(
+                    &role,
+                    launch.world_dir.clone(),
+                    world_seed,
+                    launch.difficulty,
+                    settings.render_distance.max(2) as u32,
+                    world_rules.pvp,
+                )
+                .unwrap_or_else(|error| panic!("failed to start embedded server runtime: {error}")),
+            )
+        } else {
+            None
         };
-        if in_process_authority
-            && !has_save
-            && bonus_chest
-            && current_dimension == crate::dimension::Dimension::Overworld
-        {
-            if let Some(boundary) = authority_boundary.as_mut() {
-                boundary.seed_bonus_chest(world_spawn);
-            }
-        }
+        let embedded_session_id = embedded_runtime
+            .as_ref()
+            .map(EmbeddedRuntimeBridge::session_id);
         let mut state = Self {
             window,
             surface,
@@ -7211,13 +7365,11 @@ impl State {
             advancement_manager,
             advancement_gui,
             role,
-            authority_boundary,
-            authority_request_id: 1,
-            authority_client_sequence: 1,
+            embedded_runtime,
             network,
             network_staging: NetworkStaging::default(),
             network_ready: !is_client,
-            local_player_id: None,
+            local_player_id: embedded_session_id,
             remote_players: std::collections::HashMap::new(),
             replicated_entities: std::collections::HashMap::new(),
             replicated_entity_ids: std::collections::HashSet::new(),
@@ -7275,14 +7427,6 @@ impl State {
         // particular Spectator noclip/flight) before the first simulation tick.
         let initial_mode = state.game_mode;
         state.set_game_mode(initial_mode);
-        state.sync_authority_gameplay_from_local();
-
-        let initial_authority_mutations = state
-            .authority_boundary
-            .as_mut()
-            .map(|boundary| boundary.take_pending_mutations())
-            .unwrap_or_default();
-        state.project_authority_mutations(&initial_authority_mutations);
 
         let initial_mesh_coords: Vec<_> = state.chunk_meshes.keys().copied().collect();
         state.invalidate_chunk_meshes(initial_mesh_coords, DependencyReason::ChunkLoad);
@@ -7311,12 +7455,19 @@ impl State {
         !matches!(self.role, MultiplayerRole::Client { .. })
     }
 
+    /// True when this presentation root is backed by the shared headless
+    /// runtime. Renderer-side simulation and persistence stay disabled while
+    /// this is set; the runtime is the only authority owner.
+    fn has_in_process_runtime(&self) -> bool {
+        self.embedded_runtime.is_some()
+    }
+
     /// Return the authority topology without exposing transport internals to
     /// presentation/input callers.
     pub fn authority_topology(&self) -> Option<AuthorityTopology> {
-        self.authority_boundary
+        self.embedded_runtime
             .as_ref()
-            .map(|boundary| boundary.topology)
+            .map(EmbeddedRuntimeBridge::topology)
     }
 
     /// Advance the in-process authority by one fixed 20 Hz tick.  Dedicated
@@ -7324,23 +7475,241 @@ impl State {
     pub fn tick_authority_boundary(
         &mut self,
     ) -> Option<crate::authority::contract::AuthoritySnapshot> {
-        let current_dimension = self.current_dimension;
-        let (snapshot, rules) = {
-            let boundary = self.authority_boundary.as_mut()?;
-            boundary.set_position(self.player_physics.position.to_array());
-            let snapshot = boundary.tick();
-            let rules = boundary
-                .core
-                .world_ref(current_dimension)
-                .map(|world| world.rules)
-                .unwrap_or(boundary.core.world.rules);
-            (snapshot, rules)
+        let sequence = self.network_pose_sequence;
+        let position = self.player_physics.position;
+        let yaw = self.camera.yaw;
+        let pitch = self.camera.pitch;
+        let runtime = self.embedded_runtime.as_mut()?;
+        let session_id = runtime.session_id();
+        let _ = runtime.queue_position(sequence, position, yaw, pitch);
+        let output = match runtime.tick() {
+            Ok(output) => output,
+            Err(error) => {
+                self.save_error
+                    .get_or_insert_with(|| format!("embedded runtime tick failed: {error}"));
+                return None;
+            }
         };
-        self.project_authority_mutations(&snapshot.mutations);
-        self.project_authority_sessions(&snapshot.session_updates);
-        self.world_time.ticks = snapshot.tick;
-        self.world_rules = rules;
-        Some(snapshot)
+        for event in output.presentation_events {
+            self.project_runtime_presentation_event(event, session_id);
+        }
+        self.project_authority_mutations(&output.snapshot.mutations);
+        self.project_authority_sessions(&output.snapshot.session_updates);
+        self.world_time.ticks = output.snapshot.tick;
+        Some(output.snapshot)
+    }
+
+    /// Convert the runtime's target-aware presentation lane into the existing
+    /// renderer staging path.  The runtime remains the sole mutation owner;
+    /// these handlers only update presentation caches after a fixed tick.
+    fn project_runtime_presentation_event(
+        &mut self,
+        event: crate::server_runtime::RuntimePresentationEvent,
+        session_id: crate::network::protocol::PlayerId,
+    ) {
+        use crate::server_runtime::RuntimePresentationEvent as Event;
+        let inbound = match event {
+            Event::GameplayResponse { target, response } if target == session_id => {
+                Some(NetworkInbound::GameplayResponse { response })
+            }
+            Event::BlockChange {
+                target,
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                block,
+                state,
+            } if target == session_id => Some(NetworkInbound::AuthoritativeBlockChange {
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                block,
+                state,
+            }),
+            Event::ChunkData {
+                target,
+                dimension,
+                cx,
+                cz,
+                revision,
+                min_section_y,
+                section_count,
+                blocks,
+                block_states,
+                block_entities,
+            } if target == session_id => Some(NetworkInbound::ChunkData {
+                dimension,
+                cx,
+                cz,
+                revision,
+                min_section_y,
+                section_count,
+                blocks,
+                block_states,
+                block_entities,
+            }),
+            Event::BlockEntityDelta {
+                target,
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                entity,
+            } if target == session_id => Some(NetworkInbound::BlockEntityDelta {
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                entity,
+            }),
+            Event::EntitySpawn {
+                target,
+                dimension,
+                sequence,
+                state,
+            } if target == session_id => Some(NetworkInbound::EntitySpawn {
+                dimension,
+                sequence,
+                state,
+            }),
+            Event::EntityState {
+                target,
+                dimension,
+                sequence,
+                state,
+            } if target == session_id => Some(NetworkInbound::EntityState {
+                dimension,
+                sequence,
+                state,
+            }),
+            Event::EntityDespawn {
+                target,
+                dimension,
+                sequence,
+                entity_id,
+            } if target == session_id => Some(NetworkInbound::EntityDespawn {
+                dimension,
+                sequence,
+                entity_id,
+            }),
+            Event::PlayerSessionUpdate {
+                target,
+                sequence,
+                player_id,
+                dimension,
+                state,
+            } if target == session_id => Some(NetworkInbound::PlayerSessionUpdate {
+                sequence,
+                player_id,
+                dimension,
+                state,
+            }),
+            Event::PlayerEffect {
+                target,
+                sequence,
+                player_id,
+                effects,
+            } if target == session_id => Some(NetworkInbound::PlayerEffect {
+                sequence,
+                player_id,
+                effects,
+            }),
+            Event::PlayerPosition {
+                target,
+                id,
+                sequence,
+                sender_time_millis,
+                position,
+                yaw,
+                pitch,
+            } if target == session_id => Some(NetworkInbound::PlayerPosition {
+                id,
+                sequence,
+                sender_time_millis,
+                x: position[0],
+                y: position[1],
+                z: position[2],
+                yaw,
+                pitch,
+            }),
+            Event::ContainerOpenResult {
+                target,
+                dimension,
+                success,
+                position: (x, y, z),
+                slots,
+                revision,
+            } if target == session_id => Some(NetworkInbound::ContainerOpenResult {
+                dimension,
+                success,
+                x,
+                y,
+                z,
+                slots,
+                revision,
+            }),
+            Event::ContainerClickResult {
+                target,
+                dimension,
+                success,
+                slot_index,
+                slot,
+                dragged,
+            } if target == session_id => Some(NetworkInbound::ContainerClickResult {
+                dimension,
+                success,
+                slot_index,
+                slot,
+                dragged,
+            }),
+            Event::ContainerSlotUpdate {
+                target,
+                dimension,
+                revision,
+                position: (x, y, z),
+                slot_index,
+                slot,
+            } if target == session_id => Some(NetworkInbound::ContainerSlotUpdate {
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                slot_index,
+                slot,
+            }),
+            Event::PlayerRespawnResult {
+                target,
+                position,
+                dimension,
+            } if target == session_id => Some(NetworkInbound::PlayerRespawnResult {
+                position,
+                dimension,
+            }),
+            Event::WorldRules { target, rules } if target == session_id => {
+                Some(NetworkInbound::WorldRulesSync { rules })
+            }
+            Event::TimeSync {
+                target,
+                ticks,
+                weather,
+                weather_remaining_ticks,
+            } if target == session_id => Some(NetworkInbound::TimeSync {
+                ticks,
+                weather,
+                weather_remaining_ticks,
+            }),
+            _ => None,
+        };
+        if let Some(inbound) = inbound {
+            self.handle_single_network_event(inbound);
+        }
     }
 
     fn session_slot_from_stack(
@@ -7395,11 +7764,9 @@ impl State {
     }
 
     fn sync_authority_gameplay_from_local(&mut self) {
-        let gameplay = self.authority_gameplay_from_local();
-        let Some(boundary) = self.authority_boundary.as_mut() else {
-            return;
-        };
-        let _ = boundary.set_session_gameplay(boundary.session_id, gameplay);
+        // Runtime sessions are loaded once by `ServerRuntime::new_embedded`.
+        // Do not copy renderer state back into the authority on every input;
+        // doing so would recreate a second presentation-owned authority.
     }
 
     fn project_authority_sessions(
@@ -7407,9 +7774,9 @@ impl State {
         updates: &[crate::authority::contract::SessionGameplayUpdate],
     ) {
         let Some(session_id) = self
-            .authority_boundary
+            .embedded_runtime
             .as_ref()
-            .map(|boundary| boundary.session_id)
+            .map(EmbeddedRuntimeBridge::session_id)
         else {
             return;
         };
@@ -7478,11 +7845,10 @@ impl State {
             {
                 dirty_chunks.extend(dirty);
             }
-            let entity = self
-                .authority_boundary
-                .as_ref()
-                .and_then(|boundary| boundary.block_entity_at((x, y, z)));
-            self.chunk_manager.set_block_entity(x, y, z, entity);
+            // C1's bounded runtime output does not carry block-entity or
+            // container payloads yet.  Keep those renderer caches untouched
+            // until a typed runtime projection event exists; never query or
+            // mutate a second local authority as a fallback.
         }
         if !dirty_chunks.is_empty() {
             self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
@@ -7491,28 +7857,18 @@ impl State {
 
     pub fn submit_authority_request(
         &mut self,
-        mut request: crate::network::protocol::GameplayRequest,
+        request: crate::network::protocol::GameplayRequest,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        let current_dimension = self.current_dimension;
-        let (response, pending, session_update) = {
-            let boundary = self.authority_boundary.as_mut()?;
-            request.request_id = self.authority_request_id;
-            request.client_sequence = self.authority_client_sequence;
-            request.session_id = boundary.session_id;
-            request.client_revision = boundary.core.revision_for_dimension(current_dimension);
-            let response = boundary.submit(request);
-            let pending = boundary.take_pending_mutations();
-            let session_update = boundary.session_gameplay(boundary.session_id);
-            (response, pending, session_update)
+        let Some(runtime) = self.embedded_runtime.as_mut() else {
+            return None;
         };
-        self.authority_request_id = self.authority_request_id.wrapping_add(1);
-        self.authority_client_sequence = self.authority_client_sequence.saturating_add(1);
-        self.project_authority_mutations(&pending);
-        if let Some(update) = session_update {
-            self.project_authority_session(&update);
+        if let Err(error) = runtime.queue_request(request) {
+            self.save_error
+                .get_or_insert_with(|| format!("embedded runtime input rejected: {error}"));
         }
-        self.last_gameplay_response = Some(response.clone());
-        Some(response)
+        // ACKs are deliberately observed only from `tick_with_output`; a
+        // queued request has no synchronous response to project.
+        None
     }
 
     /// Submit a local input envelope through the same authority path used by
@@ -7523,66 +7879,26 @@ impl State {
         &mut self,
         operation: crate::network::protocol::GameplayOperation,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        let current_dimension = self.current_dimension;
         self.submit_authority_request(crate::network::protocol::GameplayRequest {
-            request_id: self.authority_request_id,
-            client_sequence: self.authority_client_sequence,
+            request_id: 0,
+            client_sequence: 0,
             session_id: 0,
             dimension: self.current_dimension as u8,
             client_revision: self
-                .authority_boundary
+                .embedded_runtime
                 .as_ref()
-                .map(|boundary| boundary.core.revision_for_dimension(current_dimension))
+                .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
                 .unwrap_or_default(),
             operation,
         })
     }
 
     fn project_authority_container(&mut self, position: (i32, i32, i32)) -> bool {
-        let current_dimension = self.current_dimension;
-        let Some(slots) = self.authority_boundary.as_ref().and_then(|boundary| {
-            boundary
-                .core
-                .world_ref(current_dimension)
-                .and_then(|world| world.container_slots_wire(position))
-        }) else {
-            return false;
-        };
-        let stacks = slots
-            .iter()
-            .map(|slot| slot.as_ref().and_then(|wire| wire.to_stack()))
-            .collect::<Vec<_>>();
-        if !crate::container_sessions::ContainerSessionManager::set_container_slots(
-            &mut self.chunk_manager,
-            position.0,
-            position.1,
-            position.2,
-            &stacks,
-        ) {
-            return false;
-        }
-        if let Some(revision) = self
-            .authority_boundary
-            .as_ref()
-            .and_then(|boundary| {
-                boundary
-                    .core
-                    .world
-                    .get_block_entity(position.0, position.1, position.2)
-            })
-            .map(crate::block_entity::BlockEntity::revision)
-        {
-            if let Some(entity) = self
-                .chunk_manager
-                .get_block_entity_mut(position.0, position.1, position.2)
-            {
-                entity.set_revision(revision);
-            }
-        }
-        self.container_target = Some(position);
-        self.container_is_double = stacks.len() > 27;
-        self.open_inventory();
-        true
+        let _ = position;
+        // RuntimeTickOutput currently has no container/session payload.  Do
+        // not read renderer slots or fabricate an ACK as a local fallback;
+        // C3 will add the typed presentation projection lane.
+        false
     }
 
     fn submit_local_authority_container_action(
@@ -7654,43 +7970,23 @@ impl State {
         z: i32,
         block: BlockType,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        let current_dimension = self.current_dimension;
-        let (response, pending, rules, time) = {
-            let boundary = self.authority_boundary.as_mut()?;
-            let request = crate::network::protocol::GameplayRequest {
-                request_id: self.authority_request_id,
-                client_sequence: self.authority_client_sequence,
-                session_id: boundary.session_id,
-                dimension: self.current_dimension as u8,
-                client_revision: boundary.core.revision_for_dimension(current_dimension),
-                operation: crate::network::protocol::GameplayOperation::BlockUse {
-                    x,
-                    y,
-                    z,
-                    block: block.to_wire(),
-                },
-            };
-            let response = boundary.submit(request);
-            let pending = boundary.take_pending_mutations();
-            let (rules, time) = boundary
-                .core
-                .world_ref(current_dimension)
-                .map(|world| (world.rules, world.time))
-                .unwrap_or((boundary.core.world.rules, boundary.core.world.time));
-            (response, pending, rules, time)
-        };
-        self.authority_request_id = self.authority_request_id.wrapping_add(1);
-        self.authority_client_sequence = self.authority_client_sequence.saturating_add(1);
-        self.project_authority_mutations(&pending);
-        self.last_gameplay_response = Some(response.clone());
-        if matches!(
-            response.outcome,
-            crate::network::protocol::GameplayOutcome::Accepted { .. }
-        ) {
-            self.world_rules = rules;
-            self.world_time.ticks = time;
-        }
-        Some(response)
+        self.submit_authority_request(crate::network::protocol::GameplayRequest {
+            request_id: 0,
+            client_sequence: 0,
+            session_id: 0,
+            dimension: self.current_dimension as u8,
+            client_revision: self
+                .embedded_runtime
+                .as_ref()
+                .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
+                .unwrap_or_default(),
+            operation: crate::network::protocol::GameplayOperation::BlockUse {
+                x,
+                y,
+                z,
+                block: block.to_wire(),
+            },
+        })
     }
 
     fn submit_remote_authority_block_use(
@@ -7701,35 +7997,10 @@ impl State {
         z: i32,
         block: u32,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        let current_dimension = self.current_dimension;
-        let (response, pending) = {
-            let boundary = self.authority_boundary.as_mut()?;
-            let dimension = boundary
-                .core
-                .session(session_id)
-                .and_then(|session| crate::dimension::Dimension::from_wire(session.dimension))
-                .unwrap_or(current_dimension);
-            let sequence = boundary
-                .core
-                .session(session_id)
-                .map(|session| session.last_client_sequence.saturating_add(1))
-                .unwrap_or(1);
-            let request = crate::network::protocol::GameplayRequest {
-                request_id: self.authority_request_id,
-                client_sequence: sequence,
-                session_id,
-                dimension: dimension as u8,
-                client_revision: boundary.core.revision_for_dimension(dimension),
-                operation: crate::network::protocol::GameplayOperation::BlockUse { x, y, z, block },
-            };
-            let response = boundary.submit_for_session(session_id, request);
-            let pending = boundary.take_pending_mutations();
-            (response, pending)
-        };
-        self.authority_request_id = self.authority_request_id.wrapping_add(1);
-        self.project_authority_mutations(&pending);
-        self.last_gameplay_response = Some(response.clone());
-        Some(response)
+        let _ = (session_id, x, y, z, block);
+        // Listen transport remote events are consumed by ServerRuntime's
+        // NetworkServer. State must not service a second remote authority.
+        None
     }
 
     fn handle_authority_client_block_action(
@@ -7745,23 +8016,7 @@ impl State {
         let requested_block = match action {
             crate::network::protocol::Action::Break => BlockType::Air.to_wire(),
             crate::network::protocol::Action::Place => block,
-            crate::network::protocol::Action::Use => self
-                .authority_boundary
-                .as_ref()
-                .and_then(|boundary| {
-                    let dimension = boundary
-                        .core
-                        .session(requester_id)
-                        .and_then(|session| {
-                            crate::dimension::Dimension::from_wire(session.dimension)
-                        })
-                        .unwrap_or(current_dimension);
-                    boundary
-                        .core
-                        .world_ref(dimension)
-                        .map(|world| world.get_block(x, y, z).to_wire())
-                })
-                .unwrap_or(BlockType::Air.to_wire()),
+            crate::network::protocol::Action::Use => BlockType::Air.to_wire(),
         };
         let response =
             self.submit_remote_authority_block_use(requester_id, x, y, z, requested_block);
@@ -7780,46 +8035,20 @@ impl State {
         &mut self,
         command: &str,
     ) -> Option<crate::network::protocol::GameplayResponse> {
-        let current_dimension = self.current_dimension;
-        let (response, pending, rules, time, session) = {
-            let boundary = self.authority_boundary.as_mut()?;
-            let request = crate::network::protocol::GameplayRequest {
-                request_id: self.authority_request_id,
-                client_sequence: self.authority_client_sequence,
-                session_id: boundary.session_id,
-                dimension: self.current_dimension as u8,
-                client_revision: boundary.core.revision_for_dimension(current_dimension),
-                operation: crate::network::protocol::GameplayOperation::Command {
-                    command: command.to_string(),
-                },
-            };
-            let response = boundary.submit(request);
-            let pending = boundary.take_pending_mutations();
-            let (rules, time) = boundary
-                .core
-                .world_ref(current_dimension)
-                .map(|world| (world.rules, world.time))
-                .unwrap_or((boundary.core.world.rules, boundary.core.world.time));
-            let session = boundary.core.session(boundary.session_id).cloned();
-            (response, pending, rules, time, session)
-        };
-        self.authority_request_id = self.authority_request_id.wrapping_add(1);
-        self.authority_client_sequence = self.authority_client_sequence.saturating_add(1);
-        self.project_authority_mutations(&pending);
-        self.last_gameplay_response = Some(response.clone());
-        if matches!(
-            response.outcome,
-            crate::network::protocol::GameplayOutcome::Accepted { .. }
-        ) {
-            self.world_rules = rules;
-            self.world_time.ticks = time;
-            if let Some(session) = session {
-                self.set_game_mode(session.game_mode);
-                self.player_physics.position = Vec3::from_array(session.position);
-                self.player_physics.velocity = Vec3::ZERO;
-            }
-        }
-        Some(response)
+        self.submit_authority_request(crate::network::protocol::GameplayRequest {
+            request_id: 0,
+            client_sequence: 0,
+            session_id: 0,
+            dimension: self.current_dimension as u8,
+            client_revision: self
+                .embedded_runtime
+                .as_ref()
+                .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
+                .unwrap_or_default(),
+            operation: crate::network::protocol::GameplayOperation::Command {
+                command: command.to_string(),
+            },
+        })
     }
 
     fn can_place_block_at(&self, x: i32, y: i32, z: i32, block: BlockType) -> bool {
@@ -8351,27 +8580,12 @@ impl State {
                 self.last_gameplay_response = Some(response);
             }
             NetworkInbound::GameplayRequest { id, mut request } => {
+                // Embedded listen transport is owned by ServerRuntime.  A
+                // State-side inbound GameplayRequest would be a second
+                // authority path; retain this legacy arm only for clients,
+                // where NetworkClient remains the presentation transport.
                 request.session_id = id;
-                let request_id = request.request_id;
-                let (response, pending) = if let Some(boundary) = self.authority_boundary.as_mut() {
-                    let response = boundary.submit_for_session(id, request);
-                    let pending = boundary.take_pending_mutations();
-                    (response, pending)
-                } else {
-                    (
-                        crate::network::protocol::GameplayResponse {
-                            request_id,
-                            server_sequence: 0,
-                            outcome: crate::network::protocol::GameplayOutcome::Rejected {
-                                reason: crate::network::protocol::RejectReason::Unauthorized,
-                            },
-                        },
-                        Vec::new(),
-                    )
-                };
-                self.project_authority_mutations(&pending);
-                self.last_gameplay_response = Some(response.clone());
-                self.network.send_gameplay_response(id, response);
+                let _ = request;
             }
             NetworkInbound::Connected {
                 player_id,
@@ -8431,16 +8645,6 @@ impl State {
                 );
             }
             NetworkInbound::PlayerJoin { id, username } => {
-                if let Some(boundary) = self.authority_boundary.as_mut() {
-                    boundary.register_session(
-                        id,
-                        username.clone(),
-                        self.current_dimension as u8,
-                        self.player_physics.position.to_array(),
-                        false,
-                        self.cheats_enabled,
-                    );
-                }
                 if self.local_player_id != Some(id) {
                     if let Some(remote) = self.remote_players.get_mut(&id) {
                         remote.username = username.clone();
@@ -8477,9 +8681,6 @@ impl State {
                 }
             }
             NetworkInbound::PlayerLeave(id) => {
-                if let Some(boundary) = self.authority_boundary.as_mut() {
-                    boundary.core.remove_session(id);
-                }
                 self.pending_player_catchups.remove(&id);
                 self.remote_player_health.remove(&id);
                 self.remote_player_effects.remove(&id);
@@ -8509,9 +8710,6 @@ impl State {
                 yaw,
                 pitch,
             } => {
-                if let Some(boundary) = self.authority_boundary.as_mut() {
-                    boundary.set_session_position(id, [x, y, z]);
-                }
                 if self.local_player_id == Some(id) {
                     let authoritative = Vec3::new(x, y, z);
                     if self.player_physics.position.distance(authoritative)
@@ -8624,7 +8822,7 @@ impl State {
                 block,
                 state,
             } => {
-                if self.authority_boundary.is_some() {
+                if self.has_in_process_runtime() {
                     let _ = self.submit_remote_authority_block_use(id, x, y, z, block);
                 } else {
                     self.set_block_and_broadcast(id, x, y, z, block, state);
@@ -8639,7 +8837,7 @@ impl State {
                 block,
                 held_item,
             } => {
-                if self.authority_boundary.is_some() {
+                if self.has_in_process_runtime() {
                     self.handle_authority_client_block_action(id, action, x, y, z, block);
                 } else {
                     self.handle_client_block_action(id, action, x, y, z, block, held_item);
@@ -8780,6 +8978,63 @@ impl State {
                     self.client_player_effect_sequence = sequence;
                     self.potion_effects.active =
                         effects.into_iter().filter_map(effect_from_wire).collect();
+                }
+            }
+            NetworkInbound::PlayerSessionUpdate {
+                sequence,
+                player_id,
+                dimension,
+                state,
+            } => {
+                if self.local_player_id != Some(player_id)
+                    || (!self.has_in_process_runtime() && self.is_authoritative())
+                    || sequence <= self.client_player_health_sequence
+                {
+                    return;
+                }
+                self.client_player_health_sequence = sequence;
+                self.player_state.health = state.health_milli as f32 / 1000.0;
+                self.player_state.max_health = state.max_health_milli as f32 / 1000.0;
+                self.player_state.hunger = state.hunger_milli as f32 / 1000.0;
+                self.player_state.saturation = state.saturation_milli as f32 / 1000.0;
+                self.player_state.is_dead = state.is_dead;
+                self.player_state.experience = state.experience;
+                self.player_state.experience_level = state.experience_level;
+                self.inventory.selected = usize::from(state.selected_hotbar_slot.min(8));
+                let to_stack = |slot: Option<crate::network::protocol::SessionSlotWire>| {
+                    let slot = slot?;
+                    let mut stack = slot.item.to_stack()?;
+                    stack.can_break = slot.can_break;
+                    stack.can_place_on = slot.can_place_on;
+                    Some(stack)
+                };
+                for (target, source) in self.inventory.hotbar.iter_mut().zip(state.hotbar) {
+                    *target = to_stack(source);
+                }
+                for (target, source) in self.inventory.main.iter_mut().zip(state.main) {
+                    *target = to_stack(source);
+                }
+                for (target, source) in self.inventory.armor.iter_mut().zip(state.armor) {
+                    *target = to_stack(source);
+                }
+                self.inventory.offhand = to_stack(state.offhand);
+                if let Some(dimension) = crate::dimension::Dimension::from_wire(dimension) {
+                    self.current_dimension = dimension;
+                }
+                self.mount_manager.dismount(0);
+                if let Some(vehicle_id) = state.mounted_entity {
+                    if let Some(vehicle) = self.entity_manager.get_by_id(vehicle_id) {
+                        let capacity = if vehicle.entity_type == crate::entity::EntityType::Boat {
+                            2
+                        } else {
+                            1
+                        };
+                        let _ = self.mount_manager.mount(vehicle_id, 0, capacity);
+                    }
+                }
+                if state.is_dead {
+                    self.clear_movement_input();
+                    self.sync_cursor_mode();
                 }
             }
             NetworkInbound::TimeSync {
@@ -9487,7 +9742,7 @@ impl State {
     }
 
     fn broadcast_authoritative_replication(&mut self, dt: f32) {
-        if self.authority_boundary.is_some()
+        if self.has_in_process_runtime()
             || !matches!(self.role, MultiplayerRole::Host { .. })
             || !self.network_ready
         {
@@ -9586,6 +9841,12 @@ impl State {
     }
 
     pub fn shutdown_network(&mut self) {
+        if let Some(runtime) = self.embedded_runtime.as_mut() {
+            if let Err(error) = runtime.shutdown() {
+                self.save_error
+                    .get_or_insert_with(|| format!("embedded runtime shutdown failed: {error}"));
+            }
+        }
         self.network.shutdown();
     }
 
@@ -9645,9 +9906,6 @@ impl State {
         }
         self.player_physics.set_no_clip(policy.can_phase);
         self.game_mode = game_mode;
-        if let Some(boundary) = self.authority_boundary.as_mut() {
-            boundary.set_game_mode(game_mode);
-        }
         if game_mode == GameMode::Spectator {
             self.inventory.is_open = false;
             self.active_station = None;
@@ -9661,9 +9919,6 @@ impl State {
 
     pub fn set_world_rules(&mut self, rules: crate::game_rules::WorldRules) {
         self.world_rules = rules.normalized();
-        if let Some(boundary) = self.authority_boundary.as_mut() {
-            boundary.set_rules(self.world_rules);
-        }
         self.player_physics
             .set_no_clip(self.game_mode_policy().can_phase);
     }
@@ -9758,7 +10013,7 @@ impl State {
         // Singleplayer/listen-host.  Help and read-only gamerule queries are
         // presentation-only; unsupported mutating domains receive an explicit
         // core rejection rather than falling back to renderer state.
-        if self.authority_boundary.is_some()
+        if self.has_in_process_runtime()
             && !matches!(
                 &command,
                 Command::Help(_) | Command::GameRule { value: None, .. }
@@ -9780,7 +10035,7 @@ impl State {
                 Some(crate::network::protocol::GameplayOutcome::Rejected { reason }) => {
                     format!("Command rejected: {reason:?}.")
                 }
-                None => "Command authority is unavailable.".to_string(),
+                None => "Command queued for the next authority tick.".to_string(),
             };
             let command_label = self.translate("command.feedback");
             push_chat_history(&mut self.chat_messages, command_label, feedback);
@@ -10100,6 +10355,12 @@ impl State {
         if !self.is_authoritative() {
             return Ok(());
         }
+        if self.has_in_process_runtime() {
+            // ServerRuntime owns authoritative chunk/entity/player persistence
+            // and performs bounded autosaves from its fixed tick. State's
+            // renderer cache must never be serialized as a second authority.
+            return Ok(());
+        }
         let world_dir = self.save_manager.lock().unwrap().world_dir.clone();
         crate::menu::update_world_metadata(
             &world_dir,
@@ -10182,8 +10443,22 @@ impl State {
         Ok(())
     }
 
-    pub fn save_synchronously(&self) -> crate::save::SaveResult<()> {
+    pub fn save_synchronously(&mut self) -> crate::save::SaveResult<()> {
         if !self.is_authoritative() {
+            return Ok(());
+        }
+        if let Some(runtime) = self.embedded_runtime.as_mut() {
+            runtime
+                .save_all()
+                .map_err(|error| crate::save::SaveError::Io {
+                    operation: "embedded runtime save",
+                    path: self
+                        .save_manager
+                        .lock()
+                        .map(|manager| manager.world_dir.clone())
+                        .unwrap_or_else(|_| std::path::PathBuf::from("world")),
+                    message: error.to_string(),
+                })?;
             return Ok(());
         }
         // Mark all currently loaded chunks dirty for complete save and quit flush
@@ -10869,7 +11144,7 @@ impl State {
                         .collect_chunk_metadata(&self.chunk_manager, cx, cz)
                 });
                 if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                    if self.is_authoritative() && self.authority_boundary.is_none() {
+                    if self.is_authoritative() && !self.has_in_process_runtime() {
                         if let (Some(revision), Some(redstone_metadata)) =
                             (revision, redstone_metadata)
                         {
@@ -11123,11 +11398,11 @@ impl State {
         // Singleplayer and listen-host worlds advance exclusively in the
         // headless AuthorityCore.  The renderer-side simulation remains only
         // as a compatibility path for legacy worlds without a boundary.
-        let has_authority_boundary = self.authority_boundary.is_some();
-        if has_authority_boundary {
+        let has_in_process_runtime = self.has_in_process_runtime();
+        if has_in_process_runtime {
             let _ = self.tick_authority_boundary();
         }
-        let authoritative = self.is_authoritative() && !has_authority_boundary;
+        let authoritative = self.is_authoritative() && !has_in_process_runtime;
 
         // Tick attack cooldown & shield disable ticks
         if self.player_state.attack_cooldown_ticks < self.player_state.attack_cooldown_max_ticks {
@@ -11138,7 +11413,7 @@ impl State {
         }
 
         // Tick item usage state machine
-        if has_authority_boundary {
+        if has_in_process_runtime {
             self.player_state.using_item = None;
         } else if self.inventory.is_open
             || self.is_paused
@@ -11336,11 +11611,11 @@ impl State {
             redstone_elapsed,
         );
 
-        if !has_authority_boundary {
+        if !has_in_process_runtime {
             self.brewing.update(dt);
         }
         self.update_furnaces(dt);
-        let effect_health = if has_authority_boundary {
+        let effect_health = if has_in_process_runtime {
             0.0
         } else {
             self.potion_effects.update(dt)
@@ -11442,7 +11717,7 @@ impl State {
         } else {
             0.0
         };
-        if !has_authority_boundary {
+        if !has_in_process_runtime {
             self.world_time.tick_accumulator += elapsed_world_ticks;
             let new_ticks = self.world_time.tick_accumulator.floor() as u64;
             self.world_time.ticks += new_ticks;
@@ -12075,7 +12350,7 @@ impl State {
     }
 
     pub fn update_village_and_raid_systems(&mut self, dt: f32) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             return;
         }
         if self.player_state.hero_of_the_village_timer > 0.0 {
@@ -12407,7 +12682,7 @@ impl State {
     }
 
     pub fn update_vehicles_and_fishing(&mut self, dt: f32) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             return;
         }
         if self.is_authoritative() {
@@ -12516,16 +12791,7 @@ impl State {
     }
 
     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
-        if self.authority_boundary.is_some() {
-            let vehicle_data = self
-                .entity_manager
-                .get_by_id(vehicle_id)
-                .map(|entity| (entity.entity_type, entity.position.to_array()));
-            if let Some((entity_type, position)) = vehicle_data {
-                if let Some(boundary) = self.authority_boundary.as_mut() {
-                    let _ = boundary.sync_vehicle(vehicle_id, entity_type, position);
-                }
-            }
+        if self.has_in_process_runtime() {
             let response = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Mount {
                     entity_id: vehicle_id,
@@ -12551,7 +12817,7 @@ impl State {
     }
 
     pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Mount { entity_id: 0 },
             );
@@ -12576,7 +12842,7 @@ impl State {
     }
 
     pub fn use_fishing_rod(&mut self) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::ItemUse {
                     item: Item::FishingRod as u32,
@@ -12604,7 +12870,7 @@ impl State {
     }
 
     pub fn check_claim_furnace_xp(&mut self, slot: SlotType) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             // Furnace XP has no typed gameplay envelope yet.  Reject the
             // input explicitly instead of mutating a renderer-side furnace or
             // player experience behind the authority boundary.
@@ -12638,7 +12904,7 @@ impl State {
     }
 
     fn update_hopper_power_states(&mut self) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             return;
         }
         let mut positions = Vec::new();
@@ -12677,7 +12943,7 @@ impl State {
     }
 
     fn update_furnaces(&mut self, dt: f32) {
-        if self.authority_boundary.is_some() || !self.is_authoritative() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             return;
         }
         self.furnace_tick_timer += dt;
@@ -13260,7 +13526,7 @@ impl State {
             listener_right,
         );
 
-        if self.is_authoritative() && self.authority_boundary.is_none() {
+        if self.is_authoritative() && !self.has_in_process_runtime() {
             for entity in &mut self.entity_manager.entities {
                 if entity.entity_type == crate::entity::EntityType::RemotePlayer {
                     continue;
@@ -13304,7 +13570,7 @@ impl State {
         let support_y = fire_y - 1;
         let support = self.chunk_manager.get_block(strike.x, support_y, strike.z);
         if self.is_authoritative()
-            && self.authority_boundary.is_none()
+            && !self.has_in_process_runtime()
             && fire_y < CHUNK_HEIGHT as i32
             && support.properties().is_solid
             && !matches!(
@@ -13318,7 +13584,7 @@ impl State {
     }
 
     fn apply_weather_block_change(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
-        if self.authority_boundary.is_some() || !self.is_authoritative() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             return;
         }
         let old = self.chunk_manager.get_block(wx, wy, wz);
@@ -13576,7 +13842,7 @@ impl State {
     }
 
     fn apply_redstone_update(&mut self, update: crate::redstone::RedstoneUpdate) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             return;
         }
         let mut dirty_chunks = std::collections::HashSet::new();
@@ -13792,7 +14058,7 @@ impl State {
     ) {
         use crate::inventory::{Item, ItemStack};
 
-        if self.authority_boundary.is_some() || !self.is_authoritative() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             return;
         }
 
@@ -14275,7 +14541,7 @@ impl State {
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             let _ = self.submit_local_authority_block_use(
                 pos.x as i32,
                 pos.y as i32,
@@ -14750,7 +15016,7 @@ impl State {
     }
 
     fn update_dropped_items_and_orbs(&mut self, dt: f32) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             return;
         }
         let mut remove_ids = Vec::new();
@@ -15075,7 +15341,7 @@ impl State {
         attacker_pos: Option<[f32; 3]>,
         attacker_item: Option<Item>,
     ) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             // Encode a bounded tenth-heart damage amount in the typed Combat
             // envelope.  The authority owns health/death; this root only
             // projects the accepted session update and never drops items or
@@ -15245,7 +15511,7 @@ impl State {
     }
 
     pub fn respawn(&mut self) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             let _ = self.submit_local_authority_command("/respawn");
             return;
         }
@@ -15355,7 +15621,7 @@ impl State {
     }
 
     pub fn handle_primary_press(&mut self) -> bool {
-        let melee_consumed = if self.authority_boundary.is_some() {
+        let melee_consumed = if self.has_in_process_runtime() {
             self.submit_local_authority_combat()
         } else {
             self.is_authoritative() && self.try_melee_attack()
@@ -15385,18 +15651,6 @@ impl State {
         ) else {
             return false;
         };
-        let entity_data = self.entity_manager.get_by_id(entity_id).map(|entity| {
-            (
-                entity.entity_type,
-                entity.position.to_array(),
-                entity.health,
-            )
-        });
-        if let Some((entity_type, position, health)) = entity_data {
-            if let Some(boundary) = self.authority_boundary.as_mut() {
-                let _ = boundary.sync_entity(entity_id, entity_type, position, health);
-            }
-        }
         let _ = self.submit_local_authority_operation(
             crate::network::protocol::GameplayOperation::Combat {
                 target: entity_id,
@@ -15407,7 +15661,7 @@ impl State {
     }
 
     fn try_melee_attack(&mut self) -> bool {
-        if !self.is_authoritative() || self.authority_boundary.is_some() {
+        if !self.is_authoritative() || self.has_in_process_runtime() {
             return false;
         }
 
@@ -15535,7 +15789,7 @@ impl State {
         let offhand_stack = self.inventory.offhand;
         let offhand_item = offhand_stack.map(|s| s.item).unwrap_or(Item::Air);
 
-        if self.authority_boundary.is_some()
+        if self.has_in_process_runtime()
             && main_item != Item::Air
             && !main_item.properties().is_block
         {
@@ -15630,7 +15884,7 @@ impl State {
 
         // If mainhand didn't start an item use action, check Offhand item
         if self.player_state.using_item.is_none() {
-            if self.authority_boundary.is_some()
+            if self.has_in_process_runtime()
                 && offhand_item != Item::Air
                 && !offhand_item.properties().is_block
             {
@@ -15695,7 +15949,7 @@ impl State {
     }
 
     pub fn handle_secondary_release(&mut self) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             self.player_state.using_item = None;
             return;
         }
@@ -15748,7 +16002,7 @@ impl State {
                         }
                     }
 
-                    if self.is_authoritative() && self.authority_boundary.is_none() {
+                    if self.is_authoritative() && !self.has_in_process_runtime() {
                         let dir = Vec3::new(
                             self.camera.yaw.cos() * self.camera.pitch.cos(),
                             self.camera.pitch.sin(),
@@ -15830,7 +16084,7 @@ impl State {
             return;
         }
 
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             self.handle_authority_click(is_left_click);
             return;
         }
@@ -17024,16 +17278,14 @@ impl State {
         ) {
             let response =
                 self.submit_authority_request(crate::network::protocol::GameplayRequest {
-                    request_id: self.authority_request_id,
-                    client_sequence: self.authority_client_sequence,
+                    request_id: 0,
+                    client_sequence: 0,
                     session_id: 0,
                     dimension: self.current_dimension as u8,
                     client_revision: self
-                        .authority_boundary
+                        .embedded_runtime
                         .as_ref()
-                        .map(|boundary| {
-                            boundary.core.revision_for_dimension(self.current_dimension)
-                        })
+                        .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
                         .unwrap_or_default(),
                     operation: crate::network::protocol::GameplayOperation::Container {
                         action: crate::network::protocol::ContainerAction::Open.to_wire(),
@@ -17053,14 +17305,14 @@ impl State {
         }
         if clicked_block == BlockType::Bed {
             let _ = self.submit_authority_request(crate::network::protocol::GameplayRequest {
-                request_id: self.authority_request_id,
-                client_sequence: self.authority_client_sequence,
+                request_id: 0,
+                client_sequence: 0,
                 session_id: 0,
                 dimension: self.current_dimension as u8,
                 client_revision: self
-                    .authority_boundary
+                    .embedded_runtime
                     .as_ref()
-                    .map(|boundary| boundary.core.revision_for_dimension(self.current_dimension))
+                    .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
                     .unwrap_or_default(),
                 operation: crate::network::protocol::GameplayOperation::Sleep {
                     x: clicked.0,
@@ -17351,7 +17603,7 @@ impl State {
     }
 
     pub fn set_item_at_slot(&mut self, slot: SlotType, stack: Option<ItemStack>) {
-        if self.authority_boundary.is_some() && !matches!(slot, SlotType::ContainerSlot(_)) {
+        if self.has_in_process_runtime() {
             return;
         }
         match slot {
@@ -17443,7 +17695,7 @@ impl State {
 
     pub fn handle_swap_offhand_pressed(&mut self) {
         if !self.is_chat_open && !self.is_paused && !self.player_state.is_dead {
-            if self.authority_boundary.is_some() {
+            if self.has_in_process_runtime() {
                 return;
             }
             self.inventory.swap_offhand();
@@ -17458,7 +17710,7 @@ impl State {
     }
 
     pub fn handle_inventory_click(&mut self, is_left: bool) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             let mouse_x = self.mouse_ndc[0];
             let mouse_y = self.mouse_ndc[1];
             if self.active_station == Some(StationKind::Merchant) && is_left {
@@ -18122,7 +18374,7 @@ impl State {
         true
     }
     fn open_chest(&mut self, pos: (i32, i32, i32)) {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             // Authority-boundary callers must use project_authority_container
             // after an accepted Container::Open response.
             return;
@@ -18261,21 +18513,7 @@ impl State {
         if offer_index >= self.active_merchant_offers.len() {
             return false;
         }
-        if self.authority_boundary.is_some() {
-            let villager_data = self.entity_manager.get_by_id(villager_id).map(|entity| {
-                (
-                    entity.position.to_array(),
-                    entity.profession,
-                    entity.villager_level,
-                    self.active_merchant_offers.clone(),
-                )
-            });
-            if let Some((position, profession, level, offers)) = villager_data {
-                if let Some(boundary) = self.authority_boundary.as_mut() {
-                    let _ =
-                        boundary.sync_villager(villager_id, position, profession, level, offers);
-                }
-            }
+        if self.has_in_process_runtime() {
             let response = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Trade {
                     villager_id,
@@ -18431,7 +18669,7 @@ impl State {
     }
 
     pub fn close_inventory(&mut self) -> bool {
-        if self.authority_boundary.is_some() {
+        if self.has_in_process_runtime() {
             let accepted = if let Some(pos) = self.container_target {
                 self.submit_local_authority_container_action(
                     pos,
@@ -23932,6 +24170,128 @@ mod render_region_lifecycle_tests {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
+
+    fn embedded_test_world(name: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "icraft-state-runtime-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn embedded_runtime_uses_world_player_profile_and_fifo_ack() {
+        let world_dir = embedded_test_world("fifo");
+        let role = MultiplayerRole::Singleplayer;
+        let mut bridge =
+            EmbeddedRuntimeBridge::new(&role, world_dir.clone(), 1234, Difficulty::Normal, 8, true)
+                .expect("embedded runtime should construct");
+        let session = bridge
+            .runtime
+            .players
+            .get(&u64::MAX)
+            .expect("local world-player session");
+        assert_eq!(session.username, "local");
+        assert_eq!(
+            session.storage,
+            crate::server_runtime::LocalSessionStorage::WorldPlayer
+        );
+
+        bridge
+            .queue_request(crate::network::protocol::GameplayRequest {
+                request_id: 0,
+                client_sequence: 0,
+                session_id: 0,
+                dimension: crate::dimension::Dimension::Overworld as u8,
+                client_revision: 0,
+                operation: crate::network::protocol::GameplayOperation::BlockUse {
+                    x: 8,
+                    y: 80,
+                    z: 8,
+                    block: BlockType::Glass.to_wire(),
+                },
+            })
+            .expect("request should enter bounded FIFO");
+        assert!(bridge.runtime.authority.world.get_block(8, 80, 8) != BlockType::Glass);
+        let output = bridge.tick().expect("fixed tick should run");
+        assert!(output.snapshot.mutations.iter().any(|mutation| {
+            mutation.position == (8, 80, 8) && mutation.block == BlockType::Glass.to_wire()
+        }));
+        assert!(output.presentation_events.iter().any(|event| {
+            matches!(
+                event,
+                crate::server_runtime::RuntimePresentationEvent::GameplayResponse {
+                    target,
+                    response,
+                } if *target == u64::MAX
+                    && response.request_id == 1
+                    && matches!(
+                        response.outcome,
+                        crate::network::protocol::GameplayOutcome::Accepted { .. }
+                    )
+            )
+        }));
+        bridge.shutdown().expect("runtime save/shutdown");
+        let _ = std::fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn embedded_runtime_poses_use_monotonic_sender_time() {
+        let world_dir = embedded_test_world("pose");
+        let role = MultiplayerRole::Singleplayer;
+        let mut bridge =
+            EmbeddedRuntimeBridge::new(&role, world_dir.clone(), 1234, Difficulty::Normal, 8, true)
+                .expect("embedded runtime should construct");
+        let initial = bridge
+            .runtime
+            .players
+            .get(&u64::MAX)
+            .expect("local session")
+            .data
+            .position;
+        bridge
+            .queue_position(
+                1,
+                glam::Vec3::new(initial[0] + 1.0, initial[1], initial[2]),
+                0.5,
+                0.1,
+            )
+            .expect("first pose should enter bounded FIFO");
+        bridge.tick().expect("first pose tick");
+        let first = bridge
+            .runtime
+            .players
+            .get(&u64::MAX)
+            .expect("local session")
+            .data
+            .position;
+        assert_eq!(first[0], initial[0] + 1.0);
+
+        bridge
+            .queue_position(
+                2,
+                glam::Vec3::new(first[0] + 1.0, first[1], first[2]),
+                0.5,
+                0.1,
+            )
+            .expect("second pose should enter bounded FIFO");
+        bridge.tick().expect("second pose tick");
+        let second = bridge
+            .runtime
+            .players
+            .get(&u64::MAX)
+            .expect("local session")
+            .data
+            .position;
+        assert_eq!(second[0], first[0] + 1.0);
+
+        bridge.shutdown().expect("runtime save/shutdown");
+        let _ = std::fs::remove_dir_all(world_dir);
+    }
 
     #[test]
     fn terrain_translucent_pipeline_is_double_sided() {

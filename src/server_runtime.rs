@@ -18,8 +18,8 @@ use crate::dimension::Dimension;
 use crate::game_rules::WorldRules;
 use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
-    ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
-    ItemWire, PlayerEffectWire, RejectReason,
+    ContainerAction, EntityStateWire, GameplayOperation, GameplayOutcome, GameplayRequest,
+    GameplayResponse, ItemWire, PlayerEffectWire, RejectReason, SessionGameplayWire,
 };
 use crate::network::server::{
     HostToServer, MeteredHostEventSender, NetworkMetrics, NetworkServer, ServerConfig, ServerToHost,
@@ -46,6 +46,21 @@ const AUTOSAVE_INTERVAL_TICKS: u64 = 6_000;
 const HOST_COMMAND_QUEUE_CAPACITY: usize = 1_024;
 const HOST_EVENT_QUEUE_CAPACITY: usize = 1_024;
 const MAX_PRESENTATION_EVENTS_PER_TICK: usize = 1_024;
+// The normal presentation budget is kept small enough to drain every frame.
+// If it consists entirely of reliable events, retain at most one additional
+// slot for every inbound command the fixed tick is allowed to process.  This
+// gives the reliability lane a hard, input-budget-derived cap instead of
+// evicting an already accepted response when transient state floods the queue.
+const MAX_PRESENTATION_CRITICAL_OVERFLOW: usize = MAX_INBOUND_EVENTS_PER_TICK;
+const MAX_PRESENTATION_QUEUE_LEN: usize =
+    MAX_PRESENTATION_EVENTS_PER_TICK + MAX_PRESENTATION_CRITICAL_OVERFLOW;
+const MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK: usize = 16;
+// A validated maximum view distance of 32 covers a 65x65 chunk square.
+const MAX_PENDING_INITIAL_CHUNKS_PER_SESSION: usize = 65 * 65;
+const MAX_POSE_SPEED_BLOCKS_PER_SECOND: f32 = 100.0;
+const POSE_DISTANCE_SLACK_BLOCKS: f32 = 4.0;
+const MAX_POSE_DELTA_MILLIS: u64 = 250;
+const TELEPORT_ALLOWANCE_RADIUS: f32 = 8.0;
 
 /// Socket ownership for an embedded authority runtime. `Disabled` creates no
 /// host-command channel or network thread; local inputs still use the same
@@ -183,15 +198,197 @@ impl RuntimeInput {
 /// World and per-session gameplay changes remain in `snapshot`, including its
 /// bounded `session_updates`; this lane only diverts responses that would
 /// otherwise be addressed to a nonexistent socket session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuntimePresentationEvent {
     GameplayResponse {
         target: u64,
         response: GameplayResponse,
     },
+    BlockChange {
+        target: u64,
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        state: u8,
+    },
+    ChunkData {
+        target: u64,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        min_section_y: i8,
+        section_count: u16,
+        blocks: Vec<u8>,
+        block_states: Vec<u8>,
+        block_entities: Vec<u8>,
+    },
+    BlockEntityDelta {
+        target: u64,
+        dimension: u8,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        entity: Option<crate::block_entity::BlockEntity>,
+    },
+    EntitySpawn {
+        target: u64,
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    EntityState {
+        target: u64,
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
+    EntityDespawn {
+        target: u64,
+        dimension: u8,
+        sequence: u64,
+        entity_id: u64,
+    },
+    PlayerSessionUpdate {
+        target: u64,
+        sequence: u64,
+        player_id: u64,
+        dimension: u8,
+        state: SessionGameplayWire,
+    },
+    PlayerEffect {
+        target: u64,
+        sequence: u64,
+        player_id: u64,
+        effects: Vec<PlayerEffectWire>,
+    },
+    PlayerPosition {
+        target: u64,
+        id: u64,
+        sequence: u32,
+        sender_time_millis: u64,
+        position: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+    },
+    ContainerOpenResult {
+        target: u64,
+        dimension: u8,
+        success: bool,
+        position: (i32, i32, i32),
+        slots: Vec<Option<ItemWire>>,
+        revision: u64,
+    },
+    ContainerClickResult {
+        target: u64,
+        dimension: u8,
+        success: bool,
+        slot_index: u16,
+        slot: Option<ItemWire>,
+        dragged: Option<ItemWire>,
+    },
+    ContainerSlotUpdate {
+        target: u64,
+        dimension: u8,
+        revision: u64,
+        position: (i32, i32, i32),
+        slot_index: u16,
+        slot: Option<ItemWire>,
+    },
+    PlayerRespawnResult {
+        target: u64,
+        position: [f32; 3],
+        dimension: u8,
+    },
+    WorldRules {
+        target: u64,
+        rules: WorldRules,
+    },
+    TimeSync {
+        target: u64,
+        ticks: u64,
+        weather: u8,
+        weather_remaining_ticks: f32,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplaceablePresentationKey {
+    Chunk {
+        target: u64,
+        dimension: u8,
+        cx: i32,
+        cz: i32,
+    },
+    EntityState {
+        target: u64,
+        dimension: u8,
+        entity_id: u64,
+    },
+    PlayerPosition {
+        target: u64,
+        id: u64,
+    },
+    TimeSync {
+        target: u64,
+    },
+}
+
+impl RuntimePresentationEvent {
+    fn replaceable_key(&self) -> Option<ReplaceablePresentationKey> {
+        match self {
+            Self::ChunkData {
+                target,
+                dimension,
+                cx,
+                cz,
+                ..
+            } => Some(ReplaceablePresentationKey::Chunk {
+                target: *target,
+                dimension: *dimension,
+                cx: *cx,
+                cz: *cz,
+            }),
+            Self::EntityState {
+                target,
+                dimension,
+                state,
+                ..
+            } => Some(ReplaceablePresentationKey::EntityState {
+                target: *target,
+                dimension: *dimension,
+                entity_id: state.entity_id,
+            }),
+            Self::PlayerPosition { target, id, .. } => {
+                Some(ReplaceablePresentationKey::PlayerPosition {
+                    target: *target,
+                    id: *id,
+                })
+            }
+            Self::TimeSync { target, .. } => {
+                Some(ReplaceablePresentationKey::TimeSync { target: *target })
+            }
+            Self::GameplayResponse { .. }
+            | Self::BlockChange { .. }
+            | Self::BlockEntityDelta { .. }
+            | Self::EntitySpawn { .. }
+            | Self::EntityDespawn { .. }
+            | Self::PlayerSessionUpdate { .. }
+            | Self::PlayerEffect { .. }
+            | Self::ContainerOpenResult { .. }
+            | Self::ContainerClickResult { .. }
+            | Self::ContainerSlotUpdate { .. }
+            | Self::PlayerRespawnResult { .. }
+            | Self::WorldRules { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTickOutput {
     pub snapshot: AuthoritySnapshot,
     pub presentation_events: Vec<RuntimePresentationEvent>,
@@ -491,6 +688,12 @@ pub struct PlayerSessionState {
     pub simulation_entity_interest: HashSet<u64>,
     pub container_viewers: BTreeSet<(i32, i32, i32)>,
     pub effects: Vec<PlayerEffectWire>,
+    pending_initial_chunks: VecDeque<(Dimension, i32, i32)>,
+    last_projected_session_revision: Option<(Dimension, u64)>,
+    last_pose_sequence: u32,
+    last_pose_sender_time_millis: u64,
+    last_pose_received_at: Option<Instant>,
+    teleport_allowance: Option<[f32; 3]>,
 }
 
 impl PlayerSessionState {
@@ -517,7 +720,89 @@ impl PlayerSessionState {
             simulation_entity_interest: HashSet::new(),
             container_viewers: BTreeSet::new(),
             effects: Vec::new(),
+            pending_initial_chunks: VecDeque::new(),
+            last_projected_session_revision: None,
+            last_pose_sequence: 0,
+            last_pose_sender_time_millis: 0,
+            last_pose_received_at: None,
+            teleport_allowance: None,
         }
+    }
+
+    fn queue_initial_chunks(
+        &mut self,
+        dimension: Dimension,
+        chunks: impl IntoIterator<Item = (i32, i32)>,
+    ) {
+        for (cx, cz) in chunks {
+            if self.pending_initial_chunks.len() >= MAX_PENDING_INITIAL_CHUNKS_PER_SESSION {
+                break;
+            }
+            let item = (dimension, cx, cz);
+            if !self.pending_initial_chunks.contains(&item) {
+                self.pending_initial_chunks.push_back(item);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_pose(
+        &mut self,
+        sequence: u32,
+        sender_time_millis: u64,
+        position: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+        now: Instant,
+    ) -> bool {
+        if sequence == 0
+            || !position
+                .iter()
+                .chain([yaw, pitch].iter())
+                .all(|value| value.is_finite())
+            || position.iter().any(|value| value.abs() > WORLD_BOUND)
+        {
+            return false;
+        }
+        if self.last_pose_received_at.is_some() {
+            let sequence_delta = sequence.wrapping_sub(self.last_pose_sequence);
+            if sequence_delta == 0
+                || sequence_delta >= (1 << 31)
+                || sender_time_millis <= self.last_pose_sender_time_millis
+            {
+                return false;
+            }
+            let target = Vec3::from_array(position);
+            let previous = Vec3::from_array(self.data.position);
+            let teleport_allowed = self.teleport_allowance.is_some_and(|allowance| {
+                target.distance_squared(Vec3::from_array(allowance))
+                    <= TELEPORT_ALLOWANCE_RADIUS * TELEPORT_ALLOWANCE_RADIUS
+            });
+            if !teleport_allowed {
+                let sender_delta = sender_time_millis
+                    .saturating_sub(self.last_pose_sender_time_millis)
+                    .min(MAX_POSE_DELTA_MILLIS);
+                let received_delta = self
+                    .last_pose_received_at
+                    .map(|last| now.saturating_duration_since(last).as_millis() as u64)
+                    .unwrap_or_default()
+                    .min(MAX_POSE_DELTA_MILLIS);
+                let elapsed_seconds = sender_delta.max(received_delta) as f32 / 1_000.0;
+                let allowed_distance =
+                    POSE_DISTANCE_SLACK_BLOCKS + MAX_POSE_SPEED_BLOCKS_PER_SECOND * elapsed_seconds;
+                if previous.distance_squared(target) > allowed_distance * allowed_distance {
+                    return false;
+                }
+            }
+        }
+        self.data.position = position;
+        self.data.yaw = yaw;
+        self.data.pitch = pitch;
+        self.last_pose_sequence = sequence;
+        self.last_pose_sender_time_millis = sender_time_millis;
+        self.last_pose_received_at = Some(now);
+        self.teleport_allowance = None;
+        true
     }
 }
 
@@ -931,6 +1216,36 @@ impl ServerRuntime {
         true
     }
 
+    /// Apply a server-authorized teleport to a connected session. The next
+    /// client pose may converge to this position without being rejected by the
+    /// normal speed gate; all interest routing and the authority position are
+    /// updated before the method returns.
+    pub fn teleport_session(&mut self, id: u64, position: [f32; 3]) -> bool {
+        if !position
+            .iter()
+            .all(|component| component.is_finite() && component.abs() <= WORLD_BOUND)
+        {
+            return false;
+        }
+        let Some(dimension) = self.players.get(&id).map(|session| session.dimension) else {
+            return false;
+        };
+        if self.authority.session(id).is_none() {
+            return false;
+        }
+        if let Some(session) = self.players.get_mut(&id) {
+            session.data.position = position;
+            session.teleport_allowance = Some(position);
+        }
+        let authority_session = self
+            .authority
+            .session_mut(id)
+            .expect("authority session checked immediately above");
+        authority_session.position = position;
+        self.update_interest_for(id, dimension, position);
+        true
+    }
+
     pub fn metrics(&self) -> &ServerMetrics {
         &self.metrics
     }
@@ -1067,6 +1382,7 @@ impl ServerRuntime {
                     session.dimension = self.level.spawn_dimension;
                     session.interest.open_containers.clear();
                     session.container_viewers.clear();
+                    session.teleport_allowance = Some(session.data.position);
                     Some((session.data.position, session.dimension))
                 } else {
                     None
@@ -1095,11 +1411,7 @@ impl ServerRuntime {
                             apply_gameplay_to_player_data(&mut session.data, gameplay);
                         }
                     }
-                    self.enqueue_host(HostToServer::SendPlayerRespawnResult {
-                        to: id,
-                        position: respawn_position,
-                        dimension: dimension as u8,
-                    });
+                    self.send_respawn_result(id, respawn_position, dimension);
                     self.update_interest_for(id, dimension, respawn_position);
                 }
                 Ok(())
@@ -1316,7 +1628,7 @@ impl ServerRuntime {
         // authority map before interest queries read its entities/chunks.
         self.update_interest(&mut session);
         self.players.insert(id, session);
-        let (chunks, entities) = self
+        let (mut chunks, mut entities) = self
             .players
             .get(&id)
             .map(|session| {
@@ -1324,26 +1636,47 @@ impl ServerRuntime {
                     session.interest.chunks.iter().copied().collect::<Vec<_>>(),
                     session
                         .interest
-                        .simulation_entities
+                        .entities
                         .iter()
                         .copied()
                         .collect::<Vec<_>>(),
                 )
             })
             .unwrap_or_default();
+        chunks.sort_unstable();
+        entities.sort_unstable();
+        if let Some(session) = self.players.get_mut(&id) {
+            session.queue_initial_chunks(current_dimension, chunks.iter().copied());
+        }
         for chunk in chunks {
-            self.queue_interest_update(
+            self.record_interest_update(
+                id,
                 current_dimension,
                 self.authority.revision_for_dimension(current_dimension),
                 InterestKind::Chunk(chunk),
             );
         }
         for entity in entities {
-            self.queue_interest_update(
+            self.record_interest_update(
+                id,
                 current_dimension,
                 self.authority.revision_for_dimension(current_dimension),
                 InterestKind::Entity(entity),
             );
+            if let Some(state) = self
+                .authority
+                .world_ref(current_dimension)
+                .and_then(|world| {
+                    world
+                        .entities
+                        .entities
+                        .iter()
+                        .find(|item| item.id == entity)
+                })
+                .map(entity_state_wire)
+            {
+                self.send_entity_spawn(id, current_dimension, self.level.time.max(1), state);
+            }
         }
         let (rules, join_sequence, revision) =
             self.authority.with_world(current_dimension, |world| {
@@ -1353,13 +1686,38 @@ impl ServerRuntime {
                     world.revisions.current(),
                 )
             });
-        self.enqueue_host(HostToServer::SendWorldRules { rules, to: id });
-        self.enqueue_host(HostToServer::SendTimeSync {
-            ticks: self.level.time,
-            weather: 0,
-            weather_remaining_ticks: 0.0,
-            to: id,
-        });
+        if self.local_session_id == Some(id) {
+            self.push_presentation_event(RuntimePresentationEvent::WorldRules {
+                target: id,
+                rules,
+            });
+            self.push_presentation_event(RuntimePresentationEvent::TimeSync {
+                target: id,
+                ticks: self.level.time,
+                weather: 0,
+                weather_remaining_ticks: 0.0,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendWorldRules { rules, to: id });
+            self.enqueue_host(HostToServer::SendTimeSync {
+                ticks: self.level.time,
+                weather: 0,
+                weather_remaining_ticks: 0.0,
+                to: id,
+            });
+        }
+        if let Some((state, effects)) = self
+            .authority
+            .session(id)
+            .map(|authority_session| authority_session.gameplay)
+            .zip(self.players.get(&id).map(|session| session.effects.clone()))
+        {
+            self.send_session_update(id, join_sequence, current_dimension, state);
+            if let Some(session) = self.players.get_mut(&id) {
+                session.last_projected_session_revision = Some((current_dimension, state.revision));
+            }
+            self.send_player_effects(id, join_sequence, effects);
+        }
         self.send_response(
             id,
             GameplayResponse {
@@ -1406,16 +1764,17 @@ impl ServerRuntime {
         let Some(session) = self.players.get_mut(&id) else {
             return Ok(());
         };
-        if ![x, y, z, yaw, pitch].iter().all(|value| value.is_finite()) {
+        let position = [x, y, z];
+        if !session.accept_pose(
+            sequence,
+            sender_time_millis,
+            position,
+            yaw,
+            pitch,
+            Instant::now(),
+        ) {
             return Ok(());
         }
-        if x.abs() > WORLD_BOUND || z.abs() > WORLD_BOUND || y.abs() > WORLD_BOUND {
-            return Ok(());
-        }
-        session.data.position = [x, y, z];
-        session.data.yaw = yaw;
-        session.data.pitch = pitch;
-        let position = session.data.position;
         let dimension = session.dimension;
         let _ = session;
         if let Some(authority_session) = self.authority.session_mut(id) {
@@ -1423,16 +1782,44 @@ impl ServerRuntime {
             authority_session.dimension = dimension as u8;
         }
         self.update_interest_for(id, dimension, position);
-        self.enqueue_host(HostToServer::BroadcastPlayerPosition {
-            id,
-            sequence,
-            sender_time_millis,
-            x,
-            y,
-            z,
-            yaw,
-            pitch,
-        });
+        let block_position = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+        let mut targets: Vec<_> = self
+            .players
+            .values()
+            .filter(|target| {
+                target.id != id
+                    && target
+                        .interest
+                        .wants(dimension, InterestKind::Block(block_position))
+            })
+            .map(|target| target.id)
+            .collect();
+        targets.sort_unstable();
+        for target in targets {
+            if self.local_session_id == Some(target) {
+                self.push_presentation_event(RuntimePresentationEvent::PlayerPosition {
+                    target,
+                    id,
+                    sequence,
+                    sender_time_millis,
+                    position,
+                    yaw,
+                    pitch,
+                });
+            } else {
+                self.enqueue_host(HostToServer::SendPlayerPosition {
+                    to: target,
+                    id,
+                    sequence,
+                    sender_time_millis,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1606,16 +1993,27 @@ impl ServerRuntime {
                     .world_ref(dimension)
                     .and_then(|world| world.container_slots_wire(position))
                     .unwrap_or_default();
-                self.enqueue_host(HostToServer::SendContainerOpenResult {
-                    to: id,
-                    dimension: dimension as u8,
-                    success: true,
-                    x,
-                    y,
-                    z,
-                    slots,
-                    revision,
-                });
+                if self.local_session_id == Some(id) {
+                    self.push_presentation_event(RuntimePresentationEvent::ContainerOpenResult {
+                        target: id,
+                        dimension: dimension as u8,
+                        success: true,
+                        position,
+                        slots,
+                        revision,
+                    });
+                } else {
+                    self.enqueue_host(HostToServer::SendContainerOpenResult {
+                        to: id,
+                        dimension: dimension as u8,
+                        success: true,
+                        x,
+                        y,
+                        z,
+                        slots,
+                        revision,
+                    });
+                }
             }
             ContainerAction::Click => {
                 let slot_value = self
@@ -1623,26 +2021,30 @@ impl ServerRuntime {
                     .world_ref(dimension)
                     .and_then(|world| world.container_slot_wire(position, slot))
                     .flatten();
-                self.enqueue_host(HostToServer::SendContainerClickResult {
-                    to: id,
-                    dimension: dimension as u8,
-                    success: true,
-                    slot_index: slot,
-                    slot: slot_value,
-                    dragged: dragged.copied(),
-                });
+                if self.local_session_id == Some(id) {
+                    self.push_presentation_event(RuntimePresentationEvent::ContainerClickResult {
+                        target: id,
+                        dimension: dimension as u8,
+                        success: true,
+                        slot_index: slot,
+                        slot: slot_value,
+                        dragged: dragged.copied(),
+                    });
+                } else {
+                    self.enqueue_host(HostToServer::SendContainerClickResult {
+                        to: id,
+                        dimension: dimension as u8,
+                        success: true,
+                        slot_index: slot,
+                        slot: slot_value,
+                        dragged: dragged.copied(),
+                    });
+                }
                 for target in container_targets {
                     if target != id {
-                        self.enqueue_host(HostToServer::SendContainerSlotUpdate {
-                            to: target,
-                            dimension: dimension as u8,
-                            revision,
-                            x,
-                            y,
-                            z,
-                            slot_index: slot,
-                            slot: slot_value,
-                        });
+                        self.send_container_slot_update(
+                            target, dimension, revision, position, slot, slot_value,
+                        );
                     }
                 }
             }
@@ -1661,11 +2063,293 @@ impl ServerRuntime {
         self.enqueue_host(HostToServer::SendGameplayResponse { to, response });
     }
 
-    fn push_presentation_event(&mut self, event: RuntimePresentationEvent) {
-        if self.presentation_events.len() >= MAX_PRESENTATION_EVENTS_PER_TICK {
-            self.presentation_events.pop_front();
+    fn send_respawn_result(&mut self, to: u64, position: [f32; 3], dimension: Dimension) {
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::PlayerRespawnResult {
+                target: to,
+                position,
+                dimension: dimension as u8,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendPlayerRespawnResult {
+                to,
+                position,
+                dimension: dimension as u8,
+            });
         }
-        self.presentation_events.push_back(event);
+    }
+
+    fn send_block_entity_delta(
+        &mut self,
+        to: u64,
+        dimension: Dimension,
+        revision: u64,
+        position: (i32, i32, i32),
+        entity: Option<crate::block_entity::BlockEntity>,
+    ) {
+        let (x, y, z) = position;
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::BlockEntityDelta {
+                target: to,
+                dimension: dimension as u8,
+                revision,
+                x,
+                y,
+                z,
+                entity,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendBlockEntityDelta {
+                to,
+                dimension: dimension as u8,
+                revision,
+                x,
+                y,
+                z,
+                entity,
+            });
+        }
+    }
+
+    fn send_entity_spawn(
+        &mut self,
+        to: u64,
+        dimension: Dimension,
+        sequence: u64,
+        state: EntityStateWire,
+    ) {
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::EntitySpawn {
+                target: to,
+                dimension: dimension as u8,
+                sequence,
+                state,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendEntitySpawn {
+                to,
+                dimension: dimension as u8,
+                sequence,
+                state,
+            });
+        }
+    }
+
+    fn send_entity_state(
+        &mut self,
+        to: u64,
+        dimension: Dimension,
+        sequence: u64,
+        state: EntityStateWire,
+    ) {
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::EntityState {
+                target: to,
+                dimension: dimension as u8,
+                sequence,
+                state,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendEntityState {
+                to,
+                dimension: dimension as u8,
+                sequence,
+                state,
+            });
+        }
+    }
+
+    fn send_entity_despawn(
+        &mut self,
+        to: u64,
+        dimension: Dimension,
+        sequence: u64,
+        entity_id: u64,
+    ) {
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::EntityDespawn {
+                target: to,
+                dimension: dimension as u8,
+                sequence,
+                entity_id,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendEntityDespawn {
+                to,
+                dimension: dimension as u8,
+                sequence,
+                entity_id,
+            });
+        }
+    }
+
+    fn send_session_update(
+        &mut self,
+        to: u64,
+        sequence: u64,
+        dimension: Dimension,
+        state: SessionGameplayState,
+    ) {
+        let state = SessionGameplayWire::from(state);
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::PlayerSessionUpdate {
+                target: to,
+                sequence,
+                player_id: to,
+                dimension: dimension as u8,
+                state,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendPlayerSessionUpdate {
+                to,
+                sequence,
+                player_id: to,
+                dimension: dimension as u8,
+                state,
+            });
+        }
+    }
+
+    fn send_player_effects(&mut self, to: u64, sequence: u64, effects: Vec<PlayerEffectWire>) {
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::PlayerEffect {
+                target: to,
+                sequence,
+                player_id: to,
+                effects,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendPlayerEffect {
+                to,
+                sequence,
+                player_id: to,
+                effects,
+            });
+        }
+    }
+
+    fn send_container_slot_update(
+        &mut self,
+        to: u64,
+        dimension: Dimension,
+        revision: u64,
+        position: (i32, i32, i32),
+        slot_index: u16,
+        slot: Option<ItemWire>,
+    ) {
+        let (x, y, z) = position;
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::ContainerSlotUpdate {
+                target: to,
+                dimension: dimension as u8,
+                revision,
+                position,
+                slot_index,
+                slot,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendContainerSlotUpdate {
+                to,
+                dimension: dimension as u8,
+                revision,
+                x,
+                y,
+                z,
+                slot_index,
+                slot,
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_chunk_projection(
+        &mut self,
+        to: u64,
+        dimension: Dimension,
+        cx: i32,
+        cz: i32,
+        revision: u64,
+        min_section_y: i8,
+        section_count: u16,
+        blocks: Vec<u8>,
+        block_states: Vec<u8>,
+        block_entities: Vec<u8>,
+    ) {
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::ChunkData {
+                target: to,
+                dimension: dimension as u8,
+                cx,
+                cz,
+                revision,
+                min_section_y,
+                section_count,
+                blocks,
+                block_states,
+                block_entities,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendChunk {
+                dimension: dimension as u8,
+                cx,
+                cz,
+                revision,
+                min_section_y,
+                section_count,
+                blocks,
+                block_states,
+                block_entities,
+                to,
+            });
+        }
+    }
+
+    /// Queue an embedded-client projection without allowing replaceable state
+    /// floods to evict request acknowledgements or authoritative lifecycle
+    /// changes. Returns `false` only when a replaceable update is discarded or
+    /// the bounded critical overflow is exhausted; both paths emit QueueFull.
+    fn push_presentation_event(&mut self, event: RuntimePresentationEvent) -> bool {
+        let replaceable_key = event.replaceable_key();
+        if let Some(key) = replaceable_key {
+            if let Some(index) = self
+                .presentation_events
+                .iter()
+                .position(|queued| queued.replaceable_key() == Some(key))
+            {
+                self.presentation_events[index] = event;
+                return true;
+            }
+        }
+
+        if self.presentation_events.len() < MAX_PRESENTATION_EVENTS_PER_TICK {
+            self.presentation_events.push_back(event);
+            return true;
+        }
+
+        if let Some(index) = self
+            .presentation_events
+            .iter()
+            .position(|queued| queued.replaceable_key().is_some())
+        {
+            self.presentation_events.remove(index);
+            self.presentation_events.push_back(event);
+            self.network_metrics.record_queue_full();
+            return true;
+        }
+
+        if replaceable_key.is_some() {
+            self.network_metrics.record_queue_full();
+            return false;
+        }
+
+        if self.presentation_events.len() < MAX_PRESENTATION_QUEUE_LEN {
+            self.presentation_events.push_back(event);
+            self.network_metrics.record_queue_full();
+            return true;
+        }
+
+        self.network_metrics.record_queue_full();
+        false
     }
 
     fn enqueue_host(&mut self, event: HostToServer) -> bool {
@@ -1833,20 +2517,30 @@ impl ServerRuntime {
     ) {
         let targets =
             self.queue_interest_update(dimension, revision, InterestKind::Block((x, y, z)));
-        // The legacy network command is a broadcast. It is safe only when
-        // every connected session is in the same dimension and has this block
-        // in its view; otherwise the routed update remains queued for the
-        // targeted transport adapter instead of leaking across dimensions.
-        if !targets.is_empty() && targets.len() == self.players.len() {
-            self.enqueue_host(HostToServer::BroadcastBlockChange {
-                dimension: dimension as u8,
-                revision,
-                x,
-                y,
-                z,
-                block,
-                state,
-            });
+        for target in targets {
+            if self.local_session_id == Some(target) {
+                self.push_presentation_event(RuntimePresentationEvent::BlockChange {
+                    target,
+                    dimension: dimension as u8,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                });
+            } else {
+                self.enqueue_host(HostToServer::SendBlockChange {
+                    to: target,
+                    dimension: dimension as u8,
+                    revision,
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                });
+            }
         }
     }
 
@@ -1858,6 +2552,19 @@ impl ServerRuntime {
         &mut self,
         snapshot: &crate::authority::contract::AuthoritySnapshot,
     ) {
+        let mut session_ids: Vec<_> = self.players.keys().copied().collect();
+        session_ids.sort_unstable();
+        for id in session_ids {
+            if let Some((dimension, position)) = self
+                .players
+                .get(&id)
+                .map(|session| (session.dimension, session.data.position))
+            {
+                self.update_interest_for_at(id, dimension, position, snapshot.tick);
+            }
+        }
+        self.drain_initial_chunk_projections();
+
         let active_before = self.authority.world.dimension;
         for mutation in &snapshot.mutations {
             let Some(dimension) = Dimension::from_wire(mutation.dimension) else {
@@ -1885,15 +2592,13 @@ impl ServerRuntime {
                 InterestKind::BlockEntity(mutation.position),
             );
             for target in block_entity_targets {
-                self.enqueue_host(HostToServer::SendBlockEntityDelta {
-                    to: target,
-                    dimension: dimension as u8,
-                    revision: mutation.revision,
-                    x,
-                    y,
-                    z,
-                    entity: entity.clone(),
-                });
+                self.send_block_entity_delta(
+                    target,
+                    dimension,
+                    mutation.revision,
+                    mutation.position,
+                    entity.clone(),
+                );
             }
 
             // Container viewers receive concrete slot deltas, not merely an
@@ -1910,16 +2615,14 @@ impl ServerRuntime {
                     for (slot_index, slot) in slots.into_iter().enumerate() {
                         let slot_index = slot_index.min(u16::MAX as usize) as u16;
                         for target in &container_targets {
-                            self.enqueue_host(HostToServer::SendContainerSlotUpdate {
-                                to: *target,
-                                dimension: dimension as u8,
-                                revision: mutation.revision,
-                                x,
-                                y,
-                                z,
+                            self.send_container_slot_update(
+                                *target,
+                                dimension,
+                                mutation.revision,
+                                mutation.position,
                                 slot_index,
                                 slot,
-                            });
+                            );
                         }
                     }
                 }
@@ -1942,25 +2645,7 @@ impl ServerRuntime {
                 .entities
                 .entities
                 .iter()
-                .map(|entity| {
-                    let animation_state = u8::from(entity.on_ground)
-                        | (u8::from(entity.target_player) << 1)
-                        | (u8::from(entity.is_ignited) << 2)
-                        | (u8::from(entity.fire_aspect_timer > 0.0) << 3);
-                    (
-                        entity.id,
-                        crate::network::protocol::EntityStateWire {
-                            entity_id: entity.id,
-                            entity_type: entity.entity_type.to_wire(),
-                            position: entity.position.to_array(),
-                            velocity: entity.velocity.to_array(),
-                            yaw: entity.yaw,
-                            pitch: entity.pitch,
-                            health: entity.health,
-                            animation_state,
-                        },
-                    )
-                })
+                .map(|entity| (entity.id, entity_state_wire(entity)))
                 .collect();
             entities.sort_by_key(|(id, _)| *id);
             for (entity_id, state) in entities {
@@ -1969,23 +2654,40 @@ impl ServerRuntime {
                     // Snapshot revision is an aggregate max across worlds and
                     // cannot be used as a client gate for this dimension.
                     self.authority.revision_for_dimension(dimension),
-                    InterestKind::Entity(entity_id),
+                    InterestKind::EntityState(entity_id),
                 );
                 for target in targets {
-                    self.enqueue_host(HostToServer::SendEntityState {
-                        to: target,
-                        dimension: dimension as u8,
-                        sequence: snapshot.tick,
-                        state,
-                    });
+                    self.send_entity_state(target, dimension, snapshot.tick, state);
                 }
             }
+        }
+        for update in &snapshot.session_updates {
+            let Some(dimension) = Dimension::from_wire(update.dimension) else {
+                continue;
+            };
+            let should_send = self.players.get(&update.player_id).is_some_and(|session| {
+                session.dimension == dimension
+                    && session.last_projected_session_revision.map_or(
+                        true,
+                        |(projected_dimension, revision)| {
+                            projected_dimension != dimension || update.state.revision > revision
+                        },
+                    )
+            });
+            if !should_send {
+                continue;
+            }
+            if let Some(session) = self.players.get_mut(&update.player_id) {
+                apply_gameplay_to_player_data(&mut session.data, update.state);
+                session.last_projected_session_revision = Some((dimension, update.state.revision));
+            }
+            self.send_session_update(update.player_id, snapshot.tick, dimension, update.state);
         }
         self.authority.activate_dimension(active_before);
     }
 
     fn update_interest(&mut self, session: &mut PlayerSessionState) {
-        session
+        let _ = session
             .interest
             .update_position(session.dimension, session.data.position);
         let center = Vec3::from_array(session.data.position);
@@ -2010,7 +2712,7 @@ impl ServerRuntime {
                 (entities, simulation_entities)
             })
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
-        session.interest.update_entities(entities);
+        let _ = session.interest.update_entities(entities);
         session
             .interest
             .update_simulation_entities(simulation_entities);
@@ -2022,7 +2724,18 @@ impl ServerRuntime {
     }
 
     fn update_interest_for(&mut self, id: u64, dimension: Dimension, position: [f32; 3]) {
-        let (entities, simulation_entities) = self
+        let sequence = self.authority.last_snapshot().tick.saturating_add(1).max(1);
+        self.update_interest_for_at(id, dimension, position, sequence);
+    }
+
+    fn update_interest_for_at(
+        &mut self,
+        id: u64,
+        dimension: Dimension,
+        position: [f32; 3],
+        sequence: u64,
+    ) {
+        let (entity_states, simulation_entities) = self
             .authority
             .world_ref(dimension)
             .map(|world| {
@@ -2032,8 +2745,8 @@ impl ServerRuntime {
                         Vec3::from_array(position),
                         f32::from(self.properties.view_distance) * 16.0,
                     )
-                    .map(|entity| entity.id)
-                    .collect();
+                    .map(|entity| (entity.id, entity_state_wire(entity)))
+                    .collect::<Vec<_>>();
                 let simulation_entities = world
                     .entities
                     .query_radius(
@@ -2045,10 +2758,26 @@ impl ServerRuntime {
                 (entities, simulation_entities)
             })
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
-        if let Some(session) = self.players.get_mut(&id) {
+        let entities: Vec<_> = entity_states
+            .iter()
+            .map(|(entity_id, _)| *entity_id)
+            .collect();
+        let (entity_delta, old_dimension) = {
+            let Some(session) = self.players.get_mut(&id) else {
+                return;
+            };
+            let old_dimension = session.interest.dimension;
+            let old_entities = session.interest.entities.clone();
             session.dimension = dimension;
-            session.interest.update_position(dimension, position);
-            session.interest.update_entities(entities);
+            let chunk_delta = session.interest.update_position(dimension, position);
+            let mut entity_delta = session.interest.update_entities(entities);
+            if old_dimension != dimension {
+                entity_delta.departed = old_entities.into_iter().collect();
+                entity_delta.departed.sort_unstable();
+                entity_delta.entered = session.interest.entities.iter().copied().collect();
+                entity_delta.entered.sort_unstable();
+                session.pending_initial_chunks.clear();
+            }
             session
                 .interest
                 .update_simulation_entities(simulation_entities);
@@ -2057,6 +2786,140 @@ impl ServerRuntime {
             session.entity_interest = session.interest.entities.clone();
             session.simulation_entity_interest = session.interest.simulation_entities.clone();
             session.container_viewers = session.interest.open_containers.clone();
+            session
+                .pending_initial_chunks
+                .retain(|(queued_dimension, cx, cz)| {
+                    *queued_dimension == dimension && session.interest.chunks.contains(&(*cx, *cz))
+                });
+            session.queue_initial_chunks(dimension, chunk_delta.entered.iter().copied());
+            (entity_delta, old_dimension)
+        };
+        for entity_id in entity_delta.departed {
+            self.record_interest_update(
+                id,
+                old_dimension,
+                self.authority.revision_for_dimension(old_dimension),
+                InterestKind::Entity(entity_id),
+            );
+            self.send_entity_despawn(id, old_dimension, sequence, entity_id);
+        }
+        for entity_id in entity_delta.entered {
+            self.record_interest_update(
+                id,
+                dimension,
+                self.authority.revision_for_dimension(dimension),
+                InterestKind::Entity(entity_id),
+            );
+            if let Some(state) = entity_states
+                .iter()
+                .find_map(|(id, state)| (*id == entity_id).then_some(*state))
+            {
+                self.send_entity_spawn(id, dimension, sequence, state);
+            }
+        }
+    }
+
+    fn record_interest_update(
+        &mut self,
+        target: u64,
+        dimension: Dimension,
+        revision: u64,
+        kind: InterestKind,
+    ) {
+        if self.routed_updates.len() < MAX_INTEREST_UPDATES_PER_TICK {
+            self.routed_updates.push(RoutedInterestUpdate {
+                target,
+                dimension,
+                revision,
+                kind,
+            });
+        }
+    }
+
+    fn drain_initial_chunk_projections(&mut self) {
+        let mut ids: Vec<_> = self.players.keys().copied().collect();
+        ids.sort_unstable();
+        let mut projected = 0usize;
+        let mut inspected = 0usize;
+        while projected < MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK
+            && inspected < MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK * 4
+        {
+            let mut made_progress = false;
+            for id in &ids {
+                if projected >= MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK
+                    || inspected >= MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK * 4
+                {
+                    break;
+                }
+                let next = self
+                    .players
+                    .get_mut(id)
+                    .and_then(|session| session.pending_initial_chunks.pop_front());
+                let Some((dimension, cx, cz)) = next else {
+                    continue;
+                };
+                made_progress = true;
+                inspected += 1;
+                let payload = self.authority.world_ref(dimension).and_then(|world| {
+                    world.chunks.chunks.get(&(cx, cz)).map(|chunk| {
+                        let mut data = ChunkSaveData::from_chunk(chunk);
+                        let revision = world.chunk_revision(cx, cz);
+                        data.mutation_revision = revision;
+                        (
+                            revision,
+                            chunk.min_section_y,
+                            chunk.sections.len().min(u16::MAX as usize) as u16,
+                            data.blocks,
+                            data.block_states,
+                            data.block_entities,
+                        )
+                    })
+                });
+                let Some((
+                    revision,
+                    min_section_y,
+                    section_count,
+                    blocks,
+                    block_states,
+                    block_entities,
+                )) = payload
+                else {
+                    if let Some(session) = self.players.get_mut(id) {
+                        if session.interest.dimension == dimension
+                            && session.interest.chunks.contains(&(cx, cz))
+                            && session.pending_initial_chunks.len()
+                                < MAX_PENDING_INITIAL_CHUNKS_PER_SESSION
+                        {
+                            session
+                                .pending_initial_chunks
+                                .push_back((dimension, cx, cz));
+                        }
+                    }
+                    continue;
+                };
+                self.record_interest_update(
+                    *id,
+                    dimension,
+                    revision,
+                    InterestKind::Chunk((cx, cz)),
+                );
+                self.send_chunk_projection(
+                    *id,
+                    dimension,
+                    cx,
+                    cz,
+                    revision,
+                    min_section_y,
+                    section_count,
+                    blocks,
+                    block_states,
+                    block_entities,
+                );
+                projected += 1;
+            }
+            if !made_progress {
+                break;
+            }
         }
     }
 
@@ -2182,6 +3045,9 @@ fn gameplay_from_player_data(data: &PlayerData) -> SessionGameplayState {
     gameplay.hunger_milli = scalar_to_milli(data.hunger);
     gameplay.saturation_milli = scalar_to_milli(data.saturation);
     gameplay.is_dead = data.is_dead;
+    gameplay.experience = data.experience;
+    gameplay.experience_level = data.experience_level;
+    gameplay.selected_hotbar_slot = inventory.selected.min(8) as u8;
     gameplay.inventory = slots;
     gameplay
 }
@@ -2194,6 +3060,8 @@ fn apply_gameplay_to_player_data(data: &mut PlayerData, gameplay: SessionGamepla
     data.hunger = milli_to_scalar(gameplay.hunger_milli);
     data.saturation = milli_to_scalar(gameplay.saturation_milli);
     data.is_dead = gameplay.is_dead;
+    data.experience = gameplay.experience;
+    data.experience_level = gameplay.experience_level;
 
     let mut inventory = data.inventory.to_inventory();
     for (index, slot) in gameplay.inventory[..9].iter().copied().enumerate() {
@@ -2206,7 +3074,25 @@ fn apply_gameplay_to_player_data(data: &mut PlayerData, gameplay: SessionGamepla
         inventory.armor[index] = stack_from_session_slot(slot);
     }
     inventory.offhand = stack_from_session_slot(gameplay.inventory[40]);
+    inventory.selected = usize::from(gameplay.selected_hotbar_slot.min(8));
     data.inventory = crate::save::InventoryData::from(&inventory);
+}
+
+fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
+    let animation_state = u8::from(entity.on_ground)
+        | (u8::from(entity.target_player) << 1)
+        | (u8::from(entity.is_ignited) << 2)
+        | (u8::from(entity.fire_aspect_timer > 0.0) << 3);
+    EntityStateWire {
+        entity_id: entity.id,
+        entity_type: entity.entity_type.to_wire(),
+        position: entity.position.to_array(),
+        velocity: entity.velocity.to_array(),
+        yaw: entity.yaw,
+        pitch: entity.pitch,
+        health: entity.health,
+        animation_state,
+    }
 }
 
 fn within_reach(session: &PlayerSessionState, x: i32, y: i32, z: i32) -> bool {
@@ -2255,6 +3141,20 @@ mod tests {
         std::env::temp_dir().join(format!("icraft_plan16_{label}_{unique}"))
     }
 
+    fn embedded_runtime(label: &str) -> (ServerRuntime, RuntimeInput) {
+        let mut properties = ServerProperties::default();
+        properties.bind = "127.0.0.1".into();
+        properties.port = 25580;
+        properties.view_distance = 2;
+        properties.simulation_distance = 2;
+        properties.world_dir = temp_dir(label);
+        ServerRuntime::new_embedded(
+            properties,
+            EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(99, "local")),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn invalid_properties_fail_before_world_creation() {
         let path = temp_dir("invalid").join("server.properties");
@@ -2264,6 +3164,309 @@ mod tests {
         assert!(error.to_string().contains("port"));
         assert!(!path.parent().unwrap().join("world").exists());
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn runtime_pose_validation_rejects_regression_and_speed_but_allows_server_teleport() {
+        let (mut runtime, _input) = embedded_runtime("pose_validation");
+        let initial = runtime.players[&99].data.position;
+        runtime
+            .handle_position(
+                99,
+                1,
+                100,
+                initial[0] + 1.0,
+                initial[1],
+                initial[2],
+                0.5,
+                0.1,
+            )
+            .unwrap();
+        let accepted = runtime.players[&99].data.position;
+
+        runtime
+            .handle_position(
+                99,
+                2,
+                90,
+                accepted[0] + 1.0,
+                accepted[1],
+                accepted[2],
+                0.5,
+                0.1,
+            )
+            .unwrap();
+        assert_eq!(runtime.players[&99].data.position, accepted);
+        runtime
+            .handle_position(99, 2, 150, 5_000.0, accepted[1], 5_000.0, 0.5, 0.1)
+            .unwrap();
+        assert_eq!(runtime.players[&99].data.position, accepted);
+
+        let teleport = [5_000.0, accepted[1], 5_000.0];
+        runtime.players.get_mut(&99).unwrap().teleport_allowance = Some(teleport);
+        runtime
+            .handle_position(99, 2, 150, teleport[0], teleport[1], teleport[2], 0.5, 0.1)
+            .unwrap();
+        assert_eq!(runtime.players[&99].data.position, teleport);
+
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn presentation_saturation_preserves_ack_and_session_and_stays_bounded() {
+        let (mut runtime, _input) = embedded_runtime("presentation_saturation");
+        runtime.presentation_events.clear();
+        assert!(
+            runtime.push_presentation_event(RuntimePresentationEvent::GameplayResponse {
+                target: 99,
+                response: GameplayResponse {
+                    request_id: 700,
+                    server_sequence: 1,
+                    outcome: GameplayOutcome::Accepted { revision: 1 },
+                },
+            })
+        );
+        let mut session_state = SessionGameplayWire::default();
+        session_state.revision = 77;
+        assert!(
+            runtime.push_presentation_event(RuntimePresentationEvent::PlayerSessionUpdate {
+                target: 99,
+                sequence: 1,
+                player_id: 99,
+                dimension: Dimension::Overworld as u8,
+                state: session_state,
+            },)
+        );
+
+        for index in 0..(MAX_PRESENTATION_EVENTS_PER_TICK * 2) {
+            assert!(
+                runtime.push_presentation_event(RuntimePresentationEvent::PlayerPosition {
+                    target: 99,
+                    id: 10_000 + index as u64,
+                    sequence: index as u32 + 1,
+                    sender_time_millis: index as u64 + 1,
+                    position: [index as f32, 80.0, 0.0],
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },)
+            );
+        }
+        assert_eq!(
+            runtime.presentation_events.len(),
+            MAX_PRESENTATION_EVENTS_PER_TICK
+        );
+        assert!(runtime.presentation_events.iter().any(|event| matches!(
+            event,
+            RuntimePresentationEvent::GameplayResponse { response, .. }
+                if response.request_id == 700
+        )));
+        assert!(runtime.presentation_events.iter().any(|event| matches!(
+            event,
+            RuntimePresentationEvent::PlayerSessionUpdate { state, .. }
+                if state.revision == 77
+        )));
+        assert!(runtime.network_metrics.snapshot().queue_full > 0);
+
+        runtime.presentation_events.clear();
+        for index in 0..(MAX_PRESENTATION_QUEUE_LEN + 8) {
+            let accepted =
+                runtime.push_presentation_event(RuntimePresentationEvent::GameplayResponse {
+                    target: 99,
+                    response: GameplayResponse {
+                        request_id: index as u128,
+                        server_sequence: index as u64 + 1,
+                        outcome: GameplayOutcome::Accepted {
+                            revision: index as u64 + 1,
+                        },
+                    },
+                });
+            assert_eq!(accepted, index < MAX_PRESENTATION_QUEUE_LEN);
+        }
+        assert_eq!(
+            runtime.presentation_events.len(),
+            MAX_PRESENTATION_QUEUE_LEN
+        );
+        assert!(runtime.presentation_events.iter().any(|event| matches!(
+            event,
+            RuntimePresentationEvent::GameplayResponse { response, .. }
+                if response.request_id == 0
+        )));
+
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn embedded_interest_fanout_is_private_dimension_safe_and_exactly_once() {
+        let (mut runtime, _input) = embedded_runtime("interest_fanout");
+        runtime.login_session(2, "remote").unwrap();
+        let baseline = runtime.tick_with_output().unwrap();
+        assert!(baseline.presentation_events.iter().any(|event| matches!(
+            event,
+            RuntimePresentationEvent::ChunkData { target: 99, .. }
+        )));
+        runtime.drain_routed_updates();
+
+        let revision = runtime.session_revision(2).unwrap();
+        let response = runtime
+            .submit_request(
+                2,
+                GameplayRequest {
+                    request_id: 700,
+                    client_sequence: 1,
+                    session_id: 2,
+                    dimension: Dimension::Overworld as u8,
+                    client_revision: revision,
+                    operation: GameplayOperation::BlockUse {
+                        x: 8,
+                        y: 80,
+                        z: 8,
+                        block: crate::world::BlockType::Glass.to_wire(),
+                    },
+                },
+            )
+            .unwrap();
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        let output = runtime.tick_with_output().unwrap();
+        assert_eq!(
+            output
+                .presentation_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimePresentationEvent::BlockChange {
+                        target: 99,
+                        x: 8,
+                        y: 80,
+                        z: 8,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the immediate ACK path and fixed snapshot must not double-project a mutation"
+        );
+
+        let routed = runtime.drain_routed_updates();
+        assert!(routed.iter().any(|update| update.target == 99));
+        assert!(routed.iter().any(|update| update.target == 2));
+
+        assert!(runtime.set_session_dimension(2, Dimension::Nether));
+        runtime.drain_routed_updates();
+        let revision = runtime.session_revision(99).unwrap();
+        let response = runtime
+            .submit_request(
+                99,
+                GameplayRequest {
+                    request_id: 701,
+                    client_sequence: 1,
+                    session_id: 99,
+                    dimension: Dimension::Overworld as u8,
+                    client_revision: revision,
+                    operation: GameplayOperation::BlockUse {
+                        x: 9,
+                        y: 80,
+                        z: 8,
+                        block: crate::world::BlockType::Stone.to_wire(),
+                    },
+                },
+            )
+            .unwrap();
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(!runtime
+            .drain_routed_updates()
+            .iter()
+            .any(|update| update.target == 2 && update.dimension == Dimension::Overworld));
+
+        let chest = (8, 80, 8);
+        runtime
+            .players
+            .get_mut(&99)
+            .unwrap()
+            .interest
+            .open_containers
+            .clear();
+        assert!(runtime.set_session_dimension(2, Dimension::Overworld));
+        runtime
+            .players
+            .get_mut(&2)
+            .unwrap()
+            .interest
+            .open_containers
+            .insert(chest);
+        assert_eq!(
+            runtime.queue_interest_update(
+                Dimension::Overworld,
+                runtime
+                    .authority
+                    .revision_for_dimension(Dimension::Overworld),
+                InterestKind::Container(chest),
+            ),
+            vec![2]
+        );
+
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn complete_session_health_death_inventory_and_xp_reach_local_projection_once() {
+        let (mut runtime, _input) = embedded_runtime("session_projection");
+        let _ = runtime.tick_with_output().unwrap();
+        let mut item = ItemWire::empty();
+        item.item = crate::inventory::Item::Diamond as u32;
+        item.count = 3;
+        let gameplay = &mut runtime.authority.session_mut(99).unwrap().gameplay;
+        gameplay.health_milli = 0;
+        gameplay.is_dead = true;
+        gameplay.death_source = Some(6);
+        gameplay.experience = 77;
+        gameplay.experience_level = 4;
+        gameplay.selected_hotbar_slot = 5;
+        gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(item, 1, 2));
+        gameplay.revision = 1;
+
+        let output = runtime.tick_with_output().unwrap();
+        let updates: Vec<_> = output
+            .presentation_events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimePresentationEvent::PlayerSessionUpdate { state, .. }
+                    if state.revision == 1 =>
+                {
+                    Some(*state)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].is_dead);
+        assert_eq!(updates[0].health_milli, 0);
+        assert_eq!(updates[0].experience, 77);
+        assert_eq!(updates[0].hotbar[0].unwrap().item, item);
+        let player_data = &runtime.players[&99].data;
+        assert!(player_data.is_dead);
+        assert_eq!(player_data.experience, 77);
+        assert_eq!(player_data.experience_level, 4);
+        assert_eq!(player_data.inventory.selected, 5);
+        assert!(runtime
+            .tick_with_output()
+            .unwrap()
+            .presentation_events
+            .iter()
+            .all(|event| !matches!(
+                event,
+                RuntimePresentationEvent::PlayerSessionUpdate { state, .. }
+                    if state.revision == 1
+            )));
+
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
     }
 
     #[test]

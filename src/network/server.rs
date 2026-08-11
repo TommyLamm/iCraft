@@ -10,7 +10,8 @@ use tokio::time::{self, Instant};
 
 use super::protocol::{
     Action, EntityStateWire, GameplayOperation, GameplayRequest, GameplayResponse, LightningStrike,
-    Packet, PlayerEffectWire, PlayerId, RejectReason, RequestId, ServerSequence, PROTOCOL_VERSION,
+    Packet, PlayerEffectWire, PlayerId, RejectReason, RequestId, ServerSequence,
+    SessionGameplayWire, PROTOCOL_VERSION,
 };
 use super::transport::Connection;
 
@@ -454,6 +455,12 @@ pub enum HostToServer {
         sequence: u64,
         state: EntityStateWire,
     },
+    SendEntitySpawn {
+        to: PlayerId,
+        dimension: u8,
+        sequence: u64,
+        state: EntityStateWire,
+    },
     BroadcastEntityState {
         dimension: u8,
         sequence: u64,
@@ -466,6 +473,12 @@ pub enum HostToServer {
         state: EntityStateWire,
     },
     BroadcastEntityDespawn {
+        dimension: u8,
+        sequence: u64,
+        entity_id: u64,
+    },
+    SendEntityDespawn {
+        to: PlayerId,
         dimension: u8,
         sequence: u64,
         entity_id: u64,
@@ -485,6 +498,19 @@ pub enum HostToServer {
         sequence: u64,
         player_id: PlayerId,
         effects: Vec<PlayerEffectWire>,
+    },
+    SendPlayerEffect {
+        to: PlayerId,
+        sequence: u64,
+        player_id: PlayerId,
+        effects: Vec<PlayerEffectWire>,
+    },
+    SendPlayerSessionUpdate {
+        to: PlayerId,
+        sequence: u64,
+        player_id: PlayerId,
+        dimension: u8,
+        state: SessionGameplayWire,
     },
     BroadcastTimeSync {
         ticks: u64,
@@ -508,6 +534,17 @@ pub enum HostToServer {
         strike: LightningStrike,
     },
     BroadcastPlayerPosition {
+        id: PlayerId,
+        sequence: u32,
+        sender_time_millis: u64,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+        pitch: f32,
+    },
+    SendPlayerPosition {
+        to: PlayerId,
         id: PlayerId,
         sequence: u32,
         sender_time_millis: u64,
@@ -811,6 +848,7 @@ enum StateMailboxKey {
     Entity(u64),
     PlayerHealth(PlayerId),
     PlayerEffect(PlayerId),
+    PlayerSession(PlayerId),
 }
 
 struct StateMailbox {
@@ -851,6 +889,11 @@ impl StateMailbox {
                 player_id,
                 ..
             } => (StateMailboxKey::PlayerEffect(*player_id), *sequence),
+            Packet::PlayerSessionUpdate {
+                sequence,
+                player_id,
+                ..
+            } => (StateMailboxKey::PlayerSession(*player_id), *sequence),
             _ => return,
         };
         let mut pending = self.pending.lock().await;
@@ -859,7 +902,8 @@ impl StateMailbox {
             .and_then(|existing| match existing.packet() {
                 Packet::EntityState { sequence, .. }
                 | Packet::PlayerHealth { sequence, .. }
-                | Packet::PlayerEffect { sequence, .. } => Some(*sequence),
+                | Packet::PlayerEffect { sequence, .. }
+                | Packet::PlayerSessionUpdate { sequence, .. } => Some(*sequence),
                 _ => None,
             });
         if existing_sequence.is_some_and(|existing| existing > sequence) {
@@ -2078,6 +2122,12 @@ impl<S: HostEventSender> NetworkServer<S> {
     }
 
     async fn handle_host_command(&self, command: HostToServer) {
+        if let HostToServer::SendPlayerSessionUpdate { to, player_id, .. } = &command {
+            if to != player_id {
+                self.metrics.record_rejected_request();
+                return;
+            }
+        }
         if let HostToServer::SendChunk {
             dimension,
             cx,
@@ -2186,15 +2236,52 @@ impl<S: HostEventSender> NetworkServer<S> {
             return;
         }
 
-        if let HostToServer::SendEntityState {
+        if let HostToServer::SendPlayerPosition {
             to,
-            dimension,
+            id,
             sequence,
-            state,
+            sender_time_millis,
+            x,
+            y,
+            z,
+            yaw,
+            pitch,
         } = &command
         {
-            let failed = Self::send_to(
-                &self.sessions,
+            let mailbox = self
+                .sessions
+                .lock()
+                .await
+                .get(to)
+                .map(|session| Arc::clone(&session.pose_mailbox));
+            if let Some(mailbox) = mailbox {
+                mailbox
+                    .replace(
+                        *id,
+                        Packet::PlayerPosition {
+                            protocol_version: PROTOCOL_VERSION,
+                            id: *id,
+                            sequence: *sequence,
+                            sender_time_millis: *sender_time_millis,
+                            x: *x,
+                            y: *y,
+                            z: *z,
+                            yaw: *yaw,
+                            pitch: *pitch,
+                        },
+                    )
+                    .await;
+            }
+            return;
+        }
+
+        let targeted_state = match &command {
+            HostToServer::SendEntityState {
+                to,
+                dimension,
+                sequence,
+                state,
+            } => Some((
                 *to,
                 Packet::EntityState {
                     protocol_version: PROTOCOL_VERSION,
@@ -2202,9 +2289,49 @@ impl<S: HostEventSender> NetworkServer<S> {
                     sequence: *sequence,
                     state: *state,
                 },
-            )
-            .await;
-            Self::evict_slow_clients(&self.sessions, &self.server_to_host, failed).await;
+            )),
+            HostToServer::SendPlayerEffect {
+                to,
+                sequence,
+                player_id,
+                effects,
+            } => Some((
+                *to,
+                Packet::PlayerEffect {
+                    protocol_version: PROTOCOL_VERSION,
+                    sequence: *sequence,
+                    player_id: *player_id,
+                    effects: effects.clone(),
+                },
+            )),
+            HostToServer::SendPlayerSessionUpdate {
+                to,
+                sequence,
+                player_id,
+                dimension,
+                state,
+            } => Some((
+                *to,
+                Packet::PlayerSessionUpdate {
+                    protocol_version: PROTOCOL_VERSION,
+                    sequence: *sequence,
+                    player_id: *player_id,
+                    dimension: *dimension,
+                    state: *state,
+                },
+            )),
+            _ => None,
+        };
+        if let Some((to, packet)) = targeted_state {
+            let mailbox = self
+                .sessions
+                .lock()
+                .await
+                .get(&to)
+                .map(|session| Arc::clone(&session.state_mailbox));
+            if let Some(mailbox) = mailbox {
+                mailbox.replace(packet).await;
+            }
             return;
         }
 
@@ -2347,6 +2474,20 @@ impl<S: HostEventSender> NetworkServer<S> {
                 },
                 None,
             ),
+            HostToServer::SendEntitySpawn {
+                to,
+                dimension,
+                sequence,
+                state,
+            } => (
+                Packet::EntitySpawn {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    sequence,
+                    state,
+                },
+                Some(to),
+            ),
             HostToServer::BroadcastEntityDespawn {
                 dimension,
                 sequence,
@@ -2359,6 +2500,20 @@ impl<S: HostEventSender> NetworkServer<S> {
                     entity_id,
                 },
                 None,
+            ),
+            HostToServer::SendEntityDespawn {
+                to,
+                dimension,
+                sequence,
+                entity_id,
+            } => (
+                Packet::EntityDespawn {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    sequence,
+                    entity_id,
+                },
+                Some(to),
             ),
             HostToServer::SendBlockActionResult {
                 to,
@@ -2451,6 +2606,9 @@ impl<S: HostEventSender> NetworkServer<S> {
             HostToServer::BroadcastPlayerPosition { .. } => {
                 unreachable!("player positions use the latest-wins pose channel")
             }
+            HostToServer::SendPlayerPosition { .. } => {
+                unreachable!("targeted player positions use the latest-wins pose channel")
+            }
             HostToServer::SendGameplayResponse { to, response } => {
                 let response = Self::normalize_host_response(&self.sessions, to, response).await;
                 let packet = Packet::GameplayResponse {
@@ -2462,7 +2620,9 @@ impl<S: HostEventSender> NetworkServer<S> {
             HostToServer::BroadcastEntityState { .. }
             | HostToServer::SendEntityState { .. }
             | HostToServer::BroadcastPlayerHealth { .. }
-            | HostToServer::BroadcastPlayerEffect { .. } => {
+            | HostToServer::BroadcastPlayerEffect { .. }
+            | HostToServer::SendPlayerEffect { .. }
+            | HostToServer::SendPlayerSessionUpdate { .. } => {
                 unreachable!("state packets use the latest-wins state channel")
             }
             HostToServer::BroadcastPlayerAction { id, action } => (
@@ -4439,6 +4599,75 @@ mod tests {
         )
         .await;
         assert!(res_b.is_err());
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn player_session_projection_is_private_and_rejects_mismatched_owner() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut client_a, id_a) = server.connect("steve").await;
+        let (mut client_b, id_b) = server.connect("alex").await;
+        let state = SessionGameplayWire {
+            health_milli: 5_000,
+            is_dead: true,
+            death_source: Some(3),
+            experience: 44,
+            revision: 1,
+            ..SessionGameplayWire::default()
+        };
+        server
+            .host_tx
+            .send(HostToServer::SendPlayerSessionUpdate {
+                to: id_a,
+                sequence: 7,
+                player_id: id_a,
+                dimension: 0,
+                state,
+            })
+            .unwrap();
+
+        let received = recv_matching(&mut client_a, |packet| {
+            matches!(packet, Packet::PlayerSessionUpdate { .. })
+        })
+        .await;
+        assert!(matches!(
+            received,
+            Packet::PlayerSessionUpdate {
+                player_id,
+                state: received_state,
+                ..
+            } if player_id == id_a && received_state == state
+        ));
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            recv_matching(&mut client_b, |packet| matches!(
+                packet,
+                Packet::PlayerSessionUpdate { .. }
+            ))
+        )
+        .await
+        .is_err());
+
+        server
+            .host_tx
+            .send(HostToServer::SendPlayerSessionUpdate {
+                to: id_a,
+                sequence: 8,
+                player_id: id_b,
+                dimension: 0,
+                state: SessionGameplayWire {
+                    revision: 2,
+                    ..state
+                },
+            })
+            .unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            recv_matching(&mut client_a, |packet| matches!(packet, Packet::PlayerSessionUpdate { state, .. } if state.revision == 2))
+        )
+        .await
+        .is_err());
 
         server.stop().await;
     }

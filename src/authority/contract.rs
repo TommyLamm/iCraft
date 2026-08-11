@@ -7,7 +7,7 @@
 use crate::inventory::GameMode;
 use crate::network::protocol::{
     GameplayOperation, GameplayRequest, GameplayResponse, ItemWire, PlayerId, RejectReason,
-    SessionSlotWire, SlotRefWire,
+    SessionBrewWire, SessionFishingHookWire, SessionGameplayWire, SessionSlotWire, SlotRefWire,
 };
 use std::collections::VecDeque;
 
@@ -149,6 +149,7 @@ pub struct SessionGameplayState {
     pub is_dead: bool,
     pub death_source: Option<u8>,
     pub invulnerability_ticks: u16,
+    pub velocity_milli: [i32; 3],
     pub experience: u32,
     pub experience_level: u32,
     pub selected_hotbar_slot: u8,
@@ -173,6 +174,7 @@ impl Default for SessionGameplayState {
             is_dead: false,
             death_source: None,
             invulnerability_ticks: 0,
+            velocity_milli: [0; 3],
             experience: 0,
             experience_level: 0,
             selected_hotbar_slot: 0,
@@ -185,6 +187,122 @@ impl Default for SessionGameplayState {
             fishing_hook: None,
             brew: None,
             revision: 0,
+        }
+    }
+}
+
+impl From<SessionFishingHookState> for SessionFishingHookWire {
+    fn from(state: SessionFishingHookState) -> Self {
+        Self {
+            entity_id: state.entity_id,
+            position_milli: state.position_milli,
+            velocity_milli: state.velocity_milli,
+            stage: state.stage,
+            wait_ticks_remaining: state.wait_ticks_remaining,
+            bite_ticks_remaining: state.bite_ticks_remaining,
+        }
+    }
+}
+
+impl From<SessionFishingHookWire> for SessionFishingHookState {
+    fn from(state: SessionFishingHookWire) -> Self {
+        Self {
+            entity_id: state.entity_id,
+            position_milli: state.position_milli,
+            velocity_milli: state.velocity_milli,
+            stage: state.stage,
+            wait_ticks_remaining: state.wait_ticks_remaining,
+            bite_ticks_remaining: state.bite_ticks_remaining,
+        }
+    }
+}
+
+impl From<SessionBrewState> for SessionBrewWire {
+    fn from(state: SessionBrewState) -> Self {
+        Self {
+            station: state.station,
+            ingredient: state.ingredient,
+            bottles: state.bottles,
+            remaining_ticks: state.remaining_ticks,
+        }
+    }
+}
+
+impl From<SessionBrewWire> for SessionBrewState {
+    fn from(state: SessionBrewWire) -> Self {
+        Self {
+            station: state.station,
+            ingredient: state.ingredient,
+            bottles: state.bottles,
+            remaining_ticks: state.remaining_ticks,
+        }
+    }
+}
+
+impl From<SessionGameplayState> for SessionGameplayWire {
+    fn from(state: SessionGameplayState) -> Self {
+        Self {
+            health_milli: state.health_milli,
+            max_health_milli: state.max_health_milli,
+            hunger_milli: state.hunger_milli,
+            saturation_milli: state.saturation_milli,
+            is_dead: state.is_dead,
+            death_source: state.death_source,
+            invulnerability_ticks: state.invulnerability_ticks,
+            velocity_milli: state.velocity_milli,
+            experience: state.experience,
+            experience_level: state.experience_level,
+            selected_hotbar_slot: state.selected_hotbar_slot,
+            hotbar: std::array::from_fn(|index| state.inventory[index].map(Into::into)),
+            main: std::array::from_fn(|index| state.inventory[index + 9].map(Into::into)),
+            armor: std::array::from_fn(|index| state.inventory[index + 36].map(Into::into)),
+            offhand: state.inventory[40].map(Into::into),
+            mounted_entity: state.mounted_entity,
+            attack_cooldown_ticks: state.attack_cooldown_ticks,
+            shield_active: state.shield_active,
+            shield_cooldown_ticks: state.shield_cooldown_ticks,
+            enchant_seed: state.enchant_seed,
+            fishing_hook: state.fishing_hook.map(Into::into),
+            brew: state.brew.map(Into::into),
+            revision: state.revision,
+        }
+    }
+}
+
+impl From<SessionGameplayWire> for SessionGameplayState {
+    fn from(state: SessionGameplayWire) -> Self {
+        let mut inventory = [None; SESSION_INVENTORY_SLOTS];
+        for (index, slot) in state.hotbar.into_iter().enumerate() {
+            inventory[index] = slot.map(Into::into);
+        }
+        for (index, slot) in state.main.into_iter().enumerate() {
+            inventory[index + 9] = slot.map(Into::into);
+        }
+        for (index, slot) in state.armor.into_iter().enumerate() {
+            inventory[index + 36] = slot.map(Into::into);
+        }
+        inventory[40] = state.offhand.map(Into::into);
+        Self {
+            health_milli: state.health_milli,
+            max_health_milli: state.max_health_milli,
+            hunger_milli: state.hunger_milli,
+            saturation_milli: state.saturation_milli,
+            is_dead: state.is_dead,
+            death_source: state.death_source,
+            invulnerability_ticks: state.invulnerability_ticks,
+            velocity_milli: state.velocity_milli,
+            experience: state.experience,
+            experience_level: state.experience_level,
+            selected_hotbar_slot: state.selected_hotbar_slot,
+            inventory,
+            mounted_entity: state.mounted_entity,
+            attack_cooldown_ticks: state.attack_cooldown_ticks,
+            shield_active: state.shield_active,
+            shield_cooldown_ticks: state.shield_cooldown_ticks,
+            enchant_seed: state.enchant_seed,
+            fishing_hook: state.fishing_hook.map(Into::into),
+            brew: state.brew.map(Into::into),
+            revision: state.revision,
         }
     }
 }
@@ -761,5 +879,42 @@ mod tests {
         assert!(!session.gameplay.shield_active);
         assert_eq!(session.gameplay.fishing_hook, None);
         assert_eq!(session.gameplay.brew, None);
+    }
+
+    #[test]
+    fn session_gameplay_wire_conversion_preserves_all_fixed_slots_and_state() {
+        let mut gameplay = SessionGameplayState {
+            health_milli: 9_000,
+            velocity_milli: [2_000, 500, -1_000],
+            experience: 123,
+            experience_level: 7,
+            selected_hotbar_slot: 8,
+            mounted_entity: Some(42),
+            shield_active: true,
+            revision: 11,
+            ..SessionGameplayState::default()
+        };
+        let mut item = ItemWire::empty();
+        item.item = crate::inventory::Item::Diamond as u32;
+        item.count = 3;
+        for index in 0..SESSION_INVENTORY_SLOTS {
+            gameplay.inventory[index] = Some(SessionInventorySlot::from_wire(
+                item,
+                index as u128,
+                (index as u128) << 1,
+            ));
+        }
+        gameplay.fishing_hook = Some(SessionFishingHookState {
+            entity_id: 99,
+            position_milli: [1, 2, 3],
+            velocity_milli: [4, 5, 6],
+            stage: 2,
+            wait_ticks_remaining: 7,
+            bite_ticks_remaining: 8,
+        });
+
+        let wire = SessionGameplayWire::from(gameplay);
+        wire.validate_bounds().unwrap();
+        assert_eq!(SessionGameplayState::from(wire), gameplay);
     }
 }
