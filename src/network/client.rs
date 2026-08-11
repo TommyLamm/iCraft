@@ -78,6 +78,7 @@ pub enum ClientToGame {
         z: i32,
         block: u32,
         state: u8,
+        raw_fluid: u8,
     },
     BlockActionResult {
         x: i32,
@@ -96,6 +97,7 @@ pub enum ClientToGame {
         section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
     },
     BlockEntityDelta {
@@ -279,6 +281,7 @@ struct BufferedBlockChange {
     z: i32,
     block: u32,
     state: u8,
+    raw_fluid: u8,
 }
 
 #[derive(Default)]
@@ -410,6 +413,7 @@ impl RevisionGate {
         z: i32,
         block: u32,
         state: u8,
+        raw_fluid: u8,
     ) -> Vec<ClientToGame> {
         let key = (dimension, x.div_euclid(16), z.div_euclid(16));
         let current = self.applied.get(&key).copied().unwrap_or(0);
@@ -424,6 +428,7 @@ impl RevisionGate {
                 z,
                 block,
                 state,
+                raw_fluid,
             },
         );
         self.flush_contiguous(key)
@@ -439,6 +444,7 @@ impl RevisionGate {
         section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
     ) -> Vec<ClientToGame> {
         let key = (dimension, cx, cz);
@@ -462,6 +468,7 @@ impl RevisionGate {
             section_count,
             blocks,
             block_states,
+            fluid_levels,
             block_entities,
         }];
         events.extend(self.flush_contiguous(key));
@@ -493,6 +500,7 @@ impl RevisionGate {
                 z: change.z,
                 block: change.block,
                 state: change.state,
+                raw_fluid: change.raw_fluid,
             });
         }
         if self.buffered.get(&key).is_some_and(BTreeMap::is_empty) {
@@ -732,12 +740,13 @@ async fn run_client(
                         z,
                         block,
                         state,
+                        raw_fluid,
                         ..
                     }) => {
                         current_dimension = dimension;
                         last_client_revision = last_client_revision.max(revision);
                         for event in revision_gate.accept_block_change(
-                            dimension, revision, x, y, z, block, state,
+                            dimension, revision, x, y, z, block, state, raw_fluid,
                         ) {
                             let _ = client_to_game.send(event);
                         }
@@ -830,6 +839,7 @@ async fn run_client(
                         section_count,
                         blocks,
                         block_states,
+                        fluid_levels,
                         block_entities,
                         ..
                     }) => {
@@ -844,6 +854,7 @@ async fn run_client(
                             section_count,
                             blocks,
                             block_states,
+                            fluid_levels,
                             block_entities,
                         ) {
                             let _ = client_to_game.send(event);
@@ -1398,6 +1409,7 @@ mod tests {
                 z: -9,
                 block: 3,
                 state: 0,
+                raw_fluid: 0,
             })
             .unwrap();
         host_tx
@@ -1410,6 +1422,7 @@ mod tests {
                 section_count: 16,
                 blocks: vec![1, 2, 3, 4],
                 block_states: vec![0, 0, 0, 0],
+                fluid_levels: vec![],
                 block_entities: vec![],
                 to: player_id,
             })
@@ -1642,6 +1655,7 @@ mod tests {
                 z: 2,
                 block: crate::world::BlockType::Dirt.to_wire(),
                 state: 0,
+                raw_fluid: 0,
             })
             .unwrap();
         let snapshot = |to, cx, blocks, block_states| HostToServer::SendChunk {
@@ -1653,6 +1667,7 @@ mod tests {
             section_count: 16,
             blocks,
             block_states,
+            fluid_levels: vec![],
             block_entities: vec![],
             to,
         };
@@ -1799,6 +1814,7 @@ mod tests {
                 z: 1,
                 block: crate::world::BlockType::Dirt.to_wire(),
                 state: 0,
+                raw_fluid: 0,
             })
             .unwrap();
         host_tx
@@ -1830,6 +1846,7 @@ mod tests {
                 section_count: 16,
                 blocks: vec![1],
                 block_states: vec![0],
+                fluid_levels: vec![],
                 block_entities: vec![],
                 to: player_id,
             })
@@ -2166,9 +2183,22 @@ mod tests {
     #[test]
     fn revision_gate_orders_cross_channel_snapshot_and_block_change() {
         let mut gate = RevisionGate::default();
-        assert!(gate.accept_block_change(0, 2, 1, 70, 1, 4, 0).is_empty());
+        assert!(gate
+            .accept_block_change(0, 2, 1, 70, 1, 4, 0, crate::world::FLUID_WATERLOGGED_BIT,)
+            .is_empty());
 
-        let events = gate.accept_snapshot(0, 0, 0, 1, 0, 16, vec![1, 2], vec![0, 0], vec![]);
+        let events = gate.accept_snapshot(
+            0,
+            0,
+            0,
+            1,
+            0,
+            16,
+            vec![1, 2],
+            vec![0, 0],
+            vec![crate::world::FLUID_WATERLOGGED_BIT],
+            vec![],
+        );
         assert_eq!(events.len(), 2);
         assert!(matches!(
             &events[0],
@@ -2181,6 +2211,13 @@ mod tests {
             }
         ));
         assert!(matches!(
+            &events[0],
+            ClientToGame::ChunkData {
+                fluid_levels,
+                ..
+            } if fluid_levels == &vec![crate::world::FLUID_WATERLOGGED_BIT]
+        ));
+        assert!(matches!(
             &events[1],
             ClientToGame::BlockChange {
                 dimension: 0,
@@ -2189,22 +2226,23 @@ mod tests {
                 y: 70,
                 z: 1,
                 block: 4,
+                raw_fluid: crate::world::FLUID_WATERLOGGED_BIT,
                 ..
             }
         ));
 
         assert!(gate
-            .accept_snapshot(0, 0, 0, 1, 0, 16, vec![9], vec![9], vec![])
+            .accept_snapshot(0, 0, 0, 1, 0, 16, vec![9], vec![9], vec![], vec![])
             .is_empty());
-        assert!(gate.accept_block_change(0, 1, 1, 70, 1, 9, 0).is_empty());
+        assert!(gate.accept_block_change(0, 1, 1, 70, 1, 9, 0, 0).is_empty());
 
         let mut same_revision = RevisionGate::default();
         assert!(same_revision
-            .accept_block_change(0, 5, 1, 70, 1, 4, 0)
+            .accept_block_change(0, 5, 1, 70, 1, 4, 0, 0)
             .is_empty());
         assert_eq!(
             same_revision
-                .accept_snapshot(0, 0, 0, 5, 0, 16, vec![1], vec![0], vec![])
+                .accept_snapshot(0, 0, 0, 5, 0, 16, vec![1], vec![0], vec![], vec![])
                 .len(),
             1
         );
@@ -2242,6 +2280,7 @@ mod tests {
                 2,
                 crate::world::BlockType::Dirt.to_wire(),
                 0,
+                0,
             );
             assert!(events.is_empty());
             events.extend(gate.accept_snapshot(
@@ -2253,6 +2292,7 @@ mod tests {
                 24,
                 snapshot.blocks.clone(),
                 snapshot.block_states.clone(),
+                snapshot.fluid_levels.clone(),
                 snapshot.block_entities.clone(),
             ));
 

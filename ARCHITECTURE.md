@@ -94,7 +94,7 @@ the primary Vulkan path has caused a verified NVIDIA driver crash.
 4. Builds initial terrain meshes and starts background services.
 5. Streams the remaining render distance incrementally.
 
-Joining clients wait for a successful protocol-v16 login before using the host's
+Joining clients wait for a successful protocol-v17 login before using the host's
 seed and synchronized world state.
 
 ### Per-frame update
@@ -226,6 +226,20 @@ ChestOpen/ChestClose edge fallback. The v16 packet has no epoch/reason/cursor,
 so same-key stale-close disambiguation remains a v17 follow-up; smooth lid,
 GPU/audio-device, and Host+Join visual evidence remain outside headless claims.
 
+Plan27 adds the minimal waterlogging authority lane without changing the
+`BlockState` bit layout. Only `OakSlab` and `CobblestoneSlab` interpret bit 7 of
+the chunk raw-fluid byte as `WATERLOGGED`; level/falling bits and reserved bits
+retain their existing masks. `GameplayOperation::FluidUse` validates the exact
+selected `SlotRefWire`, hand, face, reach, and dimension before atomically
+committing a `WaterBucket`/`Bucket` transaction through `ServerWorld`. A
+waterlogged slab remains solid while the fixed fluid tick may source adjacent
+air, including across chunk boundaries; raw-only fluid transitions still carry
+their own revision-bearing `WorldMutation`. Save v3 persists the byte unchanged,
+and protocol v17 carries it through `BlockChange.raw_fluid` and
+`ChunkData.fluid_levels` in both embedded and socket projection paths. The
+complement translucent slab mesh reuses the existing halo/translucent pass while
+collision, voxel shape, and light values stay on the host slab semantics.
+
 `src/voxel_shape.rs` defines `VoxelShape` (holding up to 8 AABBs without heap allocation) to provide unified `block_collision_shape`, `block_selection_shape`, and `block_occlusion_shape`. Player physics (`physics.rs`) iterates over all constituent AABBs for movement collision and ladder climbing. DDA raycasting (`interaction.rs`) queries `block_selection_shape.ray_intersects` at each voxel step. Non-full blocks (Slabs, Stairs, Fences, Fence Gates, Walls, Panes, Ladders, Signs) bypass greedy meshing via `is_greedy_cube` and generate faces via `src/block_model.rs` (`append_custom_block_mesh`).
 
 `SignBlockEntity` in `src/block_entity.rs` provides text storage (4 lines of up to 15 UTF-8 characters) with full save persistence and backward compatibility.
@@ -262,7 +276,8 @@ The shared headless authority lives in `authority::AuthorityCore` and
   authenticated pose/cooldown/equipment before publishing session/entity death,
   drops, XP, shield durability, and respawn deltas. Brew action `2` is the
   explicit ready-output take operation in protocol v16; fixed ticks never debit
-  reserved inputs on their own.
+  reserved inputs on their own. `GameplayOperation::FluidUse` is the protocol
+  v17 typed water-bucket seam for the bounded slab waterlogging set.
 - `ServerRuntime` is transport/session/scheduling/save/metrics glue. It does
   not maintain a parallel authoritative block/entity map.
 
@@ -291,7 +306,7 @@ GPU/manual pass.
 - `ServerListPingRequest`/`ServerListPingResponse` reports protocol version,
   MOTD, and online/max player counts.
 
-Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v16. Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta. `WorldRulesSync` carries the host's serialized `WorldRules` snapshot to clients; clients apply it for display/runtime policy and cannot submit rule mutations. Trading and raid packets remain versioned under the same protocol.
+Container operations (open/click/close) use host-authoritative transactions with `ContainerOpenRequest`/`SendContainerOpenResult`, `ContainerClickRequest`/`SendContainerClickResult`, `BroadcastContainerSlotUpdate`, and `ContainerClose` packets over protocol v17 (the container fields retain their v16 shape). Slot updates carry the container entity revision; duplicate, stale, wrong-dimension, or out-of-range updates are discarded before any local mutation. The click result updates only the cursor; the authoritative slot value arrives through the revision-bearing update/delta. `WorldRulesSync` carries the host's serialized `WorldRules` snapshot to clients; clients apply it for display/runtime policy and cannot submit rule mutations. Trading and raid packets remain versioned under the same protocol.
 `ContainerSessionManager` and `MerchantSessionManager` track player ID, dimension, villager ID, and active trade offers.
 `PoiManager` (`src/village/poi.rs`) indexes Bed and JobSite POIs by chunk with max-distance spatial hashing, maintaining spatial village clusters for villager assignment and bed count tracking.
 `RaidManager` (`src/village/raid.rs`) tracks active village raids, wave progression (Pillager/Ravager counts), Bad Omen triggers, and raid victory/defeat states.
@@ -402,9 +417,10 @@ placement, fluid tick, light propagation, world mutation validation) now use
 `dimension.height()` / `WorldHeight::contains_y` instead of hardcoded
 `0..CHUNK_HEIGHT`.
 
-Network protocol v16: `ChunkData` packet carries explicit `min_section_y: i8`
-and `section_count: u16`; block-entity variants and container updates carry
-stable revisions. Save format v3: `ChunkSaveData::data_version = 3` with
+Network protocol v17: `ChunkData` packet carries explicit `min_section_y: i8`,
+`section_count: u16`, and raw `fluid_levels`; `BlockChange` carries the raw
+fluid byte alongside block/state. Block-entity variants and container updates
+carry stable revisions. Save format v3: `ChunkSaveData::data_version = 3` with
 height-aware flat arrays, compressed block entities, and redstone metadata.
 Legacy 0..255 format (data_version 0/1/2)
 maps into Y=0..255 with Y<0 and Y>=256 remaining empty/Air. SaveManager creates `.bin.bak`
@@ -567,6 +583,18 @@ GPU-constructor unit test is claimed; client, runtime, server, and headless
 vectors cover the forced-close routing. Smooth lid interpolation, audio-device
 and Host+Join visual evidence, and v17 same-key close epoch/reason/cursor
 fields remain explicit follow-ups.
+
+Plan27 adds a bounded slab-waterlogging vector. `fluid::tests` (6),
+`chunk_manager::tests` (15), `block_model::tests` (5), and
+`server_world::tests` (11) cover raw bit masks, v3 save carriers, fixed-tick
+same-block mutations, cross-chunk source flow, mesh complement/invalidation,
+and atomic world checksums. Protocol/client/server/runtime lanes pass 28/17/35/14
+tests respectively; authority/persistence/headless/topology/waterlogging
+integration lanes pass 3/3/1/5/5. The v17 packet carries raw fluid bytes and
+rejects the prior handshake version, while `RevisionGate` preserves latest-wins
+ordering for raw-fluid block/chunk projections. Debug/release/check and diff
+gates all pass as recorded in Plan27; GPU/window/audio/DPI, full vanilla
+waterlogging parity, and a 30-minute soak are explicitly outside this plan.
 
 Use:
 

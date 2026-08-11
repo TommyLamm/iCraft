@@ -15,6 +15,7 @@ use crate::chunk_manager::ChunkManager;
 use crate::commands::{self, Command, TimeCommand};
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::{EntityManager, EntityType};
+use crate::fluid::FluidMutation;
 use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::network::protocol::{
     ContainerAction, GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
@@ -679,8 +680,82 @@ impl ServerWorld {
             position: (x, y, z),
             block: block.to_wire(),
             state,
+            raw_fluid: self.chunks.get_fluid_raw(x, y, z),
             revision,
         }))
+    }
+
+    /// Apply one authoritative water-bucket edge.  The world mutation is
+    /// intentionally separate from the session inventory transaction: callers
+    /// validate and prepare the exact hand slot first, then publish this
+    /// revision only after the target/face has been accepted.
+    pub fn apply_fluid_use(
+        &mut self,
+        position: (i32, i32, i32),
+        face: [i8; 3],
+        source: crate::inventory::Item,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        let (x, y, z) = position;
+        if !self.valid_coordinate(x, y, z)
+            || face.iter().any(|component| !matches!(*component, -1..=1))
+            || face
+                .iter()
+                .map(|component| i16::from(*component).abs())
+                .sum::<i16>()
+                != 1
+        {
+            return Err(RejectReason::InvalidState);
+        }
+        self.ensure_chunk(x.div_euclid(16), z.div_euclid(16));
+
+        match source {
+            crate::inventory::Item::WaterBucket => {
+                if self.get_block(x, y, z).is_waterloggable() {
+                    if self.chunks.set_waterlogged(x, y, z, true) {
+                        return Ok(Some(self.touch_revision(x, y, z)));
+                    }
+                    return Err(RejectReason::InvalidState);
+                }
+
+                let target = (
+                    x.saturating_add(i32::from(face[0])),
+                    y.saturating_add(i32::from(face[1])),
+                    z.saturating_add(i32::from(face[2])),
+                );
+                if !self.valid_coordinate(target.0, target.1, target.2) {
+                    return Err(RejectReason::InvalidCoordinate);
+                }
+                let Some(target_block) = self.chunks.get_loaded_block(target.0, target.1, target.2)
+                else {
+                    return Err(RejectReason::InvalidState);
+                };
+                if target_block != BlockType::Air {
+                    return Err(RejectReason::InvalidState);
+                }
+                self.chunks
+                    .set_block(target.0, target.1, target.2, BlockType::Water);
+                self.chunks.set_block_state(target.0, target.1, target.2, 0);
+                self.chunks.set_fluid_raw(target.0, target.1, target.2, 0);
+                Ok(Some(self.touch_revision(target.0, target.1, target.2)))
+            }
+            crate::inventory::Item::Bucket => {
+                if self.chunks.is_waterlogged(x, y, z) {
+                    self.chunks.set_waterlogged(x, y, z, false);
+                    return Ok(Some(self.touch_revision(x, y, z)));
+                }
+                if self.get_block(x, y, z) != BlockType::Water
+                    || self.chunks.get_fluid_level(x, y, z) != 0
+                    || self.chunks.get_fluid_falling(x, y, z)
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+                self.chunks.set_block(x, y, z, BlockType::Air);
+                self.chunks.set_block_state(x, y, z, 0);
+                self.chunks.set_fluid_raw(x, y, z, 0);
+                Ok(Some(self.touch_revision(x, y, z)))
+            }
+            _ => Err(RejectReason::InvalidState),
+        }
     }
 
     /// Seed the optional world-creation chest in the authoritative world. The
@@ -1034,7 +1109,8 @@ impl ServerWorld {
             | GameplayOperation::Enchant { .. }
             | GameplayOperation::Brew { .. }
             | GameplayOperation::Anvil { .. }
-            | GameplayOperation::UseState { .. } => {
+            | GameplayOperation::UseState { .. }
+            | GameplayOperation::FluidUse { .. } => {
                 Err(WorldDispatchError::new(RejectReason::Unsupported))
             }
         }
@@ -1256,6 +1332,27 @@ impl ServerWorld {
             position: (x, y, z),
             block: self.get_block(x, y, z).to_wire(),
             state: self.get_block_state(x, y, z),
+            raw_fluid: self.chunks.get_fluid_raw(x, y, z),
+            revision,
+        }
+    }
+
+    /// Record a fluid-only (or fluid-plus-block) mutation that has already
+    /// been applied by the authoritative fluid carrier.  Fluid ticking writes
+    /// directly to `ChunkManager` so it can schedule neighboring cells; this
+    /// helper is the single revision/publication seam for that write.
+    fn record_fluid_mutation(&mut self, mutation: FluidMutation) -> WorldMutation {
+        let (x, y, z) = mutation.position;
+        let revision = self.revisions.allocate();
+        self.block_revisions.insert((x, y, z), revision);
+        self.chunk_revisions
+            .insert((x.div_euclid(16), z.div_euclid(16)), revision);
+        WorldMutation {
+            dimension: self.dimension as u8,
+            position: mutation.position,
+            block: mutation.block.to_wire(),
+            state: self.get_block_state(x, y, z),
+            raw_fluid: mutation.raw_fluid,
             revision,
         }
     }
@@ -1304,12 +1401,8 @@ impl ServerWorld {
         for is_lava in [false, true] {
             let (_, fluid_mutations) =
                 crate::fluid::tick_fluids(&mut self.chunks, is_lava, MAX_FLUID_UPDATES);
-            for (position, block) in fluid_mutations {
-                if let Ok(Some(event)) =
-                    self.set_block(position.0, position.1, position.2, block, 0)
-                {
-                    mutations.push(event);
-                }
+            for mutation in fluid_mutations {
+                mutations.push(self.record_fluid_mutation(mutation));
             }
         }
 
@@ -1479,6 +1572,7 @@ impl ServerWorld {
             write(&mutation.position.2.to_le_bytes());
             write(&mutation.block.to_le_bytes());
             write(&mutation.state.to_le_bytes());
+            write(&mutation.raw_fluid.to_le_bytes());
             write(&mutation.revision.to_le_bytes());
         }
         for (&position, &revision) in &self.block_revisions {
@@ -1522,7 +1616,8 @@ fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> 
         | GameplayOperation::FurnaceTakeOutput { x, y, z, .. }
         | GameplayOperation::Enchant { x, y, z, .. }
         | GameplayOperation::Brew { x, y, z, .. }
-        | GameplayOperation::Anvil { x, y, z, .. } => Some((*x, *y, *z)),
+        | GameplayOperation::Anvil { x, y, z, .. }
+        | GameplayOperation::FluidUse { x, y, z, .. } => Some((*x, *y, *z)),
         GameplayOperation::Craft {
             station: Some([x, y, z]),
             ..
@@ -1792,6 +1887,43 @@ mod tests {
             world.tick(&[(7, [8.0, 80.0, 8.0])])
         };
         assert_eq!(make(), make());
+    }
+
+    #[test]
+    fn checksum_distinguishes_raw_fluid_mutations() {
+        let make = || {
+            ServerWorld::new(
+                7,
+                Dimension::Overworld,
+                WorldType::Superflat,
+                false,
+                WorldRules::default(),
+                2,
+            )
+        };
+        let mut plain = make();
+        let mut waterlogged = make();
+        let position = (8, 80, 8);
+        let plain_mutation = plain
+            .set_block(position.0, position.1, position.2, BlockType::OakSlab, 0)
+            .unwrap()
+            .unwrap();
+        waterlogged
+            .set_block(position.0, position.1, position.2, BlockType::OakSlab, 0)
+            .unwrap();
+        assert!(waterlogged
+            .chunks
+            .set_waterlogged(position.0, position.1, position.2, true));
+        let mut waterlogged_mutation = plain_mutation;
+        waterlogged_mutation.raw_fluid = waterlogged
+            .chunks
+            .get_fluid_raw(position.0, position.1, position.2);
+        assert_eq!(plain_mutation.block, waterlogged_mutation.block);
+        assert_ne!(plain_mutation.raw_fluid, waterlogged_mutation.raw_fluid);
+        assert_ne!(
+            plain.checksum(&[plain_mutation]),
+            waterlogged.checksum(&[waterlogged_mutation])
+        );
     }
 
     #[test]

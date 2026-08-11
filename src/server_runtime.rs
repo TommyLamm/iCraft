@@ -213,6 +213,7 @@ pub enum RuntimePresentationEvent {
         z: i32,
         block: u32,
         state: u8,
+        raw_fluid: u8,
     },
     ChunkData {
         target: u64,
@@ -224,6 +225,7 @@ pub enum RuntimePresentationEvent {
         section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
     },
     BlockEntityDelta {
@@ -1931,7 +1933,14 @@ impl ServerRuntime {
                             .world_ref(dimension)
                             .map(|world| world.get_block_state(x, y, z))
                             .unwrap_or(0);
-                        self.queue_block_change(dimension, *revision, x, y, z, block, state);
+                        let raw_fluid = self
+                            .authority
+                            .world_ref(dimension)
+                            .map(|world| world.chunks.get_fluid_raw(x, y, z))
+                            .unwrap_or(0);
+                        self.queue_block_change(
+                            dimension, *revision, x, y, z, block, state, raw_fluid,
+                        );
                         self.routed_mutations.insert((dimension, *revision));
                     }
                     GameplayOperation::Container {
@@ -2393,6 +2402,7 @@ impl ServerRuntime {
         section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
     ) {
         if self.local_session_id == Some(to) {
@@ -2406,6 +2416,7 @@ impl ServerRuntime {
                 section_count,
                 blocks,
                 block_states,
+                fluid_levels,
                 block_entities,
             });
         } else {
@@ -2418,6 +2429,7 @@ impl ServerRuntime {
                 section_count,
                 blocks,
                 block_states,
+                fluid_levels,
                 block_entities,
                 to,
             });
@@ -2634,6 +2646,7 @@ impl ServerRuntime {
         z: i32,
         block: u32,
         state: u8,
+        raw_fluid: u8,
     ) {
         let targets =
             self.queue_interest_update(dimension, revision, InterestKind::Block((x, y, z)));
@@ -2648,6 +2661,7 @@ impl ServerRuntime {
                     z,
                     block,
                     state,
+                    raw_fluid,
                 });
             } else {
                 self.enqueue_host(HostToServer::SendBlockChange {
@@ -2659,6 +2673,7 @@ impl ServerRuntime {
                     z,
                     block,
                     state,
+                    raw_fluid,
                 });
             }
         }
@@ -2703,6 +2718,7 @@ impl ServerRuntime {
                 z,
                 mutation.block,
                 mutation.state,
+                mutation.raw_fluid,
             );
 
             let entity = self.authority.world.get_block_entity(x, y, z).cloned();
@@ -3005,6 +3021,7 @@ impl ServerRuntime {
                             chunk.sections.len().min(u16::MAX as usize) as u16,
                             data.blocks,
                             data.block_states,
+                            data.fluid_levels,
                             data.block_entities,
                         )
                     })
@@ -3015,6 +3032,7 @@ impl ServerRuntime {
                     section_count,
                     blocks,
                     block_states,
+                    fluid_levels,
                     block_entities,
                 )) = payload
                 else {
@@ -3047,6 +3065,7 @@ impl ServerRuntime {
                     section_count,
                     blocks,
                     block_states,
+                    fluid_levels,
                     block_entities,
                 );
                 projected += 1;

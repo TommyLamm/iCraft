@@ -1,6 +1,7 @@
 use crate::world::{
     BlockSupportStatus, BlockType, Chunk, MeshVoxel, SectionHaloSnapshot, SectionKey, CHUNK_DEPTH,
-    CHUNK_HEIGHT, CHUNK_WIDTH, SECTION_SIZE,
+    CHUNK_HEIGHT, CHUNK_WIDTH, FLUID_FALLING_BIT, FLUID_LEVEL_MASK, FLUID_RESERVED_MASK,
+    FLUID_WATERLOGGED_BIT, SECTION_SIZE,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -373,9 +374,11 @@ impl ChunkManager {
                 }
                 chunk.set_block_local(bx, by, bz, block);
                 chunk.set_block_state(bx as i32, by as i32, bz as i32, 0);
-                if block != BlockType::Water && block != BlockType::Lava {
-                    chunk.set_fluid_level(bx, by, bz, 0);
-                }
+                // A changed block never inherits the previous cell's fluid
+                // byte.  Fluid placement sets its canonical level/falling
+                // state immediately after this call; clearing here prevents a
+                // waterlogged slab bit from leaking into a replacement block.
+                chunk.set_fluid_level(bx, by, bz, 0);
                 chunk.update_heightmap(bx, bz);
                 self.schedule_fluid_neighbors(wx, wy, wz);
                 self.dirty_chunks.mark_dirty(cx, cz);
@@ -433,7 +436,7 @@ impl ChunkManager {
     pub fn get_fluid_level(&self, wx: i32, wy: i32, wz: i32) -> u8 {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                return chunk.get_fluid_level(bx, by, bz) & 0x07;
+                return chunk.get_fluid_level(bx, by, bz) & FLUID_LEVEL_MASK;
             }
         }
         0
@@ -443,7 +446,7 @@ impl ChunkManager {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
                 let current = chunk.get_fluid_level(bx, by, bz);
-                let updated = (current & 0xF8) | (level & 0x07);
+                let updated = (current & !FLUID_LEVEL_MASK) | (level & FLUID_LEVEL_MASK);
                 if current != updated {
                     chunk.set_fluid_level(bx, by, bz, updated);
                     self.schedule_fluid_neighbors(wx, wy, wz);
@@ -457,7 +460,7 @@ impl ChunkManager {
     pub fn get_fluid_falling(&self, wx: i32, wy: i32, wz: i32) -> bool {
         if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
             if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-                return (chunk.get_fluid_level(bx, by, bz) & 0x08) != 0;
+                return (chunk.get_fluid_level(bx, by, bz) & FLUID_FALLING_BIT) != 0;
             }
         }
         false
@@ -468,9 +471,9 @@ impl ChunkManager {
             if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
                 let current = chunk.get_fluid_level(bx, by, bz);
                 let updated = if falling {
-                    current | 0x08
+                    current | FLUID_FALLING_BIT
                 } else {
-                    current & !0x08
+                    current & !FLUID_FALLING_BIT
                 };
                 if current != updated {
                     chunk.set_fluid_level(bx, by, bz, updated);
@@ -577,6 +580,59 @@ impl ChunkManager {
         if self.chunks.contains_key(&(cx, cz)) {
             self.dirty_chunks.mark_dirty(cx, cz);
         }
+    }
+
+    /// Return the complete raw fluid byte.  `get_fluid_level` intentionally
+    /// remains level-only for existing callers; replication and mesh workers
+    /// use this lossless form so bit 7 cannot be dropped.
+    pub fn get_fluid_raw(&self, wx: i32, wy: i32, wz: i32) -> u8 {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                return chunk.get_fluid_level(bx, by, bz);
+            }
+        }
+        0
+    }
+
+    /// Set a complete raw fluid byte and schedule the same neighborhood work
+    /// as level/falling setters.  Callers must validate block eligibility for
+    /// bit 7; malformed wire state is never promoted to a source here.
+    pub fn set_fluid_raw(&mut self, wx: i32, wy: i32, wz: i32, raw: u8) {
+        if let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) {
+            if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                let current = chunk.get_fluid_level(bx, by, bz);
+                if current != raw {
+                    chunk.set_fluid_level(bx, by, bz, raw);
+                    self.schedule_fluid_neighbors(wx, wy, wz);
+                    self.dirty_chunks.mark_dirty(cx, cz);
+                    self.record_mesh_invalidation(wx, wy, wz);
+                }
+            }
+        }
+    }
+
+    pub fn is_waterlogged(&self, wx: i32, wy: i32, wz: i32) -> bool {
+        self.get_block(wx, wy, wz).is_waterloggable()
+            && (self.get_fluid_raw(wx, wy, wz) & FLUID_WATERLOGGED_BIT) != 0
+    }
+
+    /// Toggle waterlogging on an existing eligible solid.  Low level/falling
+    /// bits are canonicalized away while reserved bits remain untouched.
+    pub fn set_waterlogged(&mut self, wx: i32, wy: i32, wz: i32, waterlogged: bool) -> bool {
+        if !self.get_block(wx, wy, wz).is_waterloggable() {
+            return false;
+        }
+        let current = self.get_fluid_raw(wx, wy, wz);
+        let updated = if waterlogged {
+            (current & FLUID_RESERVED_MASK) | FLUID_WATERLOGGED_BIT
+        } else {
+            current & FLUID_RESERVED_MASK
+        };
+        if current == updated {
+            return false;
+        }
+        self.set_fluid_raw(wx, wy, wz, updated);
+        true
     }
 
     fn break_unsupported_from_candidates<I, F>(
@@ -692,6 +748,39 @@ mod tests {
             HashSet::from([(0, 0), (1, 0)])
         );
         assert!(manager.drain_mesh_invalidations().is_empty());
+    }
+
+    #[test]
+    fn raw_fluid_roundtrip_preserves_waterlogged_bit_and_boundary_mesh_dependencies() {
+        let mut manager = ChunkManager::new(2);
+        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.set_block(15, 80, 8, BlockType::OakSlab);
+        manager.drain_mesh_invalidations();
+
+        manager.set_fluid_raw(15, 80, 8, 0xff);
+        assert_eq!(manager.get_fluid_raw(15, 80, 8), 0xff);
+        assert!(manager.is_waterlogged(15, 80, 8));
+        assert_eq!(
+            manager.drain_mesh_invalidations(),
+            HashSet::from([(0, 0), (1, 0)])
+        );
+
+        assert!(manager.set_waterlogged(15, 80, 8, false));
+        assert_eq!(manager.get_fluid_raw(15, 80, 8), FLUID_RESERVED_MASK);
+        manager.set_fluid_raw(15, 80, 8, 0xff);
+        assert!(manager.set_waterlogged(15, 80, 8, false));
+        assert_eq!(manager.get_fluid_raw(15, 80, 8), FLUID_RESERVED_MASK);
+        assert!(manager.set_waterlogged(15, 80, 8, true));
+        assert_eq!(
+            manager.get_fluid_raw(15, 80, 8),
+            FLUID_RESERVED_MASK | FLUID_WATERLOGGED_BIT
+        );
+        assert!(manager.set_waterlogged(15, 80, 8, false));
+        assert_eq!(manager.get_fluid_raw(15, 80, 8), FLUID_RESERVED_MASK);
+        manager.set_block(15, 80, 8, BlockType::Stone);
+        assert_eq!(manager.get_fluid_raw(15, 80, 8), 0);
+        assert!(!manager.is_waterlogged(15, 80, 8));
     }
 
     #[test]

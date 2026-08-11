@@ -7,6 +7,14 @@ pub const CHUNK_WIDTH: usize = 16;
 pub const CHUNK_HEIGHT: usize = 256;
 pub const CHUNK_DEPTH: usize = 16;
 
+/// Canonical raw fluid-byte layout shared by chunk storage, mesh snapshots,
+/// saves, and the authority/network projection.  BlockState bit 7 remains
+/// reserved; waterlogging lives only in this fluid byte.
+pub const FLUID_LEVEL_MASK: u8 = 0x07;
+pub const FLUID_FALLING_BIT: u8 = 0x08;
+pub const FLUID_RESERVED_MASK: u8 = 0x70;
+pub const FLUID_WATERLOGGED_BIT: u8 = 0x80;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Biome {
     Plains,
@@ -629,6 +637,13 @@ impl BlockType {
         } else {
             None
         }
+    }
+
+    /// The intentionally small Plan27 waterlogging contract.  Other blocks
+    /// retain their existing fluid semantics and must be rejected by the
+    /// authority rather than silently accepting bit 7.
+    pub const fn is_waterloggable(self) -> bool {
+        matches!(self, BlockType::OakSlab | BlockType::CobblestoneSlab)
     }
 
     pub fn is_cross_model(self) -> bool {
@@ -4172,6 +4187,25 @@ impl Chunk {
                         )
                     };
                     if custom_mesh {
+                        if block.is_waterloggable() && voxel.raw_fluid & FLUID_WATERLOGGED_BIT != 0
+                        {
+                            crate::block_model::append_waterlogged_slab_mesh(
+                                block,
+                                voxel.state,
+                                [world_x as f32, world_y as f32, world_z as f32],
+                                voxel.sky,
+                                voxel.block_light,
+                                region_coord,
+                                &mut trans_vertices,
+                                &mut trans_indices,
+                                registry.map(|registry| {
+                                    registry.atlas_tile_for_block(
+                                        BlockType::Water,
+                                        BlockType::Water.get_face_tex_index(0),
+                                    )
+                                }),
+                            );
+                        }
                         continue;
                     }
 

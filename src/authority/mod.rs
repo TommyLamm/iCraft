@@ -769,6 +769,7 @@ impl AuthorityCore {
                     | crate::network::protocol::GameplayOperation::Brew { .. }
                     | crate::network::protocol::GameplayOperation::Anvil { .. }
                     | crate::network::protocol::GameplayOperation::UseState { .. }
+                    | crate::network::protocol::GameplayOperation::FluidUse { .. }
             )
         {
             return self.reject_for_session(id, request_id, RejectReason::PermissionDenied, None);
@@ -940,6 +941,14 @@ impl AuthorityCore {
                 hand,
                 look_milli,
             } => Some(self.apply_fishing(session_id, *action, *hand, *look_milli)),
+            GameplayOperation::FluidUse {
+                x,
+                y,
+                z,
+                face,
+                hand,
+                source,
+            } => Some(self.apply_fluid_use(session_id, (*x, *y, *z), *face, *hand, *source)),
             GameplayOperation::FurnaceTakeOutput { .. }
             | GameplayOperation::Craft { .. }
             | GameplayOperation::Enchant { .. }
@@ -950,6 +959,86 @@ impl AuthorityCore {
             }
             _ => None,
         }
+    }
+
+    fn apply_fluid_use(
+        &mut self,
+        session_id: PlayerId,
+        position: (i32, i32, i32),
+        face: [i8; 3],
+        hand: u8,
+        source: crate::network::protocol::SlotRefWire,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        use crate::inventory::Item;
+        use crate::network::protocol::SessionSlotWire;
+
+        let Some((dimension, original)) = self
+            .sessions
+            .get(&session_id)
+            .map(|session| (session.dimension, session.gameplay))
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let selected_index = held_slot_index(&original, hand)?;
+        if source.index != selected_index || source.count != 1 {
+            return Err(RejectReason::InvalidState);
+        }
+        let source_item =
+            Item::from_u32(source.expected.item.item).ok_or(RejectReason::InvalidState)?;
+        let mut candidate = original;
+        match source_item {
+            Item::WaterBucket => {
+                if source.expected.item.count != 1
+                    || !candidate.slot_matches(source)
+                    || !candidate.replace_slot_exact(
+                        source,
+                        Some(SessionSlotWire::new(
+                            crate::network::protocol::ItemWire {
+                                item: Item::Bucket.to_u32(),
+                                ..source.expected.item
+                            },
+                            source.expected.can_break,
+                            source.expected.can_place_on,
+                        )),
+                    )
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+            }
+            Item::Bucket => {
+                let mut filled_wire = source.expected.item;
+                filled_wire.item = Item::WaterBucket.to_u32();
+                filled_wire.count = 1;
+                if !candidate.consume_slot_exact(source)
+                    || !candidate.add_slot(contract::SessionInventorySlot::from_wire(
+                        filled_wire,
+                        source.expected.can_break,
+                        source.expected.can_place_on,
+                    ))
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+            }
+            _ => return Err(RejectReason::InvalidState),
+        }
+        if !preserves_brew_locks(&original, &candidate) {
+            return Err(RejectReason::InvalidState);
+        }
+
+        let Some(dimension) = Dimension::from_wire(dimension) else {
+            return Err(RejectReason::InvalidDimension);
+        };
+        let mutation = self.with_world(dimension, |world| {
+            world.apply_fluid_use(position, face, source_item)
+        })?;
+        let Some(mutation) = mutation else {
+            return Err(RejectReason::InvalidState);
+        };
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err(RejectReason::Unauthorized);
+        };
+        session.gameplay = candidate;
+        Ok(Some(mutation))
     }
 
     fn apply_fishing(

@@ -457,6 +457,7 @@ pub enum HostToServer {
         z: i32,
         block: u32,
         state: u8,
+        raw_fluid: u8,
     },
     SendBlockChange {
         to: PlayerId,
@@ -467,6 +468,7 @@ pub enum HostToServer {
         z: i32,
         block: u32,
         state: u8,
+        raw_fluid: u8,
     },
     BroadcastBlockEntityDelta {
         dimension: u8,
@@ -503,6 +505,7 @@ pub enum HostToServer {
         section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
         to: PlayerId,
     },
@@ -2220,6 +2223,7 @@ impl<S: HostEventSender> NetworkServer<S> {
             section_count,
             blocks,
             block_states,
+            fluid_levels,
             block_entities,
             to,
         } = command
@@ -2234,6 +2238,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                 section_count,
                 blocks,
                 block_states,
+                fluid_levels,
                 block_entities,
             };
             let mailbox = self
@@ -2490,6 +2495,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                 z,
                 block,
                 state,
+                raw_fluid,
             } => (
                 Packet::BlockChange {
                     protocol_version: PROTOCOL_VERSION,
@@ -2500,6 +2506,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                     z,
                     block,
                     state,
+                    raw_fluid,
                 },
                 None,
             ),
@@ -2512,6 +2519,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                 z,
                 block,
                 state,
+                raw_fluid,
             } => (
                 Packet::BlockChange {
                     protocol_version: PROTOCOL_VERSION,
@@ -2522,6 +2530,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                     z,
                     block,
                     state,
+                    raw_fluid,
                 },
                 Some(to),
             ),
@@ -3870,6 +3879,7 @@ mod tests {
                 z: -4,
                 block: 3,
                 state: 0,
+                raw_fluid: 0,
             })
             .await
             .unwrap();
@@ -4315,6 +4325,7 @@ mod tests {
                 z: -3,
                 block: 4,
                 state: 0,
+                raw_fluid: 0,
             }),
         )
         .await;
@@ -4819,6 +4830,7 @@ mod tests {
             section_count: 16,
             blocks: vec![1],
             block_states: vec![],
+            fluid_levels: vec![],
             block_entities: vec![],
         };
         let p2 = Packet::ChunkData {
@@ -4831,6 +4843,7 @@ mod tests {
             section_count: 16,
             blocks: vec![2],
             block_states: vec![],
+            fluid_levels: vec![],
             block_entities: vec![],
         };
         let p3 = Packet::ChunkData {
@@ -4843,6 +4856,7 @@ mod tests {
             section_count: 16,
             blocks: vec![3],
             block_states: vec![],
+            fluid_levels: vec![],
             block_entities: vec![],
         };
         assert!(mailbox.replace(p1).await.is_ok());
@@ -4869,6 +4883,7 @@ mod tests {
             section_count: 16,
             blocks: vec![1],
             block_states: vec![],
+            fluid_levels: vec![],
             block_entities: vec![],
         };
         let farther = Packet::ChunkData {
@@ -4881,6 +4896,7 @@ mod tests {
             section_count: 16,
             blocks: vec![2],
             block_states: vec![],
+            fluid_levels: vec![],
             block_entities: vec![],
         };
         mailbox.replace(near.clone()).await.unwrap();
@@ -4904,6 +4920,7 @@ mod tests {
             section_count: 16,
             blocks: vec![value],
             block_states: vec![],
+            fluid_levels: vec![],
             block_entities: vec![],
         };
 

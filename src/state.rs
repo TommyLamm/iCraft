@@ -4001,6 +4001,7 @@ enum NetworkInbound {
         z: i32,
         block: u32,
         state: u8,
+        raw_fluid: u8,
     },
     BlockEntityDelta {
         dimension: u8,
@@ -4019,6 +4020,7 @@ enum NetworkInbound {
         section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
     },
     EntitySpawn {
@@ -4681,6 +4683,7 @@ impl NetworkHandle {
                             z,
                             block,
                             state,
+                            raw_fluid,
                         } => NetworkInbound::AuthoritativeBlockChange {
                             dimension,
                             revision,
@@ -4689,6 +4692,7 @@ impl NetworkHandle {
                             z,
                             block,
                             state,
+                            raw_fluid,
                         },
                         crate::network::client::ClientToGame::BlockActionResult {
                             x,
@@ -4729,6 +4733,7 @@ impl NetworkHandle {
                             section_count,
                             blocks,
                             block_states,
+                            fluid_levels,
                             block_entities,
                         } => NetworkInbound::ChunkData {
                             dimension,
@@ -4739,6 +4744,7 @@ impl NetworkHandle {
                             section_count,
                             blocks,
                             block_states,
+                            fluid_levels,
                             block_entities,
                         },
                         crate::network::client::ClientToGame::EntitySpawn {
@@ -5064,6 +5070,20 @@ impl NetworkHandle {
         block: u32,
         state: u8,
     ) {
+        self.broadcast_block_change_with_raw(dimension, revision, x, y, z, block, state, 0);
+    }
+
+    fn broadcast_block_change_with_raw(
+        &self,
+        dimension: crate::dimension::Dimension,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        state: u8,
+        raw_fluid: u8,
+    ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
                 crate::network::server::HostToServer::BroadcastBlockChange {
@@ -5074,6 +5094,7 @@ impl NetworkHandle {
                     z,
                     block,
                     state,
+                    raw_fluid,
                 },
             );
         }
@@ -5243,6 +5264,7 @@ impl NetworkHandle {
                 section_count,
                 blocks,
                 block_states,
+                fluid_levels: Vec::new(),
                 block_entities,
                 to,
             });
@@ -5691,12 +5713,13 @@ pub struct State {
     network_time: f64,
     /// Client-only: chunk payloads that arrived from the host before the chunk
     /// was streamed in. Applied when `update_chunks` loads the coordinate.
-    pending_chunk_payloads: std::collections::HashMap<(i32, i32), (u64, Vec<u8>, Vec<u8>, Vec<u8>)>,
+    pending_chunk_payloads:
+        std::collections::HashMap<(i32, i32), (u64, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
     /// Client-only coalesced mutations for chunks that are not streamed in yet.
     /// The latest authoritative value wins for each world-space block.
     pending_block_changes: std::collections::HashMap<
         (i32, i32),
-        std::collections::HashMap<(i32, i32, i32), (u64, u32, u8)>,
+        std::collections::HashMap<(i32, i32, i32), (u64, u32, u8, u8)>,
     >,
     client_chunk_revisions: std::collections::HashMap<(crate::dimension::Dimension, i32, i32), u64>,
     /// Host-only persistent latest revision per mutated chunk. Keeping only
@@ -7605,6 +7628,7 @@ impl State {
                 z,
                 block,
                 state,
+                raw_fluid,
             } if target == session_id => Some(NetworkInbound::AuthoritativeBlockChange {
                 dimension,
                 revision,
@@ -7613,6 +7637,7 @@ impl State {
                 z,
                 block,
                 state,
+                raw_fluid,
             }),
             Event::ChunkData {
                 target,
@@ -7624,6 +7649,7 @@ impl State {
                 section_count,
                 blocks,
                 block_states,
+                fluid_levels,
                 block_entities,
             } if target == session_id => Some(NetworkInbound::ChunkData {
                 dimension,
@@ -7634,6 +7660,7 @@ impl State {
                 section_count,
                 blocks,
                 block_states,
+                fluid_levels,
                 block_entities,
             }),
             Event::BlockEntityDelta {
@@ -8340,6 +8367,17 @@ impl State {
     }
 
     fn broadcast_block_change(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
+        self.broadcast_block_change_with_raw(x, y, z, block, 0);
+    }
+
+    fn broadcast_block_change_with_raw(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: BlockType,
+        raw_fluid: u8,
+    ) {
         if !matches!(self.role, MultiplayerRole::Host { .. }) {
             return;
         }
@@ -8355,7 +8393,7 @@ impl State {
         self.mutation_revision_generation = self.mutation_revision_generation.saturating_add(1);
         self.mutation_index_dirty = true;
         let state = self.chunk_manager.get_block_state(x, y, z);
-        self.network.broadcast_block_change(
+        self.network.broadcast_block_change_with_raw(
             self.current_dimension,
             revision,
             x,
@@ -8363,6 +8401,7 @@ impl State {
             z,
             block.to_wire(),
             state,
+            raw_fluid,
         );
     }
 
@@ -9144,8 +9183,11 @@ impl State {
                 z,
                 block,
                 state,
+                raw_fluid,
             } => {
-                self.apply_remote_block_change(dimension, revision, x, y, z, block, state);
+                self.apply_remote_block_change(
+                    dimension, revision, x, y, z, block, state, raw_fluid,
+                );
             }
             NetworkInbound::BlockEntityDelta {
                 dimension,
@@ -9166,6 +9208,7 @@ impl State {
                 section_count,
                 blocks,
                 block_states,
+                fluid_levels,
                 block_entities,
             } => {
                 self.apply_remote_chunk_data(
@@ -9177,6 +9220,7 @@ impl State {
                     section_count,
                     blocks,
                     block_states,
+                    fluid_levels,
                     block_entities,
                 );
             }
@@ -11156,7 +11200,7 @@ impl State {
                     }
 
                     let mut pending_base_revision = 0;
-                    if let Some((revision, blocks, block_states, block_entities)) =
+                    if let Some((revision, blocks, block_states, fluid_levels, block_entities)) =
                         self.pending_chunk_payloads.remove(&result.coord)
                     {
                         pending_base_revision = revision;
@@ -11165,6 +11209,7 @@ impl State {
                                 chunk,
                                 &blocks,
                                 &block_states,
+                                &fluid_levels,
                                 &block_entities,
                             );
                         }
@@ -11176,8 +11221,8 @@ impl State {
                             pending_base_revision,
                         );
                         let mut changes: Vec<_> = changes.into_iter().collect();
-                        changes.sort_by_key(|(_, (revision, _, _))| *revision);
-                        for ((x, y, z), (revision, block, state)) in changes {
+                        changes.sort_by_key(|(_, (revision, _, _, _))| *revision);
+                        for ((x, y, z), (revision, block, state, raw_fluid)) in changes {
                             self.apply_remote_block_change(
                                 self.current_dimension as u8,
                                 revision,
@@ -11186,6 +11231,7 @@ impl State {
                                 z,
                                 block,
                                 state,
+                                raw_fluid,
                             );
                         }
                     }
@@ -11784,8 +11830,9 @@ impl State {
             let lighting_started = Instant::now();
             let (mut dirty, mutations) =
                 crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
-            for ((x, y, z), block) in mutations {
-                self.broadcast_block_change(x, y, z, block);
+            for mutation in mutations {
+                let (x, y, z) = mutation.position;
+                self.broadcast_block_change_with_raw(x, y, z, mutation.block, mutation.raw_fluid);
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
             }
             self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
@@ -11803,8 +11850,9 @@ impl State {
             let lighting_started = Instant::now();
             let (mut dirty, mutations) =
                 crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
-            for ((x, y, z), block) in mutations {
-                self.broadcast_block_change(x, y, z, block);
+            for mutation in mutations {
+                let (x, y, z) = mutation.position;
+                self.broadcast_block_change_with_raw(x, y, z, mutation.block, mutation.raw_fluid);
                 self.check_and_break_unsupported_above(x, y, z, &mut dirty);
             }
             self.invalidate_chunk_meshes(dirty, DependencyReason::Fluid);
@@ -14697,6 +14745,7 @@ impl State {
         z: i32,
         block_wire: u32,
         state: u8,
+        raw_fluid: u8,
     ) {
         let Some(dimension) = crate::dimension::Dimension::from_wire(dimension_wire) else {
             return;
@@ -14726,17 +14775,23 @@ impl State {
             self.pending_block_changes
                 .entry((cx, cz))
                 .or_default()
-                .insert((x, y, z), (revision, block_wire, state));
+                .insert((x, y, z), (revision, block_wire, state, raw_fluid));
             return;
         }
         let previous_block = self.chunk_manager.get_block(x, y, z);
         let previous_state = self.chunk_manager.get_block_state(x, y, z);
+        let previous_raw_fluid = self.chunk_manager.get_fluid_raw(x, y, z);
         self.play_chest_state_edge((x, y, z), previous_block, previous_state, block, state);
-        let Some(dirty_chunks) =
+        let mut dirty_chunks =
             apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state)
-        else {
+                .unwrap_or_default();
+        if previous_raw_fluid != raw_fluid {
+            self.chunk_manager.set_fluid_raw(x, y, z, raw_fluid);
+            crate::chunk_manager::mark_block_mesh_dependencies(&mut dirty_chunks, x, z);
+        }
+        if previous_block == block && previous_state == state && previous_raw_fluid == raw_fluid {
             return;
-        };
+        }
         self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Network);
     }
 
@@ -14793,6 +14848,7 @@ impl State {
         _section_count: u16,
         blocks: Vec<u8>,
         block_states: Vec<u8>,
+        fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
     ) {
         let Some(dimension) = crate::dimension::Dimension::from_wire(dimension_wire) else {
@@ -14813,7 +14869,13 @@ impl State {
         }
         self.client_chunk_revisions.insert(revision_key, revision);
         if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-            Self::restore_chunk_payload(chunk, &blocks, &block_states, &block_entities);
+            Self::restore_chunk_payload(
+                chunk,
+                &blocks,
+                &block_states,
+                &fluid_levels,
+                &block_entities,
+            );
             self.invalidate_chunk_mesh((cx, cz), DependencyReason::Network);
             // Re-seed boundary lighting so neighbors pick up the overwritten
             // column heights and light values.
@@ -14845,12 +14907,14 @@ impl State {
             let should_replace = self
                 .pending_chunk_payloads
                 .get(&(cx, cz))
-                .map_or(true, |(existing_revision, _, _, _)| {
+                .map_or(true, |(existing_revision, _, _, _, _)| {
                     revision >= *existing_revision
                 });
             if should_replace {
-                self.pending_chunk_payloads
-                    .insert((cx, cz), (revision, blocks, block_states, block_entities));
+                self.pending_chunk_payloads.insert(
+                    (cx, cz),
+                    (revision, blocks, block_states, fluid_levels, block_entities),
+                );
             }
         }
     }
@@ -14862,6 +14926,7 @@ impl State {
         chunk: &mut crate::world::Chunk,
         blocks: &[u8],
         block_states: &[u8],
+        fluid_levels: &[u8],
         block_entities: &[u8],
     ) {
         let save_data = crate::save::ChunkSaveData {
@@ -14870,7 +14935,7 @@ impl State {
             blocks: blocks.to_vec(),
             sky_light: Vec::new(),
             block_light: Vec::new(),
-            fluid_levels: Vec::new(),
+            fluid_levels: fluid_levels.to_vec(),
             redstone_metadata: Vec::new(),
             block_states: block_states.to_vec(),
             mutation_revision: 0,
@@ -25388,6 +25453,7 @@ mod debug_tests {
                 z: -4,
                 block: BlockType::Stone.to_wire(),
                 state: 0,
+                raw_fluid: 0,
             })
             .unwrap();
 

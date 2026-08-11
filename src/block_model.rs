@@ -275,6 +275,54 @@ fn append_box(
     atlas_tile: (u32, u32),
     region_coord: (i32, i32),
 ) {
+    append_box_with_face_skip(
+        vertices,
+        indices,
+        origin,
+        bounds,
+        sky_light,
+        block_light,
+        atlas_tile,
+        region_coord,
+        None,
+    );
+}
+
+fn append_box_without_face(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    bounds: ([f32; 3], [f32; 3]),
+    sky_light: u8,
+    block_light: u8,
+    atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
+    skip_face: usize,
+) {
+    append_box_with_face_skip(
+        vertices,
+        indices,
+        origin,
+        bounds,
+        sky_light,
+        block_light,
+        atlas_tile,
+        region_coord,
+        Some(skip_face),
+    );
+}
+
+fn append_box_with_face_skip(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    origin: [f32; 3],
+    bounds: ([f32; 3], [f32; 3]),
+    sky_light: u8,
+    block_light: u8,
+    atlas_tile: (u32, u32),
+    region_coord: (i32, i32),
+    skip_face: Option<usize>,
+) {
     let light_level = sky_light as f32 + block_light as f32 * 16.0;
     let (min, max) = bounds;
 
@@ -325,7 +373,10 @@ fn append_box(
 
     let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
 
-    for (p0, p1, p2, p3) in faces {
+    for (face_index, (p0, p1, p2, p3)) in faces.into_iter().enumerate() {
+        if skip_face == Some(face_index) {
+            continue;
+        }
         let positions = [
             [origin[0] + p0[0], origin[1] + p0[1], origin[2] + p0[2]],
             [origin[0] + p1[0], origin[1] + p1[1], origin[2] + p1[2]],
@@ -418,6 +469,40 @@ where
         Some(tile),
         get_neighbor,
     )
+}
+
+/// Append the translucent fluid volume that occupies the complementary half
+/// of a waterlogged slab.  The host slab remains an opaque/cutout solid; this
+/// helper only contributes the water overlay to the translucent mesh lane.
+pub fn append_waterlogged_slab_mesh(
+    block: BlockType,
+    state_raw: u8,
+    origin: [f32; 3],
+    sky_light: u8,
+    block_light: u8,
+    region_coord: (i32, i32),
+    trans_vertices: &mut Vec<TerrainVertex>,
+    trans_indices: &mut Vec<u32>,
+    atlas_tile_override: Option<(u32, u32)>,
+) {
+    if !block.is_waterloggable() {
+        return;
+    }
+    let state = BlockState::decode(state_raw);
+    let min_y = if state.is_top { 0.0 } else { 0.5 };
+    let max_y = if state.is_top { 0.5 } else { 1.0 };
+    let tile = atlas_tile_override.unwrap_or_else(|| block.get_face_tex_index(0));
+    append_box_without_face(
+        trans_vertices,
+        trans_indices,
+        origin,
+        ([0.0, min_y, 0.0], [1.0, max_y, 1.0]),
+        sky_light,
+        block_light,
+        tile,
+        region_coord,
+        if state.is_top { 4 } else { 5 },
+    );
 }
 
 fn append_custom_block_mesh_impl<F>(
@@ -1099,6 +1184,94 @@ mod tests {
         assert_eq!(closed_indices.len(), open_indices.len());
         assert!(!closed_vertices.is_empty());
         assert_ne!(closed_vertices, open_vertices);
+    }
+
+    #[test]
+    fn waterlogged_slab_adds_only_the_translucent_complement() {
+        let mut opaque_vertices = Vec::new();
+        let mut opaque_indices = Vec::new();
+        let mut trans_vertices = Vec::new();
+        let mut trans_indices = Vec::new();
+        let state = BlockState::default().encode();
+        assert!(append_custom_block_mesh(
+            BlockType::OakSlab,
+            state,
+            [0.0, 0.0, 0.0],
+            15,
+            0,
+            (0, 0),
+            &mut opaque_vertices,
+            &mut opaque_indices,
+            &mut trans_vertices,
+            &mut trans_indices,
+            |_, _, _| BlockType::Air,
+        ));
+        let opaque_len = opaque_vertices.len();
+        append_waterlogged_slab_mesh(
+            BlockType::OakSlab,
+            state,
+            [0.0, 0.0, 0.0],
+            15,
+            0,
+            (0, 0),
+            &mut trans_vertices,
+            &mut trans_indices,
+            Some((3, 4)),
+        );
+        assert_eq!(opaque_vertices.len(), opaque_len);
+        assert_eq!(trans_vertices.len(), 20);
+        assert_eq!(trans_indices.len(), 30);
+        assert!(trans_vertices
+            .iter()
+            .all(|vertex| vertex.atlas_tile == [3, 4]));
+        assert!(trans_vertices.iter().all(|vertex| vertex.pos[1] >= 16));
+        assert!(trans_vertices.iter().all(|vertex| vertex.pos[1] <= 32));
+        let has_horizontal_quad = |vertices: &[TerrainVertex], indices: &[u32], y: u16| {
+            indices.chunks_exact(6).any(|quad| {
+                quad.iter()
+                    .all(|index| vertices[*index as usize].pos[1] == y)
+            })
+        };
+        assert!(!has_horizontal_quad(&trans_vertices, &trans_indices, 16));
+        assert!(has_horizontal_quad(&trans_vertices, &trans_indices, 32));
+
+        let mut top_vertices = Vec::new();
+        let mut top_indices = Vec::new();
+        let top_state = BlockState {
+            is_top: true,
+            ..BlockState::default()
+        }
+        .encode();
+        append_waterlogged_slab_mesh(
+            BlockType::OakSlab,
+            top_state,
+            [0.0, 0.0, 0.0],
+            15,
+            0,
+            (0, 0),
+            &mut top_vertices,
+            &mut top_indices,
+            Some((3, 4)),
+        );
+        assert_eq!(top_vertices.len(), 20);
+        assert_eq!(top_indices.len(), 30);
+        assert!(top_vertices.iter().all(|vertex| vertex.pos[1] <= 16));
+        assert!(!has_horizontal_quad(&top_vertices, &top_indices, 16));
+        assert!(has_horizontal_quad(&top_vertices, &top_indices, 0));
+
+        let before = trans_vertices.len();
+        append_waterlogged_slab_mesh(
+            BlockType::Stone,
+            state,
+            [0.0, 0.0, 0.0],
+            15,
+            0,
+            (0, 0),
+            &mut trans_vertices,
+            &mut trans_indices,
+            None,
+        );
+        assert_eq!(trans_vertices.len(), before);
     }
 
     #[test]

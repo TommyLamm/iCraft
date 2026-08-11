@@ -626,6 +626,9 @@ pub struct WorldMutation {
     pub position: (i32, i32, i32),
     pub block: u32,
     pub state: u8,
+    /// Complete raw fluid byte (including Plan27 waterlogged bit 7).  Block
+    /// mutations and fluid-only level/falling changes share one revision lane.
+    pub raw_fluid: u8,
     pub revision: u64,
 }
 

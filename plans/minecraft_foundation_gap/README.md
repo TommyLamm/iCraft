@@ -99,6 +99,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 24 | [三拓撲對照、Metrics 穩定化與最終自動驗收](24_topology_metrics_final_automation.md) | 已完成；三拓撲 authority gameplay parity、TCP metrics publication/rollback、debug/release/check、50x isolated release 與 dated 30 分鐘 dedicated headless soak 均有 artifact；GPU/window/audio/DPI/Host+Join visual 仍明確排除 |
 | 25 | [權威難度消費與持久化完成](25_authority_difficulty_completion.md) | 已完成 headless contract；四難度 strict parse、server.properties persistence、Peaceful hostile despawn、Easy/Normal/Hard chase consumer、pvp independence 與 embedded/dedicated parity 通過；完整 vanilla difficulty systems 與 GPU/manual evidence 明確排除 |
 | 26 | [容器生命週期強制關閉與箱子回饋](26_container_lifecycle_chest_feedback.md) | 已實作 v16 targeted forced-close；dimension/player/session 精確清理涵蓋超距離、非法維度、transfer、interest departure、break、logout/disconnect；雙箱 `is_open` 首末 viewer、deterministic binary mesh、ChestOpen/Close edge audio 與 client/runtime/headless tests 通過；State 直接 GPU ctor、smooth lid、audio-device、Host+Join visual、v17 epoch/reason/cursor 明確排除 |
+| 27 | [半磚 Waterlogging 權威閉環](27_slab_waterlogging_authority.md) | 已完成；OakSlab/CobblestoneSlab raw-fluid bit7、v3 save、FluidUse 原子 bucket、fixed-tick 跨 Chunk flow、v17 BlockChange/ChunkData 與 embedded/listen/dedicated headless projection 及 debug/release/check gates 通過；GPU/window/audio/DPI、完整原版 parity、30 分鐘 soak 明確不在本計劃 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 

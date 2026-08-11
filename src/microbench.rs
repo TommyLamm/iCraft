@@ -240,6 +240,7 @@ fn bench_network() -> u64 {
             section_count: chunk.sections.len() as u16,
             blocks: flattened.blocks,
             block_states: flattened.block_states,
+            fluid_levels: flattened.fluid_levels,
             block_entities: flattened.block_entities,
         };
         let bytes = packet.encode();
