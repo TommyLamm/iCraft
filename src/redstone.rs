@@ -188,6 +188,10 @@ impl ComponentState {
             || self.repeater_delay != 1
             || self.comparator_mode != ComparatorMode::Compare
             || self.note != 0
+            // Dispenser/dropper rising-edge state must survive a powered
+            // chunk reload; otherwise the first post-load tick would emit a
+            // duplicate action.
+            || self.last_powered
     }
 }
 
@@ -270,6 +274,11 @@ pub struct RedstoneComponentMetadata {
     pub repeater_delay: u8,
     pub comparator_mode: SavedComparatorMode,
     pub note: u8,
+    /// Persisted rising-edge latch. `serde(default)` covers self-describing
+    /// formats; `ChunkSaveData::redstone_metadata` also has an explicit
+    /// bincode fallback for pre-latch sidecars and treats them as unpowered.
+    #[serde(default)]
+    pub last_powered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -565,6 +574,7 @@ impl RedstoneSystem {
                 repeater_delay: state.repeater_delay,
                 comparator_mode: state.comparator_mode.into(),
                 note: state.note,
+                last_powered: state.last_powered,
             });
         }
         metadata
@@ -603,6 +613,7 @@ impl RedstoneSystem {
             state.repeater_delay = entry.repeater_delay.clamp(1, 4);
             state.comparator_mode = entry.comparator_mode.into_comparator_mode();
             state.note = entry.note.min(24);
+            state.last_powered = entry.last_powered;
             self.mark_dirty(pos);
         }
     }
@@ -2313,6 +2324,40 @@ mod tests {
         system.on_block_changed(&manager, (0, Y, 0), Direction::East);
         let second = system.tick(&mut manager, &[]);
         assert_eq!(second.actions.len(), 1);
+    }
+
+    #[test]
+    fn powered_dispenser_latch_roundtrips_without_phantom_edge() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        place(
+            &mut system,
+            &mut manager,
+            0,
+            BlockType::LeverOn,
+            Direction::East,
+        );
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::Dispenser,
+            Direction::South,
+        );
+        let first = system.tick(&mut manager, &[]);
+        assert_eq!(first.actions.len(), 1);
+        let metadata = system.collect_chunk_metadata(&manager, 0, 0);
+        assert_eq!(
+            metadata
+                .iter()
+                .find(|entry| entry.local_x == 1)
+                .map(|entry| entry.last_powered),
+            Some(true)
+        );
+
+        let mut reloaded = RedstoneSystem::new();
+        reloaded.restore_chunk_metadata(&manager, 0, 0, &metadata);
+        assert!(reloaded.tick(&mut manager, &[]).actions.is_empty());
     }
 
     #[test]

@@ -939,8 +939,9 @@ pub struct ChunkSaveData {
     pub block_light: Vec<u8>,  // Zlib compressed u8 array of block light
     pub fluid_levels: Vec<u8>, // Zlib compressed u8 array of fluid levels
     /// Zlib-compressed bincode of `Vec<RedstoneComponentMetadata>`. Older saves
-    /// written before this sidecar existed deserialize as an empty vector via
-    /// `#[serde(default)]`, preserving full backward compatibility.
+    /// written before this sidecar existed deserialize as an empty vector; the
+    /// immediately previous sidecar shape (without `last_powered`) is decoded
+    /// explicitly below so bincode's fixed struct layout cannot discard it.
     #[serde(default)]
     pub redstone_metadata: Vec<u8>,
     #[serde(default)]
@@ -957,6 +958,21 @@ pub struct ChunkSaveData {
 /// still accepted by `restore_to_chunk`; the new version only records that
 /// hopper/dispenser/dropper/observer state is included in every save path.
 pub const CHUNK_SAVE_DATA_VERSION: u32 = 3;
+
+/// The Plan14/Plan27 sidecar shape before the rising-edge latch was added.
+/// `serde(default)` is not sufficient for bincode: unlike self-describing
+/// formats, bincode will not synthesize a missing struct tail. Keep this
+/// private compatibility carrier until all pre-latch worlds have migrated.
+#[derive(Serialize, Deserialize)]
+struct LegacyRedstoneComponentMetadata {
+    local_x: u8,
+    local_y: u8,
+    local_z: u8,
+    facing: crate::redstone::SavedDirection,
+    repeater_delay: u8,
+    comparator_mode: crate::redstone::SavedComparatorMode,
+    note: u8,
+}
 
 impl ChunkSaveData {
     pub fn from_chunk(chunk: &Chunk) -> Self {
@@ -1040,7 +1056,37 @@ impl ChunkSaveData {
         decompress_bytes(&self.redstone_metadata)
             .ok()
             .and_then(|bytes| {
-                bincode::deserialize::<Vec<crate::redstone::RedstoneComponentMetadata>>(&bytes).ok()
+                // Decode the current shape first. A legacy vector has no
+                // latch byte to satisfy this shape and falls through to the
+                // explicit migration below. This ordering is important:
+                // bincode's shorter struct decoder accepts trailing bytes.
+                if let Ok(current) =
+                    bincode::deserialize::<Vec<crate::redstone::RedstoneComponentMetadata>>(&bytes)
+                {
+                    // Require an exact re-encoding match so a legacy vector
+                    // whose next local_x happens to be 0/1 cannot be accepted
+                    // after being misaligned into the new bool tail.
+                    if bincode::serialize(&current).ok().as_deref() == Some(bytes.as_slice()) {
+                        return Some(current);
+                    }
+                }
+                bincode::deserialize::<Vec<LegacyRedstoneComponentMetadata>>(&bytes)
+                    .ok()
+                    .map(|legacy| {
+                        legacy
+                            .into_iter()
+                            .map(|entry| crate::redstone::RedstoneComponentMetadata {
+                                local_x: entry.local_x,
+                                local_y: entry.local_y,
+                                local_z: entry.local_z,
+                                facing: entry.facing,
+                                repeater_delay: entry.repeater_delay,
+                                comparator_mode: entry.comparator_mode,
+                                note: entry.note,
+                                last_powered: false,
+                            })
+                            .collect()
+                    })
             })
             .unwrap_or_default()
     }
@@ -3647,6 +3693,7 @@ mod tests {
             repeater_delay: 4,
             comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
             note: 12,
+            last_powered: true,
         }];
         let mut manager = SaveManager::new(&world_dir);
         manager
@@ -3664,6 +3711,35 @@ mod tests {
         assert_eq!(saved.redstone_metadata(), metadata);
 
         fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_redstone_sidecar_preserves_fields_and_defaults_latch() {
+        let legacy = vec![LegacyRedstoneComponentMetadata {
+            local_x: 6,
+            local_y: 91,
+            local_z: 4,
+            facing: crate::redstone::SavedDirection::South,
+            repeater_delay: 3,
+            comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
+            note: 9,
+        }];
+        let mut saved = ChunkSaveData::from_chunk(&Chunk::new(0, 0));
+        saved.redstone_metadata = compress_bytes(&bincode::serialize(&legacy).unwrap()).unwrap();
+
+        assert_eq!(
+            saved.redstone_metadata(),
+            vec![crate::redstone::RedstoneComponentMetadata {
+                local_x: 6,
+                local_y: 91,
+                local_z: 4,
+                facing: crate::redstone::SavedDirection::South,
+                repeater_delay: 3,
+                comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
+                note: 9,
+                last_powered: false,
+            }]
+        );
     }
 
     #[test]
@@ -3896,6 +3972,7 @@ mod tests {
             repeater_delay: 2,
             comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
             note: 7,
+            last_powered: false,
         };
         let mut larger = base.clone();
         larger.redstone_metadata = vec![metadata; 32];
@@ -4576,6 +4653,9 @@ mod tests {
         // 2. EntitySaveData dropped_stack migration
         let mut stack = crate::inventory::ItemStack::new(crate::inventory::Item::DiamondSword, 1);
         stack.durability = 100;
+        stack.custom_name.set("automation-drop");
+        stack.can_break = 0x55;
+        stack.can_place_on = 0xaa;
 
         let mut entity = crate::entity::Entity::new(
             1,
@@ -4591,6 +4671,9 @@ mod tests {
         let restored_stack = restored_entity.dropped_stack.unwrap();
         assert_eq!(restored_stack.item, crate::inventory::Item::DiamondSword);
         assert_eq!(restored_stack.durability, 100);
+        assert_eq!(restored_stack.custom_name.as_str(), "automation-drop");
+        assert_eq!(restored_stack.can_break, 0x55);
+        assert_eq!(restored_stack.can_place_on, 0xaa);
 
         // Pet and entity save data test (Plan 11)
         let mut wolf = crate::entity::Entity::new(

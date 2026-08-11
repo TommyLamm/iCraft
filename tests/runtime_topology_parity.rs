@@ -285,6 +285,65 @@ fn prepare_topology_fixture(harness: &mut TopologyHarness) {
         .set_session_gameplay(TOPOLOGY_VICTIM_ID, victim_gameplay));
 }
 
+fn prepare_dispenser_fixture(harness: &mut TopologyHarness) -> ItemWire {
+    let source = (8, 80, 8);
+    let front = (9, 80, 8);
+    let lever = (7, 80, 8);
+    harness
+        .runtime
+        .authority
+        .world
+        .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
+        .unwrap();
+    harness
+        .runtime
+        .authority
+        .world
+        .set_block(front.0, front.1, front.2, BlockType::Air, 0)
+        .unwrap();
+    harness
+        .runtime
+        .authority
+        .world
+        .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+        .unwrap();
+
+    let mut stack = icraft::inventory::ItemStack::new(icraft::inventory::Item::Stone, 2)
+        .with_can_break(BlockType::Dirt)
+        .with_can_place_on(BlockType::Stone);
+    stack.custom_name.set("topology-drop");
+    if let Some(BlockEntity::Dispenser(dispenser)) = harness
+        .runtime
+        .authority
+        .world
+        .chunks
+        .get_block_entity_mut(source.0, source.1, source.2)
+    {
+        let mut entity = icraft::block_entity::DispenserBlockEntity::new();
+        entity.slots[0] = Some(stack);
+        *dispenser = entity;
+    } else {
+        panic!("dispenser block entity fixture is missing");
+    }
+    harness.runtime.authority.world.redstone.on_block_changed(
+        &harness.runtime.authority.world.chunks,
+        lever,
+        icraft::redstone::Direction::East,
+    );
+    harness.runtime.authority.world.redstone.on_block_changed(
+        &harness.runtime.authority.world.chunks,
+        source,
+        icraft::redstone::Direction::East,
+    );
+    assert!(harness
+        .runtime
+        .teleport_session(harness.session_id, [8.0, 80.0, 8.0]));
+
+    let mut expected = ItemWire::from_stack(&stack);
+    expected.count = 1;
+    expected
+}
+
 fn accepted_response(
     output: &RuntimeTickOutput,
     session_id: u64,
@@ -691,6 +750,70 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
                     if *target == harness.session_id && *player_id == TOPOLOGY_VICTIM_ID
             )
         }));
+        harness.shutdown();
+    }
+}
+
+#[test]
+fn plan28_dispenser_item_projection_matches_all_runtime_topologies() {
+    let mut baseline: Option<(u64, ItemWire)> = None;
+    for (label, topology, transport) in [
+        (
+            "dispenser_singleplayer",
+            AuthorityTopology::Singleplayer,
+            TransportMode::Disabled,
+        ),
+        (
+            "dispenser_listen",
+            AuthorityTopology::ListenServer,
+            TransportMode::Listen,
+        ),
+        (
+            "dispenser_dedicated",
+            AuthorityTopology::Dedicated,
+            TransportMode::Disabled,
+        ),
+    ] {
+        let mut harness = TopologyHarness::new(label, topology, transport);
+        let expected = prepare_dispenser_fixture(&mut harness);
+        let mut projection = None;
+        for _ in 0..8 {
+            let output = harness.runtime.tick_with_output().unwrap();
+            projection = output.presentation_events.into_iter().find_map(|event| {
+                let state = match event {
+                    RuntimePresentationEvent::EntitySpawn { target, state, .. }
+                    | RuntimePresentationEvent::EntityState { target, state, .. }
+                        if target == harness.session_id
+                            && state.entity_type == EntityType::DroppedItem.to_wire() =>
+                    {
+                        state
+                    }
+                    _ => return None,
+                };
+                state.item.map(|item| (state.entity_id, item))
+            });
+            if projection.is_some() {
+                break;
+            }
+        }
+        let projection = projection
+            .unwrap_or_else(|| panic!("{topology:?} did not project dispenser output in {label}"));
+        assert_eq!(projection.1, expected);
+        if let Some(previous) = baseline {
+            assert_eq!(projection, previous, "topology projection diverged");
+        } else {
+            baseline = Some(projection);
+        }
+        let source_count = match harness.runtime.authority.world.get_block_entity(8, 80, 8) {
+            Some(BlockEntity::Dispenser(dispenser)) => {
+                dispenser.slots[0].map_or(0, |stack| stack.count)
+            }
+            _ => 0,
+        };
+        assert_eq!(
+            source_count, 1,
+            "powered edge must consume exactly one item"
+        );
         harness.shutdown();
     }
 }

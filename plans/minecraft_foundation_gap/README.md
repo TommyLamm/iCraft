@@ -100,6 +100,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 25 | [權威難度消費與持久化完成](25_authority_difficulty_completion.md) | 已完成 headless contract；四難度 strict parse、server.properties persistence、Peaceful hostile despawn、Easy/Normal/Hard chase consumer、pvp independence 與 embedded/dedicated parity 通過；完整 vanilla difficulty systems 與 GPU/manual evidence 明確排除 |
 | 26 | [容器生命週期強制關閉與箱子回饋](26_container_lifecycle_chest_feedback.md) | 已實作 v16 targeted forced-close；dimension/player/session 精確清理涵蓋超距離、非法維度、transfer、interest departure、break、logout/disconnect；雙箱 `is_open` 首末 viewer、deterministic binary mesh、ChestOpen/Close edge audio 與 client/runtime/headless tests 通過；State 直接 GPU ctor、smooth lid、audio-device、Host+Join visual、v17 epoch/reason/cursor 明確排除 |
 | 27 | [半磚 Waterlogging 權威閉環](27_slab_waterlogging_authority.md) | 已完成；OakSlab/CobblestoneSlab raw-fluid bit7、v3 save、FluidUse 原子 bucket、fixed-tick 跨 Chunk flow、v17 BlockChange/ChunkData 與 embedded/listen/dedicated headless projection 及 debug/release/check gates 通過；GPU/window/audio/DPI、完整原版 parity、30 分鐘 soak 明確不在本計劃 |
+| 28 | [權威 Dispenser／Dropper](28_authoritative_dispenser_dropper.md) | 已完成 headless/runtime 核心；紅石上升沿 deterministic action、loaded-front guard、Arrow/Potion/Bucket/Flint/普通掉物窄矩陣、Dropper merge/fallback、metadata/save/reload、全球 entity id 與 v17 EntityStateWire 及 TCP 雙客戶端／三拓撲 projection 通過；完整 vanilla 行為、cauldron/waterlogging、hopper rewrite、GPU/window/audio/manual visual 明確不在本計劃 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
@@ -112,6 +113,29 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 - [Accessibility](https://www.minecraft.net/en-us/accessibility)把選單導覽、旁白與聊天顯示列為核心無障礙工具。
 
 Plan26 的自動證據以 v16/headless 邊界為準：pre-review baseline debug `cargo test --lib` 為 665 passed、3 ignored，release `cargo test --release --lib` 為 666 passed、3 ignored；完整 pre-review `cargo test --release` 的各 binary/integration/doc-test lanes 均通過。review fix 後窄閘門亦通過：`container_sessions` 9、`server_world` chest/forced-viewer 3、`server_runtime::tests` 14、`headless_server_authority` 1、`runtime_topology_parity` 5；`cargo check --release`、`cargo fmt --all -- --check` 與 `git diff --check` 亦通過。State 直接 GPU 建構、audio-device、smooth lid、Host+Join visual 仍需人工 C 類驗收，v17 epoch/reason/cursor 不在本計劃。舊 Plan02 含 pre-existing invalid UTF-8 control byte，未安全回填其歷史重複 checkbox；Plan26 文件是 D3/lifecycle follow-up 的狀態來源。
+
+Plan28 的 authority/transport 自動證據以同一未發佈 v17 development sequence 為準：
+`cargo test --lib authoritative_` 10 passed、`cargo test --lib bucket_` 2 passed，
+redstone latch roundtrip 1、EntityStateWire metadata roundtrip 1；真 TCP
+`headless_server_authority` Dispenser projection 1 passed，且
+`runtime_topology_parity` Dispenser projection 1 passed across
+Singleplayer/ListenServer/Dedicated。DroppedItem 的 `ItemWire` 同步攜帶
+count、durability、enchantments、custom_name、`can_break` 與 `can_place_on`，
+source/target revisions 與 saved redstone latch 由 host authority 提交；中間
+Plan27 `b77c38f` 的 EntityStateWire 形狀不宣稱 binary compatibility，Plan27+28
+只在未發佈 sequence 內 finalize v17。完整 release/check/fmt/diff gate 由本批
+整合收尾執行，Plan14 的 GPU/manual Host+Join、完整 vanilla dispenser 行為和
+waterlogging/cauldron/hopper 擴充仍維持明確 non-goal。舊 Plan02 含
+pre-existing invalid UTF-8 control byte，未安全回填其歷史重複 checkbox。
+
+Plan28 final serial full-suite record (2026-08-12, `--test-threads=1`) is
+1,524 passed, 0 failed, and 6 ignored in both debug and release (library
+684/3 ignored, client binary 815/3 ignored, server binary 2, integrations
+3/3/3/2/1/6/5, doc-tests 0). `cargo check --all-targets` and
+`cargo check --release --locked` pass; `cargo fmt --all -- --check` and
+`git diff --check` pass. The serial setting avoids the pre-existing
+process-local save serialization-injection race; no production save behavior
+was changed for it.
 
 ## 5. 執行規則
 

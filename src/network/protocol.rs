@@ -723,6 +723,11 @@ pub struct ItemWire {
     pub enchantments: [u8; 6],
     pub potion: Option<PotionWire>,
     pub custom_name: [u8; 24],
+    /// Adventure-mode metadata retained for automation entity projection.
+    #[serde(default)]
+    pub can_break: u128,
+    #[serde(default)]
+    pub can_place_on: u128,
 }
 
 impl ItemWire {
@@ -734,6 +739,8 @@ impl ItemWire {
             enchantments: [0; 6],
             potion: None,
             custom_name: [0; 24],
+            can_break: 0,
+            can_place_on: 0,
         }
     }
 
@@ -762,6 +769,8 @@ impl ItemWire {
             enchantments,
             potion,
             custom_name,
+            can_break: stack.can_break,
+            can_place_on: stack.can_place_on,
         }
     }
 
@@ -791,6 +800,8 @@ impl ItemWire {
         if !name_str.is_empty() {
             stack.custom_name.set(name_str);
         }
+        stack.can_break = self.can_break;
+        stack.can_place_on = self.can_place_on;
         Some(stack)
     }
 
@@ -873,6 +884,11 @@ pub struct EntityStateWire {
     pub pitch: f32,
     pub health: f32,
     pub animation_state: u8,
+    /// Item/potion payload for DroppedItem and projectile convergence. Plan27
+    /// and Plan28 finalize this in one not-yet-published v17 development
+    /// sequence; the intermediate Plan27 wire shape is not compatible.
+    #[serde(default)]
+    pub item: Option<ItemWire>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1829,6 +1845,23 @@ mod tests {
 
     #[test]
     fn entity_lifecycle_and_player_authority_roundtrip() {
+        let mut dropped = ItemWire::from_stack(&ItemStack {
+            item: Item::Stone,
+            count: 3,
+            durability: 7,
+            enchantments: EnchantmentSet::default(),
+            potion: None,
+            custom_name: {
+                let mut name = crate::enchantment::ItemName::default();
+                name.set("drop");
+                name
+            },
+            can_break: 0x55,
+            can_place_on: 0xaa,
+        });
+        assert_eq!(dropped.to_stack().unwrap().can_break, 0x55);
+        assert_eq!(dropped.to_stack().unwrap().can_place_on, 0xaa);
+        dropped.count = 3;
         let state = EntityStateWire {
             entity_id: 42,
             entity_type: 3,
@@ -1838,6 +1871,7 @@ mod tests {
             pitch: -0.2,
             health: 17.0,
             animation_state: 0b0000_0111,
+            item: Some(dropped),
         };
         for packet in [
             Packet::EntitySpawn {

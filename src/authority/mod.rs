@@ -587,6 +587,19 @@ impl AuthorityCore {
                 .collect();
             let world_snapshot = self.world.tick(&players);
             let mut world_mutations = world_snapshot.mutations;
+            // Redstone emits dispenser/dropper edges from inside the world
+            // tick, but entity ids belong to AuthorityCore's global namespace.
+            // Drain and execute them here before collecting pending revisions
+            // so source/target block entities and spawned entities share one
+            // deterministic snapshot boundary.
+            let actions = self.world.take_pending_redstone_actions();
+            for action in actions {
+                let candidate = self.next_unique_entity_id();
+                let spawned = self.world.execute_redstone_dispense(action, candidate);
+                if spawned {
+                    self.claim_entity_id(candidate);
+                }
+            }
             world_mutations.extend(self.world.take_pending_mutations());
             mutations_by_dimension.insert(dimension, world_mutations);
         }
@@ -1852,6 +1865,103 @@ mod tests {
         let pending = core.take_pending_mutations();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].position, (8, 80, 8));
+    }
+
+    #[test]
+    fn authoritative_dispenser_edge_executes_once_with_global_entity_id() {
+        let mut core = core(AuthorityTopology::Dedicated);
+        let lever = (7, 80, 8);
+        let source = (8, 80, 8);
+        core.world
+            .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+            .unwrap();
+        core.world
+            .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
+            .unwrap();
+        core.world.redstone.on_block_changed(
+            &core.world.chunks,
+            lever,
+            crate::redstone::Direction::East,
+        );
+        core.world.redstone.on_block_changed(
+            &core.world.chunks,
+            source,
+            crate::redstone::Direction::South,
+        );
+        if let Some(entity) = core
+            .world
+            .chunks
+            .get_block_entity_mut(source.0, source.1, source.2)
+        {
+            entity.set_stack(0, Some(crate::inventory::ItemStack::new(Item::Arrow, 2)));
+        }
+
+        let first = core.tick();
+        assert_eq!(
+            core.world
+                .entities
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type == EntityType::Arrow)
+                .count(),
+            1
+        );
+        let arrow_id = core
+            .world
+            .entities
+            .entities
+            .iter()
+            .find(|entity| entity.entity_type == EntityType::Arrow)
+            .unwrap()
+            .id;
+        assert!(arrow_id >= AUTHORITY_ENTITY_ID_START);
+        assert!(first
+            .mutations
+            .iter()
+            .any(|mutation| mutation.position == source));
+
+        let sustained = core.tick();
+        assert!(sustained
+            .mutations
+            .iter()
+            .all(|mutation| mutation.position != source));
+        assert_eq!(
+            core.world
+                .entities
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type == EntityType::Arrow)
+                .count(),
+            1
+        );
+
+        core.world
+            .set_block(lever.0, lever.1, lever.2, BlockType::Lever, 0)
+            .unwrap();
+        core.world.redstone.on_block_changed(
+            &core.world.chunks,
+            lever,
+            crate::redstone::Direction::East,
+        );
+        let _ = core.tick();
+        core.world
+            .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+            .unwrap();
+        core.world.redstone.on_block_changed(
+            &core.world.chunks,
+            lever,
+            crate::redstone::Direction::East,
+        );
+        let _ = core.tick();
+        assert_eq!(
+            core.world
+                .entities
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type == EntityType::Arrow)
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -1,11 +1,14 @@
 use icraft::authority::interest::InterestKind;
+use icraft::block_entity::{BlockEntity, DispenserBlockEntity};
 use icraft::dimension::Dimension;
+use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient, NetworkClient};
 use icraft::network::protocol::{
     ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
     ItemWire, RejectReason,
 };
+use icraft::redstone::Direction;
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use icraft::world::BlockType;
 use std::collections::{BTreeSet, VecDeque};
@@ -758,4 +761,337 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         |runtime, _| runtime.players.is_empty(),
     );
     restarted.shutdown().expect("stop restarted runtime");
+}
+
+fn projected_dropped_item(client: &HeadlessClient) -> Option<(u64, ItemWire)> {
+    client.events.iter().find_map(|event| {
+        let state = match event {
+            ClientToGame::EntitySpawn { state, .. } | ClientToGame::EntityState { state, .. }
+                if state.entity_type == EntityType::DroppedItem.to_wire() =>
+            {
+                state
+            }
+            _ => return None,
+        };
+        state.item.map(|item| (state.entity_id, item))
+    })
+}
+
+fn projected_block_entity(
+    client: &HeadlessClient,
+    position: (i32, i32, i32),
+) -> Option<(u64, BlockEntity)> {
+    client.events.iter().find_map(|event| match event {
+        ClientToGame::BlockEntityDelta {
+            x,
+            y,
+            z,
+            revision,
+            entity: Some(entity),
+            ..
+        } if (*x, *y, *z) == position => Some((*revision, entity.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
+    let world = TempWorld::new();
+    let port = reserve_port();
+    let server_properties = properties(world.path(), port);
+    let address = format!("127.0.0.1:{port}");
+    let mut runtime =
+        ServerRuntime::new(server_properties).expect("start headless dispenser runtime");
+    let mut alice = HeadlessClient::connect(&address, "alice");
+    let mut bob = HeadlessClient::connect(&address, "bob");
+
+    drive_pair_until(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        "two authenticated dispenser viewers",
+        |runtime, alice, bob| {
+            alice.player_id().is_some() && bob.player_id().is_some() && runtime.players.len() == 2
+        },
+    );
+    let alice_id = alice.player_id().expect("alice authenticated");
+    let bob_id = bob.player_id().expect("bob authenticated");
+    assert!(runtime.teleport_session(alice_id, [8.0, 80.0, 8.0]));
+    assert!(runtime.teleport_session(bob_id, [8.0, 80.0, 8.0]));
+    drive_pair_until(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        "both clients entering dispenser interest",
+        |runtime, _, _| {
+            runtime
+                .players
+                .get(&alice_id)
+                .is_some_and(|session| session.data.position == [8.0, 80.0, 8.0])
+                && runtime
+                    .players
+                    .get(&bob_id)
+                    .is_some_and(|session| session.data.position == [8.0, 80.0, 8.0])
+        },
+    );
+    runtime.drain_routed_updates();
+    alice.clear_events();
+    bob.clear_events();
+
+    // Fixture setup is intentionally direct authority mutation.  The edge,
+    // entity allocation, transport fanout, and metadata assertions below all
+    // cross the real TCP/runtime projection boundary.
+    let source = (8, 80, 8);
+    let front = (9, 80, 8);
+    let lever = (7, 80, 8);
+    runtime
+        .authority
+        .world
+        .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
+        .expect("place dispenser fixture");
+    runtime
+        .authority
+        .world
+        .set_block(front.0, front.1, front.2, BlockType::Air, 0)
+        .expect("clear dispenser front");
+    runtime
+        .authority
+        .world
+        .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+        .expect("place powered lever fixture");
+    let mut stack = ItemStack::new(Item::Stone, 2)
+        .with_can_break(BlockType::Dirt)
+        .with_can_place_on(BlockType::Stone);
+    stack.custom_name.set("tcp-drop");
+    if let Some(BlockEntity::Dispenser(dispenser)) = runtime
+        .authority
+        .world
+        .chunks
+        .get_block_entity_mut(source.0, source.1, source.2)
+    {
+        let mut entity = DispenserBlockEntity::new();
+        entity.slots[0] = Some(stack);
+        *dispenser = entity;
+    } else {
+        panic!("dispenser block entity fixture is missing");
+    }
+    runtime.authority.world.redstone.on_block_changed(
+        &runtime.authority.world.chunks,
+        lever,
+        Direction::East,
+    );
+    runtime.authority.world.redstone.on_block_changed(
+        &runtime.authority.world.chunks,
+        source,
+        Direction::East,
+    );
+
+    drive_pair_until(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        "authoritative dropped-item metadata over TCP",
+        |_, alice, bob| {
+            projected_dropped_item(alice).is_some()
+                && projected_dropped_item(bob).is_some()
+                && projected_block_entity(alice, source).is_some()
+                && projected_block_entity(bob, source).is_some()
+        },
+    );
+    let (alice_entity, alice_item) =
+        projected_dropped_item(&alice).expect("alice receives dropped item projection");
+    let (bob_entity, bob_item) =
+        projected_dropped_item(&bob).expect("bob receives dropped item projection");
+    assert_eq!(
+        alice_entity, bob_entity,
+        "authority uses one global entity id"
+    );
+    assert_eq!(alice_item.item, Item::Stone.to_u32());
+    assert_eq!(bob_item.item, Item::Stone.to_u32());
+    assert_eq!(alice_item.count, 1);
+    assert_eq!(bob_item.count, 1);
+    assert_eq!(alice_item.custom_name, bob_item.custom_name);
+    assert_eq!(alice_item.can_break, 1u128 << (BlockType::Dirt as u8));
+    assert_eq!(bob_item.can_place_on, 1u128 << (BlockType::Stone as u8));
+    let (alice_source_revision, alice_source_entity) =
+        projected_block_entity(&alice, source).expect("alice receives dispenser slot delta");
+    let (bob_source_revision, bob_source_entity) =
+        projected_block_entity(&bob, source).expect("bob receives dispenser slot delta");
+    let (alice_source_be_revision, alice_source_slot) = match alice_source_entity {
+        BlockEntity::Dispenser(dispenser) => (
+            dispenser.revision,
+            dispenser.slots[0].map(|stack| ItemWire::from_stack(&stack)),
+        ),
+        _ => panic!("alice received a non-dispenser source delta"),
+    };
+    let (bob_source_be_revision, bob_source_slot) = match bob_source_entity {
+        BlockEntity::Dispenser(dispenser) => (
+            dispenser.revision,
+            dispenser.slots[0].map(|stack| ItemWire::from_stack(&stack)),
+        ),
+        _ => panic!("bob received a non-dispenser source delta"),
+    };
+    assert_eq!(alice_source_revision, bob_source_revision);
+    assert_eq!(alice_source_be_revision, bob_source_be_revision);
+    assert_eq!(alice_source_slot, bob_source_slot);
+    assert_eq!(alice_source_slot.map(|slot| slot.count), Some(1));
+
+    // Sustained power is a latch, not a repeated action.  A second source item
+    // remains after several fixed ticks, proving no phantom duplicate spawn.
+    drive_pair_for(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        Duration::from_millis(150),
+    );
+    let source_count = match runtime
+        .authority
+        .world
+        .get_block_entity(source.0, source.1, source.2)
+    {
+        Some(BlockEntity::Dispenser(dispenser)) => dispenser.slots[0].map_or(0, |item| item.count),
+        _ => 0,
+    };
+    assert_eq!(source_count, 1, "sustained power must not dispense twice");
+
+    // Turn the edge off, replace the source/front fixture, then raise it again
+    // as a Dropper -> Chest insertion. Both viewers must observe source
+    // decrement and target merge; no second DroppedItem may be spawned.
+    runtime
+        .authority
+        .world
+        .set_block(lever.0, lever.1, lever.2, BlockType::Lever, 0)
+        .expect("turn dispenser fixture off");
+    runtime.authority.world.redstone.on_block_changed(
+        &runtime.authority.world.chunks,
+        lever,
+        Direction::East,
+    );
+    drive_pair_for(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        Duration::from_millis(80),
+    );
+    runtime.drain_routed_updates();
+    alice.clear_events();
+    bob.clear_events();
+
+    runtime
+        .authority
+        .world
+        .chunks
+        .set_block_entity(source.0, source.1, source.2, None);
+    runtime
+        .authority
+        .world
+        .set_block(source.0, source.1, source.2, BlockType::Dropper, 0)
+        .expect("replace source with dropper");
+    runtime
+        .authority
+        .world
+        .set_block(front.0, front.1, front.2, BlockType::Chest, 0)
+        .expect("place dropper target chest");
+    let mut dropper_stack = stack;
+    dropper_stack.count = 2;
+    if let Some(BlockEntity::Dropper(dropper)) = runtime
+        .authority
+        .world
+        .chunks
+        .get_block_entity_mut(source.0, source.1, source.2)
+    {
+        let mut entity = icraft::block_entity::DropperBlockEntity::new();
+        entity.slots[0] = Some(dropper_stack);
+        *dropper = entity;
+    } else {
+        panic!("dropper block entity fixture is missing");
+    }
+    if let Some(BlockEntity::Chest(chest)) = runtime
+        .authority
+        .world
+        .chunks
+        .get_block_entity_mut(front.0, front.1, front.2)
+    {
+        let mut target_stack = stack;
+        target_stack.count = 4;
+        chest.inventory.slots[0] = Some(target_stack);
+    } else {
+        panic!("dropper target chest fixture is missing");
+    }
+    runtime.authority.world.redstone.on_block_changed(
+        &runtime.authority.world.chunks,
+        source,
+        Direction::East,
+    );
+    runtime
+        .authority
+        .world
+        .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
+        .expect("raise dropper fixture edge");
+    runtime.authority.world.redstone.on_block_changed(
+        &runtime.authority.world.chunks,
+        lever,
+        Direction::East,
+    );
+
+    drive_pair_until(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        "dropper target insertion over TCP",
+        |_, alice, bob| {
+            projected_block_entity(alice, source).is_some()
+                && projected_block_entity(bob, source).is_some()
+                && projected_block_entity(alice, front).is_some()
+                && projected_block_entity(bob, front).is_some()
+        },
+    );
+    let (_, alice_dropper) =
+        projected_block_entity(&alice, source).expect("alice receives dropper source delta");
+    let (_, bob_dropper) =
+        projected_block_entity(&bob, source).expect("bob receives dropper source delta");
+    let (_, alice_chest) =
+        projected_block_entity(&alice, front).expect("alice receives chest target delta");
+    let (_, bob_chest) =
+        projected_block_entity(&bob, front).expect("bob receives chest target delta");
+    let source_slot = |entity: &BlockEntity| match entity {
+        BlockEntity::Dropper(dropper) => dropper.slots[0].map(|stack| ItemWire::from_stack(&stack)),
+        _ => None,
+    };
+    let chest_slot = |entity: &BlockEntity| match entity {
+        BlockEntity::Chest(chest) => {
+            chest.inventory.slots[0].map(|stack| ItemWire::from_stack(&stack))
+        }
+        _ => None,
+    };
+    assert_eq!(source_slot(&alice_dropper), source_slot(&bob_dropper));
+    assert_eq!(chest_slot(&alice_chest), chest_slot(&bob_chest));
+    assert_eq!(source_slot(&alice_dropper).map(|slot| slot.count), Some(1));
+    assert_eq!(chest_slot(&alice_chest).map(|slot| slot.count), Some(5));
+    let authority_dropped_ids: BTreeSet<_> = runtime
+        .authority
+        .world
+        .entities
+        .entities
+        .iter()
+        .filter(|entity| entity.entity_type == EntityType::DroppedItem)
+        .map(|entity| entity.id)
+        .collect();
+    assert_eq!(
+        authority_dropped_ids,
+        BTreeSet::from([alice_entity]),
+        "dropper insertion must not create a fallback dropped entity"
+    );
+    assert_eq!(alice_entity, bob_entity);
+
+    alice.disconnect_and_join();
+    bob.disconnect_and_join();
+    drive_pair_until(
+        &mut runtime,
+        &mut alice,
+        &mut bob,
+        "dispenser viewer disconnect",
+        |runtime, _, _| runtime.players.is_empty(),
+    );
+    runtime.shutdown().expect("stop headless dispenser runtime");
 }

@@ -19,6 +19,8 @@ fn item_wire(item: Item) -> ItemWire {
         enchantments: [0; 6],
         potion: None,
         custom_name: [0; 24],
+        can_break: 0,
+        can_place_on: 0,
     }
 }
 

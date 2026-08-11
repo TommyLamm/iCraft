@@ -596,6 +596,31 @@ ordering for raw-fluid block/chunk projections. Debug/release/check and diff
 gates all pass as recorded in Plan27; GPU/window/audio/DPI, full vanilla
 waterlogging parity, and a 30-minute soak are explicitly outside this plan.
 
+Plan28 closes the narrow authoritative Dispenser/Dropper lane without another
+protocol bump: Plan27+28 finalize the same unpublished development v17
+sequence, while the intermediate Plan27 `b77c38f` EntityStateWire shape is not
+claimed binary-compatible. `RedstoneAction::Dispense` is drained in sorted
+position/facing order on a rising edge only; source/front chunks and matching
+block entities must be loaded before an atomic source/target/entity commit.
+Dispenser behavior is deliberately limited to Arrow, SplashPotion, source-only
+Water/Lava buckets, Flint and Steel fire placement, and metadata-preserving
+ordinary DroppedItem fallback. Dropper insertion is merge-first/lowest-empty,
+otherwise one DroppedItem is spawned. The authority allocator owns global
+entity ids; `EntityStateWire.item` carries complete ItemStack metadata so
+embedded, TCP, and three-topology projections converge. Redstone `last_powered`
+and block/entity payloads retain their save/reload semantics, and powered reload
+does not phantom-fire. Targeted evidence is 10 `authoritative_` unit tests,
+2 bucket atomicity/flow tests, one latch roundtrip, one wire roundtrip, one real
+TCP two-client projection, and one Singleplayer/ListenServer/Dedicated topology
+projection; full vanilla dispenser behavior, cauldron/waterlogging integration,
+hopper rewrites, GPU/window/audio, and manual visual acceptance remain outside
+this plan. Final serial debug/release suites each pass 1,524 tests (684 library,
+815 client binary, 2 server binary, 23 integration, zero doc-tests) with six
+ignored benchmark/crash-child tests; `cargo check --all-targets` and
+`cargo check --release --locked` pass. The serial test setting isolates an
+existing process-local save-failure injection race; it does not change
+production save behavior.
+
 Use:
 
 ```text

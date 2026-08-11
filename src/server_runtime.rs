@@ -1141,7 +1141,10 @@ impl ServerRuntime {
                     .into_iter()
                     .filter_map(|(cx, cz)| {
                         world.chunks.chunks.get(&(cx, cz)).map(|chunk| {
-                            let mut data = ChunkSaveData::from_chunk(chunk);
+                            let metadata =
+                                world.redstone.collect_chunk_metadata(&world.chunks, cx, cz);
+                            let mut data =
+                                ChunkSaveData::from_chunk_with_redstone(chunk, &metadata);
                             data.mutation_revision = world.chunk_revision(cx, cz);
                             (cx, cz, data)
                         })
@@ -3236,6 +3239,24 @@ fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
         | (u8::from(entity.target_player) << 1)
         | (u8::from(entity.is_ignited) << 2)
         | (u8::from(entity.fire_aspect_timer > 0.0) << 3);
+    let item = entity
+        .dropped_stack
+        .as_ref()
+        .map(ItemWire::from_stack)
+        .or_else(|| {
+            entity.dropped_item.map(|item| {
+                let stack = crate::inventory::ItemStack::new(item, entity.dropped_count.max(1));
+                ItemWire::from_stack(&stack)
+            })
+        })
+        .or_else(|| {
+            entity.potion.map(|potion| {
+                let mut stack =
+                    crate::inventory::ItemStack::new(crate::inventory::Item::SplashPotion, 1);
+                stack.potion = Some(potion);
+                ItemWire::from_stack(&stack)
+            })
+        });
     EntityStateWire {
         entity_id: entity.id,
         entity_type: entity.entity_type.to_wire(),
@@ -3245,6 +3266,7 @@ fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
         pitch: entity.pitch,
         health: entity.health,
         animation_state,
+        item,
     }
 }
 
@@ -3968,6 +3990,8 @@ mod tests {
         // save round-trip can assert both wire and semantic metadata.
         wire.enchantments = [0x15, 0x23, 0x31, 0x55, 0x62, 0];
         wire.custom_name = [b'R'; 24];
+        wire.can_break = 0x11;
+        wire.can_place_on = 0x22;
         let mut gameplay = SessionGameplayState::default();
         gameplay.health_milli = 12_345;
         gameplay.hunger_milli = 8_765;

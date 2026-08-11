@@ -8,7 +8,7 @@
 - 建議提交上限：3
 - 禁止順帶實作：Crafter、完整所有可發射物品行為、準連接等高階 Java quirks
 
-> 2026-08-06 狀態：核心玩法、存檔、協議與 headless 驗證已完成；GPU/window
+> 2026-08-12 狀態：核心玩法、存檔、協議與 headless/runtime/topology 驗證已完成；GPU/window
 > 與真實 Host+Join Client 場景不在目前環境內，對應實機驗收項目保持未勾選，
 > 不宣稱已通過。
 
@@ -71,7 +71,7 @@
 - [x] Chest→Hopper→Furnace→Hopper→Chest 自動熔煉，物品與燃料總量守恆。
 - [x] Hopper 跨 Chunk unload 不吞物；循環鏈 obey budget 且結果可重現。
 - [x] Comparator 空、半滿、滿、double chest 和 furnace 不同 slot fullness。
-- [ ] Dispenser／Dropper 代表物品、空容器、上升沿、保存重載（headless 可驗證資料/上升沿/存檔；State+GPU 實機場景待執行）。
+- [x] Dispenser／Dropper 代表物品、空容器、上升沿、保存重載（Plan28 headless authority、真 TCP 雙客戶端 source/target projection 與三拓撲 metadata convergence 通過；State+GPU 實機場景仍待執行）。
 - [x] Observer 監視放置／破壞／state 改變且不自激振盪。
 - [ ] Host+Client 觀看同一自動化容器，UI 不倒退或複製。
 
@@ -81,6 +81,9 @@
 
 > 完成閘門的程式碼條件已滿足：Dispenser/Dropper 只從自身 9 格實際 slot
 > 選擇與消耗物品，Dropper 的前方容器寫入與來源扣除為同一個原子結果；固定
-> Arrow/Redstone 輸出路徑已不存在。完整實機驗收仍需在可用 GPU 與 Host+Join
-> Client 環境執行，故上方未勾選項目維持真實狀態。
+> Arrow/Redstone 輸出路徑已不存在。Plan28 另補齊 rising-edge latch、loaded-front
+> guard、bucket/fluid narrow semantics、完整 ItemStack metadata、save/reload
+> 與全球 entity id；v17 EntityStateWire 只在 Plan27+28 的未發佈 development
+> sequence 內 finalize。完整原版發射器行為、cauldron/waterlogging、hopper
+> rewrite、GPU/audio 與 Host+Join visual 仍是本計劃 non-goal 或人工待驗收。
 

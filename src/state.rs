@@ -666,6 +666,7 @@ mod remote_sync_tests {
                     pitch: 0.0,
                     health: 20.0,
                     animation_state: 0,
+                    item: None,
                 },
             });
         }
@@ -2986,6 +2987,7 @@ mod authority_policy_tests {
             pitch: 0.0,
             health: 20.0 - sequence as f32,
             animation_state: 0,
+            item: None,
         };
         assert!(!replicated.push(state(1, 0.0), 1, 1.0));
         assert!(!replicated.push(state(2, 2.0), 2, 2.0));
@@ -3571,6 +3573,23 @@ fn entity_animation_state(entity: &crate::entity::Entity) -> u8 {
 }
 
 fn entity_state_wire(entity: &crate::entity::Entity) -> crate::network::protocol::EntityStateWire {
+    let item = entity
+        .dropped_stack
+        .as_ref()
+        .map(crate::network::protocol::ItemWire::from_stack)
+        .or_else(|| {
+            entity.dropped_item.map(|item| {
+                let stack = ItemStack::new(item, entity.dropped_count.max(1));
+                crate::network::protocol::ItemWire::from_stack(&stack)
+            })
+        })
+        .or_else(|| {
+            entity.potion.map(|potion| {
+                let mut stack = ItemStack::new(Item::SplashPotion, 1);
+                stack.potion = Some(potion);
+                crate::network::protocol::ItemWire::from_stack(&stack)
+            })
+        });
     crate::network::protocol::EntityStateWire {
         entity_id: entity.id,
         entity_type: entity.entity_type.to_wire(),
@@ -3580,6 +3599,7 @@ fn entity_state_wire(entity: &crate::entity::Entity) -> crate::network::protocol
         pitch: entity.pitch,
         health: entity.health,
         animation_state: entity_animation_state(entity),
+        item,
     }
 }
 
@@ -3600,11 +3620,24 @@ fn apply_entity_wire_state(
     } else {
         0.0
     };
+    if entity.entity_type == crate::entity::EntityType::DroppedItem {
+        if let Some(stack) = state.item.and_then(|item| item.to_stack()) {
+            entity.dropped_item = Some(stack.item);
+            entity.dropped_count = stack.count;
+            entity.dropped_stack = Some(stack);
+        }
+    } else if entity.entity_type == crate::entity::EntityType::SplashPotion {
+        entity.potion = state
+            .item
+            .and_then(|item| item.to_stack())
+            .and_then(|stack| stack.potion);
+    }
 }
 
 fn is_replicated_entity_type(entity_type: crate::entity::EntityType) -> bool {
     entity_type.is_living()
         || entity_type.is_projectile()
+        || entity_type == crate::entity::EntityType::DroppedItem
         || entity_type == crate::entity::EntityType::EndCrystal
 }
 

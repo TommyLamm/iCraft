@@ -4949,6 +4949,7 @@ mod tests {
             pitch: 0.0,
             health: 20.0,
             animation_state: 0,
+            item: None,
         };
         mailbox
             .replace(Packet::EntityState {

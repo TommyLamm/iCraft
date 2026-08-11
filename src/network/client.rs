@@ -2529,6 +2529,7 @@ mod tests {
             pitch: 0.0,
             health: 18.0,
             animation_state: 1,
+            item: None,
         };
         host_tx
             .send(HostToServer::BroadcastEntitySpawn {
