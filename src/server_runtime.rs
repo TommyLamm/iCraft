@@ -299,6 +299,14 @@ pub enum RuntimePresentationEvent {
         slot_index: u16,
         slot: Option<ItemWire>,
     },
+    /// Targeted invalidation for a container session that can no longer
+    /// remain open (block break, transfer, interest departure, or logout).
+    /// This uses the existing v16 close wire shape at the transport boundary.
+    ContainerClose {
+        target: u64,
+        dimension: u8,
+        position: (i32, i32, i32),
+    },
     PlayerRespawnResult {
         target: u64,
         position: [f32; 3],
@@ -382,6 +390,7 @@ impl RuntimePresentationEvent {
             | Self::ContainerOpenResult { .. }
             | Self::ContainerClickResult { .. }
             | Self::ContainerSlotUpdate { .. }
+            | Self::ContainerClose { .. }
             | Self::PlayerRespawnResult { .. }
             | Self::WorldRules { .. } => None,
         }
@@ -1011,6 +1020,9 @@ impl ServerRuntime {
         }
         let snapshot = self.authority.tick();
         self.route_authority_snapshot(&snapshot);
+        for closure in self.authority.take_container_closures() {
+            self.close_runtime_container(closure.player_id, closure.dimension, closure.position);
+        }
         self.level.time = snapshot.tick;
         self.metrics.ticks = self.metrics.ticks.wrapping_add(1);
         self.metrics.players_online = self.players.len();
@@ -1209,15 +1221,14 @@ impl ServerRuntime {
     }
 
     pub fn set_session_dimension(&mut self, id: u64, dimension: Dimension) -> bool {
-        let Some((old_dimension, position)) = self
+        let Some((_old_dimension, position)) = self
             .players
             .get(&id)
             .map(|session| (session.dimension, session.data.position))
         else {
             return false;
         };
-        self.authority
-            .with_world(old_dimension, |world| world.close_container_viewers(id));
+        self.force_close_player_containers(id);
         if !self.authority.set_session_dimension(id, dimension) {
             return false;
         }
@@ -1386,7 +1397,7 @@ impl ServerRuntime {
                 let previous_dimension = self.players.get(&id).map(|session| session.dimension);
                 if let Some(dimension) = previous_dimension {
                     self.authority
-                        .with_world(dimension, |world| world.close_container_viewers(id));
+                        .with_world(dimension, |world| world.close_container_viewers_forced(id));
                 }
                 let respawn = if let Some(session) = self.players.get_mut(&id) {
                     session.data.position = [
@@ -1755,8 +1766,14 @@ impl ServerRuntime {
     fn handle_leave(&mut self, id: u64) -> io::Result<()> {
         if let Some(session) = self.players.remove(&id) {
             let dimension = session.dimension;
+            for &position in &session.interest.open_containers {
+                let _ = self.authority.with_world(dimension, |world| {
+                    world.close_container_viewer_forced(id, position)
+                });
+                self.send_container_close(id, dimension, position);
+            }
             self.authority
-                .with_world(dimension, |world| world.close_container_viewers(id));
+                .with_world(dimension, |world| world.close_container_viewers_forced(id));
             self.save_player(&session)?;
         }
         self.authority.remove_session(id);
@@ -1927,12 +1944,10 @@ impl ServerRuntime {
                         let action = ContainerAction::from_wire(action)
                             .expect("authority accepted only a typed container action");
                         self.route_container_result(id, *revision, x, y, z, slot, action, None);
-                        let dimension = self
-                            .authority
-                            .session(id)
-                            .and_then(|session| Dimension::from_wire(session.dimension))
-                            .unwrap_or_else(|| self.authority.active_dimension());
-                        self.routed_mutations.insert((dimension, *revision));
+                        // Container open/close changes the authoritative chest
+                        // block state.  It is published by the next snapshot
+                        // (including a double-chest partner mutation), so do
+                        // not mark this revision as already routed here.
                     }
                     GameplayOperation::ContainerClick {
                         x,
@@ -1962,8 +1977,17 @@ impl ServerRuntime {
                     _ => {}
                 }
             }
-            GameplayOutcome::Rejected { .. } => {
+            GameplayOutcome::Rejected { reason } => {
                 self.metrics.requests_rejected = self.metrics.requests_rejected.saturating_add(1);
+                if matches!(
+                    operation,
+                    GameplayOperation::Container { .. } | GameplayOperation::ContainerClick { .. }
+                ) && matches!(
+                    reason,
+                    RejectReason::TooFar | RejectReason::InvalidDimension
+                ) {
+                    self.force_close_player_containers(id);
+                }
             }
         }
         Ok(response)
@@ -1981,6 +2005,29 @@ impl ServerRuntime {
         dragged: Option<&crate::network::protocol::ItemWire>,
     ) {
         let position = (x, y, z);
+        let dimension = self
+            .authority
+            .session(id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+            .unwrap_or_else(|| self.authority.active_dimension());
+        if matches!(action, ContainerAction::Open) {
+            let previous_positions = self
+                .players
+                .get(&id)
+                .map(|session| {
+                    session
+                        .interest
+                        .open_containers
+                        .iter()
+                        .copied()
+                        .filter(|previous| *previous != position)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for previous in previous_positions {
+                self.close_runtime_container(id, dimension, previous);
+            }
+        }
         if let Some(session) = self.players.get_mut(&id) {
             match action {
                 ContainerAction::Close => {
@@ -1993,11 +2040,6 @@ impl ServerRuntime {
                 }
             }
         }
-        let dimension = self
-            .authority
-            .session(id)
-            .and_then(|session| Dimension::from_wire(session.dimension))
-            .unwrap_or_else(|| self.authority.active_dimension());
         self.queue_interest_update(dimension, revision, InterestKind::BlockEntity(position));
         let container_targets =
             self.queue_interest_update(dimension, revision, InterestKind::Container(position));
@@ -2273,6 +2315,69 @@ impl ServerRuntime {
                 slot_index,
                 slot,
             });
+        }
+    }
+
+    fn send_container_close(&mut self, to: u64, dimension: Dimension, position: (i32, i32, i32)) {
+        let (x, y, z) = position;
+        if self.local_session_id == Some(to) {
+            self.push_presentation_event(RuntimePresentationEvent::ContainerClose {
+                target: to,
+                dimension: dimension as u8,
+                position,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendContainerClose {
+                to,
+                dimension: dimension as u8,
+                x,
+                y,
+                z,
+            });
+        }
+    }
+
+    /// Remove one exact lifecycle registration and emit at most one close for
+    /// the current session.  Double-chest partner intents may arrive after the
+    /// primary half; they still clean the world viewer but cannot close a new
+    /// session or duplicate the packet.
+    fn close_runtime_container(
+        &mut self,
+        id: u64,
+        dimension: Dimension,
+        position: (i32, i32, i32),
+    ) {
+        let _ = self.authority.with_world(dimension, |world| {
+            world.close_container_viewer_forced(id, position)
+        });
+        let was_open = self
+            .players
+            .get_mut(&id)
+            .is_some_and(|session| session.interest.open_containers.remove(&position));
+        if was_open {
+            if let Some(session) = self.players.get_mut(&id) {
+                session.container_viewers.remove(&position);
+            }
+            self.send_container_close(id, dimension, position);
+        }
+    }
+
+    fn force_close_player_containers(&mut self, id: u64) {
+        let Some((dimension, positions)) = self.players.get(&id).map(|session| {
+            (
+                session.dimension,
+                session
+                    .interest
+                    .open_containers
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+            )
+        }) else {
+            return;
+        };
+        for position in positions {
+            self.close_runtime_container(id, dimension, position);
         }
     }
 
@@ -2777,14 +2882,19 @@ impl ServerRuntime {
             .iter()
             .map(|(entity_id, _)| *entity_id)
             .collect();
-        let (entity_delta, old_dimension) = {
+        let (entity_delta, old_dimension, departed_containers) = {
             let Some(session) = self.players.get_mut(&id) else {
                 return;
             };
             let old_dimension = session.interest.dimension;
             let old_entities = session.interest.entities.clone();
+            let old_open_containers = session.interest.open_containers.clone();
             session.dimension = dimension;
             let chunk_delta = session.interest.update_position(dimension, position);
+            let departed_containers: Vec<_> = old_open_containers
+                .difference(&session.interest.open_containers)
+                .copied()
+                .collect();
             let mut entity_delta = session.interest.update_entities(entities);
             if old_dimension != dimension {
                 entity_delta.departed = old_entities.into_iter().collect();
@@ -2807,8 +2917,17 @@ impl ServerRuntime {
                     *queued_dimension == dimension && session.interest.chunks.contains(&(*cx, *cz))
                 });
             session.queue_initial_chunks(dimension, chunk_delta.entered.iter().copied());
-            (entity_delta, old_dimension)
+            (entity_delta, old_dimension, departed_containers)
         };
+        for position in departed_containers {
+            if let Some(session) = self.players.get_mut(&id) {
+                session.container_viewers.remove(&position);
+            }
+            let _ = self.authority.with_world(old_dimension, |world| {
+                world.close_container_viewer_forced(id, position)
+            });
+            self.send_container_close(id, old_dimension, position);
+        }
         for entity_id in entity_delta.departed {
             self.record_interest_update(
                 id,
@@ -3147,6 +3266,7 @@ impl Drop for ServerRuntime {
 mod tests {
     use super::*;
     use crate::network::protocol::RejectReason;
+    use crate::world::BlockType;
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -3423,6 +3543,138 @@ mod tests {
             vec![2]
         );
 
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn opening_new_container_replaces_old_session_and_preserves_other_viewers() {
+        fn request(
+            id: u64,
+            sequence: u64,
+            revision: u64,
+            position: (i32, i32, i32),
+        ) -> GameplayRequest {
+            GameplayRequest {
+                request_id: sequence as u128,
+                client_sequence: sequence,
+                session_id: id,
+                dimension: Dimension::Overworld as u8,
+                client_revision: revision,
+                operation: GameplayOperation::Container {
+                    action: ContainerAction::Open.to_wire(),
+                    x: position.0,
+                    y: position.1,
+                    z: position.2,
+                    slot: 0,
+                },
+            }
+        }
+
+        let prepare =
+            |runtime: &mut ServerRuntime, first: (i32, i32, i32), second: (i32, i32, i32)| {
+                runtime.authority.with_world(Dimension::Overworld, |world| {
+                    world
+                        .set_block(first.0, first.1, first.2, BlockType::Chest, 0)
+                        .unwrap();
+                    world
+                        .set_block(second.0, second.1, second.2, BlockType::Chest, 0)
+                        .unwrap();
+                });
+            };
+
+        let first = (10, 80, 8);
+        let second = (11, 80, 8);
+        let (mut runtime, _input) = embedded_runtime("container_open_replace");
+        prepare(&mut runtime, first, second);
+        let revision = runtime.session_revision(99).unwrap();
+        assert!(matches!(
+            runtime
+                .submit_request(99, request(99, 1, revision, first))
+                .unwrap()
+                .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        let revision = runtime.session_revision(99).unwrap();
+        assert!(matches!(
+            runtime
+                .submit_request(99, request(99, 2, revision, second))
+                .unwrap()
+                .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
+        assert!(world.container_viewers_at(first).next().is_none());
+        assert!(
+            !crate::world::BlockState::decode(world.get_block_state(first.0, first.1, first.2))
+                .is_open
+        );
+        assert_eq!(
+            world
+                .container_viewers_at(second)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![99]
+        );
+        assert!(
+            crate::world::BlockState::decode(world.get_block_state(second.0, second.1, second.2))
+                .is_open
+        );
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+
+        let (mut runtime, _input) = embedded_runtime("container_open_replace_observer");
+        prepare(&mut runtime, first, second);
+        runtime.login_session(2, "observer").unwrap();
+        let revision = runtime.session_revision(99).unwrap();
+        assert!(matches!(
+            runtime
+                .submit_request(99, request(99, 1, revision, first))
+                .unwrap()
+                .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        let revision = runtime.session_revision(2).unwrap();
+        assert!(matches!(
+            runtime
+                .submit_request(2, request(2, 1, revision, first))
+                .unwrap()
+                .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        let revision = runtime.session_revision(99).unwrap();
+        assert!(matches!(
+            runtime
+                .submit_request(99, request(99, 2, revision, second))
+                .unwrap()
+                .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
+        assert_eq!(
+            world
+                .container_viewers_at(first)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(
+            crate::world::BlockState::decode(world.get_block_state(first.0, first.1, first.2))
+                .is_open
+        );
+        assert_eq!(
+            world
+                .container_viewers_at(second)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![99]
+        );
+        assert!(
+            crate::world::BlockState::decode(world.get_block_state(second.0, second.1, second.2))
+                .is_open
+        );
         let world_dir = runtime.world_dir.clone();
         runtime.shutdown().unwrap();
         let _ = fs::remove_dir_all(world_dir);

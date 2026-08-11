@@ -98,6 +98,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 23 | [State／Runtime 權威接線與三拓撲收斂](23_state_runtime_topology_completion.md) | 核心完成；Join Client typed egress、owner-private projection、listen + 2 clients headless gates 通過；station-specific progress 與 manual GPU/visual artifacts 仍後續；Plan24 已補完整 Plan22 三拓撲對照、metrics race、全套 regression 與 dedicated soak |
 | 24 | [三拓撲對照、Metrics 穩定化與最終自動驗收](24_topology_metrics_final_automation.md) | 已完成；三拓撲 authority gameplay parity、TCP metrics publication/rollback、debug/release/check、50x isolated release 與 dated 30 分鐘 dedicated headless soak 均有 artifact；GPU/window/audio/DPI/Host+Join visual 仍明確排除 |
 | 25 | [權威難度消費與持久化完成](25_authority_difficulty_completion.md) | 已完成 headless contract；四難度 strict parse、server.properties persistence、Peaceful hostile despawn、Easy/Normal/Hard chase consumer、pvp independence 與 embedded/dedicated parity 通過；完整 vanilla difficulty systems 與 GPU/manual evidence 明確排除 |
+| 26 | [容器生命週期強制關閉與箱子回饋](26_container_lifecycle_chest_feedback.md) | 已實作 v16 targeted forced-close；dimension/player/session 精確清理涵蓋超距離、非法維度、transfer、interest departure、break、logout/disconnect；雙箱 `is_open` 首末 viewer、deterministic binary mesh、ChestOpen/Close edge audio 與 client/runtime/headless tests 通過；State 直接 GPU ctor、smooth lid、audio-device、Host+Join visual、v17 epoch/reason/cursor 明確排除 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
@@ -108,6 +109,8 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 - [所有遊戲模式](https://help.minecraft.net/hc/en-us/articles/360058743992-Minecraft-Differences-Between-Creative-Survival-and-Hardcore-Game-Modes)定義 Survival、Creative、Adventure、Spectator 和 Hardcore。
 - [獨立伺服器說明](https://help.minecraft.net/hc/en-us/articles/4408873961869-Minecraft-Dedicated-and-Featured-Servers-FAQ-)確認 Java Edition 的獨立伺服器是正式玩法面。
 - [Accessibility](https://www.minecraft.net/en-us/accessibility)把選單導覽、旁白與聊天顯示列為核心無障礙工具。
+
+Plan26 的自動證據以 v16/headless 邊界為準：pre-review baseline debug `cargo test --lib` 為 665 passed、3 ignored，release `cargo test --release --lib` 為 666 passed、3 ignored；完整 pre-review `cargo test --release` 的各 binary/integration/doc-test lanes 均通過。review fix 後窄閘門亦通過：`container_sessions` 9、`server_world` chest/forced-viewer 3、`server_runtime::tests` 14、`headless_server_authority` 1、`runtime_topology_parity` 5；`cargo check --release`、`cargo fmt --all -- --check` 與 `git diff --check` 亦通過。State 直接 GPU 建構、audio-device、smooth lid、Host+Join visual 仍需人工 C 類驗收，v17 epoch/reason/cursor 不在本計劃。舊 Plan02 含 pre-existing invalid UTF-8 control byte，未安全回填其歷史重複 checkbox；Plan26 文件是 D3/lifecycle follow-up 的狀態來源。
 
 ## 5. 執行規則
 

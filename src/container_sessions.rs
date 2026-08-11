@@ -61,20 +61,70 @@ impl ContainerSessionManager {
         true
     }
 
-    pub fn close_by_player(&mut self, player_id: PlayerId) {
-        self.sessions.retain(|s| s.player_id != player_id);
-    }
-
-    pub fn close_by_block(&mut self, x: i32, y: i32, z: i32) -> Vec<PlayerId> {
-        let affected: Vec<PlayerId> = self
+    /// Remove every session owned by `player_id` and return the removed
+    /// records so callers can target lifecycle notifications precisely.
+    pub fn close_by_player(&mut self, player_id: PlayerId) -> Vec<ContainerSession> {
+        let affected: Vec<ContainerSession> = self
             .sessions
             .iter()
-            .filter(|s| (s.x - x).abs() <= 1 && s.y == y && (s.z - z).abs() <= 1)
-            .map(|s| s.player_id)
+            .filter(|session| session.player_id == player_id)
+            .cloned()
+            .collect();
+        self.sessions.retain(|s| s.player_id != player_id);
+        affected
+    }
+
+    /// Remove one exact session.  A stale close from an old coordinate or
+    /// dimension must not terminate a newer session owned by the same player.
+    pub fn close_exact(
+        &mut self,
+        player_id: PlayerId,
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<ContainerSession> {
+        let index = self.sessions.iter().position(|session| {
+            session.player_id == player_id
+                && session.dimension == dimension
+                && session.x == x
+                && session.y == y
+                && session.z == z
+        })?;
+        Some(self.sessions.remove(index))
+    }
+
+    /// Remove sessions watching exactly this block in one dimension. Returning
+    /// full records avoids accidentally sending a close for a same-coordinate
+    /// session in another dimension. Callers that break a double chest must
+    /// explicitly close both the primary and the verified partner coordinate.
+    pub fn close_by_block(
+        &mut self,
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Vec<ContainerSession> {
+        let affected: Vec<ContainerSession> = self
+            .sessions
+            .iter()
+            .filter(|s| s.dimension == dimension && s.x == x && s.y == y && s.z == z)
+            .cloned()
             .collect();
         self.sessions
-            .retain(|s| !((s.x - x).abs() <= 1 && s.y == y && (s.z - z).abs() <= 1));
+            .retain(|s| !(s.dimension == dimension && s.x == x && s.y == y && s.z == z));
         affected
+    }
+
+    /// Return the number of sessions watching a coordinate in one dimension.
+    /// This is used for first-viewer/last-viewer chest state transitions.
+    pub fn viewer_count(&self, dimension: u8, x: i32, y: i32, z: i32) -> usize {
+        self.sessions
+            .iter()
+            .filter(|session| {
+                session.dimension == dimension && session.x == x && session.y == y && session.z == z
+            })
+            .count()
     }
 
     pub fn close_all_for_player(&mut self, player_id: PlayerId) {
@@ -489,9 +539,61 @@ mod tests {
         let mut manager = ContainerSessionManager::new();
         manager.open(1, 0, 10, 64, 20);
         manager.open(2, 0, 10, 64, 20);
-        let affected = manager.close_by_block(10, 64, 20);
+        let affected = manager.close_by_block(0, 10, 64, 20);
         assert_eq!(affected.len(), 2);
+        assert!(affected.iter().all(|session| session.dimension == 0));
         assert!(manager.find_by_player(1).is_none());
+        assert!(manager.find_by_player(2).is_none());
+    }
+
+    #[test]
+    fn container_session_close_by_block_is_dimension_scoped_and_exact() {
+        let mut manager = ContainerSessionManager::new();
+        manager.open(1, 0, 10, 64, 20);
+        manager.open(2, 1, 10, 64, 20);
+        let affected = manager.close_by_block(0, 10, 64, 20);
+        assert_eq!(affected.len(), 1);
+        assert_eq!(affected[0].player_id, 1);
+        assert!(manager.find_by_player(1).is_none());
+        assert!(manager.find_by_player(2).is_some());
+
+        assert!(manager.close_exact(2, 0, 10, 64, 20).is_none());
+        assert!(manager.close_exact(2, 1, 10, 64, 20).is_some());
+        assert!(manager.find_by_player(2).is_none());
+    }
+
+    #[test]
+    fn container_session_close_by_block_does_not_close_adjacent_non_partner() {
+        let mut manager = ContainerSessionManager::new();
+        manager.open(1, 0, 10, 64, 20);
+        manager.open(2, 0, 11, 64, 20);
+
+        let affected = manager.close_by_block(0, 10, 64, 20);
+        assert_eq!(
+            affected
+                .iter()
+                .map(|session| session.player_id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(manager.find_by_player(1).is_none());
+        assert!(manager.find_by_player(2).is_some());
+    }
+
+    #[test]
+    fn container_session_double_chest_partner_requires_explicit_exact_close() {
+        let mut manager = ContainerSessionManager::new();
+        manager.open(1, 0, 10, 64, 20);
+        manager.open(2, 0, 11, 64, 20);
+
+        let primary = manager.close_by_block(0, 10, 64, 20);
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].player_id, 1);
+        assert!(manager.find_by_player(2).is_some());
+
+        let partner = manager.close_by_block(0, 11, 64, 20);
+        assert_eq!(partner.len(), 1);
+        assert_eq!(partner[0].player_id, 2);
         assert!(manager.find_by_player(2).is_none());
     }
 

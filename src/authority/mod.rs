@@ -411,7 +411,7 @@ impl AuthorityCore {
             session.gameplay.shield_active = false;
         }
         self.with_world(dimension, |world| {
-            world.close_container_viewers(id);
+            world.close_container_viewers_forced(id);
             world.remove_passenger(id);
             if let Some(hook) = hook {
                 world.remove_authority_entity(hook);
@@ -586,7 +586,9 @@ impl AuthorityCore {
                 .map(|session| (session.id, session.position))
                 .collect();
             let world_snapshot = self.world.tick(&players);
-            mutations_by_dimension.insert(dimension, world_snapshot.mutations);
+            let mut world_mutations = world_snapshot.mutations;
+            world_mutations.extend(self.world.take_pending_mutations());
+            mutations_by_dimension.insert(dimension, world_mutations);
         }
 
         for mutation in std::mem::take(&mut self.pending_mutations) {
@@ -789,6 +791,8 @@ impl AuthorityCore {
                     .dispatch(&request, id, operator)
                     .map_err(|error| error.reason())
             });
+        self.pending_mutations
+            .extend(self.world.take_pending_mutations());
         let response = match result {
             Ok(mutation) => {
                 if let Some(mutation) = mutation {
@@ -1512,6 +1516,20 @@ impl AuthorityCore {
     /// Drain request mutations without advancing the simulation clock.
     pub fn take_pending_mutations(&mut self) -> Vec<WorldMutation> {
         std::mem::take(&mut self.pending_mutations)
+    }
+
+    /// Drain exact container invalidations emitted by all loaded dimensions.
+    /// The runtime consumes these after the fixed tick so a block break can
+    /// close only the viewers that were actually registered on that block.
+    pub fn take_container_closures(&mut self) -> Vec<crate::server_world::ContainerClosure> {
+        let dimensions = self.dimensions();
+        let mut closures = Vec::new();
+        for dimension in dimensions {
+            if let Some(world) = self.world_mut(dimension) {
+                closures.extend(world.take_container_closures());
+            }
+        }
+        closures
     }
 }
 

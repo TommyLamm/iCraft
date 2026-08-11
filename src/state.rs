@@ -4850,6 +4850,19 @@ impl NetworkHandle {
                             slots,
                             revision,
                         },
+                        crate::network::client::ClientToGame::ContainerClose {
+                            id,
+                            dimension,
+                            x,
+                            y,
+                            z,
+                        } => NetworkInbound::ContainerClose {
+                            id,
+                            dimension,
+                            x,
+                            y,
+                            z,
+                        },
                         crate::network::client::ClientToGame::ContainerClickResult {
                             dimension,
                             success,
@@ -7755,6 +7768,17 @@ impl State {
                 slot_index,
                 slot,
             }),
+            Event::ContainerClose {
+                target,
+                dimension,
+                position: (x, y, z),
+            } if target == session_id => Some(NetworkInbound::ContainerClose {
+                id: target,
+                dimension,
+                x,
+                y,
+                z,
+            }),
             Event::PlayerRespawnResult {
                 target,
                 position,
@@ -8026,6 +8050,15 @@ impl State {
                 continue;
             };
             let (x, y, z) = mutation.position;
+            let previous_block = self.chunk_manager.get_block(x, y, z);
+            let previous_state = self.chunk_manager.get_block_state(x, y, z);
+            self.play_chest_state_edge(
+                (x, y, z),
+                previous_block,
+                previous_state,
+                block,
+                mutation.state,
+            );
             if let Some(dirty) =
                 apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, mutation.state)
             {
@@ -8039,6 +8072,40 @@ impl State {
         if !dirty_chunks.is_empty() {
             self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Block);
         }
+    }
+
+    fn play_chest_state_edge(
+        &self,
+        position: (i32, i32, i32),
+        previous_block: BlockType,
+        previous_state: u8,
+        block: BlockType,
+        state: u8,
+    ) {
+        if !matches!(previous_block, BlockType::Chest | BlockType::EndCityChest)
+            || !matches!(block, BlockType::Chest | BlockType::EndCityChest)
+        {
+            return;
+        }
+        let previous = crate::world::BlockState::decode(previous_state);
+        let next = crate::world::BlockState::decode(state);
+        if previous.is_open == next.is_open {
+            return;
+        }
+        // A double chest emits two block-state mutations. Pick the
+        // lexicographically first half so one edge produces one sound.
+        if let Some(partner) =
+            crate::block_entity::double_chest_partner(&self.chunk_manager, position)
+        {
+            if position > partner {
+                return;
+            }
+        }
+        self.audio_manager.play_sound(if next.is_open {
+            crate::audio::SoundId::ChestOpen
+        } else {
+            crate::audio::SoundId::ChestClose
+        });
     }
 
     pub fn submit_authority_request(
@@ -8828,6 +8895,7 @@ impl State {
                 self.is_chat_open = false;
                 self.chat_input.clear();
                 clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
+                self.force_close_inventory();
                 self.container_sessions.sessions.clear();
                 self.clear_replicated_entities();
                 self.client_session_projection = None;
@@ -9375,6 +9443,35 @@ impl State {
                     }
 
                     if valid {
+                        let had_viewer = self.legacy_chest_viewer_count(dimension, (x, y, z)) > 0;
+                        let replaced = self.container_sessions.close_by_player(id);
+                        for old in replaced {
+                            if old.dimension == dimension && old.x == x && old.y == y && old.z == z
+                            {
+                                continue;
+                            }
+                            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
+                                let _ = host_to_server.tracked_send(
+                                    crate::network::server::HostToServer::SendContainerClose {
+                                        to: old.player_id,
+                                        dimension: old.dimension,
+                                        x: old.x,
+                                        y: old.y,
+                                        z: old.z,
+                                    },
+                                );
+                            }
+                            let old_position = (old.x, old.y, old.z);
+                            if old.dimension == self.current_dimension as u8
+                                && matches!(
+                                    self.chunk_manager.get_block(old.x, old.y, old.z),
+                                    BlockType::Chest | BlockType::EndCityChest
+                                )
+                                && self.legacy_chest_viewer_count(old.dimension, old_position) == 0
+                            {
+                                self.set_local_chest_open_state(old_position, false);
+                            }
+                        }
                         if matches!(block, BlockType::Chest | BlockType::EndCityChest) {
                             crate::container_sessions::ContainerSessionManager::ensure_chest_loot_generated(
                                 &mut self.chunk_manager,
@@ -9385,6 +9482,11 @@ impl State {
                             );
                         }
                         self.container_sessions.open(id, dimension, x, y, z);
+                        if matches!(block, BlockType::Chest | BlockType::EndCityChest)
+                            && !had_viewer
+                        {
+                            self.set_local_chest_open_state((x, y, z), true);
+                        }
                         if let Some(session) = self.container_sessions.find_by_player_mut(id) {
                             session.revision = self
                                 .chunk_manager
@@ -9572,16 +9674,39 @@ impl State {
                 }
             }
             NetworkInbound::ContainerClose {
-                id: _,
-                dimension: _,
+                id,
+                dimension,
                 x,
                 y,
                 z,
             } => {
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    self.container_sessions.close_by_block(x, y, z);
+                    let closed = self.container_sessions.close_exact(id, dimension, x, y, z);
+                    if let Some(session) = closed {
+                        let block = self
+                            .chunk_manager
+                            .get_block(session.x, session.y, session.z);
+                        if session.dimension == self.current_dimension as u8
+                            && matches!(block, BlockType::Chest | BlockType::EndCityChest)
+                            && self.legacy_chest_viewer_count(
+                                session.dimension,
+                                (session.x, session.y, session.z),
+                            ) == 0
+                            && self.container_target != Some((session.x, session.y, session.z))
+                        {
+                            self.set_local_chest_open_state(
+                                (session.x, session.y, session.z),
+                                false,
+                            );
+                        }
+                    }
                 }
-                self.close_inventory();
+                if self.local_player_id == Some(id)
+                    && dimension == self.current_dimension as u8
+                    && self.container_target == Some((x, y, z))
+                {
+                    self.force_close_inventory();
+                }
             }
             NetworkInbound::ContainerOpenResult {
                 dimension,
@@ -9592,7 +9717,13 @@ impl State {
                 slots,
                 revision,
             } => {
-                if success && dimension == self.current_dimension as u8 {
+                if !success {
+                    if dimension == self.current_dimension as u8
+                        && self.container_target == Some((x, y, z))
+                    {
+                        self.force_close_inventory();
+                    }
+                } else if dimension == self.current_dimension as u8 {
                     let current_revision = self
                         .chunk_manager
                         .get_block_entity(x, y, z)
@@ -14529,6 +14660,7 @@ impl State {
             );
             return;
         }
+        self.play_chest_state_edge((x, y, z), prev, prev_state, block, state);
         let Some(mut dirty_chunks) =
             apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state)
         else {
@@ -14597,6 +14729,9 @@ impl State {
                 .insert((x, y, z), (revision, block_wire, state));
             return;
         }
+        let previous_block = self.chunk_manager.get_block(x, y, z);
+        let previous_state = self.chunk_manager.get_block_state(x, y, z);
+        self.play_chest_state_edge((x, y, z), previous_block, previous_state, block, state);
         let Some(dirty_chunks) =
             apply_synced_block_change(&mut self.chunk_manager, x, y, z, block, state)
         else {
@@ -14765,48 +14900,36 @@ impl State {
         }
         let old_state_raw = self.chunk_manager.get_block_state(wx, wy, wz);
         let old_state = crate::world::BlockState::decode(old_state_raw);
+        let chest_partner = if old_block == crate::world::BlockType::Chest
+            && old_state.chest_type != crate::world::ChestType::Single
+        {
+            self.double_chest_partner((wx, wy, wz), old_state.chest_type)
+        } else {
+            None
+        };
 
         // Chest-specific: extract inventory before the block is destroyed,
         // and handle double-chest partner revert.
         let _chest_inventory_dropped = false;
         if old_block == crate::world::BlockType::Chest {
             let _ = self.drop_chest_inventory((wx, wy, wz));
-            let affected = self.container_sessions.close_by_block(wx, wy, wz);
-            for pid in affected {
-                if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                    let _ = host_to_server.tracked_send(
-                        crate::network::server::HostToServer::SendContainerOpenResult {
-                            to: pid,
-                            dimension: self.current_dimension as u8,
-                            success: false,
-                            x: wx,
-                            y: wy,
-                            z: wz,
-                            slots: vec![],
-                            revision: 0,
-                        },
-                    );
-                }
-            }
-            if self.container_target == Some((wx, wy, wz)) {
-                self.close_inventory();
+            self.close_legacy_container_sessions_at((wx, wy, wz));
+            if let Some(partner) = chest_partner {
+                self.close_legacy_container_sessions_at(partner);
             }
             // If this was part of a double chest, revert the partner to single.
-            if old_state.chest_type != crate::world::ChestType::Single {
-                if let Some(partner) = self.double_chest_partner((wx, wy, wz), old_state.chest_type)
-                {
-                    let partner_raw = self
-                        .chunk_manager
-                        .get_block_state(partner.0, partner.1, partner.2);
-                    let mut partner_state = crate::world::BlockState::decode(partner_raw);
-                    partner_state.chest_type = crate::world::ChestType::Single;
-                    self.chunk_manager.set_block_state(
-                        partner.0,
-                        partner.1,
-                        partner.2,
-                        partner_state.encode(),
-                    );
-                }
+            if let Some(partner) = chest_partner {
+                let partner_raw = self
+                    .chunk_manager
+                    .get_block_state(partner.0, partner.1, partner.2);
+                let mut partner_state = crate::world::BlockState::decode(partner_raw);
+                partner_state.chest_type = crate::world::ChestType::Single;
+                self.chunk_manager.set_block_state(
+                    partner.0,
+                    partner.1,
+                    partner.2,
+                    partner_state.encode(),
+                );
             }
         }
 
@@ -17015,6 +17138,18 @@ impl State {
                     if !self.can_break_current_block(old_block) {
                         return;
                     }
+                    let chest_partner = if old_block == BlockType::Chest {
+                        let old_state = crate::world::BlockState::decode(
+                            self.chunk_manager.get_block_state(wx, wy, wz),
+                        );
+                        if old_state.chest_type != crate::world::ChestType::Single {
+                            self.double_chest_partner((wx, wy, wz), old_state.chest_type)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     // Inventory-bearing entities are authoritative state and
                     // must be drained before the block is removed.  The same
                     // path is used for every automation container.
@@ -17029,48 +17164,25 @@ impl State {
                             | BlockType::Dropper
                     ) {
                         self.drop_block_entity_inventory((wx, wy, wz));
-                        let affected = self.container_sessions.close_by_block(wx, wy, wz);
-                        for pid in affected {
-                            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                                let _ = host_to_server.tracked_send(
-                                    crate::network::server::HostToServer::SendContainerOpenResult {
-                                        to: pid,
-                                        dimension: self.current_dimension as u8,
-                                        success: false,
-                                        x: wx,
-                                        y: wy,
-                                        z: wz,
-                                        slots: vec![],
-                                        revision: 0,
-                                    },
-                                );
-                            }
-                        }
-                        if self.container_target == Some((wx, wy, wz)) {
-                            self.close_inventory();
+                        self.close_legacy_container_sessions_at((wx, wy, wz));
+                        if let Some(partner) = chest_partner {
+                            self.close_legacy_container_sessions_at(partner);
                         }
                     }
                     if old_block == crate::world::BlockType::Chest {
-                        let old_state_raw = self.chunk_manager.get_block_state(wx, wy, wz);
-                        let old_state = crate::world::BlockState::decode(old_state_raw);
                         // If part of a double chest, revert partner to single.
-                        if old_state.chest_type != crate::world::ChestType::Single {
-                            if let Some(partner) =
-                                self.double_chest_partner((wx, wy, wz), old_state.chest_type)
-                            {
-                                let partner_raw = self
-                                    .chunk_manager
-                                    .get_block_state(partner.0, partner.1, partner.2);
-                                let mut partner_state =
-                                    crate::world::BlockState::decode(partner_raw);
-                                partner_state.chest_type = crate::world::ChestType::Single;
-                                self.chunk_manager.set_block_state(
-                                    partner.0,
-                                    partner.1,
-                                    partner.2,
-                                    partner_state.encode(),
-                                );
-                            }
+                        if let Some(partner) = chest_partner {
+                            let partner_raw = self
+                                .chunk_manager
+                                .get_block_state(partner.0, partner.1, partner.2);
+                            let mut partner_state = crate::world::BlockState::decode(partner_raw);
+                            partner_state.chest_type = crate::world::ChestType::Single;
+                            self.chunk_manager.set_block_state(
+                                partner.0,
+                                partner.1,
+                                partner.2,
+                                partner_state.encode(),
+                            );
                         }
                     }
                     self.chunk_manager.set_block(wx, wy, wz, BlockType::Air);
@@ -18643,6 +18755,35 @@ impl State {
         self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, None);
         true
     }
+
+    /// Close legacy sessions at one exact container coordinate. Double-chest
+    /// callers must invoke this once for the broken half and once for the
+    /// verified partner; unrelated adjacent containers remain untouched.
+    fn close_legacy_container_sessions_at(&mut self, position: (i32, i32, i32)) {
+        let affected = self.container_sessions.close_by_block(
+            self.current_dimension as u8,
+            position.0,
+            position.1,
+            position.2,
+        );
+        for session in affected {
+            if let NetworkHandle::Host { host_to_server, .. } = &self.network {
+                let _ = host_to_server.tracked_send(
+                    crate::network::server::HostToServer::SendContainerClose {
+                        to: session.player_id,
+                        dimension: session.dimension,
+                        x: session.x,
+                        y: session.y,
+                        z: session.z,
+                    },
+                );
+            }
+        }
+        if self.container_target == Some(position) {
+            self.force_close_inventory();
+        }
+    }
+
     fn open_chest(&mut self, pos: (i32, i32, i32)) {
         if self.has_in_process_runtime() {
             // Authority-boundary callers must use project_authority_container
@@ -18697,7 +18838,77 @@ impl State {
             pos.2,
         );
         self.container_is_double = slot_count > 27;
+        self.set_local_chest_open_state(pos, true);
         self.open_inventory();
+    }
+
+    /// Count legacy viewers across both halves of a double chest. Runtime
+    /// authority paths track both halves directly; the older session manager
+    /// stores only the clicked coordinate, so first/last edges need this
+    /// pair-aware projection.
+    fn legacy_chest_viewer_count(&self, dimension: u8, position: (i32, i32, i32)) -> usize {
+        let mut count = self
+            .container_sessions
+            .viewer_count(dimension, position.0, position.1, position.2);
+        let block = self
+            .chunk_manager
+            .get_block(position.0, position.1, position.2);
+        if matches!(block, BlockType::Chest | BlockType::EndCityChest) {
+            if let Some(partner) =
+                crate::block_entity::double_chest_partner(&self.chunk_manager, position)
+            {
+                count += self
+                    .container_sessions
+                    .viewer_count(dimension, partner.0, partner.1, partner.2);
+            }
+        }
+        count
+    }
+
+    /// Legacy host/singleplayer presentation edge for chest feedback. Runtime
+    /// authority paths publish the same state through WorldMutation; this is
+    /// only used when no embedded runtime owns the world.
+    fn set_local_chest_open_state(&mut self, position: (i32, i32, i32), open: bool) {
+        let block = self
+            .chunk_manager
+            .get_block(position.0, position.1, position.2);
+        if !matches!(block, BlockType::Chest | BlockType::EndCityChest) {
+            return;
+        }
+        let current_state = self
+            .chunk_manager
+            .get_block_state(position.0, position.1, position.2);
+        let mut state = crate::world::BlockState::decode(current_state);
+        if state.is_open == open {
+            return;
+        }
+        state.is_open = open;
+        self.chunk_manager
+            .set_block_state(position.0, position.1, position.2, state.encode());
+        self.audio_manager.play_sound(if open {
+            crate::audio::SoundId::ChestOpen
+        } else {
+            crate::audio::SoundId::ChestClose
+        });
+        self.broadcast_block_change(position.0, position.1, position.2, block);
+        if let Some(partner) =
+            crate::block_entity::double_chest_partner(&self.chunk_manager, position)
+        {
+            let mut partner_state = crate::world::BlockState::decode(
+                self.chunk_manager
+                    .get_block_state(partner.0, partner.1, partner.2),
+            );
+            if partner_state.is_open != open {
+                partner_state.is_open = open;
+                self.chunk_manager.set_block_state(
+                    partner.0,
+                    partner.1,
+                    partner.2,
+                    partner_state.encode(),
+                );
+                self.broadcast_block_change(partner.0, partner.1, partner.2, block);
+            }
+        }
     }
 
     fn open_station(&mut self, kind: StationKind, position: Vec3) {
@@ -18937,6 +19148,41 @@ impl State {
         true
     }
 
+    /// Tear down a container UI after an authoritative invalidation.
+    ///
+    /// Unlike [`close_inventory`], this path must not submit a close request,
+    /// return a second copy of cursor/station items, or recurse into another
+    /// authority route.  The authoritative session/block-entity projection is
+    /// the only source of truth for any item conservation; this presentation
+    /// cleanup merely drops transient client-side UI state.
+    fn force_close_inventory(&mut self) {
+        self.inventory.dragged = None;
+        self.inventory.creative_drag_origin = None;
+        self.inventory.craft_input.fill(None);
+        self.inventory.craft_input = vec![None; 4];
+        self.inventory.craft_output = None;
+        self.enchanting.input = None;
+        self.enchanting.lapis = None;
+        self.brewing.bottles.fill(None);
+        self.brewing.ingredient = None;
+        self.anvil.left = None;
+        self.anvil.right = None;
+        self.anvil.output = None;
+        self.anvil.rename.clear();
+        if let Some(villager_id) = self.active_merchant_villager_id {
+            self.merchant_sessions
+                .close_sessions_for_villager(villager_id);
+        }
+        self.active_merchant_villager_id = None;
+        self.active_merchant_offers.clear();
+        self.inventory.is_open = false;
+        self.inventory.is_table_open = false;
+        self.active_station = None;
+        self.container_target = None;
+        self.container_is_double = false;
+        self.sync_cursor_mode();
+    }
+
     pub fn close_inventory(&mut self) -> bool {
         if self.has_in_process_runtime() {
             let accepted = if let Some(pos) = self.container_target {
@@ -18989,6 +19235,13 @@ impl State {
             self.active_station = None;
             self.sync_cursor_mode();
             return true;
+        }
+        if !matches!(self.role, MultiplayerRole::Client { .. }) {
+            if let Some(position) = self.container_target {
+                if self.legacy_chest_viewer_count(self.current_dimension as u8, position) == 0 {
+                    self.set_local_chest_open_state(position, false);
+                }
+            }
         }
         if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
             if let Some(pos) = self.container_target {

@@ -211,6 +211,21 @@ woken by container revision notifications rather than a world-wide per-tick scan
 
 `BlockState` encodes facing (2 bits), is_top (1), is_right_hinge (1), is_open (1), and chest_type (2 bits: Single/Left/Right) in a single byte. Bit 7 is reserved. For Farmland and Crops (Wheat, Carrot, Potato), state byte `u8` stores moisture level (0..7) and crop growth age (0..7) in bits `0..2`.
 
+Plan26 completes the container lifecycle seam without changing protocol v16:
+`ContainerSessionManager::close_by_block` is dimension-scoped and
+`close_exact` is player/position-scoped; `ServerWorld` emits closure intents for
+block replacement and `ServerRuntime` routes targeted `ContainerClose` packets
+for distance/invalid-dimension rejection, interest departure, transfer, logout,
+and disconnect. `NetworkClient` accepts a forced close only when its active
+`(dimension, x, y, z)` key matches and bypasses the normal container revision
+gate. `State::force_close_inventory` is an idempotent transient-UI cleanup path
+that never submits another close or returns/drops a cursor item. First/last
+viewers toggle both halves of a double chest through `is_open`; the renderer
+uses deterministic binary chest geometry and `audio.rs` emits one deterministic
+ChestOpen/ChestClose edge fallback. The v16 packet has no epoch/reason/cursor,
+so same-key stale-close disambiguation remains a v17 follow-up; smooth lid,
+GPU/audio-device, and Host+Join visual evidence remain outside headless claims.
+
 `src/voxel_shape.rs` defines `VoxelShape` (holding up to 8 AABBs without heap allocation) to provide unified `block_collision_shape`, `block_selection_shape`, and `block_occlusion_shape`. Player physics (`physics.rs`) iterates over all constituent AABBs for movement collision and ladder climbing. DDA raycasting (`interaction.rs`) queries `block_selection_shape.ray_intersects` at each voxel step. Non-full blocks (Slabs, Stairs, Fences, Fence Gates, Walls, Panes, Ladders, Signs) bypass greedy meshing via `is_greedy_cube` and generate faces via `src/block_model.rs` (`append_custom_block_mesh`).
 
 `SignBlockEntity` in `src/block_entity.rs` provides text storage (4 lines of up to 15 UTF-8 characters) with full save persistence and backward compatibility.
@@ -282,7 +297,7 @@ Container operations (open/click/close) use host-authoritative transactions with
 `RaidManager` (`src/village/raid.rs`) tracks active village raids, wave progression (Pillager/Ravager counts), Bad Omen triggers, and raid victory/defeat states.
 `Villager` entities execute profession claiming, food harvest, restocking, bed sleeping, breeding, and level progression based on trade XP.
 The host validates reach distance (<= 8.0 blocks), dimension, top-block solid obstruction, and container block presence before committing slot mutations.
-Rejected requests return `success: false` without partial side effects. When a chest is broken, destroyed, or a player disconnects/switches dimensions, all associated sessions close automatically.
+Rejected requests return `success: false` without partial side effects. When a chest is broken, destroyed, too far away, leaves the interest set, or a player disconnects/switches dimensions, only the matching player/dimension/position sessions close automatically; a late close cannot tear down a different active key. Forced client cleanup is deliberately non-recursive and does not mint or duplicate cursor items.
 
 The host is the sole authority for world mutations. Remote break/place requests
 are validated against authenticated player state, reach, loaded chunks,
@@ -538,6 +553,20 @@ independent `WorldRules` setting. Tests cover strict fail-before-world config,
 server.properties save/reload, checksum/policy observability, and embedded vs
 dedicated parity. There is no autonomous spawn-table, vanilla damage, hunger,
 GPU, audio, or visual implementation claim in this plan.
+
+Plan26 adds the remaining container lifecycle and chest feedback contract. The
+pre-review baseline debug library suite passed 665 tests (3 ignored), the
+release library suite passed 666 (3 ignored), and the complete pre-review
+`cargo test --release` lanes passed, including the 797-test binary lane plus
+all server/integration/doc-test lanes. Review-fix narrow gates then passed
+`container_sessions` (9), chest/forced-viewer `server_world` tests (3),
+`server_runtime::tests` (14), `headless_server_authority` (1), and
+`runtime_topology_parity` (5); `cargo check --release`, `cargo fmt --all
+-- --check`, and `git diff --check` also passed. No direct `State`
+GPU-constructor unit test is claimed; client, runtime, server, and headless
+vectors cover the forced-close routing. Smooth lid interpolation, audio-device
+and Host+Join visual evidence, and v17 same-key close epoch/reason/cursor
+fields remain explicit follow-ups.
 
 Use:
 

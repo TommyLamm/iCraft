@@ -1309,6 +1309,19 @@ mod tests {
     }
 
     #[test]
+    fn container_close_roundtrip_keeps_v16_shape() {
+        let packet = Packet::ContainerClose {
+            protocol_version: v(),
+            dimension: 2,
+            x: -11,
+            y: 64,
+            z: 19,
+        };
+        assert_eq!(packet.protocol_version(), PROTOCOL_VERSION);
+        assert_eq!(Packet::decode(&packet.encode()).unwrap(), packet);
+    }
+
+    #[test]
     fn disconnect_roundtrip() {
         let p = Packet::Disconnect {
             protocol_version: v(),

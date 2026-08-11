@@ -168,6 +168,17 @@ pub enum ClientToGame {
         slots: Vec<Option<crate::network::protocol::ItemWire>>,
         revision: u64,
     },
+    /// Targeted server-side invalidation of the active container session.
+    /// This is deliberately separate from slot revision replication: a close
+    /// remains valid even when its wire revision is lower than the last slot
+    /// update.
+    ContainerClose {
+        id: PlayerId,
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
     ContainerClickResult {
         dimension: u8,
         success: bool,
@@ -757,11 +768,40 @@ async fn run_client(
                         let _ = client_to_game.send(ClientToGame::BlockActionResult { x, y, z, success, consumed_item, drops });
                     }
                     Ok(Packet::ContainerOpenResult { dimension, success, x, y, z, slots, revision, .. }) => {
-                        if replication_gate.accept_container_update((dimension, x, y, z), revision) {
+                        let key = (dimension, x, y, z);
+                        if !success {
+                            // A failed open is not a slot delta.  If it names
+                            // the active session, treat it as a forced close;
+                            // otherwise do not disturb a different container
+                            // that the player opened in the meantime.
+                            if active_container == Some(key) {
+                                active_container = None;
+                                let _ = client_to_game.send(ClientToGame::ContainerClose {
+                                    id: player_id,
+                                    dimension,
+                                    x,
+                                    y,
+                                    z,
+                                });
+                            }
+                        } else if replication_gate.accept_container_update(key, revision) {
                             current_dimension = dimension;
                             last_client_revision = last_client_revision.max(revision);
-                            active_container = success.then_some((dimension, x, y, z));
+                            active_container = Some(key);
                             let _ = client_to_game.send(ClientToGame::ContainerOpenResult { dimension, success, x, y, z, slots, revision });
+                        }
+                    }
+                    Ok(Packet::ContainerClose { dimension, x, y, z, .. }) => {
+                        let key = (dimension, x, y, z);
+                        if active_container == Some(key) {
+                            active_container = None;
+                            let _ = client_to_game.send(ClientToGame::ContainerClose {
+                                id: player_id,
+                                dimension,
+                                x,
+                                y,
+                                z,
+                            });
                         }
                     }
                     Ok(Packet::ContainerClickResult { dimension, success, slot_index, slot, dragged, .. }) => {
@@ -2319,6 +2359,103 @@ mod tests {
         assert!(gate.accept_block_entity((1, 2, 64, 3), 10));
         assert!(gate.accept_container_update((0, 8, 80, 8), 3));
         assert!(!gate.accept_container_update((0, 8, 80, 8), 2));
+    }
+
+    #[test]
+    fn targeted_container_close_bypasses_revision_gate_and_exact_matches_active_key() {
+        let _guard = network_test_guard();
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = mpsc::channel();
+        let (server_tx, server_rx) = mpsc::channel();
+        let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
+
+        let (game_tx, game_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let client = NetworkClient::spawn(addr, "container-close".into(), game_rx, event_tx);
+        let player_id = match wait_for_event(&event_rx) {
+            ClientToGame::Connected { player_id, .. } => player_id,
+            other => panic!("expected Connected, got {other:?}"),
+        };
+        let _ = server_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+
+        let position = (4, 64, 4);
+        host_tx
+            .send(HostToServer::SendContainerOpenResult {
+                to: player_id,
+                dimension: 0,
+                success: true,
+                x: position.0,
+                y: position.1,
+                z: position.2,
+                slots: vec![],
+                revision: 2,
+            })
+            .unwrap();
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::ContainerOpenResult {
+                success: true,
+                x,
+                y,
+                z,
+                ..
+            } if (x, y, z) == position
+        ));
+
+        // Advance the slot revision so a close with no revision field proves
+        // it is not accidentally sent through the container delta gate.
+        host_tx
+            .send(HostToServer::SendContainerSlotUpdate {
+                to: player_id,
+                dimension: 0,
+                revision: 100,
+                x: position.0,
+                y: position.1,
+                z: position.2,
+                slot_index: 0,
+                slot: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::ContainerSlotUpdate { revision: 100, .. }
+        ));
+
+        host_tx
+            .send(HostToServer::SendContainerClose {
+                to: player_id,
+                dimension: 0,
+                x: position.0 + 1,
+                y: position.1,
+                z: position.2,
+            })
+            .unwrap();
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_millis(250)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        host_tx
+            .send(HostToServer::SendContainerClose {
+                to: player_id,
+                dimension: 0,
+                x: position.0,
+                y: position.1,
+                z: position.2,
+            })
+            .unwrap();
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::ContainerClose { id, dimension: 0, x, y, z }
+                if id == player_id && (x, y, z) == position
+        ));
+
+        game_tx.send(GameToClient::Disconnect).unwrap();
+        client.join().unwrap();
+        host_tx.send(HostToServer::Stop).unwrap();
+        server.join().unwrap();
     }
 
     #[test]

@@ -640,6 +640,16 @@ pub enum HostToServer {
         slots: Vec<Option<crate::network::protocol::ItemWire>>,
         revision: u64,
     },
+    /// Targeted lifecycle invalidation.  It maps to the existing v16
+    /// `Packet::ContainerClose` wire shape and therefore does not require a
+    /// protocol-version bump.
+    SendContainerClose {
+        to: PlayerId,
+        dimension: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
     SendContainerClickResult {
         to: PlayerId,
         dimension: u8,
@@ -2751,6 +2761,22 @@ impl<S: HostEventSender> NetworkServer<S> {
                     z,
                     slots,
                     revision,
+                };
+                (packet, Some(to))
+            }
+            HostToServer::SendContainerClose {
+                to,
+                dimension,
+                x,
+                y,
+                z,
+            } => {
+                let packet = Packet::ContainerClose {
+                    protocol_version: PROTOCOL_VERSION,
+                    dimension,
+                    x,
+                    y,
+                    z,
                 };
                 (packet, Some(to))
             }

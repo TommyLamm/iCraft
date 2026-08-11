@@ -451,6 +451,65 @@ where
     let tile = atlas_tile_override.unwrap_or_else(|| block.get_face_tex_index(0));
 
     match block {
+        BlockType::Chest | BlockType::EndCityChest => {
+            let bs = BlockState::decode(state_raw);
+            append_box(
+                target_v,
+                target_i,
+                origin,
+                (
+                    [2.0 * SIXTEENTH, 0.0, 2.0 * SIXTEENTH],
+                    [14.0 * SIXTEENTH, 14.0 * SIXTEENTH, 14.0 * SIXTEENTH],
+                ),
+                sky_light,
+                block_light,
+                tile,
+                region_coord,
+            );
+            let lid_bounds = if !bs.is_open {
+                (
+                    [SIXTEENTH, 14.0 * SIXTEENTH, SIXTEENTH],
+                    [15.0 * SIXTEENTH, 1.0, 15.0 * SIXTEENTH],
+                )
+            } else {
+                match bs.facing {
+                    Direction::North => (
+                        [SIXTEENTH, 14.0 * SIXTEENTH, 0.0],
+                        [15.0 * SIXTEENTH, 1.0, 14.0 * SIXTEENTH],
+                    ),
+                    Direction::South => (
+                        [SIXTEENTH, 14.0 * SIXTEENTH, 2.0 * SIXTEENTH],
+                        [15.0 * SIXTEENTH, 1.0, 1.0],
+                    ),
+                    Direction::West => (
+                        [0.0, 14.0 * SIXTEENTH, SIXTEENTH],
+                        [14.0 * SIXTEENTH, 1.0, 15.0 * SIXTEENTH],
+                    ),
+                    Direction::East => (
+                        [2.0 * SIXTEENTH, 14.0 * SIXTEENTH, SIXTEENTH],
+                        [1.0, 1.0, 15.0 * SIXTEENTH],
+                    ),
+                    // Chests are horizontal containers; malformed vertical
+                    // facings use the stable closed-like North geometry.
+                    Direction::Up | Direction::Down => (
+                        [SIXTEENTH, 14.0 * SIXTEENTH, 0.0],
+                        [15.0 * SIXTEENTH, 1.0, 14.0 * SIXTEENTH],
+                    ),
+                }
+            };
+            append_box(
+                target_v,
+                target_i,
+                origin,
+                lid_bounds,
+                sky_light,
+                block_light,
+                tile,
+                region_coord,
+            );
+            true
+        }
+
         BlockType::OakSlab | BlockType::CobblestoneSlab => {
             let bs = BlockState::decode(state_raw);
             let (min_y, max_y) = if bs.is_top { (0.5, 1.0) } else { (0.0, 0.5) };
@@ -1000,6 +1059,46 @@ mod tests {
         ));
         assert_eq!(opaque_vertices[0].atlas_tile, [15, 14]);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn chest_mesh_has_distinct_binary_open_and_closed_geometry() {
+        let mut closed_vertices = Vec::new();
+        let mut closed_indices = Vec::new();
+        let mut open_vertices = Vec::new();
+        let mut open_indices = Vec::new();
+        let closed = BlockState::default().encode();
+        let mut opened = BlockState::default();
+        opened.is_open = true;
+        assert!(append_custom_block_mesh(
+            BlockType::Chest,
+            closed,
+            [0.0, 0.0, 0.0],
+            15,
+            0,
+            (0, 0),
+            &mut closed_vertices,
+            &mut closed_indices,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            |_, _, _| BlockType::Air,
+        ));
+        assert!(append_custom_block_mesh(
+            BlockType::Chest,
+            opened.encode(),
+            [0.0, 0.0, 0.0],
+            15,
+            0,
+            (0, 0),
+            &mut open_vertices,
+            &mut open_indices,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            |_, _, _| BlockType::Air,
+        ));
+        assert_eq!(closed_indices.len(), open_indices.len());
+        assert!(!closed_vertices.is_empty());
+        assert_ne!(closed_vertices, open_vertices);
     }
 
     #[test]

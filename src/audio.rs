@@ -39,6 +39,8 @@ pub enum SoundId {
     FurnaceLit,
     ShieldBlock,
     ShieldBreak,
+    ChestOpen,
+    ChestClose,
 }
 
 impl SoundId {
@@ -62,6 +64,8 @@ impl SoundId {
             SoundId::FurnaceLit => "furnace_lit.wav".to_string(),
             SoundId::ShieldBlock => "shield_block.wav".to_string(),
             SoundId::ShieldBreak => "shield_break.wav".to_string(),
+            SoundId::ChestOpen => "chest_open.wav".to_string(),
+            SoundId::ChestClose => "chest_close.wav".to_string(),
         }
     }
 
@@ -84,7 +88,9 @@ impl SoundId {
             | SoundId::FurnaceSmelt
             | SoundId::FurnaceLit
             | SoundId::ShieldBlock
-            | SoundId::ShieldBreak => "sound.block",
+            | SoundId::ShieldBreak
+            | SoundId::ChestOpen
+            | SoundId::ChestClose => "sound.block",
         }
     }
 }
@@ -321,6 +327,22 @@ fn synth_sound(sound_id: SoundId) -> Vec<f32> {
                 })
                 .collect()
         }
+        SoundId::ChestOpen | SoundId::ChestClose => {
+            let opening = matches!(sound_id, SoundId::ChestOpen);
+            let duration = if opening { 0.18 } else { 0.14 };
+            let len = (duration * sample_rate as f32) as usize;
+            let base = if opening { 240.0 } else { 320.0 };
+            let sweep = if opening { 180.0 } else { -140.0 };
+            (0..len)
+                .map(|i| {
+                    let t = i as f32 / sample_rate as f32;
+                    let env = (1.0 - t / duration).max(0.0).powi(2);
+                    let frequency = base + sweep * (t / duration);
+                    let tone = (2.0 * std::f32::consts::PI * frequency * t).sin();
+                    tone * env * 0.35
+                })
+                .collect()
+        }
         SoundId::Note(note) => {
             let duration = 0.35;
             let frequency = 440.0 * 2.0f32.powf((note as f32 - 12.0) / 12.0);
@@ -472,6 +494,8 @@ impl AudioManager {
             SoundId::Land(SoundMaterial::Snow),
             SoundId::Land(SoundMaterial::Ice),
             SoundId::Land(SoundMaterial::Glass),
+            SoundId::ChestOpen,
+            SoundId::ChestClose,
         ];
 
         let sound_ids = sound_ids.into_iter().chain((0..25).map(SoundId::Note));
@@ -711,6 +735,16 @@ mod tests {
         // Grass used to be heavily muffled and ~0.05 peak; ensure it is now
         // clearly audible alongside other block materials.
         assert!(peak > 0.08, "grass break peak was {peak}");
+    }
+
+    #[test]
+    fn chest_feedback_synthesis_is_deterministic_and_distinct() {
+        let open = synth_sound(SoundId::ChestOpen);
+        let close = synth_sound(SoundId::ChestClose);
+        assert!(!open.is_empty() && !close.is_empty());
+        assert_eq!(open, synth_sound(SoundId::ChestOpen));
+        assert_eq!(close, synth_sound(SoundId::ChestClose));
+        assert_ne!(open, close);
     }
 
     #[test]

@@ -2551,6 +2551,8 @@ fn is_greedy_cube(block: BlockType) -> bool {
                 | BlockType::OakLadder
                 | BlockType::OakSign
                 | BlockType::Hopper
+                | BlockType::Chest
+                | BlockType::EndCityChest
         )
 }
 
