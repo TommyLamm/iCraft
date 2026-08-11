@@ -56,7 +56,11 @@ layers are skipped with one deduplicated diagnostic, while the original first-va
 - [x] 新增 headless end-to-end 測試：新世界→工具→礦→熔爐→箱子→農場→床→死亡回收。
 - [x] 新增 progression 測試：結構→Nether→Fortress→End→Dragon→End City loot。
 - [x] 新增 social/automation 測試：村民交易→Hopper furnace→載具運輸。
-- [ ] 每條場景在 single、listen-server、dedicated+2 clients 三種拓撲跑同一 assertions。Plan 18 authority hand-off；singleplayer harness 已通過，兩個網路 topology 未宣稱通過。
+- [ ] 每條場景在 single、listen-server、dedicated+2 clients 三種拓撲跑同一 assertions。
+  Singleplayer 三場景已通過；Plan30 只證明 Listen/Dedicated 的 bounded TCP
+  authority domains（含 workstation、combat、reconnect），不能把整條 Foundation/
+  Progression/Social 場景標成網路 E2E；canonical block/automation ingress 仍由
+  Plan31、travel/completion 由 Plan32 補齊。
 - [x] 建人工 QA checklist：視覺、音效、輸入、無障礙、GPU 性能、保存／重啟。
 - [x] 更新 `README.md`、`ARCHITECTURE.md`、`plans/progress.md`，刪除／標記已過時舊計劃聲明。
 - [x] 產生已知差異表，按「基礎缺口」「內容差異」「明確不支援」分類，禁止用百分比自評替代。
@@ -73,7 +77,10 @@ layers are skipped with one deduplicated diagnostic, while the original first-va
 - [x] 惡意 zip path、壓縮炸彈、錯誤 manifest、缺依賴、循環依賴被安全拒絕；17 項 resource 自動測試覆蓋 traversal、size/count/ratio、ZIP64/truncation/CRC、manifest 與 dependency 邊界，且不落地解壓。
 - [x] 所有內建 translation key 在 en_us 有值；第二語言覆蓋率達計劃門檻。
 - [ ] subtitles、reduce flashing、UI scale、鍵盤導航有自動布局／狀態測試和人工證據。狀態/queue 自動測試通過；視覺人工證據待 QA。
-- [ ] 三條端到端場景與三種網路拓撲全部通過，保存後重啟再驗一次。
+- [ ] 三條端到端場景與三種網路拓撲全部通過，保存後重啟再驗一次。Plan30 的
+  TCP bounded domain evidence 不關閉此 gate；Listen/Dedicated Foundation/Social
+  仍受 Plan31 的 player-authored block/automation ingress、Progression 受 Plan32
+  的 travel/completion ingress 阻塞。
 - [ ] 固定視角 GPU／CPU 性能與記憶體不低於既有 performance artifact 的核准門檻。
 
 ## 完成閘門

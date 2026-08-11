@@ -90,18 +90,22 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 15 | [遊戲模式、規則、指令與世界建立](15_game_modes_world_rules_commands_and_creation.md) | 已完成（headless 通過；Host+Join GPU 實機待執行） |
 | 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已實作基礎；核心權威遷移缺口轉 18（headless dedicated/runtime 短跑通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
 | 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 已實作基礎；bounded visible consumer 與 locale layer 缺口轉 Plan29；真 E2E、Accessibility presentation、GPU、30 分鐘 soak、三拓撲實機仍待 |
-| 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | authority/network/persistence/management foundation、真 TCP 雙客戶端 harness、fault/metrics、三拓撲 vectors、dedicated 30 分鐘 headless soak 與 difficulty consumer 已通過；GPU Host+Join 仍待 |
-| 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow、selected-pack texture/sound/lang/model/font consumers 與 bounded visible consumer 基礎已通過；完整網路三場景、GPU/DPI/音效 artifact 與 soak 仍待完成 |
+| 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | authority/network/persistence/management foundation、真 TCP 雙客戶端 harness、fault/metrics、三拓撲 parity vectors、dedicated 30 分鐘 headless soak 與 difficulty consumer 已通過；完整玩家三場景 TCP E2E 由 Plan30/31/32 分流，GPU Host+Join 仍待 |
+| 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow、selected-pack texture/sound/lang/model/font consumers 與 bounded visible consumer 基礎已通過；Plan30 證明 bounded TCP domains，完整 Foundation/Social block/automation ingress 仍 Plan31、Progression travel/completion 仍 Plan32，GPU/DPI/音效 artifact 仍待 |
 | 20 | [Plan01–17 回歸硬化](20_plan01_17_regression_hardening.md) | 已完成；debug/release 結構 seed、Plan15 legacy metadata／備份與 `mob_griefing` consumer 語義均有回歸測試 |
-| 21 | [多維度權威拓撲與 Plan18 既有缺口](21_multidimension_authority_topology_followup.md) | Phase A 多維度 headless authority、session routing、interest/persistence foundation、玩法域、三拓撲回歸與 reconnect/soak 自動證據已通過；listen State/C 的實機 GPU 驗收仍待後續 |
+| 21 | [多維度權威拓撲與 Plan18 既有缺口](21_multidimension_authority_topology_followup.md) | Phase A 多維度 headless authority、session routing、interest/persistence foundation、玩法域、三拓撲回歸與 reconnect/soak 自動證據已通過；Plan30 補 bounded 真 TCP domains，dimension travel/full scenario 與 listen State/C GPU 驗收仍待後續 |
 | 22 | [Plan21 玩法權威域完成](22_authority_gameplay_domains_completion.md) | 已完成；fishing、workstation transaction、brew ready/take 與 combat/death/respawn headless authority vector 通過；GPU/transport/soak 不在本計劃 |
-| 23 | [State／Runtime 權威接線與三拓撲收斂](23_state_runtime_topology_completion.md) | 核心完成；Join Client typed egress、owner-private projection、listen + 2 clients headless gates 通過；station-specific progress 與 manual GPU/visual artifacts 仍後續；Plan24 已補完整 Plan22 三拓撲對照、metrics race、全套 regression 與 dedicated soak |
-| 24 | [三拓撲對照、Metrics 穩定化與最終自動驗收](24_topology_metrics_final_automation.md) | 已完成；三拓撲 authority gameplay parity、TCP metrics publication/rollback、debug/release/check、50x isolated release 與 dated 30 分鐘 dedicated headless soak 均有 artifact；GPU/window/audio/DPI/Host+Join visual 仍明確排除 |
+| 23 | [State／Runtime 權威接線與三拓撲收斂](23_state_runtime_topology_completion.md) | 核心完成；Join Client typed egress、owner-private projection、listen + 2 clients embedded parity gates 通過；Plan30 另補真 TCP bounded domains（含 workstation），dimension/full scenario 與 manual GPU/visual artifacts 仍後續；Plan24 已補 runtime parity、metrics race、全套 regression 與 dedicated soak |
+| 24 | [三拓撲對照、Metrics 穩定化與最終自動驗收](24_topology_metrics_final_automation.md) | 已完成；三拓撲 embedded authority parity、TCP metrics publication/rollback、debug/release/check、50x isolated release 與 dated 30 分鐘 dedicated headless soak 均有 artifact；Plan30 true TCP 僅關閉 bounded domain subset，GPU/window/audio/DPI/Host+Join visual 仍明確排除 |
 | 25 | [權威難度消費與持久化完成](25_authority_difficulty_completion.md) | 已完成 headless contract；四難度 strict parse、server.properties persistence、Peaceful hostile despawn、Easy/Normal/Hard chase consumer、pvp independence 與 embedded/dedicated parity 通過；完整 vanilla difficulty systems 與 GPU/manual evidence 明確排除 |
 | 26 | [容器生命週期強制關閉與箱子回饋](26_container_lifecycle_chest_feedback.md) | 已實作 v16 targeted forced-close；dimension/player/session 精確清理涵蓋超距離、非法維度、transfer、interest departure、break、logout/disconnect；雙箱 `is_open` 首末 viewer、deterministic binary mesh、ChestOpen/Close edge audio 與 client/runtime/headless tests 通過；State 直接 GPU ctor、smooth lid、audio-device、Host+Join visual、v17 epoch/reason/cursor 明確排除 |
 | 27 | [半磚 Waterlogging 權威閉環](27_slab_waterlogging_authority.md) | 已完成；OakSlab/CobblestoneSlab raw-fluid bit7、v3 save、FluidUse 原子 bucket、fixed-tick 跨 Chunk flow、v17 BlockChange/ChunkData 與 embedded/listen/dedicated headless projection 及 debug/release/check gates 通過；GPU/window/audio/DPI、完整原版 parity、30 分鐘 soak 明確不在本計劃 |
 | 28 | [權威 Dispenser／Dropper](28_authoritative_dispenser_dropper.md) | 已完成 headless/runtime 核心；紅石上升沿 deterministic action、loaded-front guard、Arrow/Potion/Bucket/Flint/普通掉物窄矩陣、Dropper merge/fallback、metadata/save/reload、全球 entity id 與 v17 EntityStateWire 及 TCP 雙客戶端／三拓撲 projection 通過；完整 vanilla 行為、cauldron/waterlogging、hopper rewrite、GPU/window/audio/manual visual 明確不在本計劃 |
 | 29 | [Locale layers 與 bounded visible labels](29_plan17_locale_visible_labels.md) | 已完成 bounded headless contract；selected EN/DE partial layers、invalid diagnostics、bounded menu/HUD/inventory/station/command consumers 與 EN/DE coverage 通過；GPU/window/audio/DPI、clean-checkout startup、三拓撲 E2E 仍不在本計劃 |
+| 30 | [真實 TCP 拓撲驗收矩陣](30_real_transport_acceptance_matrix.md) | 已完成 bounded evidence；Singleplayer embedded 與 Listen（local host+2 TCP remotes）/Dedicated（2 TCP clients）共用 domain assertions，含 fishing cast+cached duplicate、Furnace/Craft/Enchant/Anvil/Brew、combat/respawn、stale/out-of-order、owner-private projection、reconnect；reel 精確 `InvalidRevision` blocker 轉 Plan33，完整 Foundation/Social block/automation 轉 Plan31、Progression travel/completion 轉 Plan32 |
+| 31 | [權威方塊操作與採礦](31_authoritative_block_actions_mining.md) | 待執行；補 player-authored block placement/mining、progress/drop/XP 與真 TCP 三拓撲 assertions；Plan30 不實作 |
+| 32 | [進度旅行與完成閉環](32_progression_travel_completion.md) | 待執行；補 portal/dimension travel、progression completion、dragon/End City 真 ingress/egress；Plan30 不實作 |
+| 33 | [TCP 釣魚生命週期 revision](33_tcp_fishing_lifecycle_revision.md) | 待執行；修正最新 owner revision 下 cast→reel 的真 TCP lifecycle；Plan30 保留 reel `Rejected(InvalidRevision)` evidence，不繞過 anti-stale gate |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
@@ -199,10 +203,13 @@ consumer contract; manual presentation and topology evidence remain open.
 
 Plan23 核心接線已完成：Join Client 的 State inputs 走 typed
 `GameplayRequest`，embedded/socket 共用權威 projection，listen + 2 clients
-headless request/interest/owner-private session vector 通過。craft/enchant/anvil
-station-specific progress 與 GPU/visual artifacts 仍明確保留給後續 plan；Plan24
-已以相同 fixed-tick runtime lane 完成完整 Plan22 三拓撲對照、transport metrics
-publication/rollback、完整 debug/release/check 與 dated dedicated 30 分鐘 headless
+headless `RuntimeInput` parity request/interest/owner-private session vector
+通過。Plan30 再以真 TCP 覆蓋 bounded fishing cast/duplicate、Furnace/Craft/
+Enchant/Anvil/Brew、combat/respawn、stale/out-of-order、reconnect；reel
+lifecycle 轉 Plan33，完整 Foundation/Social block/automation ingress 轉 Plan31，
+Progression travel/completion 轉 Plan32。GPU/visual artifacts 仍明確保留給
+後續 plan；Plan24 已以相同 fixed-tick runtime lane 完成完整 Plan22 三拓撲
+parity、transport metrics publication/rollback、完整 debug/release/check 與 dated dedicated 30 分鐘 headless
 soak。Plan25 再將 server-owned difficulty 以 strict `ServerDifficulty` 接入既有
 hostile AI lane，並完成 `server.properties` save/reload、Peaceful despawn、
 Easy/Normal/Hard chase 與 pvp-independent authority parity。headless 結果不取代

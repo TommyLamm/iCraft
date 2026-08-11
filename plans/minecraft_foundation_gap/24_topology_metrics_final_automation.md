@@ -11,7 +11,10 @@
 ## A. Plan22 三拓撲 runtime vector
 
 - [x] 以同一 `ServerRuntime` scheduling/request/ACK/snapshot harness 在 Singleplayer、
-  ListenServer、Dedicated 執行 fishing、furnace/craft/enchant/brew/anvil、combat/death/respawn。
+  ListenServer、Dedicated 執行 fishing、furnace/craft/enchant/brew/anvil、combat/death/respawn；
+  這是三 topology 的 embedded `RuntimeInput` parity fixture，不是玩家 TCP E2E。
+  Plan30 另以真 `NetworkClient` TCP 驗證 bounded domains，完整 Foundation/Progression/
+  Social rows 仍保留 Plan31/32 blockers。
 - [x] accepted/rejected、duplicate/out-of-order/stale 的 outcome、session inventory/health/revision、
   world/entity/container delta 在三拓撲一致；fixture 可建立初始 world/session，但不得 direct core
   mutation 代替被驗證的 request/tick/result。
@@ -54,6 +57,10 @@
   respawn health/velocity reset、stale/out-of-order rejection、dimension
   transfer 與 named-session reconnect。owner-private `PlayerSessionUpdate` 與
   workstation rich metadata assertions 均在每個 topology 執行。
+  這個 vector 以 embedded `RuntimeInput` 驅動三種 runtime topology；真 TCP
+  bounded domain assertions（含 Craft/Enchant/Anvil、reconnect 與 reel
+  `InvalidRevision` evidence）另見 Plan30，不能將 Plan24 parity fixture 稱為
+  完整三場景玩家 E2E。
 - `cargo test --lib network::server::tests`：35 passed；其中 outbound reservation
   fault-injection test 先觀察成功 reservation，再確認 write failure rollback。
   生產 writer/connection send path 均經 `send_with_outbound_metrics`，沒有以

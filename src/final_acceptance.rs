@@ -1,9 +1,10 @@
 //! Headless acceptance harness for Plan 17.
 //!
 //! The harness intentionally exercises the deterministic simulation seams that
-//! are available without a GPU or a live network socket.  Dedicated/listen
-//! topology rows are represented as blocked hand-off rows until Plan 18
-//! unifies authority; they are never reported as passing by assumption.
+//! are available without a GPU or a live network socket. Dedicated/listen
+//! rows remain scenario-specific blocked rows unless a true TCP player vector
+//! proves the whole scenario; Plan30's bounded domain vector is not a blanket
+//! network E2E claim.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AcceptanceScenario {
@@ -76,9 +77,7 @@ pub fn run_headless(
             scenario,
             topology,
             assertions: Vec::new(),
-            blocked_reason: Some(
-                "Plan 18 authority unification required before listen/dedicated topology acceptance",
-            ),
+            blocked_reason: Some(network_block_reason(scenario)),
         };
     }
 
@@ -92,6 +91,20 @@ pub fn run_headless(
         topology,
         assertions,
         blocked_reason: None,
+    }
+}
+
+const fn network_block_reason(scenario: AcceptanceScenario) -> &'static str {
+    match scenario {
+        AcceptanceScenario::Foundation => {
+            "Plan30 TCP domain subset passes, but canonical block-action/mining ingress is missing (Plan31)"
+        }
+        AcceptanceScenario::Progression => {
+            "Plan30 TCP domain subset passes, but player travel/completion ingress is missing (Plan32)"
+        }
+        AcceptanceScenario::SocialAutomation => {
+            "Plan30 TCP domain subset passes, but player-authored block/automation ingress is missing (Plan31)"
+        }
     }
 }
 
@@ -822,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn network_rows_are_explicitly_handed_to_plan18() {
+    fn network_rows_keep_scenario_specific_blockers() {
         for scenario in AcceptanceScenario::ALL {
             for topology in [
                 AcceptanceTopology::ListenServer,
@@ -830,7 +843,12 @@ mod tests {
             ] {
                 let report = run_headless(scenario, topology);
                 assert!(!report.passed());
-                assert!(report.blocked_reason.is_some());
+                let reason = report.blocked_reason.expect("network blocker");
+                assert!(reason.contains(match scenario {
+                    AcceptanceScenario::Foundation => "Plan31",
+                    AcceptanceScenario::Progression => "Plan32",
+                    AcceptanceScenario::SocialAutomation => "Plan31",
+                }));
             }
         }
     }

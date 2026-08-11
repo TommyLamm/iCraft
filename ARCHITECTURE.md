@@ -519,20 +519,25 @@ outside the headless test environment.
 Plan 17/19 adds `final_acceptance.rs`, a deterministic headless harness for real
 foundation, progression, and social/automation workflows, including inventory,
 block-entity and save/reload assertions. Singleplayer runs in CI. A separate
-Plan18 harness now runs a real dedicated authority with two TCP clients for
-block/container/revision/interest/reconnect coverage; the complete three-scenario
-listen/dedicated rows remain explicit Plan18 hand-offs. Resource
+Plan18 harness runs a real dedicated authority with two TCP clients for
+block/container/revision/interest/reconnect coverage. Plan30 extends that
+transport evidence to a bounded gameplay-domain vector; the complete
+three-scenario listen/dedicated rows remain blocked by the player-authored
+ingress gaps tracked in Plan31/32. Resource
 packs, localization, subtitles, reduced motion, and keyboard-focus behavior
 have unit coverage. Plan29 additionally covers partial EN/DE locale layers and a
 bounded `VISIBLE_REQUIRED_KEYS` contract for stable menu/HUD/inventory/station/
 command labels; parser/debug/raw-input literals remain explicit non-goals. Visual
-4:3/16:9/21:9/high-DPI, audio-device,
-GPU-performance, 30-minute soak, and three-topology acceptance still require
-the manual steps in `plans/minecraft_foundation_gap/17_qa_checklist.md`.
+4:3/16:9/21:9/high-DPI, audio-device, GPU-performance, and manual Host+Join
+presentation still require the steps in
+`plans/minecraft_foundation_gap/17_qa_checklist.md`; Plan24 closes the automated
+runtime parity/soak lanes and Plan30 supplies bounded true-TCP evidence, not a
+blanket three-scenario E2E claim.
 Plan21 Phase A additionally keeps simultaneous dimension worlds and per-session
 interest/revision routing isolated in headless tests, with persistence and
-topology/reconnect regression coverage. Its fishing/furnace and listen-State
-follow-up phases remain unchecked.
+ topology/reconnect regression coverage. Plan30 now verifies the reachable TCP
+ fishing/workstation/combat subset; fishing reel lifecycle remains Plan33 and
+ player travel remains Plan32.
 Plan22 adds `tests/authority_gameplay_domains.rs`, a dedicated headless vector
 for fishing fixed-tick cast/bite/reel idempotency, furnace/craft/enchant/anvil
 transactions, explicit brew-ready take and reconnect cleanup, and combat
@@ -544,17 +549,23 @@ inputs: each mutating input emits one typed `GameplayRequest`, while embedded
 and socket roots share the ACK/session/world/entity/container projection lane.
 Session snapshots are gated by dimension, sequence, and revision; a dimension
 transfer clears presentation caches before ordered ChunkData/entity deltas
-repopulate them. The listen + two-client headless vector verifies request
-delivery, interest isolation, duplicate/stale rejection, and owner-private
-session payloads. Station-specific craft/enchant/anvil progress projection and
-GPU/window artifacts remain explicit follow-up boundaries; Plan24 records the
-automated topology, transport-metrics, and dedicated-headless-soak closures.
+repopulate them. The listen + two-client headless vector is an embedded
+`RuntimeInput` parity fixture for request delivery, interest isolation,
+duplicate/stale rejection, and owner-private session payloads. Plan30 separately
+verifies these bounded domains through true TCP, including station transactions
+and reconnect; full-scenario and GPU/window artifacts remain explicit follow-up
+boundaries. Plan24 records the automated topology, transport-metrics, and
+dedicated-headless-soak closures.
 
 Plan24 closes the automated portions of those follow-ups. The shared
-`ServerRuntime` fixed-tick/request/ACK/snapshot vector now runs the fishing,
+`ServerRuntime` fixed-tick/request/ACK/snapshot vector runs the fishing,
 workstation, brew, combat/death/respawn, stale/duplicate, dimension-transfer,
-and reconnect cases in Singleplayer, ListenServer, and Dedicated topologies;
-owner-private session projections carry the workstation results and metadata.
+and reconnect cases in Singleplayer, ListenServer, and Dedicated *embedded*
+topology modes; owner-private session projections carry the workstation results
+and metadata. Plan30 adds the same assertions through true TCP for the bounded
+domain subset (including Craft/Enchant/Anvil), while full Foundation/Progression/
+Social acceptance remains blocked by Plan31/32 and fishing reel lifecycle by
+Plan33.
 Outbound network counters reserve publication before a frame write and roll
 back on write failure, with all production writer paths using the same guard;
 the TCP metrics test passed 50 isolated release runs. Debug/release suites and
@@ -637,8 +648,9 @@ pack/controls/delete labels, save/connection/death/pause HUD, inventory/stations
 and command prefix/status templates. Unit coverage exercises partial layers,
 invalid diagnostics, selected-pack sentinels, EN/DE key coverage, and language
 switch formatting. This is headless evidence only; GPU/window/audio/DPI, clean
-checkout startup, visual artifacts, and three-topology E2E remain Plan17/19 or QA
-gates. Final serial debug and release suites each pass 1,532 tests (688 library,
+checkout startup, visual artifacts, and full three-scenario topology E2E remain
+Plan17/19 plus Plan31/32; Plan30 supplies only bounded true-TCP domain evidence.
+Final serial debug and release suites each pass 1,532 tests (688 library,
 819 client binary, 2 server binary, 23 integration, zero doc-tests) with six
 ignored tests; resource/localization/menu targeted lanes pass 18/10/30 and the
 state-only filter matches zero pure tests. `cargo check --all-targets`,

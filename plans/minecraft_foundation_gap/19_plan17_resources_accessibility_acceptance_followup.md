@@ -3,7 +3,7 @@
 ## 定位
 
 - 優先級：P3，Plan 17 follow-up
-- 前置條件：Plan 17 的基礎 resolver、locale catalog、Accessibility settings、singleplayer harness 已存在；Plan 18 僅是 A 項網路拓撲的前置條件
+- 前置條件：Plan 17 的基礎 resolver、locale catalog、Accessibility settings、singleplayer harness 已存在；Plan30 已補上 bounded 真 TCP authority domains，但完整場景仍受 Plan31/32 gameplay ingress 缺口限制
 - 後續解鎖：Plan 17 的真實完成閘門，以及整條 foundation-gap route 的最終驗收
 - 建議提交上限：3 個功能提交；文件與測試接線可併入對應功能提交
 - 本計劃只補 Plan 17 的可證明缺口，不擴張 vanilla 完整 pack format、Marketplace、shader override、mod loader 或內容目錄
@@ -46,8 +46,11 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
 ### 拓撲與保存
 
 - Singleplayer：A–C 三場景必須在同一 harness 中完成，並在 save→reload 後重跑關鍵 assertions。
-- Listen-server、dedicated + 2 clients：沿用相同 scenario/assertion 套件；該部分依賴 Plan 18
-  authority unification，Plan 19 不在 Plan 18 完成前宣稱通過。
+- Listen-server、dedicated + 2 clients：Plan30 已以真 TCP 驗證 bounded fishing cast、
+  workstation、combat/respawn、duplicate/stale、owner-private projection 與 reconnect；
+  不能把這個 subset 冒充三條完整 scenario。Foundation/Social 的 player-authored
+  block/automation ingress 仍 blocked by Plan31，Progression travel/completion 仍
+  blocked by Plan32，Plan19 不宣稱完整網路場景通過。
 - 報告應列出每個 step 的輸入、權威結果、保存結果與失敗原因；禁止只輸出 enum assertion 名稱。
 
 ## B. Resource-pack consumers、locale 與安全邊界
@@ -144,8 +147,10 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
   tests 全通過，並附 4:3、16:9、21:9、DPI 的人工 artifact。
 - [ ] QA checklist 每項有日期、平台、操作步驟與 log／screenshot／performance artifact；未完成項保留
   `[ ]` 並標明 blocker。
-- [ ] Listen-server 與 dedicated+2 clients 三場景只有在 Plan 18 authority unification 完成後才可
-  由同一 assertion suite 宣稱通過；在此之前標記 `blocked by Plan 18`。
+- [ ] Listen-server 與 dedicated+2 clients 三場景只有在真 TCP assertion suite
+  覆蓋每個玩家 authored gameplay ingress 後才可宣稱通過；Plan30 的 bounded
+  domain evidence 已通過，但 Foundation/Social 缺 Plan31 block/automation ingress，
+  Progression 缺 Plan32 travel/completion ingress，因此保留 per-scenario blocked。
 - [x] `cargo fmt --all -- --check`、`cargo test --release`、`cargo check --release`、
   `git diff --check` 及 Plan 17/19 targeted tests 通過。
 
@@ -153,7 +158,7 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
 
 - Plan 19 A 的 singleplayer harness、B 的 resource/locale consumers 與 C 的 Accessibility/layout
   可立即並行，彼此以 logical asset、settings 與 simulation test contract 對接。
-- Plan 19 A 的 listen-server／dedicated+2 clients execution 依賴 Plan 18 authority unification；
-  在 Plan 18 完成前只能建立 adapter、scenario vectors 與 blocked report，不可修改或複製其權威
-  遷移實作。
+- Plan 19 A 的 listen-server／dedicated+2 clients 完整 scenario execution 仍需 Plan31/32
+  的 player-authored ingress；Plan30 提供可重用 TCP driver 與 bounded domain vector，
+  本計劃只引用其 evidence，不修改或複製 authority migration。
 - B/C 不應等待 Plan 18；若需要跨域 authority 行為，只記錄 hand-off，不擴大 Plan 19 範圍。
