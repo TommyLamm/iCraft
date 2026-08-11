@@ -713,6 +713,127 @@ impl ServerWorld {
         }))
     }
 
+    /// Apply one already-authorized placement. The caller owns the inventory
+    /// transaction; this method only validates loaded support and publishes a
+    /// revision-bearing world mutation.
+    pub fn apply_block_place(
+        &mut self,
+        position: (i32, i32, i32),
+        face: [i8; 3],
+        block: BlockType,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        if face.iter().any(|component| !matches!(*component, -1..=1))
+            || face
+                .iter()
+                .map(|component| i16::from(*component).abs())
+                .sum::<i16>()
+                != 1
+            || block == BlockType::Air
+        {
+            return Err(RejectReason::InvalidState);
+        }
+        let (x, y, z) = position;
+        if !self.valid_coordinate(x, y, z) {
+            return Err(RejectReason::InvalidCoordinate);
+        }
+        let Some(existing) = self.chunks.get_loaded_block(x, y, z) else {
+            return Err(RejectReason::InvalidState);
+        };
+        if existing != BlockType::Air {
+            return Err(RejectReason::InvalidState);
+        }
+        let support = (
+            x.saturating_sub(i32::from(face[0])),
+            y.saturating_sub(i32::from(face[1])),
+            z.saturating_sub(i32::from(face[2])),
+        );
+        if !self.valid_coordinate(support.0, support.1, support.2)
+            || !self.chunks.can_place_block_with_support(block, x, y, z)
+        {
+            return Err(RejectReason::InvalidState);
+        }
+        self.set_block(x, y, z, block, 0)
+            .map_err(|error| error.reason())
+    }
+
+    /// Verify the authenticated pose's sightline reaches exactly one loaded
+    /// block. Missing chunks are never treated as transparent by the action
+    /// boundary; the target itself is checked before this helper is called.
+    pub fn has_block_line_of_sight(
+        &self,
+        position: [f32; 3],
+        look_milli: [i16; 3],
+        target: (i32, i32, i32),
+    ) -> bool {
+        let direction = Vec3::new(
+            f32::from(look_milli[0]),
+            f32::from(look_milli[1]),
+            f32::from(look_milli[2]),
+        )
+        .normalize_or_zero();
+        if direction == Vec3::ZERO {
+            return false;
+        }
+        let origin = Vec3::from_array(position) + Vec3::new(0.0, 1.62, 0.0);
+        let target_vec = Vec3::new(
+            target.0 as f32 + 0.5,
+            target.1 as f32 + 0.5,
+            target.2 as f32 + 0.5,
+        );
+        if origin.distance(target_vec) > 8.0 {
+            return false;
+        }
+        let Some(hit) = crate::interaction::raycast(
+            origin,
+            direction,
+            8.0,
+            &self.chunks,
+            crate::interaction::RaycastTargetPolicy::Break,
+        ) else {
+            return false;
+        };
+        (
+            hit.block_pos.x as i32,
+            hit.block_pos.y as i32,
+            hit.block_pos.z as i32,
+        ) == target
+    }
+
+    pub fn spawn_dropped_item(
+        &mut self,
+        entity_id: u64,
+        position: [f32; 3],
+        stack: crate::inventory::ItemStack,
+    ) -> bool {
+        if entity_id == 0 || self.entities.get_by_id(entity_id).is_some() || stack.count == 0 {
+            return false;
+        }
+        if !self.ensure_entity(entity_id, EntityType::DroppedItem, position, 0.0) {
+            return false;
+        }
+        let Some(entity) = self.entities.get_by_id_mut(entity_id) else {
+            return false;
+        };
+        entity.dropped_item = Some(stack.item);
+        entity.dropped_count = stack.count;
+        entity.dropped_stack = Some(stack);
+        true
+    }
+
+    pub fn spawn_experience_orb(&mut self, entity_id: u64, position: [f32; 3], value: u32) -> bool {
+        if entity_id == 0 || value == 0 || self.entities.get_by_id(entity_id).is_some() {
+            return false;
+        }
+        if !self.ensure_entity(entity_id, EntityType::ExperienceOrb, position, 0.0) {
+            return false;
+        }
+        let Some(entity) = self.entities.get_by_id_mut(entity_id) else {
+            return false;
+        };
+        entity.xp_value = value;
+        true
+    }
+
     /// Apply one authoritative water-bucket edge.  The world mutation is
     /// intentionally separate from the session inventory transaction: callers
     /// validate and prepare the exact hand slot first, then publish this
@@ -1079,6 +1200,14 @@ impl ServerWorld {
         operator: bool,
     ) -> Result<Option<WorldMutation>, WorldDispatchError> {
         match &request.operation {
+            GameplayOperation::BlockAction { action, .. } => {
+                // Block actions are session-scoped and may mutate inventory,
+                // progress, drops, and XP. AuthorityCore owns that transaction;
+                // never let the generic world dispatcher become a legacy
+                // mutation backdoor.
+                let _ = action;
+                Err(WorldDispatchError::new(RejectReason::Unsupported))
+            }
             GameplayOperation::BlockUse { x, y, z, block } => {
                 let block = BlockType::from_wire(*block)
                     .ok_or_else(|| WorldDispatchError::new(RejectReason::InvalidState))?;
@@ -1945,7 +2074,8 @@ impl ServerWorld {
 
 fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> {
     match operation {
-        GameplayOperation::BlockUse { x, y, z, .. }
+        GameplayOperation::BlockAction { x, y, z, .. }
+        | GameplayOperation::BlockUse { x, y, z, .. }
         | GameplayOperation::Sleep { x, y, z }
         | GameplayOperation::Container { x, y, z, .. }
         | GameplayOperation::ContainerClick { x, y, z, .. }

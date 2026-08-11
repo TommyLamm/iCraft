@@ -5539,6 +5539,13 @@ pub struct State {
     pub left_mouse_pressed: bool,
     pub mining_target: Option<glam::Vec3>,
     pub mining_progress: f32,
+    /// Held-stack identity latched with the typed StartBreak ingress. This
+    /// prevents a held-item change from re-starting the same target without a
+    /// single balancing CancelBreak request.
+    mining_held: Option<crate::network::protocol::SessionSlotWire>,
+    /// Suppresses duplicate CancelBreak traffic while the authoritative
+    /// projection is still in flight after release/target loss.
+    mining_cancel_sent: bool,
     crack_vertex_buffer: wgpu::Buffer,
     crack_index_buffer: wgpu::Buffer,
     pub player_state: PlayerState,
@@ -7357,6 +7364,8 @@ impl State {
             left_mouse_pressed: false,
             mining_target: None,
             mining_progress: 0.0,
+            mining_held: None,
+            mining_cancel_sent: false,
             crack_vertex_buffer,
             crack_index_buffer,
             player_state,
@@ -8027,6 +8036,22 @@ impl State {
             index += 1;
         }
         self.inventory.offhand = gameplay.inventory[index].and_then(Self::stack_from_session_slot);
+        if let Some(mining) = gameplay.mining {
+            if !self.mining_cancel_sent {
+                self.mining_target = Some(Vec3::new(
+                    mining.target[0] as f32,
+                    mining.target[1] as f32,
+                    mining.target[2] as f32,
+                ));
+                self.mining_progress = f32::from(mining.progress_milli) / 1000.0;
+                self.mining_held = mining.held;
+            }
+        } else {
+            self.mining_target = None;
+            self.mining_progress = 0.0;
+            self.mining_held = None;
+            self.mining_cancel_sent = false;
+        }
         self.mount_manager.dismount(0);
         if let Some(vehicle_id) = gameplay.mounted_entity {
             if let Some(vehicle) = self.entity_manager.get_by_id(vehicle_id) {
@@ -8306,6 +8331,99 @@ impl State {
                 z,
                 block: block.to_wire(),
             },
+        })
+    }
+
+    fn submit_local_authority_block_action(
+        &mut self,
+        action: crate::network::protocol::BlockActionKind,
+        x: i32,
+        y: i32,
+        z: i32,
+        face: [i8; 3],
+        block: BlockType,
+    ) -> Option<crate::network::protocol::GameplayResponse> {
+        if matches!(
+            action,
+            crate::network::protocol::BlockActionKind::CancelBreak
+        ) {
+            if self.mining_cancel_sent {
+                return None;
+            }
+            self.mining_cancel_sent = true;
+        } else if matches!(
+            action,
+            crate::network::protocol::BlockActionKind::StartBreak
+        ) {
+            self.mining_cancel_sent = false;
+        }
+        let look = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        )
+        .normalize_or_zero();
+        let look_milli = [
+            (look.x * 1_000.0).round() as i16,
+            (look.y * 1_000.0).round() as i16,
+            (look.z * 1_000.0).round() as i16,
+        ];
+        let hand = 0;
+        let held = self.inventory.hotbar[self.inventory.selected].map(|stack| {
+            let slot = crate::authority::contract::SessionInventorySlot::from_wire(
+                crate::network::protocol::ItemWire::from_stack(&stack),
+                stack.can_break,
+                stack.can_place_on,
+            );
+            crate::network::protocol::SessionSlotWire::from(slot)
+        });
+        self.submit_authority_request(crate::network::protocol::GameplayRequest {
+            request_id: 0,
+            client_sequence: 0,
+            session_id: 0,
+            dimension: self.current_dimension as u8,
+            client_revision: self
+                .embedded_runtime
+                .as_ref()
+                .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
+                .or_else(|| {
+                    self.client_session_projection
+                        .map(|(_, _, revision)| revision)
+                })
+                .unwrap_or_default(),
+            operation: crate::network::protocol::GameplayOperation::BlockAction {
+                action,
+                x,
+                y,
+                z,
+                face,
+                hand,
+                held: if matches!(
+                    action,
+                    crate::network::protocol::BlockActionKind::CancelBreak
+                ) {
+                    None
+                } else {
+                    held
+                },
+                block: if matches!(action, crate::network::protocol::BlockActionKind::Place) {
+                    block.to_wire()
+                } else {
+                    BlockType::Air.to_wire()
+                },
+                look_milli,
+            },
+        })
+    }
+
+    fn selected_mining_held(&self) -> Option<crate::network::protocol::SessionSlotWire> {
+        self.inventory.hotbar[self.inventory.selected].map(|stack| {
+            let slot = crate::authority::contract::SessionInventorySlot::from_wire(
+                crate::network::protocol::ItemWire::from_stack(&stack),
+                stack.can_break,
+                stack.can_place_on,
+            );
+            crate::network::protocol::SessionSlotWire::from(slot)
         })
     }
 
@@ -13724,6 +13842,7 @@ impl State {
             self.game_mode,
             self.camera_look_allowed(),
         ) {
+            let authority_mining = self.has_in_process_runtime() || !self.is_authoritative();
             let dir = Vec3::new(
                 self.camera.yaw.cos() * self.camera.pitch.cos(),
                 self.camera.pitch.sin(),
@@ -13744,34 +13863,104 @@ impl State {
                         .get_block(target.x as i32, target.y as i32, target.z as i32);
 
                 if self.can_break_current_block(block) {
-                    if self.mining_target != Some(target) {
+                    let held = self.selected_mining_held();
+                    let target_changed = self.mining_target != Some(target);
+                    let held_changed = self.mining_held != held;
+                    if target_changed || held_changed {
+                        if authority_mining {
+                            if let Some(previous) = self.mining_target {
+                                let _ = self.submit_local_authority_block_action(
+                                    crate::network::protocol::BlockActionKind::CancelBreak,
+                                    previous.x as i32,
+                                    previous.y as i32,
+                                    previous.z as i32,
+                                    [0, 0, 0],
+                                    BlockType::Air,
+                                );
+                            }
+                        }
                         self.mining_target = Some(target);
                         self.mining_progress = 0.0;
+                        self.mining_held = held;
+                        if authority_mining {
+                            let _ = self.submit_local_authority_block_action(
+                                crate::network::protocol::BlockActionKind::StartBreak,
+                                target.x as i32,
+                                target.y as i32,
+                                target.z as i32,
+                                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                                BlockType::Air,
+                            );
+                        }
                     }
-                    let mining_time = self.calculate_mining_time(block);
-                    if mining_time <= 0.0 {
-                        self.break_block(target);
-                        self.mining_target = None;
-                        self.mining_progress = 0.0;
-                    } else {
-                        self.mining_progress += dt / mining_time;
-                        if self.mining_progress >= 1.0 {
-                            let pos = target;
-                            self.break_block(pos);
+                    if !authority_mining {
+                        let mining_time = self.calculate_mining_time(block);
+                        if mining_time <= 0.0 {
+                            self.break_block(target);
                             self.mining_target = None;
+                            self.mining_held = None;
                             self.mining_progress = 0.0;
+                        } else {
+                            self.mining_progress += dt / mining_time;
+                            if self.mining_progress >= 1.0 {
+                                let pos = target;
+                                self.break_block(pos);
+                                self.mining_target = None;
+                                self.mining_held = None;
+                                self.mining_progress = 0.0;
+                            }
                         }
                     }
                 } else {
+                    if authority_mining {
+                        if let Some(previous) = self.mining_target {
+                            let _ = self.submit_local_authority_block_action(
+                                crate::network::protocol::BlockActionKind::CancelBreak,
+                                previous.x as i32,
+                                previous.y as i32,
+                                previous.z as i32,
+                                [0, 0, 0],
+                                BlockType::Air,
+                            );
+                        }
+                    }
                     self.mining_target = None;
+                    self.mining_held = None;
                     self.mining_progress = 0.0;
                 }
             } else {
+                if authority_mining {
+                    if let Some(previous) = self.mining_target {
+                        let _ = self.submit_local_authority_block_action(
+                            crate::network::protocol::BlockActionKind::CancelBreak,
+                            previous.x as i32,
+                            previous.y as i32,
+                            previous.z as i32,
+                            [0, 0, 0],
+                            BlockType::Air,
+                        );
+                    }
+                }
                 self.mining_target = None;
+                self.mining_held = None;
                 self.mining_progress = 0.0;
             }
         } else {
+            let authority_mining = self.has_in_process_runtime() || !self.is_authoritative();
+            if authority_mining {
+                if let Some(previous) = self.mining_target {
+                    let _ = self.submit_local_authority_block_action(
+                        crate::network::protocol::BlockActionKind::CancelBreak,
+                        previous.x as i32,
+                        previous.y as i32,
+                        previous.z as i32,
+                        [0, 0, 0],
+                        BlockType::Air,
+                    );
+                }
+            }
             self.mining_target = None;
+            self.mining_held = None;
             self.mining_progress = 0.0;
         }
 
@@ -15040,10 +15229,12 @@ impl State {
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
         if self.has_in_process_runtime() || !self.is_authoritative() {
-            let _ = self.submit_local_authority_block_use(
+            let _ = self.submit_local_authority_block_action(
+                crate::network::protocol::BlockActionKind::StartBreak,
                 pos.x as i32,
                 pos.y as i32,
                 pos.z as i32,
+                [0, 0, 0],
                 BlockType::Air,
             );
             return;
@@ -16617,19 +16808,31 @@ impl State {
                     }
                 }
                 if is_left_click {
-                    let _ = self.submit_local_authority_block_use(
+                    let _ = self.submit_local_authority_block_action(
+                        crate::network::protocol::BlockActionKind::StartBreak,
                         hit.block_pos.x as i32,
                         hit.block_pos.y as i32,
                         hit.block_pos.z as i32,
+                        [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
                         BlockType::Air,
                     );
+                    self.mining_target = Some(hit.block_pos);
+                    self.mining_progress = 0.0;
+                    self.mining_held = self.selected_mining_held();
                 } else if let Some(block) = self.inventory.get_selected_block() {
                     let target = hit.block_pos + hit.normal;
                     let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
                     if !self.can_place_block_at(x, y, z, block) {
                         return;
                     }
-                    let _ = self.submit_local_authority_block_use(x, y, z, block);
+                    let _ = self.submit_local_authority_block_action(
+                        crate::network::protocol::BlockActionKind::Place,
+                        x,
+                        y,
+                        z,
+                        [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                        block,
+                    );
                 }
             }
             return;
@@ -17792,12 +17995,17 @@ impl State {
             ) {
                 return;
             }
-            let _ = self.submit_local_authority_block_use(
+            let _ = self.submit_local_authority_block_action(
+                crate::network::protocol::BlockActionKind::StartBreak,
                 clicked.0,
                 clicked.1,
                 clicked.2,
+                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
                 BlockType::Air,
             );
+            self.mining_target = Some(hit.block_pos);
+            self.mining_progress = 0.0;
+            self.mining_held = self.selected_mining_held();
             self.network
                 .send_action(crate::network::protocol::Action::Break);
             return;
@@ -17866,20 +18074,30 @@ impl State {
         let target = hit.block_pos + hit.normal;
         let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
         let Some(block) = self.inventory.get_selected_block() else {
-            // Send a deterministic same-block request so the core returns an
-            // explicit domain rejection instead of allowing a local fallback.
-            let _ = self.submit_local_authority_block_use(
-                clicked.0,
-                clicked.1,
-                clicked.2,
-                clicked_block,
+            // Keep the ingress typed even when no placeable stack is held. The
+            // authority rejects this bounded request without touching the
+            // world; legacy BlockUse is not a mutation fallback.
+            let _ = self.submit_local_authority_block_action(
+                crate::network::protocol::BlockActionKind::Place,
+                x,
+                y,
+                z,
+                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                BlockType::Air,
             );
             return;
         };
         if !self.can_place_block_at(x, y, z, block) {
             return;
         }
-        let _ = self.submit_local_authority_block_use(x, y, z, block);
+        let _ = self.submit_local_authority_block_action(
+            crate::network::protocol::BlockActionKind::Place,
+            x,
+            y,
+            z,
+            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+            block,
+        );
         self.network
             .send_action(crate::network::protocol::Action::Place);
     }

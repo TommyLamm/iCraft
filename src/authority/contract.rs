@@ -6,8 +6,9 @@
 
 use crate::inventory::GameMode;
 use crate::network::protocol::{
-    GameplayOperation, GameplayRequest, GameplayResponse, ItemWire, PlayerId, RejectReason,
-    SessionBrewWire, SessionFishingHookWire, SessionGameplayWire, SessionSlotWire, SlotRefWire,
+    GameplayOperation, GameplayRequest, GameplayResponse, ItemWire, MiningProgressWire, PlayerId,
+    RejectReason, SessionBrewWire, SessionFishingHookWire, SessionGameplayWire, SessionSlotWire,
+    SlotRefWire,
 };
 use std::collections::VecDeque;
 
@@ -137,6 +138,53 @@ pub struct SessionBrewState {
     pub remaining_ticks: u16,
 }
 
+/// Authority-owned fixed-tick mining session. Progress is reset on logout or
+/// reconnect; only the final block/drop/XP mutation is durable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MiningProgressState {
+    pub dimension: u8,
+    pub target: [i32; 3],
+    pub progress_milli: u16,
+    pub hand: u8,
+    pub slot_index: u8,
+    pub held: Option<SessionSlotWire>,
+    pub block: u32,
+    pub state: u8,
+    pub look_milli: [i16; 3],
+}
+
+impl From<MiningProgressState> for MiningProgressWire {
+    fn from(state: MiningProgressState) -> Self {
+        Self {
+            dimension: state.dimension,
+            target: state.target,
+            progress_milli: state.progress_milli,
+            hand: state.hand,
+            slot_index: state.slot_index,
+            held: state.held,
+            block: state.block,
+            state: state.state,
+            look_milli: state.look_milli,
+        }
+    }
+}
+
+impl From<MiningProgressWire> for MiningProgressState {
+    fn from(state: MiningProgressWire) -> Self {
+        Self {
+            dimension: state.dimension,
+            target: state.target,
+            progress_milli: state.progress_milli,
+            hand: state.hand,
+            slot_index: state.slot_index,
+            held: state.held,
+            block: state.block,
+            state: state.state,
+            look_milli: state.look_milli,
+        }
+    }
+}
+
 /// Gameplay state that must not be duplicated in a renderer root.  Keep this
 /// compact and integer-based so snapshots remain deterministic and cheap to
 /// compare across Singleplayer, listen and dedicated topologies.
@@ -161,6 +209,7 @@ pub struct SessionGameplayState {
     pub enchant_seed: u64,
     pub fishing_hook: Option<SessionFishingHookState>,
     pub brew: Option<SessionBrewState>,
+    pub mining: Option<MiningProgressState>,
     pub revision: u64,
 }
 
@@ -186,6 +235,7 @@ impl Default for SessionGameplayState {
             enchant_seed: 0,
             fishing_hook: None,
             brew: None,
+            mining: None,
             revision: 0,
         }
     }
@@ -264,6 +314,7 @@ impl From<SessionGameplayState> for SessionGameplayWire {
             enchant_seed: state.enchant_seed,
             fishing_hook: state.fishing_hook.map(Into::into),
             brew: state.brew.map(Into::into),
+            mining: state.mining.map(Into::into),
             revision: state.revision,
         }
     }
@@ -302,6 +353,7 @@ impl From<SessionGameplayWire> for SessionGameplayState {
             enchant_seed: state.enchant_seed,
             fishing_hook: state.fishing_hook.map(Into::into),
             brew: state.brew.map(Into::into),
+            mining: state.mining.map(Into::into),
             revision: state.revision,
         }
     }

@@ -4,17 +4,19 @@ pub mod combat;
 pub mod contract;
 pub mod fishing;
 pub mod interest;
+pub mod mining;
 pub mod transactions;
 
 use crate::dimension::Dimension;
 use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::network::protocol::{
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, PlayerId, RejectReason,
+    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
+    PlayerId, RejectReason, SessionSlotWire,
 };
 use crate::server_world::ServerWorld;
 use contract::{
-    AuthoritySnapshot, AuthorityTopology, SessionContract, SessionGameplayState,
-    SessionGameplayUpdate, WorldMutation,
+    AuthoritySnapshot, AuthorityTopology, MiningProgressState, SessionContract,
+    SessionGameplayState, SessionGameplayUpdate, SessionInventorySlot, WorldMutation,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -407,6 +409,7 @@ impl AuthorityCore {
             // reservation is therefore the lossless logout/transition path.
             session.gameplay.fishing_hook = None;
             session.gameplay.brew = None;
+            session.gameplay.mining = None;
             session.gameplay.mounted_entity = None;
             session.gameplay.shield_active = false;
         }
@@ -579,6 +582,7 @@ impl AuthorityCore {
         for dimension in dimensions.iter().copied() {
             self.activate_dimension(dimension);
             self.tick_session_domains(dimension);
+            self.tick_mining(dimension);
             let players: Vec<(PlayerId, [f32; 3])> = self
                 .sessions
                 .values()
@@ -728,6 +732,227 @@ impl AuthorityCore {
         }
     }
 
+    fn tick_mining(&mut self, dimension: Dimension) {
+        let ids: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|session| session.dimension == dimension as u8)
+            .map(|session| session.id)
+            .collect();
+        for id in ids {
+            let Some((position, game_mode, progress)) = self
+                .sessions
+                .get(&id)
+                .map(|session| (session.position, session.game_mode, session.gameplay.mining))
+            else {
+                continue;
+            };
+            let Some(progress) = progress else {
+                continue;
+            };
+            if progress.dimension != dimension as u8 {
+                self.clear_mining_progress(id);
+                continue;
+            }
+            let target = (progress.target[0], progress.target[1], progress.target[2]);
+            let Some(block) = self
+                .world
+                .chunks
+                .get_loaded_block(target.0, target.1, target.2)
+            else {
+                self.clear_mining_progress(id);
+                continue;
+            };
+            let expected_block = crate::world::BlockType::from_wire(progress.block);
+            let expected_state = self.world.get_block_state(target.0, target.1, target.2);
+            if expected_block != Some(block) || expected_state != progress.state {
+                self.clear_mining_progress(id);
+                continue;
+            }
+            let eye = glam::Vec3::from_array(position) + glam::Vec3::new(0.0, 1.62, 0.0);
+            let target_center = glam::Vec3::new(
+                target.0 as f32 + 0.5,
+                target.1 as f32 + 0.5,
+                target.2 as f32 + 0.5,
+            );
+            if eye.distance(target_center) > 8.0 {
+                self.clear_mining_progress(id);
+                continue;
+            }
+            if block == crate::world::BlockType::Air
+                || !self
+                    .world
+                    .has_block_line_of_sight(position, progress.look_milli, target)
+            {
+                self.clear_mining_progress(id);
+                continue;
+            }
+            let selected_index = if progress.hand == 1 {
+                40
+            } else {
+                self.sessions
+                    .get(&id)
+                    .map_or(0, |session| session.gameplay.selected_hotbar_slot)
+            };
+            if selected_index != progress.slot_index {
+                self.clear_mining_progress(id);
+                continue;
+            }
+            let held_matches = self
+                .sessions
+                .get(&id)
+                .and_then(|session| session.gameplay.slot(selected_index).flatten())
+                == progress.held.map(SessionInventorySlot::from);
+            if !held_matches {
+                self.clear_mining_progress(id);
+                continue;
+            }
+            let held_stack = stack_from_slot(progress.held);
+            let policy = crate::game_rules::GameModePolicy::for_rules(game_mode, &self.world.rules);
+            if !policy.can_break_stack(held_stack.as_ref(), block) {
+                self.clear_mining_progress(id);
+                continue;
+            }
+            if game_mode == crate::inventory::GameMode::Creative {
+                let _ = self.commit_mining_break(id, dimension, target, held_stack, game_mode);
+                continue;
+            }
+            let duration =
+                crate::authority::mining::mining_time_seconds(block, held_stack.as_ref());
+            if !duration.is_finite() || duration <= 0.0 || duration == f32::MAX {
+                self.clear_mining_progress(id);
+                continue;
+            }
+            let step = ((1_000.0 / (duration * FIXED_TICK_HZ as f32)).ceil() as u16).max(1);
+            let next = progress.progress_milli.saturating_add(step);
+            if next >= 1_000 {
+                let _ = self.commit_mining_break(id, dimension, target, held_stack, game_mode);
+            } else if let Some(session) = self.sessions.get_mut(&id) {
+                if let Some(active) = session.gameplay.mining.as_mut() {
+                    active.progress_milli = next;
+                }
+                let revision = self.world.revisions.allocate();
+                session.gameplay.revision = revision;
+            }
+        }
+    }
+
+    fn clear_mining_progress(&mut self, id: PlayerId) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        if session.gameplay.mining.take().is_some() {
+            let revision = self.world.revisions.allocate();
+            session.gameplay.revision = revision;
+        }
+    }
+
+    fn commit_mining_break(
+        &mut self,
+        id: PlayerId,
+        dimension: Dimension,
+        target: (i32, i32, i32),
+        held_stack: Option<crate::inventory::ItemStack>,
+        game_mode: crate::inventory::GameMode,
+    ) -> bool {
+        let Some(session) = self.sessions.get(&id) else {
+            return false;
+        };
+        let Some(progress) = session.gameplay.mining else {
+            return false;
+        };
+        if session.dimension != dimension as u8 || progress.target != [target.0, target.1, target.2]
+        {
+            return false;
+        }
+        let Some(old_block) = self
+            .world
+            .chunks
+            .get_loaded_block(target.0, target.1, target.2)
+        else {
+            self.clear_mining_progress(id);
+            return false;
+        };
+        if old_block == crate::world::BlockType::Air
+            || crate::world::BlockType::from_wire(progress.block) != Some(old_block)
+            || self.world.get_block_state(target.0, target.1, target.2) != progress.state
+        {
+            self.clear_mining_progress(id);
+            return false;
+        }
+        let rewards = crate::authority::mining::calculate_block_break_rewards(
+            old_block,
+            self.world.get_block_state(target.0, target.1, target.2),
+            target,
+            held_stack.as_ref(),
+            game_mode,
+        );
+        // Preflight every session-side consequence on a copy. XP/level
+        // overflow or a stale durability slot must abort before any entity ID
+        // is claimed or world block is changed.
+        let mut next_gameplay = session.gameplay;
+        if !next_gameplay.grant_experience(rewards.xp) {
+            return false;
+        }
+        next_gameplay.mining = None;
+        if rewards.tool_damaged && game_mode != crate::inventory::GameMode::Creative {
+            let salt = (target.0 as u32)
+                ^ (target.1 as u32).rotate_left(11)
+                ^ (target.2 as u32).rotate_left(22);
+            if held_stack.as_ref().is_some_and(|stack| {
+                crate::enchantment::should_consume_durability(&stack.enchantments, salt)
+            }) {
+                let slot = usize::from(progress.slot_index);
+                let Some(Some(current)) = next_gameplay.inventory.get_mut(slot) else {
+                    return false;
+                };
+                if current.item.durability > 1 {
+                    current.item.durability -= 1;
+                } else {
+                    next_gameplay.inventory[slot] = None;
+                }
+            }
+        }
+        // Reserve every entity id before changing source or inventory. Gaps in
+        // the global allocator are harmless; reusing an id after a failed
+        // request would not be.
+        let mut entity_ids = Vec::with_capacity(rewards.drops.len() + usize::from(rewards.xp > 0));
+        for _ in &rewards.drops {
+            let candidate = self.next_unique_entity_id();
+            if candidate == 0 {
+                return false;
+            }
+            self.claim_entity_id(candidate);
+            entity_ids.push(candidate);
+        }
+        let Ok(Some(mutation)) = self.world.set_block(
+            target.0,
+            target.1,
+            target.2,
+            crate::world::BlockType::Air,
+            0,
+        ) else {
+            return false;
+        };
+        self.pending_mutations.push(mutation);
+        let drop_position = [
+            target.0 as f32 + 0.5,
+            target.1 as f32 + 0.5,
+            target.2 as f32 + 0.5,
+        ];
+        for (entity_id, stack) in entity_ids.into_iter().zip(rewards.drops) {
+            debug_assert!(self
+                .world
+                .spawn_dropped_item(entity_id, drop_position, stack));
+        }
+        if let Some(session) = self.sessions.get_mut(&id) {
+            session.gameplay = next_gameplay;
+            session.gameplay.revision = mutation.revision;
+            session.last_revision = mutation.revision;
+        }
+        true
+    }
+
     pub fn submit_request(&mut self, request: GameplayRequest) -> GameplayResponse {
         let request_id = request.request_id;
         let id = request.session_id;
@@ -768,7 +993,8 @@ impl AuthorityCore {
         if session.game_mode == crate::inventory::GameMode::Spectator
             && matches!(
                 &request.operation,
-                crate::network::protocol::GameplayOperation::BlockUse { .. }
+                crate::network::protocol::GameplayOperation::BlockAction { .. }
+                    | crate::network::protocol::GameplayOperation::BlockUse { .. }
                     | crate::network::protocol::GameplayOperation::Container { .. }
                     | crate::network::protocol::GameplayOperation::ContainerClick { .. }
                     | crate::network::protocol::GameplayOperation::ItemUse { .. }
@@ -867,6 +1093,26 @@ impl AuthorityCore {
         use crate::inventory::GameMode;
 
         match &request.operation {
+            GameplayOperation::BlockAction {
+                action,
+                x,
+                y,
+                z,
+                face,
+                hand,
+                held,
+                block,
+                look_milli,
+            } => Some(self.apply_block_action(
+                session_id,
+                *action,
+                (*x, *y, *z),
+                *face,
+                *hand,
+                *held,
+                *block,
+                *look_milli,
+            )),
             GameplayOperation::ItemUse { item, count } => {
                 let Some(item_kind) = crate::inventory::Item::from_u32(*item) else {
                     return Some(Err(RejectReason::InvalidState));
@@ -971,6 +1217,193 @@ impl AuthorityCore {
                 Some(self.apply_transaction_operation(session_id, &request.operation))
             }
             _ => None,
+        }
+    }
+
+    fn apply_block_action(
+        &mut self,
+        session_id: PlayerId,
+        action: BlockActionKind,
+        position: (i32, i32, i32),
+        face: [i8; 3],
+        hand: u8,
+        held: Option<SessionSlotWire>,
+        block_wire: u32,
+        look_milli: [i16; 3],
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        let Some(session) = self.sessions.get(&session_id).cloned() else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let Some(dimension) = Dimension::from_wire(session.dimension) else {
+            return Err(RejectReason::InvalidDimension);
+        };
+        if dimension != self.world.dimension {
+            return Err(RejectReason::InvalidDimension);
+        }
+        if matches!(action, BlockActionKind::CancelBreak) {
+            if let Some(session) = self.sessions.get_mut(&session_id) {
+                session.gameplay.mining = None;
+            }
+            return Ok(None);
+        }
+        let slot_index = if hand == 0 {
+            session.gameplay.selected_hotbar_slot
+        } else if hand == 1 {
+            40
+        } else {
+            return Err(RejectReason::InvalidState);
+        };
+        let current = session.gameplay.slot(slot_index).flatten();
+        let current_stack = match held {
+            Some(expected) => {
+                if current != Some(SessionInventorySlot::from(expected)) {
+                    return Err(RejectReason::InvalidState);
+                }
+                stack_from_slot(Some(expected))
+            }
+            None => {
+                if current.is_some() {
+                    return Err(RejectReason::InvalidState);
+                }
+                None
+            }
+        };
+        if !self
+            .world
+            .valid_coordinate(position.0, position.1, position.2)
+        {
+            return Err(RejectReason::InvalidCoordinate);
+        }
+
+        match action {
+            BlockActionKind::StartBreak => {
+                let Some(target_block) = self
+                    .world
+                    .chunks
+                    .get_loaded_block(position.0, position.1, position.2)
+                else {
+                    return Err(RejectReason::InvalidState);
+                };
+                if target_block == crate::world::BlockType::Air
+                    || !self
+                        .world
+                        .has_block_line_of_sight(session.position, look_milli, position)
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+                let policy = crate::game_rules::GameModePolicy::for_rules(
+                    session.game_mode,
+                    &self.world.rules,
+                );
+                if !policy.can_break_stack(current_stack.as_ref(), target_block) {
+                    return Err(RejectReason::PermissionDenied);
+                }
+                let target_state = self
+                    .world
+                    .get_block_state(position.0, position.1, position.2);
+                let progress = MiningProgressState {
+                    dimension: dimension as u8,
+                    target: [position.0, position.1, position.2],
+                    progress_milli: session
+                        .gameplay
+                        .mining
+                        .filter(|active| {
+                            active.dimension == dimension as u8
+                                && active.target == [position.0, position.1, position.2]
+                                && active.hand == hand
+                                && active.slot_index == slot_index
+                                && active.held == held
+                                && active.block == target_block.to_wire()
+                                && active.state == target_state
+                        })
+                        .map_or(0, |active| active.progress_milli),
+                    hand,
+                    slot_index,
+                    held,
+                    block: target_block.to_wire(),
+                    state: target_state,
+                    look_milli,
+                };
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    session.gameplay.mining = Some(progress);
+                }
+                if session.game_mode == crate::inventory::GameMode::Creative {
+                    let _ = self.commit_mining_break(
+                        session_id,
+                        dimension,
+                        position,
+                        current_stack,
+                        session.game_mode,
+                    );
+                }
+                Ok(None)
+            }
+            BlockActionKind::CancelBreak => unreachable!("cancel handled before slot validation"),
+            BlockActionKind::Place => {
+                let block = crate::world::BlockType::from_wire(block_wire)
+                    .ok_or(RejectReason::InvalidState)?;
+                if !self.world.has_block_line_of_sight(
+                    session.position,
+                    look_milli,
+                    (
+                        position.0 - i32::from(face[0]),
+                        position.1 - i32::from(face[1]),
+                        position.2 - i32::from(face[2]),
+                    ),
+                ) {
+                    return Err(RejectReason::InvalidState);
+                }
+                let support = (
+                    position.0.saturating_sub(i32::from(face[0])),
+                    position.1.saturating_sub(i32::from(face[1])),
+                    position.2.saturating_sub(i32::from(face[2])),
+                );
+                let Some(support_block) = self
+                    .world
+                    .chunks
+                    .get_loaded_block(support.0, support.1, support.2)
+                else {
+                    return Err(RejectReason::InvalidState);
+                };
+                let policy = crate::game_rules::GameModePolicy::for_rules(
+                    session.game_mode,
+                    &self.world.rules,
+                );
+                let Some(held_stack) = current_stack.as_ref() else {
+                    return Err(RejectReason::PermissionDenied);
+                };
+                if held_stack.item.properties().block_type != Some(block) {
+                    return Err(RejectReason::InvalidState);
+                }
+                if !policy.can_place_stack(Some(held_stack), support_block) {
+                    return Err(RejectReason::PermissionDenied);
+                }
+                // Prepare the inventory debit before mutating the world. The
+                // copied gameplay state makes the place transaction atomic if
+                // a late slot check ever fails, and placing always cancels an
+                // in-flight mining target for this owner.
+                let mut next_gameplay = session.gameplay;
+                next_gameplay.mining = None;
+                if session.game_mode != crate::inventory::GameMode::Creative {
+                    let index = usize::from(slot_index);
+                    let Some(Some(slot)) = next_gameplay.inventory.get_mut(index) else {
+                        return Err(RejectReason::PermissionDenied);
+                    };
+                    if slot.item.count == 0 {
+                        return Err(RejectReason::InvalidState);
+                    }
+                    slot.item.count -= 1;
+                    if slot.item.count == 0 {
+                        next_gameplay.inventory[index] = None;
+                    }
+                }
+                let mutation = self.world.apply_block_place(position, face, block)?;
+                let Some(session) = self.sessions.get_mut(&session_id) else {
+                    return Err(RejectReason::Unauthorized);
+                };
+                session.gameplay = next_gameplay;
+                Ok(mutation)
+            }
         }
     }
 
@@ -1635,6 +2068,14 @@ impl AuthorityCore {
     }
 }
 
+fn stack_from_slot(slot: Option<SessionSlotWire>) -> Option<crate::inventory::ItemStack> {
+    let slot = slot?;
+    let mut stack = slot.item.to_stack()?;
+    stack.can_break = slot.can_break;
+    stack.can_place_on = slot.can_place_on;
+    Some(stack)
+}
+
 fn held_slot_index(gameplay: &SessionGameplayState, hand: u8) -> Result<u8, RejectReason> {
     match hand {
         0 if gameplay.selected_hotbar_slot < 9 => Ok(gameplay.selected_hotbar_slot),
@@ -1776,7 +2217,7 @@ mod tests {
     use crate::authority::contract::{SessionGameplayState, SessionInventorySlot};
     use crate::entity::EntityType;
     use crate::inventory::Item;
-    use crate::network::protocol::{GameplayOperation, GameplayOutcome};
+    use crate::network::protocol::{BlockActionKind, GameplayOperation, GameplayOutcome};
     use crate::world::BlockType;
     use contract::SessionContract;
 
@@ -1792,6 +2233,41 @@ mod tests {
         ))
         .unwrap();
         core
+    }
+
+    fn block_request(
+        request_id: u128,
+        client_sequence: u64,
+        action: BlockActionKind,
+        target: (i32, i32, i32),
+        held: Option<crate::network::protocol::SessionSlotWire>,
+        block: BlockType,
+        face: [i8; 3],
+        look_milli: [i16; 3],
+        client_revision: u64,
+    ) -> GameplayRequest {
+        GameplayRequest {
+            request_id,
+            client_sequence,
+            session_id: 7,
+            dimension: 0,
+            client_revision,
+            operation: GameplayOperation::BlockAction {
+                action,
+                x: target.0,
+                y: target.1,
+                z: target.2,
+                face,
+                hand: 0,
+                held,
+                block: if matches!(action, BlockActionKind::Place) {
+                    block.to_wire()
+                } else {
+                    BlockType::Air.to_wire()
+                },
+                look_milli,
+            },
+        }
     }
 
     #[test]
@@ -1865,6 +2341,715 @@ mod tests {
         let pending = core.take_pending_mutations();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].position, (8, 80, 8));
+    }
+
+    #[test]
+    fn typed_mining_fixed_tick_breaks_once_and_cancel_is_idempotent() {
+        let mut core = core(AuthorityTopology::Dedicated);
+        let target = (8, 81, 9);
+        core.world
+            .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
+            .unwrap();
+
+        let held_stack = crate::inventory::ItemStack::new(Item::StonePickaxe, 1);
+        let held = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&held_stack),
+            0,
+            0,
+        );
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.inventory[0] = Some(SessionInventorySlot::from(held));
+        core.set_session_gameplay(7, gameplay);
+
+        let start = GameplayRequest {
+            request_id: 100,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::BlockAction {
+                action: BlockActionKind::StartBreak,
+                x: target.0,
+                y: target.1,
+                z: target.2,
+                face: [0, 0, -1],
+                hand: 0,
+                held: Some(held),
+                block: BlockType::Air.to_wire(),
+                look_milli: [0, -100, 995],
+            },
+        };
+        assert!(matches!(
+            core.submit_request(start).outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        assert!(core.session(7).unwrap().gameplay.mining.is_some());
+
+        let mut target_mutations = 0;
+        for _ in 0..80 {
+            let snapshot = core.tick();
+            target_mutations += snapshot
+                .mutations
+                .iter()
+                .filter(|mutation| mutation.position == target)
+                .count();
+        }
+        assert_eq!(
+            core.world.get_block(target.0, target.1, target.2),
+            BlockType::Air
+        );
+        assert_eq!(target_mutations, 1);
+        assert!(core.session(7).unwrap().gameplay.mining.is_none());
+        assert_eq!(
+            core.world
+                .entities
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type == EntityType::DroppedItem)
+                .count(),
+            1
+        );
+
+        let cancel = GameplayRequest {
+            request_id: 101,
+            client_sequence: 2,
+            session_id: 7,
+            dimension: 0,
+            client_revision: core.current_revision(),
+            operation: GameplayOperation::BlockAction {
+                action: BlockActionKind::CancelBreak,
+                x: target.0,
+                y: target.1,
+                z: target.2,
+                face: [0, 0, 0],
+                hand: 0,
+                held: None,
+                block: BlockType::Air.to_wire(),
+                look_milli: [0, -100, 995],
+            },
+        };
+        let first_cancel = core.submit_request(cancel.clone());
+        assert!(matches!(
+            first_cancel.outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        assert_eq!(core.submit_request(cancel), first_cancel);
+        assert_eq!(
+            core.world
+                .entities
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type == EntityType::DroppedItem)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn typed_mining_rejects_unloaded_target_without_progress_or_mutation() {
+        let mut core = core(AuthorityTopology::Dedicated);
+        core.session_mut(7).unwrap().position = [15.0, 80.0, 8.0];
+        let held_stack = crate::inventory::ItemStack::new(Item::StonePickaxe, 1);
+        let held = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&held_stack),
+            0,
+            0,
+        );
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.inventory[0] = Some(SessionInventorySlot::from(held));
+        core.set_session_gameplay(7, gameplay);
+        let target = (16, 81, 8);
+        let response = core.submit_request(GameplayRequest {
+            request_id: 102,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::BlockAction {
+                action: BlockActionKind::StartBreak,
+                x: target.0,
+                y: target.1,
+                z: target.2,
+                face: [0, 0, -1],
+                hand: 0,
+                held: Some(held),
+                block: BlockType::Air.to_wire(),
+                look_milli: [995, -100, 0],
+            },
+        });
+        assert!(
+            matches!(
+                response.outcome,
+                GameplayOutcome::Rejected {
+                    reason: RejectReason::InvalidState
+                }
+            ),
+            "unexpected unloaded-target response: {:?}",
+            response.outcome
+        );
+        assert!(core.session(7).unwrap().gameplay.mining.is_none());
+        assert!(core.take_pending_mutations().is_empty());
+    }
+
+    #[test]
+    fn typed_mining_game_modes_and_empty_hand_are_authoritative() {
+        let target = (8, 81, 9);
+        let pick = crate::inventory::ItemStack::new(Item::StonePickaxe, 1);
+        let pick_wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&pick),
+            0,
+            0,
+        );
+
+        let mut creative = core(AuthorityTopology::Singleplayer);
+        creative.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Creative;
+        creative
+            .world
+            .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
+            .unwrap();
+        let mut creative_gameplay = SessionGameplayState::default();
+        creative_gameplay.inventory[0] = Some(SessionInventorySlot::from(pick_wire));
+        creative.set_session_gameplay(7, creative_gameplay);
+        assert!(matches!(
+            creative
+                .submit_request(block_request(
+                    110,
+                    1,
+                    BlockActionKind::StartBreak,
+                    target,
+                    Some(pick_wire),
+                    BlockType::Air,
+                    [0, 0, -1],
+                    [0, -100, 995],
+                    0,
+                ))
+                .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        assert_eq!(
+            creative.world.get_block(target.0, target.1, target.2),
+            BlockType::Air
+        );
+        assert_eq!(
+            creative.session(7).unwrap().gameplay.inventory[0],
+            Some(SessionInventorySlot::from(pick_wire))
+        );
+        assert!(creative
+            .world
+            .entities
+            .entities
+            .iter()
+            .all(|entity| entity.entity_type != EntityType::ExperienceOrb));
+
+        let mut adventure = core(AuthorityTopology::Dedicated);
+        adventure.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
+        adventure
+            .world
+            .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
+            .unwrap();
+        let mut allowed = SessionGameplayState::default();
+        let tagged_pick = crate::inventory::ItemStack::new(Item::StonePickaxe, 1)
+            .with_can_break(BlockType::Stone);
+        let tagged_wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&tagged_pick),
+            tagged_pick.can_break,
+            tagged_pick.can_place_on,
+        );
+        allowed.inventory[0] = Some(SessionInventorySlot::from(tagged_wire));
+        adventure.set_session_gameplay(7, allowed);
+        assert!(matches!(
+            adventure
+                .submit_request(block_request(
+                    111,
+                    1,
+                    BlockActionKind::StartBreak,
+                    target,
+                    Some(tagged_wire),
+                    BlockType::Air,
+                    [0, 0, -1],
+                    [0, -100, 995],
+                    0,
+                ))
+                .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        for _ in 0..80 {
+            let _ = adventure.tick();
+        }
+        assert_eq!(
+            adventure.world.get_block(target.0, target.1, target.2),
+            BlockType::Air
+        );
+
+        let mut denied = core(AuthorityTopology::Dedicated);
+        denied.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
+        denied
+            .world
+            .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
+            .unwrap();
+        let mut untagged = SessionGameplayState::default();
+        untagged.inventory[0] = Some(SessionInventorySlot::from(pick_wire));
+        denied.set_session_gameplay(7, untagged);
+        assert!(matches!(
+            denied
+                .submit_request(block_request(
+                    112,
+                    1,
+                    BlockActionKind::StartBreak,
+                    target,
+                    Some(pick_wire),
+                    BlockType::Air,
+                    [0, 0, -1],
+                    [0, -100, 995],
+                    0,
+                ))
+                .outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::PermissionDenied
+            }
+        ));
+        assert_eq!(
+            denied.world.get_block(target.0, target.1, target.2),
+            BlockType::Stone
+        );
+
+        let mut empty_hand = core(AuthorityTopology::Dedicated);
+        empty_hand
+            .world
+            .set_block(target.0, target.1, target.2, BlockType::Dirt, 0)
+            .unwrap();
+        assert!(matches!(
+            empty_hand
+                .submit_request(block_request(
+                    113,
+                    1,
+                    BlockActionKind::StartBreak,
+                    target,
+                    None,
+                    BlockType::Air,
+                    [0, 0, -1],
+                    [0, -100, 995],
+                    0,
+                ))
+                .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn typed_place_maps_item_debits_once_and_rejects_cheat_block() {
+        let support = (8, 80, 9);
+        let target = (8, 81, 9);
+        let stone_stack = crate::inventory::ItemStack::new(Item::Stone, 2);
+        let stone_wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&stone_stack),
+            0,
+            0,
+        );
+        let mut core = core(AuthorityTopology::Dedicated);
+        core.world
+            .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
+            .unwrap();
+        core.world
+            .set_block(target.0, target.1, target.2, BlockType::Air, 0)
+            .unwrap();
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.inventory[0] = Some(SessionInventorySlot::from(stone_wire));
+        core.set_session_gameplay(7, gameplay);
+        let place_request = block_request(
+            114,
+            1,
+            BlockActionKind::Place,
+            target,
+            Some(stone_wire),
+            BlockType::Stone,
+            [0, 1, 0],
+            [250, -550, 750],
+            0,
+        );
+        let accepted = core.submit_request(place_request);
+        assert!(
+            matches!(accepted.outcome, GameplayOutcome::Accepted { .. }),
+            "unexpected place response: {:?}",
+            accepted.outcome
+        );
+        assert_eq!(
+            core.world.get_block(target.0, target.1, target.2),
+            BlockType::Stone
+        );
+        assert_eq!(
+            core.session(7).unwrap().gameplay.inventory[0]
+                .unwrap()
+                .item
+                .count,
+            1
+        );
+
+        let stale = core.submit_request(block_request(
+            115,
+            2,
+            BlockActionKind::Place,
+            (8, 81, 10),
+            Some(stone_wire),
+            BlockType::Chest,
+            [0, 1, 0],
+            [0, -100, 995],
+            core.current_revision(),
+        ));
+        assert!(matches!(
+            stale.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::InvalidState
+            }
+        ));
+        assert_eq!(
+            core.session(7).unwrap().gameplay.inventory[0]
+                .unwrap()
+                .item
+                .count,
+            1
+        );
+        assert_eq!(core.world.get_block(8, 81, 10), BlockType::Air);
+
+        // The same typed path is valid across an explicitly loaded chunk
+        // boundary; unloaded front/support chunks are never synthesized by
+        // the action itself.
+        core.world.ensure_chunk(1, 0);
+        core.session_mut(7).unwrap().position = [15.0, 80.0, 8.0];
+        let support_cross = (16, 80, 8);
+        let target_cross = (16, 81, 8);
+        core.world
+            .set_block(
+                support_cross.0,
+                support_cross.1,
+                support_cross.2,
+                BlockType::Stone,
+                0,
+            )
+            .unwrap();
+        core.world
+            .set_block(
+                target_cross.0,
+                target_cross.1,
+                target_cross.2,
+                BlockType::Air,
+                0,
+            )
+            .unwrap();
+        let stone_one = crate::inventory::ItemStack::new(Item::Stone, 1);
+        let stone_one_wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&stone_one),
+            0,
+            0,
+        );
+        let mut cross_gameplay = core.session(7).unwrap().gameplay;
+        cross_gameplay.inventory[0] = Some(SessionInventorySlot::from(stone_one_wire));
+        core.set_session_gameplay(7, cross_gameplay);
+        let cross = core.submit_request(block_request(
+            116,
+            3,
+            BlockActionKind::Place,
+            target_cross,
+            Some(stone_one_wire),
+            BlockType::Stone,
+            [0, 1, 0],
+            [750, -550, 250],
+            core.current_revision(),
+        ));
+        assert!(matches!(cross.outcome, GameplayOutcome::Accepted { .. }));
+        assert_eq!(
+            core.world
+                .get_block(target_cross.0, target_cross.1, target_cross.2),
+            BlockType::Stone
+        );
+        assert!(core.session(7).unwrap().gameplay.inventory[0].is_none());
+    }
+
+    #[test]
+    fn typed_mining_cancels_on_cancel_held_change_range_or_block_replacement() {
+        let target = (8, 81, 9);
+        let pick = crate::inventory::ItemStack::new(Item::StonePickaxe, 1);
+        let pick_wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&pick),
+            0,
+            0,
+        );
+        let start = |core: &mut AuthorityCore, request_id: u128| {
+            core.world
+                .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
+                .unwrap();
+            let mut gameplay = SessionGameplayState::default();
+            gameplay.inventory[0] = Some(SessionInventorySlot::from(pick_wire));
+            core.set_session_gameplay(7, gameplay);
+            let response = core.submit_request(block_request(
+                request_id,
+                1,
+                BlockActionKind::StartBreak,
+                target,
+                Some(pick_wire),
+                BlockType::Air,
+                [0, 0, -1],
+                [0, -100, 995],
+                0,
+            ));
+            assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        };
+
+        let mut cancelled = core(AuthorityTopology::Dedicated);
+        start(&mut cancelled, 120);
+        let response = cancelled.submit_request(block_request(
+            121,
+            2,
+            BlockActionKind::CancelBreak,
+            target,
+            None,
+            BlockType::Air,
+            [0, 0, 0],
+            [0, -100, 995],
+            cancelled.current_revision(),
+        ));
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        let _ = cancelled.tick();
+        assert_eq!(
+            cancelled.world.get_block(target.0, target.1, target.2),
+            BlockType::Stone
+        );
+
+        let mut held_changed = core(AuthorityTopology::Dedicated);
+        start(&mut held_changed, 122);
+        let mut changed = held_changed.session(7).unwrap().gameplay;
+        let other = crate::inventory::ItemStack::new(Item::WoodenPickaxe, 1);
+        changed.inventory[0] = Some(SessionInventorySlot::from(
+            crate::network::protocol::SessionSlotWire::new(
+                crate::network::protocol::ItemWire::from_stack(&other),
+                0,
+                0,
+            ),
+        ));
+        held_changed.set_session_gameplay(7, changed);
+        let _ = held_changed.tick();
+        assert!(held_changed.session(7).unwrap().gameplay.mining.is_none());
+        assert_eq!(
+            held_changed.world.get_block(target.0, target.1, target.2),
+            BlockType::Stone
+        );
+
+        let mut slot_switched = core(AuthorityTopology::Dedicated);
+        start(&mut slot_switched, 125);
+        let mut switched = slot_switched.session(7).unwrap().gameplay;
+        switched.selected_hotbar_slot = 1;
+        switched.inventory[0] = Some(SessionInventorySlot::from(pick_wire));
+        switched.inventory[1] = Some(SessionInventorySlot::from(pick_wire));
+        slot_switched.set_session_gameplay(7, switched);
+        let _ = slot_switched.tick();
+        assert!(slot_switched.session(7).unwrap().gameplay.mining.is_none());
+        assert_eq!(
+            slot_switched.world.get_block(target.0, target.1, target.2),
+            BlockType::Stone
+        );
+
+        let mut moved = core(AuthorityTopology::Dedicated);
+        start(&mut moved, 123);
+        moved.session_mut(7).unwrap().position = [30.0, 80.0, 30.0];
+        let _ = moved.tick();
+        assert!(moved.session(7).unwrap().gameplay.mining.is_none());
+        assert_eq!(
+            moved.world.get_block(target.0, target.1, target.2),
+            BlockType::Stone
+        );
+
+        let mut replaced = core(AuthorityTopology::Dedicated);
+        start(&mut replaced, 124);
+        replaced
+            .world
+            .set_block(target.0, target.1, target.2, BlockType::Dirt, 0)
+            .unwrap();
+        let _ = replaced.tick();
+        assert!(replaced.session(7).unwrap().gameplay.mining.is_none());
+        assert_eq!(
+            replaced.world.get_block(target.0, target.1, target.2),
+            BlockType::Dirt
+        );
+    }
+
+    #[test]
+    fn typed_adventure_place_requires_can_place_on_and_block_entity_projection() {
+        let support = (8, 80, 9);
+        let target = (8, 81, 9);
+        let chest =
+            crate::inventory::ItemStack::new(Item::Chest, 1).with_can_place_on(BlockType::Stone);
+        let chest_wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&chest),
+            chest.can_break,
+            chest.can_place_on,
+        );
+        let mut core = core(AuthorityTopology::Dedicated);
+        core.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
+        core.world
+            .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
+            .unwrap();
+        core.world
+            .set_block(target.0, target.1, target.2, BlockType::Air, 0)
+            .unwrap();
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.inventory[0] = Some(SessionInventorySlot::from(chest_wire));
+        core.set_session_gameplay(7, gameplay);
+        let placed = core.submit_request(block_request(
+            130,
+            1,
+            BlockActionKind::Place,
+            target,
+            Some(chest_wire),
+            BlockType::Chest,
+            [0, 1, 0],
+            [250, -550, 750],
+            0,
+        ));
+        assert!(matches!(placed.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(core
+            .world
+            .get_block_entity(target.0, target.1, target.2)
+            .is_some());
+        assert!(core.session(7).unwrap().gameplay.inventory[0].is_none());
+
+        let mut break_gameplay = SessionGameplayState::default();
+        let break_chest =
+            crate::inventory::ItemStack::new(Item::Chest, 1).with_can_break(BlockType::Chest);
+        let break_wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&break_chest),
+            break_chest.can_break,
+            break_chest.can_place_on,
+        );
+        break_gameplay.inventory[0] = Some(SessionInventorySlot::from(break_wire));
+        core.set_session_gameplay(7, break_gameplay);
+        let broken = core.submit_request(block_request(
+            131,
+            2,
+            BlockActionKind::StartBreak,
+            target,
+            Some(break_wire),
+            BlockType::Air,
+            [0, 0, -1],
+            [0, -100, 995],
+            core.current_revision(),
+        ));
+        assert!(matches!(broken.outcome, GameplayOutcome::Accepted { .. }));
+        for _ in 0..300 {
+            let _ = core.tick();
+        }
+        assert_eq!(
+            core.world.get_block(target.0, target.1, target.2),
+            BlockType::Air
+        );
+        assert!(core
+            .world
+            .get_block_entity(target.0, target.1, target.2)
+            .is_none());
+    }
+
+    #[test]
+    fn reconnect_resets_owner_private_mining_progress() {
+        let target = (8, 81, 9);
+        let pick = crate::inventory::ItemStack::new(Item::StonePickaxe, 1);
+        let wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&pick),
+            0,
+            0,
+        );
+        let mut core = core(AuthorityTopology::Dedicated);
+        core.world
+            .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
+            .unwrap();
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.inventory[0] = Some(SessionInventorySlot::from(wire));
+        core.set_session_gameplay(7, gameplay);
+        assert!(matches!(
+            core.submit_request(block_request(
+                140,
+                1,
+                BlockActionKind::StartBreak,
+                target,
+                Some(wire),
+                BlockType::Air,
+                [0, 0, -1],
+                [0, -100, 995],
+                0,
+            ))
+            .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        assert!(core.session(7).unwrap().gameplay.mining.is_some());
+        let _ = core.remove_session(7);
+        core.register_session(SessionContract::new(
+            7,
+            "alex",
+            0,
+            [8.0, 80.0, 8.0],
+            true,
+            true,
+        ))
+        .unwrap();
+        assert!(core.session(7).unwrap().gameplay.mining.is_none());
+    }
+
+    #[test]
+    fn typed_mining_grants_xp_once_and_removes_broken_tool_without_orb() {
+        let target = (8, 81, 9);
+        let mut pick = crate::inventory::ItemStack::new(Item::DiamondPickaxe, 1);
+        pick.durability = 1;
+        let wire = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&pick),
+            0x55,
+            0xaa,
+        );
+        let mut core = core(AuthorityTopology::Dedicated);
+        core.world
+            .set_block(target.0, target.1, target.2, BlockType::DiamondOre, 0)
+            .unwrap();
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.experience = 6;
+        gameplay.inventory[0] = Some(SessionInventorySlot::from(wire));
+        core.set_session_gameplay(7, gameplay);
+        assert!(matches!(
+            core.submit_request(block_request(
+                150,
+                1,
+                BlockActionKind::StartBreak,
+                target,
+                Some(wire),
+                BlockType::Air,
+                [0, 0, -1],
+                [0, -100, 995],
+                0,
+            ))
+            .outcome,
+            GameplayOutcome::Accepted { .. }
+        ));
+        for _ in 0..80 {
+            let _ = core.tick();
+        }
+        assert_eq!(
+            core.world.get_block(target.0, target.1, target.2),
+            BlockType::Air
+        );
+        assert_eq!(core.session(7).unwrap().gameplay.experience, 4);
+        assert_eq!(core.session(7).unwrap().gameplay.experience_level, 1);
+        assert!(core.session(7).unwrap().gameplay.inventory[0].is_none());
+        assert!(core
+            .world
+            .entities
+            .entities
+            .iter()
+            .all(|entity| entity.entity_type != EntityType::ExperienceOrb));
+        let dropped = core
+            .world
+            .entities
+            .entities
+            .iter()
+            .find(|entity| entity.entity_type == EntityType::DroppedItem)
+            .expect("diamond ore must produce one authoritative drop");
+        assert_eq!(dropped.dropped_item, Some(Item::Diamond));
+        assert_eq!(dropped.dropped_count, 1);
     }
 
     #[test]
