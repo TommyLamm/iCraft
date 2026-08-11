@@ -7,7 +7,7 @@ pub mod interest;
 pub mod transactions;
 
 use crate::dimension::Dimension;
-use crate::game_rules::{WorldRules, WorldType};
+use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::network::protocol::{
     GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, PlayerId, RejectReason,
 };
@@ -49,6 +49,7 @@ pub struct AuthorityConfig {
     pub world_type: WorldType,
     pub generate_structures: bool,
     pub rules: WorldRules,
+    pub difficulty: ServerDifficulty,
     pub render_distance: i32,
 }
 
@@ -63,6 +64,7 @@ impl Default for AuthorityConfig {
             // malformed legacy structure seed cannot abort authority startup.
             generate_structures: false,
             rules: WorldRules::default(),
+            difficulty: ServerDifficulty::default(),
             render_distance: 8,
         }
     }
@@ -310,13 +312,14 @@ impl AuthorityCore {
     }
 
     fn new_world(config: AuthorityConfig, dimension: Dimension) -> ServerWorld {
-        ServerWorld::new(
+        ServerWorld::new_with_difficulty(
             config.seed,
             dimension,
             config.world_type,
             config.generate_structures,
             config.rules,
             config.render_distance,
+            config.difficulty,
         )
     }
 

@@ -22,9 +22,9 @@ headless vectors 驗證三種拓撲。Plan16 文件中 A 的兩個未勾項，�
 過度宣稱，均在本計劃完成後才可關閉。
 
 目前僅將由既有 commits 與自動化測試證明的 B 前三項、D address/login/transport
-子集及 E fault/metrics 子集勾選；這不等於整個 Plan18 完成。非 Peaceful difficulty
-consumer、三拓撲共同 vectors、State 完整 cutover、30 分鐘 soak 與 GPU Host+Join
-仍保持未驗證。
+子集及 E fault/metrics 子集勾選；這不等於整個 Plan18 完成。Plan25 已補齊並驗證
+server-owned difficulty consumer；三拓撲共同 vectors、State 完整 cutover、30 分鐘
+soak 與 GPU Host+Join 仍保持未驗證。
 
 ## 已知缺口（不可在本計劃開始前視為通過）
 
@@ -93,10 +93,12 @@ consumer、三拓撲共同 vectors、State 完整 cutover、30 分鐘 soak 與 G
 
 ### D. 管理面、登入原子性與有界 transport
 
-- [ ] `server.properties` 的 difficulty、PvP、view/simulation distance、motd、whitelist、
-  operators、world path/seed 均要實際套用；錯誤配置 fail-fast 且不建立／覆寫世界。
-  目前 PvP、distance、motd、名單、路徑與 seed 已接線，Peaceful 會關閉 mob spawning/PvP；
-  Easy/Normal/Hard 尚未有 headless gameplay difficulty consumer，因此本項保持未勾選。
+- [x] `server.properties` 的 difficulty 已由 Plan25 嚴格 parse、持久化並接入 shared
+  AuthorityConfig/ServerWorld；Peaceful existing-hostile despawn、Easy/Normal/Hard
+  chase consumer、embedded/dedicated parity 與 `pvp` independence 均有 headless tests。
+- [ ] `server.properties` 的 PvP、view/simulation distance、motd、whitelist、operators、
+  world path/seed 仍要以本計劃既有管理 vectors 完整驗證；錯誤配置須 fail-fast 且不建立／
+  覆寫世界。Peaceful 不再覆蓋獨立 pvp 設定。
 - [x] 將 `ServerAddressBook` 接入 Menu：多個地址、最近 ping 結果、錯誤與版本/MOTD/玩家數
   持久化，並以 server-list ping request/response 更新 UI；加入 round-trip/menu tests。
 - [x] login 在送出 LoginSuccess 前以 atomic reservation 同時檢查 duplicate identity 與

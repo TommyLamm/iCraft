@@ -254,10 +254,12 @@ The shared headless authority lives in `authority::AuthorityCore` and
 The Phase A boundary cutover and Phase C persistence/interest seams are covered by
 headless authority/projection tests, including simultaneous Overworld/Nether
 sessions and active-view restoration. Atomic concurrent login, bounded transport,
-fault injection and metrics have automated evidence; GPU Host+Join, complete
-multi-dimension reconnect/failure matrices, full difficulty consumers and the
-remaining topology acceptance are still manual or follow-up work. Headless tests
-must not be presented as a GPU/manual pass.
+fault injection and metrics have automated evidence; Plan25 now also supplies the
+server-owned difficulty consumer (strict properties parse/persistence, Peaceful
+hostile cleanup, and Easy/Normal/Hard chase policy). GPU Host+Join, complete
+multi-dimension reconnect/failure matrices, and remaining topology acceptance
+are still manual or follow-up work. Headless tests must not be presented as a
+GPU/manual pass.
 
 `src/network/` contains a versioned bincode protocol over length-prefixed TCP:
 
@@ -524,6 +526,18 @@ zero queue depth, zero queue-full events, six saves, and no panic/error. The
 raw soak log and command/metrics record live under
 `plans/minecraft_foundation_gap/artifacts/`. GPU/window/audio/DPI and real
 Host+Join visual evidence remain manual and are intentionally not claimed.
+
+Plan25 makes `ServerDifficulty` a server-owned value parsed from
+`server.properties` and passed through `AuthorityConfig` to every
+`ServerWorld`, without changing the existing binary `level.dat` layout or
+protocol version. The existing hostile AI lane consumes it deterministically:
+Peaceful removes loaded hostiles on the next fixed tick, while Easy/Normal/Hard
+use bounded `0.9/1.0/1.1` chase multipliers. `do_mob_spawning=false` remains a
+spawn gate and does not freeze already-loaded hostiles; PvP remains an
+independent `WorldRules` setting. Tests cover strict fail-before-world config,
+server.properties save/reload, checksum/policy observability, and embedded vs
+dedicated parity. There is no autonomous spawn-table, vanilla damage, hunger,
+GPU, audio, or visual implementation claim in this plan.
 
 Use:
 

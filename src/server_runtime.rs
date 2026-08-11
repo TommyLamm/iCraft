@@ -15,7 +15,7 @@ use crate::authority::interest::{
 };
 use crate::authority::{AuthorityConfig, AuthorityCore};
 use crate::dimension::Dimension;
-use crate::game_rules::WorldRules;
+use crate::game_rules::{ServerDifficulty, WorldRules};
 use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
     ContainerAction, EntityStateWire, GameplayOperation, GameplayOutcome, GameplayRequest,
@@ -464,6 +464,16 @@ impl Default for ServerProperties {
 }
 
 impl ServerProperties {
+    pub fn difficulty_kind(&self) -> Result<ServerDifficulty, ServerConfigError> {
+        ServerDifficulty::parse(&self.difficulty).ok_or_else(|| {
+            invalid(
+                "difficulty",
+                &self.difficulty,
+                "expected peaceful, easy, normal, or hard",
+            )
+        })
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ServerConfigError> {
         let path = path.as_ref();
         if !path.exists() {
@@ -544,6 +554,7 @@ impl ServerProperties {
     }
 
     pub fn validate(&self) -> Result<(), ServerConfigError> {
+        self.difficulty_kind()?;
         if self.bind.trim().is_empty() {
             return Err(invalid("bind", &self.bind, "must not be empty"));
         }
@@ -868,6 +879,7 @@ impl ServerRuntime {
         options: EmbeddedRuntimeOptions,
     ) -> Result<(Self, RuntimeInput), ServerConfigError> {
         properties.validate()?;
+        let difficulty = properties.difficulty_kind()?;
         let world_dir = properties.world_dir.clone();
         if world_dir.exists() && !world_dir.is_dir() {
             return Err(ServerConfigError::Io(io::Error::new(
@@ -889,13 +901,11 @@ impl ServerRuntime {
             });
         // `server.properties` is the live authority configuration.  A saved
         // level may carry an older rule snapshot, but connection/runtime
-        // policy must still apply the operator's pvp and difficulty settings
-        // before constructing the shared headless core.
+        // policy must still apply the operator's pvp setting before
+        // constructing the shared headless core. Difficulty is carried as a
+        // separate server-owned value so adding it does not invalidate old
+        // binary level payloads.
         level.rules.pvp = properties.pvp;
-        if properties.difficulty.eq_ignore_ascii_case("peaceful") {
-            level.rules.do_mob_spawning = false;
-            level.rules.pvp = false;
-        }
         level.rules = level.rules.normalized();
         let (server_to_host_tx, host_rx) = mpsc::sync_channel(HOST_EVENT_QUEUE_CAPACITY);
         let network_metrics = NetworkMetrics::default();
@@ -917,6 +927,7 @@ impl ServerRuntime {
                 world_type: crate::game_rules::WorldType::Default,
                 generate_structures: false,
                 rules: level.rules,
+                difficulty,
                 render_distance: properties.simulation_distance as i32,
             },
             options.topology,
@@ -1152,6 +1163,10 @@ impl ServerRuntime {
         let started = Instant::now();
         self.save_manager.save_level(&self.level)?;
         self.save_authority_state()?;
+        // Keep operator-owned difficulty (and the rest of server policy) in
+        // the same durable world directory as level/player state.  Runtime
+        // construction validates this file before an authority world exists.
+        self.persist_properties()?;
         let mut names: Vec<_> = self.players.values().collect();
         names.sort_by_key(|session| session.id);
         for session in names {

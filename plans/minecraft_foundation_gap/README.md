@@ -90,13 +90,14 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 15 | [遊戲模式、規則、指令與世界建立](15_game_modes_world_rules_commands_and_creation.md) | 已完成（headless 通過；Host+Join GPU 實機待執行） |
 | 16 | [多人權威與獨立伺服器](16_multiplayer_dedicated_server_and_authority_completion.md) | 已實作基礎；核心權威遷移缺口轉 18（headless dedicated/runtime 短跑通過；30 分鐘 soak 與 GPU Host+Join 實機待執行） |
 | 17 | [資源包、本地化、無障礙與總驗收](17_resource_packs_localization_accessibility_and_final_acceptance.md) | 已實作基礎；真 E2E、consumer 接線與 Accessibility presentation 缺口轉 Plan19（GPU、30 分鐘 soak、三拓撲實機待執行；權威缺口轉 Plan18） |
-| 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | authority/network/persistence/management foundation、真 TCP 雙客戶端 harness、fault/metrics、三拓撲 vectors 與 dedicated 30 分鐘 headless soak 已通過；完整 difficulty consumer 與 GPU Host+Join 仍待 |
+| 18 | [Plan16 核心權威遷移與獨立伺服器補齊](18_server_authority_unification_followup.md) | authority/network/persistence/management foundation、真 TCP 雙客戶端 harness、fault/metrics、三拓撲 vectors、dedicated 30 分鐘 headless soak 與 difficulty consumer 已通過；GPU Host+Join 仍待 |
 | 19 | [Plan17 資源包、本地化、無障礙與真驗收補齊](19_plan17_resources_accessibility_acceptance_followup.md) | Singleplayer 真 workflow、selected-pack texture/sound/lang/model/font consumers 與 C 自動化基礎已通過；完整網路三場景、GPU/DPI/音效 artifact 與 soak 仍待完成 |
 | 20 | [Plan01–17 回歸硬化](20_plan01_17_regression_hardening.md) | 已完成；debug/release 結構 seed、Plan15 legacy metadata／備份與 `mob_griefing` consumer 語義均有回歸測試 |
 | 21 | [多維度權威拓撲與 Plan18 既有缺口](21_multidimension_authority_topology_followup.md) | Phase A 多維度 headless authority、session routing、interest/persistence foundation、玩法域、三拓撲回歸與 reconnect/soak 自動證據已通過；listen State/C 的實機 GPU 驗收仍待後續 |
 | 22 | [Plan21 玩法權威域完成](22_authority_gameplay_domains_completion.md) | 已完成；fishing、workstation transaction、brew ready/take 與 combat/death/respawn headless authority vector 通過；GPU/transport/soak 不在本計劃 |
 | 23 | [State／Runtime 權威接線與三拓撲收斂](23_state_runtime_topology_completion.md) | 核心完成；Join Client typed egress、owner-private projection、listen + 2 clients headless gates 通過；station-specific progress 與 manual GPU/visual artifacts 仍後續；Plan24 已補完整 Plan22 三拓撲對照、metrics race、全套 regression 與 dedicated soak |
 | 24 | [三拓撲對照、Metrics 穩定化與最終自動驗收](24_topology_metrics_final_automation.md) | 已完成；三拓撲 authority gameplay parity、TCP metrics publication/rollback、debug/release/check、50x isolated release 與 dated 30 分鐘 dedicated headless soak 均有 artifact；GPU/window/audio/DPI/Host+Join visual 仍明確排除 |
+| 25 | [權威難度消費與持久化完成](25_authority_difficulty_completion.md) | 已完成 headless contract；四難度 strict parse、server.properties persistence、Peaceful hostile despawn、Easy/Normal/Hard chase consumer、pvp independence 與 embedded/dedicated parity 通過；完整 vanilla difficulty systems 與 GPU/manual evidence 明確排除 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
@@ -163,5 +164,8 @@ headless request/interest/owner-private session vector 通過。craft/enchant/an
 station-specific progress 與 GPU/visual artifacts 仍明確保留給後續 plan；Plan24
 已以相同 fixed-tick runtime lane 完成完整 Plan22 三拓撲對照、transport metrics
 publication/rollback、完整 debug/release/check 與 dated dedicated 30 分鐘 headless
-soak。headless 結果不取代 GPU/window/audio/DPI 或實機 Host+Join 證據。
+soak。Plan25 再將 server-owned difficulty 以 strict `ServerDifficulty` 接入既有
+hostile AI lane，並完成 `server.properties` save/reload、Peaceful despawn、
+Easy/Normal/Hard chase 與 pvp-independent authority parity。headless 結果不取代
+GPU/window/audio/DPI 或實機 Host+Join 證據。
 

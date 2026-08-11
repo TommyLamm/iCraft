@@ -15,7 +15,7 @@ use crate::chunk_manager::ChunkManager;
 use crate::commands::{self, Command, TimeCommand};
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::{EntityManager, EntityType};
-use crate::game_rules::{WorldRules, WorldType};
+use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::network::protocol::{
     ContainerAction, GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
 };
@@ -52,6 +52,11 @@ pub struct ServerWorld {
     pub world_type: WorldType,
     pub generate_structures: bool,
     pub rules: WorldRules,
+    /// Server-owned difficulty shared by every loaded dimension.  It is kept
+    /// outside `WorldRules` so adding this policy does not invalidate the
+    /// existing binary level-save layout; `server.properties` is its durable
+    /// source of truth.
+    pub difficulty: ServerDifficulty,
     pub time: u64,
     pub revisions: RevisionClock,
     pub chunks: ChunkManager,
@@ -74,12 +79,33 @@ impl ServerWorld {
         rules: WorldRules,
         render_distance: i32,
     ) -> Self {
+        Self::new_with_difficulty(
+            seed,
+            dimension,
+            world_type,
+            generate_structures,
+            rules,
+            render_distance,
+            ServerDifficulty::default(),
+        )
+    }
+
+    pub fn new_with_difficulty(
+        seed: u32,
+        dimension: Dimension,
+        world_type: WorldType,
+        generate_structures: bool,
+        rules: WorldRules,
+        render_distance: i32,
+        difficulty: ServerDifficulty,
+    ) -> Self {
         let mut world = Self {
             seed,
             dimension,
             world_type,
             generate_structures,
             rules: rules.normalized(),
+            difficulty,
             time: 0,
             revisions: RevisionClock::new(),
             chunks: ChunkManager::new_in_dimension(render_distance.max(1), dimension),
@@ -94,6 +120,14 @@ impl ServerWorld {
         };
         world.ensure_chunk(0, 0);
         world
+    }
+
+    /// Whether a future/other authoritative spawn source may create a
+    /// hostile entity.  Peaceful is an independent policy from the
+    /// `do_mob_spawning` gamerule; the latter never freezes already-loaded
+    /// hostiles.
+    pub const fn allows_hostile_spawning(&self) -> bool {
+        self.rules.do_mob_spawning && !matches!(self.difficulty, ServerDifficulty::Peaceful)
     }
 
     pub fn ensure_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
@@ -1156,6 +1190,19 @@ impl ServerWorld {
     }
 
     fn tick_entities(&mut self, players: &[(PlayerId, [f32; 3])]) {
+        // Peaceful is an authority policy, not merely a spawn-rate hint:
+        // already-loaded hostile entities are removed at the next fixed tick.
+        // `do_mob_spawning=false` deliberately does not take this path, so it
+        // cannot freeze an existing hostile entity's AI.
+        if matches!(self.difficulty, ServerDifficulty::Peaceful) {
+            let before = self.entities.entities.len();
+            self.entities
+                .entities
+                .retain(|entity| !entity.entity_type.is_hostile());
+            if self.entities.entities.len() != before {
+                self.entities.rebuild_indexes();
+            }
+        }
         let mut player_positions: Vec<_> = players.to_vec();
         player_positions.sort_by_key(|(id, _)| *id);
         let chunks = &self.chunks;
@@ -1166,7 +1213,9 @@ impl ServerWorld {
             entity.action_cooldown = (entity.action_cooldown - FIXED_DT).max(0.0);
             entity.invulnerable_time = (entity.invulnerable_time - FIXED_DT).max(0.0);
             entity.fire_aspect_timer = (entity.fire_aspect_timer - FIXED_DT).max(0.0);
-            if entity.entity_type.is_hostile() && self.rules.do_mob_spawning {
+            if entity.entity_type.is_hostile()
+                && !matches!(self.difficulty, ServerDifficulty::Peaceful)
+            {
                 if let Some((_, target)) =
                     player_positions.iter().min_by(|(_, left), (_, right)| {
                         entity
@@ -1177,8 +1226,9 @@ impl ServerWorld {
                 {
                     let direction =
                         (Vec3::from_array(*target) - entity.position).normalize_or_zero();
-                    entity.velocity.x = direction.x * 1.2;
-                    entity.velocity.z = direction.z * 1.2;
+                    let speed = self.difficulty.hostile_chase_speed_milli() as f32 / 1_000.0;
+                    entity.velocity.x = direction.x * 1.2 * speed;
+                    entity.velocity.z = direction.z * 1.2 * speed;
                     entity.target_player = true;
                 }
             }
@@ -1208,6 +1258,7 @@ impl ServerWorld {
         write(&[
             self.rules.do_daylight_cycle as u8,
             self.rules.do_mob_spawning as u8,
+            self.difficulty.as_u8(),
         ]);
         for mutation in mutations {
             write(&mutation.dimension.to_le_bytes());
@@ -1333,6 +1384,89 @@ mod tests {
             world.tick(&[(7, [8.0, 80.0, 8.0])])
         };
         assert_eq!(make(), make());
+    }
+
+    #[test]
+    fn difficulty_controls_hostile_policy_without_binding_pvp_or_spawn_rule() {
+        let mut rules = WorldRules::default();
+        rules.pvp = true;
+        rules.do_mob_spawning = false;
+        let mut peaceful = ServerWorld::new_with_difficulty(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            rules,
+            2,
+            ServerDifficulty::Peaceful,
+        );
+        assert!(!peaceful.allows_hostile_spawning());
+        assert!(peaceful.rules.pvp);
+        let peaceful_id = peaceful
+            .entities
+            .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
+        peaceful.tick(&[(7, [8.0, 80.0, 8.0])]);
+        assert!(peaceful.entities.get_by_id(peaceful_id).is_none());
+
+        let mut easy_rules = rules;
+        easy_rules.do_mob_spawning = false;
+        let mut easy = ServerWorld::new_with_difficulty(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            easy_rules,
+            2,
+            ServerDifficulty::Easy,
+        );
+        assert!(!easy.allows_hostile_spawning());
+        let easy_id = easy
+            .entities
+            .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
+        easy.tick(&[(7, [8.0, 80.0, 8.0])]);
+        assert!(easy.entities.get_by_id(easy_id).is_some());
+        assert!(easy
+            .entities
+            .get_by_id(easy_id)
+            .is_some_and(|entity| entity.velocity.x < 0.0));
+
+        let mut normal = ServerWorld::new_with_difficulty(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            WorldRules::default(),
+            2,
+            ServerDifficulty::Normal,
+        );
+        let normal_id = normal
+            .entities
+            .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
+        normal.tick(&[(7, [8.0, 80.0, 8.0])]);
+
+        let mut hard = ServerWorld::new_with_difficulty(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            WorldRules::default(),
+            2,
+            ServerDifficulty::Hard,
+        );
+        let hard_id = hard
+            .entities
+            .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
+        hard.tick(&[(7, [8.0, 80.0, 8.0])]);
+        let easy_speed = easy.entities.get_by_id(easy_id).unwrap().velocity.x.abs();
+        let normal_speed = normal
+            .entities
+            .get_by_id(normal_id)
+            .unwrap()
+            .velocity
+            .x
+            .abs();
+        let hard_speed = hard.entities.get_by_id(hard_id).unwrap().velocity.x.abs();
+        assert!(easy_speed < normal_speed && normal_speed < hard_speed);
     }
 
     #[test]

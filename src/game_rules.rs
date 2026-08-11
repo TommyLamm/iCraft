@@ -40,6 +40,68 @@ impl WorldType {
     }
 }
 
+/// Server-owned difficulty policy.  This is deliberately separate from the
+/// renderer/menu `Difficulty` enum: dedicated and embedded runtimes consume
+/// the same value parsed from `server.properties`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerDifficulty {
+    Peaceful,
+    Easy,
+    Normal,
+    Hard,
+}
+
+impl Default for ServerDifficulty {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+impl ServerDifficulty {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "peaceful" => Some(Self::Peaceful),
+            "easy" => Some(Self::Easy),
+            "normal" => Some(Self::Normal),
+            "hard" => Some(Self::Hard),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Peaceful => "peaceful",
+            Self::Easy => "easy",
+            Self::Normal => "normal",
+            Self::Hard => "hard",
+        }
+    }
+
+    /// Stable value used by the headless checksum.  This is not a wire
+    /// protocol version; it only makes two authority rulesets observably
+    /// different when their hostile policy differs.
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Peaceful => 0,
+            Self::Easy => 1,
+            Self::Normal => 2,
+            Self::Hard => 3,
+        }
+    }
+
+    /// Existing hostile AI has one chase-speed lane.  Keep the difficulty
+    /// consumer bounded to that lane rather than inventing new mob systems:
+    /// Easy is slower, Normal is the baseline, and Hard is faster.
+    pub const fn hostile_chase_speed_milli(self) -> u32 {
+        match self {
+            Self::Peaceful => 0,
+            Self::Easy => 900,
+            Self::Normal => 1_000,
+            Self::Hard => 1_100,
+        }
+    }
+}
+
 /// Rules that affect simulation.  Keep this a plain value: a host can clone
 /// it for a tick and clients can replace their display snapshot atomically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,5 +362,30 @@ mod tests {
         assert!(!policy.can_break_stack(Some(&stack), BlockType::Stone));
         stack = stack.with_can_break(BlockType::Stone);
         assert!(policy.can_break_stack(Some(&stack), BlockType::Stone));
+    }
+
+    #[test]
+    fn server_difficulty_parse_and_chase_policy_are_canonical() {
+        assert_eq!(
+            ServerDifficulty::parse("PEACEFUL"),
+            Some(ServerDifficulty::Peaceful)
+        );
+        assert_eq!(
+            ServerDifficulty::parse("easy"),
+            Some(ServerDifficulty::Easy)
+        );
+        assert_eq!(
+            ServerDifficulty::parse("normal"),
+            Some(ServerDifficulty::Normal)
+        );
+        assert_eq!(
+            ServerDifficulty::parse("hard"),
+            Some(ServerDifficulty::Hard)
+        );
+        assert_eq!(ServerDifficulty::parse("unknown"), None);
+        assert_eq!(ServerDifficulty::Easy.hostile_chase_speed_milli(), 900);
+        assert_eq!(ServerDifficulty::Normal.hostile_chase_speed_milli(), 1_000);
+        assert_eq!(ServerDifficulty::Hard.hostile_chase_speed_milli(), 1_100);
+        assert_eq!(ServerDifficulty::Peaceful.hostile_chase_speed_milli(), 0);
     }
 }
