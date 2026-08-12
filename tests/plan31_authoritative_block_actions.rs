@@ -20,13 +20,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const OWNER_ID: u64 = 0x31_0000;
 const OBSERVER_ID: u64 = OWNER_ID + 1;
-const TARGET: (i32, i32, i32) = (8, 81, 9);
-const PLACE_TARGET: (i32, i32, i32) = (8, 81, 10);
-const PLACE_SUPPORT: (i32, i32, i32) = (8, 80, 10);
-const OWNER_POSITION: [f32; 3] = [8.0, 80.0, 8.0];
-const OBSERVER_POSITION: [f32; 3] = [8.0, 80.0, 7.0];
-const LOOK: [i16; 3] = [0, -100, 995];
-const PLACE_LOOK: [i16; 3] = [180, -403, 899];
+// Players stay in chunk (0, 0), while both mutation targets are in chunk
+// (1, 0). The normal topology vector therefore exercises cross-chunk
+// validation, mutation, interest projection, and persistence.
+const TARGET: (i32, i32, i32) = (16, 81, 9);
+const RECONNECT_TARGET: (i32, i32, i32) = (16, 81, 8);
+const PLACE_TARGET: (i32, i32, i32) = (16, 81, 10);
+const PLACE_SUPPORT: (i32, i32, i32) = (16, 80, 10);
+const OWNER_POSITION: [f32; 3] = [15.0, 80.0, 8.0];
+const OBSERVER_POSITION: [f32; 3] = [15.0, 80.0, 7.0];
+const LOOK: [i16; 3] = [706, -57, 706];
+const RECONNECT_LOOK: [i16; 3] = [946, -76, 315];
+const PLACE_LOOK: [i16; 3] = [480, -359, 800];
 
 fn temp_world(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -103,6 +108,20 @@ fn start_request_at(
     position: (i32, i32, i32),
     wire: SessionSlotWire,
 ) -> GameplayRequest {
+    start_request_at_with_look(
+        runtime, player_id, request_id, sequence, position, wire, LOOK,
+    )
+}
+
+fn start_request_at_with_look(
+    runtime: &ServerRuntime,
+    player_id: u64,
+    request_id: u128,
+    sequence: u64,
+    position: (i32, i32, i32),
+    wire: SessionSlotWire,
+    look_milli: [i16; 3],
+) -> GameplayRequest {
     request(
         runtime,
         player_id,
@@ -117,7 +136,7 @@ fn start_request_at(
             hand: 0,
             held: Some(wire),
             block: BlockType::Air.to_wire(),
-            look_milli: LOOK,
+            look_milli,
         },
     )
 }
@@ -186,6 +205,8 @@ fn cancel_request(
 }
 
 fn prepare(runtime: &mut ServerRuntime, owner: u64, observer: u64, target_block: BlockType) {
+    runtime.authority.world.ensure_chunk(0, 0);
+    runtime.authority.world.ensure_chunk(1, 0);
     runtime
         .authority
         .world
@@ -680,6 +701,102 @@ fn run_tcp_vector(label: &str, listen: bool) {
             },
         );
     }
+
+    // Leave an unfinished slow mining action active, disconnect through the
+    // real socket, then reconnect the same profile. Mining progress is
+    // connection-scoped and must not survive into the replacement session.
+    runtime
+        .authority
+        .world
+        .set_block(
+            RECONNECT_TARGET.0,
+            RECONNECT_TARGET.1,
+            RECONNECT_TARGET.2,
+            BlockType::Obsidian,
+            0,
+        )
+        .expect("seed reconnect mining target");
+    let mut reconnect_gameplay = runtime
+        .authority
+        .session(owner_id)
+        .expect("owner session before reconnect")
+        .gameplay;
+    reconnect_gameplay.inventory[0] = Some(slot(pick));
+    reconnect_gameplay.mining = None;
+    assert!(runtime
+        .authority
+        .set_session_gameplay(owner_id, reconnect_gameplay));
+    clients[0].clear_events();
+    clients[0].send_request(start_request_at_with_look(
+        &runtime,
+        owner_id,
+        8,
+        6,
+        RECONNECT_TARGET,
+        wire,
+        RECONNECT_LOOK,
+    ));
+    {
+        let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
+        let response = wait_for_response(&mut runtime, &mut refs, 0, 8);
+        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        drive_until(
+            &mut runtime,
+            &mut refs,
+            "Plan31 unfinished TCP mining progress",
+            |_runtime, views| {
+                views[0].events().iter().any(|event| {
+                    matches!(
+                        event,
+                        ClientToGame::PlayerSessionUpdate { player_id, state, .. }
+                            if *player_id == owner_id && state.mining.is_some()
+                    )
+                })
+            },
+        );
+    }
+    assert!(runtime
+        .authority
+        .session(owner_id)
+        .is_some_and(|session| session.gameplay.mining.is_some()));
+    clients[0].disconnect_and_join();
+    {
+        let mut observer_ref = [&mut clients[1]];
+        drive_until(
+            &mut runtime,
+            &mut observer_ref,
+            "Plan31 owner disconnect cleanup",
+            |runtime, _| !runtime.players.contains_key(&owner_id),
+        );
+    }
+    clients[0] = TcpClient::connect(&address, "plan31-owner");
+    let expected_players = if local_host { 3 } else { 2 };
+    {
+        let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
+        drive_until(
+            &mut runtime,
+            &mut refs,
+            "Plan31 owner reconnect",
+            |runtime, views| {
+                views[0].player_id().is_some() && runtime.players.len() == expected_players
+            },
+        );
+    }
+    let reconnected_id = clients[0].player_id().expect("reconnected owner id");
+    assert_ne!(reconnected_id, owner_id);
+    assert!(runtime
+        .authority
+        .session(reconnected_id)
+        .is_some_and(|session| session.gameplay.mining.is_none()));
+    assert_eq!(
+        runtime.authority.world.get_block(
+            RECONNECT_TARGET.0,
+            RECONNECT_TARGET.1,
+            RECONNECT_TARGET.2,
+        ),
+        BlockType::Obsidian
+    );
+
     clients[0].disconnect_and_join();
     clients[1].disconnect_and_join();
     runtime.shutdown().expect("shutdown TCP Plan31 runtime");

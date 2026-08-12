@@ -106,6 +106,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 31 | [權威方塊操作與採礦](31_authoritative_block_actions_mining.md) | 已完成；typed BlockAction v18、owner-private progress wire、Singleplayer/Listen/Dedicated TCP 三拓撲 Block/Drop/XP projection 均通過 |
 | 32 | [進度旅行與完成閉環](32_progression_travel_completion.md) | 待執行；補 portal/dimension travel、progression completion、dragon/End City 真 ingress/egress；Plan30 不實作 |
 | 33 | [TCP 釣魚生命週期 revision](33_tcp_fishing_lifecycle_revision.md) | 待執行；修正最新 owner revision 下 cast→reel 的真 TCP lifecycle；Plan30 保留 reel `Rejected(InvalidRevision)` evidence，不繞過 anti-stale gate |
+| 34 | [容器破壞內容物守恆](34_container_break_inventory_conservation.md) | 待執行；補非空 Chest/Furnace/Hopper/Dispenser/Dropper 被權威破壞時完整 ItemStack 掉落、duplicate/reconnect/save 守恆；Plan31 只完成 BE removal，不宣稱內容物守恆 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 

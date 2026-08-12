@@ -666,6 +666,9 @@ Single-commit block breaking guarantees drop & XP conservation in release mode (
 `debug_assert!` side-effect bug). All 3 integration tests in `tests/plan31_authoritative_block_actions.rs`
 (Embedded, Listen TCP, Dedicated TCP) and all 698 library unit tests pass in release mode.
 `cargo check --release --all-targets`, `cargo fmt --all -- --check`, and `git diff --check` pass cleanly.
+Plan31 deliberately does not claim inventory conservation when a non-empty container block is
+broken: the block entity is removed and projected, but its slots are not yet converted to dropped
+items. That bounded authority/duplicate/save gap is tracked explicitly by Plan34.
 
 Use:
 

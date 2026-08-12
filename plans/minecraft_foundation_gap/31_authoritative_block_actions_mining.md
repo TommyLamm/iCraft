@@ -29,6 +29,9 @@
 
 - 新方塊內容、renderer/voxel mesh、GPU/window/audio/DPI、完整 vanilla tool table，
   以及任何未被 Plan30 blocker 指出的 protocol bump。
+- 含 inventory 的 Chest／Furnace／Hopper／Dispenser／Dropper 被破壞時之內容物掉落守恆；
+  現有 block-entity removal 只保證資料與 projection 移除，完整內容物守恆由 Plan34
+  精確追蹤，本計劃不宣稱已完成。
 
 ## 完成記錄（2026-08-12）
 
@@ -51,3 +54,8 @@
 - `git diff --check`：pass。
 - `cargo test --release --test plan31_authoritative_block_actions -- --test-threads=1`：3/3 pass（Embedded, Listen TCP, Dedicated TCP 均通過）。
 - `cargo test --release --lib -- --test-threads=1`：698/698 unit tests pass。
+
+Corrective acceptance 補驗證同一 bounded vector 中玩家位於 chunk `(0,0)`、mutation 位於
+chunk `(1,0)`，以及未完成 Obsidian mining 經真 TCP disconnect 後，以同 username
+reconnect 得到新 session 且 `mining=None`；詳見 dated artifact
+`artifacts/plan31_20260812_verification.md`。
