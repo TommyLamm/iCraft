@@ -57,11 +57,22 @@ it is a Plan33 regression or a pre-existing expectation conflict. Do not patch i
 make that determination first, and create the next numbered Plan if the missing behavior is outside
 Plan33's stated revision-lifecycle scope.
 
+CodeGraph and `git blame` narrowed this further before cutoff. Plan31 commit `beecd55` deliberately
+changed `GameplayResponseGate::accept` so a byte-for-byte identical cached ACK returns `true` and is
+surfaced again; its unit test
+`gameplay_response_gate_replays_exact_cached_ack_and_drops_rewrites` explicitly requires that
+behavior. The failing headless integration explicitly requires the opposite behavior for the same
+active-client replay. This is therefore an unresolved Plan31 transport/replication contract conflict,
+not evidence that Plan33's revision rebasing caused the failure. Do not make only one assertion
+green: first define one coherent contract for retry completion versus already-observed replay
+suppression, then update implementation and both levels of tests together. Because this conflict is
+inside Plan31's stated seam, no new numbered Plan was created merely to defer it.
+
 ## Exact resume order
 
-1. Audit the response-gate path for the reproduced `headless_server_authority` failure above, then
-   rerun `--lib` and `--bin icraft` individually with `--test-threads=1`, retaining full logs to
-   identify their concrete test cases/assertions.
+1. Resolve the documented Plan31 response-gate contract conflict, then rerun `--lib` and
+   `--bin icraft` individually with `--test-threads=1`, retaining full logs to identify their other
+   concrete test cases/assertions.
 2. Determine whether each failure is deterministic, environmental/flaky, or a regression. Add a
    numbered Plan before any real newly discovered scope; do not fold unrelated fixes into Plan33.
 3. After any scoped correction, rerun the exact serial debug full suite, then the serial release full
