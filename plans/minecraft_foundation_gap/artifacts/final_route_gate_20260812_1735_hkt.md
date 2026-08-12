@@ -42,10 +42,26 @@ The release full suite, release check, and post-suite fmt/diff gates were theref
 not be claimed as passing. Before the full-suite attempt, Plan33's targeted fmt and diff checks did
 pass.
 
+### Bounded diagnosis completed before cutoff
+
+A standalone serial rerun of `cargo test --locked --test headless_server_authority --no-fail-fast
+-- --test-threads=1` reproduced one failure (1 passed, 1 failed). The concrete case is
+`two_clients_share_headless_authority_with_revision_interest_and_reconnect`, at
+`tests/headless_server_authority.rs:486`: after resending the same `BLOCK_REQUEST`,
+`alice.take_response(BLOCK_REQUEST)` returned a replayed cached response even though the test
+requires the client response gate to suppress it. The adjacent authority metrics assertions are
+intended to prove the replay is counted once without accepting/rejecting or executing the mutation
+again. This is close to the Plan33 `NetworkClient` seam and is a real reproducible blocker, but the
+cutoff arrived before the response-gate call path could be audited far enough to establish whether
+it is a Plan33 regression or a pre-existing expectation conflict. Do not patch it speculatively;
+make that determination first, and create the next numbered Plan if the missing behavior is outside
+Plan33's stated revision-lifecycle scope.
+
 ## Exact resume order
 
-1. Re-run the three failed debug targets individually with `--test-threads=1`, retaining full logs,
-   and identify the concrete test cases/assertions.
+1. Audit the response-gate path for the reproduced `headless_server_authority` failure above, then
+   rerun `--lib` and `--bin icraft` individually with `--test-threads=1`, retaining full logs to
+   identify their concrete test cases/assertions.
 2. Determine whether each failure is deterministic, environmental/flaky, or a regression. Add a
    numbered Plan before any real newly discovered scope; do not fold unrelated fixes into Plan33.
 3. After any scoped correction, rerun the exact serial debug full suite, then the serial release full
