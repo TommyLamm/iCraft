@@ -215,8 +215,46 @@ pub fn generate_chunk_with_options(
             std::sync::OnceLock::new();
         let manager = STRUCTURE_MANAGER.get_or_init(|| crate::structure::StructureManager::new());
         manager.apply_structures_to_chunk(&mut chunk, dimension, seed);
+        if dimension == Dimension::End {
+            apply_fixed_end_city(&mut chunk, seed);
+        }
     }
     chunk
+}
+
+fn apply_fixed_end_city(chunk: &mut Chunk, seed: u32) {
+    let start = crate::structure::gen::end_city::generate_end_city(
+        END_CITY_X,
+        END_CITY_BASE_Y,
+        END_CITY_Z,
+        seed,
+    );
+    for piece in &start.pieces {
+        if !piece
+            .bounding_box
+            .intersects_chunk(chunk.chunk_x, chunk.chunk_z)
+        {
+            continue;
+        }
+        for placement in &piece.blocks {
+            if placement.world_x.div_euclid(16) != chunk.chunk_x
+                || placement.world_z.div_euclid(16) != chunk.chunk_z
+            {
+                continue;
+            }
+            let lx = placement.world_x.rem_euclid(16) as usize;
+            let lz = placement.world_z.rem_euclid(16) as usize;
+            chunk.set_block_local(lx, placement.world_y, lz, placement.block_type);
+            if let Some(entity) = &placement.block_entity {
+                let _ = chunk.insert_block_entity(
+                    lx as u8,
+                    placement.world_y as i16,
+                    lz as u8,
+                    entity.clone(),
+                );
+            }
+        }
+    }
 }
 
 fn generate_superflat_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
@@ -723,6 +761,38 @@ where
         }
     }
     None
+}
+
+/// Returns the block placements for a 4x5 obsidian Nether portal frame
+/// with NetherPortal interior blocks, plus the spawn position inside the portal.
+pub fn build_linked_nether_portal_blocks(
+    chunk_x: i32,
+    chunk_z: i32,
+    spawn_y: i32,
+    height: WorldHeight,
+) -> (Vec<((i32, i32, i32), BlockType)>, Vec3) {
+    let base_x = chunk_x * CHUNK_WIDTH as i32 + 6;
+    let base_z = chunk_z * CHUNK_DEPTH as i32 + 8;
+    let clamp_min = height.min_y + 1;
+    let clamp_max = height.max_y_exclusive() - 5;
+    let base_y = (spawn_y - 1).clamp(clamp_min, clamp_max);
+    let mut changes = Vec::new();
+    for x in base_x..=base_x + 3 {
+        changes.push(((x, base_y, base_z), BlockType::Obsidian));
+        changes.push(((x, base_y + 4, base_z), BlockType::Obsidian));
+    }
+    for y in base_y + 1..=base_y + 3 {
+        changes.push(((base_x, y, base_z), BlockType::Obsidian));
+        changes.push(((base_x + 3, y, base_z), BlockType::Obsidian));
+        changes.push(((base_x + 1, y, base_z), BlockType::NetherPortal));
+        changes.push(((base_x + 2, y, base_z), BlockType::NetherPortal));
+    }
+    let spawn_pos = Vec3::new(
+        base_x as f32 + 1.5,
+        base_y as f32 + 1.0,
+        base_z as f32 + 0.5,
+    );
+    (changes, spawn_pos)
 }
 
 fn nether_frame_x<F>(base_x: i32, base_y: i32, z: i32, getter: &mut F) -> Option<Vec<BlockPos>>

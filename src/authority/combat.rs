@@ -380,7 +380,10 @@ fn validate_common(
     if !event.has_line_of_sight {
         return Err(CombatReject::NoLineOfSight);
     }
-    if horizontal_dot(event.attacker_look_milli, delta) <= 0 {
+    let horizontal_distance_sq = i128::from(delta[0]).pow(2) + i128::from(delta[2]).pow(2);
+    if horizontal_distance_sq > 1_000i128.pow(2)
+        && horizontal_dot(event.attacker_look_milli, delta) <= 0
+    {
         return Err(CombatReject::NotFacingTarget);
     }
     Ok(())
@@ -562,8 +565,9 @@ fn knockback_delta(event: &DamageEvent, resistance_milli: u16) -> [i32; 3] {
 
 fn validate_look(look: [i16; 3]) -> Result<(), CombatReject> {
     let x = i64::from(look[0]);
+    let y = i64::from(look[1]);
     let z = i64::from(look[2]);
-    if !(250_000..=1_210_000).contains(&(x * x + z * z)) {
+    if !(250_000..=1_210_000).contains(&(x * x + y * y + z * z)) {
         return Err(CombatReject::InvalidEvent);
     }
     Ok(())

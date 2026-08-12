@@ -27,7 +27,7 @@ use glam::Vec3;
 use std::collections::{BTreeMap, BTreeSet};
 
 const WORLD_BOUND: i32 = 30_000_000;
-const FIXED_DT: f32 = 1.0 / 20.0;
+pub const FIXED_DT: f32 = 1.0 / 20.0;
 const MAX_AUTOMATION_TRANSFERS: usize = 64;
 const MAX_FLUID_UPDATES: usize = 256;
 
@@ -127,7 +127,11 @@ impl ServerWorld {
             time: 0,
             revisions: RevisionClock::new(),
             chunks: ChunkManager::new_in_dimension(render_distance.max(1), dimension),
-            entities: EntityManager::new(),
+            // Network player ids occupy the low numeric lane while authority-
+            // created transient ids reserve the high bit. Persistent world
+            // entities use the middle lane so a combat target can never be
+            // mistaken for the authenticated player with the same raw id.
+            entities: EntityManager::new_with_id_base(1u64 << 32),
             redstone: RedstoneSystem::new(),
             recipe_manager: crate::crafting::RecipeManager::new(),
             container_viewers: BTreeMap::new(),
@@ -170,6 +174,17 @@ impl ServerWorld {
             && z.unsigned_abs() <= WORLD_BOUND as u32
     }
 
+    pub fn safe_spawn_y(&mut self, x: i32, z: i32) -> i32 {
+        self.ensure_chunk(x.div_euclid(16), z.div_euclid(16));
+        let height = self.dimension.height();
+        for y in (height.min_y()..height.max_y_exclusive()).rev() {
+            if self.get_block(x, y, z).properties().is_solid {
+                return (y + 1).clamp(height.min_y() + 1, height.max_y_exclusive() - 5);
+            }
+        }
+        64
+    }
+
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> BlockType {
         self.chunks.get_block(x, y, z)
     }
@@ -182,14 +197,48 @@ impl ServerWorld {
         self.chunks.get_block_entity(x, y, z)
     }
 
+    pub fn ensure_chest_loot(&mut self, position: (i32, i32, i32)) {
+        let pending = matches!(
+            self.get_block_entity(position.0, position.1, position.2),
+            Some(BlockEntity::Chest(chest)) if chest.loot_table.is_some()
+        );
+        if !pending {
+            return;
+        }
+        let revision = self.revisions.allocate();
+        if let Some(BlockEntity::Chest(chest)) = self
+            .chunks
+            .get_block_entity_mut(position.0, position.1, position.2)
+        {
+            chest.ensure_loot_generated(self.seed, position);
+            chest.revision = revision;
+        }
+        self.block_revisions.insert(position, revision);
+        self.chunk_revisions.insert(
+            (position.0.div_euclid(16), position.2.div_euclid(16)),
+            revision,
+        );
+        self.pending_mutations.push(WorldMutation {
+            dimension: self.dimension as u8,
+            position,
+            block: self.get_block(position.0, position.1, position.2).to_wire(),
+            state: self.get_block_state(position.0, position.1, position.2),
+            raw_fluid: self
+                .chunks
+                .get_fluid_raw(position.0, position.1, position.2),
+            revision,
+        });
+    }
+
     /// Return a serializable view of a container slot for the transport
     /// adapter. `None` is a valid empty slot; an out-of-range slot returns
     /// `None` as well and is rejected by dispatch before this helper is used.
     pub fn container_slot_wire(
-        &self,
+        &mut self,
         position: (i32, i32, i32),
         slot: u16,
     ) -> Option<Option<ItemWire>> {
+        self.ensure_chest_loot(position);
         let entity = self.get_block_entity(position.0, position.1, position.2)?;
         let access = ContainerAccess::for_entity(entity)?;
         if usize::from(slot) >= access.slot_count {
@@ -206,9 +255,15 @@ impl ServerWorld {
         Some(stack.as_ref().map(ItemWire::from_stack))
     }
 
-    pub fn container_slots_wire(&self, position: (i32, i32, i32)) -> Option<Vec<Option<ItemWire>>> {
-        let entity = self.get_block_entity(position.0, position.1, position.2)?;
-        let count = ContainerAccess::for_entity(entity)?.slot_count;
+    pub fn container_slots_wire(
+        &mut self,
+        position: (i32, i32, i32),
+    ) -> Option<Vec<Option<ItemWire>>> {
+        self.ensure_chest_loot(position);
+        let count = {
+            let entity = self.get_block_entity(position.0, position.1, position.2)?;
+            ContainerAccess::for_entity(entity)?.slot_count
+        };
         (0..count)
             .map(|slot| self.container_slot_wire(position, slot as u16))
             .collect()
@@ -703,6 +758,36 @@ impl ServerWorld {
         self.block_revisions.insert((x, y, z), revision);
         self.chunk_revisions
             .insert((x.div_euclid(16), z.div_euclid(16)), revision);
+
+        if block == BlockType::Fire {
+            if let Some(interior) =
+                crate::dimension::detect_nether_frame((x, y, z), |x, y, z| self.get_block(x, y, z))
+            {
+                for pos in interior {
+                    if let Ok(Some(mutation)) =
+                        self.set_block(pos.0, pos.1, pos.2, BlockType::NetherPortal, 0)
+                    {
+                        self.pending_mutations.push(mutation);
+                    }
+                }
+            }
+        }
+        if block == BlockType::EndPortalFrameFilled {
+            if let Some(interior) =
+                crate::dimension::detect_completed_end_portal((x, y, z), |x, y, z| {
+                    self.get_block(x, y, z)
+                })
+            {
+                for pos in interior {
+                    if let Ok(Some(mutation)) =
+                        self.set_block(pos.0, pos.1, pos.2, BlockType::EndPortal, 0)
+                    {
+                        self.pending_mutations.push(mutation);
+                    }
+                }
+            }
+        }
+
         Ok(Some(WorldMutation {
             dimension: self.dimension as u8,
             position: (x, y, z),
@@ -740,7 +825,10 @@ impl ServerWorld {
             return Err(RejectReason::InvalidState);
         };
         if existing != BlockType::Air {
-            return Err(RejectReason::InvalidState);
+            if !(block == BlockType::EndPortalFrameFilled && existing == BlockType::EndPortalFrame)
+            {
+                return Err(RejectReason::InvalidState);
+            }
         }
         let support = (
             x.saturating_sub(i32::from(face[0])),
@@ -1970,6 +2058,47 @@ impl ServerWorld {
             entity.update_physics(FIXED_DT, chunks);
         }
         self.entities.sync_positions();
+
+        if let Some((_, first_pos)) = player_positions.first() {
+            let player_vec = Vec3::from_array(*first_pos);
+            crate::boss::ensure_dimension_entities(
+                self.dimension,
+                &mut self.entities,
+                &self.chunks,
+                player_vec,
+                self.time as f32 * FIXED_DT,
+            );
+            let boss_events = crate::boss::update_dimension_entities(
+                self.dimension,
+                &mut self.entities,
+                &self.chunks,
+                player_vec,
+                Vec3::NEG_Z,
+                FIXED_DT,
+                crate::inventory::GameMode::Survival,
+            );
+            if boss_events.dragon_completion.is_some() {
+                self.handle_dragon_completion();
+            }
+        }
+    }
+
+    pub(crate) fn handle_dragon_completion(&mut self) {
+        const EXIT_Y: i32 = 73;
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if let Ok(Some(mutation)) = self.set_block(dx, EXIT_Y, dz, BlockType::EndPortal, 0)
+                {
+                    self.pending_mutations.push(mutation);
+                }
+            }
+        }
+        if let Ok(Some(mutation)) = self.set_block(0, EXIT_Y + 5, 0, BlockType::DragonEgg, 0) {
+            self.pending_mutations.push(mutation);
+        }
+        if let Ok(Some(mutation)) = self.set_block(8, EXIT_Y + 1, 0, BlockType::EndGateway, 0) {
+            self.pending_mutations.push(mutation);
+        }
     }
 
     pub(crate) fn checksum(&self, mutations: &[WorldMutation]) -> u64 {

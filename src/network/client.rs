@@ -153,6 +153,10 @@ pub enum ClientToGame {
     WorldRulesSync {
         rules: crate::game_rules::WorldRules,
     },
+    DimensionTransfer {
+        dimension: u8,
+        position: [f32; 3],
+    },
     LightningStrike(LightningStrike),
     Chat {
         sender: String,
@@ -826,6 +830,17 @@ async fn run_client(
                         current_dimension = dimension;
                         let _ = client_to_game.send(ClientToGame::PlayerRespawnResult { position, dimension });
                     }
+                    Ok(Packet::DimensionTransfer { player_id: target_id, dimension, position, .. }) => {
+                        if target_id == player_id {
+                            current_dimension = dimension;
+                            // Revisions are independent per dimension; the
+                            // first target-world snapshot/request must not be
+                            // compared to the source world's high-water mark.
+                            last_client_revision = 0;
+                            active_container = None;
+                            let _ = client_to_game.send(ClientToGame::DimensionTransfer { dimension, position });
+                        }
+                    }
                     Ok(Packet::SleepStateSync { player_id, is_sleeping, .. }) => {
                         let _ = client_to_game.send(ClientToGame::SleepStateSync { player_id, is_sleeping });
                     }
@@ -997,10 +1012,10 @@ async fn run_client(
                         let _ = client_to_game.send(ClientToGame::WorldRulesSync { rules });
                     }
                     Ok(Packet::GameplayResponse { response, .. }) => {
+                        if let crate::network::protocol::GameplayOutcome::Accepted { revision } = response.outcome {
+                            last_client_revision = last_client_revision.max(revision);
+                        }
                         if gameplay_response_gate.accept(&response) {
-                            if let crate::network::protocol::GameplayOutcome::Accepted { revision } = response.outcome {
-                                last_client_revision = last_client_revision.max(revision);
-                            }
                             let _ = client_to_game.send(ClientToGame::GameplayResponse { response });
                         }
                     }

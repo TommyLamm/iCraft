@@ -612,6 +612,11 @@ pub struct SessionContract {
     pub cheats_enabled: bool,
     pub last_client_sequence: u64,
     pub last_revision: u64,
+    pub portal_contact_time: f32,
+    pub portal_cooldown: f32,
+    /// Set only by an accepted typed `EnterPortal` action. Fixed ticks advance
+    /// contact time while the authenticated pose remains inside that portal.
+    pub portal_requested: bool,
     pub gameplay: SessionGameplayState,
     response_cache: VecDeque<GameplayResponse>,
 }
@@ -639,6 +644,9 @@ impl SessionContract {
             cheats_enabled,
             last_client_sequence: 0,
             last_revision: 0,
+            portal_contact_time: 0.0,
+            portal_cooldown: 0.0,
+            portal_requested: false,
             gameplay: SessionGameplayState::default(),
             response_cache: VecDeque::with_capacity(RESPONSE_CACHE_CAPACITY),
         }

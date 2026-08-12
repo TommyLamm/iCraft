@@ -706,6 +706,10 @@ pub struct EntityManager {
 
 impl EntityManager {
     pub fn new() -> Self {
+        Self::new_with_id_base(1)
+    }
+
+    pub(crate) fn new_with_id_base(next_id: u64) -> Self {
         Self {
             entities: Vec::new(),
             id_to_index: HashMap::new(),
@@ -713,7 +717,7 @@ impl EntityManager {
             spatial_buckets: HashMap::new(),
             entity_chunks: HashMap::new(),
             scratch: EntityScratch::default(),
-            next_id: 1,
+            next_id: next_id.max(1),
             #[cfg(test)]
             position_sync_visits: 0,
         }

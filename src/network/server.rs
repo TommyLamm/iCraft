@@ -693,6 +693,11 @@ pub enum HostToServer {
         to: PlayerId,
         response: GameplayResponse,
     },
+    SendDimensionTransfer {
+        to: PlayerId,
+        dimension: u8,
+        position: [f32; 3],
+    },
     Stop,
 }
 
@@ -2872,6 +2877,28 @@ impl<S: HostEventSender> NetworkServer<S> {
                     is_sleeping,
                 };
                 (packet, None)
+            }
+            HostToServer::SendDimensionTransfer {
+                to,
+                dimension,
+                position,
+            } => {
+                if let Some(session) = self.sessions.lock().await.get_mut(&to) {
+                    // Gameplay revisions are dimension-scoped. Crossing a
+                    // portal starts the target world's lane; retaining the
+                    // source revision would reject every lower target-world
+                    // revision before it could reach the authority.
+                    session.gameplay.current_dimension = dimension;
+                    session.gameplay.last_client_revision = 0;
+                    session.gameplay.active_container = None;
+                }
+                let packet = Packet::DimensionTransfer {
+                    protocol_version: PROTOCOL_VERSION,
+                    player_id: to,
+                    dimension,
+                    position,
+                };
+                (packet, Some(to))
             }
         };
 

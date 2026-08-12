@@ -2511,6 +2511,37 @@ impl State {
         let z = pos.z.floor() as i32;
         let feet = self.chunk_manager.get_block(x, y, z);
         let body = self.chunk_manager.get_block(x, y + 1, z);
+        let portal = if matches!(
+            feet,
+            BlockType::NetherPortal | BlockType::EndPortal | BlockType::EndGateway
+        ) {
+            Some(((x, y, z), feet))
+        } else if matches!(
+            body,
+            BlockType::NetherPortal | BlockType::EndPortal | BlockType::EndGateway
+        ) {
+            Some(((x, y + 1, z), body))
+        } else {
+            None
+        };
+        if self.has_in_process_runtime() || !self.is_authoritative() {
+            if let Some(((portal_x, portal_y, portal_z), portal_block)) = portal {
+                if self.portal_contact_time == 0.0 {
+                    let _ = self.submit_local_authority_block_action(
+                        crate::network::protocol::BlockActionKind::EnterPortal,
+                        portal_x,
+                        portal_y,
+                        portal_z,
+                        [0, 0, 0],
+                        portal_block,
+                    );
+                    self.portal_contact_time = dt.max(f32::EPSILON);
+                }
+            } else {
+                self.portal_contact_time = 0.0;
+            }
+            return;
+        }
         if feet == BlockType::EndGateway || body == BlockType::EndGateway {
             if self.current_dimension == crate::dimension::Dimension::End {
                 let dist = pos.length();
@@ -4200,6 +4231,10 @@ enum NetworkInbound {
         player_id: crate::network::protocol::PlayerId,
         is_sleeping: bool,
     },
+    DimensionTransfer {
+        dimension: u8,
+        position: [f32; 3],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4945,6 +4980,13 @@ impl NetworkHandle {
                         } => NetworkInbound::SleepStateSync {
                             player_id,
                             is_sleeping,
+                        },
+                        crate::network::client::ClientToGame::DimensionTransfer {
+                            dimension,
+                            position,
+                        } => NetworkInbound::DimensionTransfer {
+                            dimension,
+                            position,
                         },
                     })
                     .collect()
@@ -7856,6 +7898,14 @@ impl State {
                 position,
                 dimension,
             }),
+            Event::DimensionTransfer {
+                target,
+                dimension,
+                position,
+            } if target == session_id => Some(NetworkInbound::DimensionTransfer {
+                dimension,
+                position,
+            }),
             Event::WorldRules { target, rules } if target == session_id => {
                 Some(NetworkInbound::WorldRulesSync { rules })
             }
@@ -8406,7 +8456,13 @@ impl State {
                 } else {
                     held
                 },
-                block: if matches!(action, crate::network::protocol::BlockActionKind::Place) {
+                block: if matches!(
+                    action,
+                    crate::network::protocol::BlockActionKind::Place
+                        | crate::network::protocol::BlockActionKind::IgnitePortal
+                        | crate::network::protocol::BlockActionKind::InsertEnderEye
+                        | crate::network::protocol::BlockActionKind::EnterPortal
+                ) {
                     block.to_wire()
                 } else {
                     BlockType::Air.to_wire()
@@ -10188,6 +10244,18 @@ impl State {
                     } else if let Some(remote) = self.remote_players.get_mut(&player_id) {
                         remote.is_sleeping = is_sleeping;
                     }
+                }
+            }
+            NetworkInbound::DimensionTransfer {
+                dimension,
+                position,
+            } => {
+                if let Some(target) = crate::dimension::Dimension::from_wire(dimension) {
+                    self.reset_presented_dimension(target);
+                    self.player_physics.position = Vec3::from_array(position);
+                    self.camera.position = Vec3::from_array(position) + Vec3::new(0.0, 1.6, 0.0);
+                    self.portal_contact_time = 0.0;
+                    self.portal_cooldown = 3.0;
                 }
             }
         }
@@ -12075,9 +12143,7 @@ impl State {
             );
         }
 
-        if authoritative {
-            self.update_portal_travel(dt);
-        }
+        self.update_portal_travel(dt);
 
         if authoritative {
             self.redstone_tick_timer += dt;
@@ -16776,6 +16842,32 @@ impl State {
                     let clicked_block = self
                         .chunk_manager
                         .get_block(clicked.0, clicked.1, clicked.2);
+                    let held_item = self.inventory.hotbar[self.inventory.selected]
+                        .map(|stack| stack.item)
+                        .unwrap_or(Item::Air);
+                    if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
+                        let target = hit.block_pos + hit.normal;
+                        let _ = self.submit_local_authority_block_action(
+                            crate::network::protocol::BlockActionKind::IgnitePortal,
+                            target.x as i32,
+                            target.y as i32,
+                            target.z as i32,
+                            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                            BlockType::Fire,
+                        );
+                        return;
+                    }
+                    if clicked_block == BlockType::EndPortalFrame && held_item == Item::EyeOfEnder {
+                        let _ = self.submit_local_authority_block_action(
+                            crate::network::protocol::BlockActionKind::InsertEnderEye,
+                            clicked.0,
+                            clicked.1,
+                            clicked.2,
+                            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                            BlockType::EndPortalFrameFilled,
+                        );
+                        return;
+                    }
                     if clicked_block == BlockType::Bed {
                         let _ = self.submit_local_authority_operation(
                             crate::network::protocol::GameplayOperation::Sleep {
@@ -18014,6 +18106,32 @@ impl State {
         let clicked_block = self
             .chunk_manager
             .get_block(clicked.0, clicked.1, clicked.2);
+        let held_item = self.inventory.hotbar[self.inventory.selected]
+            .map(|stack| stack.item)
+            .unwrap_or(Item::Air);
+        if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
+            let target = hit.block_pos + hit.normal;
+            let _ = self.submit_local_authority_block_action(
+                crate::network::protocol::BlockActionKind::IgnitePortal,
+                target.x as i32,
+                target.y as i32,
+                target.z as i32,
+                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                BlockType::Fire,
+            );
+            return;
+        }
+        if clicked_block == BlockType::EndPortalFrame && held_item == Item::EyeOfEnder {
+            let _ = self.submit_local_authority_block_action(
+                crate::network::protocol::BlockActionKind::InsertEnderEye,
+                clicked.0,
+                clicked.1,
+                clicked.2,
+                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                BlockType::EndPortalFrameFilled,
+            );
+            return;
+        }
         if matches!(
             clicked_block,
             BlockType::Chest

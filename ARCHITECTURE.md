@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-08-11
+> Last verified: 2026-08-12
 > Git baseline: tommy-dev
 >
 > This document is a concise navigation map. Source code remains authoritative.
@@ -669,6 +669,17 @@ Single-commit block breaking guarantees drop & XP conservation in release mode (
 Plan31 deliberately does not claim inventory conservation when a non-empty container block is
 broken: the block entity is removed and projected, but its slots are not yet converted to dropped
 items. That bounded authority/duplicate/save gap is tracked explicitly by Plan34.
+
+Plan32 completes the bounded authoritative progression/travel lane. Protocol v19 adds typed portal
+ignition, Ender Eye insertion, portal entry, and owner-private dimension transfer. Authority owns
+portal contact/cooldown, linked-portal mutations, transfer intents, operator progression commands,
+combat damage, and dragon completion; transport and client revision namespaces reset on dimension
+transfer. Generated fortress and End City chests materialize loot lazily with a revisioned mutation
+and persist it across reload. Five debug and five release integration vectors cover Singleplayer,
+Listen TCP, and Dedicated TCP, including duplicate ACK, stale rejection, observer privacy,
+disconnect/reconnect persistence, generated dragon completion, and fortress/End City loot. This
+does not claim full vanilla structure/dragon AI, renderer/GPU/window/audio/DPI, or visual evidence.
+Plan33 remains the next bounded gap for the fishing reel revision lifecycle.
 
 Use:
 

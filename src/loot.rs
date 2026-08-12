@@ -27,13 +27,19 @@ impl LootTableId {
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "chests/dungeon" => Some(LootTableId::Dungeon),
-            "chests/abandoned_mineshaft" => Some(LootTableId::Mineshaft),
-            "chests/village/village_house" | "chests/village" => Some(LootTableId::Village),
-            "chests/stronghold_corridor" => Some(LootTableId::StrongholdCorridor),
-            "chests/stronghold_library" => Some(LootTableId::StrongholdLibrary),
-            "chests/nether_bridge" => Some(LootTableId::NetherBridge),
-            "chests/end_city" => Some(LootTableId::EndCity),
+            "chests/dungeon" | "dungeon" => Some(LootTableId::Dungeon),
+            "chests/abandoned_mineshaft" | "mineshaft" => Some(LootTableId::Mineshaft),
+            "chests/village/village_house" | "chests/village" | "village" => {
+                Some(LootTableId::Village)
+            }
+            "chests/stronghold_corridor" | "stronghold_corridor" => {
+                Some(LootTableId::StrongholdCorridor)
+            }
+            "chests/stronghold_library" | "stronghold_library" => {
+                Some(LootTableId::StrongholdLibrary)
+            }
+            "chests/nether_bridge" | "nether_bridge" => Some(LootTableId::NetherBridge),
+            "chests/end_city" | "end_city" => Some(LootTableId::EndCity),
             _ => None,
         }
     }

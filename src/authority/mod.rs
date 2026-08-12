@@ -13,7 +13,7 @@ use crate::network::protocol::{
     BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
     PlayerId, RejectReason, SessionSlotWire,
 };
-use crate::server_world::ServerWorld;
+use crate::server_world::{ServerWorld, FIXED_DT};
 use contract::{
     AuthoritySnapshot, AuthorityTopology, MiningProgressState, SessionContract,
     SessionGameplayState, SessionGameplayUpdate, SessionInventorySlot, WorldMutation,
@@ -95,10 +95,19 @@ pub struct AuthorityCore {
     /// Session ids changed as a side effect of another player's request. They
     /// receive the request's single authoritative revision at publication.
     pending_session_revisions: BTreeSet<PlayerId>,
+    pending_dimension_transfers: Vec<DimensionTransferIntent>,
     /// High-bit ids are reserved for authority-created hooks, drops and XP.
     /// The allocator is shared by every loaded dimension, unlike each world's
     /// legacy EntityManager allocator.
     next_authority_entity_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DimensionTransferIntent {
+    pub player_id: PlayerId,
+    pub from: Dimension,
+    pub to: Dimension,
+    pub position: [f32; 3],
 }
 
 /// Presentation roots use this small in-process boundary for Singleplayer and
@@ -309,6 +318,7 @@ impl AuthorityCore {
             fixed_tick: 0,
             pending_mutations: Vec::new(),
             pending_session_revisions: BTreeSet::new(),
+            pending_dimension_transfers: Vec::new(),
             next_authority_entity_id: AUTHORITY_ENTITY_ID_START,
         }
     }
@@ -412,6 +422,8 @@ impl AuthorityCore {
             session.gameplay.mining = None;
             session.gameplay.mounted_entity = None;
             session.gameplay.shield_active = false;
+            session.portal_contact_time = 0.0;
+            session.portal_requested = false;
         }
         self.with_world(dimension, |world| {
             world.close_container_viewers_forced(id);
@@ -542,6 +554,10 @@ impl AuthorityCore {
         self.sessions.remove(&id)
     }
 
+    pub fn take_pending_dimension_transfers(&mut self) -> Vec<DimensionTransferIntent> {
+        std::mem::take(&mut self.pending_dimension_transfers)
+    }
+
     pub fn session(&self, id: PlayerId) -> Option<&SessionContract> {
         self.sessions.get(&id)
     }
@@ -583,6 +599,7 @@ impl AuthorityCore {
             self.activate_dimension(dimension);
             self.tick_session_domains(dimension);
             self.tick_mining(dimension);
+            self.tick_portal_travel(dimension);
             let players: Vec<(PlayerId, [f32; 3])> = self
                 .sessions
                 .values()
@@ -845,6 +862,186 @@ impl AuthorityCore {
             let revision = self.world.revisions.allocate();
             session.gameplay.revision = revision;
         }
+    }
+
+    fn tick_portal_travel(&mut self, dimension: Dimension) {
+        use crate::inventory::GameMode;
+        use crate::world::BlockType;
+        use glam::Vec3;
+
+        let ids: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|session| session.dimension == dimension as u8)
+            .map(|session| session.id)
+            .collect();
+
+        for id in ids {
+            let Some((position, game_mode, cooldown, contact_time, requested)) =
+                self.sessions.get(&id).map(|session| {
+                    (
+                        session.position,
+                        session.game_mode,
+                        session.portal_cooldown,
+                        session.portal_contact_time,
+                        session.portal_requested,
+                    )
+                })
+            else {
+                continue;
+            };
+
+            let new_cooldown = (cooldown - FIXED_DT).max(0.0);
+            if new_cooldown > 0.0 {
+                if let Some(session) = self.sessions.get_mut(&id) {
+                    session.portal_cooldown = new_cooldown;
+                    session.portal_contact_time = 0.0;
+                    session.portal_requested = false;
+                }
+                continue;
+            }
+
+            if !requested {
+                if let Some(session) = self.sessions.get_mut(&id) {
+                    session.portal_contact_time = 0.0;
+                }
+                continue;
+            }
+
+            let px = position[0].floor() as i32;
+            let py = position[1].floor() as i32;
+            let pz = position[2].floor() as i32;
+
+            let feet = self.world.get_block(px, py, pz);
+            let body = self.world.get_block(px, py + 1, pz);
+
+            if feet == BlockType::EndGateway || body == BlockType::EndGateway {
+                if dimension == Dimension::End {
+                    let pos_vec = Vec3::from_array(position);
+                    let dist = pos_vec.length();
+                    let target_pos = if dist < 300.0 {
+                        Vec3::new(1035.5, 89.0, 11.5)
+                    } else {
+                        Vec3::new(0.5, 65.0, 0.5)
+                    };
+                    if let Some(session) = self.sessions.get_mut(&id) {
+                        session.position = target_pos.to_array();
+                        session.portal_cooldown = 2.0;
+                        session.portal_contact_time = 0.0;
+                    }
+                    self.pending_session_revisions.insert(id);
+                    continue;
+                }
+            }
+
+            if feet == BlockType::EndPortal || body == BlockType::EndPortal {
+                let target_dim = if dimension == Dimension::End {
+                    Dimension::Overworld
+                } else {
+                    Dimension::End
+                };
+
+                let target_pos = if target_dim == Dimension::End {
+                    Vec3::new(0.5, 65.0, 0.5)
+                } else {
+                    let spawn = self.sessions.get(&id).and_then(|s| s.spawn_point);
+                    if let Some(sp) = spawn {
+                        Vec3::new(sp[0] as f32 + 0.5, sp[1] as f32, sp[2] as f32 + 0.5)
+                    } else {
+                        Vec3::new(0.5, 65.0, 0.5)
+                    }
+                };
+
+                self.execute_portal_dimension_transfer(id, target_dim, target_pos.to_array());
+                continue;
+            }
+
+            if feet == BlockType::NetherPortal || body == BlockType::NetherPortal {
+                let new_contact = contact_time + FIXED_DT;
+                if new_contact >= 1.0 || game_mode == GameMode::Creative {
+                    let target_dim = if dimension == Dimension::Nether {
+                        Dimension::Overworld
+                    } else {
+                        Dimension::Nether
+                    };
+
+                    let scaled = crate::dimension::transform_position(
+                        dimension,
+                        target_dim,
+                        Vec3::from_array(position),
+                    );
+                    let cx = scaled.x.floor() as i32 >> 4;
+                    let cz = scaled.z.floor() as i32 >> 4;
+                    let height = target_dim.height();
+
+                    let target_pos = {
+                        self.ensure_dimension(target_dim);
+                        let target_world = self.world_mut(target_dim).unwrap();
+                        let target_y = target_world
+                            .safe_spawn_y(scaled.x.floor() as i32, scaled.z.floor() as i32);
+                        let (portal_blocks, spawn_vec) =
+                            crate::dimension::build_linked_nether_portal_blocks(
+                                cx, cz, target_y, height,
+                            );
+                        let mut mutations = Vec::new();
+                        for ((bx, by, bz), btype) in portal_blocks {
+                            if target_world.get_block(bx, by, bz) != BlockType::NetherPortal {
+                                if let Ok(Some(mutation)) =
+                                    target_world.set_block(bx, by, bz, btype, 0)
+                                {
+                                    mutations.push(mutation);
+                                }
+                            }
+                        }
+                        (spawn_vec, mutations)
+                    };
+                    self.pending_mutations.extend(target_pos.1);
+                    self.execute_portal_dimension_transfer(id, target_dim, target_pos.0.to_array());
+                } else {
+                    if let Some(session) = self.sessions.get_mut(&id) {
+                        session.portal_contact_time = new_contact;
+                    }
+                }
+            } else {
+                if let Some(session) = self.sessions.get_mut(&id) {
+                    session.portal_contact_time = 0.0;
+                    session.portal_requested = false;
+                }
+            }
+        }
+    }
+
+    pub fn execute_portal_dimension_transfer(
+        &mut self,
+        id: PlayerId,
+        target_dim: Dimension,
+        target_pos: [f32; 3],
+    ) -> bool {
+        let Some(from) = self
+            .sessions
+            .get(&id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+        else {
+            return false;
+        };
+        if !self.set_session_dimension(id, target_dim) {
+            return false;
+        }
+        if let Some(session) = self.sessions.get_mut(&id) {
+            session.position = target_pos;
+            session.portal_contact_time = 0.0;
+            session.portal_cooldown = 3.0;
+            session.portal_requested = false;
+        }
+        self.pending_session_revisions.insert(id);
+        self.pending_dimension_transfers
+            .push(DimensionTransferIntent {
+                player_id: id,
+                from,
+                to: target_dim,
+                position: target_pos,
+            });
+        true
     }
 
     fn commit_mining_break(
@@ -1247,6 +1444,39 @@ impl AuthorityCore {
             }
             return Ok(None);
         }
+        if matches!(action, BlockActionKind::EnterPortal) {
+            let expected =
+                crate::world::BlockType::from_wire(block_wire).ok_or(RejectReason::InvalidState)?;
+            let actual = self
+                .world
+                .chunks
+                .get_loaded_block(position.0, position.1, position.2)
+                .ok_or(RejectReason::InvalidState)?;
+            let feet = (
+                session.position[0].floor() as i32,
+                session.position[1].floor() as i32,
+                session.position[2].floor() as i32,
+            );
+            let body = (feet.0, feet.1 + 1, feet.2);
+            if actual != expected
+                || !matches!(
+                    actual,
+                    crate::world::BlockType::NetherPortal
+                        | crate::world::BlockType::EndPortal
+                        | crate::world::BlockType::EndGateway
+                )
+                || (position != feet && position != body)
+                || session.portal_cooldown > 0.0
+            {
+                return Err(RejectReason::InvalidState);
+            }
+            if let Some(session) = self.sessions.get_mut(&session_id) {
+                session.portal_contact_time = 0.0;
+                session.portal_requested = true;
+                session.gameplay.mining = None;
+            }
+            return Ok(None);
+        }
         let slot_index = if hand == 0 {
             session.gameplay.selected_hotbar_slot
         } else if hand == 1 {
@@ -1404,6 +1634,105 @@ impl AuthorityCore {
                 };
                 session.gameplay = next_gameplay;
                 Ok(mutation)
+            }
+            BlockActionKind::IgnitePortal => {
+                let Some(held_stack) = current_stack else {
+                    return Err(RejectReason::PermissionDenied);
+                };
+                if held_stack.item != crate::inventory::Item::FlintAndSteel
+                    || self.world.get_block(position.0, position.1, position.2)
+                        != crate::world::BlockType::Air
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+                let support = (
+                    position.0.saturating_sub(i32::from(face[0])),
+                    position.1.saturating_sub(i32::from(face[1])),
+                    position.2.saturating_sub(i32::from(face[2])),
+                );
+                if self.world.get_block(support.0, support.1, support.2)
+                    != crate::world::BlockType::Obsidian
+                    || !self
+                        .world
+                        .has_block_line_of_sight(session.position, look_milli, support)
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+                let mutation = self
+                    .world
+                    .set_block(
+                        position.0,
+                        position.1,
+                        position.2,
+                        crate::world::BlockType::Fire,
+                        0,
+                    )
+                    .map_err(|error| error.reason())?;
+                if mutation.is_none() {
+                    return Err(RejectReason::InvalidState);
+                }
+                if session.game_mode != crate::inventory::GameMode::Creative {
+                    let mut gameplay = session.gameplay;
+                    let index = usize::from(slot_index);
+                    let Some(slot) = gameplay.inventory[index].as_mut() else {
+                        return Err(RejectReason::InvalidState);
+                    };
+                    slot.item.durability = slot.item.durability.saturating_sub(1);
+                    if slot.item.durability == 0 {
+                        gameplay.inventory[index] = None;
+                    }
+                    gameplay.mining = None;
+                    if let Some(target) = self.sessions.get_mut(&session_id) {
+                        target.gameplay = gameplay;
+                    }
+                }
+                Ok(mutation)
+            }
+            BlockActionKind::InsertEnderEye => {
+                let Some(held_stack) = current_stack else {
+                    return Err(RejectReason::PermissionDenied);
+                };
+                if held_stack.item != crate::inventory::Item::EyeOfEnder
+                    || self.world.get_block(position.0, position.1, position.2)
+                        != crate::world::BlockType::EndPortalFrame
+                    || !self
+                        .world
+                        .has_block_line_of_sight(session.position, look_milli, position)
+                {
+                    return Err(RejectReason::InvalidState);
+                }
+                let mutation = self
+                    .world
+                    .set_block(
+                        position.0,
+                        position.1,
+                        position.2,
+                        crate::world::BlockType::EndPortalFrameFilled,
+                        0,
+                    )
+                    .map_err(|error| error.reason())?;
+                if mutation.is_none() {
+                    return Err(RejectReason::InvalidState);
+                }
+                if session.game_mode != crate::inventory::GameMode::Creative {
+                    let mut gameplay = session.gameplay;
+                    let index = usize::from(slot_index);
+                    let Some(slot) = gameplay.inventory[index].as_mut() else {
+                        return Err(RejectReason::InvalidState);
+                    };
+                    slot.item.count = slot.item.count.saturating_sub(1);
+                    if slot.item.count == 0 {
+                        gameplay.inventory[index] = None;
+                    }
+                    gameplay.mining = None;
+                    if let Some(target) = self.sessions.get_mut(&session_id) {
+                        target.gameplay = gameplay;
+                    }
+                }
+                Ok(mutation)
+            }
+            BlockActionKind::EnterPortal => {
+                unreachable!("portal entry handled before slot validation")
             }
         }
     }
@@ -1809,7 +2138,11 @@ impl AuthorityCore {
         let Some(entity) = self.world.entities.get_by_id(target) else {
             return Err(RejectReason::InvalidState);
         };
+        let target_entity_type = entity.entity_type;
         let target_position = entity.position.to_array();
+        let target_bounds = entity.get_aabb();
+        let attacker_position = glam::Vec3::from_array(attacker.position);
+        let target_hit_position = attacker_position.clamp(target_bounds.min, target_bounds.max);
         let mut target_snapshot = EntityCombatSnapshot {
             entity_id: entity.id,
             entity_type: entity.entity_type,
@@ -1838,13 +2171,13 @@ impl AuthorityCore {
             source: DamageSource::Mob,
             base_damage_milli: profile.base_damage_milli,
             attacker_position_milli,
-            target_position_milli: position_to_milli(target_position)?,
+            target_position_milli: position_to_milli(target_hit_position.to_array())?,
             attacker_look_milli,
             target_look_milli: look_from_angles(entity.yaw, entity.pitch)?,
             cooldown_ready,
             has_line_of_sight: self
                 .world
-                .has_line_of_sight(attacker.position, target_position),
+                .has_line_of_sight(attacker.position, target_hit_position.to_array()),
             attacker_used_axe: profile.used_axe,
             knockback_milli: profile.knockback_milli,
             fire_ticks: profile.fire_ticks,
@@ -1862,6 +2195,9 @@ impl AuthorityCore {
             .gameplay = attacker_gameplay;
         if target_snapshot.health_milli == 0 {
             let _ = self.world.entities.remove_by_id(target);
+            if target_entity_type == crate::entity::EntityType::EnderDragon {
+                self.world.handle_dragon_completion();
+            }
         } else if let Some(entity) = self.world.entities.get_by_id_mut(target) {
             entity.health = target_snapshot.health_milli as f32 / 1_000.0;
             entity.velocity = glam::Vec3::new(
@@ -2004,6 +2340,32 @@ impl AuthorityCore {
                     position[1] as f32,
                     position[2] as f32 + 0.5,
                 ];
+                Some(Ok(None))
+            }
+            crate::commands::Command::Give {
+                target,
+                item,
+                count,
+            } => {
+                if !matches!(
+                    target,
+                    crate::commands::CommandTarget::SelfPlayer
+                        | crate::commands::CommandTarget::NearestPlayer
+                ) {
+                    return Some(Err(RejectReason::PermissionDenied));
+                }
+                let Some(session) = self.sessions.get_mut(&session_id) else {
+                    return Some(Err(RejectReason::Unauthorized));
+                };
+                let stack = crate::inventory::ItemStack::new(item, count);
+                let slot = SessionInventorySlot::from_wire(
+                    crate::network::protocol::ItemWire::from_stack(&stack),
+                    stack.can_break,
+                    stack.can_place_on,
+                );
+                if !session.gameplay.add_slot(slot) {
+                    return Some(Err(RejectReason::InvalidState));
+                }
                 Some(Ok(None))
             }
             _ => None,

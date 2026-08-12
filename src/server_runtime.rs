@@ -13,7 +13,7 @@ use crate::authority::contract::{
 use crate::authority::interest::{
     InterestKind, InterestSet, RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
 };
-use crate::authority::{AuthorityConfig, AuthorityCore};
+use crate::authority::{AuthorityConfig, AuthorityCore, DimensionTransferIntent};
 use crate::dimension::Dimension;
 use crate::game_rules::{ServerDifficulty, WorldRules};
 use crate::inventory::{GameMode, Inventory};
@@ -314,6 +314,11 @@ pub enum RuntimePresentationEvent {
         position: [f32; 3],
         dimension: u8,
     },
+    DimensionTransfer {
+        target: u64,
+        dimension: u8,
+        position: [f32; 3],
+    },
     WorldRules {
         target: u64,
         rules: WorldRules,
@@ -394,6 +399,7 @@ impl RuntimePresentationEvent {
             | Self::ContainerSlotUpdate { .. }
             | Self::ContainerClose { .. }
             | Self::PlayerRespawnResult { .. }
+            | Self::DimensionTransfer { .. }
             | Self::WorldRules { .. } => None,
         }
     }
@@ -935,8 +941,8 @@ impl ServerRuntime {
             AuthorityConfig {
                 seed: level.seed,
                 dimension: level.spawn_dimension,
-                world_type: crate::game_rules::WorldType::Default,
-                generate_structures: false,
+                world_type: level.world_type,
+                generate_structures: level.generate_structures,
                 rules: level.rules,
                 difficulty,
                 render_distance: properties.simulation_distance as i32,
@@ -1021,6 +1027,9 @@ impl ServerRuntime {
             self.handle_event(event)?;
         }
         let snapshot = self.authority.tick();
+        for transfer in self.authority.take_pending_dimension_transfers() {
+            self.apply_authority_dimension_transfer(transfer);
+        }
         self.route_authority_snapshot(&snapshot);
         for closure in self.authority.take_container_closures() {
             self.close_runtime_container(closure.player_id, closure.dimension, closure.position);
@@ -1245,6 +1254,58 @@ impl ServerRuntime {
         session.container_viewers.clear();
         self.update_interest_for(id, dimension, position);
         true
+    }
+
+    pub fn transfer_session_dimension(
+        &mut self,
+        id: u64,
+        dimension: Dimension,
+        position: [f32; 3],
+    ) -> bool {
+        if !self
+            .authority
+            .execute_portal_dimension_transfer(id, dimension, position)
+        {
+            return false;
+        }
+        let Some(transfer) = self
+            .authority
+            .take_pending_dimension_transfers()
+            .into_iter()
+            .find(|transfer| transfer.player_id == id)
+        else {
+            return false;
+        };
+        self.apply_authority_dimension_transfer(transfer);
+        true
+    }
+
+    fn apply_authority_dimension_transfer(&mut self, transfer: DimensionTransferIntent) {
+        let id = transfer.player_id;
+        self.force_close_player_containers(id);
+        if let Some(session) = self.players.get_mut(&id) {
+            session.dimension = transfer.to;
+            session.data.position = transfer.position;
+            session.teleport_allowance = Some(transfer.position);
+            session.interest.open_containers.clear();
+            session.container_viewers.clear();
+            session.pending_initial_chunks.clear();
+            session.last_projected_session_revision = None;
+        }
+        self.update_interest_for(id, transfer.to, transfer.position);
+        if self.local_session_id == Some(id) {
+            self.push_presentation_event(RuntimePresentationEvent::DimensionTransfer {
+                target: id,
+                dimension: transfer.to as u8,
+                position: transfer.position,
+            });
+        } else {
+            self.enqueue_host(HostToServer::SendDimensionTransfer {
+                to: id,
+                dimension: transfer.to as u8,
+                position: transfer.position,
+            });
+        }
     }
 
     /// Apply a server-authorized teleport to a connected session. The next
@@ -1816,6 +1877,8 @@ impl ServerRuntime {
         let _ = session;
         if let Some(authority_session) = self.authority.session_mut(id) {
             authority_session.position = position;
+            authority_session.yaw = yaw;
+            authority_session.pitch = pitch;
             authority_session.dimension = dimension as u8;
         }
         self.update_interest_for(id, dimension, position);
@@ -1925,6 +1988,18 @@ impl ServerRuntime {
                         .unwrap_or(session.dimension);
                 }
                 match operation {
+                    GameplayOperation::Command { command } => {
+                        if matches!(
+                            crate::commands::parse(&command),
+                            Ok(crate::commands::Command::Teleport { .. })
+                        ) {
+                            if let Some(position) =
+                                self.authority.session(id).map(|session| session.position)
+                            {
+                                let _ = self.teleport_session(id, position);
+                            }
+                        }
+                    }
                     GameplayOperation::BlockUse { x, y, z, block } => {
                         let dimension = self
                             .authority
@@ -2059,7 +2134,7 @@ impl ServerRuntime {
             ContainerAction::Open => {
                 let slots = self
                     .authority
-                    .world_ref(dimension)
+                    .world_mut(dimension)
                     .and_then(|world| world.container_slots_wire(position))
                     .unwrap_or_default();
                 if self.local_session_id == Some(id) {
@@ -2087,7 +2162,7 @@ impl ServerRuntime {
             ContainerAction::Click => {
                 let slot_value = self
                     .authority
-                    .world_ref(dimension)
+                    .world_mut(dimension)
                     .and_then(|world| world.container_slot_wire(position, slot))
                     .flatten();
                 if self.local_session_id == Some(id) {
