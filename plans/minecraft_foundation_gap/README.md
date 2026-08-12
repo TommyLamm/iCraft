@@ -102,10 +102,10 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 27 | [半磚 Waterlogging 權威閉環](27_slab_waterlogging_authority.md) | 已完成；OakSlab/CobblestoneSlab raw-fluid bit7、v3 save、FluidUse 原子 bucket、fixed-tick 跨 Chunk flow、v17 BlockChange/ChunkData 與 embedded/listen/dedicated headless projection 及 debug/release/check gates 通過；GPU/window/audio/DPI、完整原版 parity、30 分鐘 soak 明確不在本計劃 |
 | 28 | [權威 Dispenser／Dropper](28_authoritative_dispenser_dropper.md) | 已完成 headless/runtime 核心；紅石上升沿 deterministic action、loaded-front guard、Arrow/Potion/Bucket/Flint/普通掉物窄矩陣、Dropper merge/fallback、metadata/save/reload、全球 entity id 與 v17 EntityStateWire 及 TCP 雙客戶端／三拓撲 projection 通過；完整 vanilla 行為、cauldron/waterlogging、hopper rewrite、GPU/window/audio/manual visual 明確不在本計劃 |
 | 29 | [Locale layers 與 bounded visible labels](29_plan17_locale_visible_labels.md) | 已完成 bounded headless contract；selected EN/DE partial layers、invalid diagnostics、bounded menu/HUD/inventory/station/command consumers 與 EN/DE coverage 通過；GPU/window/audio/DPI、clean-checkout startup、三拓撲 E2E 仍不在本計劃 |
-| 30 | [真實 TCP 拓撲驗收矩陣](30_real_transport_acceptance_matrix.md) | 已完成 bounded evidence；Singleplayer embedded 與 Listen（local host+2 TCP remotes）/Dedicated（2 TCP clients）共用 domain assertions，含 fishing cast+cached duplicate、Furnace/Craft/Enchant/Anvil/Brew、combat/respawn、stale/out-of-order、owner-private projection、reconnect；reel 精確 `InvalidRevision` blocker 轉 Plan33，完整 Foundation/Social block/automation 轉 Plan31、Progression travel/completion 轉 Plan32 |
+| 30 | [真實 TCP 拓撲驗收矩陣](30_real_transport_acceptance_matrix.md) | 已完成 bounded evidence；Singleplayer embedded 與 Listen（local host+2 TCP remotes）/Dedicated（2 TCP clients）共用 domain assertions，含 fishing cast/reel+cached duplicate、Furnace/Craft/Enchant/Anvil/Brew、combat/respawn、stale/out-of-order、owner-private projection、reconnect；reel revision blocker 已由 Plan33 關閉，Foundation/Social block/automation 已由 Plan31 關閉、Progression travel/completion 已由 Plan32 關閉 |
 | 31 | [權威方塊操作與採礦](31_authoritative_block_actions_mining.md) | 已完成；typed BlockAction v18、owner-private progress wire、Singleplayer/Listen/Dedicated TCP 三拓撲 Block/Drop/XP projection 均通過 |
 | 32 | [進度旅行與完成閉環](32_progression_travel_completion.md) | 已完成；typed portal/dimension travel、dragon completion、fortress/End City loot 與 Singleplayer/Listen/Dedicated 真 ingress/egress 均通過 |
-| 33 | [TCP 釣魚生命週期 revision](33_tcp_fishing_lifecycle_revision.md) | 待執行；修正最新 owner revision 下 cast→reel 的真 TCP lifecycle；Plan30 保留 reel `Rejected(InvalidRevision)` evidence，不繞過 anti-stale gate |
+| 33 | [TCP 釣魚生命週期 revision](33_tcp_fishing_lifecycle_revision.md) | 已完成；fresh TCP input 綁定最新 owner revision，自主 fixed tick 不污染 client-authored baseline；Embedded/Listen/Dedicated cast→reel、duplicate/cancel、loot/XP/耐久、privacy 與 stale/out-of-order 均通過 |
 | 34 | [容器破壞內容物守恆](34_container_break_inventory_conservation.md) | 待執行；補非空 Chest/Furnace/Hopper/Dispenser/Dropper 被權威破壞時完整 ItemStack 掉落、duplicate/reconnect/save 守恆；Plan31 只完成 BE removal，不宣稱內容物守恆 |
 
 官方資料也佐證上述族群屬於基礎體驗：
@@ -213,9 +213,9 @@ Plan23 核心接線已完成：Join Client 的 State inputs 走 typed
 `GameplayRequest`，embedded/socket 共用權威 projection，listen + 2 clients
 headless `RuntimeInput` parity request/interest/owner-private session vector
 通過。Plan30 再以真 TCP 覆蓋 bounded fishing cast/duplicate、Furnace/Craft/
-Enchant/Anvil/Brew、combat/respawn、stale/out-of-order、reconnect；reel
-lifecycle 轉 Plan33，完整 Foundation/Social block/automation ingress 轉 Plan31，
-Progression travel/completion 轉 Plan32。GPU/visual artifacts 仍明確保留給
+Enchant/Anvil/Brew、combat/respawn、stale/out-of-order、reconnect；Plan31 已關閉
+Foundation/Social block/automation ingress，Plan32 已關閉 Progression travel/completion，
+Plan33 已關閉 fishing reel revision lifecycle。GPU/visual artifacts 仍明確保留給
 後續 plan；Plan24 已以相同 fixed-tick runtime lane 完成完整 Plan22 三拓撲
 parity、transport metrics publication/rollback、完整 debug/release/check 與 dated dedicated 30 分鐘 headless
 soak。Plan25 再將 server-owned difficulty 以 strict `ServerDifficulty` 接入既有

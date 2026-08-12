@@ -10,12 +10,12 @@
 
 ## 精確 acceptance
 
-- [ ] NetworkClient 在收到 cast ACK/session update 後能以 latest owner revision
+- [x] NetworkClient 在收到 cast ACK/session update 後能以 latest owner revision
   發送合法 reel；server 不因 transport delay 把仍有效的 hook request 誤判
   `InvalidRevision`。
-- [ ] cast/reel/duplicate/cancel 的 fixed-tick state、inventory/drop/XP 與
+- [x] cast/reel/duplicate/cancel 的 fixed-tick state、inventory/drop/XP 與
   owner-private projection 在 Listen TCP、Dedicated TCP 和 embedded lane 一致。
-- [ ] stale/out-of-order request 仍拒絕，且不以接受過期 revision 或跳過 sequence
+- [x] stale/out-of-order request 仍拒絕，且不以接受過期 revision 或跳過 sequence
   gate 來修正 race；補 deterministic transport test 不用 unbounded sleep。
 
 ## 預計檔案與測試
@@ -41,4 +41,19 @@
 
 - 新魚類/戰利品、renderer/GPU、manual QA、transport metrics race、或任何放寬
   anti-stale/sequence/security gate 的旁路。
+
+## 完成紀錄（2026-08-12）
+
+- `NetworkClient` 將 `client_sequence == 0` 定義為尚未送出的新 gameplay input，
+  在真正寫入 TCP frame 前配置 sequence 並綁定當下最新 owner revision；明確非零
+  sequence/revision 的 duplicate、stale 與 out-of-order probe 保持原值。
+- 本機 `PlayerSessionUpdate` 通過 replication gate 後也更新 revision high-water，
+  因此 cast ACK 後到達的 fixed-tick owner projection 可供下一個新 input 使用。
+- authority fixed tick 只推進 `gameplay.revision`，不再把自主 hook/cooldown/brew
+  presentation tick 當成 client-authored `last_revision` baseline；已接受的 request 與
+  durable mutation 仍照常推進 anti-stale baseline，未放寬 revision/sequence gate。
+- `tests/plan33_tcp_fishing_lifecycle.rs` 在 Embedded、Listen TCP、Dedicated TCP 驗證
+  cast→nibble→reel、loot/XP/釣竿耐久、cached duplicate、cancel、owner privacy、
+  stale 與 out-of-order。Plan30 的 reel expectation 已由精確 `InvalidRevision` blocker
+  更新為成功 lifecycle；protocol 維持 v19，沒有 bump。
 

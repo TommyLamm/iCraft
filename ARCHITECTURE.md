@@ -97,7 +97,7 @@ the primary Vulkan path has caused a verified NVIDIA driver crash.
 4. Builds initial terrain meshes and starts background services.
 5. Streams the remaining render distance incrementally.
 
-Joining clients wait for a successful protocol-v18 login before using the host's
+Joining clients wait for a successful protocol-v19 login before using the host's
 seed and synchronized world state.
 
 ### Per-frame update
@@ -535,9 +535,9 @@ runtime parity/soak lanes and Plan30 supplies bounded true-TCP evidence, not a
 blanket three-scenario E2E claim.
 Plan21 Phase A additionally keeps simultaneous dimension worlds and per-session
 interest/revision routing isolated in headless tests, with persistence and
- topology/reconnect regression coverage. Plan30 now verifies the reachable TCP
- fishing/workstation/combat subset; fishing reel lifecycle remains Plan33 and
- player travel remains Plan32.
+ topology/reconnect regression coverage. Plan30 verifies the reachable TCP
+ fishing/workstation/combat subset; Plan32 closes authoritative player travel and
+ Plan33 closes the fishing reel revision lifecycle.
 Plan22 adds `tests/authority_gameplay_domains.rs`, a dedicated headless vector
 for fishing fixed-tick cast/bite/reel idempotency, furnace/craft/enchant/anvil
 transactions, explicit brew-ready take and reconnect cleanup, and combat
@@ -563,9 +563,9 @@ workstation, brew, combat/death/respawn, stale/duplicate, dimension-transfer,
 and reconnect cases in Singleplayer, ListenServer, and Dedicated *embedded*
 topology modes; owner-private session projections carry the workstation results
 and metadata. Plan30 adds the same assertions through true TCP for the bounded
-domain subset (including Craft/Enchant/Anvil), while full Foundation/Progression/
-Social acceptance remains blocked by Plan31/32 and fishing reel lifecycle by
-Plan33.
+domain subset (including Craft/Enchant/Anvil). Plans31–33 close the bounded
+Foundation/Social block ingress, Progression travel/completion, and fishing reel
+revision lifecycle follow-ups respectively.
 Outbound network counters reserve publication before a frame write and roll
 back on write failure, with all production writer paths using the same guard;
 the TCP metrics test passed 50 isolated release runs. Debug/release suites and
@@ -679,7 +679,14 @@ and persist it across reload. Five debug and five release integration vectors co
 Listen TCP, and Dedicated TCP, including duplicate ACK, stale rejection, observer privacy,
 disconnect/reconnect persistence, generated dragon completion, and fortress/End City loot. This
 does not claim full vanilla structure/dragon AI, renderer/GPU/window/audio/DPI, or visual evidence.
-Plan33 remains the next bounded gap for the fishing reel revision lifecycle.
+Plan33 closes the bounded fishing reel revision lifecycle without changing protocol v19 or
+weakening anti-stale gates. Fresh `client_sequence == 0` gameplay input is allocated and rebound
+to the latest accepted owner revision immediately before TCP egress, while explicit nonzero
+sequence/revision probes remain untouched. Accepted local `PlayerSessionUpdate` projections advance
+the client's revision high-water. Authority autonomous fixed ticks publish `gameplay.revision` but
+do not advance the client-authored `last_revision` baseline. Embedded, Listen TCP, and Dedicated TCP
+tests cover cast-to-nibble-to-reel, loot/XP/rod durability, cached duplicates, cancel, owner privacy,
+and continued stale/out-of-order rejection.
 
 Use:
 

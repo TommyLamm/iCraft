@@ -685,12 +685,10 @@ fn run_topology(label: &str, listen: bool) {
     );
     assert!(runtime.metrics.duplicate_requests > duplicate_count);
 
-    // The cast lifecycle is intentionally bounded at this transport seam:
-    // while the hook is ticking, the authority advances the owner revision
-    // faster than a delayed reel packet can carry it. Keep the real packet
-    // and its exact rejection visible rather than clearing the hook and
-    // claiming a complete fishing lifecycle.
-    let reel = request(
+    // A zero client sequence marks a fresh player input. NetworkClient assigns
+    // the next sequence and the latest owner-private revision immediately
+    // before the real socket write, after any intervening hook fixed ticks.
+    let mut reel = request(
         &runtime,
         owner_id,
         0x30_002,
@@ -701,22 +699,19 @@ fn run_topology(label: &str, listen: bool) {
             look_milli: [0, 0, 1_000],
         },
     );
+    reel.client_sequence = 0;
     clients[0].send_request(reel);
     let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-    let rejected_before_reel = runtime.metrics.requests_rejected;
     let reel_response = wait_for_response(&mut runtime, &mut refs, 0, 0x30_002);
     drop(refs);
-    assert_eq!(
-        reel_response.outcome,
-        GameplayOutcome::Rejected {
-            reason: RejectReason::InvalidRevision
-        },
-        "TCP reel lifecycle remains a Plan33 blocker"
-    );
     assert!(
-        runtime.metrics.requests_rejected > rejected_before_reel,
-        "TCP reel rejection must be recorded by the authority"
+        matches!(reel_response.outcome, GameplayOutcome::Accepted { .. }),
+        "fresh TCP reel must use the latest owner revision: {reel_response:?}"
     );
+    assert!(runtime
+        .authority
+        .session(owner_id)
+        .is_some_and(|session| session.gameplay.fishing_hook.is_none()));
 
     reset_persistent_domains(&mut runtime, owner_id);
 

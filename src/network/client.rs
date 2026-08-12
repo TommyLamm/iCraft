@@ -544,6 +544,7 @@ fn prepare_gameplay_request(
     last_client_sequence: &mut u64,
     last_client_revision: &mut u64,
 ) -> GameplayRequest {
+    let fresh_input = request.client_sequence == 0;
     if request.request_id == 0 {
         request.request_id = (*next_request_id).max(1);
     }
@@ -556,11 +557,14 @@ fn prepare_gameplay_request(
     if request.client_sequence > *last_client_sequence {
         *last_client_sequence = request.client_sequence;
     }
-    // Explicit stale sequence/revision values are authoritative client input:
-    // preserve them so the server can return OutOfOrder/InvalidRevision rather
-    // than silently turning a replay into a fresh mutation.  State's typed
-    // egress seam supplies the latest acknowledged revision for new inputs.
-    if request.client_revision > *last_client_revision {
+    // A zero sequence marks a new player input whose envelope is finalized by
+    // this socket owner. Rebase only that input onto the latest owner-private
+    // projection observed immediately before the frame write. Explicit
+    // sequence/revision pairs remain untouched so stale/out-of-order probes
+    // still reach the server's security gates verbatim.
+    if fresh_input {
+        request.client_revision = *last_client_revision;
+    } else if request.client_revision > *last_client_revision {
         *last_client_revision = request.client_revision;
     }
     request.session_id = player_id;
@@ -981,22 +985,26 @@ async fn run_client(
                     }
                     Ok(Packet::PlayerSessionUpdate {
                         sequence,
-                        player_id,
+                        player_id: session_player_id,
                         dimension,
                         state,
                         ..
                     }) => {
                         if state.validate_bounds().is_ok()
                             && replication_gate.accept_session(
-                                player_id,
+                                session_player_id,
                                 dimension,
                                 sequence,
                                 state.revision,
                             )
                         {
+                            if session_player_id == player_id && dimension == current_dimension {
+                                last_client_revision =
+                                    last_client_revision.max(state.revision);
+                            }
                             let _ = client_to_game.send(ClientToGame::PlayerSessionUpdate {
                                 sequence,
-                                player_id,
+                                player_id: session_player_id,
                                 dimension,
                                 state,
                             });
@@ -1334,6 +1342,55 @@ mod tests {
                 return event;
             }
         }
+    }
+
+    #[test]
+    fn fresh_gameplay_input_rebases_revision_but_explicit_stale_input_does_not() {
+        let operation = crate::network::protocol::GameplayOperation::Fishing {
+            action: 1,
+            hand: 0,
+            look_milli: [0, 0, 1_000],
+        };
+        let mut next_request_id = 10;
+        let mut last_client_sequence = 4;
+        let mut last_client_revision = 23;
+
+        let fresh = prepare_gameplay_request(
+            GameplayRequest {
+                request_id: 77,
+                client_sequence: 0,
+                session_id: 0,
+                dimension: 0,
+                client_revision: 7,
+                operation: operation.clone(),
+            },
+            99,
+            &mut next_request_id,
+            &mut last_client_sequence,
+            &mut last_client_revision,
+        );
+        assert_eq!(fresh.request_id, 77);
+        assert_eq!(fresh.client_sequence, 5);
+        assert_eq!(fresh.client_revision, 23);
+        assert_eq!(fresh.session_id, 99);
+
+        let stale = prepare_gameplay_request(
+            GameplayRequest {
+                request_id: 78,
+                client_sequence: 6,
+                session_id: 0,
+                dimension: 0,
+                client_revision: 2,
+                operation,
+            },
+            99,
+            &mut next_request_id,
+            &mut last_client_sequence,
+            &mut last_client_revision,
+        );
+        assert_eq!(stale.client_sequence, 6);
+        assert_eq!(stale.client_revision, 2);
+        assert_eq!(last_client_revision, 23);
     }
 
     #[test]

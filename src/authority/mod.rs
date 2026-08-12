@@ -744,7 +744,13 @@ impl AuthorityCore {
             candidate.revision = revision;
             if let Some(session) = self.sessions.get_mut(&id) {
                 session.gameplay = candidate;
-                session.last_revision = revision;
+                // Autonomous cooldown, brew and hook ticks publish a newer
+                // owner-private projection, but they are not a client-authored
+                // transaction baseline. Advancing `last_revision` here makes
+                // every in-flight reel/cancel stale before TCP ingress. This
+                // matches the mining tick seam: accepted requests and durable
+                // mutations advance the anti-stale baseline; fixed-tick
+                // presentation progress advances only gameplay.revision.
             }
         }
     }
