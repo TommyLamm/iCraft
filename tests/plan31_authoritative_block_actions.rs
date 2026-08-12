@@ -26,6 +26,7 @@ const PLACE_SUPPORT: (i32, i32, i32) = (8, 80, 10);
 const OWNER_POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 const OBSERVER_POSITION: [f32; 3] = [8.0, 80.0, 7.0];
 const LOOK: [i16; 3] = [0, -100, 995];
+const PLACE_LOOK: [i16; 3] = [180, -403, 899];
 
 fn temp_world(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -154,7 +155,7 @@ fn place_request(
             hand: 0,
             held: Some(wire),
             block: block.to_wire(),
-            look_milli: LOOK,
+            look_milli: PLACE_LOOK,
         },
     )
 }
@@ -387,7 +388,9 @@ fn run_tcp_vector(label: &str, listen: bool) {
     }
     let owner_id = clients[0].player_id().expect("TCP owner id");
     let observer_id = clients[1].player_id().expect("TCP observer id");
-    prepare(&mut runtime, owner_id, observer_id, BlockType::CoalOre);
+    // Use a deliberately slow first target so real socket scheduling cannot
+    // finish the break before the bounded cancel/stale sequence assertions.
+    prepare(&mut runtime, owner_id, observer_id, BlockType::Obsidian);
     let pick = ItemStack::new(Item::StonePickaxe, 1);
     let wire = held(&pick);
     let start = start_request(&runtime, owner_id, 1, 1, wire);
@@ -429,7 +432,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
     }));
     // Out-of-order and stale requests traverse the real NetworkClient socket
     // and must not clear the latched mining session.
-    clients[0].send_request(cancel_request(&runtime, owner_id, 4, 9));
+    clients[0].send_request(cancel_request(&runtime, owner_id, 4, 1));
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
         let response = wait_for_response(&mut runtime, &mut refs, 0, 4);
@@ -457,15 +460,24 @@ fn run_tcp_vector(label: &str, listen: bool) {
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
         let response = wait_for_response(&mut runtime, &mut refs, 0, 2);
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(
+            matches!(response.outcome, GameplayOutcome::Accepted { .. }),
+            "cancel response: {response:?}"
+        );
     }
     assert_eq!(
         runtime
             .authority
             .world
             .get_block(TARGET.0, TARGET.1, TARGET.2),
-        BlockType::CoalOre
+        BlockType::Obsidian
     );
+
+    runtime
+        .authority
+        .world
+        .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::CoalOre, 0)
+        .expect("seed bounded XP mining target after cancel");
 
     clients[0].clear_events();
     clients[1].clear_events();
@@ -473,7 +485,10 @@ fn run_tcp_vector(label: &str, listen: bool) {
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
         let response = wait_for_response(&mut runtime, &mut refs, 0, 3);
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(
+            matches!(response.outcome, GameplayOutcome::Accepted { .. }),
+            "second start response: {response:?}"
+        );
     }
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
@@ -565,7 +580,12 @@ fn run_tcp_vector(label: &str, listen: bool) {
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
         let response = wait_for_response(&mut runtime, &mut refs, 0, 6);
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(
+            matches!(response.outcome, GameplayOutcome::Accepted { .. }),
+            "place response: {response:?}; authority_revision={}; session_revision={}",
+            runtime.authority.current_revision(),
+            runtime.authority.session(owner_id).unwrap().last_revision,
+        );
     }
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();

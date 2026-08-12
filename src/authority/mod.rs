@@ -941,9 +941,10 @@ impl AuthorityCore {
             target.2 as f32 + 0.5,
         ];
         for (entity_id, stack) in entity_ids.into_iter().zip(rewards.drops) {
-            debug_assert!(self
+            let spawned = self
                 .world
-                .spawn_dropped_item(entity_id, drop_position, stack));
+                .spawn_dropped_item(entity_id, drop_position, stack);
+            debug_assert!(spawned);
         }
         if let Some(session) = self.sessions.get_mut(&id) {
             session.gameplay = next_gameplay;

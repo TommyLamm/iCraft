@@ -103,7 +103,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 28 | [權威 Dispenser／Dropper](28_authoritative_dispenser_dropper.md) | 已完成 headless/runtime 核心；紅石上升沿 deterministic action、loaded-front guard、Arrow/Potion/Bucket/Flint/普通掉物窄矩陣、Dropper merge/fallback、metadata/save/reload、全球 entity id 與 v17 EntityStateWire 及 TCP 雙客戶端／三拓撲 projection 通過；完整 vanilla 行為、cauldron/waterlogging、hopper rewrite、GPU/window/audio/manual visual 明確不在本計劃 |
 | 29 | [Locale layers 與 bounded visible labels](29_plan17_locale_visible_labels.md) | 已完成 bounded headless contract；selected EN/DE partial layers、invalid diagnostics、bounded menu/HUD/inventory/station/command consumers 與 EN/DE coverage 通過；GPU/window/audio/DPI、clean-checkout startup、三拓撲 E2E 仍不在本計劃 |
 | 30 | [真實 TCP 拓撲驗收矩陣](30_real_transport_acceptance_matrix.md) | 已完成 bounded evidence；Singleplayer embedded 與 Listen（local host+2 TCP remotes）/Dedicated（2 TCP clients）共用 domain assertions，含 fishing cast+cached duplicate、Furnace/Craft/Enchant/Anvil/Brew、combat/respawn、stale/out-of-order、owner-private projection、reconnect；reel 精確 `InvalidRevision` blocker 轉 Plan33，完整 Foundation/Social block/automation 轉 Plan31、Progression travel/completion 轉 Plan32 |
-| 31 | [權威方塊操作與採礦](31_authoritative_block_actions_mining.md) | 待執行；補 player-authored block placement/mining、progress/drop/XP 與真 TCP 三拓撲 assertions；Plan30 不實作 |
+| 31 | [權威方塊操作與採礦](31_authoritative_block_actions_mining.md) | 已完成；typed BlockAction v18、owner-private progress wire、Singleplayer/Listen/Dedicated TCP 三拓撲 Block/Drop/XP projection 均通過 |
 | 32 | [進度旅行與完成閉環](32_progression_travel_completion.md) | 待執行；補 portal/dimension travel、progression completion、dragon/End City 真 ingress/egress；Plan30 不實作 |
 | 33 | [TCP 釣魚生命週期 revision](33_tcp_fishing_lifecycle_revision.md) | 待執行；修正最新 owner revision 下 cast→reel 的真 TCP lifecycle；Plan30 保留 reel `Rejected(InvalidRevision)` evidence，不繞過 anti-stale gate |
 
@@ -151,6 +151,13 @@ pure tests and is not GPU evidence. `cargo check --all-targets`,
 `cargo check --release --locked`, `cargo fmt --all -- --check`, and
 `git diff --check` pass. This closes only the bounded headless locale/visible
 consumer contract; manual presentation and topology evidence remain open.
+
+Plan31 final serial full-suite record (2026-08-12, `--test-threads=1`) is
+completed with protocol v18 typed BlockActions (StartBreak/CancelBreak/Place),
+owner-private MiningProgressWire, fixed-tick mining progress, and single-commit
+block drop & XP conservation. All 3 tests in `tests/plan31_authoritative_block_actions.rs`
+(Embedded, Listen TCP, Dedicated TCP) pass in release mode. Library suite 698/698 tests pass.
+`cargo check --release --all-targets`, `cargo fmt --all -- --check`, and `git diff --check` pass cleanly.
 
 ## 5. 執行規則
 

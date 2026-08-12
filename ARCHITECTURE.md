@@ -97,7 +97,7 @@ the primary Vulkan path has caused a verified NVIDIA driver crash.
 4. Builds initial terrain meshes and starts background services.
 5. Streams the remaining render distance incrementally.
 
-Joining clients wait for a successful protocol-v17 login before using the host's
+Joining clients wait for a successful protocol-v18 login before using the host's
 seed and synchronized world state.
 
 ### Per-frame update
@@ -656,6 +656,16 @@ ignored tests; resource/localization/menu targeted lanes pass 18/10/30 and the
 state-only filter matches zero pure tests. `cargo check --all-targets`,
 `cargo check --release --locked`, `cargo fmt --all -- --check`, and
 `git diff --check` pass.
+
+Plan31 completes authoritative player-authored block placement, mining progress,
+block drops, experience, and real TCP projections (Singleplayer, ListenServer TCP,
+Dedicated TCP). Protocol bumped to v18 for typed `BlockAction` (`StartBreak`, `CancelBreak`, `Place`)
+and owner-private `MiningProgressWire`. Stale v17 handshakes are rejected. Fixed-tick mining
+verifies range, LOS, loaded chunk, expected block state, held tool slot, and Survival/Creative/Adventure policies.
+Single-commit block breaking guarantees drop & XP conservation in release mode (fixing a release-build
+`debug_assert!` side-effect bug). All 3 integration tests in `tests/plan31_authoritative_block_actions.rs`
+(Embedded, Listen TCP, Dedicated TCP) and all 698 library unit tests pass in release mode.
+`cargo check --release --all-targets`, `cargo fmt --all -- --check`, and `git diff --check` pass cleanly.
 
 Use:
 

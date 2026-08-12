@@ -156,8 +156,13 @@ pub fn drive_until(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {description}; players={}",
-            runtime.players.len()
+            "timed out waiting for {description}; players={}; metrics={:?}; client_events={:?}",
+            runtime.players.len(),
+            runtime.metrics(),
+            views
+                .iter()
+                .map(|client| client.events())
+                .collect::<Vec<_>>(),
         );
         thread::sleep(STEP_SLEEP);
     }
@@ -180,7 +185,9 @@ pub fn wait_for_response(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for gameplay response {request_id}"
+            "timed out waiting for gameplay response {request_id}; metrics={:?}; owner_events={:?}",
+            runtime.metrics(),
+            clients[owner_index].events(),
         );
         thread::sleep(STEP_SLEEP);
     }

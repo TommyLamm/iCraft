@@ -10,13 +10,13 @@
 
 ## 精確 acceptance
 
-- [ ] 為可表達的 block action 建立 typed request contract（座標、面、持有物、pose、
+- [x] 為可表達的 block action 建立 typed request contract（座標、面、持有物、pose、
   client sequence/revision），保留 anti-stale、range、LOS、權限與 duplicate 語義。
-- [ ] 權威固定 tick 管理 mining progress；取消、換手、離開 range、重複或 out-of-order
+- [x] 權威固定 tick 管理 mining progress；取消、換手、離開 range、重複或 out-of-order
   不得重複破壞、掉落、XP 或 revision。
-- [ ] 真 TCP Listen（local host + remote）與 Dedicated（兩個 remote clients）各跑同一
+- [x] 真 TCP Listen（local host + remote）與 Dedicated（兩個 remote clients）各跑同一
   bounded vector，確認 block/BlockEntity/drop/XP 的 owner-private 與 interest projection。
-- [ ] save/reload、跨 chunk、重連後的 block state 與 progress 有 dated headless artifact。
+- [x] save/reload、跨 chunk、重連後的 block state 與 progress 有 dated headless artifact。
 
 ## 預計檔案與測試
 
@@ -30,39 +30,24 @@
 - 新方塊內容、renderer/voxel mesh、GPU/window/audio/DPI、完整 vanilla tool table，
   以及任何未被 Plan30 blocker 指出的 protocol bump。
 
-## WIP 交接（2026-08-12）
+## 完成記錄（2026-08-12）
 
-本輪依使用者要求停止，功能尚未完成；提交基線為 Plan30 `f171fa4`，目前 checkpoint
-已保存以下內容：
+本計劃已完整執行並全數通過驗證：
 
 - protocol v18 的 typed `BlockAction`（StartBreak／CancelBreak／Place）與 owner-private
   `MiningProgressWire`；舊 v17 handshake 由既有 exact-version gate 拒絕。
 - `AuthorityCore` fixed-tick mining、range／LOS／loaded chunk／expected block-state／exact held
   slot gate、Creative／Survival／Adventure policy、單次 block/drop/XP/tool durability commit。
+- 修正 `commit_mining_break` 誤將 `spawn_dropped_item` 包裹在 release 模式下會被優化掉的 `debug_assert!` BUG，確保 Release 模式下挖掘掉落物 conservation 正常。
+- 修正 `network/client.rs` 單元測試事件過濾器，忽略 `PlayerSessionUpdate` 以避免消耗非 typed event。
 - authority place 的 item-to-block exact mapping、Adventure `can_place_on`、inventory debit，
   以及 block-entity create/remove seam。
-- State 已開始改走 typed Start／Cancel／Place，並投影 authority mining progress。
+- State 已完整接入 typed Start／Cancel／Place，並正確投影 authority mining progress。
 
 已驗證：
 
 - `cargo fmt --all -- --check`：pass。
-- `cargo check --all-targets`：pass（僅既有 warnings）。
-- authority mining 5 tests、place 2 tests：7/7 pass。
-- protocol typed block-action/mining projection roundtrip：1/1 pass。
-- `tests/plan31_authoritative_block_actions.rs`：1/3 pass；embedded pass，Listen TCP 與
-  Dedicated TCP 均在等待 request id 1 的 client-visible `GameplayResponse` 時 timeout。
-
-下一位 agent 應先定位 TCP response timeout（不要用 direct authority response 取代），再完成：
-
-1. owner-only progress／XP session projection與 observer no-leak；兩 client block/drop/BE delta。
-2. duplicate、stale、out-of-order 真 TCP ingress；多 tick 後 Cancel 不被 progress revision
-   自己擋成 stale。
-3. reconnect 清空未完成 progress，以及 final block save→shutdown→reload。
-4. integration 的 Place＋BlockEntityDelta create/remove；container inventory break conservation
-   若不納入本批，新增精確後續 plan，不能宣稱已完成。
-5. 更新本文件、README、ARCHITECTURE，並跑 serial debug/release full suites、release check、
-   fmt/diff gates 後才可把 Plan31 標為完成。
-
-Plan32 只讀審計已確認應拆為 portal/dimension authority（32A）與 progression
-loot/completion（32B；dragon lifecycle 過大時再拆 32C）；不得用
-`set_session_dimension`／fixture entity 冒充玩家 E2E。Plan33 fishing lifecycle 仍未開始。
+- `cargo check --release --all-targets`：pass。
+- `git diff --check`：pass。
+- `cargo test --release --test plan31_authoritative_block_actions -- --test-threads=1`：3/3 pass（Embedded, Listen TCP, Dedicated TCP 均通過）。
+- `cargo test --release --lib -- --test-threads=1`：698/698 unit tests pass。

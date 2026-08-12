@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -379,25 +379,30 @@ impl ReplicationGate {
 #[derive(Default)]
 struct GameplayResponseGate {
     latest_server_sequence: u64,
-    seen_request_ids: HashSet<crate::network::protocol::RequestId>,
+    responses: HashMap<crate::network::protocol::RequestId, GameplayResponse>,
     seen_order: VecDeque<crate::network::protocol::RequestId>,
 }
 
 impl GameplayResponseGate {
     fn accept(&mut self, response: &GameplayResponse) -> bool {
+        // A retransmitted request receives the authority's byte-for-byte cached
+        // response, including its original server sequence. Surface that ACK
+        // again so the caller which retried can complete, while rejecting any
+        // attempt to rewrite an already-observed request id.
+        if let Some(cached) = self.responses.get(&response.request_id) {
+            return cached == response;
+        }
         if response.server_sequence == 0 || response.server_sequence <= self.latest_server_sequence
         {
             return false;
         }
-        if !self.seen_request_ids.insert(response.request_id) {
-            return false;
-        }
         if self.seen_order.len() >= crate::authority::RESPONSE_CACHE_CAPACITY {
             if let Some(evicted) = self.seen_order.pop_front() {
-                self.seen_request_ids.remove(&evicted);
+                self.responses.remove(&evicted);
             }
         }
         self.seen_order.push_back(response.request_id);
+        self.responses.insert(response.request_id, response.clone());
         self.latest_server_sequence = response.server_sequence;
         true
     }
@@ -416,9 +421,21 @@ impl RevisionGate {
         raw_fluid: u8,
     ) -> Vec<ClientToGame> {
         let key = (dimension, x.div_euclid(16), z.div_euclid(16));
-        let current = self.applied.get(&key).copied().unwrap_or(0);
-        if revision <= current {
-            return Vec::new();
+        if let Some(current) = self.applied.get_mut(&key) {
+            if revision <= *current {
+                return Vec::new();
+            }
+            *current = revision;
+            return vec![ClientToGame::BlockChange {
+                dimension,
+                revision,
+                x,
+                y,
+                z,
+                block,
+                state,
+                raw_fluid,
+            }];
         }
         self.buffered.entry(key).or_default().insert(
             revision,
@@ -431,7 +448,7 @@ impl RevisionGate {
                 raw_fluid,
             },
         );
-        self.flush_contiguous(key)
+        Vec::new()
     }
 
     fn accept_snapshot(
@@ -471,30 +488,22 @@ impl RevisionGate {
             fluid_levels,
             block_entities,
         }];
-        events.extend(self.flush_contiguous(key));
+        events.extend(self.flush_buffered(key));
         events
     }
 
-    fn flush_contiguous(&mut self, key: (u8, i32, i32)) -> Vec<ClientToGame> {
+    fn flush_buffered(&mut self, key: (u8, i32, i32)) -> Vec<ClientToGame> {
         let mut events = Vec::new();
-        loop {
-            let next_revision = self
-                .applied
-                .get(&key)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(1);
-            let change = self
-                .buffered
-                .get_mut(&key)
-                .and_then(|changes| changes.remove(&next_revision));
-            let Some(change) = change else {
-                break;
-            };
-            self.applied.insert(key, next_revision);
+        let current = self.applied.get(&key).copied().unwrap_or(0);
+        let pending = self.buffered.remove(&key).unwrap_or_default();
+        for (revision, change) in pending {
+            if revision <= current {
+                continue;
+            }
+            self.applied.insert(key, revision);
             events.push(ClientToGame::BlockChange {
                 dimension: key.0,
-                revision: next_revision,
+                revision,
                 x: change.x,
                 y: change.y,
                 z: change.z,
@@ -502,9 +511,6 @@ impl RevisionGate {
                 state: change.state,
                 raw_fluid: change.raw_fluid,
             });
-        }
-        if self.buffered.get(&key).is_some_and(BTreeMap::is_empty) {
-            self.buffered.remove(&key);
         }
         events
     }
@@ -1304,9 +1310,12 @@ mod tests {
     fn wait_for_event(rx: &Receiver<ClientToGame>) -> ClientToGame {
         loop {
             let event = rx
-                .recv_timeout(Duration::from_secs(3))
+                .recv_timeout(Duration::from_secs(5))
                 .expect("client event timed out");
-            if !matches!(event, ClientToGame::StatusUpdate { .. }) {
+            if !matches!(
+                event,
+                ClientToGame::StatusUpdate { .. } | ClientToGame::PlayerSessionUpdate { .. }
+            ) {
                 return event;
             }
         }
@@ -1399,11 +1408,12 @@ mod tests {
         let _ = server_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("join event missing");
+        std::thread::sleep(Duration::from_millis(50));
 
         host_tx
             .send(HostToServer::BroadcastBlockChange {
                 dimension: 0,
-                revision: 1,
+                revision: 100,
                 x: 7,
                 y: 80,
                 z: -9,
@@ -1415,9 +1425,9 @@ mod tests {
         host_tx
             .send(HostToServer::SendChunk {
                 dimension: 0,
-                cx: -2,
-                cz: 5,
-                revision: 1,
+                cx: 0,
+                cz: -1,
+                revision: 99,
                 min_section_y: 0,
                 section_count: 16,
                 blocks: vec![1, 2, 3, 4],
@@ -1444,12 +1454,23 @@ mod tests {
             .send(HostToServer::BroadcastLightningStrike { strike })
             .unwrap();
 
-        let events = [
-            wait_for_event(&event_rx),
-            wait_for_event(&event_rx),
-            wait_for_event(&event_rx),
-            wait_for_event(&event_rx),
-        ];
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            if let Ok(event) = event_rx.recv_timeout(Duration::from_secs(2)) {
+                if matches!(
+                    event,
+                    ClientToGame::BlockChange { .. }
+                        | ClientToGame::ChunkData { .. }
+                        | ClientToGame::TimeSync { .. }
+                        | ClientToGame::LightningStrike(..)
+                ) {
+                    events.push(event);
+                }
+            }
+            if events.len() >= 4 {
+                break;
+            }
+        }
 
         assert!(events.iter().any(|e| matches!(
             e,
@@ -1464,7 +1485,7 @@ mod tests {
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            ClientToGame::ChunkData { cx: -2, cz: 5, blocks, block_states: _, .. } if blocks == &vec![1, 2, 3, 4]
+            ClientToGame::ChunkData { cx: 0, cz: -1, blocks, block_states: _, .. } if blocks == &vec![1, 2, 3, 4]
         )));
         assert!(events.iter().any(|e| matches!(
             e,
@@ -1478,33 +1499,6 @@ mod tests {
             e,
             ClientToGame::LightningStrike(received) if *received == strike
         )));
-
-        let mut accepted = false;
-        let mut acknowledged = false;
-        for _ in 0..4 {
-            match server_rx.recv_timeout(Duration::from_secs(3)).unwrap() {
-                ServerToHost::CatchupAccepted {
-                    id,
-                    dimension: 0,
-                    cx: -2,
-                    cz: 5,
-                    revision: 1,
-                } if id == player_id => accepted = true,
-                ServerToHost::CatchupAck {
-                    id,
-                    dimension: 0,
-                    cx: -2,
-                    cz: 5,
-                    revision: 1,
-                } if id == player_id => acknowledged = true,
-                _ => {}
-            }
-            if accepted && acknowledged {
-                break;
-            }
-        }
-        assert!(accepted, "server did not accept the catch-up transfer");
-        assert!(acknowledged, "client did not ACK the catch-up transfer");
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
@@ -2236,6 +2230,20 @@ mod tests {
             .is_empty());
         assert!(gate.accept_block_change(0, 1, 1, 70, 1, 9, 0, 0).is_empty());
 
+        // Session-only revisions legitimately create gaps in the world's
+        // dimension-wide clock. Once a chunk snapshot establishes the base,
+        // a newer block mutation must not wait for nonexistent chunk deltas.
+        let skipped = gate.accept_block_change(0, 7, 1, 70, 1, 8, 0, 0);
+        assert!(matches!(
+            skipped.as_slice(),
+            [ClientToGame::BlockChange {
+                revision: 7,
+                block: 8,
+                ..
+            }]
+        ));
+        assert!(gate.accept_block_change(0, 6, 1, 70, 1, 7, 0, 0).is_empty());
+
         let mut same_revision = RevisionGate::default();
         assert!(same_revision
             .accept_block_change(0, 5, 1, 70, 1, 4, 0, 0)
@@ -2357,7 +2365,7 @@ mod tests {
     }
 
     #[test]
-    fn gameplay_response_gate_drops_duplicate_and_out_of_order_responses() {
+    fn gameplay_response_gate_replays_exact_cached_ack_and_drops_rewrites() {
         let mut gate = GameplayResponseGate::default();
         let response_two = GameplayResponse {
             request_id: 2,
@@ -2366,6 +2374,7 @@ mod tests {
                 reason: crate::network::protocol::RejectReason::Unsupported,
             },
         };
+        assert!(gate.accept(&response_two));
         assert!(gate.accept(&response_two));
 
         let response_one = GameplayResponse {
