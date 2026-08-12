@@ -104,7 +104,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 29 | [Locale layers 與 bounded visible labels](29_plan17_locale_visible_labels.md) | 已完成 bounded headless contract；selected EN/DE partial layers、invalid diagnostics、bounded menu/HUD/inventory/station/command consumers 與 EN/DE coverage 通過；GPU/window/audio/DPI、clean-checkout startup、三拓撲 E2E 仍不在本計劃 |
 | 30 | [真實 TCP 拓撲驗收矩陣](30_real_transport_acceptance_matrix.md) | 已完成 bounded evidence；Singleplayer embedded 與 Listen（local host+2 TCP remotes）/Dedicated（2 TCP clients）共用 domain assertions，含 fishing cast+cached duplicate、Furnace/Craft/Enchant/Anvil/Brew、combat/respawn、stale/out-of-order、owner-private projection、reconnect；reel 精確 `InvalidRevision` blocker 轉 Plan33，完整 Foundation/Social block/automation 轉 Plan31、Progression travel/completion 轉 Plan32 |
 | 31 | [權威方塊操作與採礦](31_authoritative_block_actions_mining.md) | 已完成；typed BlockAction v18、owner-private progress wire、Singleplayer/Listen/Dedicated TCP 三拓撲 Block/Drop/XP projection 均通過 |
-| 32 | [進度旅行與完成閉環](32_progression_travel_completion.md) | 待執行；補 portal/dimension travel、progression completion、dragon/End City 真 ingress/egress；Plan30 不實作 |
+| 32 | [進度旅行與完成閉環](32_progression_travel_completion.md) | 已完成；typed portal/dimension travel、dragon completion、fortress/End City loot 與 Singleplayer/Listen/Dedicated 真 ingress/egress 均通過 |
 | 33 | [TCP 釣魚生命週期 revision](33_tcp_fishing_lifecycle_revision.md) | 待執行；修正最新 owner revision 下 cast→reel 的真 TCP lifecycle；Plan30 保留 reel `Rejected(InvalidRevision)` evidence，不繞過 anti-stale gate |
 | 34 | [容器破壞內容物守恆](34_container_break_inventory_conservation.md) | 待執行；補非空 Chest/Furnace/Hopper/Dispenser/Dropper 被權威破壞時完整 ItemStack 掉落、duplicate/reconnect/save 守恆；Plan31 只完成 BE removal，不宣稱內容物守恆 |
 
