@@ -57,3 +57,16 @@
   stale 與 out-of-order。Plan30 的 reel expectation 已由精確 `InvalidRevision` blocker
   更新為成功 lifecycle；protocol 維持 v19，沒有 bump。
 
+## Fresh revision compatibility correction（2026-08-13）
+
+Plan33 的 fresh-input rebase 取 supplied `client_revision` 與 client-side
+high-water 的較大值，並將 high-water 更新至該值。這保留 stale/out-of-order
+probe 的非零 sequence/revision 原值，同時避免 legacy fresh envelopes 在
+high-water 尚為 0 時把明確 revision（例如 17）降成 0。
+
+Focused debug and release checks passed after this correction: the fresh-revision unit
+regression, `legacy_client_inputs_are_single_gameplay_envelopes`, the three Plan33
+topology tests, and the two Plan30 regression tests. The existing Plan33 and Plan30
+topology vectors remain the behavioral acceptance lanes; no new numbered plan is
+required. Repository-wide full-suite evidence is intentionally not claimed here.
+

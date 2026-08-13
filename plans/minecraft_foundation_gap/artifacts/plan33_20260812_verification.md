@@ -28,3 +28,30 @@ cargo fmt --all -- --check
 The Plan33 vectors passed three tests in both debug and release. The Plan30 regression matrix passed
 two tests in both profiles. Formatting passed. Repository-wide serial debug/release suites, release
 check, and final diff gates remain reserved for the post-Plan33 route gate and are not claimed here.
+
+## 2026-08-13 focused compatibility correction
+
+`NetworkClient::prepare_gameplay_request` now uses
+`max(supplied_revision, last_client_revision)` for fresh (`client_sequence == 0`)
+inputs and raises the client high-water to that value. Explicit nonzero sequence/revision
+probes remain unchanged. This fixes the legacy fresh `ContainerClickRequest` case where
+supplied revision 17 was previously rewritten to 0 while the high-water was 0.
+
+Verified after the correction:
+
+```text
+cargo test --locked --lib network::client::tests::fresh_gameplay_input_rebases_revision_but_explicit_stale_input_does_not -- --exact --test-threads=1
+cargo test --locked --lib network::client::tests::legacy_client_inputs_are_single_gameplay_envelopes -- --exact --test-threads=1
+cargo test --locked --test plan33_tcp_fishing_lifecycle -- --test-threads=1
+cargo test --locked --release --lib network::client::tests::fresh_gameplay_input_rebases_revision_but_explicit_stale_input_does_not -- --exact --test-threads=1
+cargo test --locked --release --lib network::client::tests::legacy_client_inputs_are_single_gameplay_envelopes -- --exact --test-threads=1
+cargo test --locked --release --test plan33_tcp_fishing_lifecycle -- --test-threads=1
+cargo test --locked --release --test plan30_real_transport_acceptance -- --test-threads=1
+cargo test --locked --test plan30_real_transport_acceptance -- --test-threads=1
+```
+
+All listed commands passed: the debug fresh/legacy unit tests (1 and 1), debug Plan33
+(3), release fresh/legacy unit tests (1 and 1), release Plan33 (3), and Plan30 debug/
+release (2 and 2). `cargo fmt --all -- --check` and `git diff --check` also passed.
+Repository-wide serial suites and release check are not recorded as evidence in this
+focused artifact.

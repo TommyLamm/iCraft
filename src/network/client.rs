@@ -564,7 +564,8 @@ fn prepare_gameplay_request(
     // sequence/revision pairs remain untouched so stale/out-of-order probes
     // still reach the server's security gates verbatim.
     if fresh_input {
-        request.client_revision = *last_client_revision;
+        request.client_revision = request.client_revision.max(*last_client_revision);
+        *last_client_revision = request.client_revision;
     } else if request.client_revision > *last_client_revision {
         *last_client_revision = request.client_revision;
     }
@@ -1374,6 +1375,7 @@ mod tests {
         assert_eq!(fresh.client_sequence, 5);
         assert_eq!(fresh.client_revision, 23);
         assert_eq!(fresh.session_id, 99);
+        assert_eq!(last_client_revision, 23);
 
         let stale = prepare_gameplay_request(
             GameplayRequest {
@@ -1392,6 +1394,27 @@ mod tests {
         assert_eq!(stale.client_sequence, 6);
         assert_eq!(stale.client_revision, 2);
         assert_eq!(last_client_revision, 23);
+
+        let newer_fresh = prepare_gameplay_request(
+            GameplayRequest {
+                request_id: 79,
+                client_sequence: 0,
+                session_id: 0,
+                dimension: 0,
+                client_revision: 31,
+                operation: crate::network::protocol::GameplayOperation::ItemUse {
+                    item: crate::inventory::Item::Bread as u32,
+                    count: 1,
+                },
+            },
+            99,
+            &mut next_request_id,
+            &mut last_client_sequence,
+            &mut last_client_revision,
+        );
+        assert_eq!(newer_fresh.client_sequence, 7);
+        assert_eq!(newer_fresh.client_revision, 31);
+        assert_eq!(last_client_revision, 31);
     }
 
     #[test]
