@@ -68,12 +68,36 @@ green: first define one coherent contract for retry completion versus already-ob
 suppression, then update implementation and both levels of tests together. Because this conflict is
 inside Plan31's stated seam, no new numbered Plan was created merely to defer it.
 
+## Resumed resolution — 2026-08-13
+
+The conflict was resolved inside Plan31 without adding a numbered Plan. Plan30 already defines the
+two-layer contract: the server replays its byte-identical cached ACK and records one duplicate, while
+`NetworkClient` suppresses a response for a request id already delivered into its reliable app
+queue. If the original network ACK never reaches the client gate, the first copy that does arrive is
+still accepted normally. Plan31's conflicting gate unit and TCP duplicate vector were corrected to
+that contract; the integration assertion was retained unchanged.
+
+Focused resumed evidence:
+
+```text
+cargo test --locked --lib network::client::tests::gameplay_response_gate_drops_exact_cached_ack_and_rewrites -- --test-threads=1
+cargo test --locked --bin icraft network::client::tests::gameplay_response_gate_drops_exact_cached_ack_and_rewrites -- --test-threads=1
+cargo test --locked --test headless_server_authority --no-fail-fast -- --test-threads=1
+cargo test --locked --release --test headless_server_authority --no-fail-fast -- --test-threads=1
+cargo test --locked --test plan31_authoritative_block_actions -- --test-threads=1
+cargo test --locked --release --test plan31_authoritative_block_actions -- --test-threads=1
+cargo test --locked --test plan30_real_transport_acceptance -- --test-threads=1
+cargo test --locked --release --test plan30_real_transport_acceptance -- --test-threads=1
+```
+
+These passed 1/1, 1/1, 2/2, 2/2, 3/3, 3/3, 2/2, and 2/2 respectively. The previously failed full-suite
+targets must still be re-run through the exact final serial route gates before claiming completion.
+
 ## Exact resume order
 
-1. Resolve the documented Plan31 response-gate contract conflict, then rerun `--lib` and
-   `--bin icraft` individually with `--test-threads=1`, retaining full logs to identify their other
-   concrete test cases/assertions.
-2. Determine whether each failure is deterministic, environmental/flaky, or a regression. Add a
+1. Rerun `--lib` and `--bin icraft` individually with `--test-threads=1`, retaining full logs to
+   identify any remaining concrete test cases/assertions after the Plan31 corrective.
+2. Determine whether any remaining failure is deterministic, environmental/flaky, or a regression. Add a
    numbered Plan before any real newly discovered scope; do not fold unrelated fixes into Plan33.
 3. After any scoped correction, rerun the exact serial debug full suite, then the serial release full
    suite, release check, `cargo fmt --all -- --check`, `git diff --check`, and staged/working-tree

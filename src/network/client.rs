@@ -389,12 +389,13 @@ struct GameplayResponseGate {
 
 impl GameplayResponseGate {
     fn accept(&mut self, response: &GameplayResponse) -> bool {
-        // A retransmitted request receives the authority's byte-for-byte cached
-        // response, including its original server sequence. Surface that ACK
-        // again so the caller which retried can complete, while rejecting any
-        // attempt to rewrite an already-observed request id.
-        if let Some(cached) = self.responses.get(&response.request_id) {
-            return cached == response;
+        // The server replays a byte-for-byte cached response for an idempotent
+        // request retry. Once this client has already surfaced that request id
+        // into its reliable app queue, suppress every replay or rewrite. If the
+        // first network ACK was lost before reaching this gate, the first copy
+        // that does arrive is still accepted below.
+        if self.responses.contains_key(&response.request_id) {
+            return false;
         }
         if response.server_sequence == 0 || response.server_sequence <= self.latest_server_sequence
         {
@@ -2437,7 +2438,7 @@ mod tests {
     }
 
     #[test]
-    fn gameplay_response_gate_replays_exact_cached_ack_and_drops_rewrites() {
+    fn gameplay_response_gate_drops_exact_cached_ack_and_rewrites() {
         let mut gate = GameplayResponseGate::default();
         let response_two = GameplayResponse {
             request_id: 2,
@@ -2447,7 +2448,7 @@ mod tests {
             },
         };
         assert!(gate.accept(&response_two));
-        assert!(gate.accept(&response_two));
+        assert!(!gate.accept(&response_two));
 
         let response_one = GameplayResponse {
             request_id: 1,

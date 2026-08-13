@@ -425,12 +425,29 @@ fn run_tcp_vector(label: &str, listen: bool) {
     clients[1].clear_events();
     // Request-id caching is part of the TCP ingress contract: replaying
     // the same StartBreak cannot reset or duplicate the owner session.
+    let duplicate_before = runtime.metrics.duplicate_requests;
     clients[0].send_request(start);
     {
         let mut refs: Vec<&mut TcpClient> = clients.iter_mut().collect();
-        let duplicate = wait_for_response(&mut runtime, &mut refs, 0, 1);
-        assert_eq!(duplicate, first);
+        drive_until(
+            &mut runtime,
+            &mut refs,
+            "Plan31 cached StartBreak duplicate",
+            |runtime, _| runtime.metrics.duplicate_requests > duplicate_before,
+        );
     }
+    assert_eq!(
+        runtime
+            .authority
+            .session(owner_id)
+            .and_then(|session| session.cached_response(1)),
+        Some(first),
+        "Plan31 duplicate must retain the byte-identical authority ACK"
+    );
+    assert!(
+        clients[0].take_response(1).is_none(),
+        "NetworkClient must not surface an already-observed cached ACK twice"
+    );
     for _ in 0..5 {
         runtime.tick().expect("TCP progress tick");
         for client in &mut clients {
