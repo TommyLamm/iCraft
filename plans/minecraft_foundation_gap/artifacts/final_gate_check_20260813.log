@@ -1,0 +1,1100 @@
+=== START 08/13/2026 13:56:51 ===
+    Checking icraft v0.1.0 (C:\Users\Tommy\Desktop\iCraft)
+warning: function `sound_bytes_are_decodable` is never used
+   --> src\audio.rs:164:4
+    |
+164 | fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `load_or_synthesize_sound` is never used
+   --> src\audio.rs:168:4
+    |
+168 | fn load_or_synthesize_sound(file_path: &Path, sound_id: SoundId) -> (Vec<u8>, bool) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `surrounding_chunk_coords` is never used
+  --> src\chunk_manager.rs:92:15
+   |
+92 | pub(crate) fn surrounding_chunk_coords(cx: i32, cz: i32) -> [(i32, i32); 8] {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `acknowledge_mesh_invalidation`, `drain_mesh_invalidations`, `acknowledge_section_mesh_invalidation`, and `drain_section_mesh_invalidations` are never used
+   --> src\chunk_manager.rs:166:19
+    |
+142 | impl ChunkManager {
+    | ----------------- methods in this implementation
+...
+166 |     pub(crate) fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+170 |     pub(crate) fn drain_mesh_invalidations(&mut self) -> HashSet<(i32, i32)> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     pub(crate) fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+178 |     pub(crate) fn drain_section_mesh_invalidations(&mut self) -> HashSet<SectionKey> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `broadcast_pose` is never used
+    --> src\network\server.rs:3031:14
+     |
+3028 | impl NetworkServer<std_mpsc::Sender<ServerToHost>> {
+     | -------------------------------------------------- associated function in this implementation
+...
+3031 |     async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
+     |              ^^^^^^^^^^^^^^
+
+warning: method `record_cancel` is never used
+    --> src\save.rs:1679:19
+     |
+1650 | impl SaveQueueStats {
+     | ------------------- method in this implementation
+...
+1679 |     pub(crate) fn record_cancel(&self) {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `get_interpolated_height` is never used
+   --> src\world.rs:143:4
+    |
+143 | fn get_interpolated_height(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `place_oak_tree` is never used
+   --> src\world.rs:181:4
+    |
+181 | fn place_oak_tree(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `place_birch_tree` is never used
+   --> src\world.rs:232:4
+    |
+232 | fn place_birch_tree(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `place_spruce_tree` is never used
+   --> src\world.rs:276:4
+    |
+276 | fn place_spruce_tree(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: associated items `mesh_l0_volume`, `mesh_section_lod_from_halo`, and `generate_surface_mesh` are never used
+    --> src\world.rs:4099:8
+     |
+3544 | impl Chunk {
+     | ---------- associated items in this implementation
+...
+4099 |     fn mesh_l0_volume<F>(
+     |        ^^^^^^^^^^^^^^
+...
+4939 |     fn mesh_section_lod_from_halo(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5032 |     fn generate_surface_mesh<F>(&self, get_block_at: F, step: usize) -> ChunkLodMeshData
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `continent_noise` is never read
+ --> src\worldgen\density.rs:9:5
+  |
+7 | pub struct DensityField {
+  |            ------------ field in this struct
+8 |     /// Low-frequency continent/landmass noise.
+9 |     continent_noise: Perlin,
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `DensityField` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variable does not need to be mutable
+    --> src\save.rs:4772:13
+     |
+4772 |         let mut legacy_sky = vec![15u8; total_voxels_256];
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\save.rs:4773:13
+     |
+4773 |         let mut legacy_block_light = vec![0u8; total_voxels_256];
+     |             ----^^^^^^^^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src\save.rs:4774:13
+     |
+4774 |         let mut legacy_fluid = vec![0u8; total_voxels_256];
+     |             ----^^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: `icraft` (lib) generated 12 warnings
+warning: method `has_session_update` is never used
+   --> tests\common\tcp_harness.rs:112:12
+    |
+ 23 | impl TcpClient {
+    | -------------- method in this implementation
+...
+112 |     pub fn has_session_update(&self, player_id: u64) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `send_position` and `has_session_update` are never used
+   --> tests\common\tcp_harness.rs:48:12
+    |
+ 23 | impl TcpClient {
+    | -------------- methods in this implementation
+...
+ 48 |     pub fn send_position(
+    |            ^^^^^^^^^^^^^
+...
+112 |     pub fn has_session_update(&self, player_id: u64) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `icraft` (test "plan32_progression_travel") generated 1 warning
+warning: `icraft` (test "plan33_tcp_fishing_lifecycle") generated 1 warning
+warning: `icraft` (test "plan31_authoritative_block_actions") generated 1 warning (1 duplicate)
+warning: `icraft` (test "plan34_container_break_inventory_conservation") generated 1 warning (1 duplicate)
+warning: methods `acknowledge_mesh_invalidation`, `acknowledge_section_mesh_invalidation`, and `drain_section_mesh_invalidations` are never used
+   --> src\chunk_manager.rs:166:19
+    |
+142 | impl ChunkManager {
+    | ----------------- methods in this implementation
+...
+166 |     pub(crate) fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     pub(crate) fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+178 |     pub(crate) fn drain_section_mesh_invalidations(&mut self) -> HashSet<SectionKey> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `mesh_section_lod_from_halo` is never used
+    --> src\world.rs:4939:8
+     |
+3544 | impl Chunk {
+     | ---------- associated function in this implementation
+...
+4939 |     fn mesh_section_lod_from_halo(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `AddressBookError` and `ServerPingResult`
+  --> src\menu.rs:19:31
+   |
+19 | pub use server_address_book::{AddressBookError, ServerAddressBook, ServerPingResult};
+   |                               ^^^^^^^^^^^^^^^^                     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `icraft` (lib test) generated 9 warnings (4 duplicates) (run `cargo fix --lib -p icraft --tests` to apply 3 suggestions)
+warning: unused import: `AddressBookError`
+  --> src\menu.rs:19:31
+   |
+19 | pub use server_address_book::{AddressBookError, ServerAddressBook, ServerPingResult};
+   |                               ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `feedback` is never read
+     --> src\state.rs:10609:28
+      |
+10609 |         let mut feedback = None::<String>;
+      |                            ^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+10613 |                 feedback = Some(crate::commands::help_text(command.as_deref()).into())
+      |                 -------- `feedback` is overwritten here before the previous value is read
+      |
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `new` is never used
+   --> src\chunk_render.rs:397:12
+    |
+396 | impl DrawCandidate {
+    | ------------------ associated function in this implementation
+397 |     pub fn new(
+    |            ^^^
+
+warning: struct `CompactionMove` is never constructed
+   --> src\chunk_render.rs:673:12
+    |
+673 | pub struct CompactionMove {
+    |            ^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+    --> src\chunk_render.rs:697:12
+     |
+ 680 | impl FreeList {
+     | ------------- methods in this implementation
+...
+ 697 |     pub fn capacity(&self) -> u32 {
+     |            ^^^^^^^^
+...
+ 727 |     pub fn free_units(&self) -> u32 {
+     |            ^^^^^^^^^^
+...
+ 732 |     pub fn counters_consistent(&self) -> bool {
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+ 745 |     pub fn free_blocks(&self) -> &[FreeListBlock] {
+     |            ^^^^^^^^^^^
+...
+ 749 |     pub fn allocate(&mut self, count: u32) -> Option<u32> {
+     |            ^^^^^^^^
+...
+ 810 |     pub fn deallocate(&mut self, offset: u32, count: u32) -> Result<(), FreeListError> {
+     |            ^^^^^^^^^^
+...
+ 973 |     pub fn compact(&mut self) -> Result<Vec<CompactionMove>, FreeListError> {
+     |            ^^^^^^^
+...
+1017 |     pub fn fragmentation(&self) -> f32 {
+     |            ^^^^^^^^^^^^^
+
+warning: constant `MAX_DIRTY_MESH_QUEUE` is never used
+ --> src\chunk_schedule.rs:9:11
+  |
+9 | pub const MAX_DIRTY_MESH_QUEUE: usize = 16_384;
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `bounded` is never used
+   --> src\chunk_schedule.rs:119:12
+    |
+ 26 | impl SectionMeshScheduler {
+    | ------------------------- method in this implementation
+...
+119 |     pub fn bounded(&self, max_items: usize) -> usize {
+    |            ^^^^^^^
+
+warning: associated items `new` and `coord` are never used
+   --> src\chunk_schedule.rs:164:8
+    |
+163 | impl DirtyMeshPriority {
+    | ---------------------- associated items in this implementation
+164 |     fn new(coord: (i32, i32), reason: DependencyReason, player_chunk: (i32, i32)) -> Self {
+    |        ^^^
+...
+173 |     fn coord(self) -> (i32, i32) {
+    |        ^^^^^
+
+warning: field `dirty_mesh_drop_count` is never read
+   --> src\chunk_schedule.rs:205:9
+    |
+197 | pub struct ChunkStreamingScheduler {
+    |            ----------------------- field in this struct
+...
+205 |     pub dirty_mesh_drop_count: u64,
+    |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `enqueue_dirty`, `dirty_len`, `pop_nearest_dirty`, and `requeue_dirty` are never used
+   --> src\chunk_schedule.rs:224:12
+    |
+208 | impl ChunkStreamingScheduler {
+    | ---------------------------- methods in this implementation
+...
+224 |     pub fn enqueue_dirty(
+    |            ^^^^^^^^^^^^^
+...
+273 |     pub fn dirty_len(&self) -> usize {
+    |            ^^^^^^^^^
+...
+289 |     pub fn pop_nearest_dirty(
+    |            ^^^^^^^^^^^^^^^^^
+...
+302 |     pub fn requeue_dirty(&mut self, work: DirtyMeshWork, player_chunk: (i32, i32)) {
+    |            ^^^^^^^^^^^^^
+
+warning: field `is_double` is never read
+  --> src\container_sessions.rs:20:9
+   |
+13 | pub struct ContainerSession {
+   |            ---------------- field in this struct
+...
+20 |     pub is_double: bool,
+   |         ^^^^^^^^^
+   |
+   = note: `ContainerSession` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `close_all_for_player`, `get_chest_inventory`, `set_chest_inventory`, `get_furnace_slots`, and `set_furnace_slots` are never used
+   --> src\container_sessions.rs:130:12
+    |
+ 42 | impl ContainerSessionManager {
+    | ---------------------------- associated items in this implementation
+...
+130 |     pub fn close_all_for_player(&mut self, player_id: PlayerId) {
+    |            ^^^^^^^^^^^^^^^^^^^^
+...
+244 |     pub fn get_chest_inventory(
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+359 |     pub fn set_chest_inventory(
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+369 |     pub fn get_furnace_slots(
+    |            ^^^^^^^^^^^^^^^^^
+...
+395 |     pub fn set_furnace_slots(
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: function `traverse_section_visibility` is never used
+   --> src\culling.rs:286:8
+    |
+286 | pub fn traverse_section_visibility<F>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `in_flight_count` and `request_capacity` are never used
+   --> src\culling.rs:783:12
+    |
+736 | impl EntityLosManager {
+    | --------------------- methods in this implementation
+...
+783 |     pub fn in_flight_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^
+...
+787 |     pub fn request_capacity(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: function `generate_chunk` is never used
+   --> src\dimension.rs:188:8
+    |
+188 | pub fn generate_chunk(dimension: Dimension, chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
+    |        ^^^^^^^^^^^^^^
+
+warning: associated function `identity` is never used
+  --> src\hand_renderer.rs:20:12
+   |
+19 | impl HandAnimationUniform {
+   | ------------------------- associated function in this implementation
+20 |     pub fn identity() -> Self {
+   |            ^^^^^^^^
+
+warning: function `apply_hand_animation` is never used
+   --> src\hand_renderer.rs:123:8
+    |
+123 | pub fn apply_hand_animation(vertices: &mut [Vertex], animation: HandAnimationUniform) {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_first_person_hand_mesh_into` is never used
+   --> src\hand_renderer.rs:151:8
+    |
+151 | pub fn build_first_person_hand_mesh_into(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Ping` is never constructed
+  --> src\server_address_book.rs:40:5
+   |
+36 | pub enum AddressBookError {
+   |          ---------------- variant in this enum
+...
+40 |     Ping(String),
+   |     ^^^^
+   |
+   = note: `AddressBookError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `recent_results` is never used
+   --> src\server_address_book.rs:122:12
+    |
+109 | impl ServerAddressBook {
+    | ---------------------- method in this implementation
+...
+122 |     pub fn recent_results(&self) -> &[ServerPingResult] {
+    |            ^^^^^^^^^^^^^^
+
+warning: function `expand_mob_instances` is never used
+   --> src\mob_renderer.rs:204:8
+    |
+204 | pub fn expand_mob_instances(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_mobs_legacy` is never used
+   --> src\mob_renderer.rs:348:8
+    |
+348 | pub fn render_mobs_legacy(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_local_player_legacy` is never used
+   --> src\mob_renderer.rs:367:8
+    |
+367 | pub fn render_local_player_legacy(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `RequestBlockChange`, `RequestBlockAction`, and `ContainerOpenRequest` are never constructed
+   --> src\network\client.rs:231:5
+    |
+218 | pub enum GameToClient {
+    |          ------------ variants in this enum
+...
+231 |     RequestBlockChange {
+    |     ^^^^^^^^^^^^^^^^^^
+...
+237 |     RequestBlockAction {
+    |     ^^^^^^^^^^^^^^^^^^
+...
+249 |     ContainerOpenRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `GameToClient` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: constant `MAX_REQUEST_STRING_BYTES` is never used
+  --> src\network\protocol.rs:20:11
+   |
+20 | pub const MAX_REQUEST_STRING_BYTES: usize = 256;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `ClientBlockChange`, `ClientBlockAction`, `ClientSleepRequest`, `ContainerOpenRequest`, `ContainerClickRequest`, and `ContainerClose` are never constructed
+   --> src\network\server.rs:374:5
+    |
+345 | pub enum ServerToHost {
+    |          ------------ variants in this enum
+...
+374 |     ClientBlockChange {
+    |     ^^^^^^^^^^^^^^^^^
+...
+382 |     ClientBlockAction {
+    |     ^^^^^^^^^^^^^^^^^
+...
+420 |     ClientSleepRequest {
+    |     ^^^^^^^^^^^^^^^^^^
+...
+426 |     ContainerOpenRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+433 |     ContainerClickRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^^
+...
+441 |     ContainerClose {
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `ServerToHost` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: associated functions `spawn` and `spawn_with_config` are never used
+    --> src\network\server.rs:1148:12
+     |
+1147 | impl<S: HostEventSender> NetworkServer<S> {
+     | ----------------------------------------- associated functions in this implementation
+1148 |     pub fn spawn(
+     |            ^^^^^
+...
+1192 |     pub fn spawn_with_config(
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: method `compile_mesh` is never used
+   --> src\particles.rs:247:12
+    |
+164 | impl ParticleSystem {
+    | ------------------- method in this implementation
+...
+247 |     pub fn compile_mesh(
+    |            ^^^^^^^^^^^^
+
+warning: function `alloc_count` is never used
+  --> src\perf.rs:54:8
+   |
+54 | pub fn alloc_count() -> u64 {
+   |        ^^^^^^^^^^^
+
+warning: methods `is_zero` and `to_vec` are never used
+   --> src\perf.rs:165:12
+    |
+141 | impl<const N: usize> ScopeAccumulator<N> {
+    | ---------------------------------------- methods in this implementation
+...
+165 |     pub fn is_zero(&self) -> bool {
+    |            ^^^^^^^
+...
+171 |     pub fn to_vec(&self) -> Vec<u64> {
+    |            ^^^^^^
+
+warning: function `unit_block_aabb` is never used
+  --> src\physics.rs:69:8
+   |
+69 | pub fn unit_block_aabb((x, y, z): (i32, i32, i32)) -> AABB {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `block_aabb` is never used
+  --> src\physics.rs:91:8
+   |
+91 | pub fn block_aabb(block: BlockType, state_raw: u8, pos: (i32, i32, i32)) -> AABB {
+   |        ^^^^^^^^^^
+
+warning: associated function `named` is never used
+   --> src\server_runtime.rs:104:12
+    |
+ 93 | impl LocalSessionProfile {
+    | ------------------------ associated function in this implementation
+...
+104 |     pub fn named(id: u64, username: impl Into<String>) -> Self {
+    |            ^^^^^
+
+warning: associated function `load` is never used
+   --> src\server_runtime.rs:494:12
+    |
+483 | impl ServerProperties {
+    | --------------------- associated function in this implementation
+...
+494 |     pub fn load(path: impl AsRef<Path>) -> Result<Self, ServerConfigError> {
+    |            ^^^^
+
+warning: function `parse_bool` is never used
+   --> src\server_runtime.rs:655:4
+    |
+655 | fn parse_bool(key: &str, value: &str) -> Result<bool, ServerConfigError> {
+    |    ^^^^^^^^^^
+
+warning: function `parse_range` is never used
+   --> src\server_runtime.rs:663:4
+    |
+663 | fn parse_range<T>(
+    |    ^^^^^^^^^^^
+
+warning: field `transport_mode` is never read
+   --> src\server_runtime.rs:863:5
+    |
+837 | pub struct ServerRuntime {
+    |            ------------- field in this struct
+...
+863 |     transport_mode: TransportMode,
+    |     ^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> src\server_runtime.rs:872:12
+     |
+ 871 | impl ServerRuntime {
+     | ------------------ associated items in this implementation
+ 872 |     pub fn new(properties: ServerProperties) -> Result<Self, ServerConfigError> {
+     |            ^^^
+...
+1002 |     pub fn tick(&mut self) -> io::Result<()> {
+     |            ^^^^
+...
+1074 |     pub fn run_for_ticks(&mut self, ticks: u64) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^
+...
+1081 |     pub fn run_until_shutdown(&mut self) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^^^^^^
+...
+1213 |     pub fn request_shutdown(&mut self) {
+     |            ^^^^^^^^^^^^^^^^
+...
+1217 |     pub fn submit_request(
+     |            ^^^^^^^^^^^^^^
+...
+1229 |     pub fn login_session(&mut self, id: u64, username: impl Into<String>) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^
+...
+1233 |     pub fn logout_session(&mut self, id: u64) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^^
+...
+1259 |     pub fn transfer_session_dimension(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1341 |     pub fn metrics(&self) -> &ServerMetrics {
+     |            ^^^^^^^
+...
+1345 |     pub fn transport_mode(&self) -> TransportMode {
+     |            ^^^^^^^^^^^^^^
+...
+1349 |     pub fn is_stopped(&self) -> bool {
+     |            ^^^^^^^^^^
+...
+1355 |     pub fn execute_console_command(&mut self, line: &str) -> Result<String, String> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+2682 |     pub fn drain_routed_updates(&mut self) -> Vec<RoutedInterestUpdate> {
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `region_coord` and `region_uniform_buffer` are never read
+    --> src\state.rs:1283:9
+     |
+1282 | pub struct RenderRegion {
+     |            ------------ fields in this struct
+1283 |     pub region_coord: (i32, i32),
+     |         ^^^^^^^^^^^^
+...
+1292 |     pub region_uniform_buffer: wgpu::Buffer,
+     |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `total_indices` is never used
+    --> src\state.rs:1679:8
+     |
+1652 | impl GpuSectionMesh {
+     | ------------------- method in this implementation
+...
+1679 |     fn total_indices(&self) -> usize {
+     |        ^^^^^^^^^^^^^
+
+warning: methods `finest_bounds` and `total_indices` are never used
+    --> src\state.rs:1752:8
+     |
+1710 | impl ChunkMesh {
+     | -------------- methods in this implementation
+...
+1752 |     fn finest_bounds(&self) -> Option<MeshBounds> {
+     |        ^^^^^^^^^^^^^
+...
+1759 |     fn total_indices(&self) -> usize {
+     |        ^^^^^^^^^^^^^
+
+warning: struct `MeshVoxel` is never constructed
+    --> src\state.rs:1796:8
+     |
+1796 | struct MeshVoxel {
+     |        ^^^^^^^^^
+
+warning: struct `MeshSnapshot` is never constructed
+    --> src\state.rs:1803:8
+     |
+1803 | struct MeshSnapshot {
+     |        ^^^^^^^^^^^^
+
+warning: associated items `WIDTH`, `DEPTH`, `capture`, and `get` are never used
+    --> src\state.rs:1811:11
+     |
+1810 | impl MeshSnapshot {
+     | ----------------- associated items in this implementation
+1811 |     const WIDTH: usize = CHUNK_WIDTH + 2;
+     |           ^^^^^
+1812 |     const DEPTH: usize = CHUNK_DEPTH + 2;
+     |           ^^^^^
+1813 |
+1814 |     fn capture(
+     |        ^^^^^^^
+...
+1860 |     fn get(&self, world_x: i32, world_y: i32, world_z: i32) -> (BlockType, u8, u8, u8, bool) {
+     |        ^^^
+
+warning: variant `Furnace` is never constructed
+    --> src\state.rs:3100:5
+     |
+3096 | pub enum StationKind {
+     |          ----------- variant in this enum
+...
+3100 |     Furnace,
+     |     ^^^^^^^
+     |
+     = note: `StationKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `Host` is never constructed
+    --> src\state.rs:3106:5
+     |
+3104 | pub enum NetworkHandle {
+     |          ------------- variant in this enum
+3105 |     None,
+3106 |     Host {
+     |     ^^^^
+
+warning: field `topology` is never read
+    --> src\state.rs:3127:5
+     |
+3123 | struct EmbeddedRuntimeBridge {
+     |        --------------------- field in this struct
+...
+3127 |     topology: AuthorityTopology,
+     |     ^^^^^^^^
+
+warning: method `topology` is never used
+    --> src\state.rs:3201:8
+     |
+3135 | impl EmbeddedRuntimeBridge {
+     | -------------------------- method in this implementation
+...
+3201 |     fn topology(&self) -> AuthorityTopology {
+     |        ^^^^^^^^
+
+warning: variant `Unsupported` is never constructed
+    --> src\state.rs:3324:5
+     |
+3323 | pub enum GpuTimestampReadbackState {
+     |          ------------------------- variant in this enum
+3324 |     Unsupported,
+     |     ^^^^^^^^^^^
+     |
+     = note: `GpuTimestampReadbackState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `gpu_timestamp_capability` is never used
+    --> src\state.rs:3423:14
+     |
+3423 | pub const fn gpu_timestamp_capability(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `slot_index` is never read
+    --> src\state.rs:4213:9
+     |
+4210 |     ContainerClickResult {
+     |     -------------------- field in this variant
+...
+4213 |         slot_index: u16,
+     |         ^^^^^^^^^^
+
+warning: methods `send_gameplay_response`, `request_block_change`, and `request_block_action` are never used
+    --> src\state.rs:4997:8
+     |
+4503 | impl NetworkHandle {
+     | ------------------ methods in this implementation
+...
+4997 |     fn send_gameplay_response(
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+5083 |     fn request_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
+     |        ^^^^^^^^^^^^^^^^^^^^
+...
+5109 |     fn request_block_action(
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+    --> src\state.rs:5528:5
+     |
+5518 | pub struct State {
+     |            ----- fields in this struct
+...
+5528 |     render_pipeline: wgpu::RenderPipeline,
+     |     ^^^^^^^^^^^^^^^
+5529 |     trans_pipeline: wgpu::RenderPipeline,
+     |     ^^^^^^^^^^^^^^
+...
+5603 |     pub map_manager: crate::navigation::MapManager,
+     |         ^^^^^^^^^^^
+...
+5629 |     mob_vertex_buffer: wgpu::Buffer,
+     |     ^^^^^^^^^^^^^^^^^
+5630 |     mob_index_buffer: wgpu::Buffer,
+     |     ^^^^^^^^^^^^^^^^
+...
+5640 |     particle_vertex_buffer: wgpu::Buffer,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+5641 |     particle_index_buffer: wgpu::Buffer,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+...
+5705 |     mob_vertices_scratch: Vec<Vertex>,
+     |     ^^^^^^^^^^^^^^^^^^^^
+5706 |     mob_indices_scratch: Vec<u32>,
+     |     ^^^^^^^^^^^^^^^^^^^
+5707 |     particle_vertices_scratch: Vec<Vertex>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+5708 |     particle_indices_scratch: Vec<u32>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5727 |     pub recipe_book_search: String,
+     |         ^^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+     --> src\state.rs:5953:12
+      |
+ 5940 | impl State {
+      | ---------- associated items in this implementation
+...
+ 5953 |     pub fn set_language(&mut self, language: crate::localization::Language) {
+      |            ^^^^^^^^^^^^
+...
+ 7658 |     pub fn authority_topology(&self) -> Option<AuthorityTopology> {
+      |            ^^^^^^^^^^^^^^^^^^
+...
+ 7929 |     fn session_slot_from_stack(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7952 |     fn authority_gameplay_from_local(&self) -> crate::authority::contract::SessionGameplayState {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7980 |     fn sync_authority_gameplay_from_local(&mut self) {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 8646 |     pub fn apply_mutation_batch(
+      |            ^^^^^^^^^^^^^^^^^^^^
+...
+13406 |     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
+      |            ^^^^^^^^^^^^^^^^^^^^^
+...
+13432 |     pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `add_char_lines` is never used
+     --> src\state.rs:24910:4
+      |
+24910 | fn add_char_lines(
+      |    ^^^^^^^^^^^^^^
+
+warning: function `add_string_lines` is never used
+     --> src\state.rs:24932:4
+      |
+24932 | fn add_string_lines(
+      |    ^^^^^^^^^^^^^^^^
+
+warning: associated function `new_procedural` is never used
+    --> src\texture.rs:1729:12
+     |
+1728 | impl TextureAtlas {
+     | ----------------- associated function in this implementation
+1729 |     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
+     |            ^^^^^^^^^^^^^^
+
+warning: associated items `ALL`, `get_biome`, `terrain_params`, `is_snowy`, and `is_dry` are never used
+   --> src\world.rs:40:15
+    |
+ 38 | impl Biome {
+    | ---------- associated items in this implementation
+ 39 |     /// All 16 reachable overworld biomes.
+ 40 |     pub const ALL: [Biome; 16] = [
+    |               ^^^
+...
+ 59 |     pub fn get_biome(
+    |            ^^^^^^^^^
+...
+108 |     pub fn terrain_params(self) -> (f64, f64) {
+    |            ^^^^^^^^^^^^^^
+...
+130 |     pub fn is_snowy(self) -> bool {
+    |            ^^^^^^^^
+...
+138 |     pub fn is_dry(self) -> bool {
+    |            ^^^^^^
+
+warning: constant `RIVER_BED_DEPTH` is never used
+  --> src\worldgen\mod.rs:13:11
+   |
+13 | pub const RIVER_BED_DEPTH: i32 = 8;
+   |           ^^^^^^^^^^^^^^^
+
+warning: constant `BEACH_BAND` is never used
+  --> src\worldgen\mod.rs:15:11
+   |
+15 | pub const BEACH_BAND: f64 = 0.06;
+   |           ^^^^^^^^^^
+
+warning: field `seed` is never read
+  --> src\worldgen\mod.rs:22:9
+   |
+21 | pub struct WorldGenContext {
+   |            --------------- field in this struct
+22 |     pub seed: u32,
+   |         ^^^^
+   |
+   = note: `WorldGenContext` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `supports_dimension` is never used
+  --> src\worldgen\mod.rs:58:12
+   |
+29 | impl WorldGenContext {
+   | -------------------- method in this implementation
+...
+58 |     pub fn supports_dimension(&self, dimension: Dimension) -> bool {
+   |            ^^^^^^^^^^^^^^^^^^
+
+warning: function `salted_seed` is never used
+  --> src\worldgen\mod.rs:64:8
+   |
+64 | pub fn salted_seed(world_seed: u32, salt: u32) -> u32 {
+   |        ^^^^^^^^^^^
+
+warning: fields `continent_noise`, `cavern_noise`, `tunnel_noise`, and `ravine_noise` are never read
+  --> src\worldgen\density.rs:9:5
+   |
+ 7 | pub struct DensityField {
+   |            ------------ fields in this struct
+ 8 |     /// Low-frequency continent/landmass noise.
+ 9 |     continent_noise: Perlin,
+   |     ^^^^^^^^^^^^^^^
+...
+17 |     cavern_noise: Perlin,
+   |     ^^^^^^^^^^^^
+18 |     /// 3D tunnel noise.
+19 |     tunnel_noise: Perlin,
+   |     ^^^^^^^^^^^^
+20 |     /// 3D ravine noise.
+21 |     ravine_noise: Perlin,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `DensityField` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `density_at` and `is_cave` are never used
+   --> src\worldgen\density.rs:86:12
+    |
+ 24 | impl DensityField {
+    | ----------------- methods in this implementation
+...
+ 86 |     pub fn density_at(&self, climate: &ClimateSystem, wx: i32, wy: i32, wz: i32) -> f64 {
+    |            ^^^^^^^^^^
+...
+103 |     pub fn is_cave(&self, wx: i32, wy: i32, wz: i32, surface_h: i32) -> bool {
+    |            ^^^^^^^
+
+warning: function `surface_height` is never used
+   --> src\worldgen\density.rs:132:8
+    |
+132 | pub fn surface_height(climate: &ClimateSystem, wx: i32, wz: i32) -> i32 {
+    |        ^^^^^^^^^^^^^^
+
+warning: method `configs` is never used
+  --> src\worldgen\ore.rs:66:12
+   |
+22 | impl OreGenerator {
+   | ----------------- method in this implementation
+...
+66 |     pub fn configs(&self) -> &[OreConfig] {
+   |            ^^^^^^^
+
+warning: field `is_dry` is never read
+  --> src\worldgen\surface.rs:12:9
+   |
+ 6 | pub struct BiomeSurfaceData {
+   |            ---------------- field in this struct
+...
+12 |     pub is_dry: bool,
+   |         ^^^^^^
+   |
+   = note: `BiomeSurfaceData` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `icraft` (bin "icraft") generated 77 warnings (9 duplicates) (run `cargo fix --bin "icraft" -p icraft` to apply 1 suggestion)
+warning: method `bounded` is never used
+   --> src\chunk_schedule.rs:119:12
+    |
+ 26 | impl SectionMeshScheduler {
+    | ------------------------- method in this implementation
+...
+119 |     pub fn bounded(&self, max_items: usize) -> usize {
+    |            ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `requeue_dirty` is never used
+   --> src\chunk_schedule.rs:302:12
+    |
+208 | impl ChunkStreamingScheduler {
+    | ---------------------------- method in this implementation
+...
+302 |     pub fn requeue_dirty(&mut self, work: DirtyMeshWork, player_chunk: (i32, i32)) {
+    |            ^^^^^^^^^^^^^
+
+warning: method `request_capacity` is never used
+   --> src\culling.rs:787:12
+    |
+736 | impl EntityLosManager {
+    | --------------------- method in this implementation
+...
+787 |     pub fn request_capacity(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: variants `ClientBlockAction`, `ClientSleepRequest`, `ContainerOpenRequest`, `ContainerClickRequest`, and `ContainerClose` are never constructed
+   --> src\network\server.rs:382:5
+    |
+345 | pub enum ServerToHost {
+    |          ------------ variants in this enum
+...
+382 |     ClientBlockAction {
+    |     ^^^^^^^^^^^^^^^^^
+...
+420 |     ClientSleepRequest {
+    |     ^^^^^^^^^^^^^^^^^^
+...
+426 |     ContainerOpenRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+433 |     ContainerClickRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^^
+...
+441 |     ContainerClose {
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `ServerToHost` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `to_vec` is never used
+   --> src\perf.rs:171:12
+    |
+141 | impl<const N: usize> ScopeAccumulator<N> {
+    | ---------------------------------------- method in this implementation
+...
+171 |     pub fn to_vec(&self) -> Vec<u64> {
+    |            ^^^^^^
+
+warning: multiple methods are never used
+    --> src\server_runtime.rs:1002:12
+     |
+ 871 | impl ServerRuntime {
+     | ------------------ methods in this implementation
+...
+1002 |     pub fn tick(&mut self) -> io::Result<()> {
+     |            ^^^^
+...
+1074 |     pub fn run_for_ticks(&mut self, ticks: u64) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^
+...
+1081 |     pub fn run_until_shutdown(&mut self) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^^^^^^
+...
+1213 |     pub fn request_shutdown(&mut self) {
+     |            ^^^^^^^^^^^^^^^^
+...
+1233 |     pub fn logout_session(&mut self, id: u64) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^^
+...
+1259 |     pub fn transfer_session_dimension(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1341 |     pub fn metrics(&self) -> &ServerMetrics {
+     |            ^^^^^^^
+...
+1345 |     pub fn transport_mode(&self) -> TransportMode {
+     |            ^^^^^^^^^^^^^^
+...
+1349 |     pub fn is_stopped(&self) -> bool {
+     |            ^^^^^^^^^^
+...
+1355 |     pub fn execute_console_command(&mut self, line: &str) -> Result<String, String> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+     --> src\state.rs:5953:12
+      |
+ 5940 | impl State {
+      | ---------- methods in this implementation
+...
+ 5953 |     pub fn set_language(&mut self, language: crate::localization::Language) {
+      |            ^^^^^^^^^^^^
+...
+ 7658 |     pub fn authority_topology(&self) -> Option<AuthorityTopology> {
+      |            ^^^^^^^^^^^^^^^^^^
+...
+ 7952 |     fn authority_gameplay_from_local(&self) -> crate::authority::contract::SessionGameplayState {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7980 |     fn sync_authority_gameplay_from_local(&mut self) {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 8646 |     pub fn apply_mutation_batch(
+      |            ^^^^^^^^^^^^^^^^^^^^
+...
+13406 |     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
+      |            ^^^^^^^^^^^^^^^^^^^^^
+...
+13432 |     pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `ALL`, `terrain_params`, `is_snowy`, and `is_dry` are never used
+   --> src\world.rs:40:15
+    |
+ 38 | impl Biome {
+    | ---------- associated items in this implementation
+ 39 |     /// All 16 reachable overworld biomes.
+ 40 |     pub const ALL: [Biome; 16] = [
+    |               ^^^
+...
+108 |     pub fn terrain_params(self) -> (f64, f64) {
+    |            ^^^^^^^^^^^^^^
+...
+130 |     pub fn is_snowy(self) -> bool {
+    |            ^^^^^^^^
+...
+138 |     pub fn is_dry(self) -> bool {
+    |            ^^^^^^
+
+warning: `icraft` (bin "icraft" test) generated 45 warnings (36 duplicates) (run `cargo fix --bin "icraft" -p icraft --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 26.47s
+=== END 08/13/2026 13:57:17 EXIT=0 ELAPSED=00:00:26.5703321 ===

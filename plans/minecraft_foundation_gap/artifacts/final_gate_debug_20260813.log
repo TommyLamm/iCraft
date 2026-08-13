@@ -1,0 +1,2773 @@
+=== START 08/13/2026 13:29:29 cwd=C:\Users\Tommy\Desktop\iCraft ===
+warning: function `sound_bytes_are_decodable` is never used
+   --> src\audio.rs:164:4
+    |
+164 | fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `load_or_synthesize_sound` is never used
+   --> src\audio.rs:168:4
+    |
+168 | fn load_or_synthesize_sound(file_path: &Path, sound_id: SoundId) -> (Vec<u8>, bool) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `surrounding_chunk_coords` is never used
+  --> src\chunk_manager.rs:92:15
+   |
+92 | pub(crate) fn surrounding_chunk_coords(cx: i32, cz: i32) -> [(i32, i32); 8] {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `acknowledge_mesh_invalidation`, `drain_mesh_invalidations`, `acknowledge_section_mesh_invalidation`, and `drain_section_mesh_invalidations` are never used
+   --> src\chunk_manager.rs:166:19
+    |
+142 | impl ChunkManager {
+    | ----------------- methods in this implementation
+...
+166 |     pub(crate) fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+170 |     pub(crate) fn drain_mesh_invalidations(&mut self) -> HashSet<(i32, i32)> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     pub(crate) fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+178 |     pub(crate) fn drain_section_mesh_invalidations(&mut self) -> HashSet<SectionKey> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `broadcast_pose` is never used
+    --> src\network\server.rs:3031:14
+     |
+3028 | impl NetworkServer<std_mpsc::Sender<ServerToHost>> {
+     | -------------------------------------------------- associated function in this implementation
+...
+3031 |     async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
+     |              ^^^^^^^^^^^^^^
+
+warning: method `record_cancel` is never used
+    --> src\save.rs:1679:19
+     |
+1650 | impl SaveQueueStats {
+     | ------------------- method in this implementation
+...
+1679 |     pub(crate) fn record_cancel(&self) {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `get_interpolated_height` is never used
+   --> src\world.rs:143:4
+    |
+143 | fn get_interpolated_height(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `place_oak_tree` is never used
+   --> src\world.rs:181:4
+    |
+181 | fn place_oak_tree(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `place_birch_tree` is never used
+   --> src\world.rs:232:4
+    |
+232 | fn place_birch_tree(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `place_spruce_tree` is never used
+   --> src\world.rs:276:4
+    |
+276 | fn place_spruce_tree(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: associated items `mesh_l0_volume`, `mesh_section_lod_from_halo`, and `generate_surface_mesh` are never used
+    --> src\world.rs:4099:8
+     |
+3544 | impl Chunk {
+     | ---------- associated items in this implementation
+...
+4099 |     fn mesh_l0_volume<F>(
+     |        ^^^^^^^^^^^^^^
+...
+4939 |     fn mesh_section_lod_from_halo(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5032 |     fn generate_surface_mesh<F>(&self, get_block_at: F, step: usize) -> ChunkLodMeshData
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `continent_noise` is never read
+ --> src\worldgen\density.rs:9:5
+  |
+7 | pub struct DensityField {
+  |            ------------ field in this struct
+8 |     /// Low-frequency continent/landmass noise.
+9 |     continent_noise: Perlin,
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `DensityField` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variable does not need to be mutable
+    --> src\save.rs:4772:13
+     |
+4772 |         let mut legacy_sky = vec![15u8; total_voxels_256];
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\save.rs:4773:13
+     |
+4773 |         let mut legacy_block_light = vec![0u8; total_voxels_256];
+     |             ----^^^^^^^^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src\save.rs:4774:13
+     |
+4774 |         let mut legacy_fluid = vec![0u8; total_voxels_256];
+     |             ----^^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: methods `acknowledge_mesh_invalidation`, `acknowledge_section_mesh_invalidation`, and `drain_section_mesh_invalidations` are never used
+   --> src\chunk_manager.rs:166:19
+    |
+142 | impl ChunkManager {
+    | ----------------- methods in this implementation
+...
+166 |     pub(crate) fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     pub(crate) fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+178 |     pub(crate) fn drain_section_mesh_invalidations(&mut self) -> HashSet<SectionKey> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `mesh_section_lod_from_halo` is never used
+    --> src\world.rs:4939:8
+     |
+3544 | impl Chunk {
+     | ---------- associated function in this implementation
+...
+4939 |     fn mesh_section_lod_from_halo(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `icraft` (lib) generated 12 warnings
+warning: `icraft` (lib test) generated 9 warnings (4 duplicates) (run `cargo fix --lib -p icraft --tests` to apply 3 suggestions)
+warning: methods `send_position` and `has_session_update` are never used
+   --> tests\common\tcp_harness.rs:48:12
+    |
+ 23 | impl TcpClient {
+    | -------------- methods in this implementation
+...
+ 48 |     pub fn send_position(
+    |            ^^^^^^^^^^^^^
+...
+112 |     pub fn has_session_update(&self, player_id: u64) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling icraft v0.1.0 (C:\Users\Tommy\Desktop\iCraft)
+warning: unused imports: `AddressBookError` and `ServerPingResult`
+  --> src\menu.rs:19:31
+   |
+19 | pub use server_address_book::{AddressBookError, ServerAddressBook, ServerPingResult};
+   |                               ^^^^^^^^^^^^^^^^                     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `feedback` is never read
+     --> src\state.rs:10609:28
+      |
+10609 |         let mut feedback = None::<String>;
+      |                            ^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+10613 |                 feedback = Some(crate::commands::help_text(command.as_deref()).into())
+      |                 -------- `feedback` is overwritten here before the previous value is read
+      |
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `new` is never used
+   --> src\chunk_render.rs:397:12
+    |
+396 | impl DrawCandidate {
+    | ------------------ associated function in this implementation
+397 |     pub fn new(
+    |            ^^^
+
+warning: struct `CompactionMove` is never constructed
+   --> src\chunk_render.rs:673:12
+    |
+673 | pub struct CompactionMove {
+    |            ^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+    --> src\chunk_render.rs:697:12
+     |
+ 680 | impl FreeList {
+     | ------------- methods in this implementation
+...
+ 697 |     pub fn capacity(&self) -> u32 {
+     |            ^^^^^^^^
+...
+ 727 |     pub fn free_units(&self) -> u32 {
+     |            ^^^^^^^^^^
+...
+ 732 |     pub fn counters_consistent(&self) -> bool {
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+ 745 |     pub fn free_blocks(&self) -> &[FreeListBlock] {
+     |            ^^^^^^^^^^^
+...
+ 749 |     pub fn allocate(&mut self, count: u32) -> Option<u32> {
+     |            ^^^^^^^^
+...
+ 810 |     pub fn deallocate(&mut self, offset: u32, count: u32) -> Result<(), FreeListError> {
+     |            ^^^^^^^^^^
+...
+ 973 |     pub fn compact(&mut self) -> Result<Vec<CompactionMove>, FreeListError> {
+     |            ^^^^^^^
+...
+1017 |     pub fn fragmentation(&self) -> f32 {
+     |            ^^^^^^^^^^^^^
+
+warning: constant `MAX_DIRTY_MESH_QUEUE` is never used
+ --> src\chunk_schedule.rs:9:11
+  |
+9 | pub const MAX_DIRTY_MESH_QUEUE: usize = 16_384;
+  |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `bounded` is never used
+   --> src\chunk_schedule.rs:119:12
+    |
+ 26 | impl SectionMeshScheduler {
+    | ------------------------- method in this implementation
+...
+119 |     pub fn bounded(&self, max_items: usize) -> usize {
+    |            ^^^^^^^
+
+warning: associated items `new` and `coord` are never used
+   --> src\chunk_schedule.rs:164:8
+    |
+163 | impl DirtyMeshPriority {
+    | ---------------------- associated items in this implementation
+164 |     fn new(coord: (i32, i32), reason: DependencyReason, player_chunk: (i32, i32)) -> Self {
+    |        ^^^
+...
+173 |     fn coord(self) -> (i32, i32) {
+    |        ^^^^^
+
+warning: field `dirty_mesh_drop_count` is never read
+   --> src\chunk_schedule.rs:205:9
+    |
+197 | pub struct ChunkStreamingScheduler {
+    |            ----------------------- field in this struct
+...
+205 |     pub dirty_mesh_drop_count: u64,
+    |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `enqueue_dirty`, `dirty_len`, `pop_nearest_dirty`, and `requeue_dirty` are never used
+   --> src\chunk_schedule.rs:224:12
+    |
+208 | impl ChunkStreamingScheduler {
+    | ---------------------------- methods in this implementation
+...
+224 |     pub fn enqueue_dirty(
+    |            ^^^^^^^^^^^^^
+...
+273 |     pub fn dirty_len(&self) -> usize {
+    |            ^^^^^^^^^
+...
+289 |     pub fn pop_nearest_dirty(
+    |            ^^^^^^^^^^^^^^^^^
+...
+302 |     pub fn requeue_dirty(&mut self, work: DirtyMeshWork, player_chunk: (i32, i32)) {
+    |            ^^^^^^^^^^^^^
+
+warning: field `is_double` is never read
+  --> src\container_sessions.rs:20:9
+   |
+13 | pub struct ContainerSession {
+   |            ---------------- field in this struct
+...
+20 |     pub is_double: bool,
+   |         ^^^^^^^^^
+   |
+   = note: `ContainerSession` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `close_all_for_player`, `get_chest_inventory`, `set_chest_inventory`, `get_furnace_slots`, and `set_furnace_slots` are never used
+   --> src\container_sessions.rs:130:12
+    |
+ 42 | impl ContainerSessionManager {
+    | ---------------------------- associated items in this implementation
+...
+130 |     pub fn close_all_for_player(&mut self, player_id: PlayerId) {
+    |            ^^^^^^^^^^^^^^^^^^^^
+...
+244 |     pub fn get_chest_inventory(
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+359 |     pub fn set_chest_inventory(
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+369 |     pub fn get_furnace_slots(
+    |            ^^^^^^^^^^^^^^^^^
+...
+395 |     pub fn set_furnace_slots(
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: function `traverse_section_visibility` is never used
+   --> src\culling.rs:286:8
+    |
+286 | pub fn traverse_section_visibility<F>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `in_flight_count` and `request_capacity` are never used
+   --> src\culling.rs:783:12
+    |
+736 | impl EntityLosManager {
+    | --------------------- methods in this implementation
+...
+783 |     pub fn in_flight_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^
+...
+787 |     pub fn request_capacity(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: function `generate_chunk` is never used
+   --> src\dimension.rs:188:8
+    |
+188 | pub fn generate_chunk(dimension: Dimension, chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
+    |        ^^^^^^^^^^^^^^
+
+warning: associated function `identity` is never used
+  --> src\hand_renderer.rs:20:12
+   |
+19 | impl HandAnimationUniform {
+   | ------------------------- associated function in this implementation
+20 |     pub fn identity() -> Self {
+   |            ^^^^^^^^
+
+warning: function `apply_hand_animation` is never used
+   --> src\hand_renderer.rs:123:8
+    |
+123 | pub fn apply_hand_animation(vertices: &mut [Vertex], animation: HandAnimationUniform) {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_first_person_hand_mesh_into` is never used
+   --> src\hand_renderer.rs:151:8
+    |
+151 | pub fn build_first_person_hand_mesh_into(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Ping` is never constructed
+  --> src\server_address_book.rs:40:5
+   |
+36 | pub enum AddressBookError {
+   |          ---------------- variant in this enum
+...
+40 |     Ping(String),
+   |     ^^^^
+   |
+   = note: `AddressBookError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `recent_results` is never used
+   --> src\server_address_book.rs:122:12
+    |
+109 | impl ServerAddressBook {
+    | ---------------------- method in this implementation
+...
+122 |     pub fn recent_results(&self) -> &[ServerPingResult] {
+    |            ^^^^^^^^^^^^^^
+
+warning: function `expand_mob_instances` is never used
+   --> src\mob_renderer.rs:204:8
+    |
+204 | pub fn expand_mob_instances(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_mobs_legacy` is never used
+   --> src\mob_renderer.rs:348:8
+    |
+348 | pub fn render_mobs_legacy(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_local_player_legacy` is never used
+   --> src\mob_renderer.rs:367:8
+    |
+367 | pub fn render_local_player_legacy(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `RequestBlockChange`, `RequestBlockAction`, and `ContainerOpenRequest` are never constructed
+   --> src\network\client.rs:231:5
+    |
+218 | pub enum GameToClient {
+    |          ------------ variants in this enum
+...
+231 |     RequestBlockChange {
+    |     ^^^^^^^^^^^^^^^^^^
+...
+237 |     RequestBlockAction {
+    |     ^^^^^^^^^^^^^^^^^^
+...
+249 |     ContainerOpenRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `GameToClient` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: constant `MAX_REQUEST_STRING_BYTES` is never used
+  --> src\network\protocol.rs:20:11
+   |
+20 | pub const MAX_REQUEST_STRING_BYTES: usize = 256;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `ClientBlockChange`, `ClientBlockAction`, `ClientSleepRequest`, `ContainerOpenRequest`, `ContainerClickRequest`, and `ContainerClose` are never constructed
+   --> src\network\server.rs:374:5
+    |
+345 | pub enum ServerToHost {
+    |          ------------ variants in this enum
+...
+374 |     ClientBlockChange {
+    |     ^^^^^^^^^^^^^^^^^
+...
+382 |     ClientBlockAction {
+    |     ^^^^^^^^^^^^^^^^^
+...
+420 |     ClientSleepRequest {
+    |     ^^^^^^^^^^^^^^^^^^
+...
+426 |     ContainerOpenRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+433 |     ContainerClickRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^^
+...
+441 |     ContainerClose {
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `ServerToHost` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: associated functions `spawn` and `spawn_with_config` are never used
+    --> src\network\server.rs:1148:12
+     |
+1147 | impl<S: HostEventSender> NetworkServer<S> {
+     | ----------------------------------------- associated functions in this implementation
+1148 |     pub fn spawn(
+     |            ^^^^^
+...
+1192 |     pub fn spawn_with_config(
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: method `compile_mesh` is never used
+   --> src\particles.rs:247:12
+    |
+164 | impl ParticleSystem {
+    | ------------------- method in this implementation
+...
+247 |     pub fn compile_mesh(
+    |            ^^^^^^^^^^^^
+
+warning: function `alloc_count` is never used
+  --> src\perf.rs:54:8
+   |
+54 | pub fn alloc_count() -> u64 {
+   |        ^^^^^^^^^^^
+
+warning: methods `is_zero` and `to_vec` are never used
+   --> src\perf.rs:165:12
+    |
+141 | impl<const N: usize> ScopeAccumulator<N> {
+    | ---------------------------------------- methods in this implementation
+...
+165 |     pub fn is_zero(&self) -> bool {
+    |            ^^^^^^^
+...
+171 |     pub fn to_vec(&self) -> Vec<u64> {
+    |            ^^^^^^
+
+warning: function `unit_block_aabb` is never used
+  --> src\physics.rs:69:8
+   |
+69 | pub fn unit_block_aabb((x, y, z): (i32, i32, i32)) -> AABB {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `block_aabb` is never used
+  --> src\physics.rs:91:8
+   |
+91 | pub fn block_aabb(block: BlockType, state_raw: u8, pos: (i32, i32, i32)) -> AABB {
+   |        ^^^^^^^^^^
+
+warning: associated function `named` is never used
+   --> src\server_runtime.rs:104:12
+    |
+ 93 | impl LocalSessionProfile {
+    | ------------------------ associated function in this implementation
+...
+104 |     pub fn named(id: u64, username: impl Into<String>) -> Self {
+    |            ^^^^^
+
+warning: associated function `load` is never used
+   --> src\server_runtime.rs:494:12
+    |
+483 | impl ServerProperties {
+    | --------------------- associated function in this implementation
+...
+494 |     pub fn load(path: impl AsRef<Path>) -> Result<Self, ServerConfigError> {
+    |            ^^^^
+
+warning: function `parse_bool` is never used
+   --> src\server_runtime.rs:655:4
+    |
+655 | fn parse_bool(key: &str, value: &str) -> Result<bool, ServerConfigError> {
+    |    ^^^^^^^^^^
+
+warning: function `parse_range` is never used
+   --> src\server_runtime.rs:663:4
+    |
+663 | fn parse_range<T>(
+    |    ^^^^^^^^^^^
+
+warning: field `transport_mode` is never read
+   --> src\server_runtime.rs:863:5
+    |
+837 | pub struct ServerRuntime {
+    |            ------------- field in this struct
+...
+863 |     transport_mode: TransportMode,
+    |     ^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> src\server_runtime.rs:872:12
+     |
+ 871 | impl ServerRuntime {
+     | ------------------ associated items in this implementation
+ 872 |     pub fn new(properties: ServerProperties) -> Result<Self, ServerConfigError> {
+     |            ^^^
+...
+1002 |     pub fn tick(&mut self) -> io::Result<()> {
+     |            ^^^^
+...
+1074 |     pub fn run_for_ticks(&mut self, ticks: u64) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^
+...
+1081 |     pub fn run_until_shutdown(&mut self) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^^^^^^
+...
+1213 |     pub fn request_shutdown(&mut self) {
+     |            ^^^^^^^^^^^^^^^^
+...
+1217 |     pub fn submit_request(
+     |            ^^^^^^^^^^^^^^
+...
+1229 |     pub fn login_session(&mut self, id: u64, username: impl Into<String>) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^
+...
+1233 |     pub fn logout_session(&mut self, id: u64) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^^
+...
+1259 |     pub fn transfer_session_dimension(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1341 |     pub fn metrics(&self) -> &ServerMetrics {
+     |            ^^^^^^^
+...
+1345 |     pub fn transport_mode(&self) -> TransportMode {
+     |            ^^^^^^^^^^^^^^
+...
+1349 |     pub fn is_stopped(&self) -> bool {
+     |            ^^^^^^^^^^
+...
+1355 |     pub fn execute_console_command(&mut self, line: &str) -> Result<String, String> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+2682 |     pub fn drain_routed_updates(&mut self) -> Vec<RoutedInterestUpdate> {
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `region_coord` and `region_uniform_buffer` are never read
+    --> src\state.rs:1283:9
+     |
+1282 | pub struct RenderRegion {
+     |            ------------ fields in this struct
+1283 |     pub region_coord: (i32, i32),
+     |         ^^^^^^^^^^^^
+...
+1292 |     pub region_uniform_buffer: wgpu::Buffer,
+     |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `total_indices` is never used
+    --> src\state.rs:1679:8
+     |
+1652 | impl GpuSectionMesh {
+     | ------------------- method in this implementation
+...
+1679 |     fn total_indices(&self) -> usize {
+     |        ^^^^^^^^^^^^^
+
+warning: methods `finest_bounds` and `total_indices` are never used
+    --> src\state.rs:1752:8
+     |
+1710 | impl ChunkMesh {
+     | -------------- methods in this implementation
+...
+1752 |     fn finest_bounds(&self) -> Option<MeshBounds> {
+     |        ^^^^^^^^^^^^^
+...
+1759 |     fn total_indices(&self) -> usize {
+     |        ^^^^^^^^^^^^^
+
+warning: struct `MeshVoxel` is never constructed
+    --> src\state.rs:1796:8
+     |
+1796 | struct MeshVoxel {
+     |        ^^^^^^^^^
+
+warning: struct `MeshSnapshot` is never constructed
+    --> src\state.rs:1803:8
+     |
+1803 | struct MeshSnapshot {
+     |        ^^^^^^^^^^^^
+
+warning: associated items `WIDTH`, `DEPTH`, `capture`, and `get` are never used
+    --> src\state.rs:1811:11
+     |
+1810 | impl MeshSnapshot {
+     | ----------------- associated items in this implementation
+1811 |     const WIDTH: usize = CHUNK_WIDTH + 2;
+     |           ^^^^^
+1812 |     const DEPTH: usize = CHUNK_DEPTH + 2;
+     |           ^^^^^
+1813 |
+1814 |     fn capture(
+     |        ^^^^^^^
+...
+1860 |     fn get(&self, world_x: i32, world_y: i32, world_z: i32) -> (BlockType, u8, u8, u8, bool) {
+     |        ^^^
+
+warning: variant `Furnace` is never constructed
+    --> src\state.rs:3100:5
+     |
+3096 | pub enum StationKind {
+     |          ----------- variant in this enum
+...
+3100 |     Furnace,
+     |     ^^^^^^^
+     |
+     = note: `StationKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `Host` is never constructed
+    --> src\state.rs:3106:5
+     |
+3104 | pub enum NetworkHandle {
+     |          ------------- variant in this enum
+3105 |     None,
+3106 |     Host {
+     |     ^^^^
+
+warning: field `topology` is never read
+    --> src\state.rs:3127:5
+     |
+3123 | struct EmbeddedRuntimeBridge {
+     |        --------------------- field in this struct
+...
+3127 |     topology: AuthorityTopology,
+     |     ^^^^^^^^
+
+warning: method `topology` is never used
+    --> src\state.rs:3201:8
+     |
+3135 | impl EmbeddedRuntimeBridge {
+     | -------------------------- method in this implementation
+...
+3201 |     fn topology(&self) -> AuthorityTopology {
+     |        ^^^^^^^^
+
+warning: variant `Unsupported` is never constructed
+    --> src\state.rs:3324:5
+     |
+3323 | pub enum GpuTimestampReadbackState {
+     |          ------------------------- variant in this enum
+3324 |     Unsupported,
+     |     ^^^^^^^^^^^
+     |
+     = note: `GpuTimestampReadbackState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `gpu_timestamp_capability` is never used
+    --> src\state.rs:3423:14
+     |
+3423 | pub const fn gpu_timestamp_capability(
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `slot_index` is never read
+    --> src\state.rs:4213:9
+     |
+4210 |     ContainerClickResult {
+     |     -------------------- field in this variant
+...
+4213 |         slot_index: u16,
+     |         ^^^^^^^^^^
+
+warning: methods `send_gameplay_response`, `request_block_change`, and `request_block_action` are never used
+    --> src\state.rs:4997:8
+     |
+4503 | impl NetworkHandle {
+     | ------------------ methods in this implementation
+...
+4997 |     fn send_gameplay_response(
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+5083 |     fn request_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
+     |        ^^^^^^^^^^^^^^^^^^^^
+...
+5109 |     fn request_block_action(
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+    --> src\state.rs:5528:5
+     |
+5518 | pub struct State {
+     |            ----- fields in this struct
+...
+5528 |     render_pipeline: wgpu::RenderPipeline,
+     |     ^^^^^^^^^^^^^^^
+5529 |     trans_pipeline: wgpu::RenderPipeline,
+     |     ^^^^^^^^^^^^^^
+...
+5603 |     pub map_manager: crate::navigation::MapManager,
+     |         ^^^^^^^^^^^
+...
+5629 |     mob_vertex_buffer: wgpu::Buffer,
+     |     ^^^^^^^^^^^^^^^^^
+5630 |     mob_index_buffer: wgpu::Buffer,
+     |     ^^^^^^^^^^^^^^^^
+...
+5640 |     particle_vertex_buffer: wgpu::Buffer,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+5641 |     particle_index_buffer: wgpu::Buffer,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+...
+5705 |     mob_vertices_scratch: Vec<Vertex>,
+     |     ^^^^^^^^^^^^^^^^^^^^
+5706 |     mob_indices_scratch: Vec<u32>,
+     |     ^^^^^^^^^^^^^^^^^^^
+5707 |     particle_vertices_scratch: Vec<Vertex>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+5708 |     particle_indices_scratch: Vec<u32>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5727 |     pub recipe_book_search: String,
+     |         ^^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+     --> src\state.rs:5953:12
+      |
+ 5940 | impl State {
+      | ---------- associated items in this implementation
+...
+ 5953 |     pub fn set_language(&mut self, language: crate::localization::Language) {
+      |            ^^^^^^^^^^^^
+...
+ 7658 |     pub fn authority_topology(&self) -> Option<AuthorityTopology> {
+      |            ^^^^^^^^^^^^^^^^^^
+...
+ 7929 |     fn session_slot_from_stack(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7952 |     fn authority_gameplay_from_local(&self) -> crate::authority::contract::SessionGameplayState {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7980 |     fn sync_authority_gameplay_from_local(&mut self) {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 8646 |     pub fn apply_mutation_batch(
+      |            ^^^^^^^^^^^^^^^^^^^^
+...
+13406 |     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
+      |            ^^^^^^^^^^^^^^^^^^^^^
+...
+13432 |     pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `add_char_lines` is never used
+     --> src\state.rs:24910:4
+      |
+24910 | fn add_char_lines(
+      |    ^^^^^^^^^^^^^^
+
+warning: function `add_string_lines` is never used
+     --> src\state.rs:24932:4
+      |
+24932 | fn add_string_lines(
+      |    ^^^^^^^^^^^^^^^^
+
+warning: associated function `new_procedural` is never used
+    --> src\texture.rs:1729:12
+     |
+1728 | impl TextureAtlas {
+     | ----------------- associated function in this implementation
+1729 |     pub fn new_procedural(device: &Device, queue: &Queue) -> Self {
+     |            ^^^^^^^^^^^^^^
+
+warning: associated items `ALL`, `get_biome`, `terrain_params`, `is_snowy`, and `is_dry` are never used
+   --> src\world.rs:40:15
+    |
+ 38 | impl Biome {
+    | ---------- associated items in this implementation
+ 39 |     /// All 16 reachable overworld biomes.
+ 40 |     pub const ALL: [Biome; 16] = [
+    |               ^^^
+...
+ 59 |     pub fn get_biome(
+    |            ^^^^^^^^^
+...
+108 |     pub fn terrain_params(self) -> (f64, f64) {
+    |            ^^^^^^^^^^^^^^
+...
+130 |     pub fn is_snowy(self) -> bool {
+    |            ^^^^^^^^
+...
+138 |     pub fn is_dry(self) -> bool {
+    |            ^^^^^^
+
+warning: constant `RIVER_BED_DEPTH` is never used
+  --> src\worldgen\mod.rs:13:11
+   |
+13 | pub const RIVER_BED_DEPTH: i32 = 8;
+   |           ^^^^^^^^^^^^^^^
+
+warning: constant `BEACH_BAND` is never used
+  --> src\worldgen\mod.rs:15:11
+   |
+15 | pub const BEACH_BAND: f64 = 0.06;
+   |           ^^^^^^^^^^
+
+warning: field `seed` is never read
+  --> src\worldgen\mod.rs:22:9
+   |
+21 | pub struct WorldGenContext {
+   |            --------------- field in this struct
+22 |     pub seed: u32,
+   |         ^^^^
+   |
+   = note: `WorldGenContext` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `supports_dimension` is never used
+  --> src\worldgen\mod.rs:58:12
+   |
+29 | impl WorldGenContext {
+   | -------------------- method in this implementation
+...
+58 |     pub fn supports_dimension(&self, dimension: Dimension) -> bool {
+   |            ^^^^^^^^^^^^^^^^^^
+
+warning: function `salted_seed` is never used
+  --> src\worldgen\mod.rs:64:8
+   |
+64 | pub fn salted_seed(world_seed: u32, salt: u32) -> u32 {
+   |        ^^^^^^^^^^^
+
+warning: fields `continent_noise`, `cavern_noise`, `tunnel_noise`, and `ravine_noise` are never read
+  --> src\worldgen\density.rs:9:5
+   |
+ 7 | pub struct DensityField {
+   |            ------------ fields in this struct
+ 8 |     /// Low-frequency continent/landmass noise.
+ 9 |     continent_noise: Perlin,
+   |     ^^^^^^^^^^^^^^^
+...
+17 |     cavern_noise: Perlin,
+   |     ^^^^^^^^^^^^
+18 |     /// 3D tunnel noise.
+19 |     tunnel_noise: Perlin,
+   |     ^^^^^^^^^^^^
+20 |     /// 3D ravine noise.
+21 |     ravine_noise: Perlin,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `DensityField` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `density_at` and `is_cave` are never used
+   --> src\worldgen\density.rs:86:12
+    |
+ 24 | impl DensityField {
+    | ----------------- methods in this implementation
+...
+ 86 |     pub fn density_at(&self, climate: &ClimateSystem, wx: i32, wy: i32, wz: i32) -> f64 {
+    |            ^^^^^^^^^^
+...
+103 |     pub fn is_cave(&self, wx: i32, wy: i32, wz: i32, surface_h: i32) -> bool {
+    |            ^^^^^^^
+
+warning: function `surface_height` is never used
+   --> src\worldgen\density.rs:132:8
+    |
+132 | pub fn surface_height(climate: &ClimateSystem, wx: i32, wz: i32) -> i32 {
+    |        ^^^^^^^^^^^^^^
+
+warning: method `configs` is never used
+  --> src\worldgen\ore.rs:66:12
+   |
+22 | impl OreGenerator {
+   | ----------------- method in this implementation
+...
+66 |     pub fn configs(&self) -> &[OreConfig] {
+   |            ^^^^^^^
+
+warning: field `is_dry` is never read
+  --> src\worldgen\surface.rs:12:9
+   |
+ 6 | pub struct BiomeSurfaceData {
+   |            ---------------- field in this struct
+...
+12 |     pub is_dry: bool,
+   |         ^^^^^^
+   |
+   = note: `BiomeSurfaceData` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `icraft` (test "plan34_container_break_inventory_conservation") generated 1 warning
+warning: `icraft` (bin "icraft") generated 77 warnings (9 duplicates) (run `cargo fix --bin "icraft" -p icraft` to apply 1 suggestion)
+warning: `icraft` (test "plan31_authoritative_block_actions") generated 1 warning (1 duplicate)
+warning: method `has_session_update` is never used
+   --> tests\common\tcp_harness.rs:112:12
+    |
+ 23 | impl TcpClient {
+    | -------------- method in this implementation
+...
+112 |     pub fn has_session_update(&self, player_id: u64) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `AddressBookError`
+  --> src\menu.rs:19:31
+   |
+19 | pub use server_address_book::{AddressBookError, ServerAddressBook, ServerPingResult};
+   |                               ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `icraft` (test "plan32_progression_travel") generated 1 warning
+warning: `icraft` (test "plan33_tcp_fishing_lifecycle") generated 1 warning (1 duplicate)
+warning: method `bounded` is never used
+   --> src\chunk_schedule.rs:119:12
+    |
+ 26 | impl SectionMeshScheduler {
+    | ------------------------- method in this implementation
+...
+119 |     pub fn bounded(&self, max_items: usize) -> usize {
+    |            ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `requeue_dirty` is never used
+   --> src\chunk_schedule.rs:302:12
+    |
+208 | impl ChunkStreamingScheduler {
+    | ---------------------------- method in this implementation
+...
+302 |     pub fn requeue_dirty(&mut self, work: DirtyMeshWork, player_chunk: (i32, i32)) {
+    |            ^^^^^^^^^^^^^
+
+warning: method `request_capacity` is never used
+   --> src\culling.rs:787:12
+    |
+736 | impl EntityLosManager {
+    | --------------------- method in this implementation
+...
+787 |     pub fn request_capacity(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: variants `ClientBlockAction`, `ClientSleepRequest`, `ContainerOpenRequest`, `ContainerClickRequest`, and `ContainerClose` are never constructed
+   --> src\network\server.rs:382:5
+    |
+345 | pub enum ServerToHost {
+    |          ------------ variants in this enum
+...
+382 |     ClientBlockAction {
+    |     ^^^^^^^^^^^^^^^^^
+...
+420 |     ClientSleepRequest {
+    |     ^^^^^^^^^^^^^^^^^^
+...
+426 |     ContainerOpenRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+433 |     ContainerClickRequest {
+    |     ^^^^^^^^^^^^^^^^^^^^^
+...
+441 |     ContainerClose {
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `ServerToHost` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `to_vec` is never used
+   --> src\perf.rs:171:12
+    |
+141 | impl<const N: usize> ScopeAccumulator<N> {
+    | ---------------------------------------- method in this implementation
+...
+171 |     pub fn to_vec(&self) -> Vec<u64> {
+    |            ^^^^^^
+
+warning: multiple methods are never used
+    --> src\server_runtime.rs:1002:12
+     |
+ 871 | impl ServerRuntime {
+     | ------------------ methods in this implementation
+...
+1002 |     pub fn tick(&mut self) -> io::Result<()> {
+     |            ^^^^
+...
+1074 |     pub fn run_for_ticks(&mut self, ticks: u64) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^
+...
+1081 |     pub fn run_until_shutdown(&mut self) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^^^^^^
+...
+1213 |     pub fn request_shutdown(&mut self) {
+     |            ^^^^^^^^^^^^^^^^
+...
+1233 |     pub fn logout_session(&mut self, id: u64) -> io::Result<()> {
+     |            ^^^^^^^^^^^^^^
+...
+1259 |     pub fn transfer_session_dimension(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1341 |     pub fn metrics(&self) -> &ServerMetrics {
+     |            ^^^^^^^
+...
+1345 |     pub fn transport_mode(&self) -> TransportMode {
+     |            ^^^^^^^^^^^^^^
+...
+1349 |     pub fn is_stopped(&self) -> bool {
+     |            ^^^^^^^^^^
+...
+1355 |     pub fn execute_console_command(&mut self, line: &str) -> Result<String, String> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+     --> src\state.rs:5953:12
+      |
+ 5940 | impl State {
+      | ---------- methods in this implementation
+...
+ 5953 |     pub fn set_language(&mut self, language: crate::localization::Language) {
+      |            ^^^^^^^^^^^^
+...
+ 7658 |     pub fn authority_topology(&self) -> Option<AuthorityTopology> {
+      |            ^^^^^^^^^^^^^^^^^^
+...
+ 7952 |     fn authority_gameplay_from_local(&self) -> crate::authority::contract::SessionGameplayState {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7980 |     fn sync_authority_gameplay_from_local(&mut self) {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 8646 |     pub fn apply_mutation_batch(
+      |            ^^^^^^^^^^^^^^^^^^^^
+...
+13406 |     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
+      |            ^^^^^^^^^^^^^^^^^^^^^
+...
+13432 |     pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `ALL`, `terrain_params`, `is_snowy`, and `is_dry` are never used
+   --> src\world.rs:40:15
+    |
+ 38 | impl Biome {
+    | ---------- associated items in this implementation
+ 39 |     /// All 16 reachable overworld biomes.
+ 40 |     pub const ALL: [Biome; 16] = [
+    |               ^^^
+...
+108 |     pub fn terrain_params(self) -> (f64, f64) {
+    |            ^^^^^^^^^^^^^^
+...
+130 |     pub fn is_snowy(self) -> bool {
+    |            ^^^^^^^^
+...
+138 |     pub fn is_dry(self) -> bool {
+    |            ^^^^^^
+
+warning: `icraft` (bin "icraft" test) generated 45 warnings (36 duplicates) (run `cargo fix --bin "icraft" -p icraft --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 48.99s
+     Running unittests src\lib.rs (target\debug\deps\icraft-3875c9656eaea0dc.exe)
+
+running 702 tests
+test accessibility::tests::focus_navigation_wraps_in_stable_order ... ok
+test accessibility::tests::reduced_motion_does_not_change_authority_values ... ok
+test accessibility::tests::settings_sanitize_and_cycle_stay_bounded ... ok
+test accessibility::tests::subtitle_direction_uses_camera_basis_for_each_yaw ... ok
+test accessibility::tests::subtitle_queue_deduplicates_non_adjacent_events_and_expires_all ... ok
+test accessibility::tests::subtitle_queue_is_bounded_and_deduplicated ... ok
+test advancements::tests::test_advancement_tree_registration ... ok
+test advancements::tests::test_serialization ... ok
+test advancements::tests::test_trigger_matching_and_progression ... ok
+test audio::tests::changing_weather_volume_refreshes_an_active_rain_loop ... ok
+test audio::tests::chest_feedback_synthesis_is_deterministic_and_distinct ... ok
+test audio::tests::invalid_wav_uses_decodable_procedural_fallback ... ok
+test audio::tests::test_grass_break_sound_is_audible ... ok
+test audio::tests::test_wav_synthesis ... ok
+test audio::tests::valid_wav_is_loaded_without_replacing_its_bytes ... ok
+test audio::tests::weather_category_gain_only_affects_rain_and_thunder ... ok
+test authority::combat::tests::armor_and_enchantments_reduce_player_damage ... ok
+test authority::combat::tests::cooldown_reject_keeps_player_snapshot_unchanged ... ok
+test authority::combat::tests::invulnerability_is_identical_for_player_and_entity_and_never_mutates ... ok
+test authority::combat::tests::lethal_entity_settlement_is_returned_exactly_once ... ok
+test authority::combat::tests::range_and_los_reject_keep_entity_snapshot_unchanged ... ok
+test authority::combat::tests::shield_blocks_only_from_front_and_loses_durability ... ok
+test authority::contract::tests::gameplay_exact_slot_helpers_are_atomic ... ok
+test authority::contract::tests::gameplay_slots_preserve_metadata_and_stack_limits ... ok
+test authority::contract::tests::gameplay_xp_helpers_and_extended_defaults_are_stable ... ok
+test authority::contract::tests::response_cache_is_bounded_and_vectors_are_stable ... ok
+test authority::contract::tests::revision_clock_is_nonzero_and_monotonic ... ok
+test authority::contract::tests::session_gameplay_wire_conversion_preserves_all_fixed_slots_and_state ... ok
+test authority::fishing::tests::bite_and_reel_are_deterministic_and_grant_bounded_loot_xp ... ok
+test authority::fishing::tests::cast_recast_and_cancel_are_atomic ... ok
+test authority::fishing::tests::each_tick_is_single_step_and_corrupt_counters_are_rejected ... ok
+test authority::fishing::tests::invalid_hand_rod_and_context_leave_state_unchanged ... ok
+test authority::fishing::tests::inventory_full_catch_rolls_back_hook_rod_loot_and_xp ... ok
+test authority::fishing::tests::last_durability_breaks_rod_after_successful_catch ... ok
+test authority::fishing::tests::too_early_and_too_late_reels_are_typed_misses ... ok
+test authority::interest::tests::container_viewer_only_receives_open_container_updates ... ok
+test authority::interest::tests::dimensions_and_simulation_distance_are_isolated ... ok
+test authority::interest::tests::interest_deltas_are_sorted_and_split_view_from_simulation ... ok
+test authority::tests::authenticated_rejections_are_cached_without_consuming_sequence ... ok
+test authority::tests::authoritative_dispenser_edge_executes_once_with_global_entity_id ... ok
+test authority::tests::authority_boundary_does_not_reingest_presentation_inventory ... ok
+test authority::tests::client_cannot_submit_self_damage ... ok
+test authority::tests::combat_mutates_headless_entity_without_state_fallback ... ok
+test authority::tests::dimension_transfer_updates_session_and_world_contract ... ok
+test authority::tests::dimension_worlds_are_parked_without_chunk_aliasing ... ok
+test authority::tests::duplicate_and_stale_revision_are_authoritative ... ok
+test authority::tests::item_use_mutates_session_inventory_and_revision ... ok
+test authority::tests::reconnect_resets_owner_private_mining_progress ... ok
+test authority::tests::request_mutation_is_drained_into_the_next_authority_snapshot ... ok
+test authority::tests::respawn_command_restores_authority_health_after_death ... ok
+test authority::tests::same_vectors_have_same_revisions_for_each_topology ... ok
+test authority::tests::sessions_in_multiple_dimensions_tick_and_dispatch_independently ... ok
+test authority::tests::trade_conserves_items_and_mount_projects_session_state ... ok
+test authority::tests::typed_adventure_place_requires_can_place_on_and_block_entity_projection ... ok
+test authority::tests::typed_mining_cancels_on_cancel_held_change_range_or_block_replacement ... ok
+test authority::tests::typed_mining_fixed_tick_breaks_once_and_cancel_is_idempotent ... ok
+test authority::tests::typed_mining_game_modes_and_empty_hand_are_authoritative ... ok
+test authority::tests::typed_mining_grants_xp_once_and_removes_broken_tool_without_orb ... ok
+test authority::tests::typed_mining_rejects_unloaded_target_without_progress_or_mutation ... ok
+test authority::tests::typed_place_maps_item_debits_once_and_rejects_cheat_block ... ok
+test authority::tests::unsupported_tool_item_use_does_not_consume_inventory ... ok
+test authority::transactions::tests::anvil_rejects_aliased_inputs_without_mutation ... ok
+test authority::transactions::tests::anvil_rename_bound_and_cost_are_atomic ... ok
+test authority::transactions::tests::brew_needs_exactly_two_hundred_ticks_and_revalidates_take ... ok
+test authority::transactions::tests::brew_slot_locks_cover_every_reserved_source_only ... ok
+test authority::transactions::tests::craft_aggregates_duplicate_sources_and_rolls_back_when_full ... ok
+test authority::transactions::tests::craft_rejects_stale_rich_metadata_without_mutation ... ok
+test authority::transactions::tests::enchant_is_seeded_and_rolls_back_insufficient_costs ... ok
+test authority::transactions::tests::furnace_output_and_xp_commit_together_and_validate_station ... ok
+test block_entity::tests::automation_transfer_preserves_itemstack_metadata ... ok
+test block_entity::tests::dispenser_and_dropper_use_nine_slot_deterministic_payload_selection ... ok
+test block_entity::tests::observer_defaults_are_backward_compatible ... ok
+test block_entity::tests::test_block_entity_matching ... ok
+test block_entity::tests::test_comparator_fullness_signal_computation ... ok
+test block_entity::tests::test_container_capability_and_sided_rules ... ok
+test block_entity::tests::test_furnace_output_full_stops_fuel_consumption ... ok
+test block_entity::tests::test_furnace_smelting_flow ... ok
+test block_entity::tests::test_legacy_furnace_stub_migration ... ok
+test block_entity::tests::test_sign_line_truncation ... ok
+test block_model::tests::canonical_block_model_paths_cover_every_wire_variant ... ok
+test block_model::tests::chest_mesh_has_distinct_binary_open_and_closed_geometry ... ok
+test block_model::tests::missing_descriptors_are_quiet_when_building_complete_registry ... ok
+test block_model::tests::selected_model_descriptor_reaches_mesh_consumer ... ok
+test block_model::tests::waterlogged_slab_adds_only_the_translucent_complement ... ok
+test boss::tests::boss_bar_progress_is_clamped ... ok
+test boss::tests::calm_enderman_wanders_without_targeting_player ... ok
+test boss::tests::creative_mode_bosses_do_not_attack_player ... ok
+test boss::tests::detects_x_oriented_wither_pattern ... ok
+test boss::tests::detects_z_oriented_wither_pattern ... ok
+test boss::tests::dragon_changes_phase_and_crystal_heals_it ... ok
+test boss::tests::dragon_orientation_follows_flight_velocity ... ok
+test boss::tests::end_dimension_spawns_enderman_on_end_stone ... ok
+test boss::tests::enderman_gaze_timer_resets_when_player_looks_away ... ok
+test boss::tests::enderman_only_attacks_after_five_seconds_of_head_gaze ... ok
+test boss::tests::full_health_dragon_periodically_charges_and_knocks_player_back ... ok
+test boss::tests::legacy_live_crystal_without_tower_gets_obsidian_support_events ... ok
+test boss::tests::nether_spawning_is_bounded_and_inside_loaded_chunks ... ok
+test boss::tests::rejects_near_miss_wither_pattern ... ok
+test boss::tests::wither_enters_low_health_charge_phase ... ok
+test brewing::tests::brewing_chain_and_modifiers_work ... ok
+test brewing::tests::effects_tick_and_modify_stats ... ok
+test brewing::tests::stand_finishes_after_ten_seconds_and_consumes_ingredient ... ok
+test camera::tests::far_plane_covers_the_render_distance_corner ... ok
+test camera::tests::far_plane_covers_the_vertical_render_distance_corner ... ok
+test chunk_manager::tests::adding_a_lateral_cactus_obstruction_breaks_and_cascades ... ok
+test chunk_manager::tests::chunk_corners_include_the_diagonal_chunk ... ok
+test chunk_manager::tests::chunk_edges_include_the_adjacent_chunk ... ok
+test chunk_manager::tests::direct_storage_mutations_emit_mesh_invalidation_dependencies ... ok
+test chunk_manager::tests::interior_block_only_invalidates_its_own_chunk ... ok
+test chunk_manager::tests::loading_a_boundary_obstruction_revalidates_neighboring_cactus ... ok
+test chunk_manager::tests::missing_boundary_chunk_is_unknown_until_loaded_and_never_forced ... ok
+test chunk_manager::tests::negative_world_coordinates_use_euclidean_chunk_boundaries ... ok
+test chunk_manager::tests::player_placement_support_requires_water_for_cane_and_clear_sides_for_cactus ... ok
+test chunk_manager::tests::raw_fluid_roundtrip_preserves_waterlogged_bit_and_boundary_mesh_dependencies ... ok
+test chunk_manager::tests::removing_cane_water_breaks_the_entire_column ... ok
+test chunk_manager::tests::section_dependencies_include_xyz_edges_and_corners ... ok
+test chunk_manager::tests::set_block_updates_torch_index_at_negative_world_coordinates ... ok
+test chunk_manager::tests::surrounding_chunks_contains_all_eight_neighbors ... ok
+test chunk_manager::tests::test_check_and_break_unsupported_above ... ok
+test chunk_render::tests::aabb_touching_or_crossing_a_plane_remains_visible ... ok
+test chunk_render::tests::allocation_owner_changes_across_runtime_identity ... ok
+test chunk_render::tests::chunk_mesh_data_tracks_bounds_and_triangles ... ok
+test chunk_render::tests::chunk_to_region_coord_maps_8x8_blocks ... ok
+test chunk_render::tests::degenerate_view_projection_does_not_false_cull ... ok
+test chunk_render::tests::draw_plan_culls_empty_and_outside_candidates ... ok
+test chunk_render::tests::draw_plan_reuses_visible_chunk_storage_without_allocating ... ok
+test chunk_render::tests::draw_plan_statistics_count_unique_chunks ... ok
+test chunk_render::tests::embedded_shader_uses_discrete_ao_mapping ... ok
+test chunk_render::tests::freelist_allocates_deallocates_and_coalesces ... ok
+test chunk_render::tests::freelist_compaction_preserves_capacity_and_non_overlap ... ok
+test chunk_render::tests::freelist_deterministic_randomized_invariants ... ok
+test chunk_render::tests::freelist_rejects_stale_double_free_and_out_of_bounds ... ok
+test chunk_render::tests::freelist_reports_arithmetic_overflow_without_mutation ... ok
+test chunk_render::tests::identity_frustum_rejects_each_lateral_side ... ok
+test chunk_render::tests::identity_matrix_uses_wgpu_zero_to_one_depth ... ok
+test chunk_render::tests::lod_can_be_selected_from_mesh_bounds ... ok
+test chunk_render::tests::lod_selection_obeys_boundaries_and_safe_fallbacks ... ok
+test chunk_render::tests::lod_thresholds_reject_invalid_ranges ... ok
+test chunk_render::tests::lod_uses_nearest_distance_for_tall_bounds ... ok
+test chunk_render::tests::mesh_bounds_are_derived_from_actual_vertices ... ok
+test chunk_render::tests::mesh_bounds_validate_union_and_distance ... ok
+test chunk_render::tests::opaque_is_near_to_far_with_coordinate_tie_break ... ok
+test chunk_render::tests::owned_tokens_reject_wrong_owner_and_counters_stay_bounded ... ok
+test chunk_render::tests::perspective_frustum_handles_front_back_near_and_far ... ok
+test chunk_render::tests::terrain_vertex_is_pod_with_expected_cpu_layout ... ok
+test chunk_render::tests::transparent_is_far_to_near_with_coordinate_tie_break ... ok
+test chunk_schedule::tests::duplicate_invalidations_update_revision_and_reason_without_duplicate_work ... ok
+test chunk_schedule::tests::nearest_work_is_persistent_and_reprioritized_after_player_moves ... ok
+test chunk_schedule::tests::section_scheduler_deduplicates_and_rejects_stale_completion ... ok
+test chunk_schedule::tests::test_precompute_spiral_offsets_ordering ... ok
+test chunk_schedule::tests::test_scheduler_dirty_management ... ok
+test commands::tests::coordinate_bounds_reject_extreme_i32_without_overflow ... ok
+test commands::tests::parser_covers_typed_commands ... ok
+test commands::tests::parser_rejects_bad_numbers_without_panicking ... ok
+test commands::tests::world_type_is_part_of_the_shared_creation_contract ... ok
+test container_sessions::tests::container_click_left_on_empty_returns_cursor ... ok
+test container_sessions::tests::container_click_left_swap_different_items ... ok
+test container_sessions::tests::container_click_right_takes_half ... ok
+test container_sessions::tests::container_session_close_by_block ... ok
+test container_sessions::tests::container_session_close_by_block_does_not_close_adjacent_non_partner ... ok
+test container_sessions::tests::container_session_close_by_block_is_dimension_scoped_and_exact ... ok
+test container_sessions::tests::container_session_double_chest_partner_requires_explicit_exact_close ... ok
+test container_sessions::tests::container_session_open_close ... ok
+test container_sessions::tests::container_slot_commit_rejects_invalid_stack_without_partial_write ... ok
+test culling::entity_los_tests::bounded_in_flight_and_physical_queue_overflow_fail_open ... ok
+test culling::entity_los_tests::near_and_special_translucent_models_fail_open_without_distance_cull_credit ... ok
+test culling::entity_los_tests::nonce_cell_and_world_stale_results_are_rejected ... ok
+test culling::entity_los_tests::opaque_wall_eventually_culls_and_removal_fails_open_then_refreshes ... ok
+test culling::entity_los_tests::teleport_supersedes_old_request_and_stale_result_cannot_cull ... ok
+test culling::entity_los_tests::timeout_and_unloaded_chunk_remain_visible ... ok
+test culling::tests::invalid_connectivity_fails_open ... ok
+test culling::tests::opaque_cube_blocks_los ... ok
+test culling::tests::section_visibility_reuses_traversal_scratch_capacity ... ok
+test culling::tests::transparent_and_partial_blocks_fail_open ... ok
+test culling::tests::valid_connectivity_preserves_the_computed_mask ... ok
+test dimension::tests::custom_dimension_generation_is_deterministic ... ok
+test dimension::tests::detects_nether_frames_in_both_vertical_axes ... ok
+test dimension::tests::dimension_scaling_only_affects_overworld_nether_travel ... ok
+test dimension::tests::end_has_dormant_origin_fountain_and_reachable_city_island ... ok
+test dimension::tests::end_healing_crystals_have_obsidian_tower_support ... ok
+test dimension::tests::nether_has_roof_lava_features_and_no_sky_light ... ok
+test dimension::tests::overworld_stronghold_contains_twelve_empty_frames ... ok
+test dimension::tests::recognizes_twelve_filled_end_frames ... ok
+test dimension::tests::superflat_generation_is_signed_height_and_deterministic ... ok
+test enchantment::tests::anvil_repairs_and_combines ... ok
+test enchantment::tests::bookshelf_options_scale_and_are_deterministic ... ok
+test enchantment::tests::efficiency_and_protection_change_gameplay_values ... ok
+test enchantment::tests::silk_touch_and_fortune_conflict ... ok
+test entity::tests::dropped_item_collection_adds_to_inventory ... ok
+test entity::tests::dropped_item_falls_with_gravity ... ok
+test entity::tests::dropped_item_lands_on_solid_block ... ok
+test entity::tests::dropped_item_pickup_cooldown_decreases ... ok
+test entity::tests::entity_index_radius_query_handles_sparse_and_boundary_buckets ... ok
+test entity::tests::entity_index_rebuild_removes_stale_empty_buckets ... ok
+test entity::tests::incremental_indexes_match_rebuild_oracle_after_lifecycle ... ok
+test entity::tests::moved_position_sync_visits_only_supplied_ids_and_preserves_buckets ... ok
+test entity::tests::r59_iteration_classification_keeps_candidate_queries_distinct ... ok
+test entity::tests::remote_player_representation_has_human_aabb_and_defaults ... ok
+test entity::tests::test_chicken_slow_fall ... ok
+test entity::tests::test_dropped_item_and_xp_orb_entity_properties ... ok
+test entity::tests::test_entity_manager_counts_passive_and_hostile ... ok
+test entity::tests::test_ray_aabb_intersection ... ok
+test final_acceptance::tests::network_rows_keep_scenario_specific_blockers ... ok
+test final_acceptance::tests::singleplayer_headless_scenarios_pass ... ok
+test fishing::tests::test_fishing_cast_and_reel ... ok
+test fluid::tests::generated_chunks_do_not_schedule_the_static_ocean ... ok
+test fluid::tests::placed_source_flows_without_scanning_the_world ... ok
+test fluid::tests::raw_fluid_change_is_reported_when_block_stays_water ... ok
+test fluid::tests::removing_a_source_drains_its_incremental_flow ... ok
+test fluid::tests::waterlogged_slab_flows_across_chunk_boundary ... ok
+test fluid::tests::waterlogged_slab_source_flows_into_adjacent_air ... ok
+test game_rules::tests::adventure_item_predicates_require_explicit_tags ... ok
+test game_rules::tests::policy_truth_table_covers_all_modes ... ok
+test game_rules::tests::rule_updates_are_bounded_and_aliases_are_supported ... ok
+test game_rules::tests::server_difficulty_parse_and_chase_policy_are_canonical ... ok
+test gpu_frame_resources::tests::bounded_pool_never_reuses_in_flight_slots ... ok
+test gpu_frame_resources::tests::completion_is_exact_and_idempotent ... ok
+test gpu_frame_resources::tests::lazy_growth_is_bounded ... ok
+test interaction::tests::break_policy_targets_decorations_but_not_environmental_passables ... ok
+test interaction::tests::break_raycast_hits_each_explicit_passable_decoration ... ok
+test interaction::tests::break_raycast_returns_none_for_only_environmental_passables ... ok
+test interaction::tests::break_raycast_skips_water_and_lava_for_solid_behind_them ... ok
+test interaction::tests::dda_crosses_exact_boundary_into_negative_coordinates ... ok
+test interaction::tests::place_raycast_can_target_open_door_and_trapdoor_for_interaction ... ok
+test interaction::tests::place_raycast_ignores_passable_vegetation_and_fluids ... ok
+test interaction::tests::test_raycast_air ... ok
+test interaction::tests::test_raycast_hit ... ok
+test interaction::tests::test_raycast_hit_from_negative_direction_returns_front_face ... ok
+test interaction::tests::test_raycast_hits_passable_plants_when_breaking ... ok
+test inventory::tests::add_item_does_not_merge_plain_items_into_named_stacks ... ok
+test inventory::tests::add_stack_returns_exact_metadata_preserving_remainder ... ok
+test inventory::tests::automation_item_ids_append_without_reindexing_legacy_items ... ok
+test inventory::tests::close_storage_discards_only_catalog_cursor ... ok
+test inventory::tests::close_storage_transaction_rolls_back_partial_returns_and_real_cursor ... ok
+test inventory::tests::creative_catalog_contains_every_non_air_item_once ... ok
+test inventory::tests::creative_catalog_items_have_valid_properties ... ok
+test inventory::tests::creative_catalog_supplies_left_max_and_right_one ... ok
+test inventory::tests::creative_close_keeps_real_cursor_when_storage_is_full ... ok
+test inventory::tests::creative_hotbar_rejects_same_item_with_different_metadata ... ok
+test inventory::tests::creative_hotbar_reuses_drag_drop_and_close_semantics ... ok
+test inventory::tests::creative_tabs_partition_catalog_without_duplicates ... ok
+test inventory::tests::creative_virtual_slot_write_is_a_no_op ... ok
+test inventory::tests::creative_window_scrolls_by_row_and_clamps ... ok
+test inventory::tests::fishing_rod_starts_with_authority_durability ... ok
+test inventory::tests::splash_potion_stack_has_water_splash_metadata ... ok
+test inventory::tests::stack_clicks_merge_only_identical_metadata ... ok
+test inventory::tests::stack_identity_checks_every_metadata_field ... ok
+test inventory::tests::test_inventory_add_item ... ok
+test inventory::tests::test_inventory_creative_init ... ok
+test inventory::tests::test_item_properties ... ok
+test inventory::tests::test_new_mob_items ... ok
+test inventory::tests::test_renders_flat ... ok
+test lighting::tests::initial_lighting_reaches_horizontal_cave_entrance ... ok
+test lighting::tests::propagation_does_not_discard_work_after_five_thousand_nodes ... ok
+test localization::tests::english_required_keys_have_values_and_german_is_complete ... ok
+test localization::tests::immutable_format_and_language_switch_use_catalog_values ... ok
+test localization::tests::malformed_selected_locale_falls_back_and_reports_once ... ok
+test localization::tests::missing_key_falls_back_without_english_fragments ... ok
+test localization::tests::missing_named_keys_use_builtin_display_names ... ok
+test localization::tests::parameter_and_plural_messages_are_structured ... ok
+test localization::tests::partial_selected_locales_merge_without_swallowing_lower_layers ... ok
+test localization::tests::selected_pack_can_override_item_block_and_entity_names ... ok
+test localization::tests::selected_pack_locale_is_used_and_german_missing_keys_fall_back_to_english ... ok
+test localization::tests::visible_keys_have_builtin_english_and_german_values ... ok
+test loot::tests::test_end_city_loot_contains_elytra ... ok
+test loot::tests::test_loot_rolling_determinism ... ok
+test menu::server_address_book::tests::corrupt_and_oversized_files_are_rejected_without_replacement ... ok
+test menu::server_address_book::tests::path_safety_rejects_directory_targets ... ok
+test menu::server_address_book::tests::ping_text_is_bounded_and_safe_for_menu_rendering ... ok
+test menu::server_address_book::tests::ping_uses_server_list_api_and_records_result ... ok
+test menu::server_address_book::tests::round_trip_preserves_addresses_and_ping_metadata ... ok
+test menu::tests::accessibility_settings_survive_restart_and_resource_pack_ids_round_trip ... ok
+test menu::tests::client_world_launch_uses_temp_dir_and_placeholder_seed ... ok
+test menu::tests::controls_config_parse_and_round_trip ... ok
+test menu::tests::difficulty_steps_both_directions ... ok
+test menu::tests::focus_layout_rects_remain_inside_ndc_at_common_aspects ... ok
+test menu::tests::fps_cap_cycles_through_uncapped_and_standard_rates ... ok
+test menu::tests::fps_cap_round_trip_and_sanitization ... ok
+test menu::tests::leaving_controls_clears_pending_rebind ... ok
+test menu::tests::legacy_metadata_preserves_saved_hardcore_and_creation_options ... ok
+test menu::tests::legacy_settings_without_weather_volume_use_reduced_default ... ok
+test menu::tests::menu_text_uses_selected_font_and_builtin_fallback ... ok
+test menu::tests::multiplayer_focus_activation_covers_saved_servers_and_actions ... ok
+test menu::tests::multiplayer_settings_defaults_and_mutation ... ok
+test menu::tests::non_finite_view_settings_are_sanitized_before_save ... ok
+test menu::tests::non_finite_view_settings_fall_back_during_load ... ok
+test menu::tests::sanitizes_world_names_and_generates_stable_slugs ... ok
+test menu::tests::saved_server_addresses_split_for_join_form ... ok
+test menu::tests::selected_world_directory_survives_list_reordering ... ok
+test menu::tests::server_address_book_keeps_recent_ping_results ... ok
+test menu::tests::settings_file_round_trip_includes_weather_volume ... ok
+test menu::tests::settings_key_names_round_trip ... ok
+test menu::tests::view_setting_boundaries_round_trip_without_drift ... ok
+test menu::tests::weather_options_row_is_distinct_from_language_controls_and_back ... ok
+test menu::tests::weather_volume_load_clamps_out_of_range_values ... ok
+test menu::tests::world_path_guard_rejects_saves_root ... ok
+test microbench::microbench_release ... ignored, timing benchmark; run explicitly in release mode
+test microbench::smoke_checksums_are_stable ... ok
+test microbench::storage_fixtures_cover_every_runtime_representation ... ok
+test mob::tests::creative_mode_mobs_do_not_target_player ... ok
+test mob::tests::disabled_mob_griefing_keeps_creeper_ai_without_breaking_blocks ... ok
+test mob::tests::explosion_reports_authoritative_block_removals_and_can_be_visual_only ... ok
+test mob::tests::health_cleanup_removes_zero_hp_living_entities_but_preserves_nonliving_lifecycles ... ok
+test mob::tests::player_knockback_uses_actual_attacker_regardless_of_entity_order ... ok
+test mob::tests::remote_player_velocity_survives_mob_update ... ok
+test mob::tests::test_daylight_exposure_and_water_extinguish ... ok
+test mob::tests::test_explosion_damage ... ok
+test mob::tests::test_mob_burn_death_drops ... ok
+test mob::tests::test_mob_yaw_faces_player ... ok
+test navigation::tests::test_clock_overworld_fraction ... ok
+test navigation::tests::test_compass_angle_calculation ... ok
+test navigation::tests::test_map_creation_and_update ... ok
+test network::client::tests::authoritative_weather_packets_map_to_pure_client_events ... ok
+test network::client::tests::connects_and_receives_join_for_second_client ... ok
+test network::client::tests::fresh_gameplay_input_rebases_revision_but_explicit_stale_input_does_not ... ok
+test network::client::tests::gameplay_response_gate_drops_exact_cached_ack_and_rewrites ... ok
+test network::client::tests::host_client_entity_health_and_effect_replication_converges ... ok
+test network::client::tests::host_stop_notifies_client_and_threads_join_without_hanging ... ok
+test network::client::tests::legacy_client_inputs_are_single_gameplay_envelopes ... ok
+test network::client::tests::queue_accounting_closed_consumer_is_cancelled ... ok
+test network::client::tests::queue_accounting_covers_success_and_closed_paths ... ok
+test network::client::tests::receives_targeted_chunk_catchup_and_time_sync ... ok
+test network::client::tests::replication_gate_drops_stale_block_entity_and_container_deltas ... ok
+test network::client::tests::replication_gate_rejects_stale_entity_health_and_effect_state ... ok
+test network::client::tests::revision_gate_multi_client_checksum_converges ... ok
+test network::client::tests::revision_gate_orders_cross_channel_snapshot_and_block_change ... ok
+test network::client::tests::sends_and_receives_chat ... ok
+test network::client::tests::targeted_container_close_bypasses_revision_gate_and_exact_matches_active_key ... ok
+test network::client::tests::tcp_capacity_one_retries_without_starving_second_client_and_converges ... ok
+test network::client::tests::tcp_cross_channel_revision_gate_and_reliable_control_are_fifo ... ok
+test network::protocol::tests::authority_domain_bounds_reject_invalid_envelopes ... ok
+test network::protocol::tests::authority_domain_requests_roundtrip_with_rich_slot_refs ... ok
+test network::protocol::tests::automation_block_entity_and_revision_roundtrip ... ok
+test network::protocol::tests::block_action_request_roundtrip ... ok
+test network::protocol::tests::block_action_result_roundtrip ... ok
+test network::protocol::tests::block_change_and_chunk_data_state_roundtrip ... ok
+test network::protocol::tests::block_change_roundtrip ... ok
+test network::protocol::tests::chunk_data_roundtrip ... ok
+test network::protocol::tests::container_close_roundtrip_keeps_v16_shape ... ok
+test network::protocol::tests::disconnect_roundtrip ... ok
+test network::protocol::tests::entity_lifecycle_and_player_authority_roundtrip ... ok
+test network::protocol::tests::gameplay_bounds_keep_specific_reject_reasons ... ok
+test network::protocol::tests::gameplay_command_limit_is_rejected ... ok
+test network::protocol::tests::gameplay_request_response_roundtrip_and_bounds ... ok
+test network::protocol::tests::handshake_roundtrip ... ok
+test network::protocol::tests::intermediate_legacy_handshake_is_not_accepted_by_current_contract ... ok
+test network::protocol::tests::invalid_bytes_rejected ... ok
+test network::protocol::tests::item_wire_roundtrip ... ok
+test network::protocol::tests::legacy_container_and_combat_encodings_remain_accepted ... ok
+test network::protocol::tests::login_success_roundtrip ... ok
+test network::protocol::tests::old_weather_packet_version_is_rejected_by_version_check ... ok
+test network::protocol::tests::player_action_roundtrip ... ok
+test network::protocol::tests::player_join_roundtrip ... ok
+test network::protocol::tests::player_leave_roundtrip ... ok
+test network::protocol::tests::player_position_roundtrip ... ok
+test network::protocol::tests::private_session_projection_is_fixed_width_bounded_and_roundtrips ... ok
+test network::protocol::tests::rich_item_wire_requires_canonical_enchantments ... ok
+test network::protocol::tests::typed_block_action_and_owner_mining_projection_roundtrip ... ok
+test network::protocol::tests::version_mismatch_detectable ... ok
+test network::protocol::tests::world_rules_sync_roundtrip ... ok
+test network::server::tests::bind_failure_notifies_host_and_thread_exits ... ok
+test network::server::tests::block_change_reports_authenticated_session_id_to_host ... ok
+test network::server::tests::catchup_mailbox_is_latest_wins_and_bounded ... ok
+test network::server::tests::catchup_mailbox_preserves_distance_priority_insertion_order ... ok
+test network::server::tests::client_cannot_inject_authoritative_lightning ... ok
+test network::server::tests::concurrent_case_insensitive_duplicate_login_is_atomic ... ok
+test network::server::tests::concurrent_logins_reserve_max_player_slot_atomically ... ok
+test network::server::tests::connect_and_login ... ok
+test network::server::tests::disconnect_cleans_up_and_notifies_remaining_clients ... ok
+test network::server::tests::entity_state_mailbox_is_latest_wins_per_entity ... ok
+test network::server::tests::evicted_client_task_exits_and_cannot_forward_gameplay ... ok
+test network::server::tests::full_reliable_queue_evicts_slow_client_without_ghost_session ... ok
+test network::server::tests::gameplay_request_is_bound_to_authenticated_session ... ok
+test network::server::tests::gameplay_requests_are_idempotent_and_rejections_keep_sequences ... ok
+test network::server::tests::legacy_sleep_and_container_fields_are_preserved_in_envelopes ... ok
+test network::server::tests::metered_host_event_queue_counts_success_full_and_receive_once ... ok
+test network::server::tests::newcomer_receives_existing_roster ... ok
+test network::server::tests::newcomer_receives_roster_larger_than_queue_capacity ... ok
+test network::server::tests::outbound_metrics_publish_before_write_and_rollback_on_failure ... ok
+test network::server::tests::player_session_projection_is_private_and_rejects_mismatched_owner ... ok
+test network::server::tests::queue_metrics_track_backlog_replacement_drain_and_saturation ... ok
+test network::server::tests::rejects_old_protocol_during_handshake ... ok
+test network::server::tests::rejects_v4_handshake ... ok
+test network::server::tests::relays_block_action_request_and_targeted_result ... ok
+test network::server::tests::relays_chat_through_host_with_canonical_sender ... ok
+test network::server::tests::relays_player_action_through_host ... ok
+test network::server::tests::relays_player_position_through_host ... ok
+test network::server::tests::reliable_join_and_leave_wait_for_bounded_queue_capacity ... ok
+test network::server::tests::request_rate_limit_rejects_without_forwarding_the_second_request ... ok
+test network::server::tests::server_list_ping_reports_version_and_capacity_without_login ... ok
+test network::server::tests::slow_client_backpressure_does_not_starve_other_mailboxes ... ok
+test network::server::tests::transport_metrics_count_exact_successful_tcp_frames ... ok
+test network::server::tests::unsent_pose_updates_are_latest_wins_per_player ... ok
+test network::server::tests::weather_snapshot_and_lightning_broadcast_in_reliable_order ... ok
+test network::server::tests::weather_snapshot_can_target_only_the_joining_client ... ok
+test network::transport::tests::bidirectional_multiple_packets ... ok
+test network::transport::tests::framed_roundtrip ... ok
+test network::transport::tests::recv_multiple_frames_in_one_segment ... ok
+test network::transport::tests::recv_survives_cancellation_between_header_and_body ... ok
+test passive_mob::tests::available_inventory_space_stores_egg_without_a_duplicate_drop ... ok
+test passive_mob::tests::disabled_mob_griefing_keeps_sheep_ai_without_eating_grass ... ok
+test passive_mob::tests::full_inventory_drops_exactly_one_egg_at_the_chicken ... ok
+test passive_mob::tests::partner_query_matches_independent_radius_oracle ... ok
+test perf::tests::category_bank_is_independent ... ok
+test perf::tests::empty_history ... ok
+test perf::tests::frame_percentile_uses_240_sample_ring_window ... ok
+test perf::tests::frame_percentile_uses_bounded_history ... ok
+test perf::tests::percentile_math ... ok
+test perf::tests::ring_wrapping_keeps_latest ... ok
+test perf::tests::scope_accumulator_records_all_categories_and_resets ... ok
+test perf::tests::shared_queue_stats_reset_clears_world_lifecycle_state ... ok
+test perf::tests::shared_queue_stats_tracks_backlog_age_and_terminal_counters ... ok
+test perf::tests::thread_alloc_count_is_local_to_calling_thread ... ok
+test physics::tests::a_50ms_tick_matches_four_shared_player_substeps ... ok
+test physics::tests::creative_flight_hovers_and_moves_vertically_without_fall_damage ... ok
+test physics::tests::creative_flight_keeps_solid_collision_on_every_axis ... ok
+test physics::tests::creative_flight_sprint_changes_horizontal_speed_without_fluid_drag ... ok
+test physics::tests::creative_flight_toggle_clears_vertical_momentum_and_fall_distance ... ok
+test physics::tests::door_and_trapdoor_block_aabbs_use_thin_slab_bounds ... ok
+test physics::tests::extreme_input_is_displacement_capped_without_tunneling ... ok
+test physics::tests::high_speed_motion_cannot_tunnel_through_one_block_barriers_on_any_axis ... ok
+test physics::tests::non_flying_gravity_and_fall_damage_are_unchanged ... ok
+test physics::tests::non_solid_placement_is_allowed_inside_player_aabb ... ok
+test physics::tests::player_and_unit_block_aabbs_use_foot_and_cell_coordinates ... ok
+test physics::tests::solid_placement_allows_face_edge_and_corner_touching ... ok
+test physics::tests::solid_placement_is_blocked_by_positive_player_overlap ... ok
+test physics::tests::test_aabb_intersection ... ok
+test physics::tests::test_player_edge_guard ... ok
+test physics::tests::test_player_sneaking_speed ... ok
+test physics::tests::test_player_sprinting_speed ... ok
+test player::tests::reset_for_respawn_restores_survival_resources_and_timers ... ok
+test player::tests::test_attack_cooldown_scaling ... ok
+test player::tests::test_bow_shot_charging ... ok
+test player::tests::test_damage_reduction_calculation ... ok
+test player::tests::test_death_experience_drop_caps_at_100 ... ok
+test player::tests::test_player_drowning ... ok
+test player::tests::test_player_exhaustion_hunger ... ok
+test player::tests::test_player_natural_regen ... ok
+test player::tests::test_player_starvation ... ok
+test player::tests::test_player_take_damage ... ok
+test player::tests::test_shield_blocking_direction ... ok
+test rail::tests::test_minecart_powered_rail_boost ... ok
+test rail::tests::test_rail_shape_conversion ... ok
+test recipes::tests::test_bread_recipe_requires_wheat ... ok
+test recipes::tests::test_fuels ... ok
+test recipes::tests::test_ore_cannot_be_crafted_in_grid ... ok
+test recipes::tests::test_recipe_id_uniqueness ... ok
+test redstone::tests::canonical_checksum_changes_for_each_redstone_state_domain ... ok
+test redstone::tests::canonical_checksum_preserves_scheduled_queue_order ... ok
+test redstone::tests::canonical_snapshot_is_order_independent_for_unordered_state ... ok
+test redstone::tests::collect_and_restore_preserves_repeater_delay_comparator_mode_and_note ... ok
+test redstone::tests::collect_only_emits_components_inside_the_target_chunk ... ok
+test redstone::tests::collect_skips_components_with_default_metadata ... ok
+test redstone::tests::comparator_subtract_mode_uses_side_input ... ok
+test redstone::tests::container_revision_wakes_sleeping_comparator ... ok
+test redstone::tests::cross_chunk_redstone_line_propagation ... ok
+test redstone::tests::differential_dirty_worklist_vs_full_settle_parity ... ok
+test redstone::tests::direct_sources_strongly_charge_solid_blocks ... ok
+test redstone::tests::dispenser_actions_are_rising_edge_only_and_carry_facing ... ok
+test redstone::tests::door_and_trapdoor_redstone_toggle_preserves_facing_and_updates_open_bit ... ok
+test redstone::tests::dust_propagates_and_loses_one_level_per_block ... ok
+test redstone::tests::loop_budget_parity_test ... ok
+test redstone::tests::observer_baselines_without_false_pulse_and_pulses_on_rising_change ... ok
+test redstone::tests::observer_skips_unloaded_front_until_streamed ... ok
+test redstone::tests::occupant_movement_wakes_sleeping_pressure_plate_processing ... ok
+test redstone::tests::piston_pushes_one_movable_block ... ok
+test redstone::tests::powered_dispenser_latch_roundtrips_without_phantom_edge ... ok
+test redstone::tests::powered_tnt_keeps_its_fuse_after_the_block_is_removed ... ok
+test redstone::tests::pressure_plate_opens_and_closes_an_adjacent_door ... ok
+test redstone::tests::pressure_plate_output_matches_independent_occupancy_oracle ... ok
+test redstone::tests::repeater_applies_configured_tick_delay_and_restores_full_power ... ok
+test redstone::tests::restore_ignores_entries_whose_block_is_no_longer_a_component ... ok
+test redstone::tests::scheduled_redstone_work_is_bounded_and_deterministic ... ok
+test redstone::tests::sleeping_constant_plate_occupant_skips_pressure_plate_scan ... ok
+test redstone::tests::sleeping_mechanism_behavior ... ok
+test resources::tests::archive_security_budget_matrix_is_rejected_before_decode ... ok
+test resources::tests::bitmap_font_source_is_parsed_and_invalid_payload_falls_back_once ... ok
+test resources::tests::dependency_cycles_are_rejected ... ok
+test resources::tests::directory_security_and_manifest_budget_are_bounded_before_read ... ok
+test resources::tests::environment_override_is_honored_at_runtime ... ok
+test resources::tests::explicit_runtime_override_is_the_only_user_candidate ... ok
+test resources::tests::locale_layers_are_high_to_low_and_skip_invalid_entries_once ... ok
+test resources::tests::logical_paths_reject_absolute_and_parent_components ... ok
+test resources::tests::manifest_and_dependency_order_are_deterministic ... ok
+test resources::tests::manifest_validates_description_and_dependency_ids ... ok
+test resources::tests::missing_asset_records_one_diagnostic ... ok
+test resources::tests::missing_manifest_and_missing_dependencies_are_diagnostic_not_global_failures ... ok
+test resources::tests::typed_consumers_skip_invalid_override_and_deduplicate_diagnostics ... ok
+test resources::tests::zip_crc_mismatch_and_zip64_markers_are_rejected ... ok
+test resources::tests::zip_path_traversal_is_rejected_before_extraction ... ok
+test save::tests::atomic_replace_crash_child ... ignored, helper subprocess for atomic_replace_survives_process_crash_before_and_after_replace
+test save::tests::atomic_replace_faults_leave_a_complete_old_or_new_file ... ok
+test save::tests::atomic_replace_survives_process_crash_before_and_after_replace ... ok
+test save::tests::automation_block_entities_roundtrip_and_snapshot_preserves_runtime_state ... ok
+test save::tests::block_entity_save_and_restore_roundtrip ... ok
+test save::tests::block_states_roundtrip_and_restore ... ok
+test save::tests::chunk_saved_without_redstone_sidecar_loads_as_empty_metadata ... ok
+test save::tests::corrupt_existing_region_is_never_overwritten ... ok
+test save::tests::current_dimension_sidecar_roundtrips_and_defaults_to_overworld ... ok
+test save::tests::dimension_chunk_namespaces_are_independent ... ok
+test save::tests::enchanted_potion_stack_metadata_roundtrips ... ok
+test save::tests::enqueue_failure_restores_in_flight_revision_to_dirty ... ok
+test save::tests::flush_propagates_io_failure_and_keeps_chunk_dirty_for_retry ... ok
+test save::tests::latest_revision_replaces_older_pending_snapshot ... ok
+test save::tests::legacy_redstone_sidecar_preserves_fields_and_defaults_latch ... ok
+test save::tests::migration_fixture_legacy_0_to_255_preserves_data_and_creates_backup ... ok
+test save::tests::missing_region_load_does_not_create_phantom_lru_keys ... ok
+test save::tests::mutation_index_and_unloaded_snapshot_source_survive_reload ... ok
+test save::tests::mutation_revision_index_reclaim_is_revision_safe_and_frees_capacity ... ok
+test save::tests::mutation_revision_index_refuses_new_coordinate_at_capacity ... ok
+test save::tests::mutation_revision_index_roundtrip_preserves_highest_revision ... ok
+test save::tests::offhand_save_roundtrip_and_legacy_migration ... ok
+test save::tests::paused_worker_sustained_latest_wins_stays_bounded_in_items_and_bytes ... ok
+test save::tests::previous_bincode_player_fixture_migrates_without_a_cursor ... ok
+test save::tests::real_cursors_roundtrip_and_catalog_cursors_do_not_persist ... ok
+test save::tests::redstone_metadata_sidecar_roundtrips_through_save_and_load ... ok
+test save::tests::salvage_copies_only_readable_chunks_without_mutating_source ... ok
+test save::tests::same_region_batch_crash_child ... ignored, helper subprocess for same_region_batch_survives_process_crash_before_and_after_replace
+test save::tests::same_region_batch_faults_replace_atomically_and_preserve_sibling_on_restart ... ok
+test save::tests::same_region_batch_survives_process_crash_before_and_after_replace ... ok
+test save::tests::saved_chunk_restores_player_placed_blocks ... ok
+test save::tests::serialization_failure_is_propagated_and_retryable ... ok
+test save::tests::stale_ack_cannot_clear_a_newer_dirty_revision ... ok
+test save::tests::test_corrupt_region_file_is_not_overwritten_on_save_failure ... ok
+test save::tests::test_entity_save_data_roundtrip ... ok
+test save::tests::test_plan04_save_roundtrip_and_migration ... ok
+test save::tests::test_save_manager_entities_persistence ... ok
+test save::tests::test_serialization_roundtrips ... ok
+test save::tests::versioned_player_codec_preserves_real_cursor_metadata_and_provenance ... ok
+test save::tests::worker_panic_is_acked_as_error_and_snapshot_is_retained ... ok
+test server_runtime::tests::authority_gameplay_round_trips_through_dedicated_player_save ... ok
+test server_runtime::tests::complete_session_health_death_inventory_and_xp_reach_local_projection_once ... ok
+test server_runtime::tests::dimension_interest_and_session_transfer_are_isolated ... ok
+test server_runtime::tests::disconnect_reconnect_loads_atomic_player_state ... ok
+test server_runtime::tests::embedded_interest_fanout_is_private_dimension_safe_and_exactly_once ... ok
+test server_runtime::tests::headless_two_sessions_share_one_authoritative_sequence ... ok
+test server_runtime::tests::invalid_properties_fail_before_world_creation ... ok
+test server_runtime::tests::opening_new_container_replaces_old_session_and_preserves_other_viewers ... ok
+test server_runtime::tests::presentation_saturation_preserves_ack_and_session_and_stays_bounded ... ok
+test server_runtime::tests::properties_roundtrip_and_whitelist_are_deterministic ... ok
+test server_runtime::tests::request_deduplication_and_out_of_order_are_authoritative ... ok
+test server_runtime::tests::respawn_updates_authority_dimension_and_position ... ok
+test server_runtime::tests::runtime_pose_validation_rejects_regression_and_speed_but_allows_server_teleport ... ok
+test server_runtime::tests::save_failure_is_reported_and_retry_keeps_original_path ... ok
+test server_world::tests::authoritative_dispense_skips_unloaded_front_without_consumption ... ok
+test server_world::tests::authoritative_dispenser_matrix_preserves_payload_and_revisions ... ok
+test server_world::tests::authoritative_dropper_insert_is_merge_first_and_fallback_is_one_item ... ok
+test server_world::tests::block_mutation_changes_real_chunk_and_revision ... ok
+test server_world::tests::bucket_rejects_flowing_or_falling_source_without_consumption ... ok
+test server_world::tests::checksum_distinguishes_raw_fluid_mutations ... ok
+test server_world::tests::chest_block_break_emits_dimension_scoped_closures ... ok
+test server_world::tests::chest_first_and_last_viewer_toggle_authoritative_state ... ok
+test server_world::tests::difficulty_controls_hostile_policy_without_binding_pvp_or_spawn_rule ... ok
+test server_world::tests::dispenser_invalid_entity_id_is_atomic_and_bucket_consumes_one_with_rollback ... ok
+test server_world::tests::double_chest_open_publishes_partner_state_mutation ... ok
+test server_world::tests::fixed_tick_checksum_is_deterministic ... ok
+test server_world::tests::forced_last_viewer_closes_chest_once_and_other_viewer_keeps_it_open ... ok
+test server_world::tests::malformed_combat_action_is_explicitly_rejected ... ok
+test server_world::tests::mount_requires_range_and_updates_authoritative_passengers ... ok
+test server_world::tests::trade_second_cost_failure_rolls_back_first_cost ... ok
+test sim_harness::tests::checksum_domains_are_covered ... ok
+test sim_harness::tests::fps_is_deterministic ... ok
+test sim_harness::tests::high_speed_player_collision_is_bounded ... ok
+test sim_harness::tests::remove_item_count_consumes_items_in_all_profiles ... ok
+test sim_harness::tests::workflow_mutates_inventory_and_block_entities ... ok
+test spawning::tests::test_far_distance_despawns ... ok
+test spawning::tests::test_mob_category_caps ... ok
+test spawning::tests::test_peaceful_despawns_hostile ... ok
+test spawning::tests::test_persistent_entity_does_not_despawn ... ok
+test structure::gen::dungeon::tests::negative_coordinates_have_deterministic_non_panicking_loot_seeds ... ok
+test structure::locate::tests::test_locate_stronghold_deterministic ... ok
+test structure::manager::tests::test_apply_structures_to_chunk ... ok
+test structure::manager::tests::test_structure_manager_determinism ... ok
+test texture::tests::filled_end_portal_frame_composites_eye_over_opaque_frame ... ok
+test texture::tests::redstone_torch_sprite_has_transparent_background_and_thin_artwork ... ok
+test texture::tests::resource_pack_atlas_applies_real_textures ... ok
+test texture::tests::resource_pack_tiles_are_unique ... ok
+test texture::tests::vanilla_end_portal_frame_side_texture_is_available ... ok
+test texture::tests::vanilla_ender_dragon_texture_is_available ... ok
+test texture::tests::vanilla_enderman_textures_are_available ... ok
+test vehicle::tests::test_capacity_limit ... ok
+test vehicle::tests::test_dismount_all ... ok
+test vehicle::tests::test_mount_cycle_detection ... ok
+test village::poi::tests::test_poi_chunk_unload ... ok
+test village::poi::tests::test_poi_registration_and_claim ... ok
+test village::poi::tests::test_village_clustering ... ok
+test village::raid::tests::test_raid_trigger_and_wave_advancement ... ok
+test village::trade::tests::test_offer_generation ... ok
+test village::trade::tests::test_trade_discount ... ok
+test village::trade::tests::test_villager_level_thresholds ... ok
+test voxel_shape::tests::empty_shape_has_no_boxes ... ok
+test voxel_shape::tests::fence_has_correct_box_count ... ok
+test voxel_shape::tests::full_cube_is_full_occluder ... ok
+test voxel_shape::tests::non_full_blocks_have_empty_occlusion ... ok
+test voxel_shape::tests::ray_intersects_full_cube ... ok
+test voxel_shape::tests::ray_intersects_full_cube_from_negative_direction_returns_facing_normal ... ok
+test voxel_shape::tests::ray_intersects_slab_bottom ... ok
+test voxel_shape::tests::ray_misses_empty_shape ... ok
+test voxel_shape::tests::slab_bottom_is_not_full_occluder ... ok
+test voxel_shape::tests::stair_north_has_two_boxes ... ok
+test voxel_shape::tests::stair_ray_hits_step_and_passes_gap ... ok
+test voxel_shape::tests::translate_shifts_all_boxes ... ok
+test weather::tests::client_snapshot_never_advances_phase_or_schedules_lightning ... ok
+test weather::tests::desert_is_dry_and_cold_biomes_snow ... ok
+test weather::tests::invalid_snapshot_is_rejected_without_mutating_client_weather ... ok
+test weather::tests::presentation_randomness_does_not_change_authority_sequence ... ok
+test weather::tests::random_durations_stay_between_half_and_one_day ... ok
+test weather::tests::thunder_schedules_a_flash_and_strike ... ok
+test weather::tests::weather_cycles_in_the_required_order ... ok
+test weather::tests::wire_values_and_seeded_visuals_are_deterministic ... ok
+test world::tests::ambient_occlusion_levels_match_occluder_counts ... ok
+test world::tests::ao_diagonal_selection_preserves_face_winding ... ok
+test world::tests::ao_samples_follow_every_face_and_corner_direction ... ok
+test world::tests::block_state_encoding_roundtrip ... ok
+test world::tests::block_type_from_wire_rejects_unknown_values ... ok
+test world::tests::block_type_wire_roundtrip_covers_all_variants ... ok
+test world::tests::cactus_mesh_generation_bounds_and_quad_count ... ok
+test world::tests::chunk_block_entity_operations ... ok
+test world::tests::chunk_memory_usage_tracks_section_promotion_and_demotion ... ok
+test world::tests::chunk_section_metadata_counts ... ok
+test world::tests::contextual_plant_support_enforces_water_and_lateral_clearance ... ok
+test world::tests::contextual_plant_support_reports_unknown_for_missing_neighbor_chunks ... ok
+test world::tests::cross_model_blocks_generate_x_mesh ... ok
+test world::tests::door_mesh_generation_bounds_and_quad_count ... ok
+test world::tests::end_portal_frame_and_surface_use_lower_minecraft_heights ... ok
+test world::tests::end_portal_frames_use_distinct_top_side_and_filled_top_tiles ... ok
+test world::tests::generated_mesh_writes_ao_for_isolated_and_occluded_vertices ... ok
+test world::tests::greedy_meshing_does_not_merge_different_light_or_material ... ok
+test world::tests::greedy_meshing_merges_equal_faces_and_repeats_the_atlas_tile ... ok
+test world::tests::l0_volume_respects_section_extent_bounds ... ok
+test world::tests::legacy_generate_mesh_matches_l0_adapter_fixture ... ok
+test world::tests::light_storage_packing_and_nibbles ... ok
+test world::tests::mesh_voxel_render_inputs_flow_through_core ... ok
+test world::tests::only_solid_opaque_blocks_cast_ambient_occlusion ... ok
+test world::tests::optional_arrays_release_when_zero ... ok
+test world::tests::paletted_block_storage_transitions ... ok
+test world::tests::production_mesh_entries_apply_selected_tiles_and_keep_default_fallback ... ok
+test world::tests::randomized_storage_matches_flat_oracle_after_compact ... ok
+test world::tests::redstone_torch_variants_use_thin_torch_mesh_and_redstone_tile ... ok
+test world::tests::section_bundle_builds_distinct_bounded_lods_and_preserves_identity ... ok
+test world::tests::section_compaction_is_deferred_to_safe_point ... ok
+test world::tests::section_halo_occludes_boundary_neighbor ... ok
+test world::tests::section_safe_point_immediately_demotes_empty_and_uniform_storage ... ok
+test world::tests::section_safe_point_immediately_demotes_uniform_light_storage ... ok
+test world::tests::snow_layer_mesh_is_one_eighth_of_a_block_high ... ok
+test world::tests::storage_compact_demotes_and_preserves_values ... ok
+test world::tests::surface_lod_merges_flat_skirts_and_coarsens_varied_terrain ... ok
+test world::tests::test_biome_distribution ... ok
+test world::tests::test_block_harvest_properties ... ok
+test world::tests::test_cave_entrances ... ok
+test world::tests::test_cave_generation ... ok
+test world::tests::test_find_safe_spawn_position_fallback ... ok
+test world::tests::test_fluid_level_encoding ... ok
+test world::tests::test_ore_clustering ... ok
+test world::tests::test_plant_support_requirements ... ok
+test world::tests::test_tree_placement_bounds ... ok
+test world::tests::torch_index_tracks_local_mutations_without_duplicates ... ok
+test world::tests::torch_mesh_has_minecraft_bounds_and_six_outward_faces ... ok
+test world::tests::torch_mesh_uses_inset_face_uvs_inside_its_atlas_tile ... ok
+test world::tests::torch_mesh_uses_source_light_without_ao_or_face_shading ... ok
+test world::tests::torch_properties_and_floor_support_semantics_are_preserved ... ok
+test world::tests::trapdoor_mesh_generation_open_and_closed_bounds ... ok
+test world::tests::weather_blocks_have_expected_collision_and_light ... ok
+test world::tests::world_seed_changes_generated_terrain ... ok
+test world_mutation::tests::test_batch_mutation_all_or_nothing ... ok
+test world_mutation::tests::test_batch_mutation_with_block_entity ... ok
+test world_tick::tests::hopper_cycle_obeys_transfer_budget_and_sorted_order ... ok
+test world_tick::tests::hopper_does_not_consume_across_unloaded_chunk_boundary ... ok
+test world_tick::tests::hopper_failed_destination_is_atomic_and_preserves_metadata ... ok
+test world_tick::tests::hopper_full_chain_smelts_and_conserves_items ... ok
+test world_tick::tests::hopper_pulls_one_dropped_item_with_full_stack_metadata ... ok
+test world_tick::tests::powered_hopper_is_disabled_without_consuming_source ... ok
+test world_tick::tests::test_cactus_growth ... ok
+test world_tick::tests::test_deterministic_rng_reproducibility ... ok
+test world_tick::tests::test_falling_sand ... ok
+test world_tick::tests::test_farmland_degradation_when_covered ... ok
+test world_tick::tests::test_farmland_hydration_mutation ... ok
+test world_tick::tests::test_grass_decay_when_covered ... ok
+test world_tick::tests::test_hopper_transfer_chain_smelting ... ok
+test world_tick::tests::test_leaf_decay_without_log ... ok
+test world_tick::tests::test_leaf_preservation_with_log ... ok
+test world_tick::tests::test_water_nearby_detection ... ok
+test worldgen::carver::tests::carving_is_deterministic ... ok
+test worldgen::carver::tests::carving_respects_bounds ... ok
+test worldgen::carver::tests::lava_lakes_only_deep ... ok
+test worldgen::climate::tests::all_16_biomes_are_reachable ... ok
+test worldgen::climate::tests::climate_samples_are_deterministic ... ok
+test worldgen::climate::tests::deep_ocean_is_below_ocean ... ok
+test worldgen::climate::tests::desert_and_badlands_are_dry_hot ... ok
+test worldgen::climate::tests::different_seeds_produce_different_climate ... ok
+test worldgen::climate::tests::jungle_and_swamp_are_hot_humid ... ok
+test worldgen::climate::tests::snowy_plains_and_taiga_are_cold ... ok
+test worldgen::density::tests::cave_detection_is_bounded ... ok
+test worldgen::density::tests::density_is_deterministic ... ok
+test worldgen::density::tests::surface_height_within_world_bounds ... ok
+test worldgen::feature::tests::feature_placement_is_deterministic ... ok
+test worldgen::ore::tests::ore_configs_cover_negative_y ... ok
+test worldgen::ore::tests::ore_placement_is_deterministic ... ok
+test worldgen::surface::tests::block_for_column_handles_water ... ok
+test worldgen::surface::tests::every_biome_has_surface_data ... ok
+test worldgen::tests::adjacent_chunk_surface_height_continuity ... ok
+test worldgen::tests::chunk_generation_is_byte_identical_across_threads ... ok
+
+test result: ok. 699 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 528.52s
+
+     Running unittests src\main.rs (target\debug\deps\icraft-a8b8e37b6ffe2f7d.exe)
+
+running 833 tests
+test accessibility::tests::focus_navigation_wraps_in_stable_order ... ok
+test accessibility::tests::reduced_motion_does_not_change_authority_values ... ok
+test accessibility::tests::settings_sanitize_and_cycle_stay_bounded ... ok
+test accessibility::tests::subtitle_direction_uses_camera_basis_for_each_yaw ... ok
+test accessibility::tests::subtitle_queue_deduplicates_non_adjacent_events_and_expires_all ... ok
+test accessibility::tests::subtitle_queue_is_bounded_and_deduplicated ... ok
+test advancements::tests::test_advancement_tree_registration ... ok
+test advancements::tests::test_serialization ... ok
+test advancements::tests::test_trigger_matching_and_progression ... ok
+test app::tests::blocked_mouse_motion_does_not_produce_camera_angles ... ok
+test app::tests::deadline_reset_supports_cap_changes ... ok
+test app::tests::frame_deadlines_cover_common_caps_and_uncapped_mode ... ok
+test app::tests::frame_delta_preserves_elapsed_time_beyond_fps_interval ... ok
+test app::tests::game_mode_shortcut_cycles_through_typed_commands ... ok
+test app::tests::late_deadlines_skip_missed_slots_without_drift ... ok
+test app::tests::mouse_motion_applies_sensitivity_and_clamps_pitch ... ok
+test app::tests::repeated_escape_after_closing_chat_does_not_toggle_pause ... ok
+test app::tests::ui_transitions_ignore_repeated_and_release_events ... ok
+test app::tests::wheel_target_keeps_creative_catalog_separate_from_hotbar ... ok
+test audio::tests::changing_weather_volume_refreshes_an_active_rain_loop ... ok
+test audio::tests::chest_feedback_synthesis_is_deterministic_and_distinct ... ok
+test audio::tests::invalid_wav_uses_decodable_procedural_fallback ... ok
+test audio::tests::test_grass_break_sound_is_audible ... ok
+test audio::tests::test_wav_synthesis ... ok
+test audio::tests::valid_wav_is_loaded_without_replacing_its_bytes ... ok
+test audio::tests::weather_category_gain_only_affects_rain_and_thunder ... ok
+test authority::combat::tests::armor_and_enchantments_reduce_player_damage ... ok
+test authority::combat::tests::cooldown_reject_keeps_player_snapshot_unchanged ... ok
+test authority::combat::tests::invulnerability_is_identical_for_player_and_entity_and_never_mutates ... ok
+test authority::combat::tests::lethal_entity_settlement_is_returned_exactly_once ... ok
+test authority::combat::tests::range_and_los_reject_keep_entity_snapshot_unchanged ... ok
+test authority::combat::tests::shield_blocks_only_from_front_and_loses_durability ... ok
+test authority::contract::tests::gameplay_exact_slot_helpers_are_atomic ... ok
+test authority::contract::tests::gameplay_slots_preserve_metadata_and_stack_limits ... ok
+test authority::contract::tests::gameplay_xp_helpers_and_extended_defaults_are_stable ... ok
+test authority::contract::tests::response_cache_is_bounded_and_vectors_are_stable ... ok
+test authority::contract::tests::revision_clock_is_nonzero_and_monotonic ... ok
+test authority::contract::tests::session_gameplay_wire_conversion_preserves_all_fixed_slots_and_state ... ok
+test authority::fishing::tests::bite_and_reel_are_deterministic_and_grant_bounded_loot_xp ... ok
+test authority::fishing::tests::cast_recast_and_cancel_are_atomic ... ok
+test authority::fishing::tests::each_tick_is_single_step_and_corrupt_counters_are_rejected ... ok
+test authority::fishing::tests::invalid_hand_rod_and_context_leave_state_unchanged ... ok
+test authority::fishing::tests::inventory_full_catch_rolls_back_hook_rod_loot_and_xp ... ok
+test authority::fishing::tests::last_durability_breaks_rod_after_successful_catch ... ok
+test authority::fishing::tests::too_early_and_too_late_reels_are_typed_misses ... ok
+test authority::interest::tests::container_viewer_only_receives_open_container_updates ... ok
+test authority::interest::tests::dimensions_and_simulation_distance_are_isolated ... ok
+test authority::interest::tests::interest_deltas_are_sorted_and_split_view_from_simulation ... ok
+test authority::tests::authenticated_rejections_are_cached_without_consuming_sequence ... ok
+test authority::tests::authoritative_dispenser_edge_executes_once_with_global_entity_id ... ok
+test authority::tests::authority_boundary_does_not_reingest_presentation_inventory ... ok
+test authority::tests::client_cannot_submit_self_damage ... ok
+test authority::tests::combat_mutates_headless_entity_without_state_fallback ... ok
+test authority::tests::dimension_transfer_updates_session_and_world_contract ... ok
+test authority::tests::dimension_worlds_are_parked_without_chunk_aliasing ... ok
+test authority::tests::duplicate_and_stale_revision_are_authoritative ... ok
+test authority::tests::item_use_mutates_session_inventory_and_revision ... ok
+test authority::tests::reconnect_resets_owner_private_mining_progress ... ok
+test authority::tests::request_mutation_is_drained_into_the_next_authority_snapshot ... ok
+test authority::tests::respawn_command_restores_authority_health_after_death ... ok
+test authority::tests::same_vectors_have_same_revisions_for_each_topology ... ok
+test authority::tests::sessions_in_multiple_dimensions_tick_and_dispatch_independently ... ok
+test authority::tests::trade_conserves_items_and_mount_projects_session_state ... ok
+test authority::tests::typed_adventure_place_requires_can_place_on_and_block_entity_projection ... ok
+test authority::tests::typed_mining_cancels_on_cancel_held_change_range_or_block_replacement ... ok
+test authority::tests::typed_mining_fixed_tick_breaks_once_and_cancel_is_idempotent ... ok
+test authority::tests::typed_mining_game_modes_and_empty_hand_are_authoritative ... ok
+test authority::tests::typed_mining_grants_xp_once_and_removes_broken_tool_without_orb ... ok
+test authority::tests::typed_mining_rejects_unloaded_target_without_progress_or_mutation ... ok
+test authority::tests::typed_place_maps_item_debits_once_and_rejects_cheat_block ... ok
+test authority::tests::unsupported_tool_item_use_does_not_consume_inventory ... ok
+test authority::transactions::tests::anvil_rejects_aliased_inputs_without_mutation ... ok
+test authority::transactions::tests::anvil_rename_bound_and_cost_are_atomic ... ok
+test authority::transactions::tests::brew_needs_exactly_two_hundred_ticks_and_revalidates_take ... ok
+test authority::transactions::tests::brew_slot_locks_cover_every_reserved_source_only ... ok
+test authority::transactions::tests::craft_aggregates_duplicate_sources_and_rolls_back_when_full ... ok
+test authority::transactions::tests::craft_rejects_stale_rich_metadata_without_mutation ... ok
+test authority::transactions::tests::enchant_is_seeded_and_rolls_back_insufficient_costs ... ok
+test authority::transactions::tests::furnace_output_and_xp_commit_together_and_validate_station ... ok
+test block_entity::tests::automation_transfer_preserves_itemstack_metadata ... ok
+test block_entity::tests::dispenser_and_dropper_use_nine_slot_deterministic_payload_selection ... ok
+test block_entity::tests::observer_defaults_are_backward_compatible ... ok
+test block_entity::tests::test_block_entity_matching ... ok
+test block_entity::tests::test_comparator_fullness_signal_computation ... ok
+test block_entity::tests::test_container_capability_and_sided_rules ... ok
+test block_entity::tests::test_furnace_output_full_stops_fuel_consumption ... ok
+test block_entity::tests::test_furnace_smelting_flow ... ok
+test block_entity::tests::test_legacy_furnace_stub_migration ... ok
+test block_entity::tests::test_sign_line_truncation ... ok
+test block_model::tests::canonical_block_model_paths_cover_every_wire_variant ... ok
+test block_model::tests::chest_mesh_has_distinct_binary_open_and_closed_geometry ... ok
+test block_model::tests::missing_descriptors_are_quiet_when_building_complete_registry ... ok
+test block_model::tests::selected_model_descriptor_reaches_mesh_consumer ... ok
+test block_model::tests::waterlogged_slab_adds_only_the_translucent_complement ... ok
+test boss::tests::boss_bar_progress_is_clamped ... ok
+test boss::tests::calm_enderman_wanders_without_targeting_player ... ok
+test boss::tests::creative_mode_bosses_do_not_attack_player ... ok
+test boss::tests::detects_x_oriented_wither_pattern ... ok
+test boss::tests::detects_z_oriented_wither_pattern ... ok
+test boss::tests::dragon_changes_phase_and_crystal_heals_it ... ok
+test boss::tests::dragon_orientation_follows_flight_velocity ... ok
+test boss::tests::end_dimension_spawns_enderman_on_end_stone ... ok
+test boss::tests::enderman_gaze_timer_resets_when_player_looks_away ... ok
+test boss::tests::enderman_only_attacks_after_five_seconds_of_head_gaze ... ok
+test boss::tests::full_health_dragon_periodically_charges_and_knocks_player_back ... ok
+test boss::tests::legacy_live_crystal_without_tower_gets_obsidian_support_events ... ok
+test boss::tests::nether_spawning_is_bounded_and_inside_loaded_chunks ... ok
+test boss::tests::rejects_near_miss_wither_pattern ... ok
+test boss::tests::wither_enters_low_health_charge_phase ... ok
+test brewing::tests::brewing_chain_and_modifiers_work ... ok
+test brewing::tests::effects_tick_and_modify_stats ... ok
+test brewing::tests::stand_finishes_after_ten_seconds_and_consumes_ingredient ... ok
+test camera::tests::far_plane_covers_the_render_distance_corner ... ok
+test camera::tests::far_plane_covers_the_vertical_render_distance_corner ... ok
+test chunk_manager::tests::adding_a_lateral_cactus_obstruction_breaks_and_cascades ... ok
+test chunk_manager::tests::chunk_corners_include_the_diagonal_chunk ... ok
+test chunk_manager::tests::chunk_edges_include_the_adjacent_chunk ... ok
+test chunk_manager::tests::direct_storage_mutations_emit_mesh_invalidation_dependencies ... ok
+test chunk_manager::tests::interior_block_only_invalidates_its_own_chunk ... ok
+test chunk_manager::tests::loading_a_boundary_obstruction_revalidates_neighboring_cactus ... ok
+test chunk_manager::tests::missing_boundary_chunk_is_unknown_until_loaded_and_never_forced ... ok
+test chunk_manager::tests::negative_world_coordinates_use_euclidean_chunk_boundaries ... ok
+test chunk_manager::tests::player_placement_support_requires_water_for_cane_and_clear_sides_for_cactus ... ok
+test chunk_manager::tests::raw_fluid_roundtrip_preserves_waterlogged_bit_and_boundary_mesh_dependencies ... ok
+test chunk_manager::tests::removing_cane_water_breaks_the_entire_column ... ok
+test chunk_manager::tests::section_dependencies_include_xyz_edges_and_corners ... ok
+test chunk_manager::tests::set_block_updates_torch_index_at_negative_world_coordinates ... ok
+test chunk_manager::tests::surrounding_chunks_contains_all_eight_neighbors ... ok
+test chunk_manager::tests::test_check_and_break_unsupported_above ... ok
+test chunk_render::tests::aabb_touching_or_crossing_a_plane_remains_visible ... ok
+test chunk_render::tests::allocation_owner_changes_across_runtime_identity ... ok
+test chunk_render::tests::chunk_mesh_data_tracks_bounds_and_triangles ... ok
+test chunk_render::tests::chunk_to_region_coord_maps_8x8_blocks ... ok
+test chunk_render::tests::degenerate_view_projection_does_not_false_cull ... ok
+test chunk_render::tests::draw_plan_culls_empty_and_outside_candidates ... ok
+test chunk_render::tests::draw_plan_reuses_visible_chunk_storage_without_allocating ... ok
+test chunk_render::tests::draw_plan_statistics_count_unique_chunks ... ok
+test chunk_render::tests::embedded_shader_uses_discrete_ao_mapping ... ok
+test chunk_render::tests::freelist_allocates_deallocates_and_coalesces ... ok
+test chunk_render::tests::freelist_compaction_preserves_capacity_and_non_overlap ... ok
+test chunk_render::tests::freelist_deterministic_randomized_invariants ... ok
+test chunk_render::tests::freelist_rejects_stale_double_free_and_out_of_bounds ... ok
+test chunk_render::tests::freelist_reports_arithmetic_overflow_without_mutation ... ok
+test chunk_render::tests::identity_frustum_rejects_each_lateral_side ... ok
+test chunk_render::tests::identity_matrix_uses_wgpu_zero_to_one_depth ... ok
+test chunk_render::tests::lod_can_be_selected_from_mesh_bounds ... ok
+test chunk_render::tests::lod_selection_obeys_boundaries_and_safe_fallbacks ... ok
+test chunk_render::tests::lod_thresholds_reject_invalid_ranges ... ok
+test chunk_render::tests::lod_uses_nearest_distance_for_tall_bounds ... ok
+test chunk_render::tests::mesh_bounds_are_derived_from_actual_vertices ... ok
+test chunk_render::tests::mesh_bounds_validate_union_and_distance ... ok
+test chunk_render::tests::opaque_is_near_to_far_with_coordinate_tie_break ... ok
+test chunk_render::tests::owned_tokens_reject_wrong_owner_and_counters_stay_bounded ... ok
+test chunk_render::tests::perspective_frustum_handles_front_back_near_and_far ... ok
+test chunk_render::tests::terrain_vertex_is_pod_with_expected_cpu_layout ... ok
+test chunk_render::tests::transparent_is_far_to_near_with_coordinate_tie_break ... ok
+test chunk_schedule::tests::duplicate_invalidations_update_revision_and_reason_without_duplicate_work ... ok
+test chunk_schedule::tests::nearest_work_is_persistent_and_reprioritized_after_player_moves ... ok
+test chunk_schedule::tests::section_scheduler_deduplicates_and_rejects_stale_completion ... ok
+test chunk_schedule::tests::test_precompute_spiral_offsets_ordering ... ok
+test chunk_schedule::tests::test_scheduler_dirty_management ... ok
+test commands::tests::coordinate_bounds_reject_extreme_i32_without_overflow ... ok
+test commands::tests::parser_covers_typed_commands ... ok
+test commands::tests::parser_rejects_bad_numbers_without_panicking ... ok
+test commands::tests::world_type_is_part_of_the_shared_creation_contract ... ok
+test container_sessions::tests::container_click_left_on_empty_returns_cursor ... ok
+test container_sessions::tests::container_click_left_swap_different_items ... ok
+test container_sessions::tests::container_click_right_takes_half ... ok
+test container_sessions::tests::container_session_close_by_block ... ok
+test container_sessions::tests::container_session_close_by_block_does_not_close_adjacent_non_partner ... ok
+test container_sessions::tests::container_session_close_by_block_is_dimension_scoped_and_exact ... ok
+test container_sessions::tests::container_session_double_chest_partner_requires_explicit_exact_close ... ok
+test container_sessions::tests::container_session_open_close ... ok
+test container_sessions::tests::container_slot_commit_rejects_invalid_stack_without_partial_write ... ok
+test culling::entity_los_tests::bounded_in_flight_and_physical_queue_overflow_fail_open ... ok
+test culling::entity_los_tests::near_and_special_translucent_models_fail_open_without_distance_cull_credit ... ok
+test culling::entity_los_tests::nonce_cell_and_world_stale_results_are_rejected ... ok
+test culling::entity_los_tests::opaque_wall_eventually_culls_and_removal_fails_open_then_refreshes ... ok
+test culling::entity_los_tests::teleport_supersedes_old_request_and_stale_result_cannot_cull ... ok
+test culling::entity_los_tests::timeout_and_unloaded_chunk_remain_visible ... ok
+test culling::tests::invalid_connectivity_fails_open ... ok
+test culling::tests::opaque_cube_blocks_los ... ok
+test culling::tests::section_visibility_reuses_traversal_scratch_capacity ... ok
+test culling::tests::transparent_and_partial_blocks_fail_open ... ok
+test culling::tests::valid_connectivity_preserves_the_computed_mask ... ok
+test dimension::tests::custom_dimension_generation_is_deterministic ... ok
+test dimension::tests::detects_nether_frames_in_both_vertical_axes ... ok
+test dimension::tests::dimension_scaling_only_affects_overworld_nether_travel ... ok
+test dimension::tests::end_has_dormant_origin_fountain_and_reachable_city_island ... ok
+test dimension::tests::end_healing_crystals_have_obsidian_tower_support ... ok
+test dimension::tests::nether_has_roof_lava_features_and_no_sky_light ... ok
+test dimension::tests::overworld_stronghold_contains_twelve_empty_frames ... ok
+test dimension::tests::recognizes_twelve_filled_end_frames ... ok
+test dimension::tests::superflat_generation_is_signed_height_and_deterministic ... ok
+test enchantment::tests::anvil_repairs_and_combines ... ok
+test enchantment::tests::bookshelf_options_scale_and_are_deterministic ... ok
+test enchantment::tests::efficiency_and_protection_change_gameplay_values ... ok
+test enchantment::tests::silk_touch_and_fortune_conflict ... ok
+test entity::tests::dropped_item_collection_adds_to_inventory ... ok
+test entity::tests::dropped_item_falls_with_gravity ... ok
+test entity::tests::dropped_item_lands_on_solid_block ... ok
+test entity::tests::dropped_item_pickup_cooldown_decreases ... ok
+test entity::tests::entity_index_radius_query_handles_sparse_and_boundary_buckets ... ok
+test entity::tests::entity_index_rebuild_removes_stale_empty_buckets ... ok
+test entity::tests::incremental_indexes_match_rebuild_oracle_after_lifecycle ... ok
+test entity::tests::moved_position_sync_visits_only_supplied_ids_and_preserves_buckets ... ok
+test entity::tests::r59_iteration_classification_keeps_candidate_queries_distinct ... ok
+test entity::tests::remote_player_representation_has_human_aabb_and_defaults ... ok
+test entity::tests::test_chicken_slow_fall ... ok
+test entity::tests::test_dropped_item_and_xp_orb_entity_properties ... ok
+test entity::tests::test_entity_manager_counts_passive_and_hostile ... ok
+test entity::tests::test_ray_aabb_intersection ... ok
+test final_acceptance::tests::network_rows_keep_scenario_specific_blockers ... ok
+test final_acceptance::tests::singleplayer_headless_scenarios_pass ... ok
+test fishing::tests::test_fishing_cast_and_reel ... ok
+test fluid::tests::generated_chunks_do_not_schedule_the_static_ocean ... ok
+test fluid::tests::placed_source_flows_without_scanning_the_world ... ok
+test fluid::tests::raw_fluid_change_is_reported_when_block_stays_water ... ok
+test fluid::tests::removing_a_source_drains_its_incremental_flow ... ok
+test fluid::tests::waterlogged_slab_flows_across_chunk_boundary ... ok
+test fluid::tests::waterlogged_slab_source_flows_into_adjacent_air ... ok
+test game_rules::tests::adventure_item_predicates_require_explicit_tags ... ok
+test game_rules::tests::policy_truth_table_covers_all_modes ... ok
+test game_rules::tests::rule_updates_are_bounded_and_aliases_are_supported ... ok
+test game_rules::tests::server_difficulty_parse_and_chase_policy_are_canonical ... ok
+test gpu_frame_resources::tests::bounded_pool_never_reuses_in_flight_slots ... ok
+test gpu_frame_resources::tests::completion_is_exact_and_idempotent ... ok
+test gpu_frame_resources::tests::lazy_growth_is_bounded ... ok
+test hand_renderer::tests::animation_uniform_changes_with_walk_and_attack ... ok
+test hand_renderer::tests::base_mesh_is_animation_independent_and_rebuild_only_on_key_change ... ok
+test hand_renderer::tests::hand_mesh_contains_right_arm_and_held_block ... ok
+test hand_renderer::tests::hand_mesh_omits_item_when_slot_is_empty ... ok
+test hand_renderer::tests::hand_mesh_renders_flat_item_as_sprite_quad ... ok
+test hand_renderer::tests::held_cuboid_faces_are_planar_and_use_independent_tile_rows ... ok
+test hand_renderer::tests::held_end_portal_frame_preserves_world_face_tiles ... ok
+test interaction::tests::break_policy_targets_decorations_but_not_environmental_passables ... ok
+test interaction::tests::break_raycast_hits_each_explicit_passable_decoration ... ok
+test interaction::tests::break_raycast_returns_none_for_only_environmental_passables ... ok
+test interaction::tests::break_raycast_skips_water_and_lava_for_solid_behind_them ... ok
+test interaction::tests::dda_crosses_exact_boundary_into_negative_coordinates ... ok
+test interaction::tests::place_raycast_can_target_open_door_and_trapdoor_for_interaction ... ok
+test interaction::tests::place_raycast_ignores_passable_vegetation_and_fluids ... ok
+test interaction::tests::test_raycast_air ... ok
+test interaction::tests::test_raycast_hit ... ok
+test interaction::tests::test_raycast_hit_from_negative_direction_returns_front_face ... ok
+test interaction::tests::test_raycast_hits_passable_plants_when_breaking ... ok
+test inventory::tests::add_item_does_not_merge_plain_items_into_named_stacks ... ok
+test inventory::tests::add_stack_returns_exact_metadata_preserving_remainder ... ok
+test inventory::tests::automation_item_ids_append_without_reindexing_legacy_items ... ok
+test inventory::tests::close_storage_discards_only_catalog_cursor ... ok
+test inventory::tests::close_storage_transaction_rolls_back_partial_returns_and_real_cursor ... ok
+test inventory::tests::creative_catalog_contains_every_non_air_item_once ... ok
+test inventory::tests::creative_catalog_items_have_valid_properties ... ok
+test inventory::tests::creative_catalog_supplies_left_max_and_right_one ... ok
+test inventory::tests::creative_close_keeps_real_cursor_when_storage_is_full ... ok
+test inventory::tests::creative_hotbar_rejects_same_item_with_different_metadata ... ok
+test inventory::tests::creative_hotbar_reuses_drag_drop_and_close_semantics ... ok
+test inventory::tests::creative_tabs_partition_catalog_without_duplicates ... ok
+test inventory::tests::creative_virtual_slot_write_is_a_no_op ... ok
+test inventory::tests::creative_window_scrolls_by_row_and_clamps ... ok
+test inventory::tests::fishing_rod_starts_with_authority_durability ... ok
+test inventory::tests::splash_potion_stack_has_water_splash_metadata ... ok
+test inventory::tests::stack_clicks_merge_only_identical_metadata ... ok
+test inventory::tests::stack_identity_checks_every_metadata_field ... ok
+test inventory::tests::test_inventory_add_item ... ok
+test inventory::tests::test_inventory_creative_init ... ok
+test inventory::tests::test_item_properties ... ok
+test inventory::tests::test_new_mob_items ... ok
+test inventory::tests::test_renders_flat ... ok
+test lighting::tests::initial_lighting_reaches_horizontal_cave_entrance ... ok
+test lighting::tests::propagation_does_not_discard_work_after_five_thousand_nodes ... ok
+test localization::tests::english_required_keys_have_values_and_german_is_complete ... ok
+test localization::tests::immutable_format_and_language_switch_use_catalog_values ... ok
+test localization::tests::malformed_selected_locale_falls_back_and_reports_once ... ok
+test localization::tests::missing_key_falls_back_without_english_fragments ... ok
+test localization::tests::missing_named_keys_use_builtin_display_names ... ok
+test localization::tests::parameter_and_plural_messages_are_structured ... ok
+test localization::tests::partial_selected_locales_merge_without_swallowing_lower_layers ... ok
+test localization::tests::selected_pack_can_override_item_block_and_entity_names ... ok
+test localization::tests::selected_pack_locale_is_used_and_german_missing_keys_fall_back_to_english ... ok
+test localization::tests::visible_keys_have_builtin_english_and_german_values ... ok
+test loot::tests::test_end_city_loot_contains_elytra ... ok
+test loot::tests::test_loot_rolling_determinism ... ok
+test menu::server_address_book::tests::corrupt_and_oversized_files_are_rejected_without_replacement ... ok
+test menu::server_address_book::tests::path_safety_rejects_directory_targets ... ok
+test menu::server_address_book::tests::ping_text_is_bounded_and_safe_for_menu_rendering ... ok
+test menu::server_address_book::tests::ping_uses_server_list_api_and_records_result ... ok
+test menu::server_address_book::tests::round_trip_preserves_addresses_and_ping_metadata ... ok
+test menu::tests::accessibility_settings_survive_restart_and_resource_pack_ids_round_trip ... ok
+test menu::tests::client_world_launch_uses_temp_dir_and_placeholder_seed ... ok
+test menu::tests::controls_config_parse_and_round_trip ... ok
+test menu::tests::difficulty_steps_both_directions ... ok
+test menu::tests::focus_layout_rects_remain_inside_ndc_at_common_aspects ... ok
+test menu::tests::fps_cap_cycles_through_uncapped_and_standard_rates ... ok
+test menu::tests::fps_cap_round_trip_and_sanitization ... ok
+test menu::tests::leaving_controls_clears_pending_rebind ... ok
+test menu::tests::legacy_metadata_preserves_saved_hardcore_and_creation_options ... ok
+test menu::tests::legacy_settings_without_weather_volume_use_reduced_default ... ok
+test menu::tests::menu_text_uses_selected_font_and_builtin_fallback ... ok
+test menu::tests::multiplayer_focus_activation_covers_saved_servers_and_actions ... ok
+test menu::tests::multiplayer_settings_defaults_and_mutation ... ok
+test menu::tests::non_finite_view_settings_are_sanitized_before_save ... ok
+test menu::tests::non_finite_view_settings_fall_back_during_load ... ok
+test menu::tests::sanitizes_world_names_and_generates_stable_slugs ... ok
+test menu::tests::saved_server_addresses_split_for_join_form ... ok
+test menu::tests::selected_world_directory_survives_list_reordering ... ok
+test menu::tests::server_address_book_keeps_recent_ping_results ... ok
+test menu::tests::settings_file_round_trip_includes_weather_volume ... ok
+test menu::tests::settings_key_names_round_trip ... ok
+test menu::tests::view_setting_boundaries_round_trip_without_drift ... ok
+test menu::tests::weather_options_row_is_distinct_from_language_controls_and_back ... ok
+test menu::tests::weather_volume_load_clamps_out_of_range_values ... ok
+test menu::tests::world_path_guard_rejects_saves_root ... ok
+test microbench::microbench_release ... ignored, timing benchmark; run explicitly in release mode
+test microbench::smoke_checksums_are_stable ... ok
+test microbench::storage_fixtures_cover_every_runtime_representation ... ok
+test mob::tests::creative_mode_mobs_do_not_target_player ... ok
+test mob::tests::disabled_mob_griefing_keeps_creeper_ai_without_breaking_blocks ... ok
+test mob::tests::explosion_reports_authoritative_block_removals_and_can_be_visual_only ... ok
+test mob::tests::health_cleanup_removes_zero_hp_living_entities_but_preserves_nonliving_lifecycles ... ok
+test mob::tests::player_knockback_uses_actual_attacker_regardless_of_entity_order ... ok
+test mob::tests::remote_player_velocity_survives_mob_update ... ok
+test mob::tests::test_daylight_exposure_and_water_extinguish ... ok
+test mob::tests::test_explosion_damage ... ok
+test mob::tests::test_mob_burn_death_drops ... ok
+test mob::tests::test_mob_yaw_faces_player ... ok
+test mob_renderer::tests::cuboid_outside_faces_are_clockwise_on_screen_with_left_handed_camera ... ok
+test mob_renderer::tests::dropped_block_item_still_renders_as_cube ... ok
+test mob_renderer::tests::dropped_flat_item_renders_as_sprite_quad ... ok
+test mob_renderer::tests::ender_dragon_uses_only_dedicated_opaque_atlas_tiles ... ok
+test mob_renderer::tests::enderman_uses_tall_model_and_dedicated_skin_tiles ... ok
+test mob_renderer::tests::local_player_faces_camera_direction_with_shifted_yaw ... ok
+test mob_renderer::tests::local_player_renders_as_six_cuboids ... ok
+test mob_renderer::tests::passive_mob_heads_have_single_face_texture_and_body_sides ... ok
+test mob_renderer::tests::remote_player_renders_as_six_cuboids ... ok
+test mob_renderer::tests::test_burning_entity_fire_flag ... ok
+test mob_renderer::tests::test_creeper_mesh_geometry_no_gap ... ok
+test navigation::tests::test_clock_overworld_fraction ... ok
+test navigation::tests::test_compass_angle_calculation ... ok
+test navigation::tests::test_map_creation_and_update ... ok
+test network::client::tests::authoritative_weather_packets_map_to_pure_client_events ... ok
+test network::client::tests::connects_and_receives_join_for_second_client ... ok
+test network::client::tests::fresh_gameplay_input_rebases_revision_but_explicit_stale_input_does_not ... ok
+test network::client::tests::gameplay_response_gate_drops_exact_cached_ack_and_rewrites ... ok
+test network::client::tests::host_client_entity_health_and_effect_replication_converges ... ok
+test network::client::tests::host_stop_notifies_client_and_threads_join_without_hanging ... ok
+test network::client::tests::legacy_client_inputs_are_single_gameplay_envelopes ... ok
+test network::client::tests::queue_accounting_closed_consumer_is_cancelled ... ok
+test network::client::tests::queue_accounting_covers_success_and_closed_paths ... ok
+test network::client::tests::receives_targeted_chunk_catchup_and_time_sync ... ok
+test network::client::tests::replication_gate_drops_stale_block_entity_and_container_deltas ... ok
+test network::client::tests::replication_gate_rejects_stale_entity_health_and_effect_state ... ok
+test network::client::tests::revision_gate_multi_client_checksum_converges ... ok
+test network::client::tests::revision_gate_orders_cross_channel_snapshot_and_block_change ... ok
+test network::client::tests::sends_and_receives_chat ... ok
+test network::client::tests::targeted_container_close_bypasses_revision_gate_and_exact_matches_active_key ... ok
+test network::client::tests::tcp_capacity_one_retries_without_starving_second_client_and_converges ... ok
+test network::client::tests::tcp_cross_channel_revision_gate_and_reliable_control_are_fifo ... ok
+test network::protocol::tests::authority_domain_bounds_reject_invalid_envelopes ... ok
+test network::protocol::tests::authority_domain_requests_roundtrip_with_rich_slot_refs ... ok
+test network::protocol::tests::automation_block_entity_and_revision_roundtrip ... ok
+test network::protocol::tests::block_action_request_roundtrip ... ok
+test network::protocol::tests::block_action_result_roundtrip ... ok
+test network::protocol::tests::block_change_and_chunk_data_state_roundtrip ... ok
+test network::protocol::tests::block_change_roundtrip ... ok
+test network::protocol::tests::chunk_data_roundtrip ... ok
+test network::protocol::tests::container_close_roundtrip_keeps_v16_shape ... ok
+test network::protocol::tests::disconnect_roundtrip ... ok
+test network::protocol::tests::entity_lifecycle_and_player_authority_roundtrip ... ok
+test network::protocol::tests::gameplay_bounds_keep_specific_reject_reasons ... ok
+test network::protocol::tests::gameplay_command_limit_is_rejected ... ok
+test network::protocol::tests::gameplay_request_response_roundtrip_and_bounds ... ok
+test network::protocol::tests::handshake_roundtrip ... ok
+test network::protocol::tests::intermediate_legacy_handshake_is_not_accepted_by_current_contract ... ok
+test network::protocol::tests::invalid_bytes_rejected ... ok
+test network::protocol::tests::item_wire_roundtrip ... ok
+test network::protocol::tests::legacy_container_and_combat_encodings_remain_accepted ... ok
+test network::protocol::tests::login_success_roundtrip ... ok
+test network::protocol::tests::old_weather_packet_version_is_rejected_by_version_check ... ok
+test network::protocol::tests::player_action_roundtrip ... ok
+test network::protocol::tests::player_join_roundtrip ... ok
+test network::protocol::tests::player_leave_roundtrip ... ok
+test network::protocol::tests::player_position_roundtrip ... ok
+test network::protocol::tests::private_session_projection_is_fixed_width_bounded_and_roundtrips ... ok
+test network::protocol::tests::rich_item_wire_requires_canonical_enchantments ... ok
+test network::protocol::tests::typed_block_action_and_owner_mining_projection_roundtrip ... ok
+test network::protocol::tests::version_mismatch_detectable ... ok
+test network::protocol::tests::world_rules_sync_roundtrip ... ok
+test network::server::tests::bind_failure_notifies_host_and_thread_exits ... ok
+test network::server::tests::block_change_reports_authenticated_session_id_to_host ... ok
+test network::server::tests::catchup_mailbox_is_latest_wins_and_bounded ... ok
+test network::server::tests::catchup_mailbox_preserves_distance_priority_insertion_order ... ok
+test network::server::tests::client_cannot_inject_authoritative_lightning ... ok
+test network::server::tests::concurrent_case_insensitive_duplicate_login_is_atomic ... ok
+test network::server::tests::concurrent_logins_reserve_max_player_slot_atomically ... ok
+test network::server::tests::connect_and_login ... ok
+test network::server::tests::disconnect_cleans_up_and_notifies_remaining_clients ... ok
+test network::server::tests::entity_state_mailbox_is_latest_wins_per_entity ... ok
+test network::server::tests::evicted_client_task_exits_and_cannot_forward_gameplay ... ok
+test network::server::tests::full_reliable_queue_evicts_slow_client_without_ghost_session ... ok
+test network::server::tests::gameplay_request_is_bound_to_authenticated_session ... ok
+test network::server::tests::gameplay_requests_are_idempotent_and_rejections_keep_sequences ... ok
+test network::server::tests::legacy_sleep_and_container_fields_are_preserved_in_envelopes ... ok
+test network::server::tests::metered_host_event_queue_counts_success_full_and_receive_once ... ok
+test network::server::tests::newcomer_receives_existing_roster ... ok
+test network::server::tests::newcomer_receives_roster_larger_than_queue_capacity ... ok
+test network::server::tests::outbound_metrics_publish_before_write_and_rollback_on_failure ... ok
+test network::server::tests::player_session_projection_is_private_and_rejects_mismatched_owner ... ok
+test network::server::tests::queue_metrics_track_backlog_replacement_drain_and_saturation ... ok
+test network::server::tests::rejects_old_protocol_during_handshake ... ok
+test network::server::tests::rejects_v4_handshake ... ok
+test network::server::tests::relays_block_action_request_and_targeted_result ... ok
+test network::server::tests::relays_chat_through_host_with_canonical_sender ... ok
+test network::server::tests::relays_player_action_through_host ... ok
+test network::server::tests::relays_player_position_through_host ... ok
+test network::server::tests::reliable_join_and_leave_wait_for_bounded_queue_capacity ... ok
+test network::server::tests::request_rate_limit_rejects_without_forwarding_the_second_request ... ok
+test network::server::tests::server_list_ping_reports_version_and_capacity_without_login ... ok
+test network::server::tests::slow_client_backpressure_does_not_starve_other_mailboxes ... ok
+test network::server::tests::transport_metrics_count_exact_successful_tcp_frames ... ok
+test network::server::tests::unsent_pose_updates_are_latest_wins_per_player ... ok
+test network::server::tests::weather_snapshot_and_lightning_broadcast_in_reliable_order ... ok
+test network::server::tests::weather_snapshot_can_target_only_the_joining_client ... ok
+test network::transport::tests::bidirectional_multiple_packets ... ok
+test network::transport::tests::framed_roundtrip ... ok
+test network::transport::tests::recv_multiple_frames_in_one_segment ... ok
+test network::transport::tests::recv_survives_cancellation_between_header_and_body ... ok
+test particles::tests::compile_instances_carries_custom_color_and_light ... ok
+test particles::tests::compile_instances_preserves_legacy_white_full_light_math ... ok
+test particles::tests::fade_scale_particle_shrinks_with_age ... ok
+test particles::tests::particle_instance_layout_has_stable_color_and_light_offsets ... ok
+test particles::tests::particle_update_applies_gravity_and_expires ... ok
+test particles::tests::spawn_respects_max_capacity ... ok
+test particles::tests::stretched_particles_preserve_the_requested_aspect ... ok
+test passive_mob::tests::available_inventory_space_stores_egg_without_a_duplicate_drop ... ok
+test passive_mob::tests::disabled_mob_griefing_keeps_sheep_ai_without_eating_grass ... ok
+test passive_mob::tests::full_inventory_drops_exactly_one_egg_at_the_chicken ... ok
+test passive_mob::tests::partner_query_matches_independent_radius_oracle ... ok
+test perf::tests::category_bank_is_independent ... ok
+test perf::tests::empty_history ... ok
+test perf::tests::frame_percentile_uses_240_sample_ring_window ... ok
+test perf::tests::frame_percentile_uses_bounded_history ... ok
+test perf::tests::percentile_math ... ok
+test perf::tests::ring_wrapping_keeps_latest ... ok
+test perf::tests::scope_accumulator_records_all_categories_and_resets ... ok
+test perf::tests::shared_queue_stats_reset_clears_world_lifecycle_state ... ok
+test perf::tests::shared_queue_stats_tracks_backlog_age_and_terminal_counters ... ok
+test perf::tests::thread_alloc_count_is_local_to_calling_thread ... ok
+test physics::tests::a_50ms_tick_matches_four_shared_player_substeps ... ok
+test physics::tests::creative_flight_hovers_and_moves_vertically_without_fall_damage ... ok
+test physics::tests::creative_flight_keeps_solid_collision_on_every_axis ... ok
+test physics::tests::creative_flight_sprint_changes_horizontal_speed_without_fluid_drag ... ok
+test physics::tests::creative_flight_toggle_clears_vertical_momentum_and_fall_distance ... ok
+test physics::tests::door_and_trapdoor_block_aabbs_use_thin_slab_bounds ... ok
+test physics::tests::extreme_input_is_displacement_capped_without_tunneling ... ok
+test physics::tests::high_speed_motion_cannot_tunnel_through_one_block_barriers_on_any_axis ... ok
+test physics::tests::non_flying_gravity_and_fall_damage_are_unchanged ... ok
+test physics::tests::non_solid_placement_is_allowed_inside_player_aabb ... ok
+test physics::tests::player_and_unit_block_aabbs_use_foot_and_cell_coordinates ... ok
+test physics::tests::solid_placement_allows_face_edge_and_corner_touching ... ok
+test physics::tests::solid_placement_is_blocked_by_positive_player_overlap ... ok
+test physics::tests::test_aabb_intersection ... ok
+test physics::tests::test_player_edge_guard ... ok
+test physics::tests::test_player_sneaking_speed ... ok
+test physics::tests::test_player_sprinting_speed ... ok
+test player::tests::reset_for_respawn_restores_survival_resources_and_timers ... ok
+test player::tests::test_attack_cooldown_scaling ... ok
+test player::tests::test_bow_shot_charging ... ok
+test player::tests::test_damage_reduction_calculation ... ok
+test player::tests::test_death_experience_drop_caps_at_100 ... ok
+test player::tests::test_player_drowning ... ok
+test player::tests::test_player_exhaustion_hunger ... ok
+test player::tests::test_player_natural_regen ... ok
+test player::tests::test_player_starvation ... ok
+test player::tests::test_player_take_damage ... ok
+test player::tests::test_shield_blocking_direction ... ok
+test rail::tests::test_minecart_powered_rail_boost ... ok
+test rail::tests::test_rail_shape_conversion ... ok
+test recipes::tests::test_bread_recipe_requires_wheat ... ok
+test recipes::tests::test_fuels ... ok
+test recipes::tests::test_ore_cannot_be_crafted_in_grid ... ok
+test recipes::tests::test_recipe_id_uniqueness ... ok
+test redstone::tests::canonical_checksum_changes_for_each_redstone_state_domain ... ok
+test redstone::tests::canonical_checksum_preserves_scheduled_queue_order ... ok
+test redstone::tests::canonical_snapshot_is_order_independent_for_unordered_state ... ok
+test redstone::tests::collect_and_restore_preserves_repeater_delay_comparator_mode_and_note ... ok
+test redstone::tests::collect_only_emits_components_inside_the_target_chunk ... ok
+test redstone::tests::collect_skips_components_with_default_metadata ... ok
+test redstone::tests::comparator_subtract_mode_uses_side_input ... ok
+test redstone::tests::container_revision_wakes_sleeping_comparator ... ok
+test redstone::tests::cross_chunk_redstone_line_propagation ... ok
+test redstone::tests::differential_dirty_worklist_vs_full_settle_parity ... ok
+test redstone::tests::direct_sources_strongly_charge_solid_blocks ... ok
+test redstone::tests::dispenser_actions_are_rising_edge_only_and_carry_facing ... ok
+test redstone::tests::door_and_trapdoor_redstone_toggle_preserves_facing_and_updates_open_bit ... ok
+test redstone::tests::dust_propagates_and_loses_one_level_per_block ... ok
+test redstone::tests::loop_budget_parity_test ... ok
+test redstone::tests::observer_baselines_without_false_pulse_and_pulses_on_rising_change ... ok
+test redstone::tests::observer_skips_unloaded_front_until_streamed ... ok
+test redstone::tests::occupant_movement_wakes_sleeping_pressure_plate_processing ... ok
+test redstone::tests::piston_pushes_one_movable_block ... ok
+test redstone::tests::powered_dispenser_latch_roundtrips_without_phantom_edge ... ok
+test redstone::tests::powered_tnt_keeps_its_fuse_after_the_block_is_removed ... ok
+test redstone::tests::pressure_plate_opens_and_closes_an_adjacent_door ... ok
+test redstone::tests::pressure_plate_output_matches_independent_occupancy_oracle ... ok
+test redstone::tests::repeater_applies_configured_tick_delay_and_restores_full_power ... ok
+test redstone::tests::restore_ignores_entries_whose_block_is_no_longer_a_component ... ok
+test redstone::tests::scheduled_redstone_work_is_bounded_and_deterministic ... ok
+test redstone::tests::sleeping_constant_plate_occupant_skips_pressure_plate_scan ... ok
+test redstone::tests::sleeping_mechanism_behavior ... ok
+test resources::tests::archive_security_budget_matrix_is_rejected_before_decode ... ok
+test resources::tests::bitmap_font_source_is_parsed_and_invalid_payload_falls_back_once ... ok
+test resources::tests::dependency_cycles_are_rejected ... ok
+test resources::tests::directory_security_and_manifest_budget_are_bounded_before_read ... ok
+test resources::tests::environment_override_is_honored_at_runtime ... ok
+test resources::tests::explicit_runtime_override_is_the_only_user_candidate ... ok
+test resources::tests::locale_layers_are_high_to_low_and_skip_invalid_entries_once ... ok
+test resources::tests::logical_paths_reject_absolute_and_parent_components ... ok
+test resources::tests::manifest_and_dependency_order_are_deterministic ... ok
+test resources::tests::manifest_validates_description_and_dependency_ids ... ok
+test resources::tests::missing_asset_records_one_diagnostic ... ok
+test resources::tests::missing_manifest_and_missing_dependencies_are_diagnostic_not_global_failures ... ok
+test resources::tests::typed_consumers_skip_invalid_override_and_deduplicate_diagnostics ... ok
+test resources::tests::zip_crc_mismatch_and_zip64_markers_are_rejected ... ok
+test resources::tests::zip_path_traversal_is_rejected_before_extraction ... ok
+test save::tests::atomic_replace_crash_child ... ignored, helper subprocess for atomic_replace_survives_process_crash_before_and_after_replace
+test save::tests::atomic_replace_faults_leave_a_complete_old_or_new_file ... ok
+test save::tests::atomic_replace_survives_process_crash_before_and_after_replace ... ok
+test save::tests::automation_block_entities_roundtrip_and_snapshot_preserves_runtime_state ... ok
+test save::tests::block_entity_save_and_restore_roundtrip ... ok
+test save::tests::block_states_roundtrip_and_restore ... ok
+test save::tests::chunk_saved_without_redstone_sidecar_loads_as_empty_metadata ... ok
+test save::tests::corrupt_existing_region_is_never_overwritten ... ok
+test save::tests::current_dimension_sidecar_roundtrips_and_defaults_to_overworld ... ok
+test save::tests::dimension_chunk_namespaces_are_independent ... ok
+test save::tests::enchanted_potion_stack_metadata_roundtrips ... ok
+test save::tests::enqueue_failure_restores_in_flight_revision_to_dirty ... ok
+test save::tests::flush_propagates_io_failure_and_keeps_chunk_dirty_for_retry ... ok
+test save::tests::latest_revision_replaces_older_pending_snapshot ... ok
+test save::tests::legacy_redstone_sidecar_preserves_fields_and_defaults_latch ... ok
+test save::tests::migration_fixture_legacy_0_to_255_preserves_data_and_creates_backup ... ok
+test save::tests::missing_region_load_does_not_create_phantom_lru_keys ... ok
+test save::tests::mutation_index_and_unloaded_snapshot_source_survive_reload ... ok
+test save::tests::mutation_revision_index_reclaim_is_revision_safe_and_frees_capacity ... ok
+test save::tests::mutation_revision_index_refuses_new_coordinate_at_capacity ... ok
+test save::tests::mutation_revision_index_roundtrip_preserves_highest_revision ... ok
+test save::tests::offhand_save_roundtrip_and_legacy_migration ... ok
+test save::tests::paused_worker_sustained_latest_wins_stays_bounded_in_items_and_bytes ... ok
+test save::tests::previous_bincode_player_fixture_migrates_without_a_cursor ... ok
+test save::tests::real_cursors_roundtrip_and_catalog_cursors_do_not_persist ... ok
+test save::tests::redstone_metadata_sidecar_roundtrips_through_save_and_load ... ok
+test save::tests::salvage_copies_only_readable_chunks_without_mutating_source ... ok
+test save::tests::same_region_batch_crash_child ... ignored, helper subprocess for same_region_batch_survives_process_crash_before_and_after_replace
+test save::tests::same_region_batch_faults_replace_atomically_and_preserve_sibling_on_restart ... ok
+test save::tests::same_region_batch_survives_process_crash_before_and_after_replace ... ok
+test save::tests::saved_chunk_restores_player_placed_blocks ... ok
+test save::tests::serialization_failure_is_propagated_and_retryable ... ok
+test save::tests::stale_ack_cannot_clear_a_newer_dirty_revision ... ok
+test save::tests::test_corrupt_region_file_is_not_overwritten_on_save_failure ... ok
+test save::tests::test_entity_save_data_roundtrip ... ok
+test save::tests::test_plan04_save_roundtrip_and_migration ... ok
+test save::tests::test_save_manager_entities_persistence ... ok
+test save::tests::test_serialization_roundtrips ... ok
+test save::tests::versioned_player_codec_preserves_real_cursor_metadata_and_provenance ... ok
+test save::tests::worker_panic_is_acked_as_error_and_snapshot_is_retained ... ok
+test server_runtime::tests::authority_gameplay_round_trips_through_dedicated_player_save ... ok
+test server_runtime::tests::complete_session_health_death_inventory_and_xp_reach_local_projection_once ... ok
+test server_runtime::tests::dimension_interest_and_session_transfer_are_isolated ... ok
+test server_runtime::tests::disconnect_reconnect_loads_atomic_player_state ... ok
+test server_runtime::tests::embedded_interest_fanout_is_private_dimension_safe_and_exactly_once ... ok
+test server_runtime::tests::headless_two_sessions_share_one_authoritative_sequence ... ok
+test server_runtime::tests::invalid_properties_fail_before_world_creation ... ok
+test server_runtime::tests::opening_new_container_replaces_old_session_and_preserves_other_viewers ... ok
+test server_runtime::tests::presentation_saturation_preserves_ack_and_session_and_stays_bounded ... ok
+test server_runtime::tests::properties_roundtrip_and_whitelist_are_deterministic ... ok
+test server_runtime::tests::request_deduplication_and_out_of_order_are_authoritative ... ok
+test server_runtime::tests::respawn_updates_authority_dimension_and_position ... ok
+test server_runtime::tests::runtime_pose_validation_rejects_regression_and_speed_but_allows_server_teleport ... ok
+test server_runtime::tests::save_failure_is_reported_and_retry_keeps_original_path ... ok
+test server_world::tests::authoritative_dispense_skips_unloaded_front_without_consumption ... ok
+test server_world::tests::authoritative_dispenser_matrix_preserves_payload_and_revisions ... ok
+test server_world::tests::authoritative_dropper_insert_is_merge_first_and_fallback_is_one_item ... ok
+test server_world::tests::block_mutation_changes_real_chunk_and_revision ... ok
+test server_world::tests::bucket_rejects_flowing_or_falling_source_without_consumption ... ok
+test server_world::tests::checksum_distinguishes_raw_fluid_mutations ... ok
+test server_world::tests::chest_block_break_emits_dimension_scoped_closures ... ok
+test server_world::tests::chest_first_and_last_viewer_toggle_authoritative_state ... ok
+test server_world::tests::difficulty_controls_hostile_policy_without_binding_pvp_or_spawn_rule ... ok
+test server_world::tests::dispenser_invalid_entity_id_is_atomic_and_bucket_consumes_one_with_rollback ... ok
+test server_world::tests::double_chest_open_publishes_partner_state_mutation ... ok
+test server_world::tests::fixed_tick_checksum_is_deterministic ... ok
+test server_world::tests::forced_last_viewer_closes_chest_once_and_other_viewer_keeps_it_open ... ok
+test server_world::tests::malformed_combat_action_is_explicitly_rejected ... ok
+test server_world::tests::mount_requires_range_and_updates_authoritative_passengers ... ok
+test server_world::tests::trade_second_cost_failure_rolls_back_first_cost ... ok
+test sim_harness::tests::checksum_domains_are_covered ... ok
+test sim_harness::tests::fps_is_deterministic ... ok
+test sim_harness::tests::high_speed_player_collision_is_bounded ... ok
+test sim_harness::tests::remove_item_count_consumes_items_in_all_profiles ... ok
+test sim_harness::tests::workflow_mutates_inventory_and_block_entities ... ok
+test spawning::tests::test_far_distance_despawns ... ok
+test spawning::tests::test_mob_category_caps ... ok
+test spawning::tests::test_peaceful_despawns_hostile ... ok
+test spawning::tests::test_persistent_entity_does_not_despawn ... ok
+test state::authority_policy_tests::host_clamps_remote_pose_before_echoing_authoritative_correction ... ok
+test state::authority_policy_tests::host_client_sixty_second_entity_checksum_converges_without_client_spawns ... ok
+test state::authority_policy_tests::multiplayer_host_keeps_world_ticks_running_while_paused_or_dead ... ok
+test state::authority_policy_tests::replicated_entity_samples_interpolate_without_mutating_authority ... ok
+test state::authority_policy_tests::singleplayer_pause_and_death_still_stop_world_ticks ... ok
+test state::authority_projection_tests::session_inventory_projection_preserves_rich_stack_metadata ... ok
+test state::camera_input_tests::continuous_mining_requires_unblocked_survival_input ... ok
+test state::camera_input_tests::cursor_position_still_maps_to_ui_coordinates ... ok
+test state::camera_input_tests::every_gameplay_blocker_disables_camera_look ... ok
+test state::creative_flight_input_tests::disabled_or_reset_tracker_cannot_prearm_creative_flight ... ok
+test state::creative_flight_input_tests::double_tap_toggles_only_inside_the_window ... ok
+test state::creative_flight_input_tests::only_descending_onto_the_ground_exits_flight ... ok
+test state::creative_flight_input_tests::repeat_does_not_count_as_a_second_tap ... ok
+test state::creative_flight_input_tests::successful_double_tap_starts_a_fresh_pair ... ok
+test state::debug_tests::chat_history_evicts_the_oldest_message ... ok
+test state::debug_tests::chat_messages_are_trimmed_sanitized_and_bounded ... ok
+test state::debug_tests::client_block_change_is_classified_as_host_authority ... ok
+test state::debug_tests::creative_can_break_end_portal_while_survival_cannot ... ok
+test state::debug_tests::creative_layout_is_only_used_without_a_station_or_crafting_table ... ok
+test state::debug_tests::creative_tabs_catalog_scrollbar_and_hotbar_do_not_overlap ... ok
+test state::debug_tests::debug_chunk_coordinates_handle_negative_world_positions ... ok
+test state::debug_tests::debug_overlay_font_supports_every_required_character ... ok
+test state::debug_tests::disconnect_cleanup_removes_only_remote_player_entities ... ok
+test state::debug_tests::door_and_trapdoor_placement_states_and_hinges ... ok
+test state::debug_tests::embedded_runtime_poses_use_monotonic_sender_time ... ok
+test state::debug_tests::embedded_runtime_uses_world_player_profile_and_fifo_ack ... ok
+test state::debug_tests::every_biome_has_a_debug_name ... ok
+test state::debug_tests::fov_adjustment_updates_base_fov_and_camera_fov ... ok
+test state::debug_tests::friendly_arrow_damage_settles_lethal_rewards_exactly_once ... ok
+test state::debug_tests::friendly_arrows_destroy_end_crystals_without_standard_mob_rewards ... ok
+test state::debug_tests::full_inventory_generates_exactly_one_world_drop_at_the_source ... ok
+test state::debug_tests::generated_item_stored_in_inventory_does_not_duplicate_as_a_drop ... ok
+test state::debug_tests::host_inbound_block_request_preserves_authenticated_player_id ... ok
+test state::debug_tests::initial_world_load_is_bounded_independently_of_render_distance ... ok
+test state::debug_tests::invulnerable_melee_target_consumes_impact_without_damage_or_knockback ... ok
+test state::debug_tests::melee_impact_applies_damage_knockback_fire_and_reports_lethal_hits ... ok
+test state::debug_tests::melee_targeting_filters_noncombat_entities_and_selects_the_nearest_living_target ... ok
+test state::debug_tests::name_tag_projection_rejects_invalid_clip_space ... ok
+test state::debug_tests::network_handle_preserves_client_chat_and_disconnect_payloads ... ok
+test state::debug_tests::one_point_melee_hit_destroys_end_crystal ... ok
+test state::debug_tests::pause_weather_volume_and_quit_hit_regions_do_not_overlap ... ok
+test state::debug_tests::primary_press_decision_controls_block_fallback_and_held_mining_latch ... ok
+test state::debug_tests::splash_effects_ignore_nonliving_entities_but_affect_living_targets ... ok
+test state::debug_tests::state_text_helper_uses_bitmap_override_and_builtin_fallback ... ok
+test state::debug_tests::terrain_translucent_pipeline_is_double_sided ... ok
+test state::debug_tests::terrain_vertex_layout_exposes_ambient_occlusion ... ok
+test state::debug_tests::test_flower_breaks_and_pops_when_ground_is_destroyed ... ok
+test state::gpu_timestamp_state_tests::capability_requires_timestamp_query_and_inside_passes ... ok
+test state::gpu_timestamp_state_tests::transitions_are_ordered_and_failure_is_recoverable ... ok
+test state::gpu_timestamp_state_tests::two_submission_tagged_slots_cannot_be_reused_while_mapping_or_mapped ... ok
+test state::reach_tests::block_at_exact_reach_distance_passes ... ok
+test state::reach_tests::block_at_tolerance_boundary_passes ... ok
+test state::reach_tests::block_center_uses_half_offset ... ok
+test state::reach_tests::block_far_away_is_rejected ... ok
+test state::reach_tests::block_just_beyond_tolerance_is_rejected ... ok
+test state::reach_tests::block_within_tolerance_passes ... ok
+test state::reach_tests::calculate_block_break_rewards_harvest_and_drops ... ok
+test state::reach_tests::calculate_block_break_rewards_mature_and_immature_crops ... ok
+test state::reach_tests::diagonal_neighbor_block_passes ... ok
+test state::reach_tests::inventory_click_outside_and_close_overflow_tests ... ok
+test state::reach_tests::negative_coordinates_use_block_center_offset ... ok
+test state::reach_tests::same_position_block_passes ... ok
+test state::reach_tests::validate_remote_block_request_close_snapshot_passes ... ok
+test state::reach_tests::validate_remote_block_request_destroy_close_passes_and_far_rejected ... ok
+test state::reach_tests::validate_remote_block_request_empty_snapshots_rejected ... ok
+test state::reach_tests::validate_remote_block_request_far_snapshot_rejected ... ok
+test state::reach_tests::validate_remote_block_request_unknown_requester_rejected ... ok
+test state::remote_sync_tests::batched_pose_arrivals_keep_sender_cadence ... ok
+test state::remote_sync_tests::boundary_and_diagonal_ao_dependencies_queue_once ... ok
+test state::remote_sync_tests::buffered_twenty_hz_motion_samples_smoothly_at_high_frame_rate ... ok
+test state::remote_sync_tests::container_revision_order_rejects_duplicates_and_accepts_wraparound ... ok
+test state::remote_sync_tests::extrapolation_is_speed_limited_and_stops_after_one_hundred_ms ... ok
+test state::remote_sync_tests::interpolation_midpoint_and_clamps ... ok
+test state::remote_sync_tests::latest_wins_state_is_sequence_aware_per_key ... ok
+test state::remote_sync_tests::mesh_invalidation_queues_latest_revision_and_invalidates_connectivity ... ok
+test state::remote_sync_tests::mesh_snapshot_owns_the_neighbor_halo ... ok
+test state::remote_sync_tests::mutation_scheduler_worker_chain_commits_only_the_latest_visible_revision ... ok
+test state::remote_sync_tests::network_burst_budget_leaves_persistent_backlog ... ok
+test state::remote_sync_tests::network_event_and_byte_caps_are_explicit_and_measurable ... ok
+test state::remote_sync_tests::placement_uses_latest_authoritative_snapshot_before_side_effects ... ok
+test state::remote_sync_tests::reliable_events_remain_strict_fifo_until_eventual_delivery ... ok
+test state::remote_sync_tests::remote_block_change_updates_light_and_boundary_mesh_dependencies ... ok
+test state::remote_sync_tests::remote_block_entity_delta_applies_and_respects_monotonic_revisions ... ok
+test state::remote_sync_tests::runtime_mesh_mutations_cannot_bypass_the_invalidation_api ... ok
+test state::remote_sync_tests::sequence_order_handles_duplicates_old_packets_and_wraparound ... ok
+test state::remote_sync_tests::snapshots_reject_invalid_duplicate_and_out_of_order_data ... ok
+test state::remote_sync_tests::teleport_or_long_gap_clears_history_and_snaps ... ok
+test state::remote_sync_tests::terrain_shader_module_passes_wgpu_validation ... ok
+test state::remote_sync_tests::terrain_worker_tokens_reject_stale_generation_lifetime_and_revision ... ok
+test state::remote_sync_tests::unknown_remote_pose_blocks_only_solid_placement ... ok
+test state::render_region_lifecycle_tests::active_chunk_count_changes_only_for_resident_mesh_in_current_region ... ok
+test state::render_region_lifecycle_tests::arena_rebuild_is_limited_to_empty_grown_regions ... ok
+test state::render_region_lifecycle_tests::stale_region_instance_and_stale_tokens_are_rejected ... ok
+test state::sprint_policy_tests::creative_sprint_ignores_hunger_and_exhaustion ... ok
+test state::sprint_policy_tests::survival_sprint_keeps_hunger_and_exhaustion_rules ... ok
+test structure::gen::dungeon::tests::negative_coordinates_have_deterministic_non_panicking_loot_seeds ... ok
+test structure::locate::tests::test_locate_stronghold_deterministic ... ok
+test structure::manager::tests::test_apply_structures_to_chunk ... ok
+test structure::manager::tests::test_structure_manager_determinism ... ok
+test tests::microbench_flag_is_selected_without_affecting_other_args ... ok
+test texture::tests::filled_end_portal_frame_composites_eye_over_opaque_frame ... ok
+test texture::tests::redstone_torch_sprite_has_transparent_background_and_thin_artwork ... ok
+test texture::tests::resource_pack_atlas_applies_real_textures ... ok
+test texture::tests::resource_pack_tiles_are_unique ... ok
+test texture::tests::vanilla_end_portal_frame_side_texture_is_available ... ok
+test texture::tests::vanilla_ender_dragon_texture_is_available ... ok
+test texture::tests::vanilla_enderman_textures_are_available ... ok
+test vehicle::tests::test_capacity_limit ... ok
+test vehicle::tests::test_dismount_all ... ok
+test vehicle::tests::test_mount_cycle_detection ... ok
+test village::poi::tests::test_poi_chunk_unload ... ok
+test village::poi::tests::test_poi_registration_and_claim ... ok
+test village::poi::tests::test_village_clustering ... ok
+test village::raid::tests::test_raid_trigger_and_wave_advancement ... ok
+test village::trade::tests::test_offer_generation ... ok
+test village::trade::tests::test_trade_discount ... ok
+test village::trade::tests::test_villager_level_thresholds ... ok
+test voxel_shape::tests::empty_shape_has_no_boxes ... ok
+test voxel_shape::tests::fence_has_correct_box_count ... ok
+test voxel_shape::tests::full_cube_is_full_occluder ... ok
+test voxel_shape::tests::non_full_blocks_have_empty_occlusion ... ok
+test voxel_shape::tests::ray_intersects_full_cube ... ok
+test voxel_shape::tests::ray_intersects_full_cube_from_negative_direction_returns_facing_normal ... ok
+test voxel_shape::tests::ray_intersects_slab_bottom ... ok
+test voxel_shape::tests::ray_misses_empty_shape ... ok
+test voxel_shape::tests::slab_bottom_is_not_full_occluder ... ok
+test voxel_shape::tests::stair_north_has_two_boxes ... ok
+test voxel_shape::tests::stair_ray_hits_step_and_passes_gap ... ok
+test voxel_shape::tests::translate_shifts_all_boxes ... ok
+test weather::tests::client_snapshot_never_advances_phase_or_schedules_lightning ... ok
+test weather::tests::desert_is_dry_and_cold_biomes_snow ... ok
+test weather::tests::invalid_snapshot_is_rejected_without_mutating_client_weather ... ok
+test weather::tests::presentation_randomness_does_not_change_authority_sequence ... ok
+test weather::tests::random_durations_stay_between_half_and_one_day ... ok
+test weather::tests::thunder_schedules_a_flash_and_strike ... ok
+test weather::tests::weather_cycles_in_the_required_order ... ok
+test weather::tests::wire_values_and_seeded_visuals_are_deterministic ... ok
+test world::tests::ambient_occlusion_levels_match_occluder_counts ... ok
+test world::tests::ao_diagonal_selection_preserves_face_winding ... ok
+test world::tests::ao_samples_follow_every_face_and_corner_direction ... ok
+test world::tests::block_state_encoding_roundtrip ... ok
+test world::tests::block_type_from_wire_rejects_unknown_values ... ok
+test world::tests::block_type_wire_roundtrip_covers_all_variants ... ok
+test world::tests::cactus_mesh_generation_bounds_and_quad_count ... ok
+test world::tests::chunk_block_entity_operations ... ok
+test world::tests::chunk_memory_usage_tracks_section_promotion_and_demotion ... ok
+test world::tests::chunk_section_metadata_counts ... ok
+test world::tests::contextual_plant_support_enforces_water_and_lateral_clearance ... ok
+test world::tests::contextual_plant_support_reports_unknown_for_missing_neighbor_chunks ... ok
+test world::tests::cross_model_blocks_generate_x_mesh ... ok
+test world::tests::door_mesh_generation_bounds_and_quad_count ... ok
+test world::tests::end_portal_frame_and_surface_use_lower_minecraft_heights ... ok
+test world::tests::end_portal_frames_use_distinct_top_side_and_filled_top_tiles ... ok
+test world::tests::generated_mesh_writes_ao_for_isolated_and_occluded_vertices ... ok
+test world::tests::greedy_meshing_does_not_merge_different_light_or_material ... ok
+test world::tests::greedy_meshing_merges_equal_faces_and_repeats_the_atlas_tile ... ok
+test world::tests::l0_volume_respects_section_extent_bounds ... ok
+test world::tests::legacy_generate_mesh_matches_l0_adapter_fixture ... ok
+test world::tests::light_storage_packing_and_nibbles ... ok
+test world::tests::mesh_voxel_render_inputs_flow_through_core ... ok
+test world::tests::only_solid_opaque_blocks_cast_ambient_occlusion ... ok
+test world::tests::optional_arrays_release_when_zero ... ok
+test world::tests::paletted_block_storage_transitions ... ok
+test world::tests::production_mesh_entries_apply_selected_tiles_and_keep_default_fallback ... ok
+test world::tests::randomized_storage_matches_flat_oracle_after_compact ... ok
+test world::tests::redstone_torch_variants_use_thin_torch_mesh_and_redstone_tile ... ok
+test world::tests::section_bundle_builds_distinct_bounded_lods_and_preserves_identity ... ok
+test world::tests::section_compaction_is_deferred_to_safe_point ... ok
+test world::tests::section_halo_occludes_boundary_neighbor ... ok
+test world::tests::section_safe_point_immediately_demotes_empty_and_uniform_storage ... ok
+test world::tests::section_safe_point_immediately_demotes_uniform_light_storage ... ok
+test world::tests::snow_layer_mesh_is_one_eighth_of_a_block_high ... ok
+test world::tests::storage_compact_demotes_and_preserves_values ... ok
+test world::tests::surface_lod_merges_flat_skirts_and_coarsens_varied_terrain ... ok
+test world::tests::test_biome_distribution ... ok
+test world::tests::test_block_harvest_properties ... ok
+test world::tests::test_cave_entrances ... ok
+test world::tests::test_cave_generation ... ok
+test world::tests::test_find_safe_spawn_position_fallback ... ok
+test world::tests::test_fluid_level_encoding ... ok
+test world::tests::test_ore_clustering ... ok
+test world::tests::test_plant_support_requirements ... ok
+test world::tests::test_tree_placement_bounds ... ok
+test world::tests::torch_index_tracks_local_mutations_without_duplicates ... ok
+test world::tests::torch_mesh_has_minecraft_bounds_and_six_outward_faces ... ok
+test world::tests::torch_mesh_uses_inset_face_uvs_inside_its_atlas_tile ... ok
+test world::tests::torch_mesh_uses_source_light_without_ao_or_face_shading ... ok
+test world::tests::torch_properties_and_floor_support_semantics_are_preserved ... ok
+test world::tests::trapdoor_mesh_generation_open_and_closed_bounds ... ok
+test world::tests::weather_blocks_have_expected_collision_and_light ... ok
+test world::tests::world_seed_changes_generated_terrain ... ok
+test world_mutation::tests::test_batch_mutation_all_or_nothing ... ok
+test world_mutation::tests::test_batch_mutation_with_block_entity ... ok
+test world_tick::tests::hopper_cycle_obeys_transfer_budget_and_sorted_order ... ok
+test world_tick::tests::hopper_does_not_consume_across_unloaded_chunk_boundary ... ok
+test world_tick::tests::hopper_failed_destination_is_atomic_and_preserves_metadata ... ok
+test world_tick::tests::hopper_full_chain_smelts_and_conserves_items ... ok
+test world_tick::tests::hopper_pulls_one_dropped_item_with_full_stack_metadata ... ok
+test world_tick::tests::powered_hopper_is_disabled_without_consuming_source ... ok
+test world_tick::tests::test_cactus_growth ... ok
+test world_tick::tests::test_deterministic_rng_reproducibility ... ok
+test world_tick::tests::test_falling_sand ... ok
+test world_tick::tests::test_farmland_degradation_when_covered ... ok
+test world_tick::tests::test_farmland_hydration_mutation ... ok
+test world_tick::tests::test_grass_decay_when_covered ... ok
+test world_tick::tests::test_hopper_transfer_chain_smelting ... ok
+test world_tick::tests::test_leaf_decay_without_log ... ok
+test world_tick::tests::test_leaf_preservation_with_log ... ok
+test world_tick::tests::test_water_nearby_detection ... ok
+test worldgen::carver::tests::carving_is_deterministic ... ok
+test worldgen::carver::tests::carving_respects_bounds ... ok
+test worldgen::carver::tests::lava_lakes_only_deep ... ok
+test worldgen::climate::tests::all_16_biomes_are_reachable ... ok
+test worldgen::climate::tests::climate_samples_are_deterministic ... ok
+test worldgen::climate::tests::deep_ocean_is_below_ocean ... ok
+test worldgen::climate::tests::desert_and_badlands_are_dry_hot ... ok
+test worldgen::climate::tests::different_seeds_produce_different_climate ... ok
+test worldgen::climate::tests::jungle_and_swamp_are_hot_humid ... ok
+test worldgen::climate::tests::snowy_plains_and_taiga_are_cold ... ok
+test worldgen::density::tests::cave_detection_is_bounded ... ok
+test worldgen::density::tests::density_is_deterministic ... ok
+test worldgen::density::tests::surface_height_within_world_bounds ... ok
+test worldgen::feature::tests::feature_placement_is_deterministic ... ok
+test worldgen::ore::tests::ore_configs_cover_negative_y ... ok
+test worldgen::ore::tests::ore_placement_is_deterministic ... ok
+test worldgen::surface::tests::block_for_column_handles_water ... ok
+test worldgen::surface::tests::every_biome_has_surface_data ... ok
+test worldgen::tests::adjacent_chunk_surface_height_continuity ... ok
+test worldgen::tests::chunk_generation_is_byte_identical_across_threads ... ok
+
+test result: ok. 830 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 532.69s
+
+     Running unittests src\bin\icraft-server.rs (target\debug\deps\icraft_server-3c92ca8b72439e6e.exe)
+
+running 2 tests
+test tests::cli_management_fields_are_strict_and_normalized ... ok
+test tests::invalid_world_path_fails_before_runtime_creation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\authority_gameplay_domains.rs (target\debug\deps\authority_gameplay_domains-635bca0b3e83538b.exe)
+
+running 3 tests
+test combat_death_respawn_and_entity_loot_are_authoritative ... ok
+test fishing_fixed_tick_reel_is_atomic_and_idempotent ... ok
+test workstation_transactions_cover_brew_ready_take_and_exact_sources ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.59s
+
+     Running tests\authority_persistence.rs (target\debug\deps\authority_persistence-21ad8c3fff3e4069.exe)
+
+running 3 tests
+test authoritative_chunks_and_entities_roundtrip_with_revisions ... ok
+test dedicated_player_file_roundtrips_current_dimension_and_effects ... ok
+test runtime_reconnects_dimension_and_routes_without_cross_dimension_leak ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.02s
+
+     Running tests\difficulty_authority.rs (target\debug\deps\difficulty_authority-48f4000d7ebf4c39.exe)
+
+running 3 tests
+test difficulty_persists_through_server_properties_and_embedded_dedicated_parity ... ok
+test difficulty_policy_is_observable_and_existing_hostiles_are_not_frozen_by_gamerule ... ok
+test server_difficulty_is_strict_and_pvp_remains_independent ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.43s
+
+     Running tests\headless_server_authority.rs (target\debug\deps\headless_server_authority-88b2efab13a39f5d.exe)
+
+running 2 tests
+test tcp_dispenser_drop_projection_converges_complete_item_metadata ... ok
+test two_clients_share_headless_authority_with_revision_interest_and_reconnect ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.48s
+
+     Running tests\passive_mob_tests.rs (target\debug\deps\passive_mob_tests-b634aa9812a0cbcb.exe)
+
+running 1 test
+test test_placeholder ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\plan30_real_transport_acceptance.rs (target\debug\deps\plan30_real_transport_acceptance-a7dd2ebd47515472.exe)
+
+running 2 tests
+test plan30_embedded_singleplayer_contract_matches_domain_assertions ... ok
+test plan30_real_tcp_gameplay_vector_listen_and_dedicated ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s
+
+     Running tests\plan31_authoritative_block_actions.rs (target\debug\deps\plan31_authoritative_block_actions-7b2f5ac86abbe752.exe)
+
+running 3 tests
+test plan31_dedicated_tcp_typed_block_action_projection ... ok
+test plan31_embedded_typed_block_action_projection ... ok
+test plan31_listen_tcp_typed_block_action_projection ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.57s
+
+     Running tests\plan32_progression_travel.rs (target\debug\deps\plan32_progression_travel-60ad7b8a8a438e7b.exe)
+
+running 5 tests
+test dedicated_tcp_combat_completes_generated_dragon_lifecycle ... ok
+test dedicated_tcp_typed_portal_travel_is_owner_private_and_persistent ... ok
+test generated_end_city_loot_is_lazy_revisioned_and_persistent ... ok
+test listen_tcp_typed_portal_travel_is_owner_private_and_persistent ... ok
+test singleplayer_typed_nether_activation_and_transfer ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.61s
+
+     Running tests\plan33_tcp_fishing_lifecycle.rs (target\debug\deps\plan33_tcp_fishing_lifecycle-3977ccb4b03789cf.exe)
+
+running 3 tests
+test plan33_dedicated_tcp_fishing_lifecycle_uses_latest_owner_revision ... ok
+test plan33_embedded_fishing_lifecycle_matches_revision_contract ... ok
+test plan33_listen_tcp_fishing_lifecycle_uses_latest_owner_revision ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.01s
+
+     Running tests\plan34_container_break_inventory_conservation.rs (target\debug\deps\plan34_container_break_inventory_conservation-95f96bc936ef6332.exe)
+
+running 4 tests
+test authority_matrix_conserves_two_noncontiguous_metadata_stacks_and_retries ... ok
+test double_chest_break_only_drops_target_half ... ok
+test stale_state_failure_preserves_container_and_session_resources ... ok
+test tcp_listen_and_dedicated_container_breaks_conserve_projection_and_reload ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.37s
+
+     Running tests\runtime_topology_parity.rs (target\debug\deps\runtime_topology_parity-31811cc3a8f03343.exe)
+
+running 6 tests
+test disabled_singleplayer_drains_local_request_through_fixed_tick_fifo ... ok
+test legacy_constructor_remains_dedicated_listen_runtime ... ok
+test listen_runtime_routes_local_response_to_tick_output ... ok
+test plan24_plan22_gameplay_vectors_match_all_runtime_topologies ... ok
+test plan28_dispenser_item_projection_matches_all_runtime_topologies ... ok
+test world_player_storage_loads_and_rewrites_legacy_player_dat ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.34s
+
+     Running tests\waterlogging_authority.rs (target\debug\deps\waterlogging_authority-d3fe73ebfa81debe.exe)
+
+running 5 tests
+test bucket_does_not_replace_passable_plant_at_adjacent_face ... ok
+test bucket_place_pickup_is_atomic_and_duplicate_idempotent ... ok
+test fluid_mutation_projection_is_topology_independent_and_stale_is_noop ... ok
+test malformed_face_is_rejected_before_world_or_inventory_mutation ... ok
+test raw_fluid_survives_v3_save_and_packet_roundtrip ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.12s
+
+   Doc-tests icraft
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== END 08/13/2026 13:49:19 EXIT=0 ELAPSED=00:19:50.1683205 ===
