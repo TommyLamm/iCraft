@@ -27,8 +27,9 @@
   dragon completion、operator progression command 與 transfer intent 的唯一權威來源。
 - 世界生成尊重 persisted world type/structure policy；generated Nether fortress 與固定
   End City chest 首次開啟才 materialize loot，並配置 revision、projection 與 save payload。
-- 真 TCP vectors 驗證 cached duplicate ACK、stale revision rejection、owner-only transfer、
-  observer interest privacy，以及 disconnect/reconnect 後維持 Nether dimension。
+- 真 TCP vectors 驗證 server cached duplicate ACK、client-visible replay suppression、stale
+  revision rejection、owner-only transfer、observer interest privacy，以及
+  disconnect/reconnect 後維持 Nether dimension。
 - Dedicated TCP dragon vector 只透過 typed command/pose/combat ingress 殺死生成的 dragon，
   再驗證 3x3 exit fountain、dragon egg 與 End gateway 的權威 completion mutations。
 
@@ -39,6 +40,9 @@
   （5 passed）。
 - `cargo check --all-targets`、`cargo check --release --locked`、
   `cargo fmt --all -- --check` 與 `git diff --check` 通過。
+- 2026-08-13 corrective：portal duplicate 改以 duplicate metric + authority byte-identical
+  cache 驗證，並確認 `NetworkClient` 不再次 surface 已進 app queue 的 ACK；Plan32
+  debug/release 各 5/5 通過。
 - 詳細證據：`artifacts/plan32_20260812_verification.md`。
 
 ## 實作檔案與測試

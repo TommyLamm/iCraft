@@ -327,16 +327,17 @@ fn run_tcp_travel(label: &str, listen: bool) {
         wait_for_response(&mut runtime, &mut refs, 0, 1)
     };
     assert!(matches!(first.outcome, GameplayOutcome::Accepted { .. }));
+    let duplicate_before = runtime.metrics.duplicate_requests;
     clients[0].send_request(enter);
     {
         let mut refs: Vec<_> = clients.iter_mut().collect();
-        assert_eq!(wait_for_response(&mut runtime, &mut refs, 0, 1), first);
         drive_until(
             &mut runtime,
             &mut refs,
-            "Plan32 TCP portal transfer",
+            "Plan32 cached portal duplicate and TCP transfer",
             |runtime, views| {
-                runtime.players[&owner].dimension == Dimension::Nether
+                runtime.metrics.duplicate_requests > duplicate_before
+                    && runtime.players[&owner].dimension == Dimension::Nether
                     && views[0].events().iter().any(|event| {
                         matches!(
                             event,
@@ -347,6 +348,18 @@ fn run_tcp_travel(label: &str, listen: bool) {
             },
         );
     }
+    assert_eq!(
+        runtime
+            .authority
+            .session(owner)
+            .and_then(|session| session.cached_response(1)),
+        Some(first),
+        "Plan32 duplicate must retain the byte-identical authority ACK"
+    );
+    assert!(
+        clients[0].take_response(1).is_none(),
+        "NetworkClient must not surface an already-observed portal ACK twice"
+    );
     assert!(!clients[1]
         .events()
         .iter()
