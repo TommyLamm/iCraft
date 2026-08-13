@@ -5,4 +5,5 @@ target2/
 .worktrees/
 saves/
 settings.txt
+controls.config
 performance/reports/**/profiles/
