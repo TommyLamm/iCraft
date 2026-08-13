@@ -7,8 +7,10 @@ pub mod interest;
 pub mod mining;
 pub mod transactions;
 
+use crate::block_entity::BlockEntity;
 use crate::dimension::Dimension;
 use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
+use crate::inventory::ItemStack;
 use crate::network::protocol::{
     BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
     PlayerId, RejectReason, SessionSlotWire,
@@ -1116,17 +1118,55 @@ impl AuthorityCore {
                 }
             }
         }
+        // A block-entity-backed container is removed by set_block(Air).  Copy
+        // its complete non-empty stacks only after every session-side
+        // preflight above has succeeded, and keep the source entity untouched
+        // until the block mutation commits.
+        let mut drops = rewards.drops;
+        if let Some(block_entity) = self.world.get_block_entity(target.0, target.1, target.2) {
+            let slots: Box<dyn Iterator<Item = &ItemStack> + '_> = match block_entity {
+                BlockEntity::Chest(chest) => Box::new(chest.inventory.slots.iter().flatten()),
+                BlockEntity::Furnace(furnace) => Box::new(furnace.slots.iter().flatten()),
+                BlockEntity::Hopper(hopper) => Box::new(hopper.slots.iter().flatten()),
+                BlockEntity::Dispenser(dispenser) => Box::new(dispenser.slots.iter().flatten()),
+                BlockEntity::Dropper(dropper) => Box::new(dropper.slots.iter().flatten()),
+                BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {
+                    Box::new(std::iter::empty())
+                }
+            };
+            drops.extend(slots.filter(|stack| stack.count > 0).copied());
+        }
         // Reserve every entity id before changing source or inventory. Gaps in
         // the global allocator are harmless; reusing an id after a failed
-        // request would not be.
-        let mut entity_ids = Vec::with_capacity(rewards.drops.len() + usize::from(rewards.xp > 0));
-        for _ in &rewards.drops {
+        // request would not be. Prepare all dropped entities first: no
+        // presentation snapshot can interleave with this synchronous commit,
+        // and rollback keeps a failed mutation from losing a prepared drop.
+        let mut entity_ids = Vec::with_capacity(drops.len());
+        for _ in &drops {
             let candidate = self.next_unique_entity_id();
             if candidate == 0 {
                 return false;
             }
             self.claim_entity_id(candidate);
             entity_ids.push(candidate);
+        }
+        let drop_position = [
+            target.0 as f32 + 0.5,
+            target.1 as f32 + 0.5,
+            target.2 as f32 + 0.5,
+        ];
+        let mut prepared_ids = Vec::with_capacity(entity_ids.len());
+        for (entity_id, stack) in entity_ids.iter().copied().zip(drops.iter().copied()) {
+            if !self
+                .world
+                .spawn_dropped_item(entity_id, drop_position, stack)
+            {
+                for prepared_id in prepared_ids {
+                    self.world.remove_authority_entity(prepared_id);
+                }
+                return false;
+            }
+            prepared_ids.push(entity_id);
         }
         let Ok(Some(mutation)) = self.world.set_block(
             target.0,
@@ -1135,20 +1175,12 @@ impl AuthorityCore {
             crate::world::BlockType::Air,
             0,
         ) else {
+            for prepared_id in prepared_ids {
+                self.world.remove_authority_entity(prepared_id);
+            }
             return false;
         };
         self.pending_mutations.push(mutation);
-        let drop_position = [
-            target.0 as f32 + 0.5,
-            target.1 as f32 + 0.5,
-            target.2 as f32 + 0.5,
-        ];
-        for (entity_id, stack) in entity_ids.into_iter().zip(rewards.drops) {
-            let spawned = self
-                .world
-                .spawn_dropped_item(entity_id, drop_position, stack);
-            debug_assert!(spawned);
-        }
         if let Some(session) = self.sessions.get_mut(&id) {
             session.gameplay = next_gameplay;
             session.gameplay.revision = mutation.revision;

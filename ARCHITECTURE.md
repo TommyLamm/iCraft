@@ -688,6 +688,20 @@ do not advance the client-authored `last_revision` baseline. Embedded, Listen TC
 tests cover cast-to-nibble-to-reel, loot/XP/rod durability, cached duplicates, cancel, owner privacy,
 and continued stale/out-of-order rejection.
 
+Plan34 closes the bounded container-break inventory conservation seam. Before
+`AuthorityCore::commit_mining_break` mutates a Chest, Furnace, Hopper, Dispenser, or
+Dropper to Air, it snapshots every non-empty slot as the complete `ItemStack` value;
+block and container drops reserve their entity IDs together and prepare all dropped
+entities before the Air mutation. Any prepare or mutation failure rolls back prepared
+entities and leaves the source block entity intact; only a successful Air mutation
+commits the pending mutation and session result. The block-entity removal remains the same authoritative mutation
+and is projected as `BlockEntityDelta(None)`, while the existing `EntityStateWire.item`
+path carries durability, enchantments, potion, custom-name, count, and Adventure masks
+without a protocol bump. Authority and real TCP Listen/Dedicated evidence cover cached
+duplicates, stale requests, owner/observer interest convergence, owner-private session
+isolation, reconnect, and save/shutdown/reload. Full vanilla scatter behavior and
+repo-wide suite results remain outside this bounded Plan34 record.
+
 Use:
 
 ```text

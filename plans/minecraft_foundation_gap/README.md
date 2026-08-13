@@ -106,7 +106,7 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 31 | [權威方塊操作與採礦](31_authoritative_block_actions_mining.md) | 已完成；typed BlockAction v18、owner-private progress wire、Singleplayer/Listen/Dedicated TCP 三拓撲 Block/Drop/XP projection 均通過 |
 | 32 | [進度旅行與完成閉環](32_progression_travel_completion.md) | 已完成；typed portal/dimension travel、dragon completion、fortress/End City loot 與 Singleplayer/Listen/Dedicated 真 ingress/egress 均通過 |
 | 33 | [TCP 釣魚生命週期 revision](33_tcp_fishing_lifecycle_revision.md) | 已完成；fresh TCP input 綁定最新 owner revision，自主 fixed tick 不污染 client-authored baseline；Embedded/Listen/Dedicated cast→reel、duplicate/cancel、loot/XP/耐久、privacy 與 stale/out-of-order 均通過 |
-| 34 | [容器破壞內容物守恆](34_container_break_inventory_conservation.md) | 待執行；補非空 Chest/Furnace/Hopper/Dispenser/Dropper 被權威破壞時完整 ItemStack 掉落、duplicate/reconnect/save 守恆；Plan31 只完成 BE removal，不宣稱內容物守恆 |
+| 34 | [容器破壞內容物守恆](34_container_break_inventory_conservation.md) | 已完成 bounded authority/TCP evidence；五類容器完整 ItemStack metadata/count 掉落、atomic BE removal、duplicate/stale/reconnect/save 守恆；Listen/Dedicated owner/observer projection 通過 |
 
 官方資料也佐證上述族群屬於基礎體驗：
 
@@ -159,6 +159,14 @@ owner-private MiningProgressWire, fixed-tick mining progress, and single-commit
 block drop & XP conservation. All 3 tests in `tests/plan31_authoritative_block_actions.rs`
 (Embedded, Listen TCP, Dedicated TCP) pass in release mode. Library suite 698/698 tests pass.
 `cargo check --release --all-targets`, `cargo fmt --all -- --check`, and `git diff --check` pass cleanly.
+
+Plan34 focused serial evidence (2026-08-13) is recorded in
+`artifacts/plan34_20260813_verification.md`: the authority matrix covers non-empty
+Chest/Furnace/Hopper/Dispenser/Dropper stacks with full metadata/count conservation,
+cached duplicate and stale no-op behavior; one real TCP vector runs both Listen and
+Dedicated, checks owner/observer EntitySpawn/EntityState plus `BlockEntityDelta(None)`,
+observer privacy, reconnect, and save/shutdown/reload. This is bounded Plan34 evidence,
+not a repo-wide full-suite claim.
 
 ## 5. 執行規則
 
