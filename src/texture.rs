@@ -1615,6 +1615,27 @@ fn apply_resource_pack_with_manager(img: &mut RgbaImage, manager: &mut ResourceP
     }
 }
 
+/// Restore the local/remote player skin tiles after the general resource-pack
+/// pass. Player rendering uses atlas slots that do not overlap Piglin/Husk,
+/// preventing the F5 avatar from inheriting a hostile-mob head.
+fn compose_player_head_tiles_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
+    const SKIN_PATH: &str = "entity/player/wide/steve.png";
+    let Some(bytes) = manager.resolve_texture(SKIN_PATH) else {
+        return;
+    };
+    let Ok(source) = image::load_from_memory(&bytes) else {
+        return;
+    };
+
+    for tile in [
+        pack_tile_region(15, 8, SKIN_PATH, 8, 8, 8, 8), // head front
+        pack_tile_region(13, 8, SKIN_PATH, 24, 8, 8, 8), // head hair/back
+        pack_tile_region(15, 9, SKIN_PATH, 44, 20, 4, 12), // right arm front
+    ] {
+        paste_pack_tile(img, &tile, &source);
+    }
+}
+
 fn compose_enderman_eyes_with_manager(img: &mut RgbaImage, manager: &mut ResourcePackManager) {
     let Some(bytes) = manager.resolve_texture("entity/enderman/enderman_eyes.png") else {
         return;
@@ -2691,6 +2712,7 @@ impl TextureAtlas {
         // Overlay selected resource packs over the procedural base. Missing
         // assets retain the generated fallback so partial packs are safe.
         apply_resource_pack_with_manager(&mut img, manager);
+        compose_player_head_tiles_with_manager(&mut img, manager);
         compose_enderman_eyes_with_manager(&mut img, manager);
         make_enderman_tiles_opaque(&mut img);
         make_dragon_tiles_opaque(&mut img);
@@ -2853,6 +2875,7 @@ mod tests {
         }
         let mut img = RgbaImage::new(256, 256);
         apply_resource_pack_with_manager(&mut img, &mut manager);
+        compose_player_head_tiles_with_manager(&mut img, &mut manager);
         compose_enderman_eyes_with_manager(&mut img, &mut manager);
         make_enderman_tiles_opaque(&mut img);
         make_dragon_tiles_opaque(&mut img);

@@ -15,7 +15,7 @@ use crate::authority::interest::{
 };
 use crate::authority::{AuthorityConfig, AuthorityCore, DimensionTransferIntent};
 use crate::dimension::Dimension;
-use crate::game_rules::{ServerDifficulty, WorldRules};
+use crate::game_rules::{persisted_player_game_mode, ServerDifficulty, WorldRules};
 use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
     ContainerAction, EntityStateWire, GameplayOperation, GameplayOutcome, GameplayRequest,
@@ -856,6 +856,7 @@ pub struct ServerRuntime {
     routed_mutations: BTreeSet<(Dimension, u64)>,
     world_dir: PathBuf,
     save_manager: SaveManager,
+    default_game_mode: GameMode,
     host_tx: Option<SyncSender<HostToServer>>,
     host_rx: Receiver<ServerToHost>,
     network_thread: Option<JoinHandle<()>>,
@@ -905,17 +906,28 @@ impl ServerRuntime {
             )));
         }
         let save_manager = SaveManager::new(&world_dir);
-        let mut level = save_manager
-            .load_level()
-            .map_err(ServerConfigError::Io)?
-            .unwrap_or_else(|| LevelData {
-                seed: properties.seed as u32,
-                rules: WorldRules {
-                    pvp: properties.pvp,
-                    ..WorldRules::default()
-                },
-                ..LevelData::default()
-            });
+        let creation = crate::menu::load_world_creation_options(&world_dir);
+        let existing_level = save_manager.load_level().map_err(ServerConfigError::Io)?;
+        let mut level = existing_level.unwrap_or_else(|| LevelData {
+            seed: properties.seed as u32,
+            rules: WorldRules {
+                pvp: properties.pvp,
+                hardcore: creation.hardcore,
+                ..WorldRules::default()
+            },
+            world_type: creation.world_type,
+            generate_structures: creation.generate_structures,
+            bonus_chest: creation.bonus_chest,
+            cheats_enabled: creation.cheats_enabled,
+            hardcore: creation.hardcore,
+            ..LevelData::default()
+        });
+        // `world.meta` is the creation-time source of truth for cheats. The
+        // first binary level save used to drop that flag because LevelData
+        // defaulted cheats off, which then disabled `/gamemode` on reload.
+        if creation.cheats_enabled {
+            level.cheats_enabled = true;
+        }
         // `server.properties` is the live authority configuration.  A saved
         // level may carry an older rule snapshot, but connection/runtime
         // policy must still apply the operator's pvp setting before
@@ -923,6 +935,10 @@ impl ServerRuntime {
         // separate server-owned value so adding it does not invalidate old
         // binary level payloads.
         level.rules.pvp = properties.pvp;
+        if creation.hardcore {
+            level.hardcore = true;
+            level.rules.hardcore = true;
+        }
         level.rules = level.rules.normalized();
         let (server_to_host_tx, host_rx) = mpsc::sync_channel(HOST_EVENT_QUEUE_CAPACITY);
         let network_metrics = NetworkMetrics::default();
@@ -958,6 +974,7 @@ impl ServerRuntime {
             authority,
             world_dir,
             save_manager,
+            default_game_mode: creation.game_mode,
             host_tx,
             host_rx,
             network_thread: None,
@@ -1671,12 +1688,25 @@ impl ServerRuntime {
             LocalSessionStorage::Named => self
                 .save_manager
                 .load_dedicated_player(&username)?
-                .map(|file| (file.data, file.current_dimension, file.effects))
+                .map(|file| {
+                    let mut data = file.data;
+                    data.game_mode = persisted_player_game_mode(
+                        data.game_mode,
+                        self.default_game_mode,
+                        self.level.cheats_enabled,
+                    );
+                    (data, file.current_dimension, file.effects)
+                })
                 .unwrap_or_else(|| self.default_player_payload()),
             LocalSessionStorage::WorldPlayer => {
                 let player_path = self.world_dir.join("player.dat");
                 if player_path.exists() {
-                    let (_saved_level, data) = self.save_manager.load_player_and_level()?;
+                    let (_saved_level, mut data) = self.save_manager.load_player_and_level()?;
+                    data.game_mode = persisted_player_game_mode(
+                        data.game_mode,
+                        self.default_game_mode,
+                        self.level.cheats_enabled,
+                    );
                     // The legacy world-player format has no effect vector;
                     // effects start empty until that schema gains one.
                     (data, self.save_manager.load_current_dimension(), Vec::new())
@@ -1824,7 +1854,7 @@ impl ServerRuntime {
     }
 
     fn default_player_payload(&self) -> (PlayerData, Dimension, Vec<PlayerEffectWire>) {
-        let data = default_player_data();
+        let data = default_player_data(self.default_game_mode);
         let dimension = data.spawn_dimension.unwrap_or(self.level.spawn_dimension);
         (data, dimension, Vec::new())
     }
@@ -3204,16 +3234,19 @@ fn gamemode_wire(level: &LevelData) -> u8 {
     0
 }
 
-fn default_player_data() -> PlayerData {
+fn default_player_data(game_mode: GameMode) -> PlayerData {
     let state = crate::player::PlayerState::new();
-    let inventory = Inventory::new();
+    let inventory = match game_mode {
+        GameMode::Creative => Inventory::new_creative(),
+        GameMode::Survival | GameMode::Adventure | GameMode::Spectator => Inventory::new(),
+    };
     PlayerData::from_state(
         Vec3::new(8.0, 80.0, 8.0),
         Vec3::ZERO,
         0.0,
         0.0,
         &state,
-        GameMode::Survival,
+        game_mode,
         &inventory,
         Default::default(),
     )
@@ -3404,6 +3437,123 @@ mod tests {
             EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(99, "local")),
         )
         .unwrap()
+    }
+
+    fn write_world_meta(
+        world_dir: &Path,
+        game_mode: GameMode,
+        cheats_enabled: bool,
+    ) -> io::Result<()> {
+        fs::create_dir_all(world_dir)?;
+        fs::write(
+            world_dir.join("world.meta"),
+            format!(
+                "name:TEST\nseed:1\ngame_mode:{}\ndifficulty:NORMAL\nlast_played:0\nworld_type:DEFAULT\ngenerate_structures:true\nbonus_chest:false\ncheats_enabled:{cheats_enabled}\nhardcore:false\nversion:3\nneeds_upgrade:false\n",
+                match game_mode {
+                    GameMode::Creative => "CREATIVE",
+                    GameMode::Survival => "SURVIVAL",
+                    GameMode::Adventure => "ADVENTURE",
+                    GameMode::Spectator => "SPECTATOR",
+                }
+            ),
+        )
+    }
+
+    fn embedded_runtime_in(world_dir: PathBuf) -> (ServerRuntime, RuntimeInput) {
+        let mut properties = ServerProperties::default();
+        properties.bind = "127.0.0.1".into();
+        properties.port = 25580;
+        properties.view_distance = 2;
+        properties.simulation_distance = 2;
+        properties.world_dir = world_dir;
+        ServerRuntime::new_embedded(
+            properties,
+            EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(99, "local")),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn creative_world_meta_seeds_new_player_and_survives_reload() {
+        let world_dir = temp_dir("creative_persist");
+        write_world_meta(&world_dir, GameMode::Creative, false).unwrap();
+
+        let (mut runtime, _input) = embedded_runtime_in(world_dir.clone());
+        assert_eq!(
+            runtime.authority.session(99).unwrap().game_mode,
+            GameMode::Creative
+        );
+        assert!(!runtime.level.cheats_enabled);
+        runtime.shutdown().unwrap();
+        drop(runtime);
+
+        let (mut restored, _input) = embedded_runtime_in(world_dir.clone());
+        assert_eq!(
+            restored.authority.session(99).unwrap().game_mode,
+            GameMode::Creative
+        );
+        assert!(!restored.level.cheats_enabled);
+        restored.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn creative_world_recovers_player_dat_forced_to_survival() {
+        let world_dir = temp_dir("creative_recover");
+        write_world_meta(&world_dir, GameMode::Creative, false).unwrap();
+        let manager = SaveManager::new(&world_dir);
+        manager
+            .save_player_and_level(
+                &LevelData::default(),
+                &default_player_data(GameMode::Survival),
+            )
+            .unwrap();
+
+        let (mut runtime, _input) = embedded_runtime_in(world_dir.clone());
+        assert_eq!(
+            runtime.authority.session(99).unwrap().game_mode,
+            GameMode::Creative
+        );
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn world_meta_cheats_survive_first_level_save() {
+        let world_dir = temp_dir("cheats_persist");
+        write_world_meta(&world_dir, GameMode::Creative, true).unwrap();
+
+        let (mut runtime, _input) = embedded_runtime_in(world_dir.clone());
+        assert!(runtime.level.cheats_enabled);
+        assert!(runtime.authority.session(99).unwrap().cheats_enabled);
+        runtime.shutdown().unwrap();
+        drop(runtime);
+
+        let (mut restored, _input) = embedded_runtime_in(world_dir.clone());
+        assert!(restored.level.cheats_enabled);
+        assert!(restored.authority.session(99).unwrap().cheats_enabled);
+        restored.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn cheats_world_keeps_saved_survival_after_mode_change() {
+        let world_dir = temp_dir("cheats_keep_survival");
+        write_world_meta(&world_dir, GameMode::Creative, true).unwrap();
+        let manager = SaveManager::new(&world_dir);
+        let mut level = LevelData::default();
+        level.cheats_enabled = true;
+        manager
+            .save_player_and_level(&level, &default_player_data(GameMode::Survival))
+            .unwrap();
+
+        let (mut runtime, _input) = embedded_runtime_in(world_dir.clone());
+        assert_eq!(
+            runtime.authority.session(99).unwrap().game_mode,
+            GameMode::Survival
+        );
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
     }
 
     #[test]

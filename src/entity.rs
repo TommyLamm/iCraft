@@ -211,6 +211,7 @@ impl EntityType {
                 | Self::Slime
                 | Self::Witch
                 | Self::Drowned
+                | Self::Enderman
         )
     }
 

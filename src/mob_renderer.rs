@@ -3,17 +3,15 @@ use crate::entity::{Entity, EntityManager, EntityType};
 use crate::state::Vertex;
 use glam::Vec3;
 
-/// Per-face atlas columns for the player head on row 9:
-/// [Front, Back, Left, Right, Top, Bottom]. The front is a drawn face
-/// (eyes/nose/mouth with a hair fringe), back and top are full hair, the
-/// sides are skin with hair and an ear, and the bottom is plain skin.
-pub const PLAYER_HEAD_COLS: [u32; 6] = [11, 13, 12, 12, 14, 15];
-pub const PLAYER_HEAD_ROW: u32 = 9;
+/// Per-face atlas columns for the player head on row 8:
+/// [Front, Back, Left, Right, Top, Bottom]. Column 15 contains Steve's face;
+/// column 13 contains the hair/back crop used for every non-front face.
+pub const PLAYER_HEAD_COLS: [u32; 6] = [15, 13, 13, 13, 13, 13];
+pub const PLAYER_HEAD_ROW: u32 = 8;
 
-/// Atlas column and row for the player arm tile on row 8 col 13: a teal
-/// shirt sleeve at the shoulder end with bare skin below.
-pub const PLAYER_ARM_COL: u32 = 13;
-pub const PLAYER_ARM_ROW: u32 = 8;
+/// Atlas column and row for Steve's right-arm front crop.
+pub const PLAYER_ARM_COL: u32 = 15;
+pub const PLAYER_ARM_ROW: u32 = 9;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -329,6 +327,7 @@ fn add_flat_sprite(
     size: f32,
     center: Vec3,
     yaw: f32,
+    pitch: f32,
     tex_col: u32,
     tex_row: u32,
     light_val: f32,
@@ -338,7 +337,7 @@ fn add_flat_sprite(
         size: [size, size, 1.0],
         offset: [0.0, 0.0, 0.0],
         rot_yaw: yaw,
-        rot_pitch: 0.0,
+        rot_pitch: pitch,
         tex_cols_packed: pack_tex_cols([tex_col; 6]),
         tex_row,
         light_level: light_val,
@@ -375,13 +374,15 @@ pub fn render_local_player_legacy(
     velocity: Vec3,
 ) {
     let mut cuboids = Vec::new();
-    let quads = Vec::new();
+    let mut quads = Vec::new();
     render_local_player(
         position,
         yaw,
         pitch,
         chunk_manager,
         &mut cuboids,
+        &mut quads,
+        crate::inventory::Item::Air,
         time,
         velocity,
     );
@@ -1662,6 +1663,7 @@ pub fn render_mobs<'a>(
                         0.35,
                         entity.position + Vec3::new(0.0, 0.3 + y_offset, 0.0),
                         yaw,
+                        0.0,
                         col,
                         row,
                         light_val,
@@ -1737,6 +1739,22 @@ pub fn render_mobs<'a>(
                     PLAYER_ARM_ROW,
                     light_val,
                 );
+
+                // Slightly larger upper-arm overlays reproduce Steve's shirt
+                // sleeves instead of leaving bare shoulders in F5 view.
+                for (x, pitch) in [(-0.375, -swing), (0.375, swing)] {
+                    add_cuboid(
+                        cuboid_instances,
+                        Vec3::new(0.27, 0.28, 0.27),
+                        Vec3::new(0.0, -0.09, 0.0),
+                        to_world(Vec3::new(x, 1.3, 0.0)),
+                        entity.yaw,
+                        pitch,
+                        [2; 6],
+                        9,
+                        light_val,
+                    );
+                }
 
                 add_cuboid(
                     cuboid_instances,
@@ -2267,6 +2285,8 @@ pub fn render_local_player(
     pitch: f32,
     chunk_manager: &ChunkManager,
     cuboid_instances: &mut Vec<MobInstance>,
+    quad_instances: &mut Vec<MobInstance>,
+    held_item: crate::inventory::Item,
     time: f32,
     velocity: Vec3,
 ) {
@@ -2348,6 +2368,56 @@ pub fn render_local_player(
         light_val,
     );
 
+    // Minecraft's skin model has a separate sleeve layer over the upper arm.
+    // Keep it slightly larger than the arm so the clothing remains visible
+    // from the front, back, and side while the arm swings.
+    for (x, arm_pitch) in [(-0.375, -swing), (0.375, swing)] {
+        add_cuboid(
+            cuboid_instances,
+            Vec3::new(0.27, 0.28, 0.27),
+            Vec3::new(0.0, -0.09, 0.0),
+            to_world(Vec3::new(x, 1.3, 0.0)),
+            yaw,
+            arm_pitch,
+            [2; 6],
+            9,
+            light_val,
+        );
+    }
+
+    // Attach the selected hotbar item to the right hand. Its center follows
+    // the arm pitch so it stays in the player's grip while walking.
+    if held_item != crate::inventory::Item::Air {
+        let arm_pitch = -swing;
+        let grip_offset = Vec3::new(0.0, -0.68 * arm_pitch.cos(), -0.68 * arm_pitch.sin());
+        let held_center = to_world(Vec3::new(-0.375, 1.3, 0.0) + grip_offset);
+        let (col, row) = held_item.properties().tex_coords;
+        if held_item.renders_flat() {
+            add_flat_sprite(
+                quad_instances,
+                0.42,
+                held_center,
+                yaw,
+                arm_pitch,
+                col,
+                row,
+                light_val,
+            );
+        } else {
+            add_cuboid(
+                cuboid_instances,
+                Vec3::splat(0.28),
+                Vec3::ZERO,
+                held_center,
+                yaw,
+                arm_pitch,
+                [col; 6],
+                row,
+                light_val,
+            );
+        }
+    }
+
     // Legs (zombie dark blue pants)
     add_cuboid(
         cuboid_instances,
@@ -2378,7 +2448,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_player_renders_as_six_cuboids() {
+    fn remote_player_renders_body_and_two_sleeve_layers() {
         let mut entities = EntityManager::new();
         entities.spawn(EntityType::RemotePlayer, Vec3::new(4.0, 8.0, -2.0));
         let chunks = ChunkManager::new(1);
@@ -2387,15 +2457,15 @@ mod tests {
 
         render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 0.0);
 
-        assert_eq!(vertices.len(), 6 * 24);
-        assert_eq!(indices.len(), 6 * 36);
+        assert_eq!(vertices.len(), 8 * 24);
+        assert_eq!(indices.len(), 8 * 36);
         assert!(vertices
             .iter()
             .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
     }
 
     #[test]
-    fn local_player_renders_as_six_cuboids() {
+    fn local_player_renders_body_and_two_sleeve_layers() {
         let chunks = ChunkManager::new(1);
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
@@ -2411,11 +2481,81 @@ mod tests {
             Vec3::ZERO,
         );
 
-        assert_eq!(vertices.len(), 6 * 24);
-        assert_eq!(indices.len(), 6 * 36);
+        assert_eq!(vertices.len(), 8 * 24);
+        assert_eq!(indices.len(), 8 * 36);
         assert!(vertices
             .iter()
             .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
+    }
+
+    #[test]
+    fn local_player_uses_player_skin_slots_instead_of_husk_head_slots() {
+        let chunks = ChunkManager::new(1);
+        let mut instances = Vec::new();
+        let mut quads = Vec::new();
+        render_local_player(
+            Vec3::new(0.0, 64.0, 0.0),
+            0.0,
+            0.0,
+            &chunks,
+            &mut instances,
+            &mut quads,
+            crate::inventory::Item::Air,
+            0.0,
+            Vec3::ZERO,
+        );
+
+        assert_eq!(instances[0].tex_row, PLAYER_HEAD_ROW);
+        assert_eq!(
+            instances[0].tex_cols_packed,
+            pack_tex_cols(PLAYER_HEAD_COLS)
+        );
+        for arm in &instances[2..=3] {
+            assert_eq!(arm.tex_row, PLAYER_ARM_ROW);
+            assert_eq!(arm.tex_cols_packed, pack_tex_cols([PLAYER_ARM_COL; 6]));
+        }
+        for sleeve in &instances[4..=5] {
+            assert_eq!(sleeve.tex_row, 9);
+            assert_eq!(sleeve.tex_cols_packed, pack_tex_cols([2; 6]));
+            assert!(sleeve.size[0] > instances[2].size[0]);
+        }
+    }
+
+    #[test]
+    fn local_player_renders_selected_block_and_flat_item_in_right_hand() {
+        let chunks = ChunkManager::new(1);
+
+        let mut block_instances = Vec::new();
+        let mut block_quads = Vec::new();
+        render_local_player(
+            Vec3::new(0.0, 64.0, 0.0),
+            0.0,
+            0.0,
+            &chunks,
+            &mut block_instances,
+            &mut block_quads,
+            crate::inventory::Item::Stone,
+            0.0,
+            Vec3::ZERO,
+        );
+        assert_eq!(block_instances.len(), 9);
+        assert!(block_quads.is_empty());
+
+        let mut item_instances = Vec::new();
+        let mut item_quads = Vec::new();
+        render_local_player(
+            Vec3::new(0.0, 64.0, 0.0),
+            0.0,
+            0.0,
+            &chunks,
+            &mut item_instances,
+            &mut item_quads,
+            crate::inventory::Item::EyeOfEnder,
+            0.0,
+            Vec3::ZERO,
+        );
+        assert_eq!(item_instances.len(), 8);
+        assert_eq!(item_quads.len(), 1);
     }
 
     #[test]

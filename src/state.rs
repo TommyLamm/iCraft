@@ -203,7 +203,7 @@ fn closest_melee_target(
         return None;
     }
     let direction = direction.normalize();
-    const MELEE_TYPES: [crate::entity::EntityType; 19] = [
+    const MELEE_TYPES: [crate::entity::EntityType; 20] = [
         crate::entity::EntityType::Zombie,
         crate::entity::EntityType::Skeleton,
         crate::entity::EntityType::Creeper,
@@ -218,6 +218,7 @@ fn closest_melee_target(
         crate::entity::EntityType::EnderDragon,
         crate::entity::EntityType::Wither,
         crate::entity::EntityType::EndCrystal,
+        crate::entity::EntityType::Enderman,
         crate::entity::EntityType::Villager,
         crate::entity::EntityType::IronGolem,
         crate::entity::EntityType::Pillager,
@@ -2375,6 +2376,7 @@ impl State {
         self.lava_tick_timer = 0.0;
         self.lava_damage_timer = 0.0;
         self.cactus_damage_timer = 0.0;
+        self.boss_maintenance_timer = 0.0;
         self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
 
         let cx = (destination.x / CHUNK_WIDTH as f32).floor() as i32;
@@ -2496,6 +2498,7 @@ impl State {
         self.lava_tick_timer = 0.0;
         self.lava_damage_timer = 0.0;
         self.cactus_damage_timer = 0.0;
+        self.boss_maintenance_timer = 0.0;
         self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
     }
 
@@ -3196,6 +3199,13 @@ impl EmbeddedRuntimeBridge {
 
     fn session_id(&self) -> crate::network::protocol::PlayerId {
         self.session_id
+    }
+
+    fn session_game_mode(&self) -> Option<crate::inventory::GameMode> {
+        self.runtime
+            .authority
+            .session(self.session_id)
+            .map(|session| session.game_mode)
     }
 
     fn topology(&self) -> AuthorityTopology {
@@ -5515,6 +5525,75 @@ impl NetworkHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CameraPerspective {
+    #[default]
+    FirstPerson,
+    ThirdPersonBack,
+    ThirdPersonFront,
+}
+
+impl CameraPerspective {
+    pub fn next(self) -> Self {
+        match self {
+            Self::FirstPerson => Self::ThirdPersonBack,
+            Self::ThirdPersonBack => Self::ThirdPersonFront,
+            Self::ThirdPersonFront => Self::FirstPerson,
+        }
+    }
+
+    pub fn is_third_person(self) -> bool {
+        self != Self::FirstPerson
+    }
+}
+
+fn perspective_camera_transform(
+    perspective: CameraPerspective,
+    yaw: f32,
+    pitch: f32,
+) -> (Vec3, f32, f32) {
+    let forward = Vec3::new(
+        yaw.cos() * pitch.cos(),
+        pitch.sin(),
+        yaw.sin() * pitch.cos(),
+    )
+    .normalize_or_zero();
+    match perspective {
+        CameraPerspective::FirstPerson => (Vec3::ZERO, yaw, pitch),
+        CameraPerspective::ThirdPersonBack => (-forward * 4.0, yaw, pitch),
+        CameraPerspective::ThirdPersonFront => (forward * 4.0, yaw + std::f32::consts::PI, -pitch),
+    }
+}
+
+#[cfg(test)]
+mod camera_perspective_tests {
+    use super::*;
+
+    #[test]
+    fn f5_cycles_like_minecraft() {
+        let first = CameraPerspective::FirstPerson;
+        let back = first.next();
+        let front = back.next();
+        assert_eq!(back, CameraPerspective::ThirdPersonBack);
+        assert_eq!(front, CameraPerspective::ThirdPersonFront);
+        assert_eq!(front.next(), CameraPerspective::FirstPerson);
+    }
+
+    #[test]
+    fn front_camera_sits_ahead_and_looks_back_at_player() {
+        let (offset, view_yaw, view_pitch) =
+            perspective_camera_transform(CameraPerspective::ThirdPersonFront, 0.35, -0.2);
+        let view_forward = Vec3::new(
+            view_yaw.cos() * view_pitch.cos(),
+            view_pitch.sin(),
+            view_yaw.sin() * view_pitch.cos(),
+        )
+        .normalize();
+        assert!((offset.length() - 4.0).abs() < 1e-5);
+        assert!(offset.normalize().dot(view_forward) < -0.999);
+    }
+}
+
 pub struct State {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -5579,6 +5658,10 @@ pub struct State {
     pub inventory: Inventory,
     pub recipe_manager: RecipeManager,
     pub left_mouse_pressed: bool,
+    /// Visible primary-action swing timing, kept separate from the Survival
+    /// mining latch so air swings, Creative hits, and melee still animate.
+    hand_swing_started_at: f32,
+    hand_swing_until: f32,
     pub mining_target: Option<glam::Vec3>,
     pub mining_progress: f32,
     /// Held-stack identity latched with the typed StartBreak ingress. This
@@ -5594,9 +5677,8 @@ pub struct State {
     pub void_damage_timer: f32,
     pub world_time: crate::camera::WorldTime,
     pub show_debug: bool,
-    /// F5 toggles third-person camera. When true the local player model is
-    /// rendered and the camera sits behind the player.
-    pub third_person: bool,
+    /// F5 cycles first person, third-person back, and third-person front.
+    pub camera_perspective: CameraPerspective,
     pub entity_manager: crate::entity::EntityManager,
     pub mount_manager: crate::vehicle::MountManager,
     pub fishing_manager: crate::fishing::FishingManager,
@@ -5661,6 +5743,7 @@ pub struct State {
     pub lava_tick_timer: f32,
     pub lava_damage_timer: f32,
     pub cactus_damage_timer: f32,
+    boss_maintenance_timer: f32,
     pub save_manager: std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>,
     pub save_tx: crate::save::SaveQueue,
     save_queue_stats: std::sync::Arc<crate::save::SaveQueueStats>,
@@ -6218,7 +6301,7 @@ impl State {
             world_type = level.world_type;
             generate_structures = level.generate_structures;
             bonus_chest = level.bonus_chest;
-            cheats_enabled = level.cheats_enabled;
+            cheats_enabled = level.cheats_enabled || creation_options.cheats_enabled;
             player_physics.position = Vec3::from_slice(&player.position);
             player_physics.velocity = Vec3::from_slice(&player.velocity);
             camera_yaw = player.yaw;
@@ -6235,7 +6318,11 @@ impl State {
             player_state.bad_omen_level = player.bad_omen_level;
             player_state.hero_of_the_village_timer = player.hero_of_the_village_timer;
             player_state.is_dead = player.is_dead;
-            game_mode = player.game_mode;
+            game_mode = crate::game_rules::persisted_player_game_mode(
+                player.game_mode,
+                launch.game_mode,
+                cheats_enabled,
+            );
             inventory = player.inventory.to_inventory();
             advancement_progress = player.advancements;
         }
@@ -7061,18 +7148,20 @@ impl State {
             mapped_at_creation: false,
         });
 
-        // First-person hand buffers. Only a few dozen vertices are ever needed,
-        // so keep them small and preallocated.
+        // First-person hand buffers. Minecraft-style extruded tool silhouettes
+        // need a few hundred vertices, still well below these fixed limits.
         let hand_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Hand Vertex Buffer"),
-            size: (std::mem::size_of::<Vertex>() * 1024) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<Vertex>() * crate::hand_renderer::HAND_VERTEX_CAPACITY)
+                as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let hand_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Hand Index Buffer"),
-            size: (std::mem::size_of::<u32>() * 1536) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<u32>() * crate::hand_renderer::HAND_INDEX_CAPACITY)
+                as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -7404,6 +7493,8 @@ impl State {
             inventory,
             recipe_manager: RecipeManager::new(),
             left_mouse_pressed: false,
+            hand_swing_started_at: 0.0,
+            hand_swing_until: 0.0,
             mining_target: None,
             mining_progress: 0.0,
             mining_held: None,
@@ -7414,7 +7505,7 @@ impl State {
             void_damage_timer: 0.0,
             world_time,
             show_debug,
-            third_person: false,
+            camera_perspective: CameraPerspective::FirstPerson,
             entity_manager: crate::entity::EntityManager::new(),
             mount_manager: crate::vehicle::MountManager::new(),
             fishing_manager: crate::fishing::FishingManager::new(),
@@ -7469,6 +7560,7 @@ impl State {
             lava_tick_timer: 0.0,
             lava_damage_timer: 0.0,
             cactus_damage_timer: 0.0,
+            boss_maintenance_timer: 0.0,
             save_manager,
             save_tx,
             save_queue_stats,
@@ -10567,6 +10659,15 @@ impl State {
             let response = self.submit_local_authority_command(input);
             let feedback = match response.as_ref().map(|response| &response.outcome) {
                 Some(crate::network::protocol::GameplayOutcome::Accepted { .. }) => {
+                    if matches!(&command, Command::GameMode { .. }) {
+                        if let Some(mode) = self
+                            .embedded_runtime
+                            .as_ref()
+                            .and_then(EmbeddedRuntimeBridge::session_game_mode)
+                        {
+                            self.set_game_mode(mode);
+                        }
+                    }
                     if matches!(&command, Command::GameRule { .. }) {
                         self.broadcast_world_rules();
                         self.translate("command.game_rule_updated_authority")
@@ -12828,13 +12929,17 @@ impl State {
                 && self.world_rules.do_mob_spawning
                 && self.game_mode_policy().can_target_mobs
             {
-                crate::boss::ensure_dimension_entities(
-                    self.current_dimension,
-                    &mut self.entity_manager,
-                    &self.chunk_manager,
-                    self.player_physics.position,
-                    self.total_time,
-                );
+                self.boss_maintenance_timer -= dt;
+                if self.boss_maintenance_timer <= 0.0 {
+                    crate::boss::ensure_dimension_entities(
+                        self.current_dimension,
+                        &mut self.entity_manager,
+                        &self.chunk_manager,
+                        self.player_physics.position,
+                        self.total_time,
+                    );
+                    self.boss_maintenance_timer = 1.0;
+                }
                 let boss_events = crate::boss::update_dimension_entities(
                     self.current_dimension,
                     &mut self.entity_manager,
@@ -13820,18 +13925,13 @@ impl State {
             .lerp(self.player_physics.position, alpha);
 
         let eye_height = if self.keys.shift { 1.4 } else { 1.6 };
-        if self.third_person {
-            let forward = Vec3::new(
-                self.camera.yaw.cos() * self.camera.pitch.cos(),
-                self.camera.pitch.sin(),
-                self.camera.yaw.sin() * self.camera.pitch.cos(),
-            )
-            .normalize_or_zero();
-            self.camera.position =
-                interp_player_pos + Vec3::new(0.0, eye_height, 0.0) - forward * 4.0;
-        } else {
-            self.camera.position = interp_player_pos + Vec3::new(0.0, eye_height, 0.0);
-        }
+        let player_eye = interp_player_pos + Vec3::new(0.0, eye_height, 0.0);
+        let (camera_offset, view_yaw, view_pitch) = perspective_camera_transform(
+            self.camera_perspective,
+            self.camera.yaw,
+            self.camera.pitch,
+        );
+        self.camera.position = player_eye + camera_offset;
         // Keep gameplay/raycast camera coordinates canonical, and apply bob
         // only to a render copy.  This makes camera bob observable while
         // preserving movement, mining and authority calculations exactly.
@@ -13844,13 +13944,14 @@ impl State {
         let bob = crate::accessibility::camera_bob_offset(
             self.total_time,
             horizontal_speed,
-            self.settings.accessibility.camera_bobbing && !self.third_person,
+            self.settings.accessibility.camera_bobbing
+                && !self.camera_perspective.is_third_person(),
         );
         let camera_right = Vec3::new(-self.camera.yaw.sin(), 0.0, self.camera.yaw.cos());
         let presentation_camera = Camera::new(
             self.camera.position + camera_right * bob[0] + Vec3::Y * bob[1],
-            self.camera.yaw,
-            self.camera.pitch,
+            view_yaw,
+            view_pitch,
             self.camera.fov,
         );
         let is_underwater = self.chunk_manager.get_block(
@@ -16362,6 +16463,8 @@ impl State {
     }
 
     pub fn handle_primary_press(&mut self) -> bool {
+        self.hand_swing_started_at = self.total_time;
+        self.hand_swing_until = self.total_time + 0.25;
         let melee_consumed = if self.has_in_process_runtime() || !self.is_authoritative() {
             self.submit_local_authority_combat()
         } else {
@@ -20207,13 +20310,18 @@ impl State {
         self.perf_counters.frustum_culled_entities = entities_frustum_culled;
         self.perf_counters.occlusion_culled_entities = entities_occlusion_culled;
 
-        if self.third_person {
+        if self.camera_perspective.is_third_person() {
+            let held_item = self.inventory.hotbar[self.inventory.selected]
+                .map(|stack| stack.item)
+                .unwrap_or(Item::Air);
             crate::mob_renderer::render_local_player(
                 self.player_physics.position,
                 std::f32::consts::FRAC_PI_2 - self.camera.yaw,
                 -self.camera.pitch,
                 &self.chunk_manager,
                 &mut self.mob_cuboid_instances_scratch,
+                &mut self.mob_quad_instances_scratch,
+                held_item,
                 self.total_time,
                 self.player_physics.velocity,
             );
@@ -20293,7 +20401,7 @@ impl State {
 
         // Compile first-person hand mesh in view space. Hidden in third-person.
         let hand_prepare_started = Instant::now();
-        if !self.third_person {
+        if !self.camera_perspective.is_third_person() {
             let speed_2d = Vec3::new(
                 self.player_physics.velocity.x,
                 0.0,
@@ -20306,7 +20414,11 @@ impl State {
             } else {
                 0.0
             };
-            let attack_swing = if self.left_mouse_pressed { 1.0 } else { 0.0 };
+            let swing_active = self.left_mouse_pressed || self.total_time < self.hand_swing_until;
+            let attack_swing = crate::hand_renderer::hand_swing_progress(
+                (self.total_time - self.hand_swing_started_at).max(0.0),
+                swing_active,
+            );
             let mesh_key = crate::hand_renderer::hand_mesh_key(&self.inventory);
             if crate::hand_renderer::should_rebuild_hand_mesh(self.last_hand_mesh_key, mesh_key) {
                 self.last_hand_mesh_key = Some(mesh_key);
@@ -20315,22 +20427,28 @@ impl State {
                     &mut self.hand_vertices_scratch,
                     &mut self.hand_indices_scratch,
                 );
+                let hand_vertices_len = self.hand_vertices_scratch.len();
                 let hand_indices_len = self.hand_indices_scratch.len();
-                self.hand_num_indices = hand_indices_len as u32;
-                if hand_indices_len > 0 {
-                    let vert_limit = self.hand_vertices_scratch.len().min(1024);
-                    let ind_limit = hand_indices_len.min(1536);
-                    self.hand_num_indices = ind_limit as u32;
+                let mesh_fits_buffers = hand_vertices_len
+                    <= crate::hand_renderer::HAND_VERTEX_CAPACITY
+                    && hand_indices_len <= crate::hand_renderer::HAND_INDEX_CAPACITY
+                    && self
+                        .hand_indices_scratch
+                        .iter()
+                        .all(|index| (*index as usize) < hand_vertices_len);
+                self.hand_num_indices = 0;
+                if hand_indices_len > 0 && mesh_fits_buffers {
+                    self.hand_num_indices = hand_indices_len as u32;
                     let upload_started = Instant::now();
                     self.queue.write_buffer(
                         &self.hand_vertex_buffer,
                         0,
-                        bytemuck::cast_slice(&self.hand_vertices_scratch[..vert_limit]),
+                        bytemuck::cast_slice(&self.hand_vertices_scratch),
                     );
                     self.queue.write_buffer(
                         &self.hand_index_buffer,
                         0,
-                        bytemuck::cast_slice(&self.hand_indices_scratch[..ind_limit]),
+                        bytemuck::cast_slice(&self.hand_indices_scratch),
                     );
                     let hand_upload_elapsed = upload_started.elapsed();
                     gpu_upload_elapsed += hand_upload_elapsed;
@@ -20340,17 +20458,22 @@ impl State {
                     );
                     self.perf_counters.upload_bytes_frame =
                         self.perf_counters.upload_bytes_frame.saturating_add(
-                            (vert_limit * std::mem::size_of::<Vertex>()
-                                + ind_limit * std::mem::size_of::<u32>())
+                            (hand_vertices_len * std::mem::size_of::<Vertex>()
+                                + hand_indices_len * std::mem::size_of::<u32>())
                                 as u64,
                         );
+                } else if hand_indices_len > 0 {
+                    eprintln!(
+                        "Skipping invalid first-person hand mesh: {hand_vertices_len} vertices, \
+                         {hand_indices_len} indices"
+                    );
                 }
             }
 
             // Animation is a per-frame uniform transform over the cached base
             // mesh; walking and attacking never regenerate or upload vertices.
             let animation =
-                crate::hand_renderer::HandAnimationUniform::from_swings(walk_swing, attack_swing);
+                crate::hand_renderer::animation_for_hand_mesh(mesh_key, walk_swing, attack_swing);
             let aspect = self.size.width.max(1) as f32 / self.size.height.max(1) as f32;
             let hand_proj = Mat4::perspective_lh(f32::to_radians(70.0), aspect, 0.01, 10.0);
             let combined = hand_proj * animation.matrix();
@@ -23542,8 +23665,11 @@ impl State {
             + u64::from(self.mob_quad_num_instances > 0);
         total_draw_calls += u64::from(!self.particle_instances_scratch.is_empty());
         total_draw_calls += u64::from(self.mining_target.is_some() && self.mining_progress > 0.0);
-        total_draw_calls +=
-            u64::from(self.hand_num_indices > 0 && !self.third_person && !self.is_paused);
+        total_draw_calls += u64::from(
+            self.hand_num_indices > 0
+                && !self.camera_perspective.is_third_person()
+                && !self.is_paused,
+        );
         if self.is_paused {
             total_draw_calls += 2;
         } else {
@@ -23835,7 +23961,10 @@ impl State {
             // camera with a very near plane so the view-space model never
             // clips into world geometry. Hidden in third-person mode and when
             // the game is paused.
-            if self.hand_num_indices > 0 && !self.third_person && !self.is_paused {
+            if self.hand_num_indices > 0
+                && !self.camera_perspective.is_third_person()
+                && !self.is_paused
+            {
                 render_pass.set_pipeline(&self.hand_pipeline);
                 render_pass.set_bind_group(0, &self.hand_camera_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.hand_vertex_buffer.slice(..));
@@ -25700,6 +25829,18 @@ mod debug_tests {
                 MELEE_REACH
             ),
             Some(8)
+        );
+
+        let mut endermen = crate::entity::EntityManager::new();
+        endermen.entities.push(Entity::new(
+            10,
+            EntityType::Enderman,
+            Vec3::new(0.0, 0.0, 2.0),
+        ));
+        endermen.rebuild_indexes();
+        assert_eq!(
+            closest_melee_target(&endermen, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
+            Some(10)
         );
     }
 

@@ -3345,7 +3345,45 @@ impl ChunkSection {
 
     /// Returns whether this section contains at least one instance of `block`.
     pub fn contains_block(&self, block: BlockType) -> bool {
-        (0..4096).any(|idx| self.blocks.get(idx) == block)
+        match &self.blocks {
+            BlockStorage::Empty => block == BlockType::Air,
+            BlockStorage::Uniform(value) => *value == block,
+            BlockStorage::Paletted1 { palette, data } => palette
+                .iter()
+                .position(|value| *value == block)
+                .is_some_and(|palette_index| {
+                    data.iter().any(|word| {
+                        if palette_index == 0 {
+                            *word != u64::MAX
+                        } else {
+                            *word != 0
+                        }
+                    })
+                }),
+            BlockStorage::Paletted2 { palette, data } => palette
+                .iter()
+                .position(|value| *value == block)
+                .is_some_and(|palette_index| {
+                    (0..4096).any(|index| {
+                        let bit_index = index << 1;
+                        ((data[bit_index >> 6] >> (bit_index & 63)) & 3) as usize == palette_index
+                    })
+                }),
+            BlockStorage::Paletted4 { palette, data } => palette
+                .iter()
+                .position(|value| *value == block)
+                .is_some_and(|palette_index| {
+                    (0..4096).any(|index| {
+                        let bit_index = index << 2;
+                        ((data[bit_index >> 6] >> (bit_index & 63)) & 15) as usize == palette_index
+                    })
+                }),
+            BlockStorage::Paletted8 { palette, data } => palette
+                .iter()
+                .position(|value| *value == block)
+                .is_some_and(|palette_index| data.contains(&(palette_index as u8))),
+            BlockStorage::Global(data) => data.contains(&block),
+        }
     }
 
     pub fn set_block(&mut self, idx: usize, block: BlockType) -> BlockType {
@@ -6947,6 +6985,17 @@ mod tests {
         assert!(uniform.compact_if_worthwhile());
         assert_eq!(uniform.get_block(7), BlockType::Stone);
         assert!(uniform.memory_usage() < uniform_allocated);
+    }
+
+    #[test]
+    fn section_contains_block_ignores_unreferenced_palette_entries() {
+        let mut section = ChunkSection::empty_dark();
+        section.set_block(0, BlockType::Purpur);
+        assert!(section.contains_block(BlockType::Purpur));
+
+        section.set_block(0, BlockType::Air);
+        assert!(!section.contains_block(BlockType::Purpur));
+        assert!(section.contains_block(BlockType::Air));
     }
 
     #[test]

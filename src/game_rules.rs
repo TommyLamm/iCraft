@@ -314,6 +314,7 @@ pub struct WorldCreationOptions {
     pub bonus_chest: bool,
     pub cheats_enabled: bool,
     pub hardcore: bool,
+    pub game_mode: GameMode,
 }
 
 impl Default for WorldCreationOptions {
@@ -324,13 +325,56 @@ impl Default for WorldCreationOptions {
             bonus_chest: false,
             cheats_enabled: false,
             hardcore: false,
+            game_mode: GameMode::Survival,
         }
+    }
+}
+
+/// Resolve the player game mode that should be restored from disk.
+///
+/// Worlds without cheats cannot change mode, so a Survival `player.dat` that
+/// disagrees with the creation default is treated as a dropped world default
+/// (the in-process runtime used to seed every new session as Survival).
+/// Cheats-enabled worlds keep the saved player mode so `/gamemode` persists.
+pub fn persisted_player_game_mode(
+    saved: GameMode,
+    world_default: GameMode,
+    cheats_enabled: bool,
+) -> GameMode {
+    if !cheats_enabled && saved == GameMode::Survival && world_default != GameMode::Survival {
+        world_default
+    } else {
+        saved
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_player_game_mode_recovers_dropped_creative_default() {
+        assert_eq!(
+            persisted_player_game_mode(GameMode::Survival, GameMode::Creative, false),
+            GameMode::Creative
+        );
+        assert_eq!(
+            persisted_player_game_mode(GameMode::Survival, GameMode::Adventure, false),
+            GameMode::Adventure
+        );
+        assert_eq!(
+            persisted_player_game_mode(GameMode::Creative, GameMode::Survival, false),
+            GameMode::Creative
+        );
+        assert_eq!(
+            persisted_player_game_mode(GameMode::Survival, GameMode::Creative, true),
+            GameMode::Survival
+        );
+        assert_eq!(
+            persisted_player_game_mode(GameMode::Survival, GameMode::Survival, false),
+            GameMode::Survival
+        );
+    }
 
     #[test]
     fn policy_truth_table_covers_all_modes() {

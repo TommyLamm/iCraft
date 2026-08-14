@@ -8,7 +8,7 @@ use crate::chunk_manager::ChunkManager;
 use crate::dimension::Dimension;
 use crate::entity::{EntityIterationKind, EntityManager, EntityType};
 use crate::inventory::{GameMode, Item};
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH, SECTION_SIZE};
 use glam::Vec3;
 
 pub type BlockPos = (i32, i32, i32);
@@ -16,7 +16,28 @@ pub type BlockPos = (i32, i32, i32);
 const NETHER_MOB_CAP: usize = 10;
 const SHULKER_CAP: usize = 6;
 const ENDERMAN_CAP: usize = 12;
+const ENDERMAN_GAZE_RANGE: f32 = 32.0;
+const ENDERMAN_GAZE_DURATION: f32 = 3.0;
+// A forgiving cone keeps normal camera jitter and the Enderman's idle walk
+// from breaking the gaze. It is centered on the head and therefore
+// works from every side of the model, independent of the Enderman's yaw.
+const ENDERMAN_GAZE_DOT: f32 = 0.95;
 const PROJECTILE_LIFETIME: f32 = 12.0;
+const LEGACY_TOWER_REPAIR_INTERVAL: f32 = 1.0;
+const DRAGON_EGG_POSITION: BlockPos = (0, 78, 0);
+
+fn player_is_gazing_at_enderman_head(player_eye: Vec3, player_look: Vec3, head: Vec3) -> bool {
+    let to_head = head - player_eye;
+    let distance_squared = to_head.length_squared();
+    if distance_squared <= f32::EPSILON
+        || distance_squared > ENDERMAN_GAZE_RANGE * ENDERMAN_GAZE_RANGE
+    {
+        return false;
+    }
+
+    let look = player_look.normalize_or_zero();
+    look.length_squared() > 0.0 && look.dot(to_head.normalize()) >= ENDERMAN_GAZE_DOT
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DamageKind {
@@ -184,13 +205,14 @@ fn ensure_end_encounters(
         .get_entities_by_type(EntityType::EnderDragon)
         .next()
         .is_some();
-    let dragon_completed = chunks.chunks.values().any(|chunk| {
-        chunk
-            .sections
-            .iter()
-            .flatten()
-            .any(|section| section.contains_block(BlockType::DragonEgg))
-    });
+    // Dragon completion always places the egg at this canonical location.
+    // Looking it up directly avoids scanning every section of every loaded
+    // chunk on every encounter-maintenance pass.
+    let dragon_completed = chunks.get_block(
+        DRAGON_EGG_POSITION.0,
+        DRAGON_EGG_POSITION.1,
+        DRAGON_EGG_POSITION.2,
+    ) == BlockType::DragonEgg;
 
     // The dragon egg is the persistent world marker that prevents a defeated
     // dragon from being recreated after its entity has been removed.
@@ -214,33 +236,62 @@ fn ensure_end_encounters(
         return;
     }
 
-    // Purpur is an unambiguous loaded End City marker. Pick one roof position
-    // per call so entering a large city never creates an unbounded burst.
-    let mut candidates = Vec::new();
-    for (&(cx, cz), chunk) in &chunks.chunks {
-        for lx in 0..CHUNK_WIDTH {
-            for lz in 0..CHUNK_DEPTH {
-                for y in (1..CHUNK_HEIGHT - 1).rev() {
-                    let wy = y as i32 + (chunk.min_section_y as i32 * 16);
+    // Purpur is an unambiguous loaded End City marker. Section palettes reject
+    // ordinary End chunks without walking their 4096 voxels. Reservoir-sample
+    // one city chunk, then stop at its first valid roof instead of materializing
+    // every roof position in every loaded chunk.
+    let mut seed = mix64(time.to_bits() as u64 ^ shulker_count as u64);
+    let mut city_chunks_seen = 0u64;
+    let mut selected_city_chunk = None;
+    for (&coords, chunk) in &chunks.chunks {
+        if !chunk
+            .sections
+            .iter()
+            .flatten()
+            .any(|section| section.contains_block(BlockType::Purpur))
+        {
+            continue;
+        }
+        city_chunks_seen += 1;
+        if next_u64(&mut seed) % city_chunks_seen == 0 {
+            selected_city_chunk = Some(coords);
+        }
+    }
+    let Some((cx, cz)) = selected_city_chunk else {
+        return;
+    };
+    let chunk = &chunks.chunks[&(cx, cz)];
+    let mut candidate = None;
+    'roof: for (section_index, section) in chunk.sections.iter().enumerate().rev() {
+        let Some(section) = section else {
+            continue;
+        };
+        if !section.contains_block(BlockType::Purpur) {
+            continue;
+        }
+        let section_y = chunk.min_section_y as i32 + section_index as i32;
+        let min_y = section_y * SECTION_SIZE as i32;
+        let max_y = min_y + SECTION_SIZE as i32;
+        for wy in (min_y.max(1)..max_y).rev() {
+            for lx in 0..CHUNK_WIDTH {
+                for lz in 0..CHUNK_DEPTH {
                     if chunk.get_block_local(lx, wy, lz) == BlockType::Purpur
                         && chunk.get_block_local(lx, wy + 1, lz) == BlockType::Air
                     {
-                        candidates.push((
+                        candidate = Some((
                             cx * CHUNK_WIDTH as i32 + lx as i32,
                             wy + 1,
                             cz * CHUNK_DEPTH as i32 + lz as i32,
                         ));
-                        break;
+                        break 'roof;
                     }
                 }
             }
         }
     }
-    if candidates.is_empty() {
+    let Some((x, y, z)) = candidate else {
         return;
-    }
-    let index = mix64(time.to_bits() as u64 ^ shulker_count as u64) as usize % candidates.len();
-    let (x, y, z) = candidates[index];
+    };
     let pos = Vec3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5);
     if !entities
         .query_radius_types(pos, 2.0, &[EntityType::Shulker])
@@ -271,7 +322,11 @@ pub fn update_dimension_entities(
         .filter(|entity| entity.health > 0.0)
         .map(|entity| entity.position)
         .collect();
-    if dimension == Dimension::End {
+    let repair_due = dimension == Dimension::End
+        && entities
+            .get_entities_by_type(EntityType::EnderDragon)
+            .any(|dragon| periodic_work_due(dragon.ai_timer, dt, LEGACY_TOWER_REPAIR_INTERVAL));
+    if repair_due {
         repair_legacy_end_crystal_towers(chunks, &crystal_positions, &mut events);
     }
     let mut pending_spawns = Vec::new();
@@ -348,18 +403,24 @@ pub fn update_dimension_entities(
                 }
             }
             EntityType::Enderman => {
+                // Creative players cannot provoke an Enderman, but changing
+                // game mode must not freeze its normal idle movement.
+                if is_creative {
+                    entity.ai_phase = 0;
+                    entity.enderman_gaze_timer = 0.0;
+                }
+
                 if !is_creative {
                     let delta = player_pos - entity.position;
                     let horizontal = Vec3::new(delta.x, 0.0, delta.z);
                     let player_eye = player_pos + Vec3::Y * 1.62;
                     let head = entity.position + Vec3::Y * 2.62;
-                    let to_head = (head - player_eye).normalize_or_zero();
-                    let looking_at_head = horizontal.length_squared() <= 32.0 * 32.0
-                        && player_look.normalize_or_zero().dot(to_head) >= 0.995;
+                    let looking_at_head =
+                        player_is_gazing_at_enderman_head(player_eye, player_look, head);
                     if entity.ai_phase == 0 {
                         if looking_at_head {
                             entity.enderman_gaze_timer += dt;
-                            if entity.enderman_gaze_timer >= 5.0 {
+                            if entity.enderman_gaze_timer >= ENDERMAN_GAZE_DURATION {
                                 entity.ai_phase = 1;
                                 entity.target_player = true;
                             }
@@ -382,30 +443,28 @@ pub fn update_dimension_entities(
                             ));
                             entity.action_cooldown = 1.0;
                         }
-                    } else {
-                        entity.target_player = false;
-                        // Calm Endermen wander instead of freezing in place.
-                        // Each entity gets a stable, changing heading and a
-                        // short pause within a six-second idle cycle.
-                        let cycle = (entity.ai_timer / 6.0).floor() as u64;
-                        let seed = entity
-                            .id
-                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                            .wrapping_add(cycle.wrapping_mul(0xBF58_476D_1CE4_E5B9));
-                        let angle = (seed as u32) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
-                        entity.yaw = angle;
-                        let idle_speed = if entity.ai_timer % 6.0 < 4.5 {
-                            1.25
-                        } else {
-                            0.0
-                        };
-                        entity.velocity.x = angle.sin() * idle_speed;
-                        entity.velocity.z = angle.cos() * idle_speed;
                     }
-                } else {
+                }
+
+                if is_creative || entity.ai_phase == 0 {
                     entity.target_player = false;
-                    entity.velocity.x = 0.0;
-                    entity.velocity.z = 0.0;
+                    // Calm Endermen wander in every game mode. Each entity
+                    // gets a stable, changing heading and a short pause within
+                    // a six-second idle cycle.
+                    let cycle = (entity.ai_timer / 6.0).floor() as u64;
+                    let seed = entity
+                        .id
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .wrapping_add(cycle.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+                    let angle = (seed as u32) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
+                    entity.yaw = angle;
+                    let idle_speed = if entity.ai_timer % 6.0 < 4.5 {
+                        1.25
+                    } else {
+                        0.0
+                    };
+                    entity.velocity.x = angle.sin() * idle_speed;
+                    entity.velocity.z = angle.cos() * idle_speed;
                 }
                 entity.update_physics(dt, chunks);
             }
@@ -798,6 +857,11 @@ fn collect_deaths(entities: &mut EntityManager, events: &mut BossEvents) {
                 item: Item::ShulkerShell,
                 count: 1,
             }),
+            EntityType::Enderman => events.drops.push(DropEvent {
+                position: entity.position,
+                item: Item::EyeOfEnder,
+                count: 1,
+            }),
             EntityType::EndCrystal => events.explosions.push(ExplosionEvent {
                 position: entity.position,
                 radius: 6.0,
@@ -917,6 +981,10 @@ fn open_surface_y(chunks: &ChunkManager, wx: i32, wz: i32) -> Option<i32> {
             None
         }
     })
+}
+
+fn periodic_work_due(timer: f32, dt: f32, interval: f32) -> bool {
+    timer <= f32::EPSILON || (timer / interval).floor() != ((timer + dt) / interval).floor()
 }
 
 fn mix64(mut value: u64) -> u64 {
@@ -1122,10 +1190,47 @@ mod tests {
     }
 
     #[test]
-    fn enderman_only_attacks_after_five_seconds_of_head_gaze() {
+    fn periodic_legacy_repair_runs_on_start_and_interval_boundaries() {
+        assert!(periodic_work_due(0.0, 0.05, 1.0));
+        assert!(!periodic_work_due(0.20, 0.05, 1.0));
+        assert!(periodic_work_due(0.99, 0.05, 1.0));
+    }
+
+    #[test]
+    fn enderman_head_gaze_is_detected_from_every_direction() {
+        let head = Vec3::new(4.0, 70.0, -3.0);
+        for offset in [
+            Vec3::X * 10.0,
+            -Vec3::X * 10.0,
+            Vec3::Y * 10.0,
+            -Vec3::Y * 10.0,
+            Vec3::Z * 10.0,
+            -Vec3::Z * 10.0,
+        ] {
+            let player_eye = head + offset;
+            assert!(player_is_gazing_at_enderman_head(
+                player_eye,
+                head - player_eye,
+                head
+            ));
+        }
+
+        // The crosshair may sit a few blocks beside the exact head center at
+        // this distance and still count as deliberately watching it.
+        let player_eye = head - Vec3::Z * 10.0;
+        let approximate_look = head + Vec3::X * 3.0 - player_eye;
+        assert!(player_is_gazing_at_enderman_head(
+            player_eye,
+            approximate_look,
+            head
+        ));
+    }
+
+    #[test]
+    fn enderman_only_attacks_after_three_seconds_of_head_gaze() {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 10.0));
-        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 4.7;
+        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.7;
         let chunks = ChunkManager::new(1);
         let player = Vec3::ZERO;
         let look = (Vec3::new(0.0, 2.62, 10.0) - Vec3::Y * 1.62).normalize();
@@ -1161,7 +1266,7 @@ mod tests {
     fn enderman_gaze_timer_resets_when_player_looks_away() {
         let mut entities = EntityManager::new();
         let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 10.0));
-        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 4.9;
+        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.9;
         let chunks = ChunkManager::new(1);
 
         update_dimension_entities(
@@ -1200,6 +1305,110 @@ mod tests {
         assert_eq!(enderman.ai_phase, 0);
         assert!(!enderman.target_player);
         assert!(Vec3::new(enderman.velocity.x, 0.0, enderman.velocity.z).length() > 1.0);
+    }
+
+    #[test]
+    fn provoked_enderman_chases_and_damages_player() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 0.0, 2.0));
+        entities.get_by_id_mut(id).unwrap().enderman_gaze_timer = 2.95;
+        let chunks = ChunkManager::new(1);
+        let player = Vec3::ZERO;
+        let head = entities.get_by_id(id).unwrap().position + Vec3::Y * 2.62;
+        let look = head - (player + Vec3::Y * 1.62);
+
+        let events = update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            player,
+            look,
+            0.1,
+            GameMode::Survival,
+        );
+
+        let enderman = entities.get_by_id(id).unwrap();
+        assert_eq!(enderman.ai_phase, 1);
+        assert!(enderman.target_player);
+        assert!(Vec3::new(enderman.velocity.x, 0.0, enderman.velocity.z).length() > 3.0);
+        assert!(events
+            .player_damage
+            .iter()
+            .any(|damage| damage.source_entity == Some(id) && damage.amount == 7.0));
+    }
+
+    #[test]
+    fn enderman_enters_attack_mode_after_continuous_three_second_head_gaze() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(8.0, 64.0, 8.0));
+        let mut chunks = ChunkManager::new(1);
+        let mut chunk = Chunk::new(0, 0);
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                chunk.set_block_local(x, 63, z, BlockType::EndStone);
+            }
+        }
+        chunks.chunks.insert((0, 0), chunk);
+        let player = Vec3::new(8.0, 64.0, 0.0);
+
+        for _ in 0..12 {
+            let head = entities.get_by_id(id).unwrap().position + Vec3::Y * 2.62;
+            let look = (head - (player + Vec3::Y * 1.62)).normalize();
+            update_dimension_entities(
+                Dimension::End,
+                &mut entities,
+                &chunks,
+                player,
+                look,
+                0.25,
+                GameMode::Survival,
+            );
+        }
+
+        let enderman = entities.get_by_id(id).unwrap();
+        assert_eq!(enderman.ai_phase, 1);
+        assert!(enderman.target_player);
+    }
+
+    #[test]
+    fn creative_mode_enderman_wanders_without_attacking() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(0.0, 64.0, 10.0));
+        let enderman = entities.get_by_id_mut(id).unwrap();
+        enderman.ai_phase = 1;
+        enderman.target_player = true;
+        let chunks = ChunkManager::new(1);
+
+        let events = update_dimension_entities(
+            Dimension::End,
+            &mut entities,
+            &chunks,
+            Vec3::ZERO,
+            Vec3::Z,
+            0.1,
+            GameMode::Creative,
+        );
+
+        let enderman = entities.get_by_id(id).unwrap();
+        assert_eq!(enderman.ai_phase, 0);
+        assert!(!enderman.target_player);
+        assert!(events.player_damage.is_empty());
+        assert!(Vec3::new(enderman.velocity.x, 0.0, enderman.velocity.z).length() > 1.0);
+    }
+
+    #[test]
+    fn dead_enderman_drops_one_eye_of_ender() {
+        let mut entities = EntityManager::new();
+        let id = entities.spawn(EntityType::Enderman, Vec3::new(3.0, 64.0, 5.0));
+        entities.get_by_id_mut(id).unwrap().health = 0.0;
+        let mut events = BossEvents::default();
+
+        collect_deaths(&mut entities, &mut events);
+
+        assert!(entities.get_by_id(id).is_none());
+        assert_eq!(events.drops.len(), 1);
+        assert_eq!(events.drops[0].item, Item::EyeOfEnder);
+        assert_eq!(events.drops[0].count, 1);
     }
 
     #[test]

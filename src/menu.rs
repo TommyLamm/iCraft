@@ -858,12 +858,14 @@ impl WorldMetadata {
 /// level save writes the richer binary fields.
 pub fn load_world_creation_options(world_dir: &Path) -> WorldCreationOptions {
     WorldMetadata::load(world_dir)
+        .or_else(|| legacy_metadata(world_dir))
         .map(|metadata| WorldCreationOptions {
             world_type: metadata.world_type,
             generate_structures: metadata.generate_structures,
             bonus_chest: metadata.bonus_chest,
             cheats_enabled: metadata.cheats_enabled,
             hardcore: metadata.hardcore,
+            game_mode: metadata.game_mode,
         })
         .unwrap_or_default()
 }
@@ -4425,6 +4427,38 @@ mod tests {
             Some(("::1".into(), "25565".into()))
         );
         assert!(split_host_port("not-an-address").is_none());
+    }
+
+    #[test]
+    fn load_world_creation_options_reads_game_mode_and_cheats() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let world_dir = Path::new(SAVES_DIR).join(format!(
+            "icraft_creation_options_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let metadata = WorldMetadata {
+            name: "CREATIVE WORLD".to_string(),
+            seed: 42,
+            game_mode: GameMode::Creative,
+            difficulty: Difficulty::Normal,
+            last_played: 0,
+            world_type: WorldType::Default,
+            generate_structures: true,
+            bonus_chest: false,
+            cheats_enabled: true,
+            hardcore: false,
+            version: CURRENT_WORLD_FORMAT_VERSION,
+            needs_upgrade: false,
+        };
+        metadata.save(&world_dir).expect("world.meta should save");
+        let options = load_world_creation_options(&world_dir);
+        assert_eq!(options.game_mode, GameMode::Creative);
+        assert!(options.cheats_enabled);
+        fs::remove_dir_all(&world_dir).expect("temporary world should be removable");
     }
 
     #[test]

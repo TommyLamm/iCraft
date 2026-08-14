@@ -525,6 +525,7 @@ fn entity_death_outcome(entity: &EntityCombatSnapshot, looting: u8) -> DeathOutc
                 push_drop(&mut drops, Item::RawChicken);
                 push_drop(&mut drops, Item::Feather);
             }
+            EntityType::Enderman => push_drop(&mut drops, Item::EyeOfEnder),
             _ => {}
         }
     }
