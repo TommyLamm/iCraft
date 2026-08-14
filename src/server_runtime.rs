@@ -1999,6 +1999,34 @@ impl ServerRuntime {
             .and_then(|session| session.cached_response(request_id))
             .is_some();
         let operation = request.operation.clone();
+        // A presentation may see a locally generated chunk a few frames
+        // before its bounded initial projection reaches ServerWorld.  If the
+        // authenticated player already has interest in the target, load the
+        // target and its adjacent support chunk now; otherwise valid
+        // place/break input was rejected as InvalidState until the background
+        // projection queue happened to catch up.
+        if let GameplayOperation::BlockAction { x, z, face, .. } = &operation {
+            let target = (*x, *z);
+            let support = (
+                x.saturating_sub(i32::from(face[0])),
+                z.saturating_sub(i32::from(face[2])),
+            );
+            if let Some(dimension) = self
+                .players
+                .get(&id)
+                .filter(|session| {
+                    session
+                        .interest
+                        .wants(session.dimension, InterestKind::Block((*x, 0, *z)))
+                })
+                .map(|session| session.dimension)
+            {
+                let _ = self.authority.with_world(dimension, |world| {
+                    world.ensure_chunk(target.0.div_euclid(16), target.1.div_euclid(16));
+                    world.ensure_chunk(support.0.div_euclid(16), support.1.div_euclid(16));
+                });
+            }
+        }
         let response = self.authority.submit_request(request.clone());
         if duplicate {
             self.metrics.duplicate_requests = self.metrics.duplicate_requests.saturating_add(1);
@@ -3014,7 +3042,16 @@ impl ServerRuntime {
             let old_entities = session.interest.entities.clone();
             let old_open_containers = session.interest.open_containers.clone();
             session.dimension = dimension;
-            let chunk_delta = session.interest.update_position(dimension, position);
+            let mut chunk_delta = session.interest.update_position(dimension, position);
+            let center_chunk = (
+                (position[0] / 16.0).floor() as i32,
+                (position[2] / 16.0).floor() as i32,
+            );
+            chunk_delta.entered.sort_by_key(|(cx, cz)| {
+                let dx = i64::from(*cx - center_chunk.0);
+                let dz = i64::from(*cz - center_chunk.1);
+                (dx * dx + dz * dz, *cx, *cz)
+            });
             let departed_containers: Vec<_> = old_open_containers
                 .difference(&session.interest.open_containers)
                 .copied()
@@ -3118,6 +3155,14 @@ impl ServerRuntime {
                 };
                 made_progress = true;
                 inspected += 1;
+                // Interest is the authoritative chunk-loading boundary. Load
+                // only the bounded projection batch, nearest-first, so the
+                // server never stalls one tick generating the full view
+                // distance while block actions stop being rejected outside
+                // the spawn chunk.
+                let _ = self.authority.with_world(dimension, |world| {
+                    world.ensure_chunk(cx, cz);
+                });
                 let payload = self.authority.world_ref(dimension).and_then(|world| {
                     world.chunks.chunks.get(&(cx, cz)).map(|chunk| {
                         let mut data = ChunkSaveData::from_chunk(chunk);
@@ -3807,6 +3852,96 @@ mod tests {
                 InterestKind::Container(chest),
             ),
             vec![2]
+        );
+
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn embedded_block_action_loads_an_interested_boundary_chunk_on_demand() {
+        let (mut runtime, _input) = embedded_runtime("boundary_block_action");
+        let seed = runtime.level.seed;
+        let generated = crate::dimension::generate_chunk(Dimension::Overworld, 1, 0, seed);
+        let local_z = 8usize;
+        let mut target_y = i32::from(generated.heightmap[0][local_z]);
+        while !generated
+            .get_block_local(0, target_y, local_z)
+            .properties()
+            .is_solid
+        {
+            target_y -= 1;
+        }
+        let target = (16, target_y, local_z as i32);
+        assert_ne!(
+            generated.get_block_local(0, target_y, local_z),
+            BlockType::Air
+        );
+
+        let player_position = [15.25, target_y as f32 + 1.0, local_z as f32 + 0.5];
+        assert!(runtime.teleport_session(99, player_position));
+        assert!(runtime
+            .authority
+            .world_ref(Dimension::Overworld)
+            .is_some_and(|world| !world.chunks.chunks.contains_key(&(1, 0))));
+        runtime.authority.session_mut(99).unwrap().game_mode = GameMode::Creative;
+        let held = runtime
+            .authority
+            .session(99)
+            .and_then(|session| session.gameplay.slot(session.gameplay.selected_hotbar_slot))
+            .flatten()
+            .map(Into::into);
+
+        let eye = Vec3::from_array(player_position) + Vec3::new(0.0, 1.62, 0.0);
+        let look = (Vec3::new(16.5, target_y as f32 + 0.5, local_z as f32 + 0.5) - eye).normalize();
+        let look_milli = [
+            (look.x * 1_000.0).round() as i16,
+            (look.y * 1_000.0).round() as i16,
+            (look.z * 1_000.0).round() as i16,
+        ];
+        let response = runtime
+            .submit_request(
+                99,
+                GameplayRequest {
+                    request_id: 702,
+                    client_sequence: 1,
+                    session_id: 99,
+                    dimension: Dimension::Overworld as u8,
+                    client_revision: runtime.session_revision(99).unwrap(),
+                    operation: GameplayOperation::BlockAction {
+                        action: crate::network::protocol::BlockActionKind::StartBreak,
+                        x: target.0,
+                        y: target.1,
+                        z: target.2,
+                        face: [-1, 0, 0],
+                        hand: 0,
+                        held,
+                        block: BlockType::Air.to_wire(),
+                        look_milli,
+                    },
+                },
+            )
+            .unwrap();
+        let loaded_world = runtime
+            .authority
+            .world_ref(Dimension::Overworld)
+            .expect("overworld remains loaded");
+        let loaded_block = loaded_world.get_block(target.0, target.1, target.2);
+        let has_line_of_sight =
+            loaded_world.has_block_line_of_sight(player_position, look_milli, target);
+        assert!(
+            matches!(response.outcome, GameplayOutcome::Accepted { .. }),
+            "boundary action was rejected: {:?} (target={target:?}, block={loaded_block:?}, player={player_position:?}, look={look_milli:?}, los={has_line_of_sight})",
+            response.outcome,
+        );
+        assert_eq!(
+            runtime
+                .authority
+                .world_ref(Dimension::Overworld)
+                .unwrap()
+                .get_block(target.0, target.1, target.2),
+            BlockType::Air
         );
 
         let world_dir = runtime.world_dir.clone();

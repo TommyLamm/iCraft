@@ -72,19 +72,25 @@ impl FeaturePlacer {
             }
 
             let tree_prob: u32 = match biome {
-                Biome::Plains => 5,
+                Biome::Plains => 18,
                 Biome::Forest => 55,
                 Biome::BirchForest => 60,
                 Biome::Taiga => 40,
                 Biome::Swamp => 18,
                 Biome::Jungle => 70,
-                Biome::Savanna => 4,
-                Biome::Meadow => 2,
-                Biome::WindsweptHills => 2,
+                Biome::Savanna => 12,
+                Biome::Meadow => 12,
+                Biome::WindsweptHills => 8,
                 _ => 0,
             };
 
-            let roll = ((h >> 8) % 100) as u32;
+            let roll = hash_coord(
+                self.seed ^ 0x3C6E_F372,
+                n_world_x,
+                attempt,
+                n_world_z,
+                0xBB67_AE85,
+            ) % 100;
             if roll >= tree_prob {
                 continue;
             }
@@ -149,7 +155,11 @@ impl FeaturePlacer {
         min_y_offset: usize,
     ) {
         let h = hash_coord(self.seed, wx, surface_y, wz, 0xC01D_0C0A);
-        let roll = h % 100;
+        // Keep the vegetation roll independent from the height/biome fields.
+        // Reusing the surface-correlated hash produced regression seeds with
+        // thousands of grass columns but zero plants.
+        let vegetation_hash = hash_coord(self.seed ^ 0xA511_E9B3, wx, 0, wz, 0x6D2B_79F5);
+        let roll = vegetation_hash % 100;
 
         // Find the surface block.
         let Some(surface_block) = self.block_at_local(blocks, lx, surface_y, lz, min_y_offset)
@@ -270,8 +280,11 @@ impl FeaturePlacer {
         z: usize,
         min_y_offset: usize,
     ) -> Option<BlockType> {
-        let ly = wy as i32 - min_y_offset as i32;
-        if ly >= 0 && (ly as usize) < blocks.len() {
+        // Overworld dense arrays start at world Y=-64, while callers pass
+        // min_y_offset=64. Convert world Y to local Y by adding that offset.
+        // Subtracting it placed trees/plants 128 blocks too low.
+        let ly = wy.saturating_add(min_y_offset as i32);
+        if ly >= 0 && (ly as usize) < blocks.get(x)?.len() {
             Some(blocks[x][ly as usize][z])
         } else {
             None
@@ -287,8 +300,12 @@ impl FeaturePlacer {
         block: BlockType,
         min_y_offset: usize,
     ) {
-        let ly = wy as i32 - min_y_offset as i32;
-        if ly >= 0 && (ly as usize) < blocks.len() {
+        let ly = wy.saturating_add(min_y_offset as i32);
+        if ly >= 0
+            && blocks
+                .get(x)
+                .is_some_and(|column| (ly as usize) < column.len())
+        {
             blocks[x][ly as usize][z] = block;
         }
     }

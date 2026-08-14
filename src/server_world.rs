@@ -2026,6 +2026,28 @@ impl ServerWorld {
         }
         let mut player_positions: Vec<_> = players.to_vec();
         player_positions.sort_by_key(|(id, _)| *id);
+        if self.rules.do_mob_spawning && self.dimension == Dimension::Overworld {
+            for (_, position) in &player_positions {
+                let player = Vec3::from_array(*position);
+                let sky_light = if (self.time % 24_000) < 12_000 { 15 } else { 4 };
+                crate::passive_mob::spawn_passive_mobs(
+                    &mut self.entities,
+                    &self.chunks,
+                    player,
+                    sky_light,
+                    self.time as f32 * FIXED_DT,
+                );
+                if self.allows_hostile_spawning() {
+                    crate::mob::spawn_mobs(
+                        &mut self.entities,
+                        &self.chunks,
+                        player,
+                        sky_light,
+                        self.time as f32 * FIXED_DT,
+                    );
+                }
+            }
+        }
         let chunks = &self.chunks;
         for entity in &mut self.entities.entities {
             if entity.entity_type == EntityType::FishingHook {

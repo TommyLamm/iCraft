@@ -7793,6 +7793,22 @@ impl State {
         use crate::server_runtime::RuntimePresentationEvent as Event;
         let inbound = match event {
             Event::GameplayResponse { target, response } if target == session_id => {
+                // Game mode lives on SessionContract rather than inside the
+                // legacy SessionGameplayWire.  Refresh it on every accepted
+                // embedded response so an accepted /gamemode command is
+                // immediately visible to the presentation.
+                if matches!(
+                    response.outcome,
+                    crate::network::protocol::GameplayOutcome::Accepted { .. }
+                ) {
+                    if let Some(mode) = self
+                        .embedded_runtime
+                        .as_ref()
+                        .and_then(EmbeddedRuntimeBridge::session_game_mode)
+                    {
+                        self.set_game_mode(mode);
+                    }
+                }
                 Some(NetworkInbound::GameplayResponse { response })
             }
             Event::BlockChange {
@@ -8069,10 +8085,30 @@ impl State {
         state
     }
 
-    fn sync_authority_gameplay_from_local(&mut self) {
-        // Runtime sessions are loaded once by `ServerRuntime::new_embedded`.
-        // Do not copy renderer state back into the authority on every input;
-        // doing so would recreate a second presentation-owned authority.
+    pub(crate) fn sync_authority_gameplay_from_local(&mut self) {
+        let gameplay = self.authority_gameplay_from_local();
+        let Some(runtime) = self.embedded_runtime.as_mut() else {
+            return;
+        };
+        let session_id = runtime.session_id();
+        let Some(mut authoritative) = runtime
+            .runtime
+            .authority
+            .session(session_id)
+            .map(|session| session.gameplay)
+        else {
+            return;
+        };
+        // Inventory UI transactions are currently presentation-local.  Copy
+        // only their bounded inventory/selection result into the embedded
+        // authority while preserving health, XP, mining and all other
+        // server-owned gameplay fields.
+        authoritative.inventory = gameplay.inventory;
+        authoritative.selected_hotbar_slot = self.inventory.selected.min(8) as u8;
+        let _ = runtime
+            .runtime
+            .authority
+            .set_session_gameplay(session_id, authoritative);
     }
 
     fn project_authority_sessions(
@@ -18582,7 +18618,7 @@ impl State {
     }
 
     pub fn set_item_at_slot(&mut self, slot: SlotType, stack: Option<ItemStack>) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.is_authoritative() {
             return;
         }
         match slot {
@@ -18683,13 +18719,18 @@ impl State {
         }
     }
 
+    pub fn select_hotbar_slot(&mut self, slot: usize) {
+        self.inventory.selected = slot.min(8);
+        self.sync_authority_gameplay_from_local();
+    }
+
     fn refresh_workstations(&mut self) {
         self.enchanting.refresh();
         self.anvil.refresh();
     }
 
     pub fn handle_inventory_click(&mut self, is_left: bool) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.is_authoritative() {
             let mouse_x = self.mouse_ndc[0];
             let mouse_y = self.mouse_ndc[1];
             if self.active_station == Some(StationKind::Merchant) && is_left {
@@ -23584,16 +23625,10 @@ impl State {
             // the full layout inside NDC instead of clamping individual glyph
             // vertices (which used to clip text at high DPI/UI scale).
             let requested_scale = self.settings.accessibility.ui_scale;
-            let max_abs = ui_vertices
-                .iter()
-                .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()])
-                .chain(
-                    ui_line_vertices
-                        .iter()
-                        .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()]),
-                )
-                .fold(0.0, f32::max);
-            let layout_scale = crate::accessibility::fit_ui_scale(requested_scale, max_abs);
+            // Use a stable full-screen extent.  Deriving this value from the
+            // current vertices made the entire HUD subtly resize whenever a
+            // chat/permission message appeared (notably after pressing G).
+            let layout_scale = crate::accessibility::fit_ui_scale(requested_scale, 1.0);
             for vertex in ui_vertices.iter_mut() {
                 vertex.position[0] *= layout_scale;
                 vertex.position[1] *= layout_scale;
@@ -24136,17 +24171,8 @@ impl State {
         ui_line_vertices: &mut [UiVertex],
         ui_textured_vertices: &mut [TexturedUiVertex],
     ) {
-        let max_abs = ui_vertices
-            .iter()
-            .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()])
-            .chain(
-                ui_line_vertices
-                    .iter()
-                    .flat_map(|vertex| [vertex.position[0].abs(), vertex.position[1].abs()]),
-            )
-            .fold(0.0, f32::max);
         let layout_scale =
-            crate::accessibility::fit_ui_scale(self.settings.accessibility.ui_scale, max_abs);
+            crate::accessibility::fit_ui_scale(self.settings.accessibility.ui_scale, 1.0);
         for vertex in ui_vertices.iter_mut() {
             vertex.position[0] *= layout_scale;
             vertex.position[1] *= layout_scale;

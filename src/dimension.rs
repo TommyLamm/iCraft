@@ -898,6 +898,64 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_overworld_spawn_region_contains_trees_and_ground_flora() {
+        // Regression seeds taken from worlds created through the menu.  A
+        // small spawn region must expose both woody vegetation and plants;
+        // otherwise a fresh world looks like bare terrain even though the
+        // feature pass was invoked.
+        for seed in [2_563_678_733, 1_340_359_757] {
+            let mut woody = 0usize;
+            let mut flora = 0usize;
+            let mut grass = 0usize;
+            let mut biomes = std::collections::BTreeMap::<String, usize>::new();
+            let ctx = crate::worldgen::WorldGenContext::new(seed);
+            for cx in -2..=2 {
+                for cz in -2..=2 {
+                    let chunk = generate_overworld_chunk(cx, cz, seed);
+                    for x in 0..CHUNK_WIDTH {
+                        for z in 0..CHUNK_DEPTH {
+                            *biomes
+                                .entry(format!(
+                                    "{:?}",
+                                    ctx.biome_at(
+                                        cx * CHUNK_WIDTH as i32 + x as i32,
+                                        cz * CHUNK_DEPTH as i32 + z as i32,
+                                    )
+                                ))
+                                .or_default() += 1;
+                            for y in WorldHeight::OVERWORLD.min_y()
+                                ..WorldHeight::OVERWORLD.max_y_exclusive()
+                            {
+                                match chunk.get_block_local(x, y, z) {
+                                    BlockType::OakLog
+                                    | BlockType::BirchLog
+                                    | BlockType::SpruceLog
+                                    | BlockType::OakLeaves
+                                    | BlockType::BirchLeaves
+                                    | BlockType::SpruceLeaves => woody += 1,
+                                    BlockType::TallGrass
+                                    | BlockType::Dandelion
+                                    | BlockType::Poppy => flora += 1,
+                                    BlockType::Grass => grass += 1,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                woody > 0,
+                "seed {seed} generated no trees near spawn (biomes={biomes:?})"
+            );
+            assert!(
+                flora > 0,
+                "seed {seed} generated no flora near spawn (grass={grass}, woody={woody})"
+            );
+        }
+    }
     use std::collections::HashMap;
 
     #[test]

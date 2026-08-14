@@ -329,8 +329,9 @@ pub fn spawn_passive_mobs(
     sky_light_level: u8,
     time: f32,
 ) {
-    // Limit total passive mobs to prevent lag
-    if entity_manager.count_passive() >= 15 {
+    // Limit total passive mobs to prevent lag.
+    let passive_count = entity_manager.count_passive();
+    if passive_count >= 15 {
         return;
     }
 
@@ -346,13 +347,21 @@ pub fn spawn_passive_mobs(
         (rng_seed / 65536) % 32768
     };
 
-    // ~1% chance to attempt a spawn in daytime
-    if sky_light_level < 10 || next_rand() % 100 != 0 {
+    // Establish the first visible population promptly, then fall back to the
+    // lower ambient spawn rate.
+    let attempt_modulus = if passive_count == 0 { 5 } else { 100 };
+    if sky_light_level < 10 || next_rand() % attempt_modulus != 0 {
         return;
     }
 
     let angle = (next_rand() % 360) as f32 * std::f32::consts::PI / 180.0;
-    let dist = (24 + (next_rand() % 56)) as f32;
+    // Stay inside the loaded view radius.  The former 24..79 block range was
+    // usually outside a fresh world's authoritative chunks, so every spawn
+    // attempt sampled Air and silently failed.
+    let max_dist = (chunk_manager.render_distance.max(1) as u32 * 16)
+        .saturating_sub(4)
+        .clamp(12, 64);
+    let dist = (8 + next_rand() % max_dist.saturating_sub(7)) as f32;
     let spawn_x = (player_pos.x + angle.cos() * dist) as i32;
     let spawn_z = (player_pos.z + angle.sin() * dist) as i32;
 
@@ -405,6 +414,42 @@ pub fn spawn_passive_mobs(
 mod tests {
     use super::*;
     use crate::inventory::ItemStack;
+
+    #[test]
+    fn fresh_loaded_spawn_region_establishes_passive_population() {
+        let seed = 2_563_678_733;
+        let mut chunks = crate::chunk_manager::ChunkManager::new_in_dimension(
+            2,
+            crate::dimension::Dimension::Overworld,
+        );
+        for cx in -2..=2 {
+            for cz in -2..=2 {
+                chunks.chunks.insert(
+                    (cx, cz),
+                    crate::dimension::generate_chunk(
+                        crate::dimension::Dimension::Overworld,
+                        cx,
+                        cz,
+                        seed,
+                    ),
+                );
+            }
+        }
+        let mut entities = EntityManager::new();
+        for tick in 0..400 {
+            spawn_passive_mobs(
+                &mut entities,
+                &chunks,
+                Vec3::new(8.0, 80.0, 8.0),
+                15,
+                tick as f32 / 20.0,
+            );
+            if entities.count_passive() > 0 {
+                break;
+            }
+        }
+        assert!(entities.count_passive() > 0);
+    }
 
     #[test]
     fn full_inventory_drops_exactly_one_egg_at_the_chicken() {

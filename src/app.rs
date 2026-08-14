@@ -343,6 +343,7 @@ impl ApplicationHandler for App {
                                 && (button == MouseButton::Left || button == MouseButton::Right)
                             {
                                 state.handle_inventory_click(button == MouseButton::Left);
+                                state.sync_authority_gameplay_from_local();
                             }
                         } else {
                             match button {
@@ -404,9 +405,10 @@ impl ApplicationHandler for App {
                                 state.inventory.scroll_creative(scroll_dir);
                             }
                             GameWheelTarget::Hotbar if scroll_dir != 0 => {
-                                state.inventory.selected =
-                                    (state.inventory.selected as i32 + scroll_dir).rem_euclid(9)
-                                        as usize;
+                                let selected = (state.inventory.selected as i32 + scroll_dir)
+                                    .rem_euclid(9)
+                                    as usize;
+                                state.select_hotbar_slot(selected);
                             }
                             GameWheelTarget::CreativeCatalog
                             | GameWheelTarget::Hotbar
@@ -669,23 +671,23 @@ fn handle_game_keyboard(state: &mut State, event: &KeyEvent, shift_held: bool) -
         state.keys.f = pressed;
     } else if pressed {
         if code == controls.hotbar_1 {
-            state.inventory.selected = 0;
+            state.select_hotbar_slot(0);
         } else if code == controls.hotbar_2 {
-            state.inventory.selected = 1;
+            state.select_hotbar_slot(1);
         } else if code == controls.hotbar_3 {
-            state.inventory.selected = 2;
+            state.select_hotbar_slot(2);
         } else if code == controls.hotbar_4 {
-            state.inventory.selected = 3;
+            state.select_hotbar_slot(3);
         } else if code == controls.hotbar_5 {
-            state.inventory.selected = 4;
+            state.select_hotbar_slot(4);
         } else if code == controls.hotbar_6 {
-            state.inventory.selected = 5;
+            state.select_hotbar_slot(5);
         } else if code == controls.hotbar_7 {
-            state.inventory.selected = 6;
+            state.select_hotbar_slot(6);
         } else if code == controls.hotbar_8 {
-            state.inventory.selected = 7;
+            state.select_hotbar_slot(7);
         } else if code == controls.hotbar_9 {
-            state.inventory.selected = 8;
+            state.select_hotbar_slot(8);
         } else if code == controls.gamemode && !event.repeat {
             state.chat_input = format!("/gamemode {}", next_game_mode_command(state.game_mode));
             // Reuse the same authority, cheats/operator, and Hardcore checks
