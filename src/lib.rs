@@ -1,65 +1,88 @@
 //! iCraft shared library.
 //!
 //! The desktop binary still owns the winit/wgpu application loop in
-//! `main.rs`.  Keeping the simulation/network modules in a library target lets
+//! `main.rs`. Keeping the simulation/network modules in a library target lets
 //! the dedicated server reuse the authoritative code without constructing a
 //! window, audio device, or GPU surface.
+//!
+//! # Server / tests contract
+//!
+//! `icraft-server` and `tests/` may `use icraft::…` only the `pub` modules
+//! below: authority, world, network, persistence, and the thin
+//! `presentation_inventory_policy` cut. That set is the live contract.
+//!
+//! # Crate-internal / desktop-adjacent
+//!
+//! Everything else is `pub(crate)`. Those modules still compile into the
+//! library (mesh leftover, audio hooks, GPU frame bookkeeping) but are not
+//! a server or integration-test API. `sim_harness`, `final_acceptance`, and
+//! `microbench` compile only under `cfg(test)` or feature `harness`.
+//!
+//! `src/presentation/` is the Plan 10 desktop fence and **must not** be
+//! added to this library. GPU menu, terrain arenas, and frame encode stay
+//! out of `icraft-server`.
 
-pub mod accessibility;
-pub mod advancements;
-pub mod ai;
-pub mod audio;
+// Server / tests contract. Keep `pub` only for modules that `tests/` or
+// `src/bin/icraft-server.rs` actually `use icraft::…`.
 pub mod authority;
 pub mod block_entity;
-pub mod block_model;
-pub mod boss;
 pub mod brewing;
 pub mod chunk_manager;
-pub mod chunk_render;
-pub mod chunk_schedule;
-pub mod commands;
 pub mod container_sessions;
-pub mod crafting;
-pub mod culling;
 pub mod dimension;
 pub mod enchantment;
 pub mod entity;
-pub mod final_acceptance;
 pub mod fishing;
-pub mod fluid;
 pub mod game_rules;
-pub mod gpu_frame_resources;
-pub mod interaction;
 pub mod inventory;
-pub mod lighting;
-pub mod localization;
-pub mod loot;
-pub mod microbench;
-pub mod mob;
-pub mod navigation;
 pub mod network;
 pub mod passive_mob;
-pub mod perf;
-pub mod physics;
 pub mod player;
-pub mod presentation_click;
 pub mod presentation_inventory_policy;
-pub mod rail;
-pub mod recipes;
 pub mod redstone;
-pub mod resources;
 pub mod save;
-pub mod server_world;
-pub mod sim_harness;
-pub mod spawning;
-pub mod structure;
-pub mod vehicle;
-pub mod village;
-pub mod voxel_shape;
-pub mod weather;
-pub mod world;
-pub mod world_mutation;
-pub mod world_tick;
-pub mod worldgen;
-
 pub mod server_runtime;
+pub mod server_world;
+pub mod structure;
+pub mod world;
+
+// Crate-internal / desktop-adjacent. Still compiled (except harness cfg).
+pub(crate) mod accessibility;
+pub(crate) mod advancements;
+pub(crate) mod ai;
+pub(crate) mod audio;
+pub(crate) mod block_model;
+pub(crate) mod boss;
+pub(crate) mod chunk_render;
+pub(crate) mod chunk_schedule;
+pub(crate) mod commands;
+pub(crate) mod crafting;
+pub(crate) mod culling;
+#[cfg(any(test, feature = "harness"))]
+pub(crate) mod final_acceptance;
+pub(crate) mod fluid;
+pub(crate) mod gpu_frame_resources;
+pub(crate) mod interaction;
+pub(crate) mod lighting;
+pub(crate) mod localization;
+pub(crate) mod loot;
+#[cfg(any(test, feature = "harness"))]
+pub(crate) mod microbench;
+pub(crate) mod mob;
+pub(crate) mod navigation;
+pub(crate) mod perf;
+pub(crate) mod physics;
+pub(crate) mod presentation_click;
+pub(crate) mod rail;
+pub(crate) mod recipes;
+pub(crate) mod resources;
+#[cfg(any(test, feature = "harness"))]
+pub(crate) mod sim_harness;
+pub(crate) mod spawning;
+pub(crate) mod vehicle;
+pub(crate) mod village;
+pub(crate) mod voxel_shape;
+pub(crate) mod weather;
+pub(crate) mod world_mutation;
+pub(crate) mod world_tick;
+pub(crate) mod worldgen;

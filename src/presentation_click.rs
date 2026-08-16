@@ -1,5 +1,8 @@
 //! Pure world-click and inventory-click hit resolution.
 //!
+//! Crate-internal / desktop-adjacent: not part of the server/tests contract.
+//! `presentation_inventory_policy` is the thin public cut for integration tests.
+//!
 //! No GPU and no `State` fields. Join and Embedded share this resolver, then
 //! map the intent separately. Topology-specific edges are locked here so they
 //! are not "aligned" by accident:

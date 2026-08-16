@@ -1,5 +1,6 @@
 //! Bounded frame-resource pooling for GPU work submitted asynchronously.
 //!
+//! Crate-internal / desktop-adjacent: not part of the server/tests contract.
 //! The bookkeeping core deliberately has no wgpu dependency beyond the small
 //! callback adapter at the bottom of this module. A slot is unavailable from
 //! the moment it is acquired for a submission until that submission's

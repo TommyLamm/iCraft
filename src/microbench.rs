@@ -1,5 +1,9 @@
 //! Deterministic storage/engine microbenchmarks.
 //!
+//! The library copy compiles only under `cfg(test)` or feature `harness`.
+//! The desktop binary keeps its own `mod microbench` and `--microbench`
+//! entry so `cargo run -- --microbench` does not need the lib feature.
+//!
 //! Run with `cargo test --release microbench -- --ignored --nocapture`.
 //! Each JSON line contains a stable operation name, iteration count, elapsed
 //! nanoseconds per operation, and a checksum of the observed results.

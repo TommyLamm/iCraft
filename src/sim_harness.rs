@@ -1,6 +1,7 @@
 //! Deterministic CPU-only recipe / physics smoke used by Plan 19 workflows.
 //!
-//! This is not an `AuthorityCore` closed loop. The harness exposes typed
+//! Compiled only under `cfg(test)` or feature `harness`. This is not an
+//! `AuthorityCore` closed loop. The harness exposes typed
 //! operations that call the same recipe, inventory, block-entity, random-tick,
 //! structure, dimension, entity and save seams used by local simulation.
 //! Its fixture only establishes deterministic starting terrain; progression

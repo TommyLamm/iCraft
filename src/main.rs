@@ -21,7 +21,8 @@ mod dimension;
 mod dynamic_resolution;
 mod enchantment;
 mod entity;
-pub mod final_acceptance;
+#[cfg(any(test, feature = "harness"))]
+mod final_acceptance;
 pub mod fishing;
 mod fluid;
 pub mod game_rules;
@@ -53,7 +54,8 @@ pub mod resources;
 pub mod save;
 mod server_runtime;
 pub mod server_world;
-pub mod sim_harness;
+#[cfg(any(test, feature = "harness"))]
+mod sim_harness;
 pub mod spawning;
 mod state;
 pub mod structure;

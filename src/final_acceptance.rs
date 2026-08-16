@@ -1,5 +1,6 @@
 //! Headless recipe / physics smoke for Plan 17/19 workflows.
 //!
+//! Compiled only under `cfg(test)` or feature `harness`.
 //! This module walks `SimHarness` (`ChunkManager` + local inventory), not
 //! `AuthorityCore`. Passing rows prove CPU recipe and block-entity physics,
 //! not a 20 Hz authority closed loop. Listen / Dedicated coverage lives in

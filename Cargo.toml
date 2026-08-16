@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 default-run = "icraft"
 
+[features]
+# Recipe/physics smoke and desktop microbench modules. Not a default library
+# surface; `cargo test --lib` still compiles them via `cfg(test)`.
+harness = []
 
 [dependencies]
 winit = "0.30"
