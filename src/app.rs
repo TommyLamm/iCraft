@@ -342,8 +342,11 @@ impl ApplicationHandler for App {
                             if pressed
                                 && (button == MouseButton::Left || button == MouseButton::Right)
                             {
+                                let writeback = state.should_writeback_after_inventory_click();
                                 state.handle_inventory_click(button == MouseButton::Left);
-                                state.sync_authority_gameplay_from_local();
+                                if writeback {
+                                    state.sync_authority_gameplay_from_local();
+                                }
                             }
                         } else {
                             match button {

@@ -21,6 +21,11 @@ use crate::physics::{
     PLAYER_STANDING_HEIGHT,
 };
 use crate::player::{DamageSource, PlayerState};
+use crate::presentation_inventory_policy::{
+    presentation_inventory_decision, should_mutate_presentation_world,
+    should_sync_authority_inventory_from_local, should_writeback_after_inventory_click,
+    PresentationInventoryAction, PresentationInventoryTarget,
+};
 use crate::world::{
     Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
 };
@@ -2182,7 +2187,12 @@ impl State {
         wz: i32,
         dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
     ) {
-        if !self.presentation_may_mutate_chunks() {
+        if presentation_inventory_decision(
+            self.has_in_process_runtime(),
+            !self.is_authoritative(),
+            PresentationInventoryTarget::UnsupportedBreak,
+        ) != PresentationInventoryAction::LocalMutate
+        {
             return;
         }
         let mut broken_blocks = Vec::new();
@@ -2204,7 +2214,12 @@ impl State {
         cz: i32,
         dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
     ) {
-        if !self.presentation_may_mutate_chunks() {
+        if presentation_inventory_decision(
+            self.has_in_process_runtime(),
+            !self.is_authoritative(),
+            PresentationInventoryTarget::UnsupportedBreak,
+        ) != PresentationInventoryAction::LocalMutate
+        {
             return;
         }
         let mut broken_blocks = Vec::new();
@@ -3336,6 +3351,32 @@ impl EmbeddedRuntimeBridge {
     fn set_session_dimension(&mut self, dimension: crate::dimension::Dimension) -> bool {
         self.runtime
             .set_session_dimension(self.session_id, dimension)
+    }
+
+    /// Copy only presentation session inventory + selected hotbar into the
+    /// embedded authority. Health, hunger, XP, mining, and mounts stay
+    /// server-owned.
+    fn sync_local_inventory(
+        &mut self,
+        inventory: [Option<crate::authority::contract::SessionInventorySlot>;
+            crate::authority::contract::SESSION_INVENTORY_SLOTS],
+        cursor: Option<crate::authority::contract::SessionInventorySlot>,
+        selected_hotbar_slot: u8,
+    ) -> bool {
+        let Some(mut authoritative) = self
+            .runtime
+            .authority
+            .session(self.session_id)
+            .map(|session| session.gameplay)
+        else {
+            return false;
+        };
+        authoritative.inventory = inventory;
+        authoritative.cursor = cursor;
+        authoritative.selected_hotbar_slot = selected_hotbar_slot.min(8);
+        self.runtime
+            .authority
+            .set_session_gameplay(self.session_id, authoritative)
     }
 }
 
@@ -6335,7 +6376,10 @@ impl State {
         let mut cheats_enabled = creation_options.cheats_enabled || is_client;
 
         let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
-        let has_save = !is_client && {
+        // Embedded presentations start empty and wait for runtime projections.
+        // Reading player.dat / materializing the spawn halo here races
+        // `ServerRuntime::new_embedded` on the same `world_dir`.
+        let has_save = !is_client && !in_process_authority && {
             let mgr = save_manager
                 .as_ref()
                 .expect("authoritative world owns SaveManager")
@@ -6385,6 +6429,24 @@ impl State {
             );
             inventory = player.inventory.to_inventory();
             advancement_progress = player.advancements;
+        } else if !is_client && !in_process_authority {
+            if let Ok(Some(level)) = save_manager
+                .as_ref()
+                .expect("authoritative world owns SaveManager")
+                .lock()
+                .unwrap()
+                .load_level()
+            {
+                world_seed = level.seed;
+                world_time.ticks = level.time;
+                world_spawn = (level.spawn_x, level.spawn_y, level.spawn_z);
+                world_rules = level.rules.normalized();
+                world_rules.hardcore = level.hardcore || world_rules.hardcore;
+                world_type = level.world_type;
+                generate_structures = level.generate_structures;
+                bonus_chest = level.bonus_chest;
+                cheats_enabled = level.cheats_enabled || creation_options.cheats_enabled;
+            }
         }
 
         let advancement_manager =
@@ -6906,7 +6968,7 @@ impl State {
             i32,
             Vec<crate::redstone::RedstoneComponentMetadata>,
         )> = Vec::new();
-        if !is_client {
+        if !is_client && !in_process_authority {
             let initial_radius = initial_chunk_radius(render_distance);
             for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
                 for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
@@ -7814,7 +7876,7 @@ impl State {
     /// True when this presentation root is backed by the shared headless
     /// runtime. Renderer-side simulation and persistence stay disabled while
     /// this is set; the runtime is the only authority owner.
-    fn has_in_process_runtime(&self) -> bool {
+    pub(crate) fn has_in_process_runtime(&self) -> bool {
         self.embedded_runtime.is_some()
     }
 
@@ -8130,15 +8192,16 @@ impl State {
         Some(stack)
     }
 
-    fn authority_gameplay_from_local(&self) -> crate::authority::contract::SessionGameplayState {
-        use crate::authority::contract::{SessionGameplayState, SESSION_INVENTORY_SLOTS};
-        let mut state = SessionGameplayState::default();
-        state.health_milli = (self.player_state.health.max(0.0) * 1000.0).round() as u32;
-        state.max_health_milli = (self.player_state.max_health.max(0.0) * 1000.0).round() as u32;
-        state.hunger_milli = (self.player_state.hunger.clamp(0.0, 20.0) * 1000.0).round() as u32;
-        state.saturation_milli =
-            (self.player_state.saturation.clamp(0.0, 20.0) * 1000.0).round() as u32;
-        state.is_dead = self.player_state.is_dead;
+    fn local_inventory_writeback(
+        &self,
+    ) -> (
+        [Option<crate::authority::contract::SessionInventorySlot>;
+            crate::authority::contract::SESSION_INVENTORY_SLOTS],
+        Option<crate::authority::contract::SessionInventorySlot>,
+        u8,
+    ) {
+        use crate::authority::contract::SESSION_INVENTORY_SLOTS;
+        let mut inventory = [None; SESSION_INVENTORY_SLOTS];
         let mut index = 0;
         for stack in self
             .inventory
@@ -8150,40 +8213,23 @@ impl State {
             if index >= SESSION_INVENTORY_SLOTS - 1 {
                 break;
             }
-            state.inventory[index] = Self::session_slot_from_stack(*stack);
+            inventory[index] = Self::session_slot_from_stack(*stack);
             index += 1;
         }
-        state.inventory[index] = Self::session_slot_from_stack(self.inventory.offhand);
-        state.cursor = Self::session_slot_from_stack(self.inventory.dragged);
-        state.mounted_entity = self.mount_manager.get_vehicle(0);
-        state
+        inventory[index] = Self::session_slot_from_stack(self.inventory.offhand);
+        (
+            inventory,
+            Self::session_slot_from_stack(self.inventory.dragged),
+            self.inventory.selected.min(8) as u8,
+        )
     }
 
     pub(crate) fn sync_authority_gameplay_from_local(&mut self) {
-        let gameplay = self.authority_gameplay_from_local();
+        let (inventory, cursor, selected_hotbar_slot) = self.local_inventory_writeback();
         let Some(runtime) = self.embedded_runtime.as_mut() else {
             return;
         };
-        let session_id = runtime.session_id();
-        let Some(mut authoritative) = runtime
-            .runtime
-            .authority
-            .session(session_id)
-            .map(|session| session.gameplay)
-        else {
-            return;
-        };
-        // Inventory UI transactions are currently presentation-local.  Copy
-        // only their bounded inventory/selection result into the embedded
-        // authority while preserving health, XP, mining and all other
-        // server-owned gameplay fields.
-        authoritative.inventory = gameplay.inventory;
-        authoritative.cursor = gameplay.cursor;
-        authoritative.selected_hotbar_slot = self.inventory.selected.min(8) as u8;
-        let _ = runtime
-            .runtime
-            .authority
-            .set_session_gameplay(session_id, authoritative);
+        let _ = runtime.sync_local_inventory(inventory, cursor, selected_hotbar_slot);
     }
 
     fn project_authority_sessions(
@@ -12691,8 +12737,12 @@ impl State {
 
         if self.player_physics.on_ground && !self.was_on_ground {
             if under_block == BlockType::Farmland
-                && self.presentation_may_mutate_chunks()
                 && (self.is_sprinting || old_pos.y - self.player_physics.position.y > 0.5)
+                && presentation_inventory_decision(
+                    self.has_in_process_runtime(),
+                    !self.is_authoritative(),
+                    PresentationInventoryTarget::FarmlandTrample,
+                ) == PresentationInventoryAction::LocalMutate
             {
                 self.apply_block_changes(&[((px, py, pz), BlockType::Dirt)]);
             }
@@ -12838,8 +12888,15 @@ impl State {
             }
         }
 
-        // Dropped item & XP collection
-        if self.game_mode_policy().can_pickup {
+        // Dropped item & XP collection. Embedded / join-client presentations
+        // wait for authority pickup + SessionGameplayUpdate / EntityDespawn.
+        if self.game_mode_policy().can_pickup
+            && presentation_inventory_decision(
+                self.has_in_process_runtime(),
+                !self.is_authoritative(),
+                PresentationInventoryTarget::Pickup,
+            ) == PresentationInventoryAction::LocalMutate
+        {
             let player_pos = self.player_physics.position;
             let to_collect: Vec<u64> = self
                 .entity_manager
@@ -18777,6 +18834,14 @@ impl State {
         if !self.is_authoritative() {
             return;
         }
+        if matches!(slot, SlotType::ContainerSlot(_))
+            && !should_mutate_presentation_world(
+                self.has_in_process_runtime(),
+                !self.is_authoritative(),
+            )
+        {
+            return;
+        }
         match slot {
             SlotType::Creative(item) => self.inventory.write_creative_slot(item, stack),
             SlotType::Hotbar(i) => self.inventory.hotbar[i] = stack,
@@ -18877,7 +18942,12 @@ impl State {
 
     pub fn select_hotbar_slot(&mut self, slot: usize) {
         self.inventory.selected = slot.min(8);
-        self.sync_authority_gameplay_from_local();
+        if should_sync_authority_inventory_from_local(
+            self.has_in_process_runtime(),
+            !self.is_authoritative(),
+        ) {
+            self.sync_authority_gameplay_from_local();
+        }
     }
 
     fn refresh_workstations(&mut self) {
@@ -18885,8 +18955,69 @@ impl State {
         self.anvil.refresh();
     }
 
+    fn presentation_inventory_click_target(&self) -> Option<PresentationInventoryTarget> {
+        let mouse_x = self.mouse_ndc[0];
+        let mouse_y = self.mouse_ndc[1];
+        if self.active_station == Some(StationKind::Merchant) {
+            let mut offer_y = 0.28;
+            for _ in 0..self.active_merchant_offers.len() {
+                if mouse_x >= -0.35
+                    && mouse_x <= 0.35
+                    && mouse_y >= offer_y - 0.04
+                    && mouse_y <= offer_y + 0.03
+                {
+                    return Some(PresentationInventoryTarget::Workstation);
+                }
+                offer_y -= 0.09;
+                if offer_y < -0.30 {
+                    break;
+                }
+            }
+        }
+        if self.active_station == Some(StationKind::Enchanting) {
+            for index in 0..3 {
+                let y1 = 0.28 - index as f32 * 0.12;
+                let y0 = y1 - 0.09;
+                if mouse_x >= 0.02 && mouse_x <= 0.62 && mouse_y >= y0 && mouse_y <= y1 {
+                    return Some(PresentationInventoryTarget::Workstation);
+                }
+            }
+        }
+        if self.recipe_book_open
+            && mouse_x >= -0.85
+            && mouse_x <= -0.48
+            && mouse_y >= -0.45
+            && mouse_y <= 0.45
+        {
+            return Some(PresentationInventoryTarget::Workstation);
+        }
+        let clicked_slot = self
+            .get_inventory_slots()
+            .into_iter()
+            .find(|&(_, x0, x1, y0, y1)| {
+                mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
+            })
+            .map(|(slot, _, _, _, _)| slot);
+        match clicked_slot {
+            Some(SlotType::ContainerSlot(_)) => Some(PresentationInventoryTarget::ContainerSlot),
+            Some(SlotType::AnvilOutput | SlotType::EnchantInput | SlotType::EnchantLapis) => {
+                Some(PresentationInventoryTarget::Workstation)
+            }
+            Some(_) => Some(PresentationInventoryTarget::PlayerInventory),
+            None => None,
+        }
+    }
+
+    pub(crate) fn should_writeback_after_inventory_click(&self) -> bool {
+        should_writeback_after_inventory_click(
+            self.has_in_process_runtime(),
+            !self.is_authoritative(),
+            self.presentation_inventory_click_target(),
+        )
+    }
+
     pub fn handle_inventory_click(&mut self, is_left: bool) {
-        if !self.is_authoritative() {
+        if self.has_in_process_runtime() || !self.is_authoritative() {
             let mouse_x = self.mouse_ndc[0];
             let mouse_y = self.mouse_ndc[1];
             if self.active_station == Some(StationKind::Merchant) && is_left {
@@ -18912,20 +19043,47 @@ impl State {
                     .find(|&(_, x0, x1, y0, y1)| {
                         mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
                     });
-            if let Some((SlotType::ContainerSlot(slot), _, _, _, _)) = clicked_slot {
-                if let Some(position) = self.container_target {
-                    let _ = self.submit_local_authority_container_action(
-                        position,
-                        crate::network::protocol::ContainerAction::Click,
-                        slot as u16,
-                        is_left,
-                    );
+            let target = match clicked_slot.map(|(slot, _, _, _, _)| slot) {
+                Some(SlotType::ContainerSlot(_)) => {
+                    Some(PresentationInventoryTarget::ContainerSlot)
                 }
+                Some(SlotType::AnvilOutput | SlotType::EnchantInput | SlotType::EnchantLapis) => {
+                    Some(PresentationInventoryTarget::Workstation)
+                }
+                Some(_) => Some(PresentationInventoryTarget::PlayerInventory),
+                None => self.presentation_inventory_click_target(),
+            };
+            match target.map(|target| {
+                presentation_inventory_decision(
+                    self.has_in_process_runtime(),
+                    !self.is_authoritative(),
+                    target,
+                )
+            }) {
+                Some(PresentationInventoryAction::SendAuthorityOp) => {
+                    if let Some((SlotType::ContainerSlot(slot), _, _, _, _)) = clicked_slot {
+                        if let Some(position) = self.container_target {
+                            let _ = self.submit_local_authority_container_action(
+                                position,
+                                crate::network::protocol::ContainerAction::Click,
+                                slot as u16,
+                                is_left,
+                            );
+                        }
+                    }
+                    return;
+                }
+                Some(PresentationInventoryAction::Reject) | None => {
+                    // Join-client clicks and embedded workstation / empty-space
+                    // throws must not consume items or spawn drops.
+                    if !self.is_authoritative()
+                        || !matches!(target, Some(PresentationInventoryTarget::PlayerInventory))
+                    {
+                        return;
+                    }
+                }
+                Some(PresentationInventoryAction::LocalMutate) => {}
             }
-            // Crafting, enchanting, brewing, anvil and player inventory
-            // actions have no typed authority operation yet.  Explicitly
-            // reject them rather than mutating a second local inventory.
-            return;
         }
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
@@ -18976,6 +19134,14 @@ impl State {
             && mouse_y >= -0.45
             && mouse_y <= 0.45
         {
+            if presentation_inventory_decision(
+                self.has_in_process_runtime(),
+                !self.is_authoritative(),
+                PresentationInventoryTarget::Workstation,
+            ) != PresentationInventoryAction::LocalMutate
+            {
+                return;
+            }
             let smelting_recipes = self.recipe_manager.get_smelting_recipes();
             let mut line_y = 0.34;
             for r in smelting_recipes {
@@ -19021,6 +19187,14 @@ impl State {
                 let y1 = 0.28 - index as f32 * 0.12;
                 let y0 = y1 - 0.09;
                 if mouse_x >= 0.02 && mouse_x <= 0.62 && mouse_y >= y0 && mouse_y <= y1 {
+                    if presentation_inventory_decision(
+                        self.has_in_process_runtime(),
+                        !self.is_authoritative(),
+                        PresentationInventoryTarget::Workstation,
+                    ) != PresentationInventoryAction::LocalMutate
+                    {
+                        return;
+                    }
                     self.perform_enchantment(index);
                     return;
                 }
@@ -19102,6 +19276,14 @@ impl State {
                     }
                 }
                 SlotType::AnvilOutput => {
+                    if presentation_inventory_decision(
+                        self.has_in_process_runtime(),
+                        !self.is_authoritative(),
+                        PresentationInventoryTarget::Workstation,
+                    ) != PresentationInventoryAction::LocalMutate
+                    {
+                        return;
+                    }
                     if let Some(output) = self.anvil.output {
                         let affordable = self.game_mode == GameMode::Creative
                             || self.player_state.experience_level >= self.anvil.cost as u32;
@@ -19118,8 +19300,20 @@ impl State {
                     }
                 }
                 SlotType::ContainerSlot(slot_index)
-                    if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) =>
+                    if self.has_in_process_runtime()
+                        || matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) =>
                 {
+                    if self.has_in_process_runtime() {
+                        if let Some(container_pos) = self.container_target {
+                            let _ = self.submit_local_authority_container_action(
+                                container_pos,
+                                crate::network::protocol::ContainerAction::Click,
+                                slot_index as u16,
+                                is_left,
+                            );
+                        }
+                        return;
+                    }
                     let Some(container_pos) = self.container_target else {
                         return;
                     };
@@ -19364,6 +19558,12 @@ impl State {
                 }
             }
         } else if let Some(dragged) = self.inventory.dragged {
+            if !should_mutate_presentation_world(
+                self.has_in_process_runtime(),
+                !self.is_authoritative(),
+            ) {
+                return;
+            }
             let aspect = self.size.width as f32 / self.size.height as f32;
             if creative_catalog
                 && is_left
@@ -19391,6 +19591,14 @@ impl State {
     }
 
     fn perform_enchantment(&mut self, index: usize) {
+        if presentation_inventory_decision(
+            self.has_in_process_runtime(),
+            !self.is_authoritative(),
+            PresentationInventoryTarget::Workstation,
+        ) != PresentationInventoryAction::LocalMutate
+        {
+            return;
+        }
         let Some(mut input) = self.enchanting.input else {
             return;
         };
@@ -25703,6 +25911,48 @@ mod debug_tests {
             .data
             .position;
         assert_eq!(second[0], first[0] + 1.0);
+
+        bridge.shutdown().expect("runtime save/shutdown");
+        let _ = std::fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn embedded_inventory_writeback_copies_only_inventory_and_hotbar() {
+        let world_dir = embedded_test_world("writeback");
+        let role = MultiplayerRole::Singleplayer;
+        let mut bridge =
+            EmbeddedRuntimeBridge::new(&role, world_dir.clone(), 1234, Difficulty::Normal, 8, true)
+                .expect("embedded runtime should construct");
+        let session_id = bridge.session_id();
+        let before = bridge
+            .runtime
+            .authority
+            .session(session_id)
+            .expect("session")
+            .gameplay;
+        assert!(before.health_milli > 0);
+
+        let mut inventory = [None; crate::authority::contract::SESSION_INVENTORY_SLOTS];
+        inventory[0] = Some(crate::authority::contract::SessionInventorySlot::from_wire(
+            crate::network::protocol::ItemWire::from_stack(&ItemStack::new(Item::Dirt, 8)),
+            0,
+            0,
+        ));
+        assert!(bridge.sync_local_inventory(inventory, None, 3));
+
+        let after = bridge
+            .runtime
+            .authority
+            .session(session_id)
+            .expect("session")
+            .gameplay;
+        assert_eq!(after.health_milli, before.health_milli);
+        assert_eq!(after.hunger_milli, before.hunger_milli);
+        assert_eq!(after.experience, before.experience);
+        assert_eq!(after.experience_level, before.experience_level);
+        assert_eq!(after.mounted_entity, before.mounted_entity);
+        assert_eq!(after.selected_hotbar_slot, 3);
+        assert!(after.inventory[0].is_some());
 
         bridge.shutdown().expect("runtime save/shutdown");
         let _ = std::fs::remove_dir_all(world_dir);

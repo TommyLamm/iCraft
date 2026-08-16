@@ -28,7 +28,7 @@
 | 03 | [有界 bincode 解碼與對抗性 TCP](03_bounded_bincode_decode.md) | P0 | 已完成 | 無 |
 | 04 | [握手身份與 online-mode](04_handshake_identity.md) | P0 | 已完成 | 無 |
 | 05 | [Chunk restore 失敗即失敗](05_fail_closed_chunk_restore.md) | P0 | 已完成 | 無 |
-| 06 | [Embedded 表現層停止改世界](06_embedded_presentation_no_mutation.md) | P1 | 待執行 | 01、02 |
+| 06 | [Embedded 表現層停止改世界](06_embedded_presentation_no_mutation.md) | P1 | 已完成 | 01、02 |
 | 07 | [Join client 只吃投影](07_join_client_projection_only.md) | P1 | 已完成 | 無 |
 | 08 | [權威 session 生命週期](08_authority_session_lifecycle.md) | P1 | 已完成 | 無 |
 | 09 | [Signed-Y 殘留收斂](09_signed_y_completion.md) | P1 | 已完成 | 無 |

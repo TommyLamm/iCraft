@@ -44,6 +44,7 @@ pub mod passive_mob;
 pub mod perf;
 pub mod physics;
 pub mod player;
+pub mod presentation_inventory_policy;
 pub mod rail;
 pub mod recipes;
 pub mod redstone;
