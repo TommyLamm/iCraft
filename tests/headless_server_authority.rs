@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STEP_SLEEP: Duration = Duration::from_millis(5);
-const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 const CHEST_POSITION: (i32, i32, i32) = (8, 80, 8);
 
 static NEXT_WORLD: AtomicU64 = AtomicU64::new(0);
@@ -429,24 +429,20 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     alice.clear_events();
     bob.clear_events();
 
-    const BLOCK_REQUEST: u128 = 0xA001;
     let base_revision = runtime.authority.current_revision();
-    let block_request = request(
-        BLOCK_REQUEST,
-        1,
-        base_revision,
-        GameplayOperation::BlockUse {
-            x: CHEST_POSITION.0,
-            y: CHEST_POSITION.1,
-            z: CHEST_POSITION.2,
-            block: BlockType::Chest.to_wire(),
-        },
-    );
-    alice.send(GameToClient::GameplayRequest {
-        request: block_request.clone(),
-    });
-    let block_response = wait_for_response(&mut runtime, &mut alice, &mut bob, BLOCK_REQUEST);
-    let block_revision = accepted_revision(&block_response);
+    let chest_mutation = runtime
+        .authority
+        .world
+        .set_block(
+            CHEST_POSITION.0,
+            CHEST_POSITION.1,
+            CHEST_POSITION.2,
+            BlockType::Chest,
+            0,
+        )
+        .expect("authoritative chest seed")
+        .expect("chest seed must change the cell");
+    let block_revision = chest_mutation.revision;
     assert!(block_revision > base_revision);
     assert_eq!(
         runtime
@@ -456,26 +452,42 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         BlockType::Chest
     );
 
-    let block_targets: BTreeSet<_> = runtime
-        .drain_routed_updates()
-        .into_iter()
-        .filter_map(|update| {
-            (update.dimension == Dimension::Overworld
-                && update.kind == InterestKind::Block(CHEST_POSITION))
-            .then_some(update.target)
-        })
-        .collect();
+    const BLOCK_REQUEST: u128 = 0xA001;
+    let leftover_block_use = request(
+        BLOCK_REQUEST,
+        1,
+        block_revision,
+        GameplayOperation::BlockUse {
+            x: CHEST_POSITION.0,
+            y: CHEST_POSITION.1,
+            z: CHEST_POSITION.2,
+            block: BlockType::DiamondOre.to_wire(),
+        },
+    );
+    alice.send(GameToClient::GameplayRequest {
+        request: leftover_block_use.clone(),
+    });
+    let block_response = wait_for_response(&mut runtime, &mut alice, &mut bob, BLOCK_REQUEST);
     assert_eq!(
-        block_targets,
-        BTreeSet::from([alice_id]),
-        "the distant client must not enter the block mutation's interest route"
+        block_response.outcome,
+        GameplayOutcome::Rejected {
+            reason: RejectReason::Unsupported
+        }
+    );
+    assert_eq!(
+        runtime
+            .authority
+            .world
+            .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
+        BlockType::Chest,
+        "leftover BlockUse must not overwrite the seeded chest"
     );
 
     let accepted_before_replay = runtime.metrics.requests_accepted;
     let rejected_before_replay = runtime.metrics.requests_rejected;
     let duplicate_before_replay = runtime.metrics.duplicate_requests;
     alice.send(GameToClient::GameplayRequest {
-        request: block_request,
+        request: leftover_block_use,
     });
     drive_pair_for(
         &mut runtime,

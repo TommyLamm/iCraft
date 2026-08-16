@@ -25446,6 +25446,7 @@ mod debug_tests {
             crate::server_runtime::LocalSessionStorage::WorldPlayer
         );
 
+        let before = bridge.runtime.authority.world.get_block(8, 80, 8);
         bridge
             .queue_request(crate::network::protocol::GameplayRequest {
                 request_id: 0,
@@ -25461,11 +25462,15 @@ mod debug_tests {
                 },
             })
             .expect("request should enter bounded FIFO");
-        assert!(bridge.runtime.authority.world.get_block(8, 80, 8) != BlockType::Glass);
+        assert_eq!(bridge.runtime.authority.world.get_block(8, 80, 8), before);
         let output = bridge.tick().expect("fixed tick should run");
-        assert!(output.snapshot.mutations.iter().any(|mutation| {
-            mutation.position == (8, 80, 8) && mutation.block == BlockType::Glass.to_wire()
-        }));
+        assert!(!output
+            .snapshot
+            .mutations
+            .iter()
+            .any(|mutation| mutation.position == (8, 80, 8)
+                && mutation.block == BlockType::Glass.to_wire()));
+        assert_eq!(bridge.runtime.authority.world.get_block(8, 80, 8), before);
         assert!(output.presentation_events.iter().any(|event| {
             matches!(
                 event,
@@ -25476,7 +25481,9 @@ mod debug_tests {
                     && response.request_id == 1
                     && matches!(
                         response.outcome,
-                        crate::network::protocol::GameplayOutcome::Accepted { .. }
+                        crate::network::protocol::GameplayOutcome::Rejected {
+                            reason: crate::network::protocol::RejectReason::Unsupported
+                        }
                     )
             )
         }));

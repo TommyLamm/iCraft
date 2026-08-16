@@ -1889,14 +1889,21 @@ impl<S: HostEventSender> NetworkServer<S> {
                             }
                         }
                         Ok(Ok(Packet::BlockActionRequest {
-                            action: _action,
+                            action,
                             x,
                             y,
                             z,
                             block,
-                            held_item: _held_item,
+                            held_item,
                             ..
                         })) => {
+                            let Some(operation) = GameplayOperation::from_legacy_block_action(
+                                action, x, y, z, block, held_item,
+                            ) else {
+                                // Action::Use has no BlockAction kind. Do not
+                                // invent Place/StartBreak or fall back to BlockUse.
+                                continue;
+                            };
                             let request = {
                                 let mut sessions_guard = sessions.lock().await;
                                 let Some(session) = sessions_guard.get_mut(&id) else {
@@ -1907,7 +1914,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                                     session,
                                     session.gameplay.current_dimension,
                                     session.gameplay.last_client_revision,
-                                    GameplayOperation::BlockUse { x, y, z, block },
+                                    operation,
                                 )
                             };
                             if let Err(reason) = Self::route_gameplay_request(
@@ -4720,11 +4727,13 @@ mod tests {
                 && request.client_sequence == 1
                     && matches!(
                         request.operation,
-                        crate::network::protocol::GameplayOperation::BlockUse {
+                        crate::network::protocol::GameplayOperation::BlockAction {
+                            action: crate::network::protocol::BlockActionKind::StartBreak,
                             x: 10,
                             y: 64,
                             z: 20,
                             block: 0,
+                            ..
                         }
                     )
         ));

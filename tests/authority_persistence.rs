@@ -139,11 +139,6 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     restarted.set_session_dimension(10, Dimension::End);
     let _ = restarted.drain_routed_updates();
     let old = restarted.authority.world.get_block(8, 80, 8);
-    let new_block = if old == BlockType::Air {
-        BlockType::Stone
-    } else {
-        BlockType::Air
-    };
     let response = restarted
         .submit_request(
             9,
@@ -157,17 +152,22 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
                     x: 8,
                     y: 80,
                     z: 8,
-                    block: new_block.to_wire(),
+                    block: BlockType::DiamondOre.to_wire(),
                 },
             },
         )
         .unwrap();
-    assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+    assert!(matches!(
+        response.outcome,
+        GameplayOutcome::Rejected {
+            reason: icraft::network::protocol::RejectReason::Unsupported
+        }
+    ));
+    assert_eq!(restarted.authority.world.get_block(8, 80, 8), old);
     let updates = restarted.drain_routed_updates();
-    assert!(updates.iter().all(|update| update.target == 9));
-    assert!(updates
-        .iter()
-        .all(|update| update.dimension == Dimension::Overworld));
+    assert!(updates.iter().all(|update| update.target != 10
+        || update.dimension != Dimension::Overworld
+        || update.kind != icraft::authority::interest::InterestKind::Block((8, 80, 8))));
 
     let mut overworld_interest = InterestSet::new(Dimension::Overworld, 4, 2);
     overworld_interest.update_position(Dimension::Overworld, [0.0, 64.0, 0.0]);

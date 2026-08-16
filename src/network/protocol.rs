@@ -306,6 +306,8 @@ pub enum GameplayOperation {
         block: u32,
         look_milli: [i16; 3],
     },
+    /// Leftover client-authored voxel write. Authority rejects this as
+    /// `Unsupported`; the only legal place/break path is `BlockAction`.
     BlockUse {
         x: i32,
         y: i32,
@@ -416,6 +418,38 @@ pub enum GameplayOperation {
         hand: u8,
         source: SlotRefWire,
     },
+}
+
+impl GameplayOperation {
+    /// Remap leftover `Action` + held-item envelopes onto typed `BlockAction`.
+    /// `Action::Use` has no Plan31 kind and must not become `BlockUse`.
+    /// Leftover packets have no face/look; a unit +Z look keeps the envelope
+    /// well-formed so authority, not the adapter, decides Place/StartBreak.
+    pub fn from_legacy_block_action(
+        action: Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        held_item: Option<ItemWire>,
+    ) -> Option<Self> {
+        let action = match action {
+            Action::Place => BlockActionKind::Place,
+            Action::Break => BlockActionKind::StartBreak,
+            Action::Use => return None,
+        };
+        Some(Self::BlockAction {
+            action,
+            x,
+            y,
+            z,
+            face: [0, 0, 0],
+            hand: 0,
+            held: held_item.map(|item| SessionSlotWire::new(item, item.can_break, item.can_place_on)),
+            block,
+            look_milli: [0, 0, 1000],
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

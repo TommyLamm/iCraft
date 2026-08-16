@@ -43,7 +43,7 @@ fn properties(label: &str) -> ServerProperties {
     }
 }
 
-fn block_request(session_id: u64, client_revision: u64, request_id: u128) -> GameplayRequest {
+fn leftover_block_use(session_id: u64, client_revision: u64, request_id: u128) -> GameplayRequest {
     GameplayRequest {
         request_id,
         client_sequence: 1,
@@ -54,7 +54,7 @@ fn block_request(session_id: u64, client_revision: u64, request_id: u128) -> Gam
             x: 8,
             y: 80,
             z: 8,
-            block: 1,
+            block: BlockType::DiamondOre.to_wire(),
         },
     }
 }
@@ -834,22 +834,28 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
     let revision = runtime
         .authority
         .revision_for_dimension(Dimension::Overworld);
+    let before = runtime.authority.world.get_block(8, 80, 8);
     input
-        .submit_request(local_id, block_request(local_id, revision, 41))
+        .submit_request(local_id, leftover_block_use(local_id, revision, 41))
         .unwrap();
 
     // Publication is queued: authority state cannot change before the fixed
     // tick consumes the same bounded FIFO used by listen transport events.
-    assert_ne!(runtime.authority.world.get_block(8, 80, 8).to_wire(), 1);
+    assert_eq!(runtime.authority.world.get_block(8, 80, 8), before);
     let output = runtime.tick_with_output().unwrap();
     let response = response_for(&output.presentation_events, local_id, 41).unwrap();
-    assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
-    assert!(output
+    assert!(matches!(
+        response.outcome,
+        GameplayOutcome::Rejected {
+            reason: RejectReason::Unsupported
+        }
+    ));
+    assert!(!output
         .snapshot
         .mutations
         .iter()
-        .any(|mutation| mutation.position == (8, 80, 8) && mutation.block == 1));
-    assert_eq!(runtime.authority.world.get_block(8, 80, 8).to_wire(), 1);
+        .any(|mutation| mutation.position == (8, 80, 8)));
+    assert_eq!(runtime.authority.world.get_block(8, 80, 8), before);
     assert_eq!(runtime.metrics().queue_depth, 0);
     assert_eq!(runtime.metrics().queue_full, 0);
     assert_eq!(runtime.metrics().outbound_packets, 0);
@@ -875,17 +881,25 @@ fn listen_runtime_routes_local_response_to_tick_output() {
     let revision = runtime
         .authority
         .revision_for_dimension(Dimension::Overworld);
+    let before = runtime.authority.world.get_block(8, 80, 8);
     input
-        .submit_request(local_id, block_request(local_id, revision, 42))
+        .submit_request(local_id, leftover_block_use(local_id, revision, 42))
         .unwrap();
     let output = runtime.tick_with_output().unwrap();
-    assert!(response_for(&output.presentation_events, local_id, 42)
-        .is_some_and(|response| matches!(response.outcome, GameplayOutcome::Accepted { .. })));
-    assert!(output
+    assert!(response_for(&output.presentation_events, local_id, 42).is_some_and(|response| {
+        matches!(
+            response.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        )
+    }));
+    assert!(!output
         .snapshot
         .mutations
         .iter()
         .any(|mutation| mutation.position == (8, 80, 8)));
+    assert_eq!(runtime.authority.world.get_block(8, 80, 8), before);
 
     runtime.shutdown().unwrap();
     drop(runtime);

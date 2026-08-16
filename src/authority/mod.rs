@@ -1226,6 +1226,17 @@ impl AuthorityCore {
         if request.client_revision < session.last_revision {
             return self.reject_for_session(id, request_id, RejectReason::InvalidRevision, None);
         }
+        if matches!(
+            &request.operation,
+            crate::network::protocol::GameplayOperation::BlockUse { .. }
+        ) {
+            return self.reject_for_session(
+                id,
+                request_id,
+                RejectReason::Unsupported,
+                Some(request.client_sequence),
+            );
+        }
         if session.game_mode == crate::inventory::GameMode::Spectator
             && matches!(
                 &request.operation,
@@ -1349,6 +1360,7 @@ impl AuthorityCore {
                 *block,
                 *look_milli,
             )),
+            GameplayOperation::BlockUse { .. } => Some(Err(RejectReason::Unsupported)),
             GameplayOperation::ItemUse { item, count } => {
                 let Some(item_kind) = crate::inventory::Item::from_u32(*item) else {
                     return Some(Err(RejectReason::InvalidState));
@@ -2722,8 +2734,9 @@ mod tests {
     }
 
     #[test]
-    fn request_mutation_is_drained_into_the_next_authority_snapshot() {
+    fn leftover_block_use_is_unsupported_and_does_not_drain_a_mutation() {
         let mut core = core(AuthorityTopology::Singleplayer);
+        let before = core.world.get_block(8, 80, 8);
         let request = GameplayRequest {
             request_id: 21,
             client_sequence: 1,
@@ -2738,10 +2751,14 @@ mod tests {
             },
         };
         let response = core.submit_request(request);
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
-        let pending = core.take_pending_mutations();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].position, (8, 80, 8));
+        assert!(matches!(
+            response.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        ));
+        assert!(core.take_pending_mutations().is_empty());
+        assert_eq!(core.world.get_block(8, 80, 8), before);
     }
 
     #[test]
@@ -3756,53 +3773,20 @@ mod tests {
         ))
         .unwrap();
 
-        let overworld = core.submit_request(GameplayRequest {
-            request_id: 101,
-            client_sequence: 1,
-            session_id: 7,
-            dimension: Dimension::Overworld as u8,
-            client_revision: core.revision_for_dimension(Dimension::Overworld),
-            operation: GameplayOperation::BlockUse {
-                x: 8,
-                y: 80,
-                z: 8,
-                block: BlockType::Glass.to_wire(),
-            },
+        core.with_world(Dimension::Overworld, |world| {
+            world
+                .set_block(8, 80, 8, BlockType::Glass, 0)
+                .expect("seed overworld glass");
         });
-        let nether = core.submit_request(GameplayRequest {
-            request_id: 102,
-            client_sequence: 1,
-            session_id: 8,
-            dimension: Dimension::Nether as u8,
-            client_revision: core.revision_for_dimension(Dimension::Nether),
-            operation: GameplayOperation::BlockUse {
-                x: 8,
-                y: 80,
-                z: 8,
-                block: BlockType::Obsidian.to_wire(),
-            },
+        core.with_world(Dimension::Nether, |world| {
+            world
+                .set_block(8, 80, 8, BlockType::Obsidian, 0)
+                .expect("seed nether obsidian");
         });
-        assert!(matches!(
-            overworld.outcome,
-            GameplayOutcome::Accepted { .. }
-        ));
-        assert!(matches!(nether.outcome, GameplayOutcome::Accepted { .. }));
-        assert_eq!(overworld.server_sequence, nether.server_sequence);
-
         core.activate_dimension(Dimension::Overworld);
         let snapshot = core.tick();
         assert_eq!(snapshot.tick, 1);
         assert_eq!(core.world.dimension, Dimension::Overworld);
-        assert!(snapshot
-            .mutations
-            .iter()
-            .any(|mutation| mutation.dimension == Dimension::Overworld as u8
-                && mutation.block == BlockType::Glass.to_wire()));
-        assert!(snapshot
-            .mutations
-            .iter()
-            .any(|mutation| mutation.dimension == Dimension::Nether as u8
-                && mutation.block == BlockType::Obsidian.to_wire()));
         assert!(snapshot
             .session_updates
             .iter()
@@ -3822,8 +3806,30 @@ mod tests {
         let nether_revision = core.revision_for_dimension(Dimension::Nether);
         assert_eq!(overworld_revision, nether_revision);
 
-        // An active Nether compatibility view must not make a valid Overworld
-        // request fail its dimension gate; routing selects the session world.
+        let leftover = core.submit_request(GameplayRequest {
+            request_id: 101,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: Dimension::Overworld as u8,
+            client_revision: overworld_revision,
+            operation: GameplayOperation::BlockUse {
+                x: 8,
+                y: 80,
+                z: 8,
+                block: BlockType::DiamondOre.to_wire(),
+            },
+        });
+        assert!(matches!(
+            leftover.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        ));
+        core.activate_dimension(Dimension::Overworld);
+        assert_eq!(core.world.get_block(8, 80, 8), BlockType::Glass);
+
+        // An active Nether compatibility view must not make a leftover
+        // Overworld BlockUse mutate; routing still selects the session world.
         let routed_again = core.submit_request(GameplayRequest {
             request_id: 103,
             client_sequence: 2,
@@ -3839,8 +3845,13 @@ mod tests {
         });
         assert!(matches!(
             routed_again.outcome,
-            GameplayOutcome::Accepted { .. }
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
         ));
+        core.activate_dimension(Dimension::Overworld);
+        assert_eq!(core.world.get_block(8, 80, 8), BlockType::Glass);
+        assert_ne!(core.world.get_block(9, 80, 8), BlockType::Glass);
     }
 
     #[test]

@@ -1525,8 +1525,30 @@ impl ServerRuntime {
                 }
                 Ok(())
             }
-            ServerToHost::ClientBlockAction { id, x, y, z, .. } => {
-                self.handle_block_change(id, x, y, z, 0, 0)
+            ServerToHost::ClientBlockAction {
+                id,
+                action,
+                x,
+                y,
+                z,
+                block,
+                held_item,
+            } => {
+                let Some(operation) =
+                    GameplayOperation::from_legacy_block_action(action, x, y, z, block, held_item)
+                else {
+                    return Ok(());
+                };
+                let Some(request) = self.legacy_request(
+                    id,
+                    self.session_revision(id).unwrap_or(0),
+                    operation,
+                ) else {
+                    return Ok(());
+                };
+                let response = self.handle_gameplay_request(request)?;
+                self.send_response(id, response);
+                Ok(())
             }
             ServerToHost::ClientSleepRequest {
                 id,
@@ -1962,28 +1984,17 @@ impl ServerRuntime {
         block: u32,
         _state: u8,
     ) -> io::Result<()> {
-        let Some(session) = self.players.get(&id) else {
+        // Leftover BlockChange has no held/face. Submit BlockUse so the
+        // authority can reject Unsupported; never set_block or invent Air.
+        let Some(request) = self.legacy_request(
+            id,
+            self.session_revision(id).unwrap_or(0),
+            GameplayOperation::BlockUse { x, y, z, block },
+        ) else {
             return Ok(());
         };
-        if !within_reach(session, x, y, z) || !self.valid_coordinate(session.dimension, x, y, z) {
-            return Ok(());
-        }
-        let dimension = session.dimension;
-        let _ = session;
-        let revision = self.authority.revision_for_dimension(dimension);
-        let request = GameplayRequest {
-            request_id: revision as u128 + 1,
-            client_sequence: self
-                .authority
-                .session(id)
-                .map(|authority_session| authority_session.last_client_sequence + 1)
-                .unwrap_or(1),
-            session_id: id,
-            dimension: dimension as u8,
-            client_revision: revision,
-            operation: GameplayOperation::BlockUse { x, y, z, block },
-        };
-        let _response = self.handle_gameplay_request(request)?;
+        let response = self.handle_gameplay_request(request)?;
+        self.send_response(id, response);
         Ok(())
     }
 
@@ -2058,26 +2069,9 @@ impl ServerRuntime {
                             }
                         }
                     }
-                    GameplayOperation::BlockUse { x, y, z, block } => {
-                        let dimension = self
-                            .authority
-                            .session(id)
-                            .and_then(|session| Dimension::from_wire(session.dimension))
-                            .unwrap_or_else(|| self.authority.active_dimension());
-                        let state = self
-                            .authority
-                            .world_ref(dimension)
-                            .map(|world| world.get_block_state(x, y, z))
-                            .unwrap_or(0);
-                        let raw_fluid = self
-                            .authority
-                            .world_ref(dimension)
-                            .map(|world| world.chunks.get_fluid_raw(x, y, z))
-                            .unwrap_or(0);
-                        self.queue_block_change(
-                            dimension, *revision, x, y, z, block, state, raw_fluid,
-                        );
-                        self.routed_mutations.insert((dimension, *revision));
+                    GameplayOperation::BlockUse { .. } => {
+                        // BlockUse is never an accepted mutation. A leftover
+                        // accept must not project or write Air.
                     }
                     GameplayOperation::Container {
                         x,
@@ -3756,6 +3750,11 @@ mod tests {
         )));
         runtime.drain_routed_updates();
 
+        runtime.authority.with_world(Dimension::Overworld, |world| {
+            world
+                .set_block(8, 80, 8, crate::world::BlockType::Glass, 0)
+                .unwrap();
+        });
         let revision = runtime.session_revision(2).unwrap();
         let response = runtime
             .submit_request(
@@ -3770,12 +3769,17 @@ mod tests {
                         x: 8,
                         y: 80,
                         z: 8,
-                        block: crate::world::BlockType::Glass.to_wire(),
+                        block: crate::world::BlockType::DiamondOre.to_wire(),
                     },
                 },
             )
             .unwrap();
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(matches!(
+            response.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        ));
         let output = runtime.tick_with_output().unwrap();
         assert_eq!(
             output
@@ -3792,16 +3796,24 @@ mod tests {
                     }
                 ))
                 .count(),
-            1,
-            "the immediate ACK path and fixed snapshot must not double-project a mutation"
+            0,
+            "rejected leftover BlockUse must not project a BlockChange"
         );
-
-        let routed = runtime.drain_routed_updates();
-        assert!(routed.iter().any(|update| update.target == 99));
-        assert!(routed.iter().any(|update| update.target == 2));
+        assert_eq!(
+            runtime
+                .authority
+                .world_ref(Dimension::Overworld)
+                .map(|world| world.get_block(8, 80, 8)),
+            Some(crate::world::BlockType::Glass)
+        );
 
         assert!(runtime.set_session_dimension(2, Dimension::Nether));
         runtime.drain_routed_updates();
+        runtime.authority.with_world(Dimension::Overworld, |world| {
+            world
+                .set_block(9, 80, 8, crate::world::BlockType::Stone, 0)
+                .unwrap();
+        });
         let revision = runtime.session_revision(99).unwrap();
         let response = runtime
             .submit_request(
@@ -3816,16 +3828,28 @@ mod tests {
                         x: 9,
                         y: 80,
                         z: 8,
-                        block: crate::world::BlockType::Stone.to_wire(),
+                        block: crate::world::BlockType::DiamondOre.to_wire(),
                     },
                 },
             )
             .unwrap();
-        assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(matches!(
+            response.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        ));
         assert!(!runtime
             .drain_routed_updates()
             .iter()
             .any(|update| update.target == 2 && update.dimension == Dimension::Overworld));
+        assert_eq!(
+            runtime
+                .authority
+                .world_ref(Dimension::Overworld)
+                .map(|world| world.get_block(9, 80, 8)),
+            Some(crate::world::BlockType::Stone)
+        );
 
         let chest = (8, 80, 8);
         runtime
@@ -4211,6 +4235,7 @@ mod tests {
         let mut runtime = ServerRuntime::new(properties).unwrap();
         runtime.handle_join(1, "alex".into()).unwrap();
         runtime.handle_join(2, "steve".into()).unwrap();
+        let before = runtime.authority.world.get_block(8, 80, 8);
         let first = runtime
             .submit_request(
                 1,
@@ -4247,10 +4272,20 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(matches!(first.outcome, GameplayOutcome::Accepted { .. }));
-        assert!(matches!(second.outcome, GameplayOutcome::Accepted { .. }));
+        assert!(matches!(
+            first.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        ));
+        assert!(matches!(
+            second.outcome,
+            GameplayOutcome::Rejected {
+                reason: RejectReason::Unsupported
+            }
+        ));
         assert!(second.server_sequence > first.server_sequence);
-        assert_eq!(runtime.authority.world.get_block(8, 80, 8).to_wire(), 2);
+        assert_eq!(runtime.authority.world.get_block(8, 80, 8), before);
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
     }

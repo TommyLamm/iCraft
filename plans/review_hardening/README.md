@@ -23,7 +23,7 @@
 
 | # | 單獨執行文件 | 優先 | 狀態 | 前置 |
 | --- | --- | --- | --- | --- |
-| 01 | [關閉 BlockUse 任意改方塊](01_close_block_use_mutation.md) | P0 | 待執行 | 無 |
+| 01 | [關閉 BlockUse 任意改方塊](01_close_block_use_mutation.md) | P0 | 已完成 | 無 |
 | 02 | [容器點擊改為 session 守恆交易](02_container_click_conservation.md) | P0 | 待執行 | 無 |
 | 03 | [有界 bincode 解碼與對抗性 TCP](03_bounded_bincode_decode.md) | P0 | 待執行 | 無 |
 | 04 | [握手身份與 online-mode](04_handshake_identity.md) | P0 | 待執行 | 無 |

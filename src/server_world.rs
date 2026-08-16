@@ -1296,13 +1296,10 @@ impl ServerWorld {
                 let _ = action;
                 Err(WorldDispatchError::new(RejectReason::Unsupported))
             }
-            GameplayOperation::BlockUse { x, y, z, block } => {
-                let block = BlockType::from_wire(*block)
-                    .ok_or_else(|| WorldDispatchError::new(RejectReason::InvalidState))?;
-                if self.get_block(*x, *y, *z) == block {
-                    return Err(WorldDispatchError::new(RejectReason::InvalidState));
-                }
-                self.set_block(*x, *y, *z, block, 0)
+            GameplayOperation::BlockUse { .. } => {
+                // Leftover client-authored voxel write. Plan31 BlockAction is
+                // the only place/break ingress; this arm must not set_block.
+                Err(WorldDispatchError::new(RejectReason::Unsupported))
             }
             GameplayOperation::Container {
                 action,

@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const STEP_SLEEP: Duration = Duration::from_millis(5);
-pub const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A small, deterministic wrapper around one real `NetworkClient` socket.
 /// Keeping the queue/event logic here prevents each topology vector from

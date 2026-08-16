@@ -1104,10 +1104,14 @@ async fn run_client(
                                 return;
                             }
                         }
-                        Ok(GameToClient::RequestBlockAction { action, x, y, z, block, held_item: _held_item }) => {
-                            let _ = action;
+                        Ok(GameToClient::RequestBlockAction { action, x, y, z, block, held_item }) => {
+                            let Some(operation) = crate::network::protocol::GameplayOperation::from_legacy_block_action(
+                                action, x, y, z, block, held_item,
+                            ) else {
+                                continue;
+                            };
                             let request = legacy_gameplay_request(
-                                crate::network::protocol::GameplayOperation::BlockUse { x, y, z, block },
+                                operation,
                                 current_dimension,
                                 last_client_revision,
                                 player_id,
@@ -1119,7 +1123,7 @@ async fn run_client(
                                 protocol_version: PROTOCOL_VERSION,
                                 request,
                             }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy BlockAction envelope");
+                                eprintln!("[NetworkClient] Disconnecting: failed to send leftover BlockAction envelope");
                                 let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                                 return;
                             }
@@ -2131,11 +2135,13 @@ mod tests {
         assert_eq!(action.client_sequence, 2);
         assert!(matches!(
             action.operation,
-            crate::network::protocol::GameplayOperation::BlockUse {
+            crate::network::protocol::GameplayOperation::BlockAction {
+                action: crate::network::protocol::BlockActionKind::StartBreak,
                 x: 10,
                 y: 64,
                 z: 20,
                 block: 0,
+                ..
             }
         ));
 
