@@ -54,42 +54,42 @@ pub enum BlockType {
 ```
 
 ### 子任務清單
-- [ ] 擴展 `BlockType` 枚舉至 30+ 種
-- [ ] 為每種方塊定義屬性 (硬度、透明度、是否可燃、採集工具)
-- [ ] 方塊屬性表：`BlockProperties { hardness, transparent, light_level, tool_type }`
+- [x] 擴展 `BlockType` 枚舉至 30+ 種
+- [x] 為每種方塊定義屬性 (硬度、透明度、是否可燃、採集工具)
+- [x] 方塊屬性表：`BlockProperties { hardness, transparent, light_level, tool_type }`
 
 ---
 
 ## 2.2 紋理圖集升級
 **目標**: 生成 Minecraft 風格的 16×16 像素藝術紋理
 
-- [ ] 擴展紋理圖集至 256×256 (16×16 的 16×16 格子)
-- [ ] 為每種方塊生成程序化紋理 (仿 Minecraft 風格)
-- [ ] 每種方塊最多 3 種面紋理 (top/side/bottom)
-- [ ] 建立 `BlockTexture` 查找表：方塊ID + 面方向 → UV 座標
-- [ ] 修改 `generate_mesh()` 使用新的 UV 查找表
+- [x] 擴展紋理圖集至 256×256 (16×16 的 16×16 格子)
+- [x] 為每種方塊生成程序化紋理 (仿 Minecraft 風格)
+- [x] 每種方塊最多 3 種面紋理 (top/side/bottom)
+- [x] 建立 `BlockTexture` 查找表：方塊ID + 面方向 → UV 座標
+- [x] 修改 `generate_mesh()` 使用新的 UV 查找表
 
 ---
 
 ## 2.3 透明方塊渲染
 **目標**: 玻璃、樹葉、水等透明/半透明方塊的正確渲染
 
-- [ ] 區分不透明方塊與透明方塊的 mesh
-- [ ] 透明面片排序 (Back-to-Front) 或使用 Alpha Test
-- [ ] 新增透明方塊渲染 pipeline (alpha blending)
-- [ ] 樹葉方塊使用 Alpha Test (cutout)
+- [x] 區分不透明方塊與透明方塊的 mesh
+- [x] 透明面片排序 (Back-to-Front) 或使用 Alpha Test
+- [x] 新增透明方塊渲染 pipeline (alpha blending)
+- [x] 樹葉方塊使用 Alpha Test (cutout)
 
 ---
 
 ## 2.4 世界生成改進
-- [ ] 基岩層生成 (Y=0~4 隨機基岩)
-- [ ] 地下礦脈生成 (煤、鐵、金、鑽石按層級分佈)
-- [ ] 地形帶沙灘 (水面附近的沙子替換)
+- [x] 基岩層生成 (Y=0~4 隨機基岩)
+- [x] 地下礦脈生成 (煤、鐵、金、鑽石按層級分佈)
+- [x] 地形帶沙灘 (水面附近的沙子替換)
 
 ---
 
 ## 驗證
-- [ ] 世界中可見到 15+ 種不同方塊
-- [ ] 每種方塊的紋理清晰可辨
-- [ ] 透明方塊 (玻璃/樹葉) 渲染正確
-- [ ] 地下可見不同礦物
+- [x] 世界中可見到 15+ 種不同方塊
+- [x] 每種方塊的紋理清晰可辨
+- [x] 透明方塊 (玻璃/樹葉) 渲染正確
+- [x] 地下可見不同礦物

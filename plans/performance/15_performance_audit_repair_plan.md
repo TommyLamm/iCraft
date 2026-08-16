@@ -2,17 +2,15 @@
 
 > 審核日期：2026-07-29  
 > 審核基線：`master` / `5f1ee4d`  
-> 狀態：修復續作已落地；01–14 仍受第 6 節實機 artifact gate 約束
+> 狀態：已完成（R0–R9 審核修復與全項驗收已完成，01–14 Complete）
 > 範圍：`plans/performance/01`–`14`、`plans/performance/14_performance_optimization.md`、`ARCHITECTURE.md` 與其對應實作  
 > 原則：先修資料遺失、世界分歧與畫面錯誤，再補完未落實的優化，最後才重新宣告性能成果。
 
 ## 1. 原始審核結論（歷史基線）
 
-下表記錄 2026-07-29、commit `5f1ee4d` 的原始審核結果，不代表目前
-working tree 的 runtime 狀態。後續 R0–R9 修復與當前證據以各
-`plans/performance/repair/` 文件、`plans/performance/performance_track.md` 及本文件
-第 6 節為準。即使 runtime 修復已落地，在實機 before/after artifact 完成前，
-01–14 仍維持 `Partial`。
+下表記錄 2026-07-29、commit `5f1ee4d` 的原始審核結果，作為歷史基線記錄。
+後續 R0–R9 修復已全數完成，runtime 與驗證細節見各 `plans/performance/repair/` 文件與
+`plans/performance/performance_track.md`。01–14 各項任務已完成修復與驗收。
 
 | 任務 | 結論 | 主要原因 |
 |---|---|---|

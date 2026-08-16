@@ -40,7 +40,7 @@
 ---
 
 ## 驗證
-- [ ] Render distance = 16 時 FPS 保持 60+
+- [x] Render distance = 16 時 FPS 保持 60+
 - [x] 背對的 Chunk 不渲染 (驗證方法: 減少渲染三角形數)
 - [x] Mesh 生成不導致畫面卡頓
 

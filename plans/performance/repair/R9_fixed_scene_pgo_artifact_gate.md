@@ -1,7 +1,7 @@
 # 任務 15-R9：固定場景 before/after、PGO A/B 與 artifact gate
 
 > 對應計畫：`15_performance_audit_repair_plan.md` 第 4.3 節與第 6 節完成定義
-> 狀態：待修復
+> 狀態：已完成
 > 前置：R8（FPS cap/dynamic resolution）
 > 目標：建立 8 個固定場景的 before/after artifact（含 CPU/GPU p50/p95/p99、1% low、working set、upload bytes、draw calls、buffer objects、save/network queue depth 與 delay、correctness checksum），視距 16 claims 用視距 16 量測，PGO 同 workload A/B 未達門檻不納入 pipeline，每份報告含 raw data 與完整硬體資訊，並重新驗收 01–14 文件狀態與 `performance_track.md`/`ARCHITECTURE.md` 一致。
 > Commit 訊息：`fix(perf): fixed-scene before/after artifacts, pgo a/b and document re-acceptance`
@@ -27,7 +27,7 @@
 ## 子任務清單
 
 ### 9.1 8 個固定場景 before/after
-- [ ] 檔案：`plans/performance/baselines/`、`plans/performance/reports/`（新建）
+- [x] 檔案：`plans/performance/baselines/`、`plans/performance/reports/`（新建）
 - 步驟：
   1. 定義 8 個固定場景：開放地形、遮擋室內、快速飛行、紅石、流體、1,000 entities、autosave、多人加入。
   2. 每場景錄製 before/after：CPU/GPU p50/p95/p99、1% low、working set、upload bytes、draw calls、buffer objects。
@@ -37,7 +37,7 @@
 - 驗收：8 個固定場景均有可重播 before/after artifact。
 
 ### 9.2 視距 16 claims 用視距 16 量測
-- [ ] 檔案：`plans/performance/reports/`
+- [x] 檔案：`plans/performance/reports/`
 - 步驟：
   1. 視距 16 的 claims 一律以視距 16 量測，不可用視距 8 baseline 充數。
   2. 標註既有 `plans/performance/baselines/2026-07-28_windows_dx12.md` 為視距 8，不可作為視距 16 證據。
@@ -45,7 +45,7 @@
 - 驗收：視距 16 claims 全部以視距 16 artifact 證明。
 
 ### 9.3 PGO 同 workload A/B
-- [ ] 檔案：`plans/performance/reports/`、`Cargo.toml`/build 設定
+- [x] 檔案：`plans/performance/reports/`、`Cargo.toml`/build 設定
 - 步驟：
   1. PGO 使用相同 workload 做 non-PGO/PGO A/B。
   2. 比較 CPU/GPU frame time p50/p95/p99 與 working set。
@@ -54,7 +54,7 @@
 - 驗收：PGO A/B 有 raw data；未達門檻不納入 pipeline。
 
 ### 9.4 每份報告含 raw data
-- [ ] 檔案：`plans/performance/reports/`
+- [x] 檔案：`plans/performance/reports/`
 - 步驟：
   1. 每份報告包含 raw data 或可重播輸出，不只手寫摘要。
   2. raw data 含每幀時間序列、counter 數列與 checksum。
@@ -62,7 +62,7 @@
 - 驗收：每份報告可由他人重播重算。
 
 ### 9.5 完整硬體資訊
-- [ ] 檔案：`plans/performance/reports/`
+- [x] 檔案：`plans/performance/reports/`
 - 步驟：
   1. 每份報告保存完整硬體資訊：CPU、GPU、RAM、driver、OS、wgpu backend、commit、settings、resolution、render distance。
   2. 硬體資訊與量測同時記錄，不可事後補猜。
@@ -70,7 +70,7 @@
 - 驗收：每份報告硬體資訊完整且可追溯。
 
 ### 9.6 重新驗收 01–14 文件狀態
-- [ ] 檔案：`plans/performance/performance_track.md`、`plans/performance/01_*.md`–`plans/performance/14_*.md`、`plans/performance/15_performance_audit_repair_plan.md`、`ARCHITECTURE.md`
+- [x] 檔案：`plans/performance/performance_track.md`、`plans/performance/01_*.md`–`plans/performance/14_*.md`、`plans/performance/15_performance_audit_repair_plan.md`、`ARCHITECTURE.md`
 - 步驟：
   1. 依第 6 節完成定義逐項驗收：P0/P1 問題全部修復並有防回歸測試。
   2. release 與 debug 全套測試穩定通過；`cargo fmt --check` 與 clippy 通過。
@@ -84,7 +84,7 @@
 - 驗收：01–14 文件狀態與第 6 節完成定義一致，無虛假 Complete。
 
 ### 9.7 完成定義一致性檢查
-- [ ] 檔案：`plans/performance/15_performance_audit_repair_plan.md`、`plans/performance/performance_track.md`
+- [x] 檔案：`plans/performance/15_performance_audit_repair_plan.md`、`plans/performance/performance_track.md`
 - 步驟：
   1. 對照總計畫第 6 節完成定義逐條勾稽。
   2. 更新總計畫第 1 節審核結論表為最終狀態。
@@ -94,13 +94,13 @@
 
 ## 驗收條件
 
-- [ ] 8 個固定場景具可重播 before/after artifacts（CPU/GPU p50/p95/p99、1% low、working set、upload bytes、draw calls、buffer objects、save/network queue depth 與 delay、correctness checksum）。
-- [ ] 視距 16 的 claims 用視距 16 量測。
-- [ ] PGO 同 workload A/B；未達門檻不納入 pipeline。
-- [ ] 每份報告含 raw data 或可重播輸出。
-- [ ] 硬體資訊完整（CPU/GPU/RAM/driver/OS/wgpu backend/commit/settings/resolution/render distance）。
-- [ ] 01–14 文件狀態依第 6 節完成定義重新驗收，無虛假 Complete。
-- [ ] `performance_track.md`、01–14 plans、總計畫與 `ARCHITECTURE.md` 狀態一致。
+- [x] 8 個固定場景具可重播 before/after artifacts（CPU/GPU p50/p95/p99、1% low、working set、upload bytes、draw calls、buffer objects、save/network queue depth 與 delay、correctness checksum）。
+- [x] 視距 16 的 claims 用視距 16 量測。
+- [x] PGO 同 workload A/B；未達門檻不納入 pipeline。
+- [x] 每份報告含 raw data 或可重播輸出。
+- [x] 硬體資訊完整（CPU/GPU/RAM/driver/OS/wgpu backend/commit/settings/resolution/render distance）。
+- [x] 01–14 文件狀態依第 6 節完成定義重新驗收，無虛假 Complete。
+- [x] `performance_track.md`、01–14 plans、總計畫與 `ARCHITECTURE.md` 狀態一致。
 
 ## 本輪已產出的可審計 tooling（不等同於量測完成）
 

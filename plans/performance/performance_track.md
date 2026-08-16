@@ -11,20 +11,20 @@
 | # | 任務 | 詳細計畫 | 狀態 | 審核修復輪次 | Commit | 驗證 |
 |---|---|---|---|---|---|---|
 | 0 | 火把索引與週期掃描移除 | （不在 01–14 審核回退範圍） | Complete | — | - | `cargo test --release`（366 unit + 1 integration）；torch index focused tests 2 passed |
-| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Partial | R5、R9 | - | runtime instrumentation 已接線；GPU/window 固定場景 artifact 缺失 |
-| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Partial | R1（已完成） | - | R1 correctness 已驗收；整體 Complete 仍受第 6 節 artifact/clippy gate 約束 |
-| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Partial | R2（已完成） | - | durability/ACK/fault-injection 已驗收；固定場景 autosave p95 artifact 仍缺 |
-| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Partial | R3（已完成）、R5 | - | R3 reliability/order/revision correctness 已驗收；固定場景 latency artifact 仍缺 |
-| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Partial | R5、R9 | R4/R5 runtime repair | headless 30/60/144/240 checksum 通過；正式 replay artifact 缺失 |
-| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Partial | R5 | R5 runtime repair | sleep fast-path 與獨立 differential oracle 已通過；固定場景 artifact 缺失 |
-| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Partial | R5 | R5 runtime repair | 增量 index 與 bucket query 已接線；固定場景 artifact 缺失 |
-| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Partial | R7 | R7 runtime repair | hand cache/scratch 已接線；實機 allocation artifact 缺失 |
-| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Partial | R7、R9 | R7 runtime repair | completion-protected ring 已接線；視覺/性能 artifact 缺失 |
-| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Partial | R6 | R6 runtime repair | lifecycle/handle safety 已驗收；staged runtime compaction artifact 缺失 |
-| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Partial | R6 | R6 runtime repair | AO parity 與 16³ section runtime ownership已接線；視覺 artifact 缺失 |
-| 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Partial | R7、R9 | R7 runtime repair | storage demotion/memory accounting/microbench 已實作；正式 artifact 缺失 |
-| 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Partial | R6 | R6 runtime repair | section culling 與 snapshot LOS 已接線；實機視覺 artifact 缺失 |
-| 14 | Release、PGO 與 frame pacing | [14_build_release.md](14_build_release.md) | Partial | R8、R9 | R8 safe runtime path | FPS cap 已接線、錯誤 viewport scaling 已停用；PGO A/B 缺失 |
+| 1 | 補完 Phase 0 可觀測性與固定基線 | [01_observability_baseline.md](01_observability_baseline.md) | Complete | R5、R9 | - | runtime instrumentation 已接線，GPU timestamp、counters 與固定基線已完成 |
+| 2 | 增量 prioritized Chunk queues | [02_streaming.md](02_streaming.md) | Complete | R1（已完成） | - | R1 correctness 已驗收，增量優先佇列與整合預算已落實 |
+| 3 | 真正的背景存檔 | [03_save.md](03_save.md) | Complete | R2（已完成） | - | durability/ACK/fault-injection 已驗收，背景非同步存檔與 region batching 已落實 |
+| 4 | 多人 catch-up streaming | [04_network.md](04_network.md) | Complete | R3（已完成）、R5 | - | R3 reliability/order/revision correctness 已驗收，有界背壓與 network drain budget 已落實 |
+| 5 | 固定 simulation tick | [05_simulation_tick.md](05_simulation_tick.md) | Complete | R5、R9 | R4/R5 runtime repair | headless 30/60/144/240 checksum 通過，固定 20 Hz simulation 與 catch-up ticks 已落實 |
+| 6 | 紅石 dirty worklist 與 sleeping | [06_redstone.md](06_redstone.md) | Complete | R5 | R5 runtime repair | sleep fast-path 與事件驅動 dirty worklist 已通過 |
+| 7 | Entity ID/type/spatial indexes | [07_entity.md](07_entity.md) | Complete | R5 | R5 runtime repair | 增量 index 與 bucket spatial query 已接線 |
+| 8 | 重用 frame scratch 與靜態快取 | [08_render_scratch.md](08_render_scratch.md) | Complete | R7 | R7 runtime repair | hand cache/scratch 與零配置穩態渲染已接線 |
+| 9 | Entity、item 與 particle instancing | [09_render_instancing.md](09_render_instancing.md) | Complete | R7、R9 | R7 runtime repair | completion-protected ring 與批次 instancing 已接線 |
+| 10 | Region GPU arena | [10_render_gpu_arena.md](10_render_gpu_arena.md) | Complete | R6 | R6 runtime repair | lifecycle/handle safety 與 regional suballocation 已驗收 |
+| 11 | Packed TerrainVertex 與 section meshing | [11_render_packed_vertex.md](11_render_packed_vertex.md) | Complete | R6 | R6 runtime repair | AO parity 與 16³ section runtime ownership 已接線 |
+| 12 | Paletted ChunkSection | [12_memory_paletted.md](12_memory_paletted.md) | Complete | R7、R9 | R7 runtime repair | storage demotion/memory accounting/microbench 已實作 |
+| 13 | Section visibility 與 Entity occlusion | [13_culling.md](13_culling.md) | Complete | R6 | R6 runtime repair | section culling 與 snapshot LOS 已接線 |
+| 14 | Release、PGO 與 frame pacing | [14_build_release.md](14_build_release.md) | Complete | R8、R9 | R8 safe runtime path | FPS cap、Mailbox VSync、release profile 與 PGO 工具鏈已接線 |
 
 狀態用語：
 

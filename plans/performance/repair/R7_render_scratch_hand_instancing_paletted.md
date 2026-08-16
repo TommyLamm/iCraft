@@ -27,7 +27,7 @@
 ## 子任務清單
 
 ### 7.1 render scratch 重用
-- [ ] 檔案：`src/state.rs`、`src/chunk_render.rs`
+- [x] 檔案：`src/state.rs`、`src/chunk_render.rs`
 - 步驟：
   1. `visible_entities`、UI textured vertices、debug labels、uppercase/format results 移到可重用 scratch/cache，每幀 `clear` 重用。
   2. scratch 容量隨峰值成長，不每幀重新分配。
@@ -36,7 +36,7 @@
 - 驗收：穩態畫面下 render prepare 路徑零配置（以 instrumentation 驗證）。
 
 ### 7.2 實際 allocation instrumentation
-- [ ] 檔案：`src/state.rs`、測試 allocator
+- [x] 檔案：`src/state.rs`、測試 allocator
 - 步驟：
   1. 建立實際 allocation instrumentation 或測試 allocator，不能只靠手工 counter 推定零配置。
   2. 在熱路徑包裝 `Vec`/`String` 配置計數，超過門檻記錄配置點。
@@ -45,7 +45,7 @@
 - 驗收：穩態畫面配置計數為零（或 bounded），有可重現量測。
 
 ### 7.3 hand mesh 重建時機
-- [ ] 檔案：hand render 模組、`src/state.rs`
+- [x] 檔案：hand render 模組、`src/state.rs`
 - 步驟：
   1. hand 基礎 mesh 只在 held item/model 改變時重建。
   2. walk/attack swing 動畫移到 transform/uniform，不重建 CPU geometry。
@@ -54,7 +54,7 @@
 - 驗收：揮動/走路時 hand mesh 不重建 CPU geometry。
 
 ### 7.4 instance ring GPU completion
-- [ ] 檔案：`src/chunk_render.rs`、`src/state.rs`
+- [x] 檔案：`src/chunk_render.rs`、`src/state.rs`
 - 步驟：
   1. instance ring 使用 queue completion/fence 或足夠大的 staging belt，不只固定三槽輪轉。
   2. 覆寫 ring slot 前確認該 slot GPU 已完成。
@@ -63,7 +63,7 @@
 - 驗收：instance ring 不覆寫 in-flight buffer；高 entity 數穩定。
 
 ### 7.5 ParticleInstance color/light
-- [ ] 檔案：particle 模組、`src/chunk_render.rs`
+- [x] 檔案：particle 模組、`src/chunk_render.rs`
 - 步驟：
   1. `ParticleInstance` 補齊 color/light 欄位，或明確修訂 plan 與視覺基準。
   2. 粒子 instance 携带 color/light，與計畫一致。
@@ -71,7 +71,7 @@
 - 驗收：`ParticleInstance` 與計畫一致或已修訂 plan 並記錄基準。
 
 ### 7.6 paletted demotion 釋放
-- [ ] 檔案：`src/world.rs`、`src/state.rs`
+- [x] 檔案：`src/world.rs`、`src/state.rs`
 - 步驟：
   1. state/fluid 全部歸零後釋放 optional allocation。
   2. Block/Light storage 在適當時機由 Global/Paletted/Packed demote 回 Uniform/Empty。
@@ -80,7 +80,7 @@
 - 驗收：全零 state/fluid 釋放 allocation；storage 適時 demote。
 
 ### 7.7 ChunkSection representation 私有
-- [ ] 檔案：`src/world.rs`
+- [x] 檔案：`src/world.rs`
 - 步驟：
   1. 將 `ChunkSection` representation 收斂為私有，外部只用 access/query API。
   2. 移除外部直接 match storage kind 的路徑。
@@ -89,7 +89,7 @@
 - 驗收：外部僅透過 access/query API 使用 `ChunkSection`。
 
 ### 7.8 memory counter 真實 representation
-- [ ] 檔案：`src/world.rs`、`src/state.rs`
+- [x] 檔案：`src/world.rs`、`src/state.rs`
 - 步驟：
   1. memory counter 按實際 palette、packed indices、optional arrays、light storage 與 container overhead 計算。
   2. demotion 後 counter 反映釋放。
@@ -97,7 +97,7 @@
 - 驗收：memory counter 反映實際 representation，demotion 後下降。
 
 ### 7.9 可執行 microbench
-- [ ] 檔案：新增 microbench 模組（`benches/` 或測試模組）
+- [x] 檔案：新增 microbench 模組（`benches/` 或測試模組）
 - 步驟：
   1. 建立 microbench 覆蓋 `get/set`、lighting、collision、meshing 與 save/network flatten。
   2. 比較 Global/Paletted/Packed/Uniform representation 各路徑耗時。
@@ -105,7 +105,7 @@
 - 驗收：microbench 可執行且結果可重現。
 
 ### 7.10 scratch/instancing/paletted 整合測試
-- [ ] 檔案：`src/state.rs`（測試模組）、`src/world.rs`（測試模組）
+- [x] 檔案：`src/state.rs`（測試模組）、`src/world.rs`（測試模組）
 - 步驟：
   1. 穩態畫面 allocation instrumentation 斷言零/bounded 配置。
   2. hand 動畫不重建 mesh 斷言。
@@ -115,15 +115,15 @@
 
 ## 驗收條件
 
-- [ ] `visible_entities`、UI textured vertices、debug labels、uppercase/format 移到可重用 scratch。
-- [ ] 實際 allocation instrumentation 驗證穩態零/bounded 配置。
-- [ ] hand 基礎 mesh 只在 held item/model 改變時重建；動畫移到 transform/uniform。
-- [ ] instance ring 使用 queue completion/fence 或足夠 staging belt，不覆寫 in-flight。
-- [ ] `ParticleInstance` 補 color/light 或修訂 plan 並記錄基準。
-- [ ] state/fluid 全零釋放 allocation；Block/Light storage 適時 demote。
-- [ ] `ChunkSection` representation 私有，外部只用 access/query API。
-- [ ] memory counter 反映實際 representation。
-- [ ] microbench 覆蓋 get/set、lighting、collision、meshing、flatten 且可重現。
+- [x] `visible_entities`、UI textured vertices、debug labels、uppercase/format 移到可重用 scratch。
+- [x] 實際 allocation instrumentation 驗證穩態零/bounded 配置。
+- [x] hand 基礎 mesh 只在 held item/model 改變時重建；動畫移到 transform/uniform。
+- [x] instance ring 使用 queue completion/fence 或足夠 staging belt，不覆寫 in-flight。
+- [x] `ParticleInstance` 補 color/light 或修訂 plan 並記錄基準。
+- [x] state/fluid 全零釋放 allocation；Block/Light storage 適時 demote。
+- [x] `ChunkSection` representation 私有，外部只用 access/query API。
+- [x] memory counter 反映實際 representation。
+- [x] microbench 覆蓋 get/set、lighting、collision、meshing、flatten 且可重現。
 
 ## 風險與回退
 

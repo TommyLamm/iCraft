@@ -32,7 +32,7 @@
 ## 子任務清單
 
 ### 6.1 統一維度 teardown render_regions
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. dimension switch、disconnect、world reset、unload 時統一 teardown `render_regions`。
   2. `src/state.rs:1551-1559` 的 reset 路徑補上 `render_regions` 清除，與 `src/state.rs:4830-4837` 一致。
@@ -41,7 +41,7 @@
 - 驗收：維度往返後舊 region allocations/buffers 歸零。
 
 ### 6.2 allocation handle region identity/generation
-- [ ] 檔案：`src/state.rs`、`src/chunk_render.rs`
+- [x] 檔案：`src/state.rs`、`src/chunk_render.rs`
 - 步驟：
   1. allocation handle 增加 region identity、slot、generation/owner 欄位。
   2. `free` 驗證 bounds、generation、overlap；double-free 返回錯誤而非損壞 allocator。
@@ -50,7 +50,7 @@
 - 驗收：stale/double-free/out-of-bounds handle 測試不破壞 allocator。
 
 ### 6.3 used/free checked arithmetic + compact
-- [ ] 檔案：`src/state.rs`、`src/chunk_render.rs`
+- [x] 檔案：`src/state.rs`、`src/chunk_render.rs`
 - 步驟：
   1. used/free counters 使用 checked arithmetic，溢位回錯而非 wrap。
   2. fragmentation threshold 達到時觸發低優先 compact。
@@ -59,7 +59,7 @@
 - 驗收：property test 無重疊、used+free=capacity 恆成立。
 
 ### 6.4 F3 顯示實際 buffer objects
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. F3 顯示實際建立的 buffer objects，而非 `render_regions.len() * 2` 估算。
   2. 從 allocator 統計實際 alive buffer 數。
@@ -67,7 +67,7 @@
 - 驗收：F3 buffer objects 反映實際 allocation。
 
 ### 6.5 AO decode 與 CPU 一致
-- [ ] 檔案：`src/shader.wgsl`、`src/chunk_render.rs`、`src/world.rs`
+- [x] 檔案：`src/shader.wgsl`、`src/chunk_render.rs`、`src/world.rs`
 - 步驟：
   1. `src/shader.wgsl:162-163` 移除 `ao_raw / 3.0`，改用離散 mapping：packed codes `3/2/1/0` -> `1.0/0.75/0.5/0.25`。
   2. 確認 `src/chunk_render.rs:55-60` packing 與 `src/world.rs:1539-1545` CPU mapping 一致。
@@ -76,7 +76,7 @@
 - 驗收：CPU packing 與 WGSL decode parity test/golden 通過。
 
 ### 6.6 section meshing 所有權與 halo
-- [ ] 檔案：`src/state.rs`、`src/world.rs`、`src/chunk_render.rs`
+- [x] 檔案：`src/state.rs`、`src/world.rs`、`src/chunk_render.rs`
 - 步驟：
   1. mesh ownership 改成 section：16³ section mesh/revision/connectivity，18³ halo snapshot。
   2. mutation 只 dirty 本 section 及必要 halo neighbors（與 R1.2 一致）。
@@ -88,7 +88,7 @@
 - 驗收：meshing 以 16³ section 為單位，mutation 只 dirty 受影響 section 與 halo。
 
 ### 6.7 conservative is_section_occluder
-- [ ] 檔案：`src/culling.rs`
+- [x] 檔案：`src/culling.rs`
 - 步驟：
   1. `src/culling.rs:347-394` `is_section_occluder` 只接受完整、實心、opaque cube。
   2. glass、ice、fluid、leaves、cutout、cross/thin/custom model 一律 fail-open。
@@ -96,7 +96,7 @@
 - 驗收：透明/非完整模型不被錯當 occluder，無 false cull。
 
 ### 6.8 mesh dirty 立即 invalid connectivity
-- [ ] 檔案：`src/culling.rs`、`src/state.rs`
+- [x] 檔案：`src/culling.rs`、`src/state.rs`
 - 步驟：
   1. mesh dirty 時立即 invalid 對應 section connectivity graph（與 R1.3 一致）。
   2. 新 revision graph 回來前視為全可見（fail-open）。
@@ -104,7 +104,7 @@
 - 驗收：拆牆/開門後同一幀先 fail-open，之後更新 graph。
 
 ### 6.9 async LOS snapshot 與 identity 驗證
-- [ ] 檔案：`src/culling.rs`
+- [x] 檔案：`src/culling.rs`
 - 步驟：
   1. `src/culling.rs:406-493` async LOS request 必須攜帶最小 immutable voxel snapshot、dimension/generation/chunk revisions、camera cell 與 entity identity。
   2. worker 使用 snapshot 做真實 LOS，不再永遠回 visible。
@@ -113,7 +113,7 @@
 - 驗收：牆後 entity 穩定 cull；stale/timeout/overflow 一律 visible，無永久消失。
 
 ### 6.10 section-level mesh 存在才宣稱 section skip
-- [ ] 檔案：`src/culling.rs`
+- [x] 檔案：`src/culling.rs`
 - 步驟：
   1. 只有 section-level mesh/handle 存在後才宣稱 terrain section 被 skip。
   2. 否則只能算 whole-chunk coarse culling。
@@ -121,14 +121,14 @@
 - 驗收：section skip 僅在 section mesh/handle 存在時生效。
 
 ### 6.11 culling counters
-- [ ] 檔案：`src/culling.rs`、`src/state.rs`
+- [x] 檔案：`src/culling.rs`、`src/state.rs`
 - 步驟：
   1. 加入 culling counters：distance、frustum、section、LOS、fail-open、stale result。
   2. F3 顯示各類 culling 計數。
 - 驗收：culling counters 齊全且可觀測。
 
 ### 6.12 culling/arena 整合測試
-- [ ] 檔案：`src/culling.rs`（測試模組）、`src/state.rs`（測試模組）
+- [x] 檔案：`src/culling.rs`（測試模組）、`src/state.rs`（測試模組）
 - 步驟：
   1. 牆後 entity 穩定 cull；拆牆後 fail-open 再更新 graph。
   2. stale dimension/revision result 不可寫 cache。
@@ -139,15 +139,15 @@
 
 ## 驗收條件
 
-- [ ] 維度往返後舊 region allocations/buffers 歸零。
-- [ ] stale/double-free/out-of-bounds handle 測試不破壞 allocator；used+free=capacity。
-- [ ] F3 顯示實際 buffer objects。
-- [ ] AO decode 與 CPU 一致；CPU packing ↔ WGSL decode parity test/golden 通過。
-- [ ] meshing 以 16³ section 為單位，mutation 只 dirty 受影響 section 與 halo。
-- [ ] `is_section_occluder` 只接受完整實心 opaque cube，其餘 fail-open。
-- [ ] async LOS 攜帶 snapshot 與 identity，stale/timeout/overflow 一律 visible。
-- [ ] section-level skip 僅在 section mesh/handle 存在時生效。
-- [ ] culling counters 齊全。
+- [x] 維度往返後舊 region allocations/buffers 歸零。
+- [x] stale/double-free/out-of-bounds handle 測試不破壞 allocator；used+free=capacity。
+- [x] F3 顯示實際 buffer objects。
+- [x] AO decode 與 CPU 一致；CPU packing ↔ WGSL decode parity test/golden 通過。
+- [x] meshing 以 16³ section 為單位，mutation 只 dirty 受影響 section 與 halo。
+- [x] `is_section_occluder` 只接受完整實心 opaque cube，其餘 fail-open。
+- [x] async LOS 攜帶 snapshot 與 identity，stale/timeout/overflow 一律 visible。
+- [x] section-level skip 僅在 section mesh/handle 存在時生效。
+- [x] culling counters 齊全。
 
 ## 風險與回退
 

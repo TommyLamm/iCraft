@@ -28,7 +28,7 @@
 ## 子任務清單
 
 ### 5.1 GPU timestamp readback state machine
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. `src/state.rs:3137-3179` 建立 readback state machine：`map_async` 成功且 `device.poll` 完成後才呼叫 `get_mapped_range`。
   2. 追蹤每個 query set 的 map 狀態（`Unmapped`/`Mapping`/`Mapped`/`Consumed`），不可跨狀態搶讀。
@@ -37,7 +37,7 @@
 - 驗收：timestamp readback 不再次序錯誤；不支援時顯示 N/A 而非假零值。
 
 ### 5.2 區分 TIMESTAMP_QUERY 與 INSIDE_PASSES
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. 查詢 adapter `TIMESTAMP_QUERY` 與 `TIMESTAMP_QUERY_INSIDE_PASSES` feature 支援。
   2. render/compute pass 內 timestamp 僅在 `INSIDE_PASSES` 支援時使用，否則該 pass timing 顯示 N/A。
@@ -46,7 +46,7 @@
 - 驗收：不支援的 pass timing 顯示 N/A，不誤報零值。
 
 ### 5.3 lighting/gpu_upload scope 補完
-- [ ] 檔案：`src/state.rs`、`src/world.rs`
+- [x] 檔案：`src/state.rs`、`src/world.rs`
 - 步驟：
   1. lighting scope 涵蓋 load、block、fluid、weather、redstone 等所有 mutation 路徑。
   2. gpu_upload scope 涵蓋 camera、UI、crack、particle、entity、terrain writes。
@@ -55,7 +55,7 @@
 - 驗收：lighting/gpu_upload scope 涵蓋所有列舉 mutation/upload 路徑。
 
 ### 5.4 queue telemetry 分類
-- [ ] 檔案：`src/state.rs`、`src/network/server.rs`、`src/save.rs`
+- [x] 檔案：`src/state.rs`、`src/network/server.rs`、`src/save.rs`
 - 步驟：
   1. 分開 inbound/outbound/reliable/catch-up/save producer/worker queue depth、bytes、drop/retry/cancel counters。
   2. F3 顯示各 queue 的 depth/bytes/drop。
@@ -64,7 +64,7 @@
 - 驗收：F3 queue counters 與真實 backlog 一致，分類齊全。
 
 ### 5.5 移除全量 drain + reliable FIFO + per-key mailbox
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. `src/state.rs:2378-2555` 移除 `try_iter().collect()` 全量 drain，改為 bounded per-frame drain。
   2. 可靠事件保存於跨幀 FIFO；pose/time 使用 per-key latest-wins mailbox。
@@ -73,7 +73,7 @@
 - 驗收：大 burst 下單幀處理量有界；所有 reliable packet 最終按序完成；pose/time 每個 key 最後值必定保留。
 
 ### 5.6 每幀先 network state 再 authoritative ticks
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. 每幀先處理必要 network state，再進行 authoritative ticks（與 R4.6 一致）。
   2. network drain budget 與 tick 排程順序明確。
@@ -81,7 +81,7 @@
 - 驗收：network/tick 順序正確，budget 有界。
 
 ### 5.7 headless world harness 取代合成 fixed-tick test
-- [ ] 檔案：`src/state.rs`（測試模組）、新增 harness 模組
+- [x] 檔案：`src/state.rs`（測試模組）、新增 harness 模組
 - 步驟：
   1. 建立 headless world harness：固定 seed/input，無 GPU/window。
   2. 以 30/60/144/240 render FPS 驅動，比較 blocks/light/fluid/redstone/entities/player/world-time checksum。
@@ -90,7 +90,7 @@
 - 驗收：30/60/144/240 FPS 下世界 checksum 一致。
 
 ### 5.8 redstone sleep occupant set
-- [ ] 檔案：`src/world.rs`、`src/state.rs`
+- [x] 檔案：`src/world.rs`、`src/state.rs`
 - 步驟：
   1. redstone sleep 判斷只追蹤 pressure plate occupant set 的變化，不因永遠存在的 player occupant 失效。
   2. idle 時不掃全部 plate/component。
@@ -99,7 +99,7 @@
 - 驗收：redstone sleep 在有 player 時仍能 sleep；differential test 用獨立 reference。
 
 ### 5.9 entity spatial/type index 增量維護
-- [ ] 檔案：`src/state.rs`、`src/mob.rs`、`src/passive_mob.rs`、`src/boss.rs`
+- [x] 檔案：`src/state.rs`、`src/mob.rs`、`src/passive_mob.rs`、`src/boss.rs`
 - 步驟：
   1. entity spatial/type index 改為跨 bucket 移動的增量維護，entity 移動時更新 bucket。
   2. pickup、AI、partner search、projectile、melee、spawn 與 render 必須消費 bucket query。
@@ -108,7 +108,7 @@
 - 驗收：主要查詢走 bucket query，無每輪全量 rebuild。
 
 ### 5.10 instrumentation/預算整合測試
-- [ ] 檔案：`src/state.rs`（測試模組）
+- [x] 檔案：`src/state.rs`（測試模組）
 - 步驟：
   1. timestamp supported/unsupported adapter state-machine 測試。
   2. network burst 下單幀處理量有界、reliable 保序、pose/time 最後值保留測試。
@@ -118,13 +118,13 @@
 
 ## 驗收條件
 
-- [ ] GPU timestamp readback state machine 正確，不支援時顯示 N/A。
-- [ ] lighting/gpu_upload scope 涵蓋所有 mutation/upload 路徑。
-- [ ] queue telemetry 分 inbound/outbound/reliable/catch-up/save 且與真實 backlog 一致。
-- [ ] 移除全量 drain；大 burst 下單幀處理量有界；reliable 保序；pose/time 最後值保留。
-- [ ] headless world harness 30/60/144/240 FPS checksum 一致。
-- [ ] redstone sleep 在 player 存在時仍生效；differential test 用獨立 reference。
-- [ ] entity spatial/type index 增量維護，主要查詢走 bucket query。
+- [x] GPU timestamp readback state machine 正確，不支援時顯示 N/A。
+- [x] lighting/gpu_upload scope 涵蓋所有 mutation/upload 路徑。
+- [x] queue telemetry 分 inbound/outbound/reliable/catch-up/save 且與真實 backlog 一致。
+- [x] 移除全量 drain；大 burst 下單幀處理量有界；reliable 保序；pose/time 最後值保留。
+- [x] headless world harness 30/60/144/240 FPS checksum 一致。
+- [x] redstone sleep 在 player 存在時仍生效；differential test 用獨立 reference。
+- [x] entity spatial/type index 增量維護，主要查詢走 bucket query。
 
 ## 風險與回退
 

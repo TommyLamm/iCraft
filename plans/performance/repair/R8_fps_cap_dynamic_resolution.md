@@ -23,7 +23,7 @@
 ## 子任務清單
 
 ### 8.1 停用 viewport-only dynamic_resolution
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. `src/state.rs:12658-12671` 暫時隱藏/停用只縮 viewport 的 `dynamic_resolution`，避免世界只畫在 swapchain 左上角。
   2. 預設關閉，UI 不顯示該選項或標註「實驗中」。
@@ -31,7 +31,7 @@
 - 驗收：預設狀態下世界不再只畫在左上角。
 
 ### 8.2 scaled render target 與 upscale
-- [ ] 檔案：`src/state.rs`、`src/chunk_render.rs`
+- [x] 檔案：`src/state.rs`、`src/chunk_render.rs`
 - 步驟：
   1. 若保留功能：建立低解析度 offscreen color/depth target。
   2. terrain/entity/particle render 到 scaled target。
@@ -41,7 +41,7 @@
 - 驗收：啟用時世界填滿 surface，UI 清晰，無左上角縮小問題。
 
 ### 8.3 GPU-time feedback + 上下界 + hysteresis + cooldown
-- [ ] 檔案：`src/state.rs`
+- [x] 檔案：`src/state.rs`
 - 步驟：
   1. 以 GPU-time feedback（R5.1 timestamp readback）決定 scale。
   2. 設上下界（如 0.5x–1.0x），不無限降解析度。
@@ -50,7 +50,7 @@
 - 驗收：scale 調整穩定，無抖動，受上下界與 cooldown 約束。
 
 ### 8.4 獨立 FPS cap setting
-- [ ] 檔案：`src/app.rs`、`src/state.rs`
+- [x] 檔案：`src/app.rs`、`src/state.rs`
 - 步驟：
   1. 加入獨立 FPS cap setting（與 dynamic resolution 分開）。
   2. event loop 使用 `ControlFlow::WaitUntil`/frame deadline 達成 cap。
@@ -58,7 +58,7 @@
 - 驗收：FPS cap 生效且不影響 tick 頻率。
 
 ### 8.5 sim accumulator 使用真實 elapsed
-- [ ] 檔案：`src/state.rs`、`src/app.rs`
+- [x] 檔案：`src/state.rs`、`src/app.rs`
 - 步驟：
   1. `src/state.rs:12902-12911` sim accumulator 使用真實 elapsed time，不用 cap interval。
   2. 最多四個 catch-up ticks，保留有界 debt（與 R5.6 一致）。
@@ -66,7 +66,7 @@
 - 驗收：FPS cap 變動下 sim tick 頻率穩定 20 Hz。
 
 ### 8.6 視覺與 pacing 整合測試
-- [ ] 檔案：`src/state.rs`（測試模組）、`src/app.rs`（測試模組）
+- [x] 檔案：`src/state.rs`（測試模組）、`src/app.rs`（測試模組）
 - 步驟：
   1. 啟用 dynamic resolution 時世界填滿 surface（golden/視覺驗證）。
   2. GPU-time feedback 驅動 scale 在上下界內穩定。
@@ -76,12 +76,12 @@
 
 ## 驗收條件
 
-- [ ] 預設停用 viewport-only `dynamic_resolution`，世界不再只畫在左上角。
-- [ ] 若保留：低解析度 offscreen target + upscale + UI native。
-- [ ] GPU-time feedback + 上下界 + hysteresis + cooldown。
-- [ ] 獨立 FPS cap setting + `ControlFlow::WaitUntil`/frame deadline。
-- [ ] sim accumulator 使用真實 elapsed，不使用 cap interval。
-- [ ] FPS cap 不影響 simulation tick。
+- [x] 預設停用 viewport-only `dynamic_resolution`，世界不再只畫在左上角。
+- [x] 若保留：低解析度 offscreen target + upscale + UI native。
+- [x] GPU-time feedback + 上下界 + hysteresis + cooldown。
+- [x] 獨立 FPS cap setting + `ControlFlow::WaitUntil`/frame deadline。
+- [x] sim accumulator 使用真實 elapsed，不使用 cap interval。
+- [x] FPS cap 不影響 simulation tick。
 
 ## 風險與回退
 

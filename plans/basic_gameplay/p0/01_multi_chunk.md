@@ -39,23 +39,23 @@ impl ChunkManager {
 ```
 
 ### 子任務清單
-- [ ] 建立 `ChunkManager` 結構體與 `HashMap<(i32, i32), Chunk>`
-- [ ] 為 `Chunk` 新增 `chunk_x`, `chunk_z` 欄位
-- [ ] `Chunk::new(cx, cz, seed)` — 帶世界座標偏移的噪聲生成
-- [ ] `ChunkManager::get_block(wx, wy, wz)` — 世界座標→Chunk 座標轉換
-- [ ] `ChunkManager::set_block(wx, wy, wz, block)` — 同上，設置方塊
-- [ ] `ChunkManager::update_loaded_chunks()` — 根據玩家位置加載/卸載
-- [ ] 修改 `physics.rs` 的碰撞檢測：所有 `chunk.get_block()` → `chunk_manager.get_block()`
-- [ ] 修改 `interaction.rs` 的 raycast：同上
-- [ ] 修改 `state.rs`：持有 `ChunkManager` 替代 `Chunk`
+- [x] 建立 `ChunkManager` 結構體與 `HashMap<(i32, i32), Chunk>`
+- [x] 為 `Chunk` 新增 `chunk_x`, `chunk_z` 欄位
+- [x] `Chunk::new(cx, cz, seed)` — 帶世界座標偏移的噪聲生成
+- [x] `ChunkManager::get_block(wx, wy, wz)` — 世界座標→Chunk 座標轉換
+- [x] `ChunkManager::set_block(wx, wy, wz, block)` — 同上，設置方塊
+- [x] `ChunkManager::update_loaded_chunks()` — 根據玩家位置加載/卸載
+- [x] 修改 `physics.rs` 的碰撞檢測：所有 `chunk.get_block()` → `chunk_manager.get_block()`
+- [x] 修改 `interaction.rs` 的 raycast：同上
+- [x] 修改 `state.rs`：持有 `ChunkManager` 替代 `Chunk`
 
 ---
 
 ## 1.2 跨 Chunk Face Culling
 **目標**: Chunk 邊界方塊的 Face Culling 需查詢相鄰 Chunk
 
-- [ ] `generate_mesh()` 接受一個回調/閉包用於查詢跨 Chunk 邊界的鄰居方塊
-- [ ] 邊界 (x=0/15, z=0/15) 的面片依據相鄰 Chunk 的方塊決定是否繪製
+- [x] `generate_mesh()` 接受一個回調/閉包用於查詢跨 Chunk 邊界的鄰居方塊
+- [x] 邊界 (x=0/15, z=0/15) 的面片依據相鄰 Chunk 的方塊決定是否繪製
 
 ---
 
@@ -71,20 +71,20 @@ pub struct ChunkMesh {
 }
 ```
 
-- [ ] 為每個 Chunk 維護獨立的 `ChunkMesh`
-- [ ] `render()` 中遍歷所有已加載 Chunk 的 mesh 進行繪製
-- [ ] 方塊修改後僅標記對應 Chunk 為 dirty，下一幀重建
+- [x] 為每個 Chunk 維護獨立的 `ChunkMesh`
+- [x] `render()` 中遍歷所有已加載 Chunk 的 mesh 進行繪製
+- [x] 方塊修改後僅標記對應 Chunk 為 dirty，下一幀重建
 
 ---
 
 ## 1.4 渲染距離設定
-- [ ] 在暫停選單中增加 Render Distance 調整按鈕 (2~16)
-- [ ] 持久化到 `settings.txt`
+- [x] 在暫停選單中增加 Render Distance 調整按鈕 (2~16)
+- [x] 持久化到 `settings.txt`
 
 ---
 
 ## 驗證
-- [ ] 能在多個 Chunk 之間自由行走，地形無縫銜接
-- [ ] 跨 Chunk 邊界放置/挖掘方塊正常
-- [ ] Chunk 動態加載/卸載無卡頓 (至少 render distance = 8)
-- [ ] 碰撞檢測在 Chunk 邊界正常工作
+- [x] 能在多個 Chunk 之間自由行走，地形無縫銜接
+- [x] 跨 Chunk 邊界放置/挖掘方塊正常
+- [x] Chunk 動態加載/卸載無卡頓 (至少 render distance = 8)
+- [x] 碰撞檢測在 Chunk 邊界正常工作
