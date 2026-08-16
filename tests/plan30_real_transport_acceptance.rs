@@ -1,7 +1,10 @@
 mod common;
 
-use common::tcp_harness::{drive_until, wait_for_response, TcpClient};
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState, SessionInventorySlot};
+use common::tcp_harness::{
+    drive_until, gameplay_request as request, loopback_properties, session_slot, temp_world,
+    wait_for_response, HeldLoopback, TcpClient,
+};
+use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
 use icraft::dimension::Dimension;
@@ -18,48 +21,16 @@ use icraft::server_runtime::{
 };
 use icraft::world::BlockType;
 use std::fs;
-use std::net::TcpListener;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const HOST_SESSION_ID: u64 = 0xD30_000;
 const EMBEDDED_VICTIM_ID: u64 = HOST_SESSION_ID + 1;
 const POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 const VICTIM_POSITION: [f32; 3] = [8.0, 80.0, 9.0];
 
-fn temp_world(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft-plan30-{label}-{nonce}"))
-}
-
-fn reserve_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback test port");
-    listener.local_addr().expect("read loopback port").port()
-}
-
-fn properties(label: &str, port: u16) -> ServerProperties {
-    ServerProperties {
-        bind: "127.0.0.1".into(),
-        port,
-        max_players: 4,
-        view_distance: 2,
-        simulation_distance: 2,
-        pvp: true,
-        seed: 0x30_30_30_30,
-        world_dir: temp_world(label),
-        ..ServerProperties::default()
-    }
-}
-
-fn session_slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        icraft::network::protocol::ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+fn properties(label: &str) -> ServerProperties {
+    let mut properties = loopback_properties(temp_world(&format!("plan30-{label}")), "127.0.0.1");
+    properties.seed = 0x30_30_30_30;
+    properties
 }
 
 fn source(state: SessionGameplayState, index: u8, count: u16) -> SlotRefWire {
@@ -101,28 +72,6 @@ fn reset_persistent_domains(runtime: &mut ServerRuntime, id: u64) {
         session.gameplay.brew = None;
         session.gameplay.revision = revision;
         session.last_revision = revision;
-    }
-}
-
-fn request(
-    runtime: &ServerRuntime,
-    id: u64,
-    request_id: u128,
-    sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    let dimension = runtime
-        .authority
-        .session(id)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("request session dimension");
-    GameplayRequest {
-        request_id,
-        client_sequence: sequence,
-        session_id: id,
-        dimension: dimension as u8,
-        client_revision: runtime.authority.revision_for_dimension(dimension),
-        operation,
     }
 }
 
@@ -277,7 +226,7 @@ fn embedded_submit(
 }
 
 fn run_singleplayer_embedded_contract() {
-    let properties = properties("singleplayer", reserve_port());
+    let properties = properties("singleplayer");
     let world_dir = properties.world_dir.clone();
     let (mut runtime, input) = ServerRuntime::new_embedded(
         properties,
@@ -571,8 +520,11 @@ fn run_singleplayer_embedded_contract() {
 }
 
 fn run_topology(label: &str, listen: bool) {
-    let properties = properties(label, reserve_port());
+    let reserved = HeldLoopback::bind();
+    let mut properties = properties(label);
+    properties.port = reserved.port();
     let address = format!("{}:{}", properties.bind, properties.port);
+    let _port = reserved.release();
     let (mut runtime, _input, local_host) = if listen {
         let (runtime, input) = ServerRuntime::new_embedded(
             properties.clone(),

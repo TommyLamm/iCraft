@@ -1,5 +1,8 @@
-use common::tcp_harness::{drive_until, wait_for_response, TcpClient};
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState, SessionInventorySlot};
+use common::tcp_harness::{
+    drive_until, loopback_properties, session_slot as tcp_slot, temp_world, wait_for_response,
+    HeldLoopback, TcpClient,
+};
+use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::authority::{AuthorityConfig, AuthorityCore};
 use icraft::block_entity::{
     BlockEntity, ChestBlockEntity, DispenserBlockEntity, DropperBlockEntity, FurnaceBlockEntity,
@@ -20,9 +23,6 @@ use icraft::server_runtime::{
 };
 use icraft::world::{BlockState, BlockType, ChestType};
 use std::collections::BTreeMap;
-use std::net::TcpListener;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 mod common;
 
@@ -149,11 +149,7 @@ fn core_with_pick() -> AuthorityCore {
     .expect("register Plan34 authority session");
     let mut gameplay = SessionGameplayState::default();
     let pick = ItemStack::new(Item::StonePickaxe, 1);
-    gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&pick),
-        pick.can_break,
-        pick.can_place_on,
-    ));
+    gameplay.inventory[0] = Some(tcp_slot(pick));
     assert!(core.set_session_gameplay(SESSION_ID, gameplay));
     core.world.ensure_chunk(0, 0);
     core.world.ensure_chunk(1, 0);
@@ -224,41 +220,10 @@ fn dropped_total_count(stacks: &[ItemStack]) -> u32 {
     stacks.iter().map(|stack| stack.count).sum()
 }
 
-fn tcp_temp_world(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft-plan34-{label}-{nonce}"))
-}
-
-fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve Plan34 TCP port")
-        .local_addr()
-        .expect("read Plan34 TCP port")
-        .port()
-}
-
-fn tcp_properties(label: &str, port: u16) -> ServerProperties {
-    ServerProperties {
-        bind: "127.0.0.1".into(),
-        port,
-        max_players: 4,
-        view_distance: 2,
-        simulation_distance: 2,
-        seed: 0x34_34_34_34,
-        world_dir: tcp_temp_world(label),
-        ..ServerProperties::default()
-    }
-}
-
-fn tcp_slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+fn tcp_properties(label: &str) -> ServerProperties {
+    let mut properties = loopback_properties(temp_world(&format!("plan34-{label}")), "127.0.0.1");
+    properties.seed = 0x34_34_34_34;
+    properties
 }
 
 fn tcp_held(stack: &ItemStack) -> SessionSlotWire {
@@ -315,9 +280,12 @@ fn matching_drop_events(client: &TcpClient, expected: ItemStack) -> Vec<(u64, It
 }
 
 fn run_tcp_container_vector(label: &str, listen: bool) {
-    let properties = tcp_properties(label, reserve_port());
+    let reserved = HeldLoopback::bind();
+    let mut properties = tcp_properties(label);
+    properties.port = reserved.port();
     let world_dir = properties.world_dir.clone();
     let address = format!("{}:{}", properties.bind, properties.port);
+    let _port = reserved.release();
     let (mut runtime, local_host) = if listen {
         let (runtime, _) = ServerRuntime::new_embedded(
             properties.clone(),
@@ -620,11 +588,7 @@ fn stale_state_failure_preserves_container_and_session_resources() {
         .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(source_entity.clone()));
     let axe = ItemStack::new(Item::StoneAxe, 1);
     let mut gameplay = core.session(SESSION_ID).unwrap().gameplay;
-    gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&axe),
-        axe.can_break,
-        axe.can_place_on,
-    ));
+    gameplay.inventory[0] = Some(tcp_slot(axe));
     assert!(core.set_session_gameplay(SESSION_ID, gameplay));
     let start = break_request(&core, 77, 1, Item::StoneAxe);
     assert!(matches!(
@@ -707,11 +671,7 @@ fn double_chest_break_only_drops_target_half() {
     );
     let axe = ItemStack::new(Item::StoneAxe, 1);
     let mut gameplay = core.session(SESSION_ID).unwrap().gameplay;
-    gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&axe),
-        axe.can_break,
-        axe.can_place_on,
-    ));
+    gameplay.inventory[0] = Some(tcp_slot(axe));
     assert!(core.set_session_gameplay(SESSION_ID, gameplay));
     let start = break_request(&core, 88, 1, Item::StoneAxe);
     assert!(matches!(
@@ -775,11 +735,7 @@ fn authority_matrix_conserves_two_noncontiguous_metadata_stacks_and_retries() {
         let tool = tool_for(kind);
         let mut gameplay = core.session(SESSION_ID).unwrap().gameplay;
         let tool_stack = ItemStack::new(tool, 1);
-        gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(
-            ItemWire::from_stack(&tool_stack),
-            tool_stack.can_break,
-            tool_stack.can_place_on,
-        ));
+        gameplay.inventory[0] = Some(tcp_slot(tool_stack));
         assert!(core.set_session_gameplay(SESSION_ID, gameplay));
         core.world
             .set_block(TARGET.0, TARGET.1, TARGET.2, kind.block(), 0)

@@ -1,11 +1,15 @@
+use icraft::authority::contract::SessionInventorySlot;
+use icraft::dimension::Dimension;
+use icraft::inventory::ItemStack;
 use icraft::network::client::{ClientToGame, GameToClient, NetworkClient};
-use icraft::network::protocol::{GameplayRequest, GameplayResponse};
-use icraft::server_runtime::ServerRuntime;
+use icraft::network::protocol::{GameplayOperation, GameplayRequest, GameplayResponse};
+use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpListener};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Loopback port reservation that keeps the OS listener until the server bind.
 ///
@@ -229,4 +233,64 @@ pub fn wait_for_response(
         );
         thread::sleep(STEP_SLEEP);
     }
+}
+
+/// Isolated temp world directory. `prefix` is the stem after `icraft-`,
+/// e.g. `plan30-listen` → `icraft-plan30-listen-{nanos}`.
+pub fn temp_world(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("icraft-{prefix}-{nanos}"))
+}
+
+/// Shared loopback defaults for the majority TCP cluster.
+///
+/// Sets bind, `max_players=4`, `view_distance=2`, and `simulation_distance=2`.
+/// Does not force a seed or port — callers must set those (and any view/sim/
+/// player-cap overrides) themselves.
+pub fn loopback_properties(
+    world_dir: impl Into<PathBuf>,
+    bind_addr: impl Into<String>,
+) -> ServerProperties {
+    ServerProperties {
+        bind: bind_addr.into(),
+        max_players: 4,
+        view_distance: 2,
+        simulation_distance: 2,
+        world_dir: world_dir.into(),
+        ..ServerProperties::default()
+    }
+}
+
+/// Runtime-aware gameplay request using the live session dimension + revision.
+pub fn gameplay_request(
+    runtime: &ServerRuntime,
+    player_id: u64,
+    request_id: u128,
+    sequence: u64,
+    operation: GameplayOperation,
+) -> GameplayRequest {
+    let dimension = runtime
+        .authority
+        .session(player_id)
+        .and_then(|session| Dimension::from_wire(session.dimension))
+        .expect("request session dimension");
+    GameplayRequest {
+        request_id,
+        client_sequence: sequence,
+        session_id: player_id,
+        dimension: dimension as u8,
+        client_revision: runtime.authority.revision_for_dimension(dimension),
+        operation,
+    }
+}
+
+pub fn session_slot(stack: ItemStack) -> SessionInventorySlot {
+    SessionInventorySlot::from_wire(
+        icraft::network::protocol::ItemWire::from_stack(&stack),
+        stack.can_break,
+        stack.can_place_on,
+    )
 }

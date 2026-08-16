@@ -1,7 +1,10 @@
 //! Plan 08: authority session lifecycle — gateway hop, alive respawn, ignite
 //! debit failure, and identity release after a failed persist.
 
-use icraft::authority::contract::{SessionBrewState, SessionGameplayState, SessionInventorySlot};
+mod common;
+
+use common::tcp_harness::{gameplay_request, loopback_properties, session_slot as slot};
+use icraft::authority::contract::{SessionBrewState, SessionGameplayState};
 use icraft::dimension::Dimension;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::protocol::{
@@ -14,7 +17,6 @@ use icraft::server_runtime::{
 };
 use icraft::world::BlockType;
 use std::fs;
-use std::net::TcpListener;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOCAL_ID: u64 = 0x08_0001;
@@ -23,40 +25,24 @@ const GATEWAY_POSE: [f32; 3] = [8.5, 65.0, 8.5];
 const OUTER_ISLAND: [f32; 3] = [1035.5, 89.0, 11.5];
 const PORTAL_LOOK: [i16; 3] = [0, -500, 866];
 
-fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve Plan08 port")
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 fn properties(label: &str) -> ServerProperties {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    ServerProperties {
-        bind: "127.0.0.1".into(),
-        port: reserve_port(),
-        world_dir: std::env::temp_dir().join(format!(
+    let mut properties = loopback_properties(
+        std::env::temp_dir().join(format!(
             "icraft_plan08_{label}_{}_{}",
             std::process::id(),
             nonce
         )),
-        seed: 8_008,
-        view_distance: 4,
-        simulation_distance: 4,
-        ..ServerProperties::default()
-    }
-}
-
-fn slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+        "127.0.0.1",
+    );
+    properties.seed = 8_008;
+    properties.view_distance = 4;
+    properties.simulation_distance = 4;
+    properties.max_players = 20;
+    properties
 }
 
 fn held(stack: &ItemStack) -> SessionSlotWire {
@@ -73,19 +59,7 @@ fn request(
     sequence: u64,
     operation: GameplayOperation,
 ) -> GameplayRequest {
-    let dimension = runtime
-        .authority
-        .session(LOCAL_ID)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("Plan08 session dimension");
-    GameplayRequest {
-        request_id,
-        client_sequence: sequence,
-        session_id: LOCAL_ID,
-        dimension: dimension as u8,
-        client_revision: runtime.authority.revision_for_dimension(dimension),
-        operation,
-    }
+    gameplay_request(runtime, LOCAL_ID, request_id, sequence, operation)
 }
 
 #[test]

@@ -1,4 +1,9 @@
-use icraft::authority::contract::{SessionGameplayState, SessionInventorySlot};
+mod common;
+
+use common::tcp_harness::{
+    loopback_properties, session_slot, HeldLoopback, EVENT_TIMEOUT, STEP_SLEEP,
+};
+use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::interest::InterestKind;
 use icraft::block_entity::{BlockEntity, ChestBlockEntity, DispenserBlockEntity};
 use icraft::dimension::Dimension;
@@ -14,15 +19,12 @@ use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use icraft::world::BlockType;
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const STEP_SLEEP: Duration = Duration::from_millis(5);
-const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 const CHEST_POSITION: (i32, i32, i32) = (8, 80, 8);
 
 static NEXT_WORLD: AtomicU64 = AtomicU64::new(0);
@@ -202,22 +204,12 @@ impl Drop for HeadlessClient {
     }
 }
 
-fn reserve_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback test port");
-    listener.local_addr().expect("read reserved port").port()
-}
-
 fn properties(world_dir: &Path, port: u16) -> ServerProperties {
-    ServerProperties {
-        bind: "127.0.0.1".into(),
-        port,
-        max_players: 2,
-        view_distance: 2,
-        simulation_distance: 2,
-        world_dir: world_dir.to_path_buf(),
-        seed: 0xC0FF_EE11,
-        ..ServerProperties::default()
-    }
+    let mut properties = loopback_properties(world_dir, "127.0.0.1");
+    properties.port = port;
+    properties.max_players = 2;
+    properties.seed = 0xC0FF_EE11;
+    properties
 }
 
 fn drive_pair_until(
@@ -334,9 +326,10 @@ fn accepted_revision(response: &GameplayResponse) -> u64 {
 #[test]
 fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     let world = TempWorld::new();
-    let port = reserve_port();
-    let server_properties = properties(world.path(), port);
-    let address = format!("127.0.0.1:{port}");
+    let reserved = HeldLoopback::bind();
+    let server_properties = properties(world.path(), reserved.port());
+    let address = format!("127.0.0.1:{}", server_properties.port);
+    let _port = reserved.release();
     let mut runtime =
         ServerRuntime::new(server_properties.clone()).expect("start headless authority runtime");
     let mut alice = HeadlessClient::connect(&address, "alice");
@@ -663,11 +656,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         .session(alice_id)
         .map(|session| session.gameplay)
         .unwrap_or_else(SessionGameplayState::default);
-    alice_gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(
-        stone,
-        stone_stack.can_break,
-        stone_stack.can_place_on,
-    ));
+    alice_gameplay.inventory[0] = Some(session_slot(stone_stack));
     assert!(runtime
         .authority
         .set_session_gameplay(alice_id, alice_gameplay));
@@ -834,9 +823,10 @@ fn projected_block_entity(
 #[test]
 fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     let world = TempWorld::new();
-    let port = reserve_port();
-    let server_properties = properties(world.path(), port);
-    let address = format!("127.0.0.1:{port}");
+    let reserved = HeldLoopback::bind();
+    let server_properties = properties(world.path(), reserved.port());
+    let address = format!("127.0.0.1:{}", server_properties.port);
+    let _port = reserved.release();
     let mut runtime =
         ServerRuntime::new(server_properties).expect("start headless dispenser runtime");
     let mut alice = HeadlessClient::connect(&address, "alice");

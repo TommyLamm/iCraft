@@ -1,86 +1,33 @@
 mod common;
 
-use common::tcp_harness::{drive_until, wait_for_response, TcpClient};
+use common::tcp_harness::{
+    drive_until, gameplay_request as request, loopback_properties, session_slot as slot,
+    temp_world, wait_for_response, HeldLoopback, TcpClient,
+};
 use icraft::authority::contract::{
     AuthorityTopology, SessionGameplayState, SessionInventorySlot, SESSION_INVENTORY_SLOTS,
 };
-use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
-use icraft::network::protocol::{
-    GameplayOperation, GameplayOutcome, GameplayRequest, RejectReason,
-};
+use icraft::network::protocol::{GameplayOperation, GameplayOutcome, RejectReason};
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, RuntimePresentationEvent, ServerProperties,
     ServerRuntime, TransportMode,
 };
 use icraft::world::BlockType;
 use std::fs;
-use std::net::TcpListener;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const OWNER_ID: u64 = 0x01_0001;
 const TARGET: (i32, i32, i32) = (8, 80, 8);
 const OWNER_POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 
-fn temp_world(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft-plan01-block-use-{label}-{nonce}"))
-}
-
-fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve loopback test port")
-        .local_addr()
-        .expect("read loopback port")
-        .port()
-}
-
-fn properties(label: &str, port: u16) -> ServerProperties {
-    ServerProperties {
-        bind: "127.0.0.1".into(),
-        port,
-        max_players: 4,
-        view_distance: 2,
-        simulation_distance: 2,
-        seed: 0x01_01_01_01,
-        world_dir: temp_world(label),
-        ..ServerProperties::default()
-    }
-}
-
-fn slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        icraft::network::protocol::ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
-}
-
-fn request(
-    runtime: &ServerRuntime,
-    player_id: u64,
-    request_id: u128,
-    sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    let dimension = runtime
-        .authority
-        .session(player_id)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("fixture session dimension");
-    GameplayRequest {
-        request_id,
-        client_sequence: sequence,
-        session_id: player_id,
-        dimension: dimension as u8,
-        client_revision: runtime.authority.revision_for_dimension(dimension),
-        operation,
-    }
+fn properties(label: &str) -> ServerProperties {
+    let mut properties = loopback_properties(
+        temp_world(&format!("plan01-block-use-{label}")),
+        "127.0.0.1",
+    );
+    properties.seed = 0x01_01_01_01;
+    properties
 }
 
 fn seed_chest_and_inventory(runtime: &mut ServerRuntime, player_id: u64) {
@@ -164,7 +111,7 @@ fn assert_block_use_rejected(
 
 #[test]
 fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
-    let properties = properties("embedded-ore", reserve_port());
+    let properties = properties("embedded-ore");
     let world_dir = properties.world_dir.clone();
     let (mut runtime, input) = ServerRuntime::new_embedded(
         properties,
@@ -235,7 +182,7 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
 
 #[test]
 fn embedded_block_use_air_cannot_clear_chest() {
-    let properties = properties("embedded-air", reserve_port());
+    let properties = properties("embedded-air");
     let world_dir = properties.world_dir.clone();
     let (mut runtime, _input) = ServerRuntime::new_embedded(
         properties,
@@ -293,8 +240,11 @@ fn embedded_block_use_air_cannot_clear_chest() {
 
 #[test]
 fn tcp_block_use_is_rejected_without_world_or_inventory_mutation() {
-    let properties = properties("tcp", reserve_port());
+    let reserved = HeldLoopback::bind();
+    let mut properties = properties("tcp");
+    properties.port = reserved.port();
     let address = format!("{}:{}", properties.bind, properties.port);
+    let _port = reserved.release();
     let world_dir = properties.world_dir.clone();
     let mut runtime = ServerRuntime::new(properties).expect("construct dedicated Plan01 runtime");
     let mut client = TcpClient::connect(&address, "plan01-tcp");

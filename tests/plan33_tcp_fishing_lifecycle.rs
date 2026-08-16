@@ -1,9 +1,11 @@
 mod common;
 
-use common::tcp_harness::{drive_until, wait_for_response, TcpClient};
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState, SessionInventorySlot};
+use common::tcp_harness::{
+    drive_until, gameplay_request as request, loopback_properties, session_slot, temp_world,
+    wait_for_response, HeldLoopback, TcpClient,
+};
+use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::authority::fishing::water_probe_position;
-use icraft::dimension::Dimension;
 use icraft::fishing::{FishingHookStage, FISHING_INITIAL_WAIT_TICKS};
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::ClientToGame;
@@ -16,9 +18,6 @@ use icraft::server_runtime::{
 };
 use icraft::world::BlockType;
 use std::fs;
-use std::net::TcpListener;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const EMBEDDED_OWNER: u64 = 0x33_0000;
 const EMBEDDED_OBSERVER: u64 = EMBEDDED_OWNER + 1;
@@ -26,33 +25,10 @@ const POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 const OBSERVER_POSITION: [f32; 3] = [10.0, 80.0, 8.0];
 const LOOK: [i16; 3] = [0, 0, 1_000];
 
-fn temp_world(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft-plan33-{label}-{nonce}"))
-}
-
-fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve Plan33 loopback port")
-        .local_addr()
-        .expect("read Plan33 loopback port")
-        .port()
-}
-
-fn properties(label: &str, port: u16) -> ServerProperties {
-    ServerProperties {
-        bind: "127.0.0.1".into(),
-        port,
-        max_players: 4,
-        view_distance: 2,
-        simulation_distance: 2,
-        seed: 0x33_33_33_33,
-        world_dir: temp_world(label),
-        ..ServerProperties::default()
-    }
+fn properties(label: &str) -> ServerProperties {
+    let mut properties = loopback_properties(temp_world(&format!("plan33-{label}")), "127.0.0.1");
+    properties.seed = 0x33_33_33_33;
+    properties
 }
 
 fn fishing(action: u8) -> GameplayOperation {
@@ -60,28 +36,6 @@ fn fishing(action: u8) -> GameplayOperation {
         action,
         hand: 0,
         look_milli: LOOK,
-    }
-}
-
-fn request(
-    runtime: &ServerRuntime,
-    player_id: u64,
-    request_id: u128,
-    client_sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    let dimension = runtime
-        .authority
-        .session(player_id)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("Plan33 session dimension");
-    GameplayRequest {
-        request_id,
-        client_sequence,
-        session_id: player_id,
-        dimension: dimension as u8,
-        client_revision: runtime.authority.revision_for_dimension(dimension),
-        operation,
     }
 }
 
@@ -97,14 +51,6 @@ fn fresh_tcp_request(
     // before the socket write.
     request.client_revision = 0;
     request
-}
-
-fn session_slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        icraft::network::protocol::ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
 }
 
 fn prepare(runtime: &mut ServerRuntime, owner: u64, observer: u64) {
@@ -214,7 +160,7 @@ fn embedded_submit(
 }
 
 fn run_embedded() {
-    let properties = properties("embedded", reserve_port());
+    let properties = properties("embedded");
     let world_dir = properties.world_dir.clone();
     let (mut runtime, input) = ServerRuntime::new_embedded(
         properties,
@@ -362,8 +308,11 @@ fn run_embedded() {
 }
 
 fn run_tcp(label: &str, listen: bool) {
-    let properties = properties(label, reserve_port());
+    let reserved = HeldLoopback::bind();
+    let mut properties = properties(label);
+    properties.port = reserved.port();
     let address = format!("{}:{}", properties.bind, properties.port);
+    let _port = reserved.release();
     let (mut runtime, local_host) = if listen {
         let (runtime, _input) = ServerRuntime::new_embedded(
             properties.clone(),

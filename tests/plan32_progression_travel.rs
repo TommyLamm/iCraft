@@ -1,7 +1,10 @@
 mod common;
 
-use common::tcp_harness::{drive_until, wait_for_response, TcpClient};
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState, SessionInventorySlot};
+use common::tcp_harness::{
+    drive_until, gameplay_request as request, loopback_properties, session_slot as slot,
+    wait_for_response, HeldLoopback, TcpClient,
+};
+use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::block_entity::BlockEntity;
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
@@ -17,7 +20,6 @@ use icraft::server_runtime::{
 use icraft::structure::StructureId;
 use icraft::world::BlockType;
 use std::fs;
-use std::net::TcpListener;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const LOCAL_ID: u64 = 0x32_0000;
@@ -25,40 +27,24 @@ const FRAME_BASE: (i32, i32, i32) = (10, 65, 10);
 const PORTAL_CELL: (i32, i32, i32) = (11, 66, 10);
 const PORTAL_LOOK: [i16; 3] = [0, -500, 866];
 
-fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve Plan32 port")
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn properties(label: &str, port: u16) -> ServerProperties {
+fn properties(label: &str) -> ServerProperties {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    ServerProperties {
-        bind: "127.0.0.1".into(),
-        port,
-        world_dir: std::env::temp_dir().join(format!(
+    let mut properties = loopback_properties(
+        std::env::temp_dir().join(format!(
             "icraft_plan32_{label}_{}_{}",
             std::process::id(),
             nonce
         )),
-        seed: 12_345,
-        view_distance: 4,
-        simulation_distance: 4,
-        ..ServerProperties::default()
-    }
-}
-
-fn slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+        "127.0.0.1",
+    );
+    properties.seed = 12_345;
+    properties.view_distance = 4;
+    properties.simulation_distance = 4;
+    properties.max_players = 20;
+    properties
 }
 
 fn held(stack: &ItemStack) -> SessionSlotWire {
@@ -67,28 +53,6 @@ fn held(stack: &ItemStack) -> SessionSlotWire {
         stack.can_break,
         stack.can_place_on,
     )
-}
-
-fn request(
-    runtime: &ServerRuntime,
-    player_id: u64,
-    request_id: u128,
-    sequence: u64,
-    operation: GameplayOperation,
-) -> GameplayRequest {
-    let dimension = runtime
-        .authority
-        .session(player_id)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("Plan32 session dimension");
-    GameplayRequest {
-        request_id,
-        client_sequence: sequence,
-        session_id: player_id,
-        dimension: dimension as u8,
-        client_revision: runtime.authority.revision_for_dimension(dimension),
-        operation,
-    }
 }
 
 fn block_action(
@@ -162,7 +126,7 @@ fn prepare_player(runtime: &mut ServerRuntime, id: u64, position: [f32; 3], item
 
 #[test]
 fn singleplayer_typed_nether_activation_and_transfer() {
-    let props = properties("singleplayer", reserve_port());
+    let props = properties("singleplayer");
     let (mut runtime, input) = ServerRuntime::new_embedded(
         props.clone(),
         EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(LOCAL_ID, "plan32-local")),
@@ -252,8 +216,11 @@ fn singleplayer_typed_nether_activation_and_transfer() {
 }
 
 fn run_tcp_travel(label: &str, listen: bool) {
-    let props = properties(label, reserve_port());
+    let reserved = HeldLoopback::bind();
+    let mut props = properties(label);
+    props.port = reserved.port();
     let address = format!("{}:{}", props.bind, props.port);
+    let _port = reserved.release();
     let options = EmbeddedRuntimeOptions {
         topology: if listen {
             AuthorityTopology::ListenServer
@@ -435,9 +402,12 @@ fn dedicated_tcp_typed_portal_travel_is_owner_private_and_persistent() {
 
 #[test]
 fn dedicated_tcp_combat_completes_generated_dragon_lifecycle() {
-    let mut props = properties("dragon-combat", reserve_port());
+    let reserved = HeldLoopback::bind();
+    let mut props = properties("dragon-combat");
+    props.port = reserved.port();
     props.operators.insert("plan32-dragon".into());
     let address = format!("{}:{}", props.bind, props.port);
+    let _port = reserved.release();
     let (mut runtime, _) = ServerRuntime::new_embedded(
         props.clone(),
         EmbeddedRuntimeOptions {
@@ -742,7 +712,7 @@ fn dedicated_tcp_combat_completes_generated_dragon_lifecycle() {
 
 #[test]
 fn generated_end_city_loot_is_lazy_revisioned_and_persistent() {
-    let props = properties("end-city", reserve_port());
+    let props = properties("end-city");
     let (mut runtime, _) = ServerRuntime::new_embedded(
         props.clone(),
         EmbeddedRuntimeOptions {
