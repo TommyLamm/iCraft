@@ -3,7 +3,7 @@
 > **整體進度**: 28 / 28 任務完成 (另有 1 項廢案)
 > **當前階段**: 全部階段已完成（P0–P3，任務 29 廢案）
 >
-> **審查硬化路線（2026-08-16）**: 0 / 15 待執行 → [`../review_hardening/README.md`](../review_hardening/README.md)
+> **審查硬化路線（2026-08-16）**: 5 / 15 已完成（P0 01–05） → [`../review_hardening/README.md`](../review_hardening/README.md)
 
 ### 審查硬化路線（2026-08-16）
 
@@ -12,7 +12,7 @@
 
 | 級 | 計劃 | 狀態 |
 | --- | --- | --- |
-| P0 | [01 BlockUse](../review_hardening/01_close_block_use_mutation.md) · [02 容器 click](../review_hardening/02_container_click_conservation.md) · [03 有界 decode](../review_hardening/03_bounded_bincode_decode.md) · [04 身份](../review_hardening/04_handshake_identity.md) · [05 restore](../review_hardening/05_fail_closed_chunk_restore.md) | 待執行 |
+| P0 | [01 BlockUse](../review_hardening/01_close_block_use_mutation.md) · [02 容器 click](../review_hardening/02_container_click_conservation.md) · [03 有界 decode](../review_hardening/03_bounded_bincode_decode.md) · [04 身份](../review_hardening/04_handshake_identity.md) · [05 restore](../review_hardening/05_fail_closed_chunk_restore.md) | 已完成 |
 | P1 | [06 Embedded 表現層](../review_hardening/06_embedded_presentation_no_mutation.md) · [07 Join 投影](../review_hardening/07_join_client_projection_only.md) · [08 session 生命週期](../review_hardening/08_authority_session_lifecycle.md) · [09 Signed-Y](../review_hardening/09_signed_y_completion.md) · [10 世界生成](../review_hardening/10_worldgen_ore_structure_floor.md) | 待執行 |
 | P2 | [11 chunk 駐留](../review_hardening/11_interest_chunk_residency.md) · [12 網路背壓](../review_hardening/12_network_ingress_backpressure.md) · [13 持久化](../review_hardening/13_persistence_integrity.md) · [14 桌面／lib](../review_hardening/14_desktop_runtime_hygiene.md) · [15 測試契約](../review_hardening/15_verification_contract.md) | 待執行 |
 
