@@ -1455,13 +1455,6 @@ impl NetworkHandle {
         }
     }
 
-    pub(crate) fn send_sleep_request(&self, x: i32, y: i32, z: i32) {
-        if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = game_to_client
-                .tracked_send(crate::network::client::GameToClient::SleepRequest { x, y, z });
-        }
-    }
-
     pub(crate) fn send_respawn_result(&self, player_id: u64, position: [f32; 3], dimension: u8) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(

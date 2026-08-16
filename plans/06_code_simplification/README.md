@@ -60,7 +60,7 @@
 | 14 | [Desktop 改依賴 library](14_desktop_depends_on_lib.md) | P1 | 已完成 | 建議 11 |
 | 15 | [leftover 互動抽出 `state.rs`](15_legacy_interaction_extract.md) | P1 | 已完成 | 02、10（建議 06） |
 | 16 | [Session 單一同步 helper](16_session_sync_helpers.md) | P1 | 已完成 | 09 |
-| 17 | [leftover 進程內通道縮小](17_legacy_inprocess_channels.md) | P1 | 待執行 | 06、08（建議 15） |
+| 17 | [leftover 進程內通道縮小](17_legacy_inprocess_channels.md) | P1 | 已完成 | 06、08（建議 15） |
 | 18 | [`world.rs` 機械拆檔](18_world_module_split.md) | P2 | 待執行 | 07（建議 14） |
 | 19 | [`save.rs` 子模組拆分](19_save_module_split.md) | P2 | 待執行 | 05 |
 | 20 | [`network/server.rs` 拆檔](20_network_server_split.md) | P2 | 待執行 | 08（建議 17） |

@@ -14159,31 +14159,34 @@ impl State {
                         let Some(container_pos) = self.container_target else {
                             return;
                         };
-                        if let crate::state::NetworkHandle::Client { game_to_client, .. } =
-                            &self.network
-                        {
-                            let dragged = self
-                                .inventory
-                                .dragged
-                                .as_ref()
-                                .map(crate::network::protocol::ItemWire::from_stack);
-                            let _ = game_to_client.tracked_send(
-                                crate::network::client::GameToClient::ContainerClickRequest {
-                                    dimension: self.current_dimension as u8,
-                                    revision: self
-                                        .chunk_manager
-                                        .get_block_entity(
-                                            container_pos.0,
-                                            container_pos.1,
-                                            container_pos.2,
-                                        )
-                                        .map(crate::block_entity::BlockEntity::revision)
-                                        .unwrap_or(0),
-                                    slot_index: slot_index as u16,
-                                    is_left,
-                                    dragged,
-                                },
-                            );
+                        let dragged = self
+                            .inventory
+                            .dragged
+                            .as_ref()
+                            .map(crate::network::protocol::ItemWire::from_stack);
+                        let revision = self
+                            .chunk_manager
+                            .get_block_entity(
+                                container_pos.0,
+                                container_pos.1,
+                                container_pos.2,
+                            )
+                            .map(crate::block_entity::BlockEntity::revision)
+                            .unwrap_or(0);
+                        if let Some(request) = crate::network::protocol::wrap_legacy(
+                            0,
+                            self.current_dimension as u8,
+                            revision,
+                            crate::network::protocol::LegacyGameplay::ContainerClick {
+                                x: container_pos.0,
+                                y: container_pos.1,
+                                z: container_pos.2,
+                                slot: slot_index as u16,
+                                is_left,
+                                dragged,
+                            },
+                        ) {
+                            self.network.request_gameplay(request);
                         }
                         return;
                     }
@@ -15035,15 +15038,17 @@ impl State {
             crate::presentation_inventory_policy::MultiplayerRole::Client { .. }
         ) {
             if let Some(pos) = self.container_target {
-                if let crate::state::NetworkHandle::Client { game_to_client, .. } = &self.network {
-                    let _ = game_to_client.tracked_send(
-                        crate::network::client::GameToClient::ContainerClose {
-                            dimension: self.current_dimension as u8,
-                            x: pos.0,
-                            y: pos.1,
-                            z: pos.2,
-                        },
-                    );
+                if let Some(request) = crate::network::protocol::wrap_legacy(
+                    0,
+                    self.current_dimension as u8,
+                    0,
+                    crate::network::protocol::LegacyGameplay::ContainerClose {
+                        x: pos.0,
+                        y: pos.1,
+                        z: pos.2,
+                    },
+                ) {
+                    self.network.request_gameplay(request);
                 }
             }
         }

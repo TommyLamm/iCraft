@@ -618,10 +618,12 @@ impl State {
                 }
                 if clicked_block == BlockType::Bed {
                     if matches!(&self.network, NetworkHandle::Client { .. }) {
-                        self.network.send_sleep_request(
-                            clicked_pos.0,
-                            clicked_pos.1,
-                            clicked_pos.2,
+                        let _ = self.submit_local_authority_operation(
+                            crate::network::protocol::GameplayOperation::Sleep {
+                                x: clicked_pos.0,
+                                y: clicked_pos.1,
+                                z: clicked_pos.2,
+                            },
                         );
                         return;
                     }
