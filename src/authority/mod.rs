@@ -932,12 +932,17 @@ impl AuthorityCore {
                     } else {
                         Vec3::new(0.5, 65.0, 0.5)
                     };
-                    if let Some(session) = self.sessions.get_mut(&id) {
-                        session.position = target_pos.to_array();
-                        session.portal_cooldown = 2.0;
-                        session.portal_contact_time = 0.0;
+                    // Same-dimension hop still uses the portal transfer
+                    // intent so runtime can set teleport allowance and
+                    // advance the next inbound pose.
+                    if self.execute_portal_dimension_transfer(id, dimension, target_pos.to_array())
+                    {
+                        let revision = self.world.revisions.allocate();
+                        if let Some(session) = self.sessions.get_mut(&id) {
+                            session.last_revision = revision;
+                            session.gameplay.revision = revision;
+                        }
                     }
-                    self.pending_session_revisions.insert(id);
                     continue;
                 }
             }
@@ -1731,6 +1736,23 @@ impl AuthorityCore {
                 {
                     return Err(RejectReason::InvalidState);
                 }
+                // Debit the exact held slot on a clone before Fire (and any
+                // recursive portal interiors) can enter the world.
+                let mut next_gameplay = session.gameplay;
+                next_gameplay.mining = None;
+                if session.game_mode != crate::inventory::GameMode::Creative {
+                    let index = usize::from(slot_index);
+                    let Some(slot) = next_gameplay.inventory[index].as_mut() else {
+                        return Err(RejectReason::InvalidState);
+                    };
+                    slot.item.durability = slot.item.durability.saturating_sub(1);
+                    if slot.item.durability == 0 {
+                        next_gameplay.inventory[index] = None;
+                    }
+                }
+                if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
+                    return Err(RejectReason::InvalidState);
+                }
                 let mutation = self
                     .world
                     .set_block(
@@ -1744,21 +1766,10 @@ impl AuthorityCore {
                 if mutation.is_none() {
                     return Err(RejectReason::InvalidState);
                 }
-                if session.game_mode != crate::inventory::GameMode::Creative {
-                    let mut gameplay = session.gameplay;
-                    let index = usize::from(slot_index);
-                    let Some(slot) = gameplay.inventory[index].as_mut() else {
-                        return Err(RejectReason::InvalidState);
-                    };
-                    slot.item.durability = slot.item.durability.saturating_sub(1);
-                    if slot.item.durability == 0 {
-                        gameplay.inventory[index] = None;
-                    }
-                    gameplay.mining = None;
-                    if let Some(target) = self.sessions.get_mut(&session_id) {
-                        target.gameplay = gameplay;
-                    }
-                }
+                let Some(target) = self.sessions.get_mut(&session_id) else {
+                    return Err(RejectReason::Unauthorized);
+                };
+                target.gameplay = next_gameplay;
                 Ok(mutation)
             }
             BlockActionKind::InsertEnderEye => {
@@ -1774,6 +1785,24 @@ impl AuthorityCore {
                 {
                     return Err(RejectReason::InvalidState);
                 }
+                let mut next_gameplay = session.gameplay;
+                next_gameplay.mining = None;
+                if session.game_mode != crate::inventory::GameMode::Creative {
+                    let index = usize::from(slot_index);
+                    let Some(slot) = next_gameplay.inventory[index].as_mut() else {
+                        return Err(RejectReason::InvalidState);
+                    };
+                    if slot.item.count == 0 {
+                        return Err(RejectReason::InvalidState);
+                    }
+                    slot.item.count -= 1;
+                    if slot.item.count == 0 {
+                        next_gameplay.inventory[index] = None;
+                    }
+                }
+                if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
+                    return Err(RejectReason::InvalidState);
+                }
                 let mutation = self
                     .world
                     .set_block(
@@ -1787,21 +1816,10 @@ impl AuthorityCore {
                 if mutation.is_none() {
                     return Err(RejectReason::InvalidState);
                 }
-                if session.game_mode != crate::inventory::GameMode::Creative {
-                    let mut gameplay = session.gameplay;
-                    let index = usize::from(slot_index);
-                    let Some(slot) = gameplay.inventory[index].as_mut() else {
-                        return Err(RejectReason::InvalidState);
-                    };
-                    slot.item.count = slot.item.count.saturating_sub(1);
-                    if slot.item.count == 0 {
-                        gameplay.inventory[index] = None;
-                    }
-                    gameplay.mining = None;
-                    if let Some(target) = self.sessions.get_mut(&session_id) {
-                        target.gameplay = gameplay;
-                    }
-                }
+                let Some(target) = self.sessions.get_mut(&session_id) else {
+                    return Err(RejectReason::Unauthorized);
+                };
+                target.gameplay = next_gameplay;
                 Ok(mutation)
             }
             BlockActionKind::EnterPortal => {
@@ -2412,6 +2430,13 @@ impl AuthorityCore {
         else {
             return false;
         };
+        if !self
+            .sessions
+            .get(&id)
+            .is_some_and(|session| session.gameplay.is_dead)
+        {
+            return false;
+        }
         self.cleanup_session_lifecycle(id, dimension);
         self.activate_dimension(dimension);
         let hardcore = self.world.rules.hardcore;
@@ -3827,6 +3852,18 @@ mod tests {
         let state = core.session(7).unwrap().gameplay;
         assert!(!state.is_dead);
         assert_eq!(state.health_milli, state.max_health_milli);
+    }
+
+    #[test]
+    fn respawn_session_rejects_living_player() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        let before = core.session(7).unwrap().clone();
+        assert!(!before.gameplay.is_dead);
+        assert!(!core.respawn_session(7));
+        let after = core.session(7).unwrap();
+        assert_eq!(after.position, before.position);
+        assert_eq!(after.dimension, before.dimension);
+        assert_eq!(after.gameplay, before.gameplay);
     }
 
     #[test]

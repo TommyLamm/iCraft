@@ -29,6 +29,8 @@ use crate::save::{
     PlayerData, SaveManager,
 };
 use glam::Vec3;
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
@@ -62,6 +64,12 @@ const MAX_POSE_SPEED_BLOCKS_PER_SECOND: f32 = 100.0;
 const POSE_DISTANCE_SLACK_BLOCKS: f32 = 4.0;
 const MAX_POSE_DELTA_MILLIS: u64 = 250;
 const TELEPORT_ALLOWANCE_RADIUS: f32 = 8.0;
+
+#[cfg(test)]
+thread_local! {
+    static SAVE_ALL_FAILPOINT: Cell<bool> = const { Cell::new(false) };
+    static SAVE_PLAYER_FAILPOINT: Cell<bool> = const { Cell::new(false) };
+}
 
 /// Socket ownership for an embedded authority runtime. `Disabled` creates no
 /// host-command channel or network thread; local inputs still use the same
@@ -906,6 +914,9 @@ pub struct ServerRuntime {
     observed_transport_rejections: u64,
     observed_transport_duplicates: u64,
     stopped: bool,
+    /// Successful `save_all` during shutdown. `request_shutdown` only sets
+    /// `stopped`; a later `shutdown` must still flush if this is false.
+    save_flushed: bool,
 }
 
 impl ServerRuntime {
@@ -1026,6 +1037,7 @@ impl ServerRuntime {
             routed_updates: Vec::new(),
             routed_mutations: BTreeSet::new(),
             stopped: false,
+            save_flushed: false,
         };
         runtime.restore_authority_state()?;
         runtime.ensure_spawn_chunk();
@@ -1108,7 +1120,9 @@ impl ServerRuntime {
             .map(|world| world.entities.entities.len())
             .sum();
         if self.metrics.ticks % AUTOSAVE_INTERVAL_TICKS == 0 {
-            self.save_all()?;
+            if let Err(error) = self.save_all() {
+                eprintln!("[ServerRuntime] autosave failed: {error}");
+            }
         }
         let elapsed = started.elapsed();
         let elapsed_us = elapsed.as_micros().min(u64::MAX as u128) as u64;
@@ -1147,10 +1161,13 @@ impl ServerRuntime {
     }
 
     pub fn shutdown(&mut self) -> io::Result<()> {
-        if self.stopped {
+        if self.stopped && self.save_flushed {
             return Ok(());
         }
         let save_result = self.save_all();
+        if save_result.is_ok() {
+            self.save_flushed = true;
+        }
         if self.host_tx.is_some() {
             self.enqueue_stop();
         }
@@ -1250,6 +1267,13 @@ impl ServerRuntime {
     }
 
     pub fn save_all(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if SAVE_ALL_FAILPOINT.with(|failpoint| failpoint.get()) {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "injected save_all failure",
+            ));
+        }
         let started = Instant::now();
         self.save_manager.save_level(&self.level)?;
         self.save_authority_state()?;
@@ -1529,52 +1553,56 @@ impl ServerRuntime {
                 Ok(())
             }
             ServerToHost::ClientRespawnRequest { id } => {
+                let Some(is_dead) = self
+                    .authority
+                    .session(id)
+                    .map(|session| session.gameplay.is_dead)
+                else {
+                    return Ok(());
+                };
+                if !is_dead {
+                    return Ok(());
+                }
                 let previous_dimension = self.players.get(&id).map(|session| session.dimension);
                 if let Some(dimension) = previous_dimension {
                     self.authority
                         .with_world(dimension, |world| world.close_container_viewers_forced(id));
                 }
-                let respawn = if let Some(session) = self.players.get_mut(&id) {
-                    session.data.position = [
-                        self.level.spawn_x as f32,
-                        self.level.spawn_y as f32,
-                        self.level.spawn_z as f32,
-                    ];
-                    session.dimension = self.level.spawn_dimension;
+                let respawn_position = [
+                    self.level.spawn_x as f32,
+                    self.level.spawn_y as f32,
+                    self.level.spawn_z as f32,
+                ];
+                let dimension = self.level.spawn_dimension;
+                // Both authority seams must succeed before runtime pose,
+                // dimension, or inventory are written.
+                if !self.authority.respawn_session(id) {
+                    return Ok(());
+                }
+                if !self.authority.set_session_dimension(id, dimension) {
+                    return Ok(());
+                }
+                if let Some(authority_session) = self.authority.session_mut(id) {
+                    authority_session.position = respawn_position;
+                }
+                let authority_state = self
+                    .authority
+                    .session(id)
+                    .map(|session| (session.gameplay, session.game_mode, session.position));
+                if let Some(session) = self.players.get_mut(&id) {
+                    session.data.position = respawn_position;
+                    session.dimension = dimension;
                     session.interest.open_containers.clear();
                     session.container_viewers.clear();
-                    session.teleport_allowance = Some(session.data.position);
-                    Some((session.data.position, session.dimension))
-                } else {
-                    None
-                };
-                if let Some((respawn_position, dimension)) = respawn {
-                    // Respawn is a real authority session transfer.  Update
-                    // the core before projecting the result so a player never
-                    // remains registered in the old dimension.
-                    if !self.authority.set_session_dimension(id, dimension) {
-                        return Ok(());
-                    }
-                    if let Some(authority_session) = self.authority.session_mut(id) {
-                        authority_session.position = respawn_position;
-                    }
-                    if !self.authority.respawn_session(id) {
-                        return Ok(());
-                    }
-                    let authority_state = self
-                        .authority
-                        .session(id)
-                        .map(|session| (session.gameplay, session.game_mode, session.position));
+                    session.teleport_allowance = Some(respawn_position);
                     if let Some((gameplay, game_mode, position)) = authority_state {
-                        if let Some(session) = self.players.get_mut(&id) {
-                            session.data.position = position;
-                            session.data.game_mode = game_mode;
-                            apply_gameplay_to_player_data(&mut session.data, gameplay);
-                        }
+                        session.data.position = position;
+                        session.data.game_mode = game_mode;
+                        apply_gameplay_to_player_data(&mut session.data, gameplay);
                     }
-                    self.send_respawn_result(id, respawn_position, dimension);
-                    self.update_interest_for(id, dimension, respawn_position);
                 }
+                self.send_respawn_result(id, respawn_position, dimension);
+                self.update_interest_for(id, dimension, respawn_position);
                 Ok(())
             }
             ServerToHost::ClientBlockAction {
@@ -1591,11 +1619,9 @@ impl ServerRuntime {
                 else {
                     return Ok(());
                 };
-                let Some(request) = self.legacy_request(
-                    id,
-                    self.session_revision(id).unwrap_or(0),
-                    operation,
-                ) else {
+                let Some(request) =
+                    self.legacy_request(id, self.session_revision(id).unwrap_or(0), operation)
+                else {
                     return Ok(());
                 };
                 let response = self.handle_gameplay_request(request)?;
@@ -1944,7 +1970,12 @@ impl ServerRuntime {
             }
             self.authority
                 .with_world(dimension, |world| world.close_container_viewers_forced(id));
-            self.save_player(&session)?;
+            if let Err(error) = self.save_player(&session) {
+                eprintln!(
+                    "[ServerRuntime] leave save failed for {}: {error}",
+                    session.username
+                );
+            }
         }
         self.authority.remove_session(id);
         self.metrics.players_online = self.players.len();
@@ -2267,15 +2298,13 @@ impl ServerRuntime {
                     .world_mut(dimension)
                     .and_then(|world| world.container_slot_wire(position, slot))
                     .flatten();
-                let session_state = self
-                    .authority
-                    .session(id)
-                    .map(|session| session.gameplay);
-                let dragged = session_state.and_then(|state| state.cursor).map(|slot| slot.item);
+                let session_state = self.authority.session(id).map(|session| session.gameplay);
+                let dragged = session_state
+                    .and_then(|state| state.cursor)
+                    .map(|slot| slot.item);
                 if let Some(state) = session_state {
                     if let Some(session) = self.players.get_mut(&id) {
-                        session.last_projected_session_revision =
-                            Some((dimension, state.revision));
+                        session.last_projected_session_revision = Some((dimension, state.revision));
                     }
                     self.send_session_update(id, revision, dimension, state);
                 }
@@ -3302,6 +3331,13 @@ impl ServerRuntime {
     }
 
     fn save_player(&self, session: &PlayerSessionState) -> io::Result<()> {
+        #[cfg(test)]
+        if SAVE_PLAYER_FAILPOINT.with(|failpoint| failpoint.get()) {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "injected save_player failure",
+            ));
+        }
         let mut data = session.data.clone();
         let current_dimension = self
             .authority
@@ -3512,7 +3548,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 impl Drop for ServerRuntime {
     fn drop(&mut self) {
-        if !self.stopped {
+        if !self.save_flushed {
             let _ = self.shutdown();
         }
     }
@@ -4642,6 +4678,54 @@ mod tests {
         assert!(!runtime.authority.session(3).unwrap().operator);
         assert!(runtime.login_session(4, "foo.bar").is_err());
         assert!(runtime.login_session(5, "CON").is_err());
+
+        let _ = runtime.shutdown();
+        let _ = fs::remove_dir_all(&runtime.world_dir);
+    }
+
+    #[test]
+    fn autosave_error_does_not_skip_shutdown_flush() {
+        let mut properties = ServerProperties::default();
+        properties.bind = "127.0.0.1".into();
+        properties.port = 25574;
+        properties.world_dir = temp_dir("autosave_flush");
+        let mut runtime = ServerRuntime::new(properties).unwrap();
+        runtime.login_session(1, "alex").unwrap();
+        let saves_before = runtime.metrics.saves;
+
+        SAVE_ALL_FAILPOINT.with(|failpoint| failpoint.set(true));
+        runtime.metrics.ticks = AUTOSAVE_INTERVAL_TICKS - 1;
+        assert!(runtime.tick().is_ok());
+        assert_eq!(runtime.metrics.saves, saves_before);
+        SAVE_ALL_FAILPOINT.with(|failpoint| failpoint.set(false));
+
+        runtime.request_shutdown();
+        assert!(runtime.is_stopped());
+        runtime.shutdown().unwrap();
+        assert!(runtime.metrics.saves > saves_before);
+        assert!(runtime.save_flushed);
+
+        let world_dir = runtime.world_dir.clone();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn leave_save_failure_still_releases_identity() {
+        let mut properties = ServerProperties::default();
+        properties.bind = "127.0.0.1".into();
+        properties.port = 25575;
+        properties.world_dir = temp_dir("leave_save_fail");
+        let mut runtime = ServerRuntime::new(properties).unwrap();
+        runtime.login_session(1, "alex").unwrap();
+
+        SAVE_PLAYER_FAILPOINT.with(|failpoint| failpoint.set(true));
+        runtime.logout_session(1).unwrap();
+        SAVE_PLAYER_FAILPOINT.with(|failpoint| failpoint.set(false));
+
+        assert!(runtime.authority.session(1).is_none());
+        assert!(!runtime.players.contains_key(&1));
+        runtime.login_session(2, "ALEX").unwrap();
+        assert_eq!(runtime.players.get(&2).unwrap().username, "alex");
 
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
