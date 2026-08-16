@@ -34,21 +34,6 @@ pub const FIXED_DT: f32 = 1.0 / 20.0;
 const MAX_AUTOMATION_TRANSFERS: usize = 64;
 const MAX_FLUID_UPDATES: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorldDispatchError {
-    reason: RejectReason,
-}
-
-impl WorldDispatchError {
-    pub const fn new(reason: RejectReason) -> Self {
-        Self { reason }
-    }
-
-    pub const fn reason(self) -> RejectReason {
-        self.reason
-    }
-}
-
 /// All state required to advance one deterministic world tick.
 pub struct ServerWorld {
     pub seed: u32,
@@ -281,7 +266,7 @@ impl ServerWorld {
         &mut self,
         position: (i32, i32, i32),
         slots: &[Option<ItemStack>],
-    ) -> Result<WorldMutation, WorldDispatchError> {
+    ) -> Result<WorldMutation, RejectReason> {
         if !ContainerSessionManager::set_container_slots(
             &mut self.chunks,
             position.0,
@@ -289,7 +274,7 @@ impl ServerWorld {
             position.2,
             slots,
         ) {
-            return Err(WorldDispatchError::new(RejectReason::InvalidState));
+            return Err(RejectReason::InvalidState);
         }
         Ok(self.touch_revision(position.0, position.1, position.2))
     }
@@ -781,9 +766,9 @@ impl ServerWorld {
         z: i32,
         block: BlockType,
         state: u8,
-    ) -> Result<Option<WorldMutation>, WorldDispatchError> {
+    ) -> Result<Option<WorldMutation>, RejectReason> {
         if !self.valid_coordinate(x, y, z) {
-            return Err(WorldDispatchError::new(RejectReason::InvalidCoordinate));
+            return Err(RejectReason::InvalidCoordinate);
         }
         self.ensure_chunk(x.div_euclid(16), z.div_euclid(16));
         let old_block = self.get_block(x, y, z);
@@ -942,7 +927,6 @@ impl ServerWorld {
             return Err(RejectReason::InvalidState);
         }
         self.set_block(x, y, z, block, 0)
-            .map_err(|error| error.reason())
     }
 
     /// Verify the authenticated pose's sightline reaches exactly one loaded
@@ -1353,27 +1337,136 @@ impl ServerWorld {
         Ok(Some(entity_id))
     }
 
-    /// Dispatch a request after session/sequence/revision validation.
+    fn ensure_container_slot(&self, x: i32, y: i32, z: i32, slot: u16) -> Result<(), RejectReason> {
+        let Some(entity) = self.chunks.get_block_entity(x, y, z) else {
+            return Err(RejectReason::InvalidState);
+        };
+        let Some(access) = ContainerAccess::for_entity(entity) else {
+            return Err(RejectReason::InvalidState);
+        };
+        if usize::from(slot) >= access.slot_count {
+            return Err(RejectReason::InvalidState);
+        }
+        Ok(())
+    }
+
+    pub fn open_container(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot: u16,
+        player_id: PlayerId,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        self.ensure_container_slot(x, y, z, slot)?;
+        let position = (x, y, z);
+        let container_positions = self.container_positions(position);
+        let had_viewer = container_positions.iter().any(|position| {
+            self.container_viewers
+                .get(position)
+                .is_some_and(|viewers| !viewers.is_empty())
+        });
+        for position in &container_positions {
+            self.container_viewers
+                .entry(*position)
+                .or_default()
+                .insert(player_id);
+        }
+        let state_mutation = if !had_viewer {
+            self.set_chest_open_state(position, true)
+        } else {
+            None
+        };
+        Ok(Some(
+            state_mutation.unwrap_or_else(|| self.touch_revision(x, y, z)),
+        ))
+    }
+
+    pub fn close_container(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot: u16,
+        player_id: PlayerId,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        self.ensure_container_slot(x, y, z, slot)?;
+        let position = (x, y, z);
+        let container_positions = self.container_positions(position);
+        let mut removed = false;
+        for position in &container_positions {
+            removed |= self.close_container_viewer(player_id, *position);
+        }
+        let has_viewer = container_positions.iter().any(|position| {
+            self.container_viewers
+                .get(position)
+                .is_some_and(|viewers| !viewers.is_empty())
+        });
+        let state_mutation = if removed && !has_viewer {
+            self.set_chest_open_state(position, false)
+        } else {
+            None
+        };
+        Ok(Some(
+            state_mutation.unwrap_or_else(|| self.touch_revision(x, y, z)),
+        ))
+    }
+
+    pub fn sleep_player(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        player_id: PlayerId,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        if self.get_block(x, y, z) != BlockType::Bed {
+            return Err(RejectReason::InvalidState);
+        }
+        if !self.sleeping_players.insert(player_id) {
+            return Err(RejectReason::InvalidState);
+        }
+        Ok(Some(self.touch_revision(x, y, z)))
+    }
+
+    pub fn set_time(&mut self, time: u64) {
+        self.time = time;
+    }
+
+    pub fn add_time(&mut self, time: u64) {
+        self.time = self.time.wrapping_add(time);
+    }
+
+    pub fn set_gamerule(&mut self, rule: &str, value: Option<&str>) -> Result<(), RejectReason> {
+        let Some(value) = value else {
+            return Err(RejectReason::InvalidState);
+        };
+        if let Ok(bool_value) = value.parse::<bool>() {
+            self.rules
+                .set(rule, bool_value)
+                .map_err(|_| RejectReason::InvalidState)?;
+        } else if matches!(
+            rule,
+            "playerssleepingpercentage" | "sleepingpercentage" | "sleeping_percentage"
+        ) {
+            let percentage = value
+                .parse::<u8>()
+                .map_err(|_| RejectReason::InvalidState)?;
+            self.rules.set_sleeping_percentage(percentage);
+        } else {
+            return Err(RejectReason::InvalidState);
+        }
+        Ok(())
+    }
+
+    /// Thin world dispatcher retained for `server_world` unit tests. Live
+    /// requests go through `AuthorityCore`'s single operation match.
     pub fn dispatch(
         &mut self,
         request: &GameplayRequest,
         player_id: PlayerId,
-        operator: bool,
-    ) -> Result<Option<WorldMutation>, WorldDispatchError> {
+        _operator: bool,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
         match &request.operation {
-            GameplayOperation::BlockAction { action, .. } => {
-                // Block actions are session-scoped and may mutate inventory,
-                // progress, drops, and XP. AuthorityCore owns that transaction;
-                // never let the generic world dispatcher become a legacy
-                // mutation backdoor.
-                let _ = action;
-                Err(WorldDispatchError::new(RejectReason::Unsupported))
-            }
-            GameplayOperation::BlockUse { .. } => {
-                // Leftover client-authored voxel write. Plan31 BlockAction is
-                // the only place/break ingress; this arm must not set_block.
-                Err(WorldDispatchError::new(RejectReason::Unsupported))
-            }
             GameplayOperation::Container {
                 action,
                 x,
@@ -1381,167 +1474,42 @@ impl ServerWorld {
                 z,
                 slot,
             } => {
-                let action = ContainerAction::from_wire(*action)
-                    .ok_or_else(|| WorldDispatchError::new(RejectReason::InvalidState))?;
-                self.dispatch_container(action, *x, *y, *z, *slot, player_id, None)
-            }
-            GameplayOperation::ContainerClick {
-                x,
-                y,
-                z,
-                slot,
-                is_left: _,
-                dragged,
-            } => self.dispatch_container(
-                ContainerAction::Click,
-                *x,
-                *y,
-                *z,
-                *slot,
-                player_id,
-                dragged.as_ref(),
-            ),
-            GameplayOperation::Sleep { x, y, z } => {
-                if self.get_block(*x, *y, *z) != BlockType::Bed {
-                    return Err(WorldDispatchError::new(RejectReason::InvalidState));
+                let action =
+                    ContainerAction::from_wire(*action).ok_or(RejectReason::InvalidState)?;
+                match action {
+                    ContainerAction::Open => self.open_container(*x, *y, *z, *slot, player_id),
+                    ContainerAction::Close => self.close_container(*x, *y, *z, *slot, player_id),
+                    ContainerAction::Click => {
+                        self.ensure_container_slot(*x, *y, *z, *slot)?;
+                        Err(RejectReason::Unsupported)
+                    }
                 }
-                if !self.sleeping_players.insert(player_id) {
-                    return Err(WorldDispatchError::new(RejectReason::InvalidState));
-                }
-                Ok(Some(self.touch_revision(*x, *y, *z)))
             }
+            GameplayOperation::ContainerClick { x, y, z, slot, .. } => {
+                self.ensure_container_slot(*x, *y, *z, *slot)?;
+                Err(RejectReason::Unsupported)
+            }
+            GameplayOperation::Sleep { x, y, z } => self.sleep_player(*x, *y, *z, player_id),
             GameplayOperation::Command { command } => {
-                self.dispatch_command(command, operator)?;
-                Ok(None)
+                let parsed = commands::parse(command).map_err(|_| RejectReason::InvalidState)?;
+                match parsed {
+                    Command::GameRule { rule, value } => {
+                        self.set_gamerule(&rule, value.as_deref())?;
+                        Ok(None)
+                    }
+                    Command::Time(TimeCommand::Set(time)) => {
+                        self.set_time(time);
+                        Ok(None)
+                    }
+                    Command::Time(TimeCommand::Add(time)) => {
+                        self.add_time(time);
+                        Ok(None)
+                    }
+                    _ => Err(RejectReason::Unsupported),
+                }
             }
-            GameplayOperation::ItemUse { .. }
-            | GameplayOperation::Combat { .. }
-            | GameplayOperation::Trade { .. }
-            | GameplayOperation::Mount { .. }
-            | GameplayOperation::Fishing { .. }
-            | GameplayOperation::FurnaceTakeOutput { .. }
-            | GameplayOperation::Craft { .. }
-            | GameplayOperation::Enchant { .. }
-            | GameplayOperation::Brew { .. }
-            | GameplayOperation::Anvil { .. }
-            | GameplayOperation::UseState { .. }
-            | GameplayOperation::FluidUse { .. } => {
-                Err(WorldDispatchError::new(RejectReason::Unsupported))
-            }
+            _ => Err(RejectReason::Unsupported),
         }
-    }
-
-    fn dispatch_container(
-        &mut self,
-        action: ContainerAction,
-        x: i32,
-        y: i32,
-        z: i32,
-        slot: u16,
-        player_id: PlayerId,
-        dragged: Option<&ItemWire>,
-    ) -> Result<Option<WorldMutation>, WorldDispatchError> {
-        let Some(entity) = self.chunks.get_block_entity(x, y, z) else {
-            return Err(WorldDispatchError::new(RejectReason::InvalidState));
-        };
-        let Some(access) = ContainerAccess::for_entity(entity) else {
-            return Err(WorldDispatchError::new(RejectReason::InvalidState));
-        };
-        if usize::from(slot) >= access.slot_count {
-            return Err(WorldDispatchError::new(RejectReason::InvalidState));
-        }
-        let position = (x, y, z);
-        let container_positions = self.container_positions(position);
-        let mut state_mutation = None;
-        match action {
-            ContainerAction::Open => {
-                let had_viewer = container_positions.iter().any(|position| {
-                    self.container_viewers
-                        .get(position)
-                        .is_some_and(|viewers| !viewers.is_empty())
-                });
-                for position in &container_positions {
-                    self.container_viewers
-                        .entry(*position)
-                        .or_default()
-                        .insert(player_id);
-                }
-                if !had_viewer {
-                    state_mutation = self.set_chest_open_state(position, true);
-                }
-            }
-            ContainerAction::Close => {
-                let mut removed = false;
-                for position in &container_positions {
-                    removed |= self.close_container_viewer(player_id, *position);
-                }
-                let has_viewer = container_positions.iter().any(|position| {
-                    self.container_viewers
-                        .get(position)
-                        .is_some_and(|viewers| !viewers.is_empty())
-                });
-                if removed && !has_viewer {
-                    state_mutation = self.set_chest_open_state(position, false);
-                }
-            }
-            ContainerAction::Click => {
-                // Container clicks are a session inventory transaction in
-                // AuthorityCore. The world dispatcher must not write a
-                // client-authored ItemWire or evaporate an extracted stack.
-                let _ = dragged;
-                return Err(WorldDispatchError::new(RejectReason::Unsupported));
-            }
-        }
-        Ok(Some(
-            state_mutation.unwrap_or_else(|| self.touch_revision(x, y, z)),
-        ))
-    }
-
-    fn dispatch_command(&mut self, input: &str, _operator: bool) -> Result<(), WorldDispatchError> {
-        let command = commands::parse(input)
-            .map_err(|_| WorldDispatchError::new(RejectReason::InvalidState))?;
-        match command {
-            Command::GameRule { rule, value } => {
-                let Some(value) = value else {
-                    return Err(WorldDispatchError::new(RejectReason::InvalidState));
-                };
-                if let Ok(bool_value) = value.parse::<bool>() {
-                    self.rules
-                        .set(&rule, bool_value)
-                        .map_err(|_| WorldDispatchError::new(RejectReason::InvalidState))?;
-                } else if matches!(
-                    rule.as_str(),
-                    "playerssleepingpercentage" | "sleepingpercentage" | "sleeping_percentage"
-                ) {
-                    let percentage = value
-                        .parse::<u8>()
-                        .map_err(|_| WorldDispatchError::new(RejectReason::InvalidState))?;
-                    self.rules.set_sleeping_percentage(percentage);
-                } else {
-                    return Err(WorldDispatchError::new(RejectReason::InvalidState));
-                }
-            }
-            Command::Time(TimeCommand::Set(time)) => self.time = time,
-            Command::Time(TimeCommand::Add(time)) => self.time = self.time.wrapping_add(time),
-            // Session commands are handled by AuthorityCore because they need
-            // access to authenticated session state.
-            Command::GameMode { .. } | Command::Teleport { .. } => {
-                return Err(WorldDispatchError::new(RejectReason::Unsupported));
-            }
-            Command::Help(_)
-            | Command::Difficulty(_)
-            | Command::Weather(_)
-            | Command::Give { .. }
-            | Command::Kill(_)
-            | Command::SpawnPoint { .. }
-            | Command::SetWorldSpawn(_)
-            | Command::Locate(_)
-            | Command::Seed
-            | Command::SaveAll => {
-                return Err(WorldDispatchError::new(RejectReason::Unsupported));
-            }
-        }
-        Ok(())
     }
 
     fn touch_revision(&mut self, x: i32, y: i32, z: i32) -> WorldMutation {

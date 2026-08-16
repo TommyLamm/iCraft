@@ -1250,7 +1250,6 @@ impl AuthorityCore {
             && matches!(
                 &request.operation,
                 crate::network::protocol::GameplayOperation::BlockAction { .. }
-                    | crate::network::protocol::GameplayOperation::BlockUse { .. }
                     | crate::network::protocol::GameplayOperation::Container { .. }
                     | crate::network::protocol::GameplayOperation::ContainerClick { .. }
                     | crate::network::protocol::GameplayOperation::ItemUse { .. }
@@ -1279,14 +1278,83 @@ impl AuthorityCore {
         }
 
         self.pending_session_revisions.clear();
-        let result = self
-            .dispatch_session_command(&request, id)
-            .or_else(|| self.dispatch_session_gameplay(&request, id))
-            .unwrap_or_else(|| {
-                self.world
-                    .dispatch(&request, id, operator)
-                    .map_err(|error| error.reason())
-            });
+        let result = match &request.operation {
+            GameplayOperation::BlockAction {
+                action,
+                x,
+                y,
+                z,
+                face,
+                hand,
+                held,
+                block,
+                look_milli,
+            } => self.apply_block_action(
+                id,
+                *action,
+                (*x, *y, *z),
+                *face,
+                *hand,
+                *held,
+                *block,
+                *look_milli,
+            ),
+            GameplayOperation::BlockUse { .. } => Err(RejectReason::Unsupported),
+            GameplayOperation::Container {
+                action,
+                x,
+                y,
+                z,
+                slot,
+            } => match ContainerAction::from_wire(*action) {
+                Some(ContainerAction::Open) => self.world.open_container(*x, *y, *z, *slot, id),
+                Some(ContainerAction::Close) => self.world.close_container(*x, *y, *z, *slot, id),
+                Some(ContainerAction::Click) => {
+                    self.apply_container_click(id, (*x, *y, *z), *slot, true, None)
+                }
+                None => Err(RejectReason::InvalidState),
+            },
+            GameplayOperation::ContainerClick {
+                x,
+                y,
+                z,
+                slot,
+                is_left,
+                dragged,
+            } => self.apply_container_click(id, (*x, *y, *z), *slot, *is_left, dragged.as_ref()),
+            GameplayOperation::ItemUse { item, count } => self.apply_item_use(id, *item, *count),
+            GameplayOperation::Combat { target, action } => {
+                self.apply_authoritative_combat(&request, id, *target, *action)
+            }
+            GameplayOperation::Sleep { x, y, z } => self.world.sleep_player(*x, *y, *z, id),
+            GameplayOperation::Trade {
+                villager_id,
+                offer_index,
+            } => self.apply_trade(id, *villager_id, *offer_index),
+            GameplayOperation::Mount { entity_id } => self.apply_mount(id, *entity_id),
+            GameplayOperation::Command { command } => self.apply_command(id, command),
+            GameplayOperation::Fishing {
+                action,
+                hand,
+                look_milli,
+            } => self.apply_fishing(id, *action, *hand, *look_milli),
+            GameplayOperation::FluidUse {
+                x,
+                y,
+                z,
+                face,
+                hand,
+                source,
+            } => self.apply_fluid_use(id, (*x, *y, *z), *face, *hand, *source),
+            GameplayOperation::FurnaceTakeOutput { .. }
+            | GameplayOperation::Craft { .. }
+            | GameplayOperation::Enchant { .. }
+            | GameplayOperation::Brew { .. }
+            | GameplayOperation::Anvil { .. }
+            | GameplayOperation::UseState { .. } => {
+                self.apply_transaction_operation(id, &request.operation)
+            }
+        };
         self.pending_mutations
             .extend(self.world.take_pending_mutations());
         let response = match result {
@@ -1341,163 +1409,87 @@ impl AuthorityCore {
     /// headless world.  Renderer roots never perform these mutations after an
     /// authority boundary exists; an unsupported/invalid domain is rejected
     /// before it can fall back to local simulation.
-    fn dispatch_session_gameplay(
+    fn apply_item_use(
         &mut self,
-        request: &GameplayRequest,
         session_id: PlayerId,
-    ) -> Option<Result<Option<WorldMutation>, RejectReason>> {
+        item: u32,
+        count: u16,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
         use crate::inventory::GameMode;
 
-        match &request.operation {
-            GameplayOperation::BlockAction {
-                action,
-                x,
-                y,
-                z,
-                face,
-                hand,
-                held,
-                block,
-                look_milli,
-            } => Some(self.apply_block_action(
-                session_id,
-                *action,
-                (*x, *y, *z),
-                *face,
-                *hand,
-                *held,
-                *block,
-                *look_milli,
-            )),
-            GameplayOperation::BlockUse { .. } => Some(Err(RejectReason::Unsupported)),
-            GameplayOperation::ItemUse { item, count } => {
-                let Some(item_kind) = crate::inventory::Item::from_u32(*item) else {
-                    return Some(Err(RejectReason::InvalidState));
-                };
-                if *count == 0 {
-                    return Some(Err(RejectReason::InvalidState));
-                }
-                let Some(food) = item_kind.food_properties() else {
-                    return Some(Err(RejectReason::Unsupported));
-                };
-                let Some(session) = self.sessions.get(&session_id) else {
-                    return Some(Err(RejectReason::Unauthorized));
-                };
-                let original_gameplay = session.gameplay;
-                let mut gameplay = original_gameplay;
-                let hunger = gameplay.hunger_milli as f32 / 1000.0;
-                if hunger >= 20.0 && !food.always_edible && session.game_mode != GameMode::Creative
-                {
-                    return Some(Err(RejectReason::InvalidState));
-                }
-                gameplay.hunger_milli = ((hunger + food.hunger).min(20.0) * 1000.0).round() as u32;
-                gameplay.saturation_milli = ((gameplay.saturation_milli as f32 / 1000.0
-                    + food.saturation)
-                    .min(gameplay.hunger_milli as f32 / 1000.0)
-                    * 1000.0)
-                    .round() as u32;
-                if session.game_mode != GameMode::Creative
-                    && !gameplay.remove_item(*item, u32::from(*count))
-                {
-                    return Some(Err(RejectReason::InvalidState));
-                }
-                if !preserves_brew_locks(&original_gameplay, &gameplay) {
-                    return Some(Err(RejectReason::InvalidState));
-                }
-                if let Some(session) = self.sessions.get_mut(&session_id) {
-                    session.gameplay = gameplay;
-                }
-                Some(Ok(None))
-            }
-            GameplayOperation::Combat { target, action } => {
-                Some(self.apply_authoritative_combat(request, session_id, *target, *action))
-            }
-            GameplayOperation::Trade {
-                villager_id,
-                offer_index,
-            } => {
-                let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
-                    return Some(Err(RejectReason::Unauthorized));
-                };
-                let Some(mut gameplay) = self.sessions.get(&session_id).map(|s| s.gameplay) else {
-                    return Some(Err(RejectReason::Unauthorized));
-                };
-                let original = gameplay;
-                let result = self
-                    .world
-                    .apply_trade(&mut gameplay, *villager_id, *offer_index, position)
-                    .map(|_| {
-                        if !preserves_brew_locks(&original, &gameplay) {
-                            return Err(RejectReason::InvalidState);
-                        }
-                        if let Some(session) = self.sessions.get_mut(&session_id) {
-                            session.gameplay = gameplay;
-                        }
-                        Ok(None)
-                    });
-                Some(result.and_then(|result| result))
-            }
-            GameplayOperation::Mount { entity_id } => {
-                let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
-                    return Some(Err(RejectReason::Unauthorized));
-                };
-                Some(
-                    self.world
-                        .apply_mount(session_id, *entity_id, position)
-                        .map(|mounted| {
-                            if let Some(session) = self.sessions.get_mut(&session_id) {
-                                session.gameplay.mounted_entity = mounted;
-                            }
-                            None
-                        }),
-                )
-            }
-            GameplayOperation::Fishing {
-                action,
-                hand,
-                look_milli,
-            } => Some(self.apply_fishing(session_id, *action, *hand, *look_milli)),
-            GameplayOperation::FluidUse {
-                x,
-                y,
-                z,
-                face,
-                hand,
-                source,
-            } => Some(self.apply_fluid_use(session_id, (*x, *y, *z), *face, *hand, *source)),
-            GameplayOperation::FurnaceTakeOutput { .. }
-            | GameplayOperation::Craft { .. }
-            | GameplayOperation::Enchant { .. }
-            | GameplayOperation::Brew { .. }
-            | GameplayOperation::Anvil { .. }
-            | GameplayOperation::UseState { .. } => {
-                Some(self.apply_transaction_operation(session_id, &request.operation))
-            }
-            GameplayOperation::ContainerClick {
-                x,
-                y,
-                z,
-                slot,
-                is_left,
-                dragged,
-            } => Some(self.apply_container_click(
-                session_id,
-                (*x, *y, *z),
-                *slot,
-                *is_left,
-                dragged.as_ref(),
-            )),
-            GameplayOperation::Container {
-                action,
-                x,
-                y,
-                z,
-                slot,
-            } if ContainerAction::from_wire(*action) == Some(ContainerAction::Click) => {
-                Some(self.apply_container_click(session_id, (*x, *y, *z), *slot, true, None))
-            }
-            _ => None,
+        let Some(item_kind) = crate::inventory::Item::from_u32(item) else {
+            return Err(RejectReason::InvalidState);
+        };
+        if count == 0 {
+            return Err(RejectReason::InvalidState);
         }
+        let Some(food) = item_kind.food_properties() else {
+            return Err(RejectReason::Unsupported);
+        };
+        let Some(session) = self.sessions.get(&session_id) else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let original_gameplay = session.gameplay;
+        let mut gameplay = original_gameplay;
+        let hunger = gameplay.hunger_milli as f32 / 1000.0;
+        if hunger >= 20.0 && !food.always_edible && session.game_mode != GameMode::Creative {
+            return Err(RejectReason::InvalidState);
+        }
+        gameplay.hunger_milli = ((hunger + food.hunger).min(20.0) * 1000.0).round() as u32;
+        gameplay.saturation_milli = ((gameplay.saturation_milli as f32 / 1000.0 + food.saturation)
+            .min(gameplay.hunger_milli as f32 / 1000.0)
+            * 1000.0)
+            .round() as u32;
+        if session.game_mode != GameMode::Creative && !gameplay.remove_item(item, u32::from(count))
+        {
+            return Err(RejectReason::InvalidState);
+        }
+        if !preserves_brew_locks(&original_gameplay, &gameplay) {
+            return Err(RejectReason::InvalidState);
+        }
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.gameplay = gameplay;
+        }
+        Ok(None)
+    }
+
+    fn apply_trade(
+        &mut self,
+        session_id: PlayerId,
+        villager_id: u64,
+        offer_index: u16,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let Some(mut gameplay) = self.sessions.get(&session_id).map(|s| s.gameplay) else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let original = gameplay;
+        self.world
+            .apply_trade(&mut gameplay, villager_id, offer_index, position)?;
+        if !preserves_brew_locks(&original, &gameplay) {
+            return Err(RejectReason::InvalidState);
+        }
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.gameplay = gameplay;
+        }
+        Ok(None)
+    }
+
+    fn apply_mount(
+        &mut self,
+        session_id: PlayerId,
+        entity_id: u64,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let mounted = self.world.apply_mount(session_id, entity_id, position)?;
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.gameplay.mounted_entity = mounted;
+        }
+        Ok(None)
     }
 
     fn apply_block_action(
@@ -1757,16 +1749,13 @@ impl AuthorityCore {
                 if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
                     return Err(RejectReason::InvalidState);
                 }
-                let mutation = self
-                    .world
-                    .set_block(
-                        position.0,
-                        position.1,
-                        position.2,
-                        crate::world::BlockType::Fire,
-                        0,
-                    )
-                    .map_err(|error| error.reason())?;
+                let mutation = self.world.set_block(
+                    position.0,
+                    position.1,
+                    position.2,
+                    crate::world::BlockType::Fire,
+                    0,
+                )?;
                 if mutation.is_none() {
                     return Err(RejectReason::InvalidState);
                 }
@@ -1807,16 +1796,13 @@ impl AuthorityCore {
                 if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
                     return Err(RejectReason::InvalidState);
                 }
-                let mutation = self
-                    .world
-                    .set_block(
-                        position.0,
-                        position.1,
-                        position.2,
-                        crate::world::BlockType::EndPortalFrameFilled,
-                        0,
-                    )
-                    .map_err(|error| error.reason())?;
+                let mutation = self.world.set_block(
+                    position.0,
+                    position.1,
+                    position.2,
+                    crate::world::BlockType::EndPortalFrameFilled,
+                    0,
+                )?;
                 if mutation.is_none() {
                     return Err(RejectReason::InvalidState);
                 }
@@ -2053,11 +2039,11 @@ impl AuthorityCore {
         session.gameplay = candidate;
         match self.world.commit_container_item_slots(position, &slots) {
             Ok(mutation) => Ok(Some(mutation)),
-            Err(error) => {
+            Err(reason) => {
                 if let Some(session) = self.sessions.get_mut(&session_id) {
                     session.gameplay = original;
                 }
-                Err(error.reason())
+                Err(reason)
             }
         }
     }
@@ -2463,30 +2449,24 @@ impl AuthorityCore {
         true
     }
 
-    /// Commands that mutate authenticated session state (rather than world
-    /// voxels) still execute in the same core.  `State` only projects the
-    /// resulting session snapshot and never edits its local player position or
-    /// game mode as authority.
-    fn dispatch_session_command(
+    /// Commands that mutate authenticated session or world state. `State` only
+    /// projects the resulting snapshot and never edits pose or game mode as
+    /// authority. `/respawn` stays a string match so it is not folded into the
+    /// operator-only leftover Command list; TCP `ClientRespawnRequest` is a
+    /// separate non-op entry.
+    fn apply_command(
         &mut self,
-        request: &GameplayRequest,
         session_id: PlayerId,
-    ) -> Option<Result<Option<WorldMutation>, RejectReason>> {
-        let crate::network::protocol::GameplayOperation::Command { command } = &request.operation
-        else {
-            return None;
-        };
+        command: &str,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
         if command.trim().eq_ignore_ascii_case("/respawn") {
-            return Some(if self.respawn_session(session_id) {
+            return if self.respawn_session(session_id) {
                 Ok(None)
             } else {
                 Err(RejectReason::Unauthorized)
-            });
+            };
         }
-        let parsed = match crate::commands::parse(command) {
-            Ok(parsed) => parsed,
-            Err(_) => return Some(Err(RejectReason::InvalidState)),
-        };
+        let parsed = crate::commands::parse(command).map_err(|_| RejectReason::InvalidState)?;
         match parsed {
             crate::commands::Command::GameMode { mode, target } => {
                 if target.is_some_and(|target| {
@@ -2496,13 +2476,13 @@ impl AuthorityCore {
                             | crate::commands::CommandTarget::NearestPlayer
                     )
                 }) {
-                    return Some(Err(RejectReason::PermissionDenied));
+                    return Err(RejectReason::PermissionDenied);
                 }
                 let Some(session) = self.sessions.get_mut(&session_id) else {
-                    return Some(Err(RejectReason::Unauthorized));
+                    return Err(RejectReason::Unauthorized);
                 };
                 session.game_mode = mode;
-                Some(Ok(None))
+                Ok(None)
             }
             crate::commands::Command::Teleport { target, position } => {
                 if !matches!(
@@ -2510,20 +2490,20 @@ impl AuthorityCore {
                     crate::commands::CommandTarget::SelfPlayer
                         | crate::commands::CommandTarget::NearestPlayer
                 ) {
-                    return Some(Err(RejectReason::PermissionDenied));
+                    return Err(RejectReason::PermissionDenied);
                 }
                 if !self.world.dimension.height().contains_y(position[1]) {
-                    return Some(Err(RejectReason::InvalidCoordinate));
+                    return Err(RejectReason::InvalidCoordinate);
                 }
                 let Some(session) = self.sessions.get_mut(&session_id) else {
-                    return Some(Err(RejectReason::Unauthorized));
+                    return Err(RejectReason::Unauthorized);
                 };
                 session.position = [
                     position[0] as f32 + 0.5,
                     position[1] as f32,
                     position[2] as f32 + 0.5,
                 ];
-                Some(Ok(None))
+                Ok(None)
             }
             crate::commands::Command::Give {
                 target,
@@ -2535,10 +2515,10 @@ impl AuthorityCore {
                     crate::commands::CommandTarget::SelfPlayer
                         | crate::commands::CommandTarget::NearestPlayer
                 ) {
-                    return Some(Err(RejectReason::PermissionDenied));
+                    return Err(RejectReason::PermissionDenied);
                 }
                 let Some(session) = self.sessions.get_mut(&session_id) else {
-                    return Some(Err(RejectReason::Unauthorized));
+                    return Err(RejectReason::Unauthorized);
                 };
                 let stack = crate::inventory::ItemStack::new(item, count);
                 let slot = SessionInventorySlot::from_wire(
@@ -2547,11 +2527,31 @@ impl AuthorityCore {
                     stack.can_place_on,
                 );
                 if !session.gameplay.add_slot(slot) {
-                    return Some(Err(RejectReason::InvalidState));
+                    return Err(RejectReason::InvalidState);
                 }
-                Some(Ok(None))
+                Ok(None)
             }
-            _ => None,
+            crate::commands::Command::GameRule { rule, value } => {
+                self.world.set_gamerule(&rule, value.as_deref())?;
+                Ok(None)
+            }
+            crate::commands::Command::Time(crate::commands::TimeCommand::Set(time)) => {
+                self.world.set_time(time);
+                Ok(None)
+            }
+            crate::commands::Command::Time(crate::commands::TimeCommand::Add(time)) => {
+                self.world.add_time(time);
+                Ok(None)
+            }
+            crate::commands::Command::Help(_)
+            | crate::commands::Command::Difficulty(_)
+            | crate::commands::Command::Weather(_)
+            | crate::commands::Command::Kill(_)
+            | crate::commands::Command::SpawnPoint { .. }
+            | crate::commands::Command::SetWorldSpawn(_)
+            | crate::commands::Command::Locate(_)
+            | crate::commands::Command::Seed
+            | crate::commands::Command::SaveAll => Err(RejectReason::Unsupported),
         }
     }
 

@@ -2158,10 +2158,6 @@ impl ServerRuntime {
                             }
                         }
                     }
-                    GameplayOperation::BlockUse { .. } => {
-                        // BlockUse is never an accepted mutation. A leftover
-                        // accept must not project or write Air.
-                    }
                     GameplayOperation::Container {
                         x,
                         y,
