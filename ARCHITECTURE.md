@@ -1,8 +1,8 @@
 # Architecture
 
-> Last verified: 2026-08-16 at `4474f89` (`tommy-dev`).
-> Change range reviewed: the 20 commits after `b3912c6` through `4e552ed`,
-> plus P0 code-simplification 11–13 (`f8c45f6`..`4474f89`).
+> Last verified: 2026-08-16 at `3ab51aa` (`tommy-dev`).
+> Change range reviewed: P1 code-simplification 14–17 (`090fca1`..`3ab51aa`)
+> on top of the previously verified `4474f89` baseline (P0 11–13).
 > Source code is authoritative; `plans/`, `docs/superpowers/`, and most of
 > `plans/03_performance/` are design/history records, not a description of the live runtime.
 >
@@ -22,11 +22,23 @@ The desktop uses `winit`, `wgpu`, and `rodio`; shared simulation uses a determin
 | `icraft-server` | `src/bin/icraft-server.rs` | Headless fixed-tick server, TCP sessions, console commands, metrics, and synchronous save/shutdown. |
 | `icraft` library | `src/lib.rs` | Public contract for `icraft-server` and `tests/`: authority, world, network, persistence, and the thin `presentation_inventory_policy` cut. |
 
-The desktop binary declares its module tree directly instead of importing the
-library crate. Shared source files are therefore compiled once for the desktop
-target and again through `src/lib.rs` for the server/tests. Only modules that
-`tests/` or `src/bin/icraft-server.rs` actually `use icraft::…` stay `pub`; the
-rest are `pub(crate)`. `sim_harness`, `final_acceptance`, and the library
+The desktop binary re-exports shared library modules
+(`pub use icraft::{world, inventory, server_runtime, …}`) so existing
+`crate::world` paths in the desktop tree still resolve. Shared source
+therefore compiles once, through `src/lib.rs`. Desktop-only modules stay
+declared in `src/main.rs`: `app`, `camera`, `dynamic_resolution`,
+`hand_renderer`, `menu`, `microbench`, `mob_renderer`, `particles`,
+`presentation`, `state`, and `texture`. `legacy_sim`, `legacy_systems`,
+`legacy_interaction`, and `frame` are `#[path]` children of `state`, not
+library modules.
+
+`lib.rs` has two `pub` layers. The server/tests contract is still only the
+modules that `tests/` or `src/bin/icraft-server.rs` actually `use icraft::…`
+(authority, world, network, persistence, and the thin
+`presentation_inventory_policy` cut). Additional desktop-shared modules are
+`pub` so the bin crate can re-export them; they are not a dedicated-server
+API. `ai`, `loot`, `recipes`, `spawning`, `voxel_shape`, and `worldgen`
+remain `pub(crate)`. `sim_harness`, `final_acceptance`, and the library
 `microbench` compile only under `cfg(test)` or feature `harness` (not default).
 Desktop `--microbench` uses `src/main.rs`'s own `mod microbench` and does not
 need that feature. Presentation modules (`menu`, `camera`, `texture`,
@@ -34,10 +46,9 @@ need that feature. Presentation modules (`menu`, `camera`, `texture`,
 `icraft-server` does not compile the wgpu menu or GPU terrain. Small
 transport-independent presentation policies live in
 `presentation_inventory_policy` so the server and headless tests can verify the
-boundary without importing the UI. `chunk_render` and `perf` still compile into
-the library as crate-internal modules because of world mesh types and queue
-metrics. `#[global_allocator]` is installed only in `src/main.rs`; the
-dynamic-resolution controller is compiled only into the desktop tree.
+boundary without importing the UI. `#[global_allocator]` is installed only in
+`src/main.rs`; the dynamic-resolution controller is compiled only into the
+desktop tree.
 
 ## Runtime topologies
 
@@ -144,9 +155,23 @@ Important rules:
   uses the portal-transfer path and teleport allowance; living players cannot
   respawn; portal ignition/Ender Eye insertion debit a cloned inventory before
   mutating blocks. Leave-save failure still releases the normalized identity.
-- `State` still contains a large renderer-side legacy simulation path. Current
-  Singleplayer and Host launches disable it by having an embedded runtime; new
-  authoritative behavior belongs in `AuthorityCore`/`ServerWorld`, not that path.
+- `ServerRuntime` keeps two session records (`SessionContract` in the
+  authority, `PlayerSessionState` in the runtime) because interest and the
+  save codec cannot enter the deterministic core. Pose, dimension, and
+  gameplay-projection overlays are written only through
+  `write_pose` / `sync_pose_from_authority`, `sync_dimension`, and
+  `sync_gameplay_projection` in `src/server_runtime/session_sync.rs`.
+  `teleport_session` still sets `teleport_allowance` before `write_pose`.
+  An accepted `GameplayOperation::Command` no longer re-parses the chat
+  string; if the authority pose moved, the runtime calls `teleport_session`.
+- `State` still contains a large renderer-side leftover simulation path.
+  Current Singleplayer and Host launches disable it by having an embedded
+  runtime; new authoritative behavior belongs in `AuthorityCore`/`ServerWorld`,
+  not that path. Leftover click / item-use / block mutation lives in
+  `presentation/legacy_interaction.rs`; leftover village / raid / vehicle /
+  fishing / furnace / hopper ticks live in `presentation/legacy_systems.rs`;
+  leftover world-tick helpers stay in `presentation/legacy_sim.rs`. Live
+  `handle_click` is only a `PresentationTopology` gate.
 - `world_mutation::apply_batch` is an atomic helper used by the legacy renderer
   path. It is not the primary headless authority mutation root.
 
@@ -244,7 +269,13 @@ clamped to 1×1), while Timeout skips the present without retry/log churn.
 - `GameplayRequest` carries request ID, client sequence, session, dimension,
   revision, and a typed operation. The bounded response cache makes retries
   idempotent; clients independently gate chunk, entity, session, block-entity,
-  and container revisions.
+  and container revisions. Desktop and Join **new** egress for sleep, container
+  click, and container close is a `GameplayRequest` (via `wrap_legacy` or a
+  typed `GameplayOperation`). Sleep envelopes use the session /
+  `current_dimension`, never a hard-coded 0. Leftover `Packet` and
+  `GameToClient` variants remain for inbound compatibility and tests; they are
+  not constructed on the live send path. `Action::Use` still does not synthesize
+  `BlockUse`. `HostToServer` is still a separate in-process enum.
 - `NetworkServer` and `NetworkClient` each run a Tokio runtime on a background
   thread and communicate with the authority/presentation roots through bounded
   or metered channels. Pose, chat, and gameplay use separate default ingress
@@ -317,8 +348,8 @@ explicit development/test override.
 
 | Area | Primary files |
 | --- | --- |
-| Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/presentation/`, `src/presentation_inventory_policy.rs` |
-| Authority and dedicated runtime | `src/authority/`, `src/server_world.rs`, `src/server_runtime.rs`, `src/bin/icraft-server.rs` |
+| Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/presentation/` (`legacy_sim`, `legacy_systems`, `legacy_interaction`, `frame`, inbound, interpolation, GPU terrain), `src/presentation_inventory_policy.rs` |
+| Authority and dedicated runtime | `src/authority/`, `src/server_world.rs`, `src/server_runtime.rs`, `src/server_runtime/session_sync.rs`, `src/bin/icraft-server.rs` |
 | World storage and generation | `src/world.rs`, `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/`, `src/loot.rs` |
 | Gameplay systems | `src/player.rs`, `src/physics.rs`, `src/inventory.rs`, `src/recipes.rs`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss.rs`, `src/ai/` |
 | Rendering | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling.rs`, `src/block_model.rs`, `src/mob_renderer.rs`, `src/hand_renderer.rs`, `src/particles.rs`, `src/texture.rs`, `src/shader.wgsl` |
@@ -327,10 +358,12 @@ explicit development/test override.
 | Tests and performance | inline `#[cfg(test)]`, `tests/` plus `tests/common/tcp_harness.rs`, `src/sim_harness.rs` / `src/final_acceptance.rs` / lib `microbench` (`cfg(test)` or feature `harness`), desktop `src/microbench.rs`, `plans/03_performance/` |
 
 `State` is still the desktop composition root. GPU terrain arenas, inbound
-staging, interpolation, leftover world tick, and render prepare/encode live in
-desktop-only `src/presentation/` (not exported from `lib.rs`). `state.rs` still
-owns `EmbeddedRuntimeBridge` and the large field list. `server_runtime.rs` is
-the transport/session/save composition root.
+staging, interpolation, leftover world tick / leftover interaction / leftover
+systems, and render prepare/encode live in desktop-only `src/presentation/`
+(not exported from `lib.rs`; leftover files are `#[path]` children of `state`).
+`state.rs` still owns `EmbeddedRuntimeBridge`, `handle_single_network_event`,
+and the large field list. `server_runtime.rs` is the transport/session/save
+composition root; mirrored session fields go through `session_sync.rs`.
 Start changes at the narrow domain module, then verify the projection and save/
 protocol boundaries rather than adding more cross-domain logic to either root.
 
