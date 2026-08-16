@@ -3,8 +3,9 @@
 //! Declared from the desktop binary (`main.rs`). Do not add `pub mod presentation`
 //! to `lib.rs` — that would pull wgpu GPU types into icraft-server.
 //!
-//! `legacy_sim.rs` and `frame.rs` live in this directory but are loaded as
-//! children of `state` (`#[path]`) so leftover tick / render methods can see
+//! `legacy_sim.rs`, `legacy_systems.rs`, `legacy_interaction.rs`, and
+//! `frame.rs` live in this directory but are loaded as children of `state`
+//! (`#[path]`) so leftover tick / render / interaction methods can see
 //! private `State` fields.
 
 pub(crate) mod bootstrap;
