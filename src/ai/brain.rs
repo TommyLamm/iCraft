@@ -1,3 +1,9 @@
+//! Goal-stack AI prototype. Not wired into the authority tick.
+//!
+//! Live hostile/passive AI is the nearest-player chase in
+//! [`crate::server_world::ServerWorld::tick_entities`]. The leftover renderer
+//! path still calls [`crate::mob::update_mobs`].
+
 use crate::ai::goal::{
     FollowOwnerGoal, Goal, GoalContext, MeleeAttackGoal, SitGoal, SwimGoal, WanderGoal,
 };

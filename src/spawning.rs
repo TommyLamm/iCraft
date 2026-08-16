@@ -1,3 +1,8 @@
+//! Category-cap spawn helper used only by this module's unit tests.
+//!
+//! Not wired into the authority tick. Live spawning is
+//! [`crate::mob::spawn_mobs`] / [`crate::passive_mob::spawn_passive_mobs`].
+
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::Dimension;
 use crate::entity::{Entity, EntityManager, EntityType};

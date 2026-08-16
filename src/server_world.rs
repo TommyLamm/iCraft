@@ -1152,34 +1152,6 @@ impl ServerWorld {
         Ok(())
     }
 
-    /// Apply one authenticated melee hit to a living world entity.  The
-    /// session/player state is owned by AuthorityCore; this method only
-    /// mutates the headless entity and therefore cannot create a renderer-side
-    /// second authority.
-    pub fn apply_combat(
-        &mut self,
-        target: u64,
-        attacker_position: [f32; 3],
-    ) -> Result<(), RejectReason> {
-        let Some(entity) = self.entities.get_by_id_mut(target) else {
-            return Err(RejectReason::InvalidState);
-        };
-        if !entity.entity_type.is_living() || entity.health <= 0.0 {
-            return Err(RejectReason::InvalidState);
-        }
-        let distance = entity
-            .position
-            .distance_squared(Vec3::from_array(attacker_position));
-        if !distance.is_finite() || distance > 8.0 * 8.0 {
-            return Err(RejectReason::TooFar);
-        }
-        entity.health = (entity.health - 1.0).max(0.0);
-        if entity.health <= 0.0 {
-            entity.action_cooldown = 0.0;
-        }
-        Ok(())
-    }
-
     /// Seed a session-facing villager into the headless world when the local
     /// presentation loaded a persisted entity before the in-process authority
     /// was created.  Existing IDs/types are never overwritten, preserving

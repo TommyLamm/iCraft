@@ -231,6 +231,10 @@ impl ChunkStreamingScheduler {
 
     /// Persistently queues the latest revision for a chunk. Repeated
     /// invalidations update the existing work item instead of duplicating it.
+    ///
+    /// Production meshing uses [`crate::chunk_render::SectionMeshScheduler`].
+    /// This column-level dirty queue is only exercised by unit tests.
+    #[cfg(test)]
     pub fn enqueue_dirty(
         &mut self,
         coord: (i32, i32),
@@ -307,10 +311,6 @@ impl ChunkStreamingScheduler {
         })?;
         self.dirty_mesh_priority.remove(&key);
         self.dirty_chunk_meshes.remove(&key.coord())
-    }
-
-    pub fn requeue_dirty(&mut self, work: DirtyMeshWork, player_chunk: (i32, i32)) {
-        self.enqueue_dirty(work.coord, work.reason, work.revision, player_chunk);
     }
 
     /// Player movement is infrequent relative to frames, so reprioritize only

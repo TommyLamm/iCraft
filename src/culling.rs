@@ -281,32 +281,6 @@ impl SectionVisibilityScratch {
     }
 }
 
-/// Perform bounded Graph Traversal starting from camera section.
-/// Returns a set of visible section coordinates `(x, sec_y, z)`.
-pub fn traverse_section_visibility<F>(
-    cam_sec_x: i32,
-    cam_sec_y: i8,
-    cam_sec_z: i32,
-    render_distance: i32,
-    frustum: &Frustum,
-    get_connectivity: F,
-    visible_sections: &mut HashSet<(i32, i8, i32)>,
-) where
-    F: Fn(i32, i8, i32) -> Option<SectionConnectivity>,
-{
-    let mut scratch = SectionVisibilityScratch::default();
-    traverse_section_visibility_with_scratch(
-        cam_sec_x,
-        cam_sec_y,
-        cam_sec_z,
-        render_distance,
-        frustum,
-        get_connectivity,
-        visible_sections,
-        &mut scratch,
-    );
-}
-
 /// Perform bounded section visibility traversal using caller-owned scratch.
 ///
 /// Callers that invoke this once per frame should retain one

@@ -1,7 +1,5 @@
 use glam::Vec3;
-use wgpu::{Buffer, Device, Queue};
 
-use crate::state::Vertex;
 use crate::world::BlockType;
 
 #[repr(C)]
@@ -239,108 +237,6 @@ impl ParticleSystem {
             });
         }
         count as u32
-    }
-
-    /// Build billboard quads facing the camera and write them into the
-    /// pre-allocated dynamic vertex/index buffers. Returns the number of
-    /// indices to draw, or `None` if there are no particles.
-    pub fn compile_mesh(
-        &self,
-        _device: &Device,
-        queue: &Queue,
-        cam_right: Vec3,
-        cam_up: Vec3,
-        vertex_buffer: &Buffer,
-        index_buffer: &Buffer,
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
-    ) -> Option<u32> {
-        vertices.clear();
-        indices.clear();
-
-        if self.particles.is_empty() {
-            return None;
-        }
-
-        let cam_right = cam_right.normalize_or_zero();
-        let cam_up = cam_up.normalize_or_zero();
-
-        vertices.reserve(self.particles.len() * 4);
-        indices.reserve(self.particles.len() * 6);
-
-        for (i, p) in self.particles.iter().enumerate() {
-            let start_idx = (i * 4) as u32;
-
-            // Particles optionally shrink as they age (smoke fade-out).
-            let scale = if p.fade_scale {
-                let t = (p.age / p.lifetime).clamp(0.0, 1.0);
-                (1.0 - t).max(0.05)
-            } else {
-                1.0
-            };
-            let half_size = p.size * 0.5 * scale;
-            let half_height = half_size * p.stretch_y;
-
-            let c0 = p.position - cam_right * half_size - cam_up * half_height;
-            let c1 = p.position + cam_right * half_size - cam_up * half_height;
-            let c2 = p.position + cam_right * half_size + cam_up * half_height;
-            let c3 = p.position - cam_right * half_size + cam_up * half_height;
-
-            let [u0, v0, u1, v1] = p.tex_coords;
-
-            // Particles render fully lit (240 = ~max light).
-            vertices.push(Vertex {
-                position: c0.into(),
-                tex_coords: [u0, v1],
-                light_level: 240.0,
-                ao: 1.0,
-            });
-            vertices.push(Vertex {
-                position: c1.into(),
-                tex_coords: [u1, v1],
-                light_level: 240.0,
-                ao: 1.0,
-            });
-            vertices.push(Vertex {
-                position: c2.into(),
-                tex_coords: [u1, v0],
-                light_level: 240.0,
-                ao: 1.0,
-            });
-            vertices.push(Vertex {
-                position: c3.into(),
-                tex_coords: [u0, v0],
-                light_level: 240.0,
-                ao: 1.0,
-            });
-
-            indices.push(start_idx + 0);
-            indices.push(start_idx + 1);
-            indices.push(start_idx + 2);
-            indices.push(start_idx + 0);
-            indices.push(start_idx + 2);
-            indices.push(start_idx + 3);
-        }
-
-        // Truncate to the buffer capacity (safety against overflow).
-        let max_quads = MAX_PARTICLES;
-        if vertices.len() > max_quads * 4 {
-            vertices.truncate(max_quads * 4);
-        }
-        if indices.len() > max_quads * 6 {
-            indices.truncate(max_quads * 6);
-        }
-
-        if vertices.is_empty() {
-            return None;
-        }
-
-        queue.write_buffer(vertex_buffer, 0, bytemuck::cast_slice(vertices));
-        queue.write_buffer(index_buffer, 0, bytemuck::cast_slice(indices));
-
-        let _ = _device; // device reserved for future allocations
-
-        Some(indices.len() as u32)
     }
 }
 

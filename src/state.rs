@@ -12157,7 +12157,6 @@ impl State {
                 }
                 self.chunk_lifetimes.remove(&(cx, cz));
                 self.section_scheduler.remove_chunk(cx, cz);
-                self.scheduler.remove_dirty(&(cx, cz));
             }
             let mut removed_mesh_keys = Vec::new();
             for &(cx, cz) in self.chunk_meshes.keys() {
@@ -12189,7 +12188,6 @@ impl State {
             self.scheduler.last_player_chunk = Some((px, pz));
             self.scheduler.last_render_distance = r;
             self.scheduler.last_dimension = Some(self.current_dimension);
-            self.scheduler.reprioritize_dirty((px, pz));
             self.section_scheduler.reprioritize((px, pz));
         }
 

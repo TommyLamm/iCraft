@@ -34,7 +34,7 @@
 
 | # | 單獨執行文件 | 優先 | 狀態 | 前置 |
 | --- | --- | --- | --- | --- |
-| 01 | [隔離已證實死路徑](01_quarantine_dead_paths.md) | P0 | 待實作 | 無 |
+| 01 | [隔離已證實死路徑](01_quarantine_dead_paths.md) | P0 | 已完成 | 無 |
 | 02 | [表現層拓撲改成單一 enum](02_presentation_topology_enum.md) | P0 | 待實作 | 無 |
 | 03 | [權威請求單一 dispatch](03_authority_single_dispatch.md) | P0 | 待實作 | 無 |
 | 04 | [TCP 測試 helper 收斂](04_tcp_test_helpers.md) | P0 | 待實作 | 無 |

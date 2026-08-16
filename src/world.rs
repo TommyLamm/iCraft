@@ -140,44 +140,7 @@ impl Biome {
     }
 }
 
-fn get_interpolated_height(
-    world_x: i32,
-    world_z: i32,
-    perlin: &Perlin,
-    temp_perlin: &Perlin,
-    moist_perlin: &Perlin,
-    ocean_perlin: &Perlin,
-) -> usize {
-    let mut height_sum = 0.0;
-    let mut weight_sum = 0.0;
-
-    const SAMPLE_STEPS: [i32; 3] = [-8, 0, 8];
-
-    for &dx in &SAMPLE_STEPS {
-        for &dz in &SAMPLE_STEPS {
-            let sx = world_x + dx;
-            let sz = world_z + dz;
-
-            let biome = Biome::get_biome(sx, sz, temp_perlin, moist_perlin, ocean_perlin);
-            let (base, scale) = biome.terrain_params();
-
-            let noise_val = perlin.get([sx as f64 * 0.04, sz as f64 * 0.04]);
-            let local_height = base + noise_val * scale;
-
-            let weight = match (dx == 0, dz == 0) {
-                (true, true) => 1.0,                  // Center
-                (true, false) | (false, true) => 0.5, // Cardinal
-                (false, false) => 0.25,               // Diagonal
-            };
-
-            height_sum += local_height * weight;
-            weight_sum += weight;
-        }
-    }
-
-    (height_sum / weight_sum).round() as usize
-}
-
+#[cfg(test)]
 fn place_oak_tree(
     blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     local_x: i32,
@@ -229,50 +192,7 @@ fn place_oak_tree(
     }
 }
 
-fn place_birch_tree(
-    blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    local_x: i32,
-    local_z: i32,
-    start_y: i32,
-    height: i32,
-) {
-    for dy in 0..height {
-        let y = start_y + dy;
-        if y >= 0
-            && y < CHUNK_HEIGHT as i32
-            && local_x >= 0
-            && local_x < CHUNK_WIDTH as i32
-            && local_z >= 0
-            && local_z < CHUNK_DEPTH as i32
-        {
-            blocks[local_x as usize][y as usize][local_z as usize] = BlockType::BirchLog;
-        }
-    }
-    for ly in (height - 3)..=height {
-        let y = start_y + ly;
-        if y < 0 || y >= CHUNK_HEIGHT as i32 {
-            continue;
-        }
-        let is_cross = ly == height || ly == height - 3;
-        let radius: i32 = 1;
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                if is_cross && dx.abs() == 1 && dz.abs() == 1 {
-                    continue;
-                }
-                let lx = local_x + dx;
-                let lz = local_z + dz;
-                if lx >= 0 && lx < CHUNK_WIDTH as i32 && lz >= 0 && lz < CHUNK_DEPTH as i32 {
-                    let block = blocks[lx as usize][y as usize][lz as usize];
-                    if block == BlockType::Air {
-                        blocks[lx as usize][y as usize][lz as usize] = BlockType::BirchLeaves;
-                    }
-                }
-            }
-        }
-    }
-}
-
+#[cfg(test)]
 fn place_spruce_tree(
     blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
     local_x: i32,
@@ -3626,7 +3546,6 @@ impl Chunk {
                 let wx = chunk_x * CHUNK_WIDTH as i32 + x as i32;
                 let wz = chunk_z * CHUNK_DEPTH as i32 + z as i32;
                 let surface_y = ctx.surface_height_at(wx, wz);
-                let _biome = ctx.biome_at(wx, wz);
 
                 for wy in min_y..height.max_y_exclusive() {
                     let ly = (wy - min_y) as usize;
@@ -3644,8 +3563,6 @@ impl Chunk {
                     if ctx.carver.is_carved(wx, wy, wz, surface_y) {
                         if ctx.carver.is_lava_lake(wx, wy, wz) {
                             blocks[x][ly][z] = BlockType::Lava;
-                        } else if wy > 8 {
-                            blocks[x][ly][z] = BlockType::Air;
                         } else {
                             blocks[x][ly][z] = BlockType::Air;
                         }
