@@ -618,6 +618,9 @@ impl ServerProperties {
         }
         validate_identity_set("whitelist", &self.whitelist)?;
         validate_identity_set("operators", &self.operators)?;
+        if self.motd.trim().is_empty() || self.motd.len() > 256 {
+            return Err(invalid("motd", &self.motd, "must contain 1..=256 bytes"));
+        }
         Ok(())
     }
 
@@ -4676,6 +4679,23 @@ mod tests {
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&world_dir);
         let _ = fs::remove_file(blocking_file);
+    }
+
+    #[test]
+    fn motd_validate_applies_cli_256_byte_cap() {
+        let mut properties = ServerProperties::default();
+        properties.motd = "x".repeat(256);
+        properties.validate().unwrap();
+        properties.motd = "x".repeat(257);
+        let error = properties.validate().unwrap_err();
+        assert!(error.to_string().contains("motd"));
+        assert!(error.to_string().contains("1..=256"));
+        properties.motd = "   ".into();
+        assert!(properties
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("motd"));
     }
 
     #[test]

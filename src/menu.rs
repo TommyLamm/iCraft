@@ -343,10 +343,14 @@ impl GameSettings {
     }
 
     pub fn save(&self) {
-        if let Err(error) = fs::write(SETTINGS_FILE, self.to_file_contents()) {
+        if let Err(error) =
+            crate::save::atomic_write(SETTINGS_FILE, self.to_file_contents().as_bytes())
+        {
             eprintln!("[Settings] Could not save settings: {error}");
         }
-        if let Err(error) = fs::write(CONTROLS_FILE, self.to_controls_file_contents()) {
+        if let Err(error) =
+            crate::save::atomic_write(CONTROLS_FILE, self.to_controls_file_contents().as_bytes())
+        {
             eprintln!("[Settings] Could not save controls config: {error}");
         }
     }
@@ -952,14 +956,13 @@ fn discover_worlds() -> Vec<WorldEntry> {
         return worlds;
     };
     for entry in entries.flatten() {
-        let directory = entry.path();
-        if !directory.is_dir() {
+        let Ok(directory) = validated_world_path(&entry.path()) else {
             continue;
-        }
+        };
         let metadata = WorldMetadata::load(&directory).or_else(|| legacy_metadata(&directory));
         if let Some(metadata) = metadata {
             worlds.push(WorldEntry {
-                directory: fs::canonicalize(&directory).unwrap_or(directory),
+                directory,
                 metadata,
             });
         }
@@ -1112,10 +1115,40 @@ fn path_is_within(root: &Path, candidate: &Path) -> bool {
     candidate != root && candidate.starts_with(root)
 }
 
+fn is_symlink_or_junction(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Resolve a world directory while rejecting the saves root itself, traversal,
-/// and symlink escapes. All destructive/copy operations use this guard.
+/// and symlink/junction roots. Launch, upgrade, discover, and destructive
+/// operations all use this guard.
 pub fn validated_world_path(path: &Path) -> std::io::Result<PathBuf> {
     let root = canonical_saves_root()?;
+    let metadata = fs::symlink_metadata(path)?;
+    if is_symlink_or_junction(&metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "world path must not be a symlink or junction",
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "world path must be a directory",
+        ));
+    }
     let candidate = fs::canonicalize(path)?;
     if path_is_within(&root, &candidate) {
         Ok(candidate)
@@ -2303,14 +2336,21 @@ impl Menu {
     }
 
     fn launch_existing(&mut self, directory: &Path) -> MenuAction {
-        let Some(index) = world_index_by_directory(&self.worlds, directory) else {
+        let world_dir = match validated_world_path(directory) {
+            Ok(path) => path,
+            Err(error) => {
+                self.message = Some(format!("LAUNCH FAILED: {error}"));
+                return MenuAction::None;
+            }
+        };
+        let Some(index) = world_index_by_directory(&self.worlds, &world_dir)
+            .or_else(|| world_index_by_directory(&self.worlds, directory))
+        else {
             return MenuAction::None;
         };
         let world = &mut self.worlds[index];
         world.metadata.last_played = unix_now();
-        let _ = world.metadata.save(&world.directory);
-        let world_dir =
-            fs::canonicalize(&world.directory).unwrap_or_else(|_| world.directory.clone());
+        let _ = world.metadata.save(&world_dir);
         MenuAction::Launch(
             WorldLaunch {
                 world_dir,
@@ -2359,7 +2399,13 @@ impl Menu {
             self.message = Some(format!("CREATE FAILED: {error}"));
             return MenuAction::None;
         }
-        let world_dir = fs::canonicalize(&world_dir).unwrap_or(world_dir);
+        let world_dir = match validated_world_path(&world_dir) {
+            Ok(path) => path,
+            Err(error) => {
+                self.message = Some(format!("CREATE FAILED: {error}"));
+                return MenuAction::None;
+            }
+        };
         MenuAction::Launch(
             WorldLaunch {
                 world_dir,
@@ -4689,6 +4735,90 @@ mod tests {
     #[test]
     fn world_path_guard_rejects_saves_root() {
         assert!(validated_world_path(Path::new(SAVES_DIR)).is_err());
+    }
+
+    fn try_create_world_link(target: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+                return true;
+            }
+            std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &target.to_string_lossy(),
+                ])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    #[test]
+    fn world_path_guard_rejects_escape_and_symlink_roots() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let pid = std::process::id();
+        let outside = std::env::temp_dir().join(format!("icraft_escape_{pid}_{unique}"));
+        fs::create_dir_all(&outside).expect("outside dir");
+        assert!(
+            validated_world_path(&outside).is_err(),
+            "canonicalize escaping saves/ must be rejected"
+        );
+
+        let _ = fs::create_dir_all(SAVES_DIR);
+        let inside = Path::new(SAVES_DIR).join(format!("icraft_real_{pid}_{unique}"));
+        let metadata = WorldMetadata {
+            name: "REAL".to_string(),
+            seed: 1,
+            game_mode: GameMode::Survival,
+            difficulty: Difficulty::Normal,
+            last_played: 0,
+            world_type: WorldType::Default,
+            generate_structures: true,
+            bonus_chest: false,
+            cheats_enabled: false,
+            hardcore: false,
+            version: CURRENT_WORLD_FORMAT_VERSION,
+            needs_upgrade: false,
+        };
+        metadata.save(&inside).expect("real world should save");
+        assert!(validated_world_path(&inside).is_ok());
+
+        let link = Path::new(SAVES_DIR).join(format!("icraft_link_{pid}_{unique}"));
+        let created =
+            try_create_world_link(&outside, &link) || try_create_world_link(&inside, &link);
+        if created {
+            assert!(
+                validated_world_path(&link).is_err(),
+                "symlink/junction world roots must not be playable"
+            );
+            let discovered = discover_worlds();
+            assert!(
+                !discovered.iter().any(|world| {
+                    world.directory.file_name() == link.file_name() || world.directory == link
+                }),
+                "symlink/junction world roots must not appear in the menu"
+            );
+            let _ = fs::remove_dir(&link);
+            let _ = fs::remove_file(&link);
+        }
+        let _ = fs::remove_dir_all(&inside);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]

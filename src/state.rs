@@ -9037,7 +9037,12 @@ impl State {
             }
         }
 
-        if self.mutation_index_dirty && self.mutation_index_persist_in_flight.is_none() {
+        if self.has_in_process_runtime() {
+            // ServerRuntime's SaveManager is the only writer of
+            // mutation_revisions.bin. Presentation must not dual-write.
+            self.mutation_index_dirty = false;
+            self.mutation_index_persist_in_flight = None;
+        } else if self.mutation_index_dirty && self.mutation_index_persist_in_flight.is_none() {
             let generation = self.mutation_revision_generation;
             if self.network_snapshot_worker.as_ref().is_some_and(|worker| {
                 worker
@@ -9132,10 +9137,21 @@ impl State {
                 .then(|| self.chunk_manager.chunks.get(&(key.cx, key.cz)).cloned())
                 .flatten()
                 .map(Arc::new);
+            let allow_disk_fallback = !self.has_in_process_runtime();
+            if !allow_disk_fallback && chunk.is_none() {
+                // Runtime is authoritative; do not use presentation's
+                // independent region cache as a catch-up source.
+                visited_without_submit += 1;
+                continue;
+            }
             let Some(worker) = self.network_snapshot_worker.as_ref() else {
                 break;
             };
-            match worker.try_submit(crate::save::NetworkSnapshotRequest { key, chunk }) {
+            match worker.try_submit(crate::save::NetworkSnapshotRequest {
+                key,
+                chunk,
+                allow_disk_fallback,
+            }) {
                 Ok(()) => {
                     if let Some(entry) = self
                         .pending_player_catchups

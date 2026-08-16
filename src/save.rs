@@ -279,6 +279,10 @@ pub struct NetworkSnapshotKey {
 pub struct NetworkSnapshotRequest {
     pub key: NetworkSnapshotKey,
     pub chunk: Option<Arc<Chunk>>,
+    /// When false, the worker must not load from this presentation
+    /// `SaveManager`'s independent region cache. Listen-host catch-up uses
+    /// the in-process `ServerRuntime` as the only authority.
+    pub allow_disk_fallback: bool,
 }
 
 pub struct NetworkSnapshotPayload {
@@ -365,7 +369,7 @@ pub fn spawn_network_snapshot_worker(
                                 data.mutation_revision = request.key.revision;
                                 data
                             })
-                        } else {
+                        } else if request.allow_disk_fallback {
                             manager
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
@@ -374,6 +378,8 @@ pub fn spawn_network_snapshot_worker(
                                     request.key.cx,
                                     request.key.cz,
                                 )
+                        } else {
+                            None
                         };
                         let result = match data {
                             Some(data) if data.mutation_revision >= request.key.revision => {
@@ -1061,6 +1067,28 @@ fn destination_voxel_count(chunk: &Chunk) -> usize {
     chunk.sections.len() * 16 * 16 * 16
 }
 
+/// Expected inflated voxel-column size from the save `data_version` and the
+/// destination section span. Version 0 is the documented 256-high column.
+fn expected_voxel_len(data_version: u32, section_count: usize) -> usize {
+    if data_version == 0 {
+        LEGACY_VOXEL_COUNT
+    } else {
+        section_count.saturating_mul(16 * 16 * 16)
+    }
+}
+
+/// Tight inflate budget for a voxel stream: the versioned column, the
+/// destination span, or the documented 256-high overlay — never unbounded.
+fn voxel_inflate_limit(data_version: u32, chunk: &Chunk) -> usize {
+    expected_voxel_len(data_version, chunk.sections.len())
+        .max(destination_voxel_count(chunk))
+        .max(LEGACY_VOXEL_COUNT)
+}
+
+/// Sidecar streams (redstone / block entities) have no voxel length. Cap them
+/// at the pack-entry budget so a hostile zlib stream cannot grow without limit.
+const SAVE_SIDECAR_INFLATE_MAX: usize = 8 * 1024 * 1024;
+
 fn voxel_count_matches_save(len: usize, _data_version: u32, chunk: &Chunk) -> bool {
     let dest = destination_voxel_count(chunk);
     // Destination dimension height, or the documented 256-high column used by
@@ -1080,12 +1108,14 @@ fn decode_required_voxel_stream(
             format!("{name} stream is empty"),
         ));
     }
-    let bytes = decompress_bytes(data).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{name} inflate failed: {error}"),
-        )
-    })?;
+    let bytes = decompress_bytes_limited(data, voxel_inflate_limit(data_version, chunk)).map_err(
+        |error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{name} inflate failed: {error}"),
+            )
+        },
+    )?;
     if bytes.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1113,7 +1143,7 @@ fn decode_optional_voxel_stream(
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    let bytes = decompress_bytes(data).map_err(|error| {
+    let bytes = decompress_bytes_limited(data, expected_len).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{name} inflate failed: {error}"),
@@ -1257,7 +1287,7 @@ impl ChunkSaveData {
         if self.redstone_metadata.is_empty() {
             return Vec::new();
         }
-        decompress_bytes(&self.redstone_metadata)
+        decompress_bytes_limited(&self.redstone_metadata, SAVE_SIDECAR_INFLATE_MAX)
             .ok()
             .and_then(|bytes| {
                 // Decode the current shape first. A legacy vector has no
@@ -1320,7 +1350,7 @@ impl ChunkSaveData {
         if self.block_entities.is_empty() {
             return Vec::new();
         }
-        decompress_bytes(&self.block_entities)
+        decompress_bytes_limited(&self.block_entities, SAVE_SIDECAR_INFLATE_MAX)
             .ok()
             .and_then(|bytes| {
                 bincode::deserialize::<Vec<((u8, i16, u8), crate::block_entity::BlockEntity)>>(
@@ -1347,7 +1377,7 @@ impl ChunkSaveData {
         if self.block_states.is_empty() {
             return Vec::new();
         }
-        decompress_bytes(&self.block_states).unwrap_or_default()
+        decompress_bytes_limited(&self.block_states, SAVE_SIDECAR_INFLATE_MAX).unwrap_or_default()
     }
 
     /// Decode a `ChunkSaveData`-style compressed network/save payload into
@@ -2539,11 +2569,27 @@ pub fn compress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
     encoder.finish()
 }
 
-pub fn decompress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut decoder = ZlibDecoder::new(data);
+/// Inflate a zlib payload, refusing more than `max_len` output bytes.
+/// The decoder is wrapped in `take(max_len + 1)` so a hostile stream cannot
+/// grow past the caller-supplied budget (Plan 05 fail-closed).
+pub fn decompress_bytes_limited(data: &[u8], max_len: usize) -> io::Result<Vec<u8>> {
+    let decoder = ZlibDecoder::new(data);
+    let mut limited = decoder.take(max_len as u64 + 1);
     let mut result = Vec::new();
-    decoder.read_to_end(&mut result)?;
+    limited.read_to_end(&mut result)?;
+    if result.len() > max_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("inflated payload exceeds {max_len} bytes"),
+        ));
+    }
     Ok(result)
+}
+
+pub fn decompress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
+    let documented_max = LEGACY_VOXEL_COUNT
+        .max(crate::dimension::WorldHeight::OVERWORLD.section_count() * 16 * 16 * 16);
+    decompress_bytes_limited(data, documented_max)
 }
 
 /// Deserializes a `ChunkSaveData` from persisted chunk bytes with full backward
@@ -3122,6 +3168,21 @@ impl SaveManager {
         let bytes = bincode::serialize(index)
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
         atomic_write(self.world_dir.join("mutation_revisions.bin"), &bytes)
+    }
+
+    /// Presentation must not write `mutation_revisions.bin` while an
+    /// in-process `ServerRuntime` already owns this world directory.
+    /// Returns `Ok(false)` when the write is skipped.
+    pub fn save_mutation_revision_index_unless_runtime(
+        &self,
+        index: &MutationRevisionIndex,
+        has_in_process_runtime: bool,
+    ) -> io::Result<bool> {
+        if has_in_process_runtime {
+            return Ok(false);
+        }
+        self.save_mutation_revision_index(index)?;
+        Ok(true)
     }
 
     pub fn load_mutation_revision_index(&self) -> MutationRevisionIndex {
@@ -4785,7 +4846,11 @@ mod tests {
             revision: 2,
         };
         worker
-            .try_submit(NetworkSnapshotRequest { key, chunk: None })
+            .try_submit(NetworkSnapshotRequest {
+                key,
+                chunk: None,
+                allow_disk_fallback: true,
+            })
             .unwrap();
         let stale = wait_payload(&worker);
         assert_eq!(stale.key, key);
@@ -4802,7 +4867,11 @@ mod tests {
             .save_chunk_in(crate::dimension::Dimension::Overworld, 7, -4, current)
             .unwrap();
         worker
-            .try_submit(NetworkSnapshotRequest { key, chunk: None })
+            .try_submit(NetworkSnapshotRequest {
+                key,
+                chunk: None,
+                allow_disk_fallback: true,
+            })
             .unwrap();
         let payload = wait_payload(&worker);
         assert_eq!(payload.key, key);
@@ -5428,6 +5497,101 @@ mod tests {
             "save must not replace a failed restore with generated terrain"
         );
         fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn persist_index_is_noop_when_in_process_runtime_owns_world() {
+        let world_dir = unique_test_dir("persist_index_runtime");
+        let manager = SaveManager::new(&world_dir);
+        let path = world_dir.join("mutation_revisions.bin");
+        atomic_write(&path, b"runtime-owned").unwrap();
+
+        let mut index = MutationRevisionIndex::default();
+        assert_eq!(
+            index
+                .bump(crate::dimension::Dimension::Overworld, 1, 1)
+                .unwrap(),
+            1
+        );
+
+        let wrote = manager
+            .save_mutation_revision_index_unless_runtime(&index, true)
+            .unwrap();
+        assert!(!wrote);
+        assert_eq!(fs::read(&path).unwrap(), b"runtime-owned");
+
+        let wrote = manager
+            .save_mutation_revision_index_unless_runtime(&index, false)
+            .unwrap();
+        assert!(wrote);
+        assert_ne!(fs::read(&path).unwrap(), b"runtime-owned");
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_worker_skips_region_cache_when_disk_fallback_disabled() {
+        let world_dir = unique_test_dir("snapshot_no_disk_fallback");
+        let mut manager = SaveManager::new(&world_dir);
+        let chunk = Chunk::new(3, 4);
+        let mut saved = ChunkSaveData::from_chunk(&chunk).unwrap();
+        saved.mutation_revision = 1;
+        manager
+            .save_chunk_in(crate::dimension::Dimension::Overworld, 3, 4, saved)
+            .unwrap();
+        drop(manager);
+
+        let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
+        let worker = spawn_network_snapshot_worker(Arc::clone(&manager), 1);
+        let key = NetworkSnapshotKey {
+            player_id: 7,
+            dimension: crate::dimension::Dimension::Overworld,
+            cx: 3,
+            cz: 4,
+            revision: 1,
+        };
+        worker
+            .try_submit(NetworkSnapshotRequest {
+                key,
+                chunk: None,
+                allow_disk_fallback: false,
+            })
+            .unwrap();
+        let payload = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if let Some(NetworkSnapshotWorkerResult::Snapshot(payload)) =
+                    worker.try_iter().next()
+                {
+                    break payload;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "snapshot worker timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        assert!(
+            payload.result.unwrap_err().contains("unavailable"),
+            "presentation region cache must not back catch-up while runtime owns the world"
+        );
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_zlib_inflate_is_rejected_without_unbounded_output() {
+        let expected = 64;
+        let bomb = vec![0u8; expected + 256];
+        let compressed = compress_bytes(&bomb).unwrap();
+        let error = decompress_bytes_limited(&compressed, expected).expect_err("take must cap");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds"));
+
+        let mut chunk = Chunk::empty(0, 0);
+        let dest = destination_voxel_count(&chunk);
+        let mut data = ChunkSaveData::from_chunk(&chunk).unwrap();
+        data.blocks = compress_bytes(&vec![0u8; dest + 64]).unwrap();
+        assert!(data.restore_to_chunk(&mut chunk).is_err());
     }
 
     #[test]
