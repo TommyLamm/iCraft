@@ -4,6 +4,9 @@
 //! `NetworkServer` builds from `Packet::ContainerClickRequest`. They never
 //! call a typed internal helper as the write path.
 
+mod common;
+
+use common::tcp_harness::session_slot;
 use icraft::authority::contract::{
     AuthorityTopology, SessionContract, SessionGameplayState, SessionInventorySlot,
 };
@@ -38,14 +41,6 @@ fn new_core() -> AuthorityCore {
     .expect("register Plan02 session");
     core.world_mut_active().ensure_chunk(0, 0);
     core
-}
-
-fn session_slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
 }
 
 fn request(

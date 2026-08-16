@@ -1,5 +1,8 @@
+mod common;
+
+use common::tcp_harness::session_slot;
 use glam::Vec3;
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState, SessionInventorySlot};
+use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
 use icraft::dimension::Dimension;
@@ -173,14 +176,6 @@ impl TopologyHarness {
         drop(self.runtime);
         let _ = fs::remove_dir_all(world_dir);
     }
-}
-
-fn session_slot(stack: icraft::inventory::ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
 }
 
 fn prepare_topology_fixture(harness: &mut TopologyHarness) {

@@ -5,33 +5,16 @@
 
 mod common;
 
-use common::tcp_harness::{drive_until, wait_for_response, TcpClient};
+use common::tcp_harness::{drive_until, temp_world, wait_for_response, HeldLoopback, TcpClient};
 use icraft::dimension::Dimension;
 use icraft::network::client::ClientToGame;
 use icraft::network::protocol::{GameplayOperation, GameplayRequest, Packet, PROTOCOL_VERSION};
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 const POSITION: [f32; 3] = [8.0, 80.0, 8.0];
-
-fn temp_world(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft-plan12-ingress-{label}-{nonce}"))
-}
-
-fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve loopback test port")
-        .local_addr()
-        .expect("read loopback port")
-        .port()
-}
 
 fn properties(label: &str, port: u16) -> ServerProperties {
     ServerProperties {
@@ -41,7 +24,7 @@ fn properties(label: &str, port: u16) -> ServerProperties {
         view_distance: 2,
         simulation_distance: 2,
         seed: 0x12_12_12_12,
-        world_dir: temp_world(label),
+        world_dir: temp_world(&format!("plan12-ingress-{label}")),
         ..ServerProperties::default()
     }
 }
@@ -121,9 +104,11 @@ fn request(
 
 #[test]
 fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
-    let properties = properties("flood", reserve_port());
+    let reserved = HeldLoopback::bind();
+    let properties = properties("flood", reserved.port());
     let address = format!("{}:{}", properties.bind, properties.port);
     let world_dir = properties.world_dir.clone();
+    let _port = reserved.release();
     let mut runtime = ServerRuntime::new(properties).expect("construct dedicated Plan12 runtime");
 
     let (mut flooder, flooder_id) = handshake(&address, "flooder");
@@ -201,9 +186,11 @@ fn pose_and_oversized_chat_flood_does_not_block_peer_gameplay() {
 
 #[test]
 fn oversized_chat_from_join_client_is_not_relayed() {
-    let properties = properties("chat", reserve_port());
+    let reserved = HeldLoopback::bind();
+    let properties = properties("chat", reserved.port());
     let address = format!("{}:{}", properties.bind, properties.port);
     let world_dir = properties.world_dir.clone();
+    let _port = reserved.release();
     let mut runtime = ServerRuntime::new(properties).expect("construct dedicated Plan12 runtime");
 
     let mut flooder = TcpClient::connect(&address, "chatter");

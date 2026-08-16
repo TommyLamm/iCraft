@@ -5,10 +5,11 @@
 //! snapshot path used by the dedicated/listen compositions without involving
 //! a renderer or a network client.
 
+mod common;
+
+use common::tcp_harness::session_slot;
 use glam::Vec3;
-use icraft::authority::contract::{
-    AuthorityTopology, SessionContract, SessionGameplayState, SessionInventorySlot,
-};
+use icraft::authority::contract::{AuthorityTopology, SessionContract, SessionGameplayState};
 use icraft::authority::fishing::water_probe_position;
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::authority::{AuthorityConfig, AuthorityCore};
@@ -17,7 +18,7 @@ use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::protocol::{
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, ItemWire, RejectReason,
+    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
     SlotRefWire,
 };
 use icraft::world::BlockType;
@@ -36,14 +37,6 @@ fn new_core() -> AuthorityCore {
     ))
     .unwrap();
     core
-}
-
-fn session_slot(stack: ItemStack) -> SessionInventorySlot {
-    SessionInventorySlot::from_wire(
-        ItemWire::from_stack(&stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
 }
 
 fn source(state: &SessionGameplayState, index: u8, count: u16) -> SlotRefWire {
