@@ -750,6 +750,51 @@ pub enum MultiplayerRole {
     },
 }
 
+impl MultiplayerRole {
+    pub fn is_join_client(&self) -> bool {
+        matches!(self, MultiplayerRole::Client { .. })
+    }
+}
+
+/// How the presentation root may populate a chunk column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationChunkLoadPolicy {
+    /// Singleplayer / host: generate locally (save overlay is separate).
+    GenerateLocally,
+    /// Join client: never generate. Wait for revision-gated `ChunkData`.
+    AwaitAuthoritativePayload,
+}
+
+pub fn presentation_chunk_load_policy(role: &MultiplayerRole) -> PresentationChunkLoadPolicy {
+    if role.is_join_client() {
+        PresentationChunkLoadPolicy::AwaitAuthoritativePayload
+    } else {
+        PresentationChunkLoadPolicy::GenerateLocally
+    }
+}
+
+pub fn presentation_may_generate_chunks(role: &MultiplayerRole) -> bool {
+    !role.is_join_client()
+}
+
+/// Join clients must not write presentation chunks (farmland, unsupported-break,
+/// or any other local `set_block`). Plan 06 can AND this with "no embedded".
+pub fn presentation_may_mutate_chunks(role: &MultiplayerRole) -> bool {
+    !role.is_join_client()
+}
+
+/// Testable load-schedule gate. `generate` is invoked only when the role is
+/// allowed to materialize a local column.
+pub fn schedule_presentation_chunk_load<T>(
+    policy: PresentationChunkLoadPolicy,
+    generate: impl FnOnce() -> T,
+) -> Option<T> {
+    match policy {
+        PresentationChunkLoadPolicy::GenerateLocally => Some(generate()),
+        PresentationChunkLoadPolicy::AwaitAuthoritativePayload => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorldLaunch {
     pub world_dir: PathBuf,
@@ -2328,6 +2373,9 @@ impl Menu {
     }
 
     fn launch_client(&mut self) -> MenuAction {
+        // Placeholder path only. `State::new` must not construct a world
+        // SaveManager, chunk save worker, or NetworkSnapshotWorker for a join
+        // client, so this directory is never used as a persist root.
         let world_dir = std::env::temp_dir().join("icraft_multiplayer_client");
         MenuAction::Launch(
             WorldLaunch {
@@ -4661,6 +4709,53 @@ mod tests {
         assert_eq!(launch.seed, 0);
         assert!(matches!(launch.game_mode, GameMode::Survival));
         assert!(matches!(launch.role, MultiplayerRole::Client { .. }));
+    }
+
+    fn join_client_role() -> MultiplayerRole {
+        MultiplayerRole::Client {
+            server_addr: "127.0.0.1".to_string(),
+            port: 25565,
+            username: "JOINER".to_string(),
+        }
+    }
+
+    #[test]
+    fn join_client_load_policy_never_generates_or_mutates() {
+        let client = join_client_role();
+        assert!(client.is_join_client());
+        assert_eq!(
+            presentation_chunk_load_policy(&client),
+            PresentationChunkLoadPolicy::AwaitAuthoritativePayload
+        );
+        assert!(!presentation_may_generate_chunks(&client));
+        assert!(!presentation_may_mutate_chunks(&client));
+
+        let mut generated = false;
+        let loaded =
+            schedule_presentation_chunk_load(presentation_chunk_load_policy(&client), || {
+                generated = true;
+                1
+            });
+        assert!(loaded.is_none());
+        assert!(!generated);
+
+        assert_eq!(
+            presentation_chunk_load_policy(&MultiplayerRole::Singleplayer),
+            PresentationChunkLoadPolicy::GenerateLocally
+        );
+        assert!(presentation_may_generate_chunks(&MultiplayerRole::Host {
+            port: 25565
+        }));
+        assert!(presentation_may_mutate_chunks(
+            &MultiplayerRole::Singleplayer
+        ));
+        assert_eq!(
+            schedule_presentation_chunk_load(
+                presentation_chunk_load_policy(&MultiplayerRole::Singleplayer),
+                || 7
+            ),
+            Some(7)
+        );
     }
 
     #[test]

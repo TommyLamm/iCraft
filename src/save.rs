@@ -1350,6 +1350,31 @@ impl ChunkSaveData {
         decompress_bytes(&self.block_states).unwrap_or_default()
     }
 
+    /// Decode a `ChunkSaveData`-style compressed network/save payload into
+    /// `chunk`. Shared by disk restore and join-client `ChunkData` insert.
+    pub fn restore_network_payload(
+        chunk: &mut Chunk,
+        blocks: &[u8],
+        block_states: &[u8],
+        fluid_levels: &[u8],
+        block_entities: &[u8],
+    ) -> io::Result<()> {
+        let save_data = ChunkSaveData {
+            chunk_x: chunk.chunk_x,
+            chunk_z: chunk.chunk_z,
+            blocks: blocks.to_vec(),
+            sky_light: Vec::new(),
+            block_light: Vec::new(),
+            fluid_levels: fluid_levels.to_vec(),
+            redstone_metadata: Vec::new(),
+            block_states: block_states.to_vec(),
+            mutation_revision: 0,
+            block_entities: block_entities.to_vec(),
+            data_version: CHUNK_SAVE_DATA_VERSION,
+        };
+        save_data.restore_to_chunk(chunk)
+    }
+
     pub fn restore_to_chunk(&self, chunk: &mut Chunk) -> io::Result<()> {
         let blocks =
             decode_required_voxel_stream(&self.blocks, "blocks", self.data_version, chunk)?;

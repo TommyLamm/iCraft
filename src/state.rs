@@ -2081,6 +2081,9 @@ impl State {
             }
             return;
         }
+        if !self.presentation_may_mutate_chunks() {
+            return;
+        }
         let mut dirty_chunks = std::collections::HashSet::new();
         let mut broadcast: Vec<((i32, i32, i32), BlockType)> = Vec::new();
         let mut entity_broadcasts: Vec<(
@@ -2179,6 +2182,9 @@ impl State {
         wz: i32,
         dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
     ) {
+        if !self.presentation_may_mutate_chunks() {
+            return;
+        }
         let mut broken_blocks = Vec::new();
         self.chunk_manager.check_and_break_unsupported_above(
             wx,
@@ -2198,6 +2204,9 @@ impl State {
         cz: i32,
         dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
     ) {
+        if !self.presentation_may_mutate_chunks() {
+            return;
+        }
         let mut broken_blocks = Vec::new();
         self.chunk_manager
             .check_and_break_unsupported_for_loaded_chunk(
@@ -2395,6 +2404,8 @@ impl State {
         let mut restored_redstone = Vec::new();
         let saved_chunk = self
             .save_manager
+            .as_ref()
+            .expect("authoritative world owns SaveManager")
             .lock()
             .unwrap()
             .load_chunk_in(target, cx, cz);
@@ -2465,6 +2476,8 @@ impl State {
         if !self.has_in_process_runtime() {
             let _ = self
                 .save_manager
+                .as_ref()
+                .expect("authoritative world owns SaveManager")
                 .lock()
                 .unwrap()
                 .save_current_dimension(target);
@@ -5759,8 +5772,8 @@ pub struct State {
     pub lava_damage_timer: f32,
     pub cactus_damage_timer: f32,
     boss_maintenance_timer: f32,
-    pub save_manager: std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>,
-    pub save_tx: crate::save::SaveQueue,
+    pub save_manager: Option<std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>>,
+    pub save_tx: Option<crate::save::SaveQueue>,
     save_queue_stats: std::sync::Arc<crate::save::SaveQueueStats>,
     pub autosave_timer: f32,
     pub is_saving: bool,
@@ -5908,7 +5921,7 @@ pub struct State {
     mutation_revision_generation: u64,
     mutation_index_persist_in_flight: Option<u64>,
     mutation_index_dirty: bool,
-    network_snapshot_worker: crate::save::NetworkSnapshotWorker,
+    network_snapshot_worker: Option<crate::save::NetworkSnapshotWorker>,
     /// Host-only ACK-owned catch-up entries per joining client.
     pending_player_catchups:
         std::collections::HashMap<crate::network::protocol::PlayerId, Vec<PlayerCatchupEntry>>,
@@ -6218,31 +6231,55 @@ impl State {
         // Setup Depth Buffer
         let depth_view = Self::create_depth_texture(&device, &config);
 
-        // Initialize SaveManager
-        let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::save::SaveManager::new(&launch.world_dir),
-        ));
+        // Join clients never own world persistence. They apply revision-gated
+        // projections only and must not create a local save tree, chunk save
+        // worker, or snapshot worker against `icraft_multiplayer_client`.
+        let (save_manager, save_tx, save_queue_stats, network_snapshot_worker) = if is_client {
+            (
+                None,
+                None,
+                std::sync::Arc::new(crate::save::SaveQueueStats::default()),
+                None,
+            )
+        } else {
+            let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
+                crate::save::SaveManager::new(&launch.world_dir),
+            ));
+            let save_tx = crate::save::spawn_save_worker(
+                std::sync::Arc::clone(&save_manager),
+                crate::save::SAVE_QUEUE_CAPACITY,
+            );
+            let save_queue_stats = save_tx.stats();
+            let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
+                std::sync::Arc::clone(&save_manager),
+                crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
+            );
+            (
+                Some(save_manager),
+                Some(save_tx),
+                save_queue_stats,
+                Some(network_snapshot_worker),
+            )
+        };
         let current_dimension = if is_client {
             crate::dimension::Dimension::Overworld
         } else {
-            save_manager.lock().unwrap().load_current_dimension()
+            save_manager
+                .as_ref()
+                .expect("authoritative world owns SaveManager")
+                .lock()
+                .unwrap()
+                .load_current_dimension()
         };
-
-        // The save queue is bounded by unique chunk keys and coalesces newer
-        // revisions before the worker sees them.
-        let save_tx = crate::save::spawn_save_worker(
-            std::sync::Arc::clone(&save_manager),
-            crate::save::SAVE_QUEUE_CAPACITY,
-        );
-        let save_queue_stats = save_tx.stats();
-        let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
-            std::sync::Arc::clone(&save_manager),
-            crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
-        );
         let mut mutation_revisions = if is_client {
             crate::save::MutationRevisionIndex::default()
         } else {
-            save_manager.lock().unwrap().load_mutation_revision_index()
+            save_manager
+                .as_ref()
+                .expect("authoritative world owns SaveManager")
+                .lock()
+                .unwrap()
+                .load_mutation_revision_index()
         };
         let mut mutation_index_dirty = false;
         let mut mutation_index_load_error = None;
@@ -6299,13 +6336,21 @@ impl State {
 
         let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
         let has_save = !is_client && {
-            let mgr = save_manager.lock().unwrap();
+            let mgr = save_manager
+                .as_ref()
+                .expect("authoritative world owns SaveManager")
+                .lock()
+                .unwrap();
             mgr.load_player_and_level().is_ok()
         };
 
         if has_save {
             let (level, player) = {
-                let mgr = save_manager.lock().unwrap();
+                let mgr = save_manager
+                    .as_ref()
+                    .expect("authoritative world owns SaveManager")
+                    .lock()
+                    .unwrap();
                 mgr.load_player_and_level().unwrap()
             };
             world_seed = level.seed;
@@ -6876,7 +6921,11 @@ impl State {
                         },
                     );
                     let saved_chunk = {
-                        let mut manager = save_manager.lock().unwrap();
+                        let mut manager = save_manager
+                            .as_ref()
+                            .expect("authoritative world owns SaveManager")
+                            .lock()
+                            .unwrap();
                         manager.load_chunk_in(current_dimension, cx, cz)
                     };
                     if let Some(data) = saved_chunk {
@@ -7755,7 +7804,11 @@ impl State {
     }
 
     pub fn is_authoritative(&self) -> bool {
-        !matches!(self.role, MultiplayerRole::Client { .. })
+        !self.role.is_join_client()
+    }
+
+    fn presentation_may_mutate_chunks(&self) -> bool {
+        crate::menu::presentation_may_mutate_chunks(&self.role)
     }
 
     /// True when this presentation root is backed by the shared headless
@@ -8857,16 +8910,23 @@ impl State {
     }
 
     fn process_join_catchups(&mut self) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) {
+        if !matches!(self.role, MultiplayerRole::Host { .. })
+            || self.network_snapshot_worker.is_none()
+        {
             return;
         }
         let started = Instant::now();
         let worker_results: Vec<_> = self
             .network_snapshot_worker
-            .try_iter()
-            .take(64)
-            .take_while(|_| started.elapsed() < Duration::from_millis(1))
-            .collect();
+            .as_ref()
+            .map(|worker| {
+                worker
+                    .try_iter()
+                    .take(64)
+                    .take_while(|_| started.elapsed() < Duration::from_millis(1))
+                    .collect()
+            })
+            .unwrap_or_default();
         for result in worker_results {
             match result {
                 crate::save::NetworkSnapshotWorkerResult::Snapshot(payload) => {
@@ -8931,11 +8991,11 @@ impl State {
 
         if self.mutation_index_dirty && self.mutation_index_persist_in_flight.is_none() {
             let generation = self.mutation_revision_generation;
-            if self
-                .network_snapshot_worker
-                .try_persist_index(generation, self.mutation_revisions.clone())
-                .is_ok()
-            {
+            if self.network_snapshot_worker.as_ref().is_some_and(|worker| {
+                worker
+                    .try_persist_index(generation, self.mutation_revisions.clone())
+                    .is_ok()
+            }) {
                 self.mutation_index_persist_in_flight = Some(generation);
             }
         }
@@ -9024,10 +9084,10 @@ impl State {
                 .then(|| self.chunk_manager.chunks.get(&(key.cx, key.cz)).cloned())
                 .flatten()
                 .map(Arc::new);
-            match self
-                .network_snapshot_worker
-                .try_submit(crate::save::NetworkSnapshotRequest { key, chunk })
-            {
+            let Some(worker) = self.network_snapshot_worker.as_ref() else {
+                break;
+            };
+            match worker.try_submit(crate::save::NetworkSnapshotRequest { key, chunk }) {
                 Ok(()) => {
                     if let Some(entry) = self
                         .pending_player_catchups
@@ -11110,7 +11170,11 @@ impl State {
         if !tracker.begin_save(cx, cz, revision) {
             return Ok(());
         }
-        if let Err(error) = self.save_tx.send(crate::save::SaveCommand::SaveChunk {
+        let Some(save_tx) = self.save_tx.as_ref() else {
+            tracker.acknowledge_failed(cx, cz, revision);
+            return Err(crate::save::SaveError::QueueClosed);
+        };
+        if let Err(error) = save_tx.send(crate::save::SaveCommand::SaveChunk {
             snapshot,
             revision,
             tracker: tracker.clone(),
@@ -11131,7 +11195,14 @@ impl State {
             // renderer cache must never be serialized as a second authority.
             return Ok(());
         }
-        let world_dir = self.save_manager.lock().unwrap().world_dir.clone();
+        let world_dir = self
+            .save_manager
+            .as_ref()
+            .expect("authoritative world owns SaveManager")
+            .lock()
+            .unwrap()
+            .world_dir
+            .clone();
         crate::menu::update_world_metadata(
             &world_dir,
             self.world_seed,
@@ -11170,6 +11241,8 @@ impl State {
             self.advancement_manager.progress.clone(),
         );
         self.save_tx
+            .as_ref()
+            .ok_or(crate::save::SaveError::QueueClosed)?
             .send(crate::save::SaveCommand::SaveLevelAndPlayer(level, player))?;
 
         let tracker = self.chunk_manager.dirty_chunks.clone();
@@ -11192,6 +11265,8 @@ impl State {
             }
         }
         self.save_manager
+            .as_ref()
+            .expect("authoritative world owns SaveManager")
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .save_current_dimension(self.current_dimension)
@@ -11201,6 +11276,8 @@ impl State {
                 message: error.to_string(),
             })?;
         self.save_manager
+            .as_ref()
+            .expect("authoritative world owns SaveManager")
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .save_mutation_revision_index(&self.mutation_revisions)
@@ -11224,9 +11301,10 @@ impl State {
                     operation: "embedded runtime save",
                     path: self
                         .save_manager
-                        .lock()
+                        .as_ref()
+                        .and_then(|manager| manager.lock().ok())
                         .map(|manager| manager.world_dir.clone())
-                        .unwrap_or_else(|_| std::path::PathBuf::from("world")),
+                        .unwrap_or_else(|| std::path::PathBuf::from("world")),
                     message: error.to_string(),
                 })?;
             return Ok(());
@@ -11238,7 +11316,10 @@ impl State {
         self.trigger_background_save()?;
 
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        self.save_tx.send(crate::save::SaveCommand::Flush(ack_tx))?;
+        self.save_tx
+            .as_ref()
+            .ok_or(crate::save::SaveError::QueueClosed)?
+            .send(crate::save::SaveCommand::Flush(ack_tx))?;
         ack_rx
             .recv()
             .map_err(|_| crate::save::SaveError::QueueClosed)??;
@@ -11247,7 +11328,10 @@ impl State {
     }
 
     pub fn save_current_dimension_entities(&self) -> crate::save::SaveResult<()> {
-        let save_manager = match self.save_manager.lock() {
+        let Some(save_manager) = self.save_manager.as_ref() else {
+            return Ok(());
+        };
+        let save_manager = match save_manager.lock() {
             Ok(mgr) => mgr,
             Err(error) => error.into_inner(),
         };
@@ -11270,7 +11354,10 @@ impl State {
     }
 
     pub fn load_current_dimension_entities(&mut self) {
-        let save_manager = match self.save_manager.lock() {
+        let Some(save_manager) = self.save_manager.as_ref() else {
+            return;
+        };
+        let save_manager = match save_manager.lock() {
             Ok(mgr) => mgr,
             Err(_) => return,
         };
@@ -11787,6 +11874,15 @@ impl State {
         {
             return;
         }
+        if crate::menu::schedule_presentation_chunk_load(
+            crate::menu::presentation_chunk_load_policy(&self.role),
+            || (),
+        )
+        .is_none()
+        {
+            // Join client: only enqueue interest and wait for ChunkData.
+            return;
+        }
         let lifetime = self.next_chunk_lifetime();
         self.chunk_load_in_flight.insert(coord, lifetime);
         let sender = self.terrain_worker_tx.clone();
@@ -11812,11 +11908,12 @@ impl State {
             let mut restore_failed = false;
             let mut redstone_metadata = Vec::new();
             if authoritative {
-                if let Some(saved) = save_manager
-                    .lock()
-                    .unwrap()
-                    .load_chunk_in(dimension, coord.0, coord.1)
-                {
+                if let Some(saved) = save_manager.as_ref().and_then(|manager| {
+                    manager
+                        .lock()
+                        .unwrap()
+                        .load_chunk_in(dimension, coord.0, coord.1)
+                }) {
                     let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk)
                         .ok()
                         .map(|generated| generated.blocks);
@@ -12593,10 +12690,11 @@ impl State {
         let under_block = self.chunk_manager.get_block(px, py, pz);
 
         if self.player_physics.on_ground && !self.was_on_ground {
-            if under_block == BlockType::Farmland {
-                if self.is_sprinting || old_pos.y - self.player_physics.position.y > 0.5 {
-                    self.apply_block_changes(&[((px, py, pz), BlockType::Dirt)]);
-                }
+            if under_block == BlockType::Farmland
+                && self.presentation_may_mutate_chunks()
+                && (self.is_sprinting || old_pos.y - self.player_physics.position.y > 0.5)
+            {
+                self.apply_block_changes(&[((px, py, pz), BlockType::Dirt)]);
             }
             if let Some(mat) = under_block.sound_material() {
                 self.audio_manager
@@ -15356,8 +15454,8 @@ impl State {
 
     /// Client-side application of a full chunk payload sent by the host during
     /// mid-game join catch-up. The payload uses the same Zlib-compressed layout
-    /// as `save.rs::ChunkSaveData`. If the chunk is not loaded yet, the payload
-    /// is buffered and applied once `update_chunks` loads that coordinate.
+    /// as `save.rs::ChunkSaveData`. Missing columns are inserted from the
+    /// payload only — join clients never generate a stand-in.
     fn apply_remote_chunk_data(
         &mut self,
         dimension_wire: u8,
@@ -15388,7 +15486,26 @@ impl State {
             return;
         }
         self.client_chunk_revisions.insert(revision_key, revision);
-        if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
+        let inserted_new = !self.chunk_manager.chunks.contains_key(&(cx, cz));
+        if inserted_new {
+            if self
+                .chunk_manager
+                .insert_authoritative_chunk_payload(
+                    cx,
+                    cz,
+                    &blocks,
+                    &block_states,
+                    &fluid_levels,
+                    &block_entities,
+                )
+                .is_err()
+            {
+                return;
+            }
+            let lifetime = self.next_chunk_lifetime();
+            self.chunk_lifetimes.insert((cx, cz), lifetime);
+            self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
+        } else if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
             Self::restore_chunk_payload(
                 chunk,
                 &blocks,
@@ -15396,47 +15513,58 @@ impl State {
                 &fluid_levels,
                 &block_entities,
             );
-            self.invalidate_chunk_mesh((cx, cz), DependencyReason::Network);
-            // Re-seed boundary lighting so neighbors pick up the overwritten
-            // column heights and light values.
-            let mut dirty_chunks = std::collections::HashSet::new();
-            for (lighting_cx, lighting_cz) in [
-                (cx, cz),
-                (cx - 1, cz),
-                (cx + 1, cz),
-                (cx, cz - 1),
-                (cx, cz + 1),
-            ] {
-                if self
-                    .chunk_manager
-                    .chunks
-                    .contains_key(&(lighting_cx, lighting_cz))
-                {
-                    crate::lighting::propagate_chunk_lighting(
-                        &mut self.chunk_manager,
-                        lighting_cx,
-                        lighting_cz,
-                        &mut dirty_chunks,
-                    );
-                    self.invalidate_chunk_mesh((lighting_cx, lighting_cz), DependencyReason::Light);
-                }
-            }
-            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
         } else {
-            // Chunk not streamed in yet; buffer for deferred application.
-            let should_replace = self
-                .pending_chunk_payloads
-                .get(&(cx, cz))
-                .map_or(true, |(existing_revision, _, _, _, _)| {
-                    revision >= *existing_revision
-                });
-            if should_replace {
-                self.pending_chunk_payloads.insert(
-                    (cx, cz),
-                    (revision, blocks, block_states, fluid_levels, block_entities),
+            return;
+        }
+        self.invalidate_chunk_mesh(
+            (cx, cz),
+            if inserted_new {
+                DependencyReason::ChunkLoad
+            } else {
+                DependencyReason::Network
+            },
+        );
+        if let Some(changes) = self.pending_block_changes.remove(&(cx, cz)) {
+            let mut changes: Vec<_> = changes.into_iter().collect();
+            changes.sort_by_key(|(_, (change_revision, _, _, _))| *change_revision);
+            for ((x, y, z), (change_revision, block, state, raw_fluid)) in changes {
+                self.apply_remote_block_change(
+                    dimension_wire,
+                    change_revision,
+                    x,
+                    y,
+                    z,
+                    block,
+                    state,
+                    raw_fluid,
                 );
             }
         }
+        // Re-seed boundary lighting so neighbors pick up the overwritten
+        // column heights and light values.
+        let mut dirty_chunks = std::collections::HashSet::new();
+        for (lighting_cx, lighting_cz) in [
+            (cx, cz),
+            (cx - 1, cz),
+            (cx + 1, cz),
+            (cx, cz - 1),
+            (cx, cz + 1),
+        ] {
+            if self
+                .chunk_manager
+                .chunks
+                .contains_key(&(lighting_cx, lighting_cz))
+            {
+                crate::lighting::propagate_chunk_lighting(
+                    &mut self.chunk_manager,
+                    lighting_cx,
+                    lighting_cz,
+                    &mut dirty_chunks,
+                );
+                self.invalidate_chunk_mesh((lighting_cx, lighting_cz), DependencyReason::Light);
+            }
+        }
+        self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
     }
 
     /// Decode a `ChunkSaveData`-style compressed payload into an existing
@@ -15449,20 +15577,13 @@ impl State {
         fluid_levels: &[u8],
         block_entities: &[u8],
     ) {
-        let save_data = crate::save::ChunkSaveData {
-            chunk_x: chunk.chunk_x,
-            chunk_z: chunk.chunk_z,
-            blocks: blocks.to_vec(),
-            sky_light: Vec::new(),
-            block_light: Vec::new(),
-            fluid_levels: fluid_levels.to_vec(),
-            redstone_metadata: Vec::new(),
-            block_states: block_states.to_vec(),
-            mutation_revision: 0,
-            block_entities: block_entities.to_vec(),
-            data_version: 1,
-        };
-        let _ = save_data.restore_to_chunk(chunk);
+        let _ = crate::save::ChunkSaveData::restore_network_payload(
+            chunk,
+            blocks,
+            block_states,
+            fluid_levels,
+            block_entities,
+        );
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
@@ -20178,7 +20299,11 @@ impl State {
         self.perf_counters.save_in_flight = self.save_queue_stats.in_flight();
         self.perf_counters.save_in_flight_bytes = self.save_queue_stats.in_flight_bytes();
         self.perf_counters.save_drop = self.save_queue_stats.dropped();
-        if let Ok(mgr) = self.save_manager.try_lock() {
+        if let Some(mgr) = self
+            .save_manager
+            .as_ref()
+            .and_then(|manager| manager.try_lock().ok())
+        {
             self.perf_counters.loaded_region_cache_bytes = mgr.region_cache_bytes();
         }
 

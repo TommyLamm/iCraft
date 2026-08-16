@@ -183,6 +183,29 @@ impl ChunkManager {
         self.dirty_chunks.mark_dirty(cx, cz);
     }
 
+    /// Insert a join-client column from a revision-gated `ChunkData` payload.
+    /// Never generates terrain; missing streams fail closed via restore.
+    pub fn insert_authoritative_chunk_payload(
+        &mut self,
+        cx: i32,
+        cz: i32,
+        blocks: &[u8],
+        block_states: &[u8],
+        fluid_levels: &[u8],
+        block_entities: &[u8],
+    ) -> std::io::Result<()> {
+        let mut chunk = Chunk::empty_in_dimension(self.dimension, cx, cz);
+        crate::save::ChunkSaveData::restore_network_payload(
+            &mut chunk,
+            blocks,
+            block_states,
+            fluid_levels,
+            block_entities,
+        )?;
+        self.chunks.insert((cx, cz), chunk);
+        Ok(())
+    }
+
     fn schedule_fluid_neighbors(&mut self, wx: i32, wy: i32, wz: i32) {
         const OFFSETS: [(i32, i32, i32); 7] = [
             (0, 0, 0),
@@ -707,6 +730,29 @@ fn support_candidates_affected_by_change((x, y, z): BlockPos) -> [BlockPos; 10] 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoritative_payload_inserts_without_local_worldgen() {
+        let mut source = Chunk::empty(2, -3);
+        source.set_block_local(1, 70, 2, BlockType::GoldOre);
+        let payload = crate::save::ChunkSaveData::from_chunk(&source).unwrap();
+
+        let mut manager = ChunkManager::new(2);
+        manager
+            .insert_authoritative_chunk_payload(
+                2,
+                -3,
+                &payload.blocks,
+                &payload.block_states,
+                &payload.fluid_levels,
+                &payload.block_entities,
+            )
+            .unwrap();
+
+        let chunk = manager.chunks.get(&(2, -3)).expect("column inserted");
+        assert_eq!(chunk.get_block_local(1, 70, 2), BlockType::GoldOre);
+        assert_eq!(chunk.get_block_local(8, 80, 8), BlockType::Air);
+    }
 
     fn dependencies(wx: i32, wz: i32) -> HashSet<(i32, i32)> {
         let mut result = HashSet::new();
