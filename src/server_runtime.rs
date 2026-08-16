@@ -25,7 +25,8 @@ use crate::network::server::{
     HostToServer, MeteredHostEventSender, NetworkMetrics, NetworkServer, ServerConfig, ServerToHost,
 };
 use crate::save::{
-    ChunkSaveData, EntitySaveData, LevelData, MutationRevisionIndex, PlayerData, SaveManager,
+    normalize_player_identity, ChunkSaveData, EntitySaveData, LevelData, MutationRevisionIndex,
+    PlayerData, SaveManager,
 };
 use glam::Vec3;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -450,6 +451,9 @@ pub struct ServerProperties {
     pub motd: String,
     pub max_players: usize,
     pub difficulty: String,
+    /// LAN/offline account switch. `true` is rejected until challenge /
+    /// shared-secret auth exists; names are accounts and operators come only
+    /// from the dedicated-server console `op` command (or this file).
     pub online_mode: bool,
     pub whitelist: HashSet<String>,
     pub operators: HashSet<String>,
@@ -534,20 +538,10 @@ impl ServerProperties {
                 }
                 "online-mode" => properties.online_mode = parse_bool(key, value)?,
                 "whitelist" => {
-                    properties.whitelist = value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|entry| !entry.is_empty())
-                        .map(str::to_ascii_lowercase)
-                        .collect();
+                    properties.whitelist = parse_identity_set(key, value)?;
                 }
                 "operators" | "ops" => {
-                    properties.operators = value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|entry| !entry.is_empty())
-                        .map(str::to_ascii_lowercase)
-                        .collect();
+                    properties.operators = parse_identity_set(key, value)?;
                 }
                 "view-distance" => {
                     properties.view_distance = parse_range(key, value, 2..=32)?;
@@ -606,6 +600,15 @@ impl ServerProperties {
                 "must be between 2 and 32",
             ));
         }
+        if self.online_mode {
+            return Err(invalid(
+                "online-mode",
+                true,
+                "online authentication is not implemented; refuse to treat this as a credential switch (尚未實作驗證，拒絕當憑證開關)",
+            ));
+        }
+        validate_identity_set("whitelist", &self.whitelist)?;
+        validate_identity_set("operators", &self.operators)?;
         Ok(())
     }
 
@@ -614,7 +617,10 @@ impl ServerProperties {
         let mut whitelist: Vec<_> = self.whitelist.iter().cloned().collect();
         whitelist.sort();
         let content = format!(
-            "bind={}\nport={}\nmotd={}\nmax-players={}\ndifficulty={}\nonline-mode={}\nwhitelist={}\noperators={}\nview-distance={}\nsimulation-distance={}\npvp={}\nlevel-name={}\nlevel-seed={}\n",
+            "# online-mode=false is LAN/offline: names are accounts until real credentials exist.\n\
+             # Operators are granted only by the dedicated-server console `op` command (or this file),\n\
+             # bound to the normalized identity of later connections. There is still no password.\n\
+             bind={}\nport={}\nmotd={}\nmax-players={}\ndifficulty={}\nonline-mode={}\nwhitelist={}\noperators={}\nview-distance={}\nsimulation-distance={}\npvp={}\nlevel-name={}\nlevel-seed={}\n",
             self.bind,
             self.port,
             self.motd,
@@ -650,6 +656,39 @@ fn sorted_names(names: &HashSet<String>) -> Vec<String> {
     let mut values: Vec<_> = names.iter().cloned().collect();
     values.sort();
     values
+}
+
+fn parse_identity_set(key: &str, value: &str) -> Result<HashSet<String>, ServerConfigError> {
+    let mut names = HashSet::new();
+    for raw in value.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        match normalize_player_identity(raw) {
+            Ok(identity) => {
+                names.insert(identity);
+            }
+            Err(error) => return Err(invalid(key, raw, error.to_string())),
+        }
+    }
+    Ok(names)
+}
+
+fn validate_identity_set(key: &str, names: &HashSet<String>) -> Result<(), ServerConfigError> {
+    for name in names {
+        match normalize_player_identity(name) {
+            Ok(normalized) if normalized == *name => {}
+            Ok(_) | Err(_) => {
+                return Err(invalid(
+                    key,
+                    name,
+                    "must already be a normalized player identity",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, ServerConfigError> {
@@ -1386,14 +1425,18 @@ impl ServerRuntime {
             "whitelist" => match words.next().unwrap_or_default() {
                 "add" => {
                     let name = words.next().ok_or("usage: whitelist add <name>")?;
-                    self.properties.whitelist.insert(name.to_ascii_lowercase());
+                    let normalized =
+                        normalize_player_identity(name).map_err(|error| error.to_string())?;
+                    self.properties.whitelist.insert(normalized);
                     self.persist_properties()
                         .map_err(|error| error.to_string())?;
                     Ok(format!("added {name} to whitelist"))
                 }
                 "remove" => {
                     let name = words.next().ok_or("usage: whitelist remove <name>")?;
-                    self.properties.whitelist.remove(&name.to_ascii_lowercase());
+                    let normalized =
+                        normalize_player_identity(name).map_err(|error| error.to_string())?;
+                    self.properties.whitelist.remove(&normalized);
                     self.persist_properties()
                         .map_err(|error| error.to_string())?;
                     Ok(format!("removed {name} from whitelist"))
@@ -1409,7 +1452,8 @@ impl ServerRuntime {
             },
             "op" | "deop" => {
                 let name = words.next().ok_or("usage: op|deop <name>")?;
-                let normalized = name.to_ascii_lowercase();
+                let normalized =
+                    normalize_player_identity(name).map_err(|error| error.to_string())?;
                 if command == "op" {
                     self.properties.operators.insert(normalized);
                 } else {
@@ -1696,10 +1740,12 @@ impl ServerRuntime {
         username: String,
         storage: LocalSessionStorage,
     ) -> io::Result<()> {
+        let username = normalize_player_identity(&username)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         if self
             .players
             .values()
-            .any(|session| session.username.eq_ignore_ascii_case(&username))
+            .any(|session| session.username == username)
         {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -1753,9 +1799,7 @@ impl ServerRuntime {
             session.username.clone(),
             dimension,
             session.data.position,
-            self.properties
-                .operators
-                .contains(&session.username.to_ascii_lowercase()),
+            self.properties.operators.contains(&session.username),
             self.level.cheats_enabled,
         );
         authority_session.game_mode = session.data.game_mode;
@@ -4535,5 +4579,60 @@ mod tests {
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&world_dir);
         let _ = fs::remove_file(blocking_file);
+    }
+
+    #[test]
+    fn online_mode_true_fails_closed_at_validate_and_startup() {
+        let mut properties = ServerProperties::default();
+        properties.online_mode = true;
+        let error = properties.validate().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("online-mode"));
+        assert!(
+            message.contains("尚未實作驗證，拒絕當憑證開關"),
+            "{message}"
+        );
+        assert!(message.contains("not implemented"), "{message}");
+
+        let dir = temp_dir("online_mode");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.properties");
+        fs::write(&path, "online-mode=true\n").unwrap();
+        let loaded = ServerProperties::load(&path).unwrap_err();
+        assert!(loaded.to_string().contains("online-mode"));
+        properties.world_dir = dir.join("world");
+        properties.bind = "127.0.0.1".into();
+        assert!(ServerRuntime::new(properties).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn login_grants_operator_only_from_console_op_set() {
+        let mut properties = ServerProperties::default();
+        properties.bind = "127.0.0.1".into();
+        properties.port = 25573;
+        properties.world_dir = temp_dir("op_policy");
+        let mut runtime = ServerRuntime::new(properties).unwrap();
+
+        runtime.login_session(1, "Alice").unwrap();
+        assert!(!runtime.authority.session(1).unwrap().operator);
+        assert_eq!(runtime.players.get(&1).unwrap().username, "alice");
+        runtime.logout_session(1).unwrap();
+
+        runtime.execute_console_command("op Alice").unwrap();
+        assert!(runtime.properties.operators.contains("alice"));
+        assert!(runtime.execute_console_command("op foo.bar").is_err());
+        assert!(runtime.execute_console_command("op CON").is_err());
+        assert!(!runtime.properties.operators.contains("foo_bar"));
+
+        runtime.login_session(2, "ALICE").unwrap();
+        assert!(runtime.authority.session(2).unwrap().operator);
+        runtime.login_session(3, "bob").unwrap();
+        assert!(!runtime.authority.session(3).unwrap().operator);
+        assert!(runtime.login_session(4, "foo.bar").is_err());
+        assert!(runtime.login_session(5, "CON").is_err());
+
+        let _ = runtime.shutdown();
+        let _ = fs::remove_dir_all(&runtime.world_dir);
     }
 }

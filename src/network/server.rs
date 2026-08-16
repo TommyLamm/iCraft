@@ -703,6 +703,10 @@ pub enum HostToServer {
 
 const MAX_CATCHUP_QUEUE_DEPTH: usize = 32;
 
+fn authenticate_handshake_username(raw: &str) -> Result<String, &'static str> {
+    crate::save::normalize_player_identity(raw).map_err(|_| "invalid username")
+}
+
 struct ClientSession {
     id: PlayerId,
     username: String,
@@ -1526,22 +1530,21 @@ impl<S: HostEventSender> NetworkServer<S> {
             }
         };
 
-        // Keep the login identifier bounded before using it in session maps and
-        // persistence paths, while accepting existing clients whose display
-        // names are a little longer than the vanilla 16-character limit.
-        if handshake.is_empty() || handshake.len() > 32 || !handshake.is_ascii() {
-            let _ = send_connection_packet(
-                &mut connection,
-                Packet::Disconnect {
-                    protocol_version: PROTOCOL_VERSION,
-                    reason: "invalid username".into(),
-                },
-                &metrics,
-            )
-            .await;
-            return;
-        }
-        let normalized_username = handshake.to_ascii_lowercase();
+        let normalized_username = match authenticate_handshake_username(&handshake) {
+            Ok(identity) => identity,
+            Err(reason) => {
+                let _ = send_connection_packet(
+                    &mut connection,
+                    Packet::Disconnect {
+                        protocol_version: PROTOCOL_VERSION,
+                        reason: reason.into(),
+                    },
+                    &metrics,
+                )
+                .await;
+                return;
+            }
+        };
         {
             let sessions_guard = sessions.lock().await;
             if sessions_guard.len() >= config.max_players.max(1) {
@@ -1556,12 +1559,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                 .await;
                 return;
             }
-            if !config.whitelist.is_empty()
-                && !config
-                    .whitelist
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(&normalized_username))
-            {
+            if !config.whitelist.is_empty() && !config.whitelist.contains(&normalized_username) {
                 let _ = send_connection_packet(
                     &mut connection,
                     Packet::Disconnect {
@@ -1575,7 +1573,7 @@ impl<S: HostEventSender> NetworkServer<S> {
             }
             if sessions_guard
                 .values()
-                .any(|session| session.username.eq_ignore_ascii_case(&normalized_username))
+                .any(|session| session.username == normalized_username)
             {
                 let _ = send_connection_packet(
                     &mut connection,
@@ -1708,7 +1706,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                 Some("server is full")
             } else if sessions_guard
                 .values()
-                .any(|session| session.username.eq_ignore_ascii_case(&normalized_username))
+                .any(|session| session.username == normalized_username)
             {
                 Some("duplicate login")
             } else {
@@ -1716,7 +1714,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                     id,
                     ClientSession {
                         id,
-                        username: handshake.clone(),
+                        username: normalized_username.clone(),
                         out_tx: out_tx.clone(),
                         pose_mailbox: Arc::clone(&pose_mailbox),
                         state_mailbox: Arc::clone(&state_mailbox),
@@ -1759,7 +1757,7 @@ impl<S: HostEventSender> NetworkServer<S> {
             send_task.abort();
             return;
         }
-        eprintln!("[NetworkServer] Sent LoginSuccess to '{handshake}' (Player ID: {id})");
+        eprintln!("[NetworkServer] Sent LoginSuccess to '{normalized_username}' (Player ID: {id})");
         let mut roster: Vec<(PlayerId, String)> = sessions
             .lock()
             .await
@@ -1784,7 +1782,7 @@ impl<S: HostEventSender> NetworkServer<S> {
         if server_to_host
             .send(ServerToHost::ClientJoined {
                 id,
-                username: handshake,
+                username: normalized_username,
             })
             .is_err()
         {
@@ -5034,5 +5032,85 @@ mod tests {
             packet,
             Packet::EntityState { state, .. } if state.entity_id == 8
         )));
+    }
+
+    #[test]
+    fn handshake_rejects_mutating_and_reserved_identities() {
+        assert_eq!(authenticate_handshake_username("Alice").unwrap(), "alice");
+        assert_eq!(
+            authenticate_handshake_username("foo_bar").unwrap(),
+            "foo_bar"
+        );
+        assert_eq!(
+            authenticate_handshake_username("foo.bar").unwrap_err(),
+            "invalid username"
+        );
+        assert_eq!(
+            authenticate_handshake_username("Alice/../Alice").unwrap_err(),
+            "invalid username"
+        );
+        assert_eq!(
+            authenticate_handshake_username("CON").unwrap_err(),
+            "invalid username"
+        );
+        assert_eq!(
+            authenticate_handshake_username("con.txt").unwrap_err(),
+            "invalid username"
+        );
+        assert_eq!(
+            authenticate_handshake_username("").unwrap_err(),
+            "invalid username"
+        );
+    }
+
+    async fn handshake_once(server: &TestServer, username: &str) -> (Connection, Packet) {
+        let mut connection = Connection::new(server.connect_stream().await);
+        connection
+            .send(&Packet::Handshake {
+                protocol_version: PROTOCOL_VERSION,
+                username: username.into(),
+            })
+            .await
+            .unwrap();
+        let packet = time::timeout(Duration::from_secs(2), connection.recv())
+            .await
+            .expect("server did not answer handshake")
+            .expect("server closed without a handshake reply");
+        (connection, packet)
+    }
+
+    #[tokio::test]
+    async fn mutating_username_does_not_share_identity_with_sanitized_form() {
+        let server = TestServer::start_with_config(
+            0xCAFE_BABE,
+            1,
+            ServerConfig {
+                max_players: 2,
+                ..ServerConfig::default()
+            },
+        );
+        let (_online, first) = handshake_once(&server, "foo_bar").await;
+        assert!(matches!(first, Packet::LoginSuccess { .. }));
+        let (_rejected_dot, second) = handshake_once(&server, "foo.bar").await;
+        assert!(matches!(
+            second,
+            Packet::Disconnect { reason, .. } if reason == "invalid username"
+        ));
+        let (_rejected_dup, third) = handshake_once(&server, "FOO_BAR").await;
+        assert!(matches!(
+            third,
+            Packet::Disconnect { reason, .. } if reason == "duplicate login"
+        ));
+        let (_rejected_path, fourth) = handshake_once(&server, "Alice/../Alice").await;
+        assert!(matches!(
+            fourth,
+            Packet::Disconnect { reason, .. } if reason == "invalid username"
+        ));
+        let (_rejected_reserved, fifth) = handshake_once(&server, "CON").await;
+        assert!(matches!(
+            fifth,
+            Packet::Disconnect { reason, .. } if reason == "invalid username"
+        ));
+        server.stop().await;
     }
 }

@@ -18,17 +18,17 @@
 
 ## 精確 acceptance
 
-- [ ] 定義單一正規化身份：小寫、僅 `[a-z0-9_-]`、長度 1..=16（或現有 32 的嚴格子集）。
+- [x] 定義單一正規化身份：小寫、僅 `[a-z0-9_-]`、長度 1..=16（或現有 32 的嚴格子集）。
   原始名稱經淨化後若改變 → 握手拒絕，不建 session。
-- [ ] 登入重複、whitelist、operator、`players/<id>.dat` 全部使用**同一個**正規化 key。
+- [x] 登入重複、whitelist、operator、`players/<id>.dat` 全部使用**同一個**正規化 key。
   `foo.bar` 不得載入或覆寫 `foo_bar.dat`。
-- [ ] 拒絕 Windows 保留 stem（大小寫不敏感，含 `con.txt` 這類加點變體若會落到裝置名）。
-- [ ] `online-mode=true`：在實作挑戰／shared secret／密碼雜湊之前，**啟動失敗**並寫清楚
+- [x] 拒絕 Windows 保留 stem（大小寫不敏感，含 `con.txt` 這類加點變體若會落到裝置名）。
+- [x] `online-mode=true`：在實作挑戰／shared secret／密碼雜湊之前，**啟動失敗**並寫清楚
   錯誤（「尚未實作驗證，拒絕當憑證開關」）。不得再印 `online_mode=true` 卻放行任何名字。
-- [ ] `online-mode=false` 文件化為 LAN／離線：TCP 連線**不得**因名字匹配而獲得 operator。
+- [x] `online-mode=false` 文件化為 LAN／離線：TCP 連線**不得**因名字匹配而獲得 operator。
   Operator 只來自主控台 `op` 之後、綁定正規化 key 的後續連線（仍無密碼；這是明確的 LAN 模式）。
   若選擇更嚴：TCP 上完全不授 op，只留主控台指令。選一種寫進 acceptance 測試，不要兩種並存。
-- [ ] 測試：`foo.bar` vs `foo_bar` 第二個握手失敗；`Alice/../Alice` 失敗；`CON` 失敗；
+- [x] 測試：`foo.bar` vs `foo_bar` 第二個握手失敗；`Alice/../Alice` 失敗；`CON` 失敗；
   `online-mode=true` 的 `ServerProperties::validate` 或 `icraft-server` 啟動回 Err。
 
 ## 預計檔案與測試
@@ -51,3 +51,45 @@
 
 - 真正常開的線上驗證（密碼、token、TLS）。本計劃只停止「假裝有 online-mode」。
 - Chat／pose DoS（12）、symlink 世界目錄（13）。
+
+## 實作與證據
+
+單一身份入口是 `save::normalize_player_identity`：lowercase ASCII、`[a-z0-9_-]`、
+長度 1..=16。若 lowercasing 後仍需改寫（例如 `foo.bar`）、過長、空名、或 Windows
+保留 stem（`con`／`prn`／`aux`／`nul`／`com1`–`com9`／`lpt1`–`lpt9`，含 `con.txt`
+這類加點變體）→ `Err`，握手不建 session。Handshake、login 重複檢查、whitelist、
+console `op`／`deop`、以及 `players/<id>.dat` 都呼叫同一個函式。
+
+Operator 政策（已用測試釘死）：TCP／`login_session` 只在正規化身份**已經**在
+`operators` 集合裡時授 op。該集合只由專用伺服器主控台 `op`（與既有 persist
+file）寫入。Handshake 沒有其他授 op 規則。`cheats_enabled` 仍獨立放行指令。
+
+`online-mode=true` 在 `ServerProperties::validate`（因此也在 `load`／`write`／
+`ServerRuntime::new`／`icraft-server` 啟動）fail-closed，錯誤含
+「尚未實作驗證，拒絕當憑證開關」。`online-mode=false` 寫入 `server.properties`
+註解與 `--help`，標成 LAN／離線：名字即帳號，仍無密碼。
+
+驗證：
+
+```
+cargo test --lib save -- --nocapture
+# 49 passed (incl. normalize_player_identity_table,
+# dedicated_player_files_use_normalized_identity_and_reject_colliding_names)
+
+cargo test --lib network::server -- --nocapture
+# 37 passed (incl. handshake_rejects_mutating_and_reserved_identities,
+# mutating_username_does_not_share_identity_with_sanitized_form)
+
+cargo test --test authority_persistence -- --nocapture
+# 4 passed (incl. mutating_identities_cannot_join_or_share_player_files)
+
+cargo test --lib server_runtime -- --nocapture
+# online_mode_true_fails_closed_at_validate_and_startup ok
+# login_grants_operator_only_from_console_op_set ok
+
+cargo test --bin icraft-server -- --nocapture
+# 2 passed
+
+cargo check --bins
+cargo check --all-targets
+```

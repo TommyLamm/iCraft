@@ -17,6 +17,9 @@ const PLAYER_SAVE_VERSION: u16 = 1;
 /// Version of the dedicated-runtime per-player file. Version 2 adds the
 /// current dimension alongside the existing spawn dimension in `PlayerData`.
 pub const DEDICATED_PLAYER_SAVE_VERSION: u16 = 2;
+/// Handshake, whitelist, operators, and `players/<id>.dat` all share this
+/// bound. It is a strict subset of the historical 32-byte login cap.
+pub const PLAYER_IDENTITY_MAX_LEN: usize = 16;
 pub const SAVE_QUEUE_CAPACITY: usize = 128;
 pub const NETWORK_SNAPSHOT_QUEUE_CAPACITY: usize = 8;
 /// Hard admission limit for distinct mutated chunk coordinates.
@@ -45,6 +48,96 @@ impl std::fmt::Display for MutationRevisionIndexCapacityError {
 }
 
 impl std::error::Error for MutationRevisionIndexCapacityError {}
+
+/// Why a raw login name was rejected instead of being rewritten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityError {
+    Empty,
+    TooLong,
+    InvalidCharset,
+    ReservedStem,
+}
+
+impl std::fmt::Display for IdentityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(formatter, "player identity must not be empty"),
+            Self::TooLong => write!(
+                formatter,
+                "player identity must be at most {PLAYER_IDENTITY_MAX_LEN} characters"
+            ),
+            Self::InvalidCharset => write!(
+                formatter,
+                "player identity must already be ASCII [A-Za-z0-9_-] after lowercasing"
+            ),
+            Self::ReservedStem => write!(
+                formatter,
+                "player identity must not use a Windows reserved device name"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for IdentityError {}
+
+/// Single identity key for handshake, login uniqueness, whitelist, operators,
+/// and `players/<id>.dat`.
+///
+/// Raw names are accepted only when lowercasing them yields a 1..=16 character
+/// `[a-z0-9_-]` string that is not a Windows reserved stem. Mutating sanitizers
+/// such as rewriting `foo.bar` to `foo_bar` are rejected so two logins cannot
+/// share one player file.
+pub fn normalize_player_identity(raw: &str) -> Result<String, IdentityError> {
+    if raw.is_empty() {
+        return Err(IdentityError::Empty);
+    }
+    if raw.len() > PLAYER_IDENTITY_MAX_LEN {
+        return Err(IdentityError::TooLong);
+    }
+    if !raw.is_ascii() {
+        return Err(IdentityError::InvalidCharset);
+    }
+    let lowered = raw.to_ascii_lowercase();
+    if is_windows_reserved_stem(&lowered) {
+        return Err(IdentityError::ReservedStem);
+    }
+    if !lowered
+        .bytes()
+        .all(|ch| matches!(ch, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+    {
+        return Err(IdentityError::InvalidCharset);
+    }
+    Ok(lowered)
+}
+
+fn is_windows_reserved_stem(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(
+        stem,
+        "con"
+            | "prn"
+            | "aux"
+            | "nul"
+            | "com1"
+            | "com2"
+            | "com3"
+            | "com4"
+            | "com5"
+            | "com6"
+            | "com7"
+            | "com8"
+            | "com9"
+            | "lpt1"
+            | "lpt2"
+            | "lpt3"
+            | "lpt4"
+            | "lpt5"
+            | "lpt6"
+            | "lpt7"
+            | "lpt8"
+            | "lpt9"
+    )
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MutationRevisionIndex {
@@ -2494,22 +2587,21 @@ impl SaveManager {
         })
     }
 
-    /// Return the sanitized, bounded path for a dedicated player identity.
-    /// The same normalization is used for save and load, preventing path
-    /// traversal and making reconnect independent of display-name casing.
-    pub fn dedicated_player_file_path(&self, username: &str) -> PathBuf {
-        let safe: String = username
-            .chars()
-            .take(32)
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                    ch.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        self.world_dir.join("players").join(format!("{safe}.dat"))
+    /// Return the path for a dedicated player identity.
+    /// Handshake, whitelist, operators, and this file all use the same
+    /// normalized key; mutating names such as `foo.bar` are rejected instead
+    /// of being rewritten onto `foo_bar.dat`.
+    pub fn dedicated_player_file_path(&self, username: &str) -> Result<PathBuf, IdentityError> {
+        let identity = normalize_player_identity(username)?;
+        Ok(self
+            .world_dir
+            .join("players")
+            .join(format!("{identity}.dat")))
+    }
+
+    fn dedicated_player_file_path_io(&self, username: &str) -> io::Result<PathBuf> {
+        self.dedicated_player_file_path(username)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
     }
 
     /// Atomically save a dedicated player payload.  A failed replacement does
@@ -2534,14 +2626,14 @@ impl SaveManager {
                 format!("player save encode failed: {error}"),
             )
         })?;
-        atomic_write(self.dedicated_player_file_path(username), &bytes)
+        atomic_write(self.dedicated_player_file_path_io(username)?, &bytes)
     }
 
     /// Load a dedicated player payload, migrating the version-1 runtime file
     /// (which did not store current dimension) to the explicit Overworld or
     /// saved spawn dimension default.
     pub fn load_dedicated_player(&self, username: &str) -> io::Result<Option<DedicatedPlayerFile>> {
-        let path = self.dedicated_player_file_path(username);
+        let path = self.dedicated_player_file_path_io(username)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -4899,6 +4991,110 @@ mod tests {
             "corrupt region file must be preserved on disk without overwrite"
         );
 
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn normalize_player_identity_table() {
+        let cases: &[(&str, Result<&str, IdentityError>)] = &[
+            ("alice", Ok("alice")),
+            ("Alice", Ok("alice")),
+            ("ALICE", Ok("alice")),
+            ("foo_bar", Ok("foo_bar")),
+            ("foo-bar", Ok("foo-bar")),
+            ("a", Ok("a")),
+            ("abcdefghijklmnop", Ok("abcdefghijklmnop")),
+            ("1234567890ab-_", Ok("1234567890ab-_")),
+            ("", Err(IdentityError::Empty)),
+            ("abcdefghijklmnopq", Err(IdentityError::TooLong)),
+            ("foo.bar", Err(IdentityError::InvalidCharset)),
+            ("Alice/../Alice", Err(IdentityError::InvalidCharset)),
+            ("player!", Err(IdentityError::InvalidCharset)),
+            (" ", Err(IdentityError::InvalidCharset)),
+            ("你好", Err(IdentityError::InvalidCharset)),
+            ("CON", Err(IdentityError::ReservedStem)),
+            ("con", Err(IdentityError::ReservedStem)),
+            ("prn", Err(IdentityError::ReservedStem)),
+            ("aux", Err(IdentityError::ReservedStem)),
+            ("nul", Err(IdentityError::ReservedStem)),
+            ("com1", Err(IdentityError::ReservedStem)),
+            ("COM9", Err(IdentityError::ReservedStem)),
+            ("lpt1", Err(IdentityError::ReservedStem)),
+            ("LPT9", Err(IdentityError::ReservedStem)),
+            ("con.txt", Err(IdentityError::ReservedStem)),
+            ("NUL.dat", Err(IdentityError::ReservedStem)),
+        ];
+        for (raw, expected) in cases {
+            let actual = normalize_player_identity(raw);
+            match expected {
+                Ok(identity) => {
+                    assert_eq!(actual.as_deref(), Ok(*identity), "{raw:?}");
+                    assert_eq!(
+                        actual.as_deref().unwrap(),
+                        raw.to_ascii_lowercase(),
+                        "accepted names must already be the lowercase identity: {raw:?}"
+                    );
+                }
+                Err(error) => {
+                    assert_eq!(actual, Err(*error), "{raw:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dedicated_player_files_use_normalized_identity_and_reject_colliding_names() {
+        let world_dir = unique_test_dir("player_identity");
+        let manager = SaveManager::new(&world_dir);
+        let data = PlayerData {
+            position: [0.0; 3],
+            velocity: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            health: 20.0,
+            hunger: 20.0,
+            saturation: 5.0,
+            exhaustion: 0.0,
+            oxygen: 300.0,
+            experience: 0,
+            experience_level: 0,
+            game_mode: GameMode::Survival,
+            is_dead: false,
+            spawn_point: None,
+            spawn_dimension: None,
+            inventory: InventoryData {
+                hotbar: Vec::new(),
+                main: Vec::new(),
+                armor: Vec::new(),
+                offhand: None,
+                selected: 0,
+                dragged: None,
+                creative_drag_origin: None,
+            },
+            advancements: Default::default(),
+            unlocked_recipes: Default::default(),
+            bad_omen_level: 0,
+            hero_of_the_village_timer: 0.0,
+        };
+        manager
+            .save_dedicated_player("Alice", Dimension::Overworld, &data, &[])
+            .unwrap();
+        assert_eq!(
+            manager.dedicated_player_file_path("ALICE").unwrap(),
+            world_dir.join("players").join("alice.dat")
+        );
+        assert!(manager.load_dedicated_player("alice").unwrap().is_some());
+        assert!(manager.dedicated_player_file_path("foo.bar").is_err());
+        assert!(manager
+            .dedicated_player_file_path("Alice/../Alice")
+            .is_err());
+        assert!(manager.dedicated_player_file_path("CON").is_err());
+        assert!(manager
+            .save_dedicated_player("foo.bar", Dimension::Overworld, &data, &[])
+            .is_err());
+        assert!(manager.load_dedicated_player("foo.bar").is_err());
+        assert!(!world_dir.join("players").join("foo_bar.dat").exists());
+        assert!(world_dir.join("players").join("alice.dat").exists());
         fs::remove_dir_all(world_dir).unwrap();
     }
 }

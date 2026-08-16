@@ -60,7 +60,17 @@ fn dedicated_player_file_roundtrips_current_dimension_and_effects() {
     assert_eq!(loaded.effects, effects);
     assert!(manager
         .dedicated_player_file_path("Alice/../Alice")
-        .starts_with(world_dir.join("players")));
+        .is_err());
+    assert!(manager.dedicated_player_file_path("foo.bar").is_err());
+    assert!(manager.dedicated_player_file_path("CON").is_err());
+    assert_eq!(
+        manager.dedicated_player_file_path("foo_bar").unwrap(),
+        world_dir.join("players").join("foo_bar.dat")
+    );
+    assert_ne!(
+        manager.dedicated_player_file_path("Alice").unwrap(),
+        world_dir.join("players").join("foo_bar.dat")
+    );
     fs::remove_dir_all(world_dir).unwrap();
 }
 
@@ -173,5 +183,28 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     overworld_interest.update_position(Dimension::Overworld, [0.0, 64.0, 0.0]);
     assert!(!overworld_interest.wants(Dimension::Nether, InterestKind::Block((0, 64, 0)),));
     restarted.shutdown().unwrap();
+    fs::remove_dir_all(world_dir).unwrap();
+}
+
+#[test]
+fn mutating_identities_cannot_join_or_share_player_files() {
+    let world_dir = temp_dir("identity");
+    let mut properties = ServerProperties::default();
+    properties.bind = "127.0.0.1".into();
+    properties.port = 26000 + (std::process::id() as u16 % 500);
+    properties.world_dir = world_dir.clone();
+    properties.view_distance = 4;
+    properties.simulation_distance = 2;
+    let mut runtime = ServerRuntime::new(properties).unwrap();
+    runtime.login_session(1, "foo_bar").unwrap();
+    assert!(runtime.login_session(2, "foo.bar").is_err());
+    assert!(runtime.login_session(3, "Alice/../Alice").is_err());
+    assert!(runtime.login_session(4, "CON").is_err());
+    assert!(runtime.login_session(5, "FOO_BAR").is_err());
+    assert_eq!(runtime.players.len(), 1);
+    runtime.logout_session(1).unwrap();
+    runtime.shutdown().unwrap();
+    assert!(world_dir.join("players").join("foo_bar.dat").exists());
+    assert!(!world_dir.join("players").join("foo.bar.dat").exists());
     fs::remove_dir_all(world_dir).unwrap();
 }
