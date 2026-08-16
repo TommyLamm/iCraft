@@ -38,7 +38,7 @@
 | 02 | [表現層拓撲改成單一 enum](02_presentation_topology_enum.md) | P0 | 已完成 | 無 |
 | 03 | [權威請求單一 dispatch](03_authority_single_dispatch.md) | P0 | 已完成 | 無 |
 | 04 | [TCP 測試 helper 收斂](04_tcp_test_helpers.md) | P0 | 已完成 | 無 |
-| 05 | [Embedded 不再建 desktop 存檔工人](05_embedded_save_ownership.md) | P1 | 待實作 | 無 |
+| 05 | [Embedded 不再建 desktop 存檔工人](05_embedded_save_ownership.md) | P1 | 已完成 | 無 |
 | 06 | [點擊／物品欄／挖掘 cancel 去重](06_presentation_click_and_inventory.md) | P1 | 待實作 | 02 |
 | 07 | [世界 tick helper 與 signed-Y 掃描](07_world_helpers_and_signed_y.md) | P1 | 待實作 | 無 |
 | 08 | [網路 leftover 只收不發](08_network_legacy_egress.md) | P1 | 待實作 | 無 |

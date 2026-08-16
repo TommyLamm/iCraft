@@ -2419,10 +2419,7 @@ impl State {
         let saved_chunk = self
             .save_manager
             .as_ref()
-            .expect("authoritative world owns SaveManager")
-            .lock()
-            .unwrap()
-            .load_chunk_in(target, cx, cz);
+            .and_then(|manager| manager.lock().unwrap().load_chunk_in(target, cx, cz));
         let mut restore_ok = true;
         if let Some(saved) = saved_chunk {
             let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk)
@@ -6274,49 +6271,55 @@ impl State {
         // Join clients never own world persistence. They apply revision-gated
         // projections only and must not create a local save tree, chunk save
         // worker, or snapshot worker against `icraft_multiplayer_client`.
-        let (save_manager, save_tx, save_queue_stats, network_snapshot_worker) = if is_client {
-            (
-                None,
-                None,
-                std::sync::Arc::new(crate::save::SaveQueueStats::default()),
-                None,
-            )
-        } else {
-            let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
-                crate::save::SaveManager::new(&launch.world_dir),
-            ));
-            let save_tx = crate::save::spawn_save_worker(
-                std::sync::Arc::clone(&save_manager),
-                crate::save::SAVE_QUEUE_CAPACITY,
-            );
-            let save_queue_stats = save_tx.stats();
-            let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
-                std::sync::Arc::clone(&save_manager),
-                crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
-            );
-            (
-                Some(save_manager),
-                Some(save_tx),
-                save_queue_stats,
-                Some(network_snapshot_worker),
-            )
-        };
-        let current_dimension = if is_client {
+        // Embedded Singleplayer / listen-host already own the world through
+        // ServerRuntime; building a second SaveManager/SaveQueue would write
+        // mutation_revisions.bin and enqueue onto a leftover worker.
+        let (save_manager, save_tx, save_queue_stats, network_snapshot_worker) =
+            if is_client || in_process_authority {
+                (
+                    None,
+                    None,
+                    std::sync::Arc::new(crate::save::SaveQueueStats::default()),
+                    None,
+                )
+            } else {
+                // Leftover LegacyOwner: keep desktop SaveQueue semantics for
+                // tests/paths that still construct a presentation-owned world.
+                let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::save::SaveManager::new(&launch.world_dir),
+                ));
+                let save_tx = crate::save::spawn_save_worker(
+                    std::sync::Arc::clone(&save_manager),
+                    crate::save::SAVE_QUEUE_CAPACITY,
+                );
+                let save_queue_stats = save_tx.stats();
+                let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
+                    std::sync::Arc::clone(&save_manager),
+                    crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
+                );
+                (
+                    Some(save_manager),
+                    Some(save_tx),
+                    save_queue_stats,
+                    Some(network_snapshot_worker),
+                )
+            };
+        let current_dimension = if is_client || in_process_authority {
             crate::dimension::Dimension::Overworld
         } else {
             save_manager
                 .as_ref()
-                .expect("authoritative world owns SaveManager")
+                .expect("legacy owner owns SaveManager")
                 .lock()
                 .unwrap()
                 .load_current_dimension()
         };
-        let mut mutation_revisions = if is_client {
+        let mut mutation_revisions = if is_client || in_process_authority {
             crate::save::MutationRevisionIndex::default()
         } else {
             save_manager
                 .as_ref()
-                .expect("authoritative world owns SaveManager")
+                .expect("legacy owner owns SaveManager")
                 .lock()
                 .unwrap()
                 .load_mutation_revision_index()
@@ -11376,16 +11379,12 @@ impl State {
             return Ok(());
         }
         if let Some(runtime) = self.embedded_runtime.as_mut() {
+            let world_dir = runtime.runtime.properties.world_dir.clone();
             runtime
                 .save_all()
                 .map_err(|error| crate::save::SaveError::Io {
                     operation: "embedded runtime save",
-                    path: self
-                        .save_manager
-                        .as_ref()
-                        .and_then(|manager| manager.lock().ok())
-                        .map(|manager| manager.world_dir.clone())
-                        .unwrap_or_else(|| std::path::PathBuf::from("world")),
+                    path: world_dir,
                     message: error.to_string(),
                 })?;
             return Ok(());

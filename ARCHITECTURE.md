@@ -63,7 +63,9 @@ All server-side paths -> AuthorityCore -> one ServerWorld per loaded dimension
   snapshot workers; a missing/corrupt authoritative payload leaves the column
   absent.
 - Embedded presentation starts without loading `player.dat` or pre-materializing
-  a spawn halo. Player state and terrain arrive from `ServerRuntime` projections.
+  a spawn halo, and does not construct a presentation `SaveManager`, chunk-save
+  worker, or network-snapshot worker. Player state and terrain arrive from
+  `ServerRuntime` projections.
 - `AuthorityBoundary` is a thin `AuthorityCore` helper retained for unit tests;
   it is not the current desktop Singleplayer/Host runtime path.
 
@@ -242,9 +244,11 @@ clamped to 1×1), while Timeout skips the present without retry/log churn.
 - Rayon workers generate/load chunks and mesh owned section snapshots. Results
   carry dimension, generation, lifetime, and revision identities and are
   discarded if stale.
-- `save.rs` provides the desktop bounded latest-wins save worker with retryable
-  failures. The active `ServerRuntime` authority performs its own autosave and
-  synchronous shutdown flush through `SaveManager`.
+- `save.rs` provides the leftover desktop bounded latest-wins save worker for
+  `LegacyOwner` construction and unit tests. The active `ServerRuntime`
+  authority performs its own autosave and synchronous shutdown flush through
+  `SaveManager`. Embedded Singleplayer / listen-host presentation does not
+  spawn that worker.
 
 ## Persistence, settings, and assets
 

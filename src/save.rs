@@ -385,6 +385,11 @@ pub enum NetworkSnapshotSubmitError {
     Closed,
 }
 
+/// Leftover Host join catch-up encoder. Not an authority save path.
+///
+/// Embedded Singleplayer / listen-host do not construct this worker;
+/// `process_join_catchups` already returns when `has_in_process_runtime()`.
+/// `ServerRuntime` is the only writer of `mutation_revisions.bin`.
 pub struct NetworkSnapshotWorker {
     tx: std::sync::mpsc::SyncSender<NetworkSnapshotWorkerCommand>,
     rx: std::sync::mpsc::Receiver<NetworkSnapshotWorkerResult>,
@@ -2052,6 +2057,10 @@ struct SaveQueueInner {
     producers: AtomicU64,
 }
 
+/// Desktop bounded latest-wins leftover save worker.
+///
+/// Live Singleplayer / Host persist through `ServerRuntime::save_all`.
+/// This queue remains for leftover `LegacyOwner` construction and unit tests.
 pub struct SaveQueue {
     inner: Arc<SaveQueueInner>,
 }
