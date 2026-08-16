@@ -5160,14 +5160,15 @@ impl NetworkHandle {
     }
 
     fn request_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
-        if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = crate::perf::tracked_send(
-                game_to_client,
-                crate::network::client::GameToClient::RequestBlockChange { x, y, z, block },
-                std::mem::size_of::<crate::network::client::GameToClient>() as u64,
-                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-            );
-        }
+        let Some(request) = crate::network::protocol::wrap_legacy(
+            0,
+            0,
+            0,
+            crate::network::protocol::LegacyGameplay::BlockChange { x, y, z, block },
+        ) else {
+            return;
+        };
+        self.request_gameplay(request);
     }
 
     /// Publish one already-typed gameplay operation to a joining client.
@@ -5194,21 +5195,22 @@ impl NetworkHandle {
         block: u32,
         held_item: Option<crate::network::protocol::ItemWire>,
     ) {
-        if let NetworkHandle::Client { game_to_client, .. } = self {
-            let _ = crate::perf::tracked_send(
-                game_to_client,
-                crate::network::client::GameToClient::RequestBlockAction {
-                    action,
-                    x,
-                    y,
-                    z,
-                    block,
-                    held_item,
-                },
-                std::mem::size_of::<crate::network::client::GameToClient>() as u64,
-                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
-            );
-        }
+        let Some(request) = crate::network::protocol::wrap_legacy(
+            0,
+            0,
+            0,
+            crate::network::protocol::LegacyGameplay::BlockAction {
+                action,
+                x,
+                y,
+                z,
+                block,
+                held_item,
+            },
+        ) else {
+            return;
+        };
+        self.request_gameplay(request);
     }
 
     /// Host-only: fan a block mutation out to every connected client. The host

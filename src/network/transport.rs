@@ -53,16 +53,23 @@ impl Connection {
 }
 
 impl ConnectionReader {
+    /// Fill `buf` up to `need` bytes. Header and body stay separate await
+    /// points so cancellation between them still leaves `frame_len` latched.
+    async fn read_exact_into(&mut self, need: usize) -> io::Result<()> {
+        while self.buf.len() < need {
+            let mut tmp = [0u8; 4096];
+            let n = self.stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
+            }
+            self.buf.extend_from_slice(&tmp[..n]);
+        }
+        Ok(())
+    }
+
     pub async fn recv(&mut self) -> io::Result<Packet> {
         if self.frame_len.is_none() {
-            while self.buf.len() < LEN_HEADER {
-                let mut tmp = [0u8; 4096];
-                let n = self.stream.read(&mut tmp).await?;
-                if n == 0 {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
-                }
-                self.buf.extend_from_slice(&tmp[..n]);
-            }
+            self.read_exact_into(LEN_HEADER).await?;
             let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
             if len as usize > MAX_PACKET_SIZE {
                 return Err(io::Error::new(
@@ -75,14 +82,7 @@ impl ConnectionReader {
         }
 
         let need = self.frame_len.unwrap();
-        while self.buf.len() < need {
-            let mut tmp = [0u8; 4096];
-            let n = self.stream.read(&mut tmp).await?;
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "early eof"));
-            }
-            self.buf.extend_from_slice(&tmp[..n]);
-        }
+        self.read_exact_into(need).await?;
 
         let body: Vec<u8> = self.buf.drain(0..need).collect();
         self.frame_len = None;

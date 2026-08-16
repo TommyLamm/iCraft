@@ -8,10 +8,10 @@ use tokio::net::TcpStream;
 use tokio::time::{self, Instant};
 
 use super::protocol::{
-    Action, EntityStateWire, GameplayRequest, GameplayResponse, LightningStrike, Packet,
-    PlayerEffectWire, PlayerId, SessionGameplayWire, PROTOCOL_VERSION,
+    wrap_legacy, Action, EntityStateWire, GameplayRequest, GameplayResponse, LegacyGameplay,
+    LightningStrike, Packet, PlayerEffectWire, PlayerId, SessionGameplayWire, PROTOCOL_VERSION,
 };
-use super::transport::Connection;
+use super::transport::{Connection, ConnectionWriter};
 
 /// Bounded network-client → game-thread queue. A malicious server cannot grow
 /// this without bound; sustained overflow disconnects the join client.
@@ -645,28 +645,37 @@ fn prepare_gameplay_request(
 }
 
 fn legacy_gameplay_request(
-    operation: crate::network::protocol::GameplayOperation,
+    leftover: LegacyGameplay,
     dimension: u8,
     client_revision: u64,
     player_id: PlayerId,
     next_request_id: &mut crate::network::protocol::RequestId,
     last_client_sequence: &mut u64,
     last_client_revision: &mut u64,
-) -> GameplayRequest {
-    prepare_gameplay_request(
-        GameplayRequest {
-            request_id: 0,
-            client_sequence: 0,
-            session_id: player_id,
-            dimension,
-            client_revision,
-            operation,
-        },
+) -> Option<GameplayRequest> {
+    Some(prepare_gameplay_request(
+        wrap_legacy(player_id, dimension, client_revision, leftover)?,
         player_id,
         next_request_id,
         last_client_sequence,
         last_client_revision,
-    )
+    ))
+}
+
+async fn send_or_die(
+    writer: &mut ConnectionWriter,
+    packet: &Packet,
+    client_to_game: &ClientEventSender,
+    what: &str,
+) -> Result<(), ()> {
+    if writer.send(packet).await.is_err() {
+        eprintln!("[NetworkClient] Disconnecting: failed to send {what}");
+        let _ = client_to_game.send(ClientToGame::Disconnected {
+            reason: "connection lost".into(),
+        });
+        return Err(());
+    }
+    Ok(())
 }
 
 impl NetworkClient {
@@ -1157,83 +1166,100 @@ async fn run_client(
                             pitch,
                         )),
                         Ok(GameToClient::SendAction { action }) => {
-                            if writer.send(&Packet::PlayerAction { protocol_version: PROTOCOL_VERSION, id: player_id, action }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send PlayerAction");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::PlayerAction { protocol_version: PROTOCOL_VERSION, id: player_id, action },
+                                &client_to_game,
+                                "PlayerAction",
+                            ).await.is_err() {
                                 return;
                             }
                         }
                         Ok(GameToClient::RequestBlockChange { x, y, z, block }) => {
-                            let request = legacy_gameplay_request(
-                                crate::network::protocol::GameplayOperation::BlockUse { x, y, z, block },
+                            let Some(request) = legacy_gameplay_request(
+                                LegacyGameplay::BlockChange { x, y, z, block },
                                 current_dimension,
                                 last_client_revision,
                                 player_id,
                                 &mut next_request_id,
                                 &mut last_client_sequence,
                                 &mut last_client_revision,
-                            );
-                            if writer.send(&Packet::GameplayRequest {
-                                protocol_version: PROTOCOL_VERSION,
-                                request,
-                            }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy BlockChange envelope");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            ) else {
+                                continue;
+                            };
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::GameplayRequest {
+                                    protocol_version: PROTOCOL_VERSION,
+                                    request,
+                                },
+                                &client_to_game,
+                                "legacy BlockChange envelope",
+                            ).await.is_err() {
                                 return;
                             }
                         }
                         Ok(GameToClient::RequestBlockAction { action, x, y, z, block, held_item }) => {
-                            let Some(operation) = crate::network::protocol::GameplayOperation::from_legacy_block_action(
-                                action, x, y, z, block, held_item,
-                            ) else {
-                                continue;
-                            };
-                            let request = legacy_gameplay_request(
-                                operation,
+                            let Some(request) = legacy_gameplay_request(
+                                LegacyGameplay::BlockAction {
+                                    action,
+                                    x,
+                                    y,
+                                    z,
+                                    block,
+                                    held_item,
+                                },
                                 current_dimension,
                                 last_client_revision,
                                 player_id,
                                 &mut next_request_id,
                                 &mut last_client_sequence,
                                 &mut last_client_revision,
-                            );
-                            if writer.send(&Packet::GameplayRequest {
-                                protocol_version: PROTOCOL_VERSION,
-                                request,
-                            }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send leftover BlockAction envelope");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            ) else {
+                                continue;
+                            };
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::GameplayRequest {
+                                    protocol_version: PROTOCOL_VERSION,
+                                    request,
+                                },
+                                &client_to_game,
+                                "leftover BlockAction envelope",
+                            ).await.is_err() {
                                 return;
                             }
                         }
                         Ok(GameToClient::SendChat { message }) => {
-                            if writer.send(&Packet::ChatMessage { protocol_version: PROTOCOL_VERSION, sender: username.clone(), message }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send ChatMessage");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::ChatMessage { protocol_version: PROTOCOL_VERSION, sender: username.clone(), message },
+                                &client_to_game,
+                                "ChatMessage",
+                            ).await.is_err() {
                                 return;
                             }
                         }
                         Ok(GameToClient::ContainerOpenRequest { dimension, x, y, z }) => {
                             current_dimension = dimension;
                             active_container = Some((dimension, x, y, z));
-                            let request = legacy_gameplay_request(
-                                crate::network::protocol::GameplayOperation::Container {
-                                    action: 0,
-                                    x,
-                                    y,
-                                    z,
-                                    slot: 0,
-                                },
+                            let Some(request) = legacy_gameplay_request(
+                                LegacyGameplay::ContainerOpen { x, y, z },
                                 dimension,
                                 last_client_revision,
                                 player_id,
                                 &mut next_request_id,
                                 &mut last_client_sequence,
                                 &mut last_client_revision,
-                            );
-                            if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy ContainerOpen envelope");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            ) else {
+                                continue;
+                            };
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request },
+                                &client_to_game,
+                                "legacy ContainerOpen envelope",
+                            ).await.is_err() {
                                 return;
                             }
                         }
@@ -1247,82 +1273,83 @@ async fn run_client(
                             if active_dimension != dimension {
                                 continue;
                             }
-                            let operation = if dragged.is_some() || !is_left {
-                                crate::network::protocol::GameplayOperation::ContainerClick {
+                            let Some(request) = legacy_gameplay_request(
+                                LegacyGameplay::ContainerClick {
                                     x,
                                     y,
                                     z,
                                     slot: slot_index,
                                     is_left,
                                     dragged,
-                                }
-                            } else {
-                                crate::network::protocol::GameplayOperation::Container {
-                                    action: 1,
-                                    x,
-                                    y,
-                                    z,
-                                    slot: slot_index,
-                                }
-                            };
-                            let request = legacy_gameplay_request(
-                                operation,
+                                },
                                 dimension,
                                 revision,
                                 player_id,
                                 &mut next_request_id,
                                 &mut last_client_sequence,
                                 &mut last_client_revision,
-                            );
-                            if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy ContainerClick envelope");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            ) else {
+                                continue;
+                            };
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request },
+                                &client_to_game,
+                                "legacy ContainerClick envelope",
+                            ).await.is_err() {
                                 return;
                             }
                         }
                         Ok(GameToClient::ContainerClose { dimension, x, y, z }) => {
-                            let request = legacy_gameplay_request(
-                                crate::network::protocol::GameplayOperation::Container {
-                                    action: 2,
-                                    x,
-                                    y,
-                                    z,
-                                    slot: 0,
-                                },
+                            let Some(request) = legacy_gameplay_request(
+                                LegacyGameplay::ContainerClose { x, y, z },
                                 dimension,
                                 last_client_revision,
                                 player_id,
                                 &mut next_request_id,
                                 &mut last_client_sequence,
                                 &mut last_client_revision,
-                            );
+                            ) else {
+                                continue;
+                            };
                             active_container = None;
-                            if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy ContainerClose envelope");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request },
+                                &client_to_game,
+                                "legacy ContainerClose envelope",
+                            ).await.is_err() {
                                 return;
                             }
                         }
                         Ok(GameToClient::PlayerRespawnRequest) => {
-                            if writer.send(&Packet::PlayerRespawnRequest { protocol_version: PROTOCOL_VERSION }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send PlayerRespawnRequest");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::PlayerRespawnRequest { protocol_version: PROTOCOL_VERSION },
+                                &client_to_game,
+                                "PlayerRespawnRequest",
+                            ).await.is_err() {
                                 return;
                             }
                         }
                         Ok(GameToClient::SleepRequest { x, y, z }) => {
-                            let request = legacy_gameplay_request(
-                                crate::network::protocol::GameplayOperation::Sleep { x, y, z },
+                            let Some(request) = legacy_gameplay_request(
+                                LegacyGameplay::Sleep { x, y, z },
                                 current_dimension,
                                 last_client_revision,
                                 player_id,
                                 &mut next_request_id,
                                 &mut last_client_sequence,
                                 &mut last_client_revision,
-                            );
-                            if writer.send(&Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request }).await.is_err() {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send legacy Sleep envelope");
-                                let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
+                            ) else {
+                                continue;
+                            };
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request },
+                                &client_to_game,
+                                "legacy Sleep envelope",
+                            ).await.is_err() {
                                 return;
                             }
                         }
@@ -1334,18 +1361,15 @@ async fn run_client(
                                 &mut last_client_sequence,
                                 &mut last_client_revision,
                             );
-                            if writer
-                                .send(&Packet::GameplayRequest {
+                            if send_or_die(
+                                &mut writer,
+                                &Packet::GameplayRequest {
                                     protocol_version: PROTOCOL_VERSION,
                                     request,
-                                })
-                                .await
-                                .is_err()
-                            {
-                                eprintln!("[NetworkClient] Disconnecting: failed to send GameplayRequest");
-                                let _ = client_to_game.send(ClientToGame::Disconnected {
-                                    reason: "connection lost".into(),
-                                });
+                                },
+                                &client_to_game,
+                                "GameplayRequest",
+                            ).await.is_err() {
                                 return;
                             }
                         }
@@ -1372,8 +1396,9 @@ async fn run_client(
                     pitch,
                 )) = latest_position
                 {
-                    if writer
-                        .send(&Packet::PlayerPosition {
+                    if send_or_die(
+                        &mut writer,
+                        &Packet::PlayerPosition {
                             protocol_version: PROTOCOL_VERSION,
                             id: player_id,
                             sequence,
@@ -1383,14 +1408,13 @@ async fn run_client(
                             z,
                             yaw,
                             pitch,
-                        })
-                        .await
-                        .is_err()
+                        },
+                        &client_to_game,
+                        "PlayerPosition",
+                    )
+                    .await
+                    .is_err()
                     {
-                        eprintln!("[NetworkClient] Disconnecting: failed to send PlayerPosition");
-                        let _ = client_to_game.send(ClientToGame::Disconnected {
-                            reason: "connection lost".into(),
-                        });
                         return;
                     }
                 }

@@ -9,9 +9,11 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, Notify};
 use tokio::time::{self, Instant};
 
+#[cfg(test)]
+use super::protocol::GameplayOperation;
 use super::protocol::{
-    Action, EntityStateWire, GameplayOperation, GameplayRequest, GameplayResponse, LightningStrike,
-    Packet, PlayerEffectWire, PlayerId, RejectReason, RequestId, ServerSequence,
+    wrap_legacy, Action, EntityStateWire, GameplayRequest, GameplayResponse, LegacyGameplay,
+    LightningStrike, Packet, PlayerEffectWire, PlayerId, RejectReason, RequestId, ServerSequence,
     SessionGameplayWire, PROTOCOL_VERSION,
 };
 use super::transport::Connection;
@@ -1430,22 +1432,14 @@ impl<S: HostEventSender> NetworkServer<S> {
 
     fn legacy_gameplay_request(
         session: &mut ClientSession,
+        leftover: LegacyGameplay,
         dimension: u8,
         client_revision: u64,
-        operation: GameplayOperation,
-    ) -> GameplayRequest {
-        let session_id = session.id;
-        Self::prepare_gameplay_request(
+    ) -> Option<GameplayRequest> {
+        Some(Self::prepare_gameplay_request(
             session,
-            GameplayRequest {
-                request_id: 0,
-                client_sequence: 0,
-                session_id,
-                dimension,
-                client_revision,
-                operation,
-            },
-        )
+            wrap_legacy(session.id, dimension, client_revision, leftover)?,
+        ))
     }
 
     /// Apply transport/session gates once for both native envelopes and legacy
@@ -1984,10 +1978,11 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 };
                                 Self::legacy_gameplay_request(
                                     session,
+                                    LegacyGameplay::BlockChange { x, y, z, block },
                                     dimension,
                                     revision,
-                                    GameplayOperation::BlockUse { x, y, z, block },
                                 )
+                                .expect("BlockChange leftover always wraps")
                             };
                             if let Err(reason) = Self::route_gameplay_request(
                                 &sessions,
@@ -2011,13 +2006,6 @@ impl<S: HostEventSender> NetworkServer<S> {
                             held_item,
                             ..
                         })) => {
-                            let Some(operation) = GameplayOperation::from_legacy_block_action(
-                                action, x, y, z, block, held_item,
-                            ) else {
-                                // Action::Use has no BlockAction kind. Do not
-                                // invent Place/StartBreak or fall back to BlockUse.
-                                continue;
-                            };
                             let request = {
                                 let mut sessions_guard = sessions.lock().await;
                                 let Some(session) = sessions_guard.get_mut(&id) else {
@@ -2026,10 +2014,22 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 };
                                 Self::legacy_gameplay_request(
                                     session,
+                                    LegacyGameplay::BlockAction {
+                                        action,
+                                        x,
+                                        y,
+                                        z,
+                                        block,
+                                        held_item,
+                                    },
                                     session.gameplay.current_dimension,
                                     session.gameplay.last_client_revision,
-                                    operation,
                                 )
+                            };
+                            let Some(request) = request else {
+                                // Action::Use has no BlockAction kind. Do not
+                                // invent Place/StartBreak or fall back to BlockUse.
+                                continue;
                             };
                             if let Err(reason) = Self::route_gameplay_request(
                                 &sessions,
@@ -2092,10 +2092,11 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 let revision = session.gameplay.last_client_revision;
                                 Self::legacy_gameplay_request(
                                     session,
+                                    LegacyGameplay::Sleep { x, y, z },
                                     dimension,
                                     revision,
-                                    GameplayOperation::Sleep { x, y, z },
                                 )
+                                .expect("Sleep leftover always wraps")
                             };
                             if let Err(reason) = Self::route_gameplay_request(
                                 &sessions,
@@ -2120,16 +2121,11 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 session.gameplay.active_container = Some((dimension, x, y, z));
                                 Self::legacy_gameplay_request(
                                     session,
+                                    LegacyGameplay::ContainerOpen { x, y, z },
                                     dimension,
                                     session.gameplay.last_client_revision,
-                                    GameplayOperation::Container {
-                                        action: 0,
-                                        x,
-                                        y,
-                                        z,
-                                        slot: 0,
-                                    },
                                 )
+                                .expect("ContainerOpen leftover always wraps")
                             };
                             if let Err(reason) = Self::route_gameplay_request(
                                 &sessions,
@@ -2161,33 +2157,19 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 match session.gameplay.active_container {
                                     Some((active_dimension, x, y, z))
                                         if active_dimension == dimension => {
-                                            let operation = if dragged.is_some() || !is_left {
-                                                GameplayOperation::ContainerClick {
+                                            Self::legacy_gameplay_request(
+                                                session,
+                                                LegacyGameplay::ContainerClick {
                                                     x,
                                                     y,
                                                     z,
                                                     slot: slot_index,
                                                     is_left,
                                                     dragged,
-                                                }
-                                            } else {
-                                                GameplayOperation::Container {
-                                                    // The legacy boolean selects click
-                                                    // semantics, while the envelope action
-                                                    // identifies the container operation.
-                                                    action: 1,
-                                                    x,
-                                                    y,
-                                                    z,
-                                                    slot: slot_index,
-                                                }
-                                            };
-                                            Some(Self::legacy_gameplay_request(
-                                                session,
+                                                },
                                                 dimension,
                                                 revision,
-                                                operation,
-                                            ))
+                                            )
                                         }
                                     _ => None,
                                 }
@@ -2217,16 +2199,11 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 };
                                 let request = Self::legacy_gameplay_request(
                                     session,
+                                    LegacyGameplay::ContainerClose { x, y, z },
                                     dimension,
                                     session.gameplay.last_client_revision,
-                                    GameplayOperation::Container {
-                                        action: 2,
-                                        x,
-                                        y,
-                                        z,
-                                        slot: 0,
-                                    },
-                                );
+                                )
+                                .expect("ContainerClose leftover always wraps");
                                 session.gameplay.active_container = None;
                                 request
                             };

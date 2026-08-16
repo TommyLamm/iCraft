@@ -585,6 +585,123 @@ impl GameplayOperation {
     }
 }
 
+/// Leftover inbound adapters still accepted from old clients and tests.
+/// New Desktop/Join egress must send `GameplayRequest` instead.
+#[derive(Debug, Clone)]
+pub enum LegacyGameplay {
+    BlockChange {
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+    },
+    BlockAction {
+        action: Action,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u32,
+        held_item: Option<ItemWire>,
+    },
+    Sleep {
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    ContainerOpen {
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    ContainerClick {
+        x: i32,
+        y: i32,
+        z: i32,
+        slot: u16,
+        is_left: bool,
+        dragged: Option<ItemWire>,
+    },
+    ContainerClose {
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+}
+
+/// Shared leftover envelope. `request_id` / `client_sequence` stay 0 so each
+/// owner allocates through its existing prepare path. `Action::Use` returns
+/// `None` and is never synthesized as `BlockUse`.
+pub fn wrap_legacy(
+    session_id: PlayerId,
+    dimension: u8,
+    client_revision: u64,
+    leftover: LegacyGameplay,
+) -> Option<GameplayRequest> {
+    let operation = match leftover {
+        LegacyGameplay::BlockChange { x, y, z, block } => {
+            GameplayOperation::BlockUse { x, y, z, block }
+        }
+        LegacyGameplay::BlockAction {
+            action,
+            x,
+            y,
+            z,
+            block,
+            held_item,
+        } => GameplayOperation::from_legacy_block_action(action, x, y, z, block, held_item)?,
+        LegacyGameplay::Sleep { x, y, z } => GameplayOperation::Sleep { x, y, z },
+        LegacyGameplay::ContainerOpen { x, y, z } => GameplayOperation::Container {
+            action: 0,
+            x,
+            y,
+            z,
+            slot: 0,
+        },
+        LegacyGameplay::ContainerClick {
+            x,
+            y,
+            z,
+            slot,
+            is_left,
+            dragged,
+        } => {
+            if dragged.is_some() || !is_left {
+                GameplayOperation::ContainerClick {
+                    x,
+                    y,
+                    z,
+                    slot,
+                    is_left,
+                    dragged,
+                }
+            } else {
+                GameplayOperation::Container {
+                    action: 1,
+                    x,
+                    y,
+                    z,
+                    slot,
+                }
+            }
+        }
+        LegacyGameplay::ContainerClose { x, y, z } => GameplayOperation::Container {
+            action: 2,
+            x,
+            y,
+            z,
+            slot: 0,
+        },
+    };
+    Some(GameplayRequest {
+        request_id: 0,
+        client_sequence: 0,
+        session_id,
+        dimension,
+        client_revision,
+        operation,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockActionKind {
     StartBreak,
@@ -1470,6 +1587,7 @@ pub enum Packet {
         player_id: PlayerId,
         is_sleeping: bool,
     },
+    /// v19 reserved/unused. Discriminant must stay for bincode.
     OpenTradeWindow {
         protocol_version: u32,
         villager_id: u64,
@@ -1479,11 +1597,13 @@ pub enum Packet {
         #[serde(deserialize_with = "deserialize_bounded_vec")]
         offers: Vec<crate::village::trade::TradeOffer>,
     },
+    /// v19 reserved/unused. Discriminant must stay for bincode.
     ExecuteTradeRequest {
         protocol_version: u32,
         villager_id: u64,
         offer_index: u16,
     },
+    /// v19 reserved/unused. Discriminant must stay for bincode.
     ExecuteTradeResult {
         protocol_version: u32,
         success: bool,
@@ -1492,10 +1612,12 @@ pub enum Packet {
         villager_xp: u32,
         new_level: u8,
     },
+    /// v19 reserved/unused. Discriminant must stay for bincode.
     CloseTradeWindow {
         protocol_version: u32,
         villager_id: u64,
     },
+    /// v19 reserved/unused. Discriminant must stay for bincode.
     RaidStatusSync {
         protocol_version: u32,
         current_wave: u8,
@@ -1705,6 +1827,105 @@ mod tests {
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_eq!(p, decoded);
+    }
+
+    #[test]
+    fn wrap_legacy_use_stays_none_and_container_split_is_bit_identical() {
+        assert!(wrap_legacy(
+            7,
+            1,
+            9,
+            LegacyGameplay::BlockAction {
+                action: Action::Use,
+                x: 1,
+                y: 2,
+                z: 3,
+                block: 4,
+                held_item: None,
+            },
+        )
+        .is_none());
+        assert!(
+            GameplayOperation::from_legacy_block_action(Action::Use, 1, 2, 3, 4, None).is_none()
+        );
+
+        let left_empty = wrap_legacy(
+            7,
+            1,
+            9,
+            LegacyGameplay::ContainerClick {
+                x: 2,
+                y: 70,
+                z: 5,
+                slot: 4,
+                is_left: true,
+                dragged: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(left_empty.request_id, 0);
+        assert_eq!(left_empty.client_sequence, 0);
+        assert_eq!(left_empty.session_id, 7);
+        assert_eq!(left_empty.dimension, 1);
+        assert_eq!(left_empty.client_revision, 9);
+        assert!(matches!(
+            left_empty.operation,
+            GameplayOperation::Container {
+                action: 1,
+                x: 2,
+                y: 70,
+                z: 5,
+                slot: 4,
+            }
+        ));
+
+        let right = wrap_legacy(
+            7,
+            1,
+            9,
+            LegacyGameplay::ContainerClick {
+                x: 2,
+                y: 70,
+                z: 5,
+                slot: 4,
+                is_left: false,
+                dragged: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            right.operation,
+            GameplayOperation::ContainerClick {
+                x: 2,
+                y: 70,
+                z: 5,
+                slot: 4,
+                is_left: false,
+                dragged: None,
+            }
+        ));
+
+        let block = wrap_legacy(
+            3,
+            0,
+            1,
+            LegacyGameplay::BlockChange {
+                x: 3,
+                y: 80,
+                z: -4,
+                block: 7,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            block.operation,
+            GameplayOperation::BlockUse {
+                x: 3,
+                y: 80,
+                z: -4,
+                block: 7,
+            }
+        ));
     }
 
     #[test]

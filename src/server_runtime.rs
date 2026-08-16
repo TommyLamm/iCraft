@@ -19,8 +19,9 @@ use crate::dimension::Dimension;
 use crate::game_rules::{persisted_player_game_mode, ServerDifficulty, WorldRules};
 use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
-    ContainerAction, EntityStateWire, GameplayOperation, GameplayOutcome, GameplayRequest,
-    GameplayResponse, ItemWire, PlayerEffectWire, RejectReason, SessionGameplayWire,
+    wrap_legacy, ContainerAction, EntityStateWire, GameplayOperation, GameplayOutcome,
+    GameplayRequest, GameplayResponse, ItemWire, LegacyGameplay, PlayerEffectWire, RejectReason,
+    SessionGameplayWire,
 };
 use crate::network::server::{
     HostToServer, MeteredHostEventSender, NetworkMetrics, NetworkServer, ServerConfig, ServerToHost,
@@ -1619,14 +1620,18 @@ impl ServerRuntime {
                 block,
                 held_item,
             } => {
-                let Some(operation) =
-                    GameplayOperation::from_legacy_block_action(action, x, y, z, block, held_item)
-                else {
-                    return Ok(());
-                };
-                let Some(request) =
-                    self.legacy_request(id, self.session_revision(id).unwrap_or(0), operation)
-                else {
+                let Some(request) = self.legacy_request(
+                    id,
+                    self.session_revision(id).unwrap_or(0),
+                    LegacyGameplay::BlockAction {
+                        action,
+                        x,
+                        y,
+                        z,
+                        block,
+                        held_item,
+                    },
+                ) else {
                     return Ok(());
                 };
                 let response = self.handle_gameplay_request(request)?;
@@ -1642,7 +1647,7 @@ impl ServerRuntime {
                 let Some(request) = self.legacy_request(
                     id,
                     self.session_revision(id).unwrap_or(0),
-                    GameplayOperation::Sleep {
+                    LegacyGameplay::Sleep {
                         x: bed_x,
                         y: bed_y,
                         z: bed_z,
@@ -1664,13 +1669,7 @@ impl ServerRuntime {
                 let Some(request) = self.legacy_request(
                     id,
                     self.session_revision(id).unwrap_or(0),
-                    GameplayOperation::Container {
-                        action: ContainerAction::Open.to_wire(),
-                        x,
-                        y,
-                        z,
-                        slot: 0,
-                    },
+                    LegacyGameplay::ContainerOpen { x, y, z },
                 ) else {
                     return Ok(());
                 };
@@ -1740,13 +1739,7 @@ impl ServerRuntime {
                 let Some(request) = self.legacy_request(
                     id,
                     self.session_revision(id).unwrap_or(0),
-                    GameplayOperation::Container {
-                        action: ContainerAction::Close.to_wire(),
-                        x,
-                        y,
-                        z,
-                        slot: 0,
-                    },
+                    LegacyGameplay::ContainerClose { x, y, z },
                 ) else {
                     return Ok(());
                 };
@@ -2077,7 +2070,7 @@ impl ServerRuntime {
         let Some(request) = self.legacy_request(
             id,
             self.session_revision(id).unwrap_or(0),
-            GameplayOperation::BlockUse { x, y, z, block },
+            LegacyGameplay::BlockChange { x, y, z, block },
         ) else {
             return Ok(());
         };
@@ -2781,18 +2774,14 @@ impl ServerRuntime {
         &self,
         id: u64,
         client_revision: u64,
-        operation: GameplayOperation,
+        leftover: LegacyGameplay,
     ) -> Option<GameplayRequest> {
         let session = self.authority.session(id)?;
         let dimension = Dimension::from_wire(session.dimension)?;
-        Some(GameplayRequest {
-            request_id: self.authority.revision_for_dimension(dimension) as u128 + 1,
-            client_sequence: session.last_client_sequence.saturating_add(1).max(1),
-            session_id: id,
-            dimension: dimension as u8,
-            client_revision,
-            operation,
-        })
+        let mut request = wrap_legacy(id, dimension as u8, client_revision, leftover)?;
+        request.request_id = self.authority.revision_for_dimension(dimension) as u128 + 1;
+        request.client_sequence = session.last_client_sequence.saturating_add(1).max(1);
+        Some(request)
     }
 
     fn send_legacy_rejection(&mut self, to: u64, request_id: u128, reason: RejectReason) {
