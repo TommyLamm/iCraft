@@ -1,8 +1,7 @@
 use icraft::chunk_manager::ChunkManager;
 use icraft::dimension::Dimension;
 use icraft::presentation_inventory_policy::{
-    presentation_chunk_load_policy, presentation_may_generate_chunks,
-    presentation_may_mutate_chunks, schedule_presentation_chunk_load, MultiplayerRole,
+    presentation_chunk_load_policy, schedule_presentation_chunk_load, MultiplayerRole,
     PresentationChunkLoadPolicy,
 };
 use icraft::world::{BlockType, Chunk};
@@ -22,7 +21,6 @@ fn schedule_chunk_load_does_not_insert_generated_column_for_join_client() {
         presentation_chunk_load_policy(&role),
         PresentationChunkLoadPolicy::AwaitAuthoritativePayload
     );
-    assert!(!presentation_may_generate_chunks(&role));
 
     let mut manager = ChunkManager::new_in_dimension(2, Dimension::Overworld);
     let mut generated = false;
@@ -99,11 +97,16 @@ fn chunk_data_inserts_column_matching_payload_without_prior_worldgen() {
 
 #[test]
 fn join_client_must_not_mutate_presentation_chunks() {
-    assert!(!presentation_may_mutate_chunks(&join_client()));
-    assert!(presentation_may_mutate_chunks(
-        &MultiplayerRole::Singleplayer
-    ));
-    assert!(presentation_may_mutate_chunks(&MultiplayerRole::Host {
-        port: 25565
-    }));
+    assert_eq!(
+        presentation_chunk_load_policy(&join_client()),
+        PresentationChunkLoadPolicy::AwaitAuthoritativePayload
+    );
+    assert_eq!(
+        presentation_chunk_load_policy(&MultiplayerRole::Singleplayer),
+        PresentationChunkLoadPolicy::GenerateLocally
+    );
+    assert_eq!(
+        presentation_chunk_load_policy(&MultiplayerRole::Host { port: 25565 }),
+        PresentationChunkLoadPolicy::GenerateLocally
+    );
 }

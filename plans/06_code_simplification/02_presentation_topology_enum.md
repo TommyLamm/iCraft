@@ -30,15 +30,15 @@
 
 ## 精確 acceptance
 
-- [ ] 新增（或擴）一個公開、可 Copy 的 enum，語意至少覆蓋：
+- [x] 新增（或擴）一個公開、可 Copy 的 enum，語意至少覆蓋：
   - `Embedded`：Singleplayer／Host，有 in-process `ServerRuntime`
   - `JoinClient`：只吃投影
   - `LegacyOwner`：無 runtime 且非 Join（leftover 世界擁有者；現役選單啟動不應走到）
-- [ ] `State` 用 `role` + `embedded_runtime.is_some()` **導出**這個 enum，不得再讓呼叫端自己做 `a && !b`。
-- [ ] `presentation_inventory_policy.rs` 的決策函式改吃該 enum（或由其衍生的窄函式）。玩家物品欄 + Embedded 的 writeback 例外必須原樣保留，既有 4 個 policy 單元測繼續鎖定。
-- [ ] `should_mutate_presentation_world` 的布林簽名若還留著，只能是薄 wrapper，並標 deprecated／「測試相容」。生產呼叫改走 enum。
-- [ ] `presentation_may_generate_chunks`／`presentation_may_mutate_chunks` 若與 `presentation_chunk_load_policy` 等價：刪生產呼叫，測試改測一個函式。
-- [ ] 不得改變任何 mutation／投影／writeback 行為。不得刪 leftover `LegacyOwner` 路徑。
+- [x] `State` 用 `role` + `embedded_runtime.is_some()` **導出**這個 enum，不得再讓呼叫端自己做 `a && !b`。
+- [x] `presentation_inventory_policy.rs` 的決策函式改吃該 enum（或由其衍生的窄函式）。玩家物品欄 + Embedded 的 writeback 例外必須原樣保留，既有 4 個 policy 單元測繼續鎖定。
+- [x] `should_mutate_presentation_world` 的布林簽名若還留著，只能是薄 wrapper，並標 deprecated／「測試相容」。生產呼叫改走 enum。
+- [x] `presentation_may_generate_chunks`／`presentation_may_mutate_chunks` 若與 `presentation_chunk_load_policy` 等價：刪生產呼叫，測試改測一個函式。
+- [x] 不得改變任何 mutation／投影／writeback 行為。不得刪 leftover `LegacyOwner` 路徑。
 
 ## 預計檔案與測試
 
@@ -64,3 +64,47 @@
 - 把 `tick_simulation` 的 leftover body 搬到新檔（10）。
 - 刪 `LegacyOwner` 或禁止無 runtime 建構 `State`。
 - 改 `sync_authority_gameplay_from_local` 的允許欄位。
+
+## 實作與證據
+
+### 改了什麼
+
+- `src/presentation_inventory_policy.rs`：新增公開 `Copy` enum `PresentationTopology { Embedded, JoinClient, LegacyOwner }`。
+  - 建構：`from(role, has_in_process_runtime)`（Join 優先），以及測試相容 `from_bools(has_rt, is_client)`。
+  - 決策收斂到 enum methods：`should_mutate_world`（僅 LegacyOwner）、`should_sync_inventory`（僅 Embedded）、`inventory_decision`、`should_writeback_after_inventory_click`、`chunk_load_policy`。
+  - 真值表不變：
+
+    | | Embedded | JoinClient | LegacyOwner |
+    |---|---|---|---|
+    | should_mutate_world | false | false | true |
+    | should_sync inventory | true | false | false |
+    | writeback PlayerInventory | true | false | false |
+    | writeback other/None | false | false | false |
+    | ContainerSlot | SendAuthorityOp | SendAuthorityOp | LocalMutate |
+    | PlayerInventory | LocalMutate | Reject | LocalMutate |
+    | Workstation/Pickup/Farmland/Unsupported | Reject | Reject | LocalMutate |
+
+  - 舊布林 helper（`should_mutate_presentation_world` 等）改成薄 wrapper，標 deprecated／測試相容；`review_hardening_embedded_presentation` 仍用字面量呼叫。
+  - `presentation_may_*` 改成 `presentation_chunk_load_policy == GenerateLocally` 的薄別名。
+- `src/state.rs`：新增 `State::presentation_topology()`（`role` + `embedded_runtime.is_some()`）。
+  - 第三謂語 `is_authoritative() && !has_in_process_runtime` 及其反向全部改成 `presentation_topology().is_legacy_owner()`。
+  - inventory／writeback／chunk load／`apply_block_changes` 閘門改走 topology。Embedded submit、Join no-op、LegacyOwner 本地 mutate。
+  - 刪 `State::presentation_may_mutate_chunks`。
+  - 未改 `handle_click`／`handle_inventory_click` 函式體（只換閘門謂語）。未動 `sync_authority_gameplay_from_local` 允許欄位。未刪 `LegacyOwner`。
+- `src/menu.rs` 與 `tests/review_hardening_join_projection.rs`：`may_*` 測試改測 `presentation_chunk_load_policy`。未從 menu 再 export `PresentationTopology`。
+
+### 測試
+
+| 指令 | 結果 |
+|---|---|
+| `cargo test --lib presentation_inventory_policy::` | 4 passed |
+| `cargo test --bin icraft presentation_inventory_policy` | 4 passed |
+| `cargo test --test review_hardening_embedded_presentation -- --test-threads=1` | 4 passed |
+| `cargo test --test review_hardening_join_projection -- --test-threads=1` | 3 passed |
+| `cargo check --all-targets` | ok（既有 dead_code 警告，無新錯誤） |
+
+### 剩餘缺口
+
+- `is_authoritative()`／`has_in_process_runtime()` 仍是 accessor；Join-only（`!is_authoritative()` 單獨）與 runtime-only persist early-return 依計劃保留。
+- 布林 wrapper 與 `presentation_may_*` 仍公開，供 integration／舊呼叫；desktop bin 會對它們發 dead_code（與其他 leftover API 同類）。
+- Plan 06 仍負責拆 `handle_click`／`handle_inventory_click` 本體；Plan 10 仍負責搬 `tick_simulation` leftover body。

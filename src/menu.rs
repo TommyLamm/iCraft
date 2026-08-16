@@ -4308,8 +4308,7 @@ fn hash(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(127.1, 311.7)))
 mod tests {
     use super::*;
     use crate::presentation_inventory_policy::{
-        presentation_chunk_load_policy, presentation_may_generate_chunks,
-        presentation_may_mutate_chunks, schedule_presentation_chunk_load,
+        presentation_chunk_load_policy, schedule_presentation_chunk_load,
         PresentationChunkLoadPolicy,
     };
     use std::collections::HashMap;
@@ -4763,8 +4762,6 @@ mod tests {
             presentation_chunk_load_policy(&client),
             PresentationChunkLoadPolicy::AwaitAuthoritativePayload
         );
-        assert!(!presentation_may_generate_chunks(&client));
-        assert!(!presentation_may_mutate_chunks(&client));
 
         let mut generated = false;
         let loaded =
@@ -4779,12 +4776,10 @@ mod tests {
             presentation_chunk_load_policy(&MultiplayerRole::Singleplayer),
             PresentationChunkLoadPolicy::GenerateLocally
         );
-        assert!(presentation_may_generate_chunks(&MultiplayerRole::Host {
-            port: 25565
-        }));
-        assert!(presentation_may_mutate_chunks(
-            &MultiplayerRole::Singleplayer
-        ));
+        assert_eq!(
+            presentation_chunk_load_policy(&MultiplayerRole::Host { port: 25565 }),
+            PresentationChunkLoadPolicy::GenerateLocally
+        );
         assert_eq!(
             schedule_presentation_chunk_load(
                 presentation_chunk_load_policy(&MultiplayerRole::Singleplayer),

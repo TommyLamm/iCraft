@@ -24,9 +24,7 @@ use crate::physics::{
 use crate::player::{DamageSource, PlayerState};
 use crate::presentation_inventory_policy::MultiplayerRole;
 use crate::presentation_inventory_policy::{
-    presentation_inventory_decision, should_mutate_presentation_world,
-    should_sync_authority_inventory_from_local, should_writeback_after_inventory_click,
-    PresentationInventoryAction, PresentationInventoryTarget,
+    PresentationInventoryAction, PresentationInventoryTarget, PresentationTopology,
 };
 use crate::world::{
     Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
@@ -2082,13 +2080,14 @@ impl State {
         }
     }
     fn apply_block_changes(&mut self, changes: &[((i32, i32, i32), BlockType)]) {
-        if self.has_in_process_runtime() {
+        let topology = self.presentation_topology();
+        if topology.is_embedded() {
             for &((x, y, z), block) in changes {
                 let _ = self.submit_local_authority_block_use(x, y, z, block);
             }
             return;
         }
-        if !self.presentation_may_mutate_chunks() {
+        if topology.is_join_client() {
             return;
         }
         let mut dirty_chunks = std::collections::HashSet::new();
@@ -2189,11 +2188,10 @@ impl State {
         wz: i32,
         dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
     ) {
-        if presentation_inventory_decision(
-            self.has_in_process_runtime(),
-            !self.is_authoritative(),
-            PresentationInventoryTarget::UnsupportedBreak,
-        ) != PresentationInventoryAction::LocalMutate
+        if self
+            .presentation_topology()
+            .inventory_decision(PresentationInventoryTarget::UnsupportedBreak)
+            != PresentationInventoryAction::LocalMutate
         {
             return;
         }
@@ -2216,11 +2214,10 @@ impl State {
         cz: i32,
         dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
     ) {
-        if presentation_inventory_decision(
-            self.has_in_process_runtime(),
-            !self.is_authoritative(),
-            PresentationInventoryTarget::UnsupportedBreak,
-        ) != PresentationInventoryAction::LocalMutate
+        if self
+            .presentation_topology()
+            .inventory_decision(PresentationInventoryTarget::UnsupportedBreak)
+            != PresentationInventoryAction::LocalMutate
         {
             return;
         }
@@ -2572,7 +2569,7 @@ impl State {
         } else {
             None
         };
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             if let Some(((portal_x, portal_y, portal_z), portal_block)) = portal {
                 if self.portal_contact_time == 0.0 {
                     let _ = self.submit_local_authority_block_action(
@@ -7873,8 +7870,9 @@ impl State {
         !self.role.is_join_client()
     }
 
-    fn presentation_may_mutate_chunks(&self) -> bool {
-        crate::presentation_inventory_policy::presentation_may_mutate_chunks(&self.role)
+    /// Presentation topology derived from role + in-process runtime presence.
+    pub fn presentation_topology(&self) -> PresentationTopology {
+        PresentationTopology::from(&self.role, self.embedded_runtime.is_some())
     }
 
     /// True when this presentation root is backed by the shared headless
@@ -9787,7 +9785,7 @@ impl State {
                 state,
             } => {
                 if self.local_player_id != Some(player_id)
-                    || (!self.has_in_process_runtime() && self.is_authoritative())
+                    || (self.presentation_topology().is_legacy_owner())
                 {
                     return;
                 }
@@ -11979,7 +11977,7 @@ impl State {
             return;
         }
         if crate::presentation_inventory_policy::schedule_presentation_chunk_load(
-            crate::presentation_inventory_policy::presentation_chunk_load_policy(&self.role),
+            self.presentation_topology().chunk_load_policy(),
             || (),
         )
         .is_none()
@@ -12127,7 +12125,7 @@ impl State {
                         .collect_chunk_metadata(&self.chunk_manager, cx, cz)
                 });
                 if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                    if self.is_authoritative() && !self.has_in_process_runtime() {
+                    if self.presentation_topology().is_legacy_owner() {
                         if let (Some(revision), Some(redstone_metadata)) =
                             (revision, redstone_metadata)
                         {
@@ -12383,7 +12381,7 @@ impl State {
         if has_in_process_runtime {
             let _ = self.tick_authority_boundary();
         }
-        let authoritative = self.is_authoritative() && !has_in_process_runtime;
+        let authoritative = self.presentation_topology().is_legacy_owner();
 
         // Tick attack cooldown & shield disable ticks
         if self.player_state.attack_cooldown_ticks < self.player_state.attack_cooldown_max_ticks {
@@ -12394,7 +12392,7 @@ impl State {
         }
 
         // Tick item usage state machine
-        if has_in_process_runtime || !self.is_authoritative() {
+        if !authoritative {
             self.player_state.using_item = None;
         } else if self.inventory.is_open
             || self.is_paused
@@ -12793,11 +12791,10 @@ impl State {
         if self.player_physics.on_ground && !self.was_on_ground {
             if under_block == BlockType::Farmland
                 && (self.is_sprinting || old_pos.y - self.player_physics.position.y > 0.5)
-                && presentation_inventory_decision(
-                    self.has_in_process_runtime(),
-                    !self.is_authoritative(),
-                    PresentationInventoryTarget::FarmlandTrample,
-                ) == PresentationInventoryAction::LocalMutate
+                && self
+                    .presentation_topology()
+                    .inventory_decision(PresentationInventoryTarget::FarmlandTrample)
+                    == PresentationInventoryAction::LocalMutate
             {
                 self.apply_block_changes(&[((px, py, pz), BlockType::Dirt)]);
             }
@@ -12946,11 +12943,10 @@ impl State {
         // Dropped item & XP collection. Embedded / join-client presentations
         // wait for authority pickup + SessionGameplayUpdate / EntityDespawn.
         if self.game_mode_policy().can_pickup
-            && presentation_inventory_decision(
-                self.has_in_process_runtime(),
-                !self.is_authoritative(),
-                PresentationInventoryTarget::Pickup,
-            ) == PresentationInventoryAction::LocalMutate
+            && self
+                .presentation_topology()
+                .inventory_decision(PresentationInventoryTarget::Pickup)
+                == PresentationInventoryAction::LocalMutate
         {
             let player_pos = self.player_physics.position;
             let to_collect: Vec<u64> = self
@@ -13680,7 +13676,7 @@ impl State {
     }
 
     pub fn update_vehicles_and_fishing(&mut self, dt: f32) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             return;
         }
         if self.is_authoritative() {
@@ -13789,7 +13785,7 @@ impl State {
     }
 
     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             let response = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Mount {
                     entity_id: vehicle_id,
@@ -13815,7 +13811,7 @@ impl State {
     }
 
     pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Mount { entity_id: 0 },
             );
@@ -13840,7 +13836,7 @@ impl State {
     }
 
     pub fn use_fishing_rod(&mut self) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             let action = if self.fishing_manager.get_hook(0).is_some() {
                 1
             } else {
@@ -13887,7 +13883,7 @@ impl State {
 
     pub fn check_claim_furnace_xp(&mut self, slot: SlotType) {
         if matches!(slot, SlotType::ContainerSlot(2))
-            && (self.has_in_process_runtime() || !self.is_authoritative())
+            && (!self.presentation_topology().is_legacy_owner())
         {
             if let Some(pos) = self.container_target {
                 let count = self
@@ -13950,7 +13946,7 @@ impl State {
     }
 
     fn update_hopper_power_states(&mut self) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             return;
         }
         let mut positions = Vec::new();
@@ -13989,7 +13985,7 @@ impl State {
     }
 
     fn update_furnaces(&mut self, dt: f32) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             return;
         }
         self.furnace_tick_timer += dt;
@@ -14290,7 +14286,7 @@ impl State {
             self.game_mode,
             self.camera_look_allowed(),
         ) {
-            let authority_mining = self.has_in_process_runtime() || !self.is_authoritative();
+            let authority_mining = !self.presentation_topology().is_legacy_owner();
             let dir = Vec3::new(
                 self.camera.yaw.cos() * self.camera.pitch.cos(),
                 self.camera.pitch.sin(),
@@ -14394,7 +14390,7 @@ impl State {
                 self.mining_progress = 0.0;
             }
         } else {
-            let authority_mining = self.has_in_process_runtime() || !self.is_authoritative();
+            let authority_mining = !self.presentation_topology().is_legacy_owner();
             if authority_mining {
                 if let Some(previous) = self.mining_target {
                     let _ = self.submit_local_authority_block_action(
@@ -14640,7 +14636,7 @@ impl State {
             listener_right,
         );
 
-        if self.is_authoritative() && !self.has_in_process_runtime() {
+        if self.presentation_topology().is_legacy_owner() {
             for entity in &mut self.entity_manager.entities {
                 if entity.entity_type == crate::entity::EntityType::RemotePlayer {
                     continue;
@@ -14683,8 +14679,7 @@ impl State {
         let fire_y = strike.y;
         let support_y = fire_y - 1;
         let support = self.chunk_manager.get_block(strike.x, support_y, strike.z);
-        if self.is_authoritative()
-            && !self.has_in_process_runtime()
+        if self.presentation_topology().is_legacy_owner()
             && fire_y < CHUNK_HEIGHT as i32
             && support.properties().is_solid
             && !matches!(
@@ -14698,7 +14693,7 @@ impl State {
     }
 
     fn apply_weather_block_change(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             return;
         }
         let old = self.chunk_manager.get_block(wx, wy, wz);
@@ -14956,7 +14951,7 @@ impl State {
     }
 
     fn apply_redstone_update(&mut self, update: crate::redstone::RedstoneUpdate) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             return;
         }
         let mut dirty_chunks = std::collections::HashSet::new();
@@ -15172,7 +15167,7 @@ impl State {
     ) {
         use crate::inventory::{Item, ItemStack};
 
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             return;
         }
 
@@ -15699,7 +15694,7 @@ impl State {
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             let _ = self.submit_local_authority_block_action(
                 crate::network::protocol::BlockActionKind::StartBreak,
                 pos.x as i32,
@@ -16158,7 +16153,7 @@ impl State {
     }
 
     fn update_dropped_items_and_orbs(&mut self, dt: f32) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             return;
         }
         let mut remove_ids = Vec::new();
@@ -16769,7 +16764,7 @@ impl State {
     pub fn handle_primary_press(&mut self) -> bool {
         self.hand_swing_started_at = self.total_time;
         self.hand_swing_until = self.total_time + 0.25;
-        let melee_consumed = if self.has_in_process_runtime() || !self.is_authoritative() {
+        let melee_consumed = if !self.presentation_topology().is_legacy_owner() {
             self.submit_local_authority_combat()
         } else {
             self.is_authoritative() && self.try_melee_attack()
@@ -16809,7 +16804,7 @@ impl State {
     }
 
     fn try_melee_attack(&mut self) -> bool {
-        if !self.is_authoritative() || self.has_in_process_runtime() {
+        if !self.presentation_topology().is_legacy_owner() {
             return false;
         }
 
@@ -16942,7 +16937,7 @@ impl State {
             return;
         }
 
-        if (self.has_in_process_runtime() || !self.is_authoritative())
+        if (!self.presentation_topology().is_legacy_owner())
             && main_item != Item::Air
             && !main_item.properties().is_block
         {
@@ -17047,7 +17042,7 @@ impl State {
 
         // If mainhand didn't start an item use action, check Offhand item
         if self.player_state.using_item.is_none() {
-            if (self.has_in_process_runtime() || !self.is_authoritative())
+            if (!self.presentation_topology().is_legacy_owner())
                 && offhand_item != Item::Air
                 && !offhand_item.properties().is_block
             {
@@ -17193,7 +17188,7 @@ impl State {
                         }
                     }
 
-                    if self.is_authoritative() && !self.has_in_process_runtime() {
+                    if self.presentation_topology().is_legacy_owner() {
                         let dir = Vec3::new(
                             self.camera.yaw.cos() * self.camera.pitch.cos(),
                             self.camera.pitch.sin(),
@@ -18890,10 +18885,7 @@ impl State {
             return;
         }
         if matches!(slot, SlotType::ContainerSlot(_))
-            && !should_mutate_presentation_world(
-                self.has_in_process_runtime(),
-                !self.is_authoritative(),
-            )
+            && !self.presentation_topology().should_mutate_world()
         {
             return;
         }
@@ -18986,7 +18978,7 @@ impl State {
 
     pub fn handle_swap_offhand_pressed(&mut self) {
         if !self.is_chat_open && !self.is_paused && !self.player_state.is_dead {
-            if self.has_in_process_runtime() || !self.is_authoritative() {
+            if !self.presentation_topology().is_legacy_owner() {
                 return;
             }
             self.inventory.swap_offhand();
@@ -18997,10 +18989,7 @@ impl State {
 
     pub fn select_hotbar_slot(&mut self, slot: usize) {
         self.inventory.selected = slot.min(8);
-        if should_sync_authority_inventory_from_local(
-            self.has_in_process_runtime(),
-            !self.is_authoritative(),
-        ) {
+        if self.presentation_topology().should_sync_inventory() {
             self.sync_authority_gameplay_from_local();
         }
     }
@@ -19064,15 +19053,12 @@ impl State {
     }
 
     pub(crate) fn should_writeback_after_inventory_click(&self) -> bool {
-        should_writeback_after_inventory_click(
-            self.has_in_process_runtime(),
-            !self.is_authoritative(),
-            self.presentation_inventory_click_target(),
-        )
+        self.presentation_topology()
+            .should_writeback_after_inventory_click(self.presentation_inventory_click_target())
     }
 
     pub fn handle_inventory_click(&mut self, is_left: bool) {
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             let mouse_x = self.mouse_ndc[0];
             let mouse_y = self.mouse_ndc[1];
             if self.active_station == Some(StationKind::Merchant) && is_left {
@@ -19108,13 +19094,7 @@ impl State {
                 Some(_) => Some(PresentationInventoryTarget::PlayerInventory),
                 None => self.presentation_inventory_click_target(),
             };
-            match target.map(|target| {
-                presentation_inventory_decision(
-                    self.has_in_process_runtime(),
-                    !self.is_authoritative(),
-                    target,
-                )
-            }) {
+            match target.map(|target| self.presentation_topology().inventory_decision(target)) {
                 Some(PresentationInventoryAction::SendAuthorityOp) => {
                     if let Some((SlotType::ContainerSlot(slot), _, _, _, _)) = clicked_slot {
                         if let Some(position) = self.container_target {
@@ -19189,11 +19169,10 @@ impl State {
             && mouse_y >= -0.45
             && mouse_y <= 0.45
         {
-            if presentation_inventory_decision(
-                self.has_in_process_runtime(),
-                !self.is_authoritative(),
-                PresentationInventoryTarget::Workstation,
-            ) != PresentationInventoryAction::LocalMutate
+            if self
+                .presentation_topology()
+                .inventory_decision(PresentationInventoryTarget::Workstation)
+                != PresentationInventoryAction::LocalMutate
             {
                 return;
             }
@@ -19242,11 +19221,10 @@ impl State {
                 let y1 = 0.28 - index as f32 * 0.12;
                 let y0 = y1 - 0.09;
                 if mouse_x >= 0.02 && mouse_x <= 0.62 && mouse_y >= y0 && mouse_y <= y1 {
-                    if presentation_inventory_decision(
-                        self.has_in_process_runtime(),
-                        !self.is_authoritative(),
-                        PresentationInventoryTarget::Workstation,
-                    ) != PresentationInventoryAction::LocalMutate
+                    if self
+                        .presentation_topology()
+                        .inventory_decision(PresentationInventoryTarget::Workstation)
+                        != PresentationInventoryAction::LocalMutate
                     {
                         return;
                     }
@@ -19331,11 +19309,10 @@ impl State {
                     }
                 }
                 SlotType::AnvilOutput => {
-                    if presentation_inventory_decision(
-                        self.has_in_process_runtime(),
-                        !self.is_authoritative(),
-                        PresentationInventoryTarget::Workstation,
-                    ) != PresentationInventoryAction::LocalMutate
+                    if self
+                        .presentation_topology()
+                        .inventory_decision(PresentationInventoryTarget::Workstation)
+                        != PresentationInventoryAction::LocalMutate
                     {
                         return;
                     }
@@ -19355,11 +19332,7 @@ impl State {
                     }
                 }
                 SlotType::ContainerSlot(slot_index)
-                    if self.has_in_process_runtime()
-                        || matches!(
-                            self.role,
-                            crate::presentation_inventory_policy::MultiplayerRole::Client { .. }
-                        ) =>
+                    if !self.presentation_topology().is_legacy_owner() =>
                 {
                     if self.has_in_process_runtime() {
                         if let Some(container_pos) = self.container_target {
@@ -19616,10 +19589,7 @@ impl State {
                 }
             }
         } else if let Some(dragged) = self.inventory.dragged {
-            if !should_mutate_presentation_world(
-                self.has_in_process_runtime(),
-                !self.is_authoritative(),
-            ) {
+            if !self.presentation_topology().should_mutate_world() {
                 return;
             }
             let aspect = self.size.width as f32 / self.size.height as f32;
@@ -19649,11 +19619,10 @@ impl State {
     }
 
     fn perform_enchantment(&mut self, index: usize) {
-        if presentation_inventory_decision(
-            self.has_in_process_runtime(),
-            !self.is_authoritative(),
-            PresentationInventoryTarget::Workstation,
-        ) != PresentationInventoryAction::LocalMutate
+        if self
+            .presentation_topology()
+            .inventory_decision(PresentationInventoryTarget::Workstation)
+            != PresentationInventoryAction::LocalMutate
         {
             return;
         }
@@ -20053,7 +20022,7 @@ impl State {
         if offer_index >= self.active_merchant_offers.len() {
             return false;
         }
-        if self.has_in_process_runtime() || !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             let response = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Trade {
                     villager_id,
