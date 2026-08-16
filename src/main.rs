@@ -1,73 +1,32 @@
-pub mod accessibility;
-pub mod advancements;
-pub mod ai;
+//! Desktop entrypoint.
+//!
+//! Shared gameplay/network modules come from the `icraft` library via
+//! `pub use` so desktop files can keep `crate::world` (and friends) without
+//! compiling those sources a second time. Desktop-only GPU/menu modules
+//! stay declared here and must not be added to `lib.rs`.
+
+pub use icraft::{
+    accessibility, advancements, audio, authority, block_entity, block_model, boss, brewing,
+    chunk_manager, chunk_render, chunk_schedule, commands, container_sessions, crafting, culling,
+    dimension, enchantment, entity, fishing, fluid, game_rules, gpu_frame_resources, interaction,
+    inventory, lighting, localization, mob, navigation, network, passive_mob, perf, physics,
+    player, presentation_click, presentation_inventory_policy, rail, redstone, resources, save,
+    server_runtime, server_world, structure, vehicle, village, weather, world, world_mutation,
+    world_tick,
+};
+
 mod app;
-pub mod audio;
-pub mod authority;
-pub mod block_entity;
-mod block_model;
-mod boss;
-mod brewing;
 mod camera;
-pub(crate) mod chunk_manager;
-mod chunk_render;
-mod chunk_schedule;
-pub mod commands;
-mod container_sessions;
-mod crafting;
-mod culling;
-mod dimension;
 #[allow(dead_code)]
 mod dynamic_resolution;
-mod enchantment;
-mod entity;
-#[cfg(any(test, feature = "harness"))]
-mod final_acceptance;
-pub mod fishing;
-mod fluid;
-pub mod game_rules;
-pub mod gpu_frame_resources;
 mod hand_renderer;
-mod interaction;
-mod inventory;
-mod lighting;
-pub mod localization;
-pub mod loot;
 mod menu;
 pub(crate) mod microbench;
-mod mob;
 mod mob_renderer;
-pub mod navigation;
-pub(crate) mod network;
 mod particles;
-mod passive_mob;
-mod perf;
-pub(crate) mod physics;
-mod player;
 mod presentation;
-mod presentation_click;
-mod presentation_inventory_policy;
-pub mod rail;
-pub mod recipes;
-mod redstone;
-pub mod resources;
-pub mod save;
-mod server_runtime;
-pub mod server_world;
-#[cfg(any(test, feature = "harness"))]
-mod sim_harness;
-pub mod spawning;
 mod state;
-pub mod structure;
 mod texture;
-pub mod vehicle;
-pub mod village;
-pub mod voxel_shape;
-mod weather;
-pub(crate) mod world;
-pub mod world_mutation;
-pub mod world_tick;
-mod worldgen;
 
 use app::App;
 use winit::event_loop::EventLoop;

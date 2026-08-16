@@ -2654,7 +2654,7 @@ fn is_random_tick(block: BlockType) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum BlockStorage {
+pub enum BlockStorage {
     Empty,
     Uniform(BlockType),
     Paletted1 {
@@ -2992,7 +2992,7 @@ impl BlockStorage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LightStorage {
+pub enum LightStorage {
     Uniform { sky: u8, block: u8 },
     Packed(Box<[u8; 4096]>),
 }

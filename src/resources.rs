@@ -1236,7 +1236,7 @@ fn parse_bitmap_font(bytes: &[u8]) -> Option<HashMap<char, [u8; 7]>> {
     Some(parsed)
 }
 
-pub(crate) fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
+pub fn sound_bytes_are_decodable(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
     }

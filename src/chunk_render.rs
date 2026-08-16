@@ -119,6 +119,30 @@ impl TerrainVertex {
             _ => 0.25,
         }
     }
+
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<TerrainVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Uint16x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Uint16x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Uint16x2,
+                },
+            ],
+        }
+    }
 }
 
 /// Axis-aligned bounds of the vertices actually present in a mesh.

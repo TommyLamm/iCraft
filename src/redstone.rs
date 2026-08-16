@@ -1679,7 +1679,7 @@ fn is_strong_source(block: BlockType) -> bool {
     )
 }
 
-pub(crate) fn is_component(block: BlockType) -> bool {
+pub fn is_component(block: BlockType) -> bool {
     matches!(
         block,
         BlockType::RedstoneWire

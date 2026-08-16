@@ -9,7 +9,7 @@ type BlockPos = (i32, i32, i32);
 
 /// Adds every chunk whose mesh can depend on a block at the supplied world position.
 /// AO corner samples make a diagonal chunk dependent on blocks at chunk corners.
-pub(crate) fn mark_block_mesh_dependencies(dirty: &mut HashSet<(i32, i32)>, wx: i32, wz: i32) {
+pub fn mark_block_mesh_dependencies(dirty: &mut HashSet<(i32, i32)>, wx: i32, wz: i32) {
     let cx = wx.div_euclid(CHUNK_WIDTH as i32);
     let cz = wz.div_euclid(CHUNK_DEPTH as i32);
     let lx = wx.rem_euclid(CHUNK_WIDTH as i32);
@@ -46,7 +46,7 @@ pub(crate) fn mark_block_mesh_dependencies(dirty: &mut HashSet<(i32, i32)>, wx: 
 /// Marks the owner section and only sections that can observe a one-cell halo
 /// sample (including edges/corners). This is the exact 3-D counterpart to the
 /// legacy chunk dependency helper.
-pub(crate) fn mark_section_mesh_dependencies(
+pub fn mark_section_mesh_dependencies(
     dirty: &mut HashSet<SectionKey>,
     wx: i32,
     wy: i32,
@@ -89,7 +89,7 @@ pub(crate) fn mark_section_mesh_dependencies(
     }
 }
 
-pub(crate) fn surrounding_chunk_coords(cx: i32, cz: i32) -> [(i32, i32); 8] {
+pub fn surrounding_chunk_coords(cx: i32, cz: i32) -> [(i32, i32); 8] {
     [
         (cx - 1, cz - 1),
         (cx, cz - 1),
@@ -140,7 +140,6 @@ pub struct ChunkManager {
 }
 
 impl ChunkManager {
-    #[cfg(test)]
     pub fn new(render_distance: i32) -> Self {
         Self::new_in_dimension(render_distance, crate::dimension::Dimension::Overworld)
     }
@@ -163,19 +162,19 @@ impl ChunkManager {
         mark_section_mesh_dependencies(&mut self.pending_section_mesh_invalidations, wx, wy, wz);
     }
 
-    pub(crate) fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
+    pub fn acknowledge_mesh_invalidation(&mut self, coord: &(i32, i32)) {
         self.pending_mesh_invalidations.remove(coord);
     }
 
-    pub(crate) fn drain_mesh_invalidations(&mut self) -> HashSet<(i32, i32)> {
+    pub fn drain_mesh_invalidations(&mut self) -> HashSet<(i32, i32)> {
         std::mem::take(&mut self.pending_mesh_invalidations)
     }
 
-    pub(crate) fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
+    pub fn acknowledge_section_mesh_invalidation(&mut self, key: &SectionKey) {
         self.pending_section_mesh_invalidations.remove(key);
     }
 
-    pub(crate) fn drain_section_mesh_invalidations(&mut self) -> HashSet<SectionKey> {
+    pub fn drain_section_mesh_invalidations(&mut self) -> HashSet<SectionKey> {
         std::mem::take(&mut self.pending_section_mesh_invalidations)
     }
 

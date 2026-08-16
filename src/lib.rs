@@ -1,29 +1,29 @@
 //! iCraft shared library.
 //!
-//! The desktop binary still owns the winit/wgpu application loop in
-//! `main.rs`. Keeping the simulation/network modules in a library target lets
-//! the dedicated server reuse the authoritative code without constructing a
-//! window, audio device, or GPU surface.
+//! The desktop binary owns the winit/wgpu application loop in `main.rs`
+//! and re-exports these modules (`pub use icraft::{world, …}`) so existing
+//! `crate::world` paths in the desktop tree still resolve. Shared source
+//! therefore compiles once, through this library.
 //!
 //! # Server / tests contract
 //!
-//! `icraft-server` and `tests/` may `use icraft::…` only the `pub` modules
-//! below: authority, world, network, persistence, and the thin
-//! `presentation_inventory_policy` cut. That set is the live contract.
+//! `icraft-server` and `tests/` may `use icraft::…` only the contract
+//! modules below: authority, world, network, persistence, and the thin
+//! `presentation_inventory_policy` cut. That set is the live server API.
 //!
-//! # Crate-internal / desktop-adjacent
+//! # Desktop-shared modules
 //!
-//! Everything else is `pub(crate)`. Those modules still compile into the
-//! library (mesh leftover, audio hooks, GPU frame bookkeeping) but are not
-//! a server or integration-test API. `sim_harness`, `final_acceptance`, and
-//! `microbench` compile only under `cfg(test)` or feature `harness`.
+//! Additional modules are `pub` so the desktop binary crate can re-export
+//! them. They are not a dedicated-server or integration-test API.
+//! `sim_harness`, `final_acceptance`, and `microbench` compile only under
+//! `cfg(test)` or feature `harness`.
 //!
 //! `src/presentation/` is the Plan 10 desktop fence and **must not** be
 //! added to this library. GPU menu, terrain arenas, and frame encode stay
 //! out of `icraft-server`.
 
-// Server / tests contract. Keep `pub` only for modules that `tests/` or
-// `src/bin/icraft-server.rs` actually `use icraft::…`.
+// Server / tests contract. Keep this set aligned with `tests/` and
+// `src/bin/icraft-server.rs` `use icraft::…` imports.
 pub mod authority;
 pub mod block_entity;
 pub mod brewing;
@@ -46,43 +46,46 @@ pub mod server_world;
 pub mod structure;
 pub mod world;
 
-// Crate-internal / desktop-adjacent. Still compiled (except harness cfg).
-pub(crate) mod accessibility;
-pub(crate) mod advancements;
+// Desktop-shared. `pub` so `src/main.rs` can `pub use icraft::…` without
+// compiling these files a second time into the binary crate.
+pub mod accessibility;
+pub mod advancements;
+pub mod audio;
+pub mod block_model;
+pub mod boss;
+pub mod chunk_render;
+pub mod chunk_schedule;
+pub mod commands;
+pub mod crafting;
+pub mod culling;
+pub mod fluid;
+pub mod gpu_frame_resources;
+pub mod interaction;
+pub mod lighting;
+pub mod localization;
+pub mod mob;
+pub mod navigation;
+pub mod perf;
+pub mod physics;
+pub mod presentation_click;
+pub mod rail;
+pub mod resources;
+pub mod vehicle;
+pub mod village;
+pub mod weather;
+pub mod world_mutation;
+pub mod world_tick;
+
+// Still crate-internal. Desktop-only files do not `use crate::` these.
 pub(crate) mod ai;
-pub(crate) mod audio;
-pub(crate) mod block_model;
-pub(crate) mod boss;
-pub(crate) mod chunk_render;
-pub(crate) mod chunk_schedule;
-pub(crate) mod commands;
-pub(crate) mod crafting;
-pub(crate) mod culling;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod final_acceptance;
-pub(crate) mod fluid;
-pub(crate) mod gpu_frame_resources;
-pub(crate) mod interaction;
-pub(crate) mod lighting;
-pub(crate) mod localization;
 pub(crate) mod loot;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod microbench;
-pub(crate) mod mob;
-pub(crate) mod navigation;
-pub(crate) mod perf;
-pub(crate) mod physics;
-pub(crate) mod presentation_click;
-pub(crate) mod rail;
 pub(crate) mod recipes;
-pub(crate) mod resources;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod sim_harness;
 pub(crate) mod spawning;
-pub(crate) mod vehicle;
-pub(crate) mod village;
 pub(crate) mod voxel_shape;
-pub(crate) mod weather;
-pub(crate) mod world_mutation;
-pub(crate) mod world_tick;
 pub(crate) mod worldgen;

@@ -906,13 +906,13 @@ impl ContainerInventory {
         }
     }
 }
-pub(crate) struct StackClickResult {
+pub struct StackClickResult {
     pub slot: Option<ItemStack>,
     pub dragged: Option<ItemStack>,
     pub cursor_from_slot: bool,
 }
 
-pub(crate) fn apply_stack_click(
+pub fn apply_stack_click(
     slot_item: Option<ItemStack>,
     dragged_item: Option<ItemStack>,
     is_left: bool,
