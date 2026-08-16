@@ -43,6 +43,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod session_sync;
+
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_INBOUND_EVENTS_PER_TICK: usize = 512;
 const WORLD_BOUND: f32 = 30_000_000.0;
@@ -863,9 +865,8 @@ impl PlayerSessionState {
                 }
             }
         }
-        self.data.position = position;
-        self.data.yaw = yaw;
-        self.data.pitch = pitch;
+        // Pose fields are written by `ServerRuntime::write_pose` after this
+        // clock/allowance update so the speed gate stays on this type.
         self.last_pose_sequence = sequence;
         self.last_pose_sender_time_millis = sender_time_millis;
         self.last_pose_received_at = Some(now);
@@ -1328,11 +1329,13 @@ impl ServerRuntime {
         if !self.authority.set_session_dimension(id, dimension) {
             return false;
         }
-        let Some(session) = self.players.get_mut(&id) else {
+        if self.players.get(&id).is_none() {
             return false;
-        };
-        session.dimension = dimension;
-        session.interest.open_containers.clear();
+        }
+        self.sync_dimension(id, dimension);
+        if let Some(session) = self.players.get_mut(&id) {
+            session.interest.open_containers.clear();
+        }
         self.update_interest_for(id, dimension, position);
         true
     }
@@ -1365,14 +1368,13 @@ impl ServerRuntime {
         let id = transfer.player_id;
         self.force_close_player_containers(id);
         if let Some(session) = self.players.get_mut(&id) {
-            session.dimension = transfer.to;
-            session.data.position = transfer.position;
             session.teleport_allowance = Some(transfer.position);
             session.interest.open_containers.clear();
             session.pending_initial_chunks.clear();
             session.last_projected_session_revision = None;
         }
-        self.update_interest_for(id, transfer.to, transfer.position);
+        self.sync_dimension(id, transfer.to);
+        let _ = self.sync_pose_from_authority(id, true);
         if self.local_session_id == Some(id) {
             self.push_presentation_event(RuntimePresentationEvent::DimensionTransfer {
                 target: id,
@@ -1399,23 +1401,20 @@ impl ServerRuntime {
         {
             return false;
         }
-        let Some(dimension) = self.players.get(&id).map(|session| session.dimension) else {
+        let Some((yaw, pitch)) = self
+            .players
+            .get(&id)
+            .map(|session| (session.data.yaw, session.data.pitch))
+        else {
             return false;
         };
         if self.authority.session(id).is_none() {
             return false;
         }
         if let Some(session) = self.players.get_mut(&id) {
-            session.data.position = position;
             session.teleport_allowance = Some(position);
         }
-        let authority_session = self
-            .authority
-            .session_mut(id)
-            .expect("authority session checked immediately above");
-        authority_session.position = position;
-        self.update_interest_for(id, dimension, position);
-        true
+        self.write_pose(id, position, yaw, pitch, true)
     }
 
     pub fn metrics(&self) -> &ServerMetrics {
@@ -1574,24 +1573,22 @@ impl ServerRuntime {
                 if !self.authority.set_session_dimension(id, dimension) {
                     return Ok(());
                 }
-                if let Some(authority_session) = self.authority.session_mut(id) {
-                    authority_session.position = respawn_position;
-                }
-                let authority_state = self
-                    .authority
-                    .session(id)
-                    .map(|session| (session.gameplay, session.game_mode, session.position));
+                let (yaw, pitch) = self
+                    .players
+                    .get(&id)
+                    .map(|session| (session.data.yaw, session.data.pitch))
+                    .unwrap_or((0.0, 0.0));
+                let game_mode = self.authority.session(id).map(|session| session.game_mode);
                 if let Some(session) = self.players.get_mut(&id) {
-                    session.data.position = respawn_position;
-                    session.dimension = dimension;
                     session.interest.open_containers.clear();
                     session.teleport_allowance = Some(respawn_position);
-                    if let Some((gameplay, game_mode, position)) = authority_state {
-                        session.data.position = position;
+                    if let Some(game_mode) = game_mode {
                         session.data.game_mode = game_mode;
-                        apply_gameplay_to_player_data(&mut session.data, gameplay);
                     }
                 }
+                self.sync_dimension(id, dimension);
+                let _ = self.write_pose(id, respawn_position, yaw, pitch, false);
+                self.sync_gameplay_projection(id);
                 self.send_respawn_result(id, respawn_position, dimension);
                 self.update_interest_for(id, dimension, respawn_position);
                 Ok(())
@@ -1993,13 +1990,10 @@ impl ServerRuntime {
         }
         let dimension = session.dimension;
         let _ = session;
-        if let Some(authority_session) = self.authority.session_mut(id) {
-            authority_session.position = position;
-            authority_session.yaw = yaw;
-            authority_session.pitch = pitch;
-            authority_session.dimension = dimension as u8;
+        if !self.write_pose(id, position, yaw, pitch, true) {
+            return Ok(());
         }
-        self.update_interest_for(id, dimension, position);
+        self.sync_dimension(id, dimension);
         let block_position = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
         let mut targets: Vec<_> = self
             .players
@@ -2115,24 +2109,25 @@ impl ServerRuntime {
                 self.metrics.requests_accepted = self.metrics.requests_accepted.saturating_add(1);
                 if let Some(session) = self.players.get_mut(&id) {
                     session.last_client_sequence = request.client_sequence;
-                    session.dimension = self
-                        .authority
-                        .session(id)
-                        .and_then(|authority_session| {
-                            Dimension::from_wire(authority_session.dimension)
-                        })
-                        .unwrap_or(session.dimension);
+                }
+                if let Some(dimension) = self
+                    .authority
+                    .session(id)
+                    .and_then(|authority_session| Dimension::from_wire(authority_session.dimension))
+                {
+                    self.sync_dimension(id, dimension);
                 }
                 match operation {
-                    GameplayOperation::Command { command } => {
-                        if matches!(
-                            crate::commands::parse(&command),
-                            Ok(crate::commands::Command::Teleport { .. })
-                        ) {
-                            if let Some(position) =
-                                self.authority.session(id).map(|session| session.position)
-                            {
-                                let _ = self.teleport_session(id, position);
+                    GameplayOperation::Command { .. } => {
+                        let runtime_position =
+                            self.players.get(&id).map(|session| session.data.position);
+                        let authority_position =
+                            self.authority.session(id).map(|session| session.position);
+                        if let (Some(runtime_position), Some(authority_position)) =
+                            (runtime_position, authority_position)
+                        {
+                            if runtime_position != authority_position {
+                                let _ = self.teleport_session(id, authority_position);
                             }
                         }
                     }
@@ -3013,8 +3008,8 @@ impl ServerRuntime {
             if !should_send {
                 continue;
             }
+            self.sync_gameplay_projection(update.player_id);
             if let Some(session) = self.players.get_mut(&update.player_id) {
-                apply_gameplay_to_player_data(&mut session.data, update.state);
                 session.last_projected_session_revision = Some((dimension, update.state.revision));
             }
             self.send_session_update(update.player_id, snapshot.tick, dimension, update.state);
@@ -4764,11 +4759,26 @@ mod tests {
     fn interest_evict_drops_origin_after_long_walk_and_metrics_match() {
         let (mut runtime, _input) = embedded_runtime("residency_walk");
         runtime.run_for_ticks(8).unwrap();
-        assert!(runtime.authority.world_mut_active().chunks.chunks.contains_key(&(0, 0)));
-        assert!(!runtime.authority.world_mut_active().chunks.chunks.contains_key(&(8, 0)));
+        assert!(runtime
+            .authority
+            .world_mut_active()
+            .chunks
+            .chunks
+            .contains_key(&(0, 0)));
+        assert!(!runtime
+            .authority
+            .world_mut_active()
+            .chunks
+            .chunks
+            .contains_key(&(8, 0)));
         assert!(runtime.teleport_session(99, [32.0 * 16.0 + 8.0, 80.0, 8.0]));
         runtime.tick().unwrap();
-        assert!(!runtime.authority.world_mut_active().chunks.chunks.contains_key(&(0, 0)));
+        assert!(!runtime
+            .authority
+            .world_mut_active()
+            .chunks
+            .chunks
+            .contains_key(&(0, 0)));
         let loaded: usize = runtime
             .authority
             .dimensions()

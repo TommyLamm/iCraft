@@ -30,19 +30,19 @@ Plan 09 刪了五個 interest 影子 `HashSet` 與 swapped world slot，並明�
 
 ## 精確 acceptance
 
-- [ ] `ServerRuntime` 有一組私有 helper（名稱可微調，責任不可混）：
+- [x] `ServerRuntime` 有一組私有 helper（名稱可微調，責任不可混）：
       - `sync_pose_from_authority(id)` 或 `write_pose(id, position, yaw, pitch)`：一次寫入權威 + `PlayerSessionState.data` + 需要時 `update_interest_for`
       - `sync_dimension(id, dimension)`：一次寫兩側
       - `sync_gameplay_projection(id)`：把權威 `SessionGameplayState` overlay 到 `PlayerData`（現有 `apply_gameplay_to_player_data` 可成為它的本體）
-- [ ] pose 接受、`teleport_session`、dimension transfer、respawn、request accept 改走這些 helper。禁止再出現第三份 ad-hoc 欄位賦值。
-- [ ] `teleport_session` 仍設 `teleport_allowance`，仍更新 interest。速度閘與 `WORLD_BOUND` 檢查不變。
-- [ ] `GameplayOperation::Command` 在 Accepted 之後：**不要**再 `commands::parse` 字串。
+- [x] pose 接受、`teleport_session`、dimension transfer、respawn、request accept 改走這些 helper。禁止再出現第三份 ad-hoc 欄位賦值。
+- [x] `teleport_session` 仍設 `teleport_allowance`，仍更新 interest。速度閘與 `WORLD_BOUND` 檢查不變。
+- [x] `GameplayOperation::Command` 在 Accepted 之後：**不要**再 `commands::parse` 字串。
       改為比較權威 pose 與 runtime `data.position`（或 `apply_command` 回傳的既有副作用），
       若 pose 變了就走 `teleport_session`／sync helper。非 Teleport 指令不得突然設 allowance。
-- [ ] 不得把 `InterestSet` 搬進 `AuthorityCore`。不得合併 `PlayerData` 與 `SessionGameplayState` 的存檔 layout。
-- [ ] 不得合併 `open_containers` 與 `ServerWorld.container_viewers`。
-- [ ] join 仍用 `gameplay_from_player_data`；save 仍用 overlay。只是呼叫改走具名 helper。
-- [ ] 既有測試期望值不變。
+- [x] 不得把 `InterestSet` 搬進 `AuthorityCore`。不得合併 `PlayerData` 與 `SessionGameplayState` 的存檔 layout。
+- [x] 不得合併 `open_containers` 與 `ServerWorld.container_viewers`。
+- [x] join 仍用 `gameplay_from_player_data`；save 仍用 overlay。只是呼叫改走具名 helper。
+- [x] 既有測試期望值不變。
 
 ## 預計檔案與測試
 
@@ -68,3 +68,45 @@ Plan 09 刪了五個 interest 影子 `HashSet` 與 swapped world slot，並明�
 - 改 pose 速度閘、`MAX_POSE_SPEED`、teleport radius。
 - 統一三套指令語言。
 - 拆整個 `server_runtime.rs`（投影／ingress 子模組見 README §7）。
+
+## 實作與證據
+
+抽出 `src/server_runtime/session_sync.rs`。公開方法仍掛在 `ServerRuntime`（`pub(super)`）。兩個 session 型別沒有合併。
+
+| helper | 責任 |
+| --- | --- |
+| `write_pose(id, position, yaw, pitch, refresh_interest)` | 一次寫權威 `SessionContract` + runtime `PlayerData` pose；需要時 `update_interest_for`。不設 `teleport_allowance`。 |
+| `sync_pose_from_authority(id, refresh_interest)` | 讀權威 pose，再走 `write_pose`。 |
+| `sync_dimension(id, dimension)` | 一次寫兩側 dimension。 |
+| `sync_gameplay_projection(id)` | 本體仍是 `apply_gameplay_to_player_data`。 |
+
+複製點收斂：
+
+- `accept_pose` 只做速度閘／pose clock／清 allowance；`handle_position` 改 `write_pose` + `sync_dimension`。
+- `teleport_session` 仍檢查 `WORLD_BOUND`、仍設 `teleport_allowance`，pose／interest 走 `write_pose(..., true)`。
+- `set_session_dimension` 仍先 `authority.set_session_dimension`（cleanup／activate／revision），再 `sync_dimension`。
+- `apply_authority_dimension_transfer`：`sync_dimension` + `sync_pose_from_authority`；仍設 allowance、清 pending chunks。
+- respawn：`write_pose` + `sync_dimension` + `sync_gameplay_projection`；仍設 allowance 並 `update_interest_for`。
+- request accept：sequence 仍複製到 runtime；dimension 走 `sync_dimension`。
+- snapshot `session_updates` 走 `sync_gameplay_projection`。
+- join 仍 `gameplay_from_player_data`；save 仍 overlay `apply_gameplay_to_player_data`。
+
+`GameplayOperation::Command` Accepted 之後不再 `commands::parse`。比較權威 `session.position` 與 runtime `data.position`；不同才 `teleport_session`（才設 allowance）。`/gamemode`、`/give`、`/respawn` 不改 pose，因此不設 allowance。
+
+留下、不是第三份權威／runtime 雙寫：
+
+- `update_interest_for_at` 仍把 `session.dimension` 對齊該次 interest 更新的 dimension（interest 內部一致性；不寫權威）。
+- respawn 仍單獨複製 `game_mode`（不在 `SessionGameplayState` overlay 裡）。
+- `last_client_sequence` 仍在 accept 複製（權威已在 `submit_request` 寫過）。
+
+沒有把 `InterestSet` 搬進 `AuthorityCore`。沒有合併 `PlayerData`／`SessionGameplayState` 存檔 layout。沒有合併 `open_containers` 與 `ServerWorld.container_viewers`。沒有改 ARCHITECTURE.md。
+
+驗收（全部通過；未跑 repo-wide full suite）：
+
+```
+cargo test --lib server_runtime::                                          # 26 passed
+cargo test --test review_hardening_session_lifecycle -- --test-threads=1  # 3 passed
+cargo test --test plan32_progression_travel -- --test-threads=1           # 5 passed
+cargo test --test runtime_topology_parity -- --test-threads=1             # 6 passed
+cargo test --test review_hardening_invariants -- --test-threads=1         # 6 passed
+```
