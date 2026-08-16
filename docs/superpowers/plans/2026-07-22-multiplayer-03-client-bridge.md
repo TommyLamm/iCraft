@@ -1,6 +1,6 @@
 # Multiplayer Sub-task 3: Client Network Bridge & State Integration
 
-> **Parent task:** [plans/p3/25_multiplayer.md](../../../plans/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
+> **Parent task:** [plans/01_basic_gameplay/p3/25_multiplayer.md](../../../plans/01_basic_gameplay/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
 > **Sub-task:** 3 of 6 - wires networking into the main-thread `State` lifecycle.
 > **Depends on:** Sub-task 1 (Protocol & Transport), Sub-task 2 (Server Core). **Blocks:** Sub-tasks 4, 5, 6.
 >
@@ -209,7 +209,7 @@
 - **[MODIFY]** `src/app.rs`
 - **[MODIFY]** `src/state.rs`
 - **[MODIFY]** `ARCHITECTURE.md` (new "Networking" routing subsection)
-- **[MODIFY]** `plans/progress.md`
+- **[MODIFY]** `plans/01_basic_gameplay/progress.md`
 
 ## Verification Gate
 

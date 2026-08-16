@@ -1,6 +1,6 @@
 # Multiplayer Sub-task 5: World (Block) Synchronization
 
-> **Parent task:** [plans/p3/25_multiplayer.md](../../../plans/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
+> **Parent task:** [plans/01_basic_gameplay/p3/25_multiplayer.md](../../../plans/01_basic_gameplay/p3/25_multiplayer.md) (任務 25 - 多人遊戲)
 > **Sub-task:** 5 of 6 - keeps the shared world's block mutations in sync.
 > **Depends on:** Sub-task 1 (Protocol), Sub-task 2 (Server), Sub-task 3 (Client Bridge). **Blocks:** nothing strictly, but pairs with Sub-task 4/6 for the full experience.
 >

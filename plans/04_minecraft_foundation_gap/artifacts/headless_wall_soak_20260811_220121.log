@@ -1,0 +1,5 @@
+SOAK_START utc=2026-08-11T22:01:21.8990247+08:00 duration_seconds=1800 port=56912 world=plans\04_minecraft_foundation_gap\artifacts\headless_wall_soak_20260811_220121_world
+[icraft-server] starting 127.0.0.1:56912 world=plans\04_minecraft_foundation_gap\artifacts\headless_wall_soak_20260811_220121_world seed=0 difficulty=normal pvp=true motd="iCraft server" max_players=20 view_distance=10 simulation_distance=8 whitelist=0 operators=0 online_mode=false
+[NetworkServer] Listening on 127.0.0.1:56912 (Seed: 0, Gamemode: 0)
+[icraft-server] metrics ticks=35842 players_online=0 loaded_chunks=1 entities=0 inbound_packets=0 inbound_bytes=0 outbound_packets=0 outbound_bytes=0 queue_depth=0 queue_full=0 requests_accepted=0 requests_rejected=0 duplicate_requests=0 saves=6 last_tick_us=4 max_tick_us=28547 last_save_ms=26
+SOAK_END utc=2026-08-11T22:31:22.0162067+08:00 exit_code=0
