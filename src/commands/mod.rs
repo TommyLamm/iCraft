@@ -1,8 +1,13 @@
-//! Small, typed command surface used by the in-game chat dispatcher.
+//! Small, typed command surface used by session chat.
 //!
 //! This deliberately is not a Brigadier clone: parsing is deterministic,
 //! bounded, and produces typed arguments before any world mutation is
-//! attempted.  The executor in `State` remains the authority gate.
+//! attempted.
+//!
+//! Session commands are executed by `AuthorityCore::apply_command`. `State`
+//! chat is leftover / presentation-layer feedback and may still parse the same
+//! strings locally. The dedicated-server console is a separate admin surface
+//! and does not go through `commands::parse`. These three parsers stay distinct.
 
 use crate::game_rules::Difficulty;
 use crate::inventory::{GameMode, Item};

@@ -55,7 +55,7 @@
 | 09 | [權威 world map 與 session 影子欄位](09_authority_world_map_and_session.md) | P2 | 已完成 | 03 |
 | 10 | [`state.rs` 模組拆分](10_state_module_split.md) | P2 | 已完成 | 02（建議 06 已合併） |
 | 11 | [Library 面縮小與 harness cfg](11_lib_surface_and_harness_cfg.md) | P0 | 已完成 | 無 |
-| 12 | [活型別 leftover 衛生](12_live_type_leftover_hygiene.md) | P0 | 待執行 | 無 |
+| 12 | [活型別 leftover 衛生](12_live_type_leftover_hygiene.md) | P0 | 已完成 | 無 |
 | 13 | [TCP 測試 helper 長尾](13_tcp_helper_long_tail.md) | P0 | 待執行 | 04 |
 | 14 | [Desktop 改依賴 library](14_desktop_depends_on_lib.md) | P1 | 待執行 | 建議 11 |
 | 15 | [leftover 互動抽出 `state.rs`](15_legacy_interaction_extract.md) | P1 | 待執行 | 02、10（建議 06） |

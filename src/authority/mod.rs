@@ -441,7 +441,6 @@ impl AuthorityCore {
         let mut mutations_by_dimension: BTreeMap<Dimension, Vec<WorldMutation>> = BTreeMap::new();
 
         for dimension in dimensions.iter().copied() {
-            self.activate_dimension(dimension);
             self.tick_session_domains(dimension);
             self.tick_mining(dimension);
             self.tick_portal_travel(dimension);
@@ -451,24 +450,35 @@ impl AuthorityCore {
                 .filter(|session| session.dimension == dimension as u8)
                 .map(|session| (session.id, session.position))
                 .collect();
-            let world_snapshot = self.world_mut_active().tick(&players);
+            let world_snapshot = self
+                .world_mut(dimension)
+                .expect("loaded dimension missing from world map")
+                .tick(&players);
             let mut world_mutations = world_snapshot.mutations;
             // Redstone emits dispenser/dropper edges from inside the world
             // tick, but entity ids belong to AuthorityCore's global namespace.
             // Drain and execute them here before collecting pending revisions
             // so source/target block entities and spawned entities share one
             // deterministic snapshot boundary.
-            let actions = self.world_mut_active().take_pending_redstone_actions();
+            let actions = self
+                .world_mut(dimension)
+                .expect("loaded dimension missing from world map")
+                .take_pending_redstone_actions();
             for action in actions {
                 let candidate = self.next_unique_entity_id();
                 let spawned = self
-                    .world_mut_active()
+                    .world_mut(dimension)
+                    .expect("loaded dimension missing from world map")
                     .execute_redstone_dispense(action, candidate);
                 if spawned {
                     self.claim_entity_id(candidate);
                 }
             }
-            world_mutations.extend(self.world_mut_active().take_pending_mutations());
+            world_mutations.extend(
+                self.world_mut(dimension)
+                    .expect("loaded dimension missing from world map")
+                    .take_pending_mutations(),
+            );
             mutations_by_dimension.insert(dimension, world_mutations);
         }
 
@@ -491,16 +501,18 @@ impl AuthorityCore {
         let mut checksums = Vec::with_capacity(dimensions.len());
         let mut revision = 0;
         for dimension in dimensions.iter().copied() {
-            self.activate_dimension(dimension);
             let entries = mutations_by_dimension
                 .get(&dimension)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            revision = revision.max(self.world_mut_active().revisions.current());
-            checksums.push((dimension, self.world().checksum(entries)));
+            let world = self
+                .world_ref(dimension)
+                .expect("loaded dimension missing from world map");
+            revision = revision.max(world.revisions.current());
+            checksums.push((dimension, world.checksum(entries)));
         }
-        // Keep the public active-world compatibility view stable for State,
-        // ServerRuntime metrics, and save callers after the multi-world pass.
+        // Portal travel still calls set_session_dimension -> activate_dimension.
+        // Restore the compatibility view for State / ServerRuntime / save.
         self.activate_dimension(active_before_tick);
 
         let snapshot = AuthoritySnapshot {
@@ -553,11 +565,10 @@ impl AuthorityCore {
                 .min(ATTACK_COOLDOWN_TICKS);
 
             if let Some(pending) = candidate.brew {
-                let block = self.world().get_block(
-                    pending.station[0],
-                    pending.station[1],
-                    pending.station[2],
-                );
+                let block = self
+                    .world_ref(dimension)
+                    .expect("loaded dimension missing from world map")
+                    .get_block(pending.station[0], pending.station[1], pending.station[2]);
                 let context = WorkstationContext::at(pending.station, block);
                 match transactions::tick_brew(&mut candidate, context) {
                     Ok(BrewTick::Ready) => {}
@@ -568,11 +579,11 @@ impl AuthorityCore {
 
             let previous_hook = original.fishing_hook;
             if candidate.fishing_hook.is_some() {
-                match self.world().fishing_context(
-                    &candidate,
-                    position,
-                    game_mode != GameMode::Creative,
-                ) {
+                match self
+                    .world_ref(dimension)
+                    .expect("loaded dimension missing from world map")
+                    .fishing_context(&candidate, position, game_mode != GameMode::Creative)
+                {
                     Ok(context) => {
                         if crate::authority::fishing::tick(&mut candidate, context).is_err() {
                             candidate.fishing_hook = None;
@@ -585,9 +596,13 @@ impl AuthorityCore {
             if candidate == original {
                 continue;
             }
-            self.world_mut_active()
-                .sync_authority_hook(previous_hook, candidate.fishing_hook, id);
-            let revision = self.world_mut_active().revisions.allocate();
+            let revision = {
+                let world = self
+                    .world_mut(dimension)
+                    .expect("loaded dimension missing from world map");
+                world.sync_authority_hook(previous_hook, candidate.fishing_hook, id);
+                world.revisions.allocate()
+            };
             candidate.revision = revision;
             if let Some(session) = self.sessions.get_mut(&id) {
                 session.gameplay = candidate;
@@ -621,22 +636,26 @@ impl AuthorityCore {
                 continue;
             };
             if progress.dimension != dimension as u8 {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             }
             let target = (progress.target[0], progress.target[1], progress.target[2]);
             let Some(block) = self
-                .world_mut_active()
+                .world_ref(dimension)
+                .expect("loaded dimension missing from world map")
                 .chunks
                 .get_loaded_block(target.0, target.1, target.2)
             else {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             };
             let expected_block = crate::world::BlockType::from_wire(progress.block);
-            let expected_state = self.world().get_block_state(target.0, target.1, target.2);
+            let expected_state = self
+                .world_ref(dimension)
+                .expect("loaded dimension missing from world map")
+                .get_block_state(target.0, target.1, target.2);
             if expected_block != Some(block) || expected_state != progress.state {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             }
             let eye = glam::Vec3::from_array(position) + glam::Vec3::new(0.0, 1.62, 0.0);
@@ -646,15 +665,16 @@ impl AuthorityCore {
                 target.2 as f32 + 0.5,
             );
             if eye.distance(target_center) > 8.0 {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             }
             if block == crate::world::BlockType::Air
                 || !self
-                    .world_mut_active()
+                    .world_ref(dimension)
+                    .expect("loaded dimension missing from world map")
                     .has_block_line_of_sight(position, progress.look_milli, target)
             {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             }
             let selected_index = if progress.hand == 1 {
@@ -665,7 +685,7 @@ impl AuthorityCore {
                     .map_or(0, |session| session.gameplay.selected_hotbar_slot)
             };
             if selected_index != progress.slot_index {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             }
             let held_matches = self
@@ -674,13 +694,19 @@ impl AuthorityCore {
                 .and_then(|session| session.gameplay.slot(selected_index).flatten())
                 == progress.held.map(SessionInventorySlot::from);
             if !held_matches {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             }
             let held_stack = stack_from_slot(progress.held);
-            let policy = crate::game_rules::GameModePolicy::for_rules(game_mode, &self.world().rules);
+            let policy = crate::game_rules::GameModePolicy::for_rules(
+                game_mode,
+                &self
+                    .world_ref(dimension)
+                    .expect("loaded dimension missing from world map")
+                    .rules,
+            );
             if !policy.can_break_stack(held_stack.as_ref(), block) {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             }
             if game_mode == crate::inventory::GameMode::Creative {
@@ -690,7 +716,7 @@ impl AuthorityCore {
             let duration =
                 crate::authority::mining::mining_time_seconds(block, held_stack.as_ref());
             if !duration.is_finite() || duration <= 0.0 || duration == f32::MAX {
-                self.clear_mining_progress(id);
+                self.clear_mining_progress(id, dimension);
                 continue;
             }
             let step = ((1_000.0 / (duration * FIXED_TICK_HZ as f32)).ceil() as u16).max(1);
@@ -698,7 +724,11 @@ impl AuthorityCore {
             if next >= 1_000 {
                 let _ = self.commit_mining_break(id, dimension, target, held_stack, game_mode);
             } else {
-                let revision = self.world_mut_active().revisions.allocate();
+                let revision = self
+                    .world_mut(dimension)
+                    .expect("loaded dimension missing from world map")
+                    .revisions
+                    .allocate();
                 if let Some(session) = self.sessions.get_mut(&id) {
                     if let Some(active) = session.gameplay.mining.as_mut() {
                         active.progress_milli = next;
@@ -709,14 +739,18 @@ impl AuthorityCore {
         }
     }
 
-    fn clear_mining_progress(&mut self, id: PlayerId) {
+    fn clear_mining_progress(&mut self, id: PlayerId, dimension: Dimension) {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
         if session.gameplay.mining.take().is_none() {
             return;
         }
-        let revision = self.world_mut_active().revisions.allocate();
+        let revision = self
+            .world_mut(dimension)
+            .expect("loaded dimension missing from world map")
+            .revisions
+            .allocate();
         if let Some(session) = self.sessions.get_mut(&id) {
             session.gameplay.revision = revision;
         }
@@ -770,8 +804,14 @@ impl AuthorityCore {
             let py = position[1].floor() as i32;
             let pz = position[2].floor() as i32;
 
-            let feet = self.world().get_block(px, py, pz);
-            let body = self.world().get_block(px, py + 1, pz);
+            let feet = self
+                .world_ref(dimension)
+                .expect("loaded dimension missing from world map")
+                .get_block(px, py, pz);
+            let body = self
+                .world_ref(dimension)
+                .expect("loaded dimension missing from world map")
+                .get_block(px, py + 1, pz);
 
             if feet == BlockType::EndGateway || body == BlockType::EndGateway {
                 if dimension == Dimension::End {
@@ -787,7 +827,11 @@ impl AuthorityCore {
                     // advance the next inbound pose.
                     if self.execute_portal_dimension_transfer(id, dimension, target_pos.to_array())
                     {
-                        let revision = self.world_mut_active().revisions.allocate();
+                        let revision = self
+                            .world_mut(dimension)
+                            .expect("loaded dimension missing from world map")
+                            .revisions
+                            .allocate();
                         if let Some(session) = self.sessions.get_mut(&id) {
                             session.last_revision = revision;
                             session.gameplay.revision = revision;
@@ -930,23 +974,30 @@ impl AuthorityCore {
             return false;
         }
         let Some(old_block) = self
-            .world()
+            .world_ref(dimension)
+            .expect("loaded dimension missing from world map")
             .chunks
             .get_loaded_block(target.0, target.1, target.2)
         else {
-            self.clear_mining_progress(id);
+            self.clear_mining_progress(id, dimension);
             return false;
         };
         if old_block == crate::world::BlockType::Air
             || crate::world::BlockType::from_wire(progress.block) != Some(old_block)
-            || self.world().get_block_state(target.0, target.1, target.2) != progress.state
+            || self
+                .world_ref(dimension)
+                .expect("loaded dimension missing from world map")
+                .get_block_state(target.0, target.1, target.2)
+                != progress.state
         {
-            self.clear_mining_progress(id);
+            self.clear_mining_progress(id, dimension);
             return false;
         }
         let rewards = crate::authority::mining::calculate_block_break_rewards(
             old_block,
-            self.world().get_block_state(target.0, target.1, target.2),
+            self.world_ref(dimension)
+                .expect("loaded dimension missing from world map")
+                .get_block_state(target.0, target.1, target.2),
             target,
             held_stack.as_ref(),
             game_mode,
@@ -982,7 +1033,11 @@ impl AuthorityCore {
         // preflight above has succeeded, and keep the source entity untouched
         // until the block mutation commits.
         let mut drops = rewards.drops;
-        if let Some(block_entity) = self.world().get_block_entity(target.0, target.1, target.2) {
+        if let Some(block_entity) = self
+            .world_ref(dimension)
+            .expect("loaded dimension missing from world map")
+            .get_block_entity(target.0, target.1, target.2)
+        {
             let slots: Box<dyn Iterator<Item = &ItemStack> + '_> = match block_entity {
                 BlockEntity::Chest(chest) => Box::new(chest.inventory.slots.iter().flatten()),
                 BlockEntity::Furnace(furnace) => Box::new(furnace.slots.iter().flatten()),
@@ -1017,25 +1072,34 @@ impl AuthorityCore {
         let mut prepared_ids = Vec::with_capacity(entity_ids.len());
         for (entity_id, stack) in entity_ids.iter().copied().zip(drops.iter().copied()) {
             if !self
-                .world_mut_active()
+                .world_mut(dimension)
+                .expect("loaded dimension missing from world map")
                 .spawn_dropped_item(entity_id, drop_position, stack)
             {
                 for prepared_id in prepared_ids {
-                    self.world_mut_active().remove_authority_entity(prepared_id);
+                    self.world_mut(dimension)
+                        .expect("loaded dimension missing from world map")
+                        .remove_authority_entity(prepared_id);
                 }
                 return false;
             }
             prepared_ids.push(entity_id);
         }
-        let Ok(Some(mutation)) = self.world_mut_active().set_block(
-            target.0,
-            target.1,
-            target.2,
-            crate::world::BlockType::Air,
-            0,
-        ) else {
+        let Ok(Some(mutation)) = self
+            .world_mut(dimension)
+            .expect("loaded dimension missing from world map")
+            .set_block(
+                target.0,
+                target.1,
+                target.2,
+                crate::world::BlockType::Air,
+                0,
+            )
+        else {
             for prepared_id in prepared_ids {
-                self.world_mut_active().remove_authority_entity(prepared_id);
+                self.world_mut(dimension)
+                    .expect("loaded dimension missing from world map")
+                    .remove_authority_entity(prepared_id);
             }
             return false;
         };

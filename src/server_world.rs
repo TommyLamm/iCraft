@@ -13,6 +13,7 @@ use crate::authority::interest::chunks_around;
 use crate::authority::transactions::{self, WorkstationContext};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
+#[cfg(test)]
 use crate::commands::{self, Command, TimeCommand};
 use crate::container_sessions::ContainerSessionManager;
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
@@ -21,8 +22,10 @@ use crate::fluid::FluidMutation;
 use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::inventory::ItemStack;
 use crate::network::protocol::{
-    ContainerAction, GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
+    GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
 };
+#[cfg(test)]
+use crate::network::protocol::ContainerAction;
 use crate::redstone::{RedstoneAction, RedstoneSystem};
 use crate::save::{ChunkSaveData, EntitySaveData, MutationRevisionIndex};
 use crate::world::BlockType;
@@ -70,7 +73,6 @@ pub struct ServerWorld {
     /// never inserted, generated, or written back so a later save cannot
     /// replace player builds with freshly generated terrain.
     failed_restore_chunks: BTreeSet<(i32, i32)>,
-    pub last_snapshot: AuthoritySnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +136,6 @@ impl ServerWorld {
             block_revisions: BTreeMap::new(),
             chunk_revisions: BTreeMap::new(),
             failed_restore_chunks: BTreeSet::new(),
-            last_snapshot: AuthoritySnapshot::empty(),
         };
         world.ensure_chunk(0, 0);
         world
@@ -1080,9 +1081,10 @@ impl ServerWorld {
         }
     }
 
-    /// Seed the optional world-creation chest in the authoritative world. The
-    /// caller decides whether this is a new Overworld; renderer roots only
-    /// project the returned revision-bearing mutation.
+    /// Test fixture: seed the optional world-creation chest.
+    ///
+    /// Production tick and world-creation paths do not call this helper.
+    #[cfg(test)]
     pub fn place_bonus_chest(&mut self, position: (i32, i32, i32)) -> Option<WorldMutation> {
         if self.get_block(position.0, position.1, position.2) != BlockType::Air {
             return None;
@@ -1136,10 +1138,11 @@ impl ServerWorld {
         Ok(())
     }
 
-    /// Seed a session-facing villager into the headless world when the local
-    /// presentation loaded a persisted entity before the in-process authority
-    /// was created.  Existing IDs/types are never overwritten, preserving
-    /// duplicate-identity and deterministic trade semantics.
+    /// Test fixture: seed a session-facing villager.
+    ///
+    /// Existing IDs/types are never overwritten, preserving duplicate-identity
+    /// and deterministic trade semantics. Production tick does not call this.
+    #[cfg(test)]
     pub fn ensure_villager(
         &mut self,
         villager_id: u64,
@@ -1164,6 +1167,9 @@ impl ServerWorld {
         true
     }
 
+    /// Test fixture: seed a boat, minecart, or horse. Production tick does
+    /// not call this helper.
+    #[cfg(test)]
     pub fn ensure_vehicle(
         &mut self,
         vehicle_id: u64,
@@ -1460,6 +1466,7 @@ impl ServerWorld {
 
     /// Thin world dispatcher retained for `server_world` unit tests. Live
     /// requests go through `AuthorityCore`'s single operation match.
+    #[cfg(test)]
     pub fn dispatch(
         &mut self,
         request: &GameplayRequest,
@@ -1656,15 +1663,13 @@ impl ServerWorld {
         self.tick_entities(players);
         mutations.sort_by_key(|mutation| mutation.revision);
         let checksum = self.checksum(&mutations);
-        let snapshot = AuthoritySnapshot {
+        AuthoritySnapshot {
             tick: self.time,
             revision: self.revisions.current(),
             checksum,
             mutations,
             session_updates: Vec::new(),
-        };
-        self.last_snapshot = snapshot.clone();
-        snapshot
+        }
     }
 
     /// Execute one authoritative dispenser/dropper edge with the candidate id
