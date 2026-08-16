@@ -361,9 +361,10 @@ pub fn spawn_network_snapshot_worker(
                 let result = match command {
                     NetworkSnapshotWorkerCommand::Snapshot(request) => {
                         let data = if let Some(ref chunk) = request.chunk {
-                            let mut data = ChunkSaveData::from_chunk(&chunk);
-                            data.mutation_revision = request.key.revision;
-                            Some(data)
+                            ChunkSaveData::from_chunk(chunk).ok().map(|mut data| {
+                                data.mutation_revision = request.key.revision;
+                                data
+                            })
                         } else {
                             manager
                                 .lock()
@@ -1052,6 +1053,90 @@ pub struct ChunkSaveData {
 /// hopper/dispenser/dropper/observer state is included in every save path.
 pub const CHUNK_SAVE_DATA_VERSION: u32 = 3;
 
+/// Documented column height for `data_version == 0` (pre-signed-Y) saves.
+const LEGACY_CHUNK_HEIGHT: usize = 256;
+const LEGACY_VOXEL_COUNT: usize = 16 * LEGACY_CHUNK_HEIGHT * 16;
+
+fn destination_voxel_count(chunk: &Chunk) -> usize {
+    chunk.sections.len() * 16 * 16 * 16
+}
+
+fn voxel_count_matches_save(len: usize, _data_version: u32, chunk: &Chunk) -> bool {
+    let dest = destination_voxel_count(chunk);
+    // Destination dimension height, or the documented 256-high column used by
+    // pre-signed-Y saves and `UncompressedChunkSnapshot` flattening.
+    len == dest || len == LEGACY_VOXEL_COUNT
+}
+
+fn decode_required_voxel_stream(
+    data: &[u8],
+    name: &'static str,
+    data_version: u32,
+    chunk: &Chunk,
+) -> io::Result<Vec<u8>> {
+    if data.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} stream is empty"),
+        ));
+    }
+    let bytes = decompress_bytes(data).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} inflate failed: {error}"),
+        )
+    })?;
+    if bytes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} stream inflated to empty"),
+        ));
+    }
+    if !voxel_count_matches_save(bytes.len(), data_version, chunk) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{name} length {} does not match data_version {data_version} (expected {} or 256-high {LEGACY_VOXEL_COUNT})",
+                bytes.len(),
+                destination_voxel_count(chunk)
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn decode_optional_voxel_stream(
+    data: &[u8],
+    name: &'static str,
+    expected_len: usize,
+) -> io::Result<Vec<u8>> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bytes = decompress_bytes(data).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} inflate failed: {error}"),
+        )
+    })?;
+    if bytes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} stream inflated to empty"),
+        ));
+    }
+    if bytes.len() != expected_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{name} length {} does not match blocks length {expected_len}",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// The Plan14/Plan27 sidecar shape before the rising-edge latch was added.
 /// `serde(default)` is not sufficient for bincode: unlike self-describing
 /// formats, bincode will not synthesize a missing struct tail. Keep this
@@ -1068,7 +1153,7 @@ struct LegacyRedstoneComponentMetadata {
 }
 
 impl ChunkSaveData {
-    pub fn from_chunk(chunk: &Chunk) -> Self {
+    pub fn from_chunk(chunk: &Chunk) -> io::Result<Self> {
         Self::from_chunk_with_redstone(chunk, &[])
     }
 
@@ -1078,7 +1163,7 @@ impl ChunkSaveData {
     pub fn from_chunk_with_redstone(
         chunk: &Chunk,
         redstone_metadata: &[crate::redstone::RedstoneComponentMetadata],
-    ) -> Self {
+    ) -> io::Result<Self> {
         let section_count = chunk.sections.len();
         let total_height = section_count * 16;
         let min_y = chunk.min_section_y as i32 * 16;
@@ -1105,10 +1190,9 @@ impl ChunkSaveData {
         let redstone_metadata = if redstone_metadata.is_empty() {
             Vec::new()
         } else {
-            bincode::serialize(redstone_metadata)
-                .ok()
-                .and_then(|bytes| compress_bytes(&bytes).ok())
-                .unwrap_or_default()
+            let bytes = bincode::serialize(redstone_metadata)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            compress_bytes(&bytes)?
         };
 
         let block_entities_list: Vec<((u8, i16, u8), crate::block_entity::BlockEntity)> = chunk
@@ -1118,25 +1202,32 @@ impl ChunkSaveData {
         let block_entities = if block_entities_list.is_empty() {
             Vec::new()
         } else {
-            bincode::serialize(&block_entities_list)
-                .ok()
-                .and_then(|bytes| compress_bytes(&bytes).ok())
-                .unwrap_or_default()
+            let bytes = bincode::serialize(&block_entities_list)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            compress_bytes(&bytes)?
         };
 
-        Self {
+        let blocks = compress_bytes(&blocks)?;
+        if blocks.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compressed blocks payload is empty",
+            ));
+        }
+
+        Ok(Self {
             chunk_x: chunk.chunk_x,
             chunk_z: chunk.chunk_z,
-            blocks: compress_bytes(&blocks).unwrap_or_default(),
-            sky_light: compress_bytes(&sky_light).unwrap_or_default(),
-            block_light: compress_bytes(&block_light).unwrap_or_default(),
-            fluid_levels: compress_bytes(&fluid_levels).unwrap_or_default(),
+            blocks,
+            sky_light: compress_bytes(&sky_light)?,
+            block_light: compress_bytes(&block_light)?,
+            fluid_levels: compress_bytes(&fluid_levels)?,
             redstone_metadata,
-            block_states: compress_bytes(&block_states_raw).unwrap_or_default(),
+            block_states: compress_bytes(&block_states_raw)?,
             mutation_revision: 0,
             block_entities,
             data_version: CHUNK_SAVE_DATA_VERSION,
-        }
+        })
     }
 
     /// Decodes the redstone metadata sidecar into typed records. Returns an
@@ -1218,19 +1309,19 @@ impl ChunkSaveData {
         decompress_bytes(&self.block_states).unwrap_or_default()
     }
 
-    pub fn restore_to_chunk(&self, chunk: &mut Chunk) {
-        let blocks = decompress_bytes(&self.blocks).unwrap_or_default();
-        let block_states = decompress_bytes(&self.block_states).unwrap_or_default();
-        let sky_light = decompress_bytes(&self.sky_light).unwrap_or_default();
-        let block_light = decompress_bytes(&self.block_light).unwrap_or_default();
-        let fluid_levels = decompress_bytes(&self.fluid_levels).unwrap_or_default();
+    pub fn restore_to_chunk(&self, chunk: &mut Chunk) -> io::Result<()> {
+        let blocks =
+            decode_required_voxel_stream(&self.blocks, "blocks", self.data_version, chunk)?;
+        let block_states =
+            decode_optional_voxel_stream(&self.block_states, "block_states", blocks.len())?;
+        let sky_light = decode_optional_voxel_stream(&self.sky_light, "sky_light", blocks.len())?;
+        let block_light =
+            decode_optional_voxel_stream(&self.block_light, "block_light", blocks.len())?;
+        let fluid_levels =
+            decode_optional_voxel_stream(&self.fluid_levels, "fluid_levels", blocks.len())?;
 
         let total_voxels = blocks.len();
-        if total_voxels == 0 {
-            return;
-        }
-
-        let is_legacy_256 = total_voxels == 16 * 256 * 16;
+        let is_legacy_256 = total_voxels == LEGACY_VOXEL_COUNT;
         let total_height = if is_legacy_256 {
             256
         } else {
@@ -1319,6 +1410,7 @@ impl ChunkSaveData {
                 let _ = chunk.insert_block_entity(x, y, z, entity);
             }
         }
+        Ok(())
     }
 }
 
@@ -1593,21 +1685,8 @@ impl UncompressedChunkSnapshot {
         self
     }
 
-    pub fn to_chunk_save_data(&self) -> ChunkSaveData {
+    pub fn to_chunk_save_data(&self) -> SaveResult<ChunkSaveData> {
         self.try_to_chunk_save_data()
-            .unwrap_or_else(|_| ChunkSaveData {
-                chunk_x: self.chunk_x,
-                chunk_z: self.chunk_z,
-                blocks: Vec::new(),
-                sky_light: Vec::new(),
-                block_light: Vec::new(),
-                fluid_levels: Vec::new(),
-                redstone_metadata: Vec::new(),
-                block_states: Vec::new(),
-                mutation_revision: self.mutation_revision,
-                block_entities: Vec::new(),
-                data_version: 0,
-            })
     }
 
     pub fn try_to_chunk_save_data(&self) -> SaveResult<ChunkSaveData> {
@@ -2262,6 +2341,7 @@ static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 thread_local! {
     static ATOMIC_WRITE_FAILPOINT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static COMPRESS_FAILPOINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -2381,6 +2461,13 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> 
 }
 
 pub fn compress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
+    #[cfg(test)]
+    if COMPRESS_FAILPOINT.with(|failpoint| failpoint.get()) {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "injected compress failure",
+        ));
+    }
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data)?;
     encoder.finish()
@@ -3525,12 +3612,12 @@ mod tests {
 
         let mut manager = SaveManager::new(&world_dir);
         manager
-            .save_chunk(0, 0, ChunkSaveData::from_chunk(&original))
+            .save_chunk(0, 0, ChunkSaveData::from_chunk(&original).unwrap())
             .unwrap();
 
         let saved = manager.load_chunk(0, 0).expect("saved chunk should load");
         let mut restored = Chunk::new(0, 0);
-        saved.restore_to_chunk(&mut restored);
+        saved.restore_to_chunk(&mut restored).unwrap();
 
         assert_eq!(restored.get_block_local(8, 100, 8), BlockType::Brick);
 
@@ -3633,11 +3720,11 @@ mod tests {
             )
             .unwrap();
 
-        let saved = ChunkSaveData::from_chunk(&chunk);
+        let saved = ChunkSaveData::from_chunk(&chunk).unwrap();
         assert_eq!(saved.data_version, CHUNK_SAVE_DATA_VERSION);
         assert!(!saved.block_entities.is_empty());
         let mut restored = Chunk::new(0, 0);
-        saved.restore_to_chunk(&mut restored);
+        saved.restore_to_chunk(&mut restored).unwrap();
         assert_eq!(
             restored.get_block_entity(2, 64, 2),
             Some(&crate::block_entity::BlockEntity::Hopper(hopper.clone()))
@@ -3670,7 +3757,7 @@ mod tests {
         );
         let snapshot_data = snapshot.try_to_chunk_save_data().unwrap();
         let mut snapshot_restored = Chunk::new(0, 0);
-        snapshot_data.restore_to_chunk(&mut snapshot_restored);
+        snapshot_data.restore_to_chunk(&mut snapshot_restored).unwrap();
         assert_eq!(
             snapshot_restored.get_block_entity(2, 64, 2),
             Some(&crate::block_entity::BlockEntity::Hopper(hopper))
@@ -3715,7 +3802,7 @@ mod tests {
             let mut chunk = Chunk::new(4, -3);
             chunk.set_block_local(7, 90, 11, marker);
             manager
-                .save_chunk_in(dimension, 4, -3, ChunkSaveData::from_chunk(&chunk))
+                .save_chunk_in(dimension, 4, -3, ChunkSaveData::from_chunk(&chunk).unwrap())
                 .unwrap();
         }
 
@@ -3726,7 +3813,7 @@ mod tests {
                 .load_chunk_in(dimension, 4, -3)
                 .expect("dimension chunk should load");
             let mut restored = Chunk::new(4, -3);
-            saved.restore_to_chunk(&mut restored);
+            saved.restore_to_chunk(&mut restored).unwrap();
             assert_eq!(restored.get_block_local(7, 90, 11), marker);
         }
 
@@ -3793,7 +3880,7 @@ mod tests {
                 crate::dimension::Dimension::Overworld,
                 -2,
                 5,
-                ChunkSaveData::from_chunk_with_redstone(&chunk, &metadata),
+                ChunkSaveData::from_chunk_with_redstone(&chunk, &metadata).unwrap(),
             )
             .unwrap();
 
@@ -3816,7 +3903,7 @@ mod tests {
             comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
             note: 9,
         }];
-        let mut saved = ChunkSaveData::from_chunk(&Chunk::new(0, 0));
+        let mut saved = ChunkSaveData::from_chunk(&Chunk::new(0, 0)).unwrap();
         saved.redstone_metadata = compress_bytes(&bincode::serialize(&legacy).unwrap()).unwrap();
 
         assert_eq!(
@@ -3863,13 +3950,14 @@ mod tests {
 
         let chunk = Chunk::new(0, 0);
         let mut manager = SaveManager::new(&world_dir);
+        let current = ChunkSaveData::from_chunk(&chunk).unwrap();
         let legacy = LegacyChunkSaveData {
             chunk_x: chunk.chunk_x,
             chunk_z: chunk.chunk_z,
-            blocks: Vec::new(),
-            sky_light: Vec::new(),
-            block_light: Vec::new(),
-            fluid_levels: Vec::new(),
+            blocks: current.blocks,
+            sky_light: current.sky_light,
+            block_light: current.block_light,
+            fluid_levels: current.fluid_levels,
         };
         let region = crate::save::RegionData {
             chunks: [((0u8, 0u8), bincode::serialize(&legacy).unwrap())]
@@ -3887,7 +3975,7 @@ mod tests {
         assert!(saved.block_states().is_empty());
 
         let mut restored = Chunk::new(0, 0);
-        saved.restore_to_chunk(&mut restored);
+        saved.restore_to_chunk(&mut restored).unwrap();
         assert_eq!(restored.get_block_state(0, 64, 0), 0);
 
         fs::remove_dir_all(world_dir).unwrap();
@@ -3900,11 +3988,11 @@ mod tests {
         chunk.set_block_local(7, 65, 7, BlockType::Torch);
         chunk.set_block_state(5, 64, 5, 0b0000_1101); // facing East, top, right hinge
 
-        let save_data = ChunkSaveData::from_chunk(&chunk);
+        let save_data = ChunkSaveData::from_chunk(&chunk).unwrap();
         assert!(!save_data.block_states().is_empty());
 
         let mut restored = Chunk::new(1, 1);
-        save_data.restore_to_chunk(&mut restored);
+        save_data.restore_to_chunk(&mut restored).unwrap();
         assert_eq!(restored.get_block_state(5, 64, 5), 0b0000_1101);
         assert_eq!(restored.get_block(5, 64, 5), BlockType::OakDoor);
         assert!(restored
@@ -4156,7 +4244,7 @@ mod tests {
         let mut manager = SaveManager::new(&world_dir);
         let first = Chunk::new(0, 0);
         manager
-            .save_chunk(0, 0, ChunkSaveData::from_chunk(&first))
+            .save_chunk(0, 0, ChunkSaveData::from_chunk(&first).unwrap())
             .unwrap();
 
         let region_path = world_dir.join("regions/r.0.0.bin");
@@ -4165,7 +4253,7 @@ mod tests {
 
         let second = Chunk::new(1, 0);
         let error = manager
-            .save_chunk(1, 0, ChunkSaveData::from_chunk(&second))
+            .save_chunk(1, 0, ChunkSaveData::from_chunk(&second).unwrap())
             .unwrap_err();
         assert!(matches!(error, SaveError::RegionCorruption { .. }));
         assert_eq!(fs::read(&region_path).unwrap(), corrupt_bytes);
@@ -4249,7 +4337,7 @@ mod tests {
             .load_chunk_in(crate::dimension::Dimension::Overworld, cx, cz)
             .expect("same-region chunk should load after restart");
         let mut restored = Chunk::new(cx, cz);
-        saved.restore_to_chunk(&mut restored);
+        saved.restore_to_chunk(&mut restored).unwrap();
         assert_eq!(restored.get_block_local(0, 64, 0), marker);
     }
 
@@ -4506,7 +4594,7 @@ mod tests {
         let manager = SaveManager::new(&world_dir);
         let source = world_dir.join("corrupt-region.bin");
         let destination = world_dir.join("salvaged-region.bin");
-        let valid = bincode::serialize(&ChunkSaveData::from_chunk(&Chunk::new(0, 0))).unwrap();
+        let valid = bincode::serialize(&ChunkSaveData::from_chunk(&Chunk::new(0, 0)).unwrap()).unwrap();
         let region = RegionData {
             chunks: [((0, 0), valid), ((1, 0), b"broken chunk".to_vec())]
                 .into_iter()
@@ -4549,7 +4637,7 @@ mod tests {
         let world_dir = unique_test_dir("network_revision_index");
         let mut manager = SaveManager::new(&world_dir);
         let chunk = Chunk::new(7, -4);
-        let mut saved = ChunkSaveData::from_chunk(&chunk);
+        let mut saved = ChunkSaveData::from_chunk(&chunk).unwrap();
         saved.mutation_revision = 1;
         let expected_blocks = saved.blocks.clone();
         manager
@@ -4596,7 +4684,7 @@ mod tests {
             "persisted revision must not be mislabeled as current"
         );
 
-        let mut current = ChunkSaveData::from_chunk(&chunk);
+        let mut current = ChunkSaveData::from_chunk(&chunk).unwrap();
         current.mutation_revision = 2;
         manager
             .lock()
@@ -4686,9 +4774,9 @@ mod tests {
             .unwrap();
 
         // Roundtrip via ChunkSaveData
-        let save_data = ChunkSaveData::from_chunk(&chunk);
+        let save_data = ChunkSaveData::from_chunk(&chunk).unwrap();
         let mut restored = Chunk::new(0, 0);
-        save_data.restore_to_chunk(&mut restored);
+        save_data.restore_to_chunk(&mut restored).unwrap();
 
         assert_eq!(restored.get_block_local(1, 2, 3), BlockType::Chest);
         assert_eq!(restored.get_block_entity(1, 2, 3), Some(&chest_stub));
@@ -4697,7 +4785,7 @@ mod tests {
         let bytes = bincode::serialize(&save_data).unwrap();
         let loaded_save_data = deserialize_chunk_save_data(&bytes).unwrap();
         let mut reloaded = Chunk::new(0, 0);
-        loaded_save_data.restore_to_chunk(&mut reloaded);
+        loaded_save_data.restore_to_chunk(&mut reloaded).unwrap();
 
         assert_eq!(reloaded.get_block_entity(1, 2, 3), Some(&chest_stub));
     }
@@ -4912,7 +5000,7 @@ mod tests {
         assert_eq!(loaded.data_version, 0);
 
         let mut modern_chunk = Chunk::empty(0, 0);
-        loaded.restore_to_chunk(&mut modern_chunk);
+        loaded.restore_to_chunk(&mut modern_chunk).unwrap();
 
         // Verify Y=0..255 block mapping and states
         assert_eq!(
@@ -4933,7 +5021,7 @@ mod tests {
 
         // 4. Modify and re-save chunk to trigger region update and original file backup
         modern_chunk.set_block_local(8, -10, 8, BlockType::Bedrock);
-        let updated_save_data = ChunkSaveData::from_chunk(&modern_chunk);
+        let updated_save_data = ChunkSaveData::from_chunk(&modern_chunk).unwrap();
         assert_eq!(updated_save_data.data_version, CHUNK_SAVE_DATA_VERSION);
 
         manager.save_chunk(0, 0, updated_save_data).unwrap();
@@ -4973,7 +5061,7 @@ mod tests {
 
         // Attempt to save a chunk into the corrupt region
         let chunk = Chunk::new(0, 0);
-        let save_data = ChunkSaveData::from_chunk(&chunk);
+        let save_data = ChunkSaveData::from_chunk(&chunk).unwrap();
         let result = manager.save_chunk(0, 0, save_data);
 
         // Verify save_chunk fails with RegionCorruption error
@@ -5095,6 +5183,187 @@ mod tests {
         assert!(manager.load_dedicated_player("foo.bar").is_err());
         assert!(!world_dir.join("players").join("foo_bar.dat").exists());
         assert!(world_dir.join("players").join("alice.dat").exists());
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    fn region_chunk_payload(path: &Path, lx: u8, lz: u8) -> Vec<u8> {
+        let region: RegionData = bincode::deserialize(&fs::read(path).unwrap()).unwrap();
+        region.chunks.get(&(lx, lz)).cloned().unwrap()
+    }
+
+    fn overwrite_region_chunk_payload(path: &Path, lx: u8, lz: u8, payload: Vec<u8>) {
+        let mut region: RegionData = bincode::deserialize(&fs::read(path).unwrap()).unwrap();
+        region.chunks.insert((lx, lz), payload);
+        fs::write(path, bincode::serialize(&region).unwrap()).unwrap();
+    }
+
+    fn with_corrupt_inner_blocks(payload: &[u8], mutate: impl FnOnce(&mut ChunkSaveData)) -> Vec<u8> {
+        let mut data = deserialize_chunk_save_data(payload).unwrap();
+        mutate(&mut data);
+        bincode::serialize(&data).unwrap()
+    }
+
+    #[test]
+    fn empty_or_truncated_inner_zlib_restore_is_error() {
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.set_block_local(8, 10, 8, BlockType::DiamondOre);
+        let valid = ChunkSaveData::from_chunk(&chunk).unwrap();
+
+        let mut empty_blocks = valid.clone();
+        empty_blocks.blocks.clear();
+        assert!(empty_blocks
+            .restore_to_chunk(&mut Chunk::empty(0, 0))
+            .is_err());
+
+        let mut truncated = valid.clone();
+        truncated.blocks.truncate(truncated.blocks.len().min(4));
+        assert!(truncated.restore_to_chunk(&mut Chunk::empty(0, 0)).is_err());
+
+        let mut wrong_len = valid.clone();
+        wrong_len.blocks = compress_bytes(&[1, 2, 3, 4]).unwrap();
+        assert!(wrong_len.restore_to_chunk(&mut Chunk::empty(0, 0)).is_err());
+
+        let mut corrupt_states = valid;
+        corrupt_states.block_states = vec![1, 2, 3, 4];
+        assert!(corrupt_states
+            .restore_to_chunk(&mut Chunk::empty(0, 0))
+            .is_err());
+    }
+
+    #[test]
+    fn from_chunk_compression_failure_returns_err_not_empty_blocks() {
+        COMPRESS_FAILPOINT.with(|failpoint| failpoint.set(true));
+        let result = ChunkSaveData::from_chunk(&Chunk::empty(0, 0));
+        COMPRESS_FAILPOINT.with(|failpoint| failpoint.set(false));
+        let error = result.expect_err("compression failure must not succeed");
+        assert!(error.to_string().contains("injected compress failure"));
+    }
+
+    #[test]
+    fn restore_saved_chunk_does_not_insert_corrupt_inner_zlib() {
+        let mut world = crate::server_world::ServerWorld::new(
+            7,
+            crate::dimension::Dimension::Overworld,
+            crate::game_rules::WorldType::Superflat,
+            false,
+            crate::game_rules::WorldRules::default(),
+            2,
+        );
+        assert!(world.chunks.chunks.contains_key(&(0, 0)));
+
+        let mut data = ChunkSaveData::from_chunk(&Chunk::empty(0, 0)).unwrap();
+        data.chunk_x = 0;
+        data.chunk_z = 0;
+        data.blocks.clear();
+        assert!(world.restore_saved_chunk(&data).is_err());
+        assert!(!world.chunks.chunks.contains_key(&(0, 0)));
+        assert!(world.failed_restore_chunks().contains(&(0, 0)));
+
+        world.ensure_chunk(0, 0);
+        assert!(
+            !world.chunks.chunks.contains_key(&(0, 0)),
+            "failed restore must not generate the column"
+        );
+    }
+
+    #[test]
+    fn legal_region_with_empty_inner_zlib_is_not_replaced_by_generated_terrain() {
+        let world_dir = unique_test_dir("inner_zlib_empty");
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.set_block_local(4, 70, 4, BlockType::DiamondOre);
+        let mut manager = SaveManager::new(&world_dir);
+        manager
+            .save_chunk(0, 0, ChunkSaveData::from_chunk(&chunk).unwrap())
+            .unwrap();
+
+        let region_path = world_dir.join("regions/r.0.0.bin");
+        let original_payload = region_chunk_payload(&region_path, 0, 0);
+        let corrupt_payload = with_corrupt_inner_blocks(&original_payload, |data| {
+            data.blocks.clear();
+        });
+        overwrite_region_chunk_payload(&region_path, 0, 0, corrupt_payload.clone());
+
+        let loaded = SaveManager::new(&world_dir)
+            .load_chunk(0, 0)
+            .expect("envelope still readable");
+        assert!(loaded.restore_to_chunk(&mut Chunk::empty(0, 0)).is_err());
+
+        let mut world = crate::server_world::ServerWorld::new(
+            99,
+            crate::dimension::Dimension::Overworld,
+            crate::game_rules::WorldType::Default,
+            false,
+            crate::game_rules::WorldRules::default(),
+            2,
+        );
+        assert!(world.restore_saved_chunk(&loaded).is_err());
+        assert!(!world.chunks.chunks.contains_key(&(0, 0)));
+
+        let mut manager = SaveManager::new(&world_dir);
+        for (&(cx, cz), column) in &world.chunks.chunks {
+            if world.failed_restore_chunks().contains(&(cx, cz)) {
+                continue;
+            }
+            manager
+                .save_chunk(cx, cz, ChunkSaveData::from_chunk(column).unwrap())
+                .unwrap();
+        }
+
+        assert_eq!(
+            region_chunk_payload(&region_path, 0, 0),
+            corrupt_payload,
+            "save must not replace a failed restore with generated terrain"
+        );
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
+    fn player_modified_chunk_with_corrupt_inner_zlib_is_not_written_as_generated() {
+        let world_dir = unique_test_dir("inner_zlib_player");
+        let mut chunk = Chunk::new(0, 0);
+        chunk.set_block_local(8, 80, 8, BlockType::GoldOre);
+        let mut manager = SaveManager::new(&world_dir);
+        manager
+            .save_chunk(0, 0, ChunkSaveData::from_chunk(&chunk).unwrap())
+            .unwrap();
+
+        let region_path = world_dir.join("regions/r.0.0.bin");
+        let original_payload = region_chunk_payload(&region_path, 0, 0);
+        let corrupt_payload = with_corrupt_inner_blocks(&original_payload, |data| {
+            data.blocks.truncate(3);
+        });
+        overwrite_region_chunk_payload(&region_path, 0, 0, corrupt_payload.clone());
+
+        let mut world = crate::server_world::ServerWorld::new(
+            12345,
+            crate::dimension::Dimension::Overworld,
+            crate::game_rules::WorldType::Default,
+            true,
+            crate::game_rules::WorldRules::default(),
+            2,
+        );
+        let loaded = SaveManager::new(&world_dir)
+            .load_chunk(0, 0)
+            .expect("region envelope remains readable");
+        assert!(world.restore_saved_chunk(&loaded).is_err());
+        world.ensure_chunk(0, 0);
+        assert!(!world.chunks.chunks.contains_key(&(0, 0)));
+
+        let mut manager = SaveManager::new(&world_dir);
+        for (&(cx, cz), column) in &world.chunks.chunks {
+            if world.failed_restore_chunks().contains(&(cx, cz)) {
+                continue;
+            }
+            manager
+                .save_chunk(cx, cz, ChunkSaveData::from_chunk(column).unwrap())
+                .unwrap();
+        }
+
+        assert_eq!(region_chunk_payload(&region_path, 0, 0), corrupt_payload);
+        let still_corrupt = SaveManager::new(&world_dir).load_chunk(0, 0).unwrap();
+        assert!(still_corrupt
+            .restore_to_chunk(&mut Chunk::empty(0, 0))
+            .is_err());
         fs::remove_dir_all(world_dir).unwrap();
     }
 }

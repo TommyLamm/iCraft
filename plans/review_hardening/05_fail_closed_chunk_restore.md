@@ -49,3 +49,25 @@
 - 無界 inflate 的 byte cap（13）。本計劃先改語義：空／錯 ≠ 生成成功。
 - 雙 `SaveManager` 寫 `mutation_revisions.bin`（13）。
 - 桌面 latest-wins worker（embedded 路徑已關掉）。
+
+## 實作與證據
+
+### 行為
+
+- `ChunkSaveData::restore_to_chunk` 改回 `io::Result`。必要 stream `blocks` 在 inflate 失敗、為空、或長度不是「目的地 `Dimension::height()` × 16 × 16」也不是 documented legacy 256-high（`UncompressedChunkSnapshot` / pre-signed-Y）時回 `Err`，不再 `unwrap_or_default()` 後當成未修改生成 chunk。
+- 可選 stream（`block_states` / `sky_light` / `block_light` / `fluid_levels`）：缺席（空壓縮 payload）仍可選；出現但 inflate 失敗、inflate 為空、或長度對不上 `blocks` → `Err`。
+- `ServerWorld::restore_saved_chunk` 先 decode 進 empty column，成功才 insert。失敗：記入 `failed_restore_chunks`、從 `chunks` 移除該格（含 `new()` 預生成的 spawn）、不寫 revision。
+- `ensure_chunk` 對 failed set 內座標直接 return，避免之後生成再被 `save_all` 寫回。
+- `ServerRuntime::restore_authority_state` 單一 column 失敗只 `eprintln` 並 skip，不 abort 整個世界載入。
+- `save_authority_state` / `save_all` 略過 failed set 與 compress 失敗的 column。
+- `from_chunk` / `from_chunk_with_redstone` 壓縮失敗回 `Err`，不寫空 `blocks`。測試用 `COMPRESS_FAILPOINT` 注入。
+
+### 測試
+
+- `cargo test --lib save -- --nocapture`：52 passed（含既有 `corrupt_existing_region_is_never_overwritten`、`test_corrupt_region_file_is_not_overwritten_on_save_failure`、`atomic_replace_*`，以及新加的 inner-zlib / from_chunk failpoint / restore-not-insert / save-does-not-overwrite 測試）。
+- `cargo test --test review_hardening_chunk_restore -- --nocapture`：5 passed。
+- `cargo check --all-targets`：通過。
+
+### Failed set
+
+`ServerWorld.failed_restore_chunks: BTreeSet<(i32, i32)>`。載入失敗 log + insert；`ensure_chunk` / `save_authority_state` / 投影路徑查詢此集合。失敗 column 不進入 `chunks` map。

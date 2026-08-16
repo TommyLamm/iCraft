@@ -3581,7 +3581,15 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn empty(chunk_x: i32, chunk_z: i32) -> Self {
-        let height = crate::dimension::WorldHeight::OVERWORLD;
+        Self::empty_in_dimension(crate::dimension::Dimension::Overworld, chunk_x, chunk_z)
+    }
+
+    pub fn empty_in_dimension(
+        dimension: crate::dimension::Dimension,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Self {
+        let height = dimension.height();
         let section_count = height.section_count();
         Self {
             chunk_x,

@@ -1659,7 +1659,8 @@ mod tests {
                 block_entities: Vec::new(),
                 data_version: 0,
             }
-            .restore_to_chunk(&mut chunk);
+            .restore_to_chunk(&mut chunk)
+            .unwrap();
 
             match wait_for_event(rx) {
                 ClientToGame::BlockChange {
@@ -1692,7 +1693,7 @@ mod tests {
         ));
         let mut source_chunk = crate::world::Chunk::new(0, 0);
         source_chunk.set_block_local(1, 70, 1, crate::world::BlockType::Stone);
-        let mut persisted = crate::save::ChunkSaveData::from_chunk(&source_chunk);
+        let mut persisted = crate::save::ChunkSaveData::from_chunk(&source_chunk).unwrap();
         persisted.mutation_revision = 1;
         crate::save::SaveManager::new(&world_dir)
             .save_chunk(0, 0, persisted)
@@ -2376,7 +2377,7 @@ mod tests {
 
         let mut snapshot_chunk = crate::world::Chunk::new(0, 0);
         snapshot_chunk.set_block_local(1, 70, 1, crate::world::BlockType::Stone);
-        let snapshot = crate::save::ChunkSaveData::from_chunk(&snapshot_chunk);
+        let snapshot = crate::save::ChunkSaveData::from_chunk(&snapshot_chunk).unwrap();
         let mut host = snapshot_chunk.clone();
         host.set_block_local(2, 70, 2, crate::world::BlockType::Dirt);
 
@@ -2427,7 +2428,8 @@ mod tests {
                             block_entities: Vec::new(),
                             data_version: 0,
                         }
-                        .restore_to_chunk(&mut client);
+                        .restore_to_chunk(&mut client)
+                        .unwrap();
                     }
                     ClientToGame::BlockChange { x, y, z, block, .. } => {
                         client.set_block_local(

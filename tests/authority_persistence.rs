@@ -80,7 +80,7 @@ fn authoritative_chunks_and_entities_roundtrip_with_revisions() {
     let mut manager = SaveManager::new(&world_dir);
     let mut chunk = Chunk::new(2, -1);
     chunk.set_block_local(1, 70, 1, BlockType::Brick);
-    let mut data = ChunkSaveData::from_chunk(&chunk);
+    let mut data = ChunkSaveData::from_chunk(&chunk).unwrap();
     data.mutation_revision = 37;
     manager
         .save_chunk_in(Dimension::Overworld, 2, -1, data)
@@ -89,7 +89,7 @@ fn authoritative_chunks_and_entities_roundtrip_with_revisions() {
     assert_eq!(saved_chunks.len(), 1);
     assert_eq!(saved_chunks[0].mutation_revision, 37);
     let mut restored = Chunk::new(2, -1);
-    saved_chunks[0].restore_to_chunk(&mut restored);
+    saved_chunks[0].restore_to_chunk(&mut restored).unwrap();
     assert_eq!(restored.get_block_local(1, 70, 1), BlockType::Brick);
 
     let mut entities = EntityManager::new();

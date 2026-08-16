@@ -1889,6 +1889,7 @@ struct ChunkLoadResult {
     lifetime: u64,
     chunk: Chunk,
     mutated: bool,
+    restore_failed: bool,
     redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
 }
 
@@ -2397,9 +2398,12 @@ impl State {
             .lock()
             .unwrap()
             .load_chunk_in(target, cx, cz);
+        let mut restore_ok = true;
         if let Some(saved) = saved_chunk {
-            let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
-            if saved.blocks != generated_blocks {
+            let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk)
+                .ok()
+                .map(|data| data.blocks);
+            if generated_blocks.as_ref() != Some(&saved.blocks) {
                 match self.mutation_revisions.ensure_at_least(target, cx, cz, 1) {
                     Ok(true) => {
                         self.mutation_revision_generation =
@@ -2414,18 +2418,29 @@ impl State {
                 }
             }
             restored_redstone = saved.redstone_metadata();
-            saved.restore_to_chunk(&mut chunk);
+            if let Err(error) = saved.restore_to_chunk(&mut chunk) {
+                eprintln!(
+                    "[Save] skipping corrupt saved chunk ({cx}, {cz}) in {target:?}: {error}"
+                );
+                restore_ok = false;
+            }
         }
-        self.chunk_manager.chunks.insert((cx, cz), chunk);
-        if !restored_redstone.is_empty() {
-            self.redstone
-                .restore_chunk_metadata(&self.chunk_manager, cx, cz, &restored_redstone);
+        if restore_ok {
+            self.chunk_manager.chunks.insert((cx, cz), chunk);
+            if !restored_redstone.is_empty() {
+                self.redstone.restore_chunk_metadata(
+                    &self.chunk_manager,
+                    cx,
+                    cz,
+                    &restored_redstone,
+                );
+            }
+            let lifetime = self.next_chunk_lifetime();
+            self.chunk_lifetimes.insert((cx, cz), lifetime);
+            self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
+            let mut dirty = std::collections::HashSet::new();
+            crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
         }
-        let lifetime = self.next_chunk_lifetime();
-        self.chunk_lifetimes.insert((cx, cz), lifetime);
-        self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
-        let mut dirty = std::collections::HashSet::new();
-        crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
 
         let wx = destination.x.floor() as i32;
         let wz = destination.z.floor() as i32;
@@ -6864,9 +6879,10 @@ impl State {
                         manager.load_chunk_in(current_dimension, cx, cz)
                     };
                     if let Some(data) = saved_chunk {
-                        let generated_blocks =
-                            crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
-                        if data.blocks != generated_blocks {
+                        let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk)
+                            .ok()
+                            .map(|generated| generated.blocks);
+                        if generated_blocks.as_ref() != Some(&data.blocks) {
                             match mutation_revisions.ensure_at_least(current_dimension, cx, cz, 1) {
                                 Ok(changed) => mutation_index_dirty |= changed,
                                 Err(error) => {
@@ -6880,7 +6896,12 @@ impl State {
                             }
                         }
                         let metadata = data.redstone_metadata();
-                        data.restore_to_chunk(&mut chunk);
+                        if let Err(error) = data.restore_to_chunk(&mut chunk) {
+                            eprintln!(
+                                "[Save] skipping corrupt saved chunk ({cx}, {cz}): {error}"
+                            );
+                            continue;
+                        }
                         if !metadata.is_empty() {
                             pending_redstone_metadata.push((cx, cz, metadata));
                         }
@@ -11561,6 +11582,9 @@ impl State {
                     if expected == Some(result.lifetime) {
                         self.chunk_load_in_flight.remove(&result.coord);
                     }
+                    if result.restore_failed {
+                        continue;
+                    }
                     let r = self.chunk_manager.render_distance;
                     if !chunk_load_result_is_current(
                         expected,
@@ -11786,6 +11810,7 @@ impl State {
                 },
             );
             let mut mutated = false;
+            let mut restore_failed = false;
             let mut redstone_metadata = Vec::new();
             if authoritative {
                 if let Some(saved) = save_manager
@@ -11793,10 +11818,15 @@ impl State {
                     .unwrap()
                     .load_chunk_in(dimension, coord.0, coord.1)
                 {
-                    let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk).blocks;
-                    mutated = saved.blocks != generated_blocks;
+                    let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk)
+                        .ok()
+                        .map(|generated| generated.blocks);
+                    mutated = generated_blocks.as_ref() != Some(&saved.blocks);
                     redstone_metadata = saved.redstone_metadata();
-                    saved.restore_to_chunk(&mut chunk);
+                    if saved.restore_to_chunk(&mut chunk).is_err() {
+                        restore_failed = true;
+                        mutated = false;
+                    }
                 }
             }
             let _ = sender.send(TerrainWorkerResult::Loaded(ChunkLoadResult {
@@ -11806,6 +11836,7 @@ impl State {
                 lifetime,
                 chunk,
                 mutated,
+                restore_failed,
                 redstone_metadata,
             }));
         });
@@ -15429,7 +15460,7 @@ impl State {
             block_entities: block_entities.to_vec(),
             data_version: 1,
         };
-        save_data.restore_to_chunk(chunk);
+        let _ = save_data.restore_to_chunk(chunk);
     }
 
     pub fn break_block(&mut self, pos: glam::Vec3) {

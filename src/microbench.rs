@@ -211,7 +211,7 @@ fn bench_save() -> u64 {
     let start = Instant::now();
     let mut checksum = 0u64;
     for _ in 0..ITERS {
-        let data = ChunkSaveData::from_chunk(&chunk);
+        let data = ChunkSaveData::from_chunk(&chunk).expect("compress chunk");
         checksum = checksum.wrapping_add(data.blocks.len() as u64);
         checksum = checksum.wrapping_add(bincode::serialize(&data).unwrap().len() as u64);
     }
@@ -229,7 +229,7 @@ fn bench_network() -> u64 {
     let start = Instant::now();
     let mut checksum = 0u64;
     for _ in 0..ITERS {
-        let flattened = ChunkSaveData::from_chunk(&chunk);
+        let flattened = ChunkSaveData::from_chunk(&chunk).expect("compress chunk");
         let packet = Packet::ChunkData {
             protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             dimension: 0,

@@ -1182,7 +1182,12 @@ impl ServerRuntime {
             }
             self.authority.with_world(dimension, |world| {
                 for chunk in &chunks {
-                    world.restore_saved_chunk(chunk);
+                    if let Err(error) = world.restore_saved_chunk(chunk) {
+                        eprintln!(
+                            "[ServerRuntime] skipping corrupt saved chunk ({}, {}) in {:?}: {error}",
+                            chunk.chunk_x, chunk.chunk_z, dimension
+                        );
+                    }
                 }
                 for ((_cx, _cz), revision) in revisions {
                     world.revisions.observe(revision);
@@ -1205,13 +1210,16 @@ impl ServerRuntime {
                 let chunks = coordinates
                     .into_iter()
                     .filter_map(|(cx, cz)| {
-                        world.chunks.chunks.get(&(cx, cz)).map(|chunk| {
+                        if world.failed_restore_chunks().contains(&(cx, cz)) {
+                            return None;
+                        }
+                        world.chunks.chunks.get(&(cx, cz)).and_then(|chunk| {
                             let metadata =
                                 world.redstone.collect_chunk_metadata(&world.chunks, cx, cz);
                             let mut data =
-                                ChunkSaveData::from_chunk_with_redstone(chunk, &metadata);
+                                ChunkSaveData::from_chunk_with_redstone(chunk, &metadata).ok()?;
                             data.mutation_revision = world.chunk_revision(cx, cz);
-                            (cx, cz, data)
+                            Some((cx, cz, data))
                         })
                     })
                     .collect::<Vec<_>>();
@@ -3212,11 +3220,14 @@ impl ServerRuntime {
                     world.ensure_chunk(cx, cz);
                 });
                 let payload = self.authority.world_ref(dimension).and_then(|world| {
-                    world.chunks.chunks.get(&(cx, cz)).map(|chunk| {
-                        let mut data = ChunkSaveData::from_chunk(chunk);
+                    if world.failed_restore_chunks().contains(&(cx, cz)) {
+                        return None;
+                    }
+                    world.chunks.chunks.get(&(cx, cz)).and_then(|chunk| {
+                        let mut data = ChunkSaveData::from_chunk(chunk).ok()?;
                         let revision = world.chunk_revision(cx, cz);
                         data.mutation_revision = revision;
-                        (
+                        Some((
                             revision,
                             chunk.min_section_y,
                             chunk.sections.len().min(u16::MAX as usize) as u16,
@@ -3224,7 +3235,7 @@ impl ServerRuntime {
                             data.block_states,
                             data.fluid_levels,
                             data.block_entities,
-                        )
+                        ))
                     })
                 });
                 let Some((

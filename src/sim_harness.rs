@@ -702,7 +702,9 @@ impl SimHarness {
         let Some(chunk) = self.chunks.chunks.get(&(cx, cz)).cloned() else {
             return false;
         };
-        let data = ChunkSaveData::from_chunk(&chunk);
+        let Ok(data) = ChunkSaveData::from_chunk(&chunk) else {
+            return false;
+        };
         let mut manager = SaveManager::new(root);
         if manager.save_chunk_in(self.dimension, cx, cz, data).is_err() {
             return false;
@@ -711,7 +713,9 @@ impl SimHarness {
             return false;
         };
         let mut restored = Chunk::new_with_seed(cx, cz, SEED);
-        saved.restore_to_chunk(&mut restored);
+        if saved.restore_to_chunk(&mut restored).is_err() {
+            return false;
+        }
         self.chunks.chunks.insert((cx, cz), restored);
         true
     }

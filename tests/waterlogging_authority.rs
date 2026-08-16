@@ -264,10 +264,10 @@ fn raw_fluid_survives_v3_save_and_packet_roundtrip() {
     core.with_world(Dimension::Overworld, |world| {
         world.chunks.set_waterlogged(8, 80, 8, true);
         let chunk = world.chunks.chunks.get(&(0, 0)).unwrap();
-        let data = ChunkSaveData::from_chunk(chunk);
+        let data = ChunkSaveData::from_chunk(chunk).unwrap();
         assert_eq!(data.data_version, 3);
         let mut restored = Chunk::new(0, 0);
-        data.restore_to_chunk(&mut restored);
+        data.restore_to_chunk(&mut restored).unwrap();
         assert_eq!(
             restored.get_fluid_level(8, 80, 8) & FLUID_WATERLOGGED_BIT,
             FLUID_WATERLOGGED_BIT

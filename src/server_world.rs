@@ -80,6 +80,10 @@ pub struct ServerWorld {
     pub sleeping_players: BTreeSet<PlayerId>,
     block_revisions: BTreeMap<(i32, i32, i32), u64>,
     chunk_revisions: BTreeMap<(i32, i32), u64>,
+    /// Columns whose on-disk payload failed inflate/length checks. They are
+    /// never inserted, generated, or written back so a later save cannot
+    /// replace player builds with freshly generated terrain.
+    failed_restore_chunks: BTreeSet<(i32, i32)>,
     pub last_snapshot: AuthoritySnapshot,
 }
 
@@ -143,6 +147,7 @@ impl ServerWorld {
             sleeping_players: BTreeSet::new(),
             block_revisions: BTreeMap::new(),
             chunk_revisions: BTreeMap::new(),
+            failed_restore_chunks: BTreeSet::new(),
             last_snapshot: AuthoritySnapshot::empty(),
         };
         world.ensure_chunk(0, 0);
@@ -158,7 +163,9 @@ impl ServerWorld {
     }
 
     pub fn ensure_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
-        if self.chunks.chunks.contains_key(&(chunk_x, chunk_z)) {
+        if self.chunks.chunks.contains_key(&(chunk_x, chunk_z))
+            || self.failed_restore_chunks.contains(&(chunk_x, chunk_z))
+        {
             return;
         }
         let options = WorldGenerationOptions {
@@ -332,14 +339,26 @@ impl ServerWorld {
         index
     }
 
-    /// Restore a persisted chunk into the authoritative map. Existing
-    /// generated terrain is replaced by the saved payload, while the world
-    /// revision clock observes the payload revision before accepting requests.
-    pub fn restore_saved_chunk(&mut self, data: &ChunkSaveData) {
-        self.ensure_chunk(data.chunk_x, data.chunk_z);
-        if let Some(chunk) = self.chunks.chunks.get_mut(&(data.chunk_x, data.chunk_z)) {
-            data.restore_to_chunk(chunk);
+    /// Columns that failed inflate/length checks during restore. `save_all`
+    /// must never write these coordinates.
+    pub fn failed_restore_chunks(&self) -> &BTreeSet<(i32, i32)> {
+        &self.failed_restore_chunks
+    }
+
+    /// Restore a persisted chunk into the authoritative map. The payload is
+    /// decoded before any insert so a corrupt inner zlib cannot be replaced
+    /// by generated terrain and then saved back over player builds.
+    pub fn restore_saved_chunk(&mut self, data: &ChunkSaveData) -> std::io::Result<()> {
+        let key = (data.chunk_x, data.chunk_z);
+        let mut decoded =
+            crate::world::Chunk::empty_in_dimension(self.dimension, data.chunk_x, data.chunk_z);
+        if let Err(error) = data.restore_to_chunk(&mut decoded) {
+            self.failed_restore_chunks.insert(key);
+            self.chunks.chunks.remove(&key);
+            self.chunk_revisions.remove(&key);
+            return Err(error);
         }
+        self.chunks.chunks.insert(key, decoded);
         let redstone_metadata = data.redstone_metadata();
         self.redstone.restore_chunk_metadata(
             &self.chunks,
@@ -347,9 +366,9 @@ impl ServerWorld {
             data.chunk_z,
             &redstone_metadata,
         );
-        self.chunk_revisions
-            .insert((data.chunk_x, data.chunk_z), data.mutation_revision);
+        self.chunk_revisions.insert(key, data.mutation_revision);
         self.revisions.observe(data.mutation_revision);
+        Ok(())
     }
 
     /// Restore persistent entities once during authority startup. Entity IDs
