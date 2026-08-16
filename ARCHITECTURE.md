@@ -64,7 +64,8 @@ All server-side paths -> AuthorityCore -> one ServerWorld per loaded dimension
   absent.
 - Embedded presentation starts without loading `player.dat` or pre-materializing
   a spawn halo, and does not construct a presentation `SaveManager`, chunk-save
-  worker, or network-snapshot worker. Player state and terrain arrive from
+  worker, or network-snapshot worker. It may peek `dimension.dat` so the first
+  projected columns are not dropped. Player state and terrain arrive from
   `ServerRuntime` projections.
 - `AuthorityBoundary` is a thin `AuthorityCore` helper retained for unit tests;
   it is not the current desktop Singleplayer/Host runtime path.

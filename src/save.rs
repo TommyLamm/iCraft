@@ -33,6 +33,20 @@ fn default_mutation_revision_index_capacity() -> usize {
     MUTATION_REVISION_INDEX_CAPACITY
 }
 
+/// Read-only `dimension.dat` peek. Embedded presentation uses this so it can
+/// start in the last persisted dimension without constructing a writable
+/// presentation `SaveManager`.
+pub fn peek_current_dimension(world_dir: &Path) -> crate::dimension::Dimension {
+    match fs::read(world_dir.join("dimension.dat"))
+        .ok()
+        .and_then(|bytes| bytes.first().copied())
+    {
+        Some(1) => crate::dimension::Dimension::Nether,
+        Some(2) => crate::dimension::Dimension::End,
+        _ => crate::dimension::Dimension::Overworld,
+    }
+}
+
 /// Creation-time fields from `world.meta`, with a level.dat fallback for
 /// legacy worlds. Lives here so the dedicated server can read them without
 /// compiling the wgpu menu.
@@ -3275,14 +3289,7 @@ impl SaveManager {
     }
 
     pub fn load_current_dimension(&self) -> crate::dimension::Dimension {
-        match fs::read(self.world_dir.join("dimension.dat"))
-            .ok()
-            .and_then(|bytes| bytes.first().copied())
-        {
-            Some(1) => crate::dimension::Dimension::Nether,
-            Some(2) => crate::dimension::Dimension::End,
-            _ => crate::dimension::Dimension::Overworld,
-        }
+        peek_current_dimension(&self.world_dir)
     }
 
     pub fn save_player_and_level(&self, level: &LevelData, player: &PlayerData) -> io::Result<()> {

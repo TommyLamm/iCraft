@@ -65,7 +65,7 @@ Listen-host catch-up 仍可能用 `network_snapshot_worker`（`state.rs` ~9153�
 
 改動：
 
-- `State::new` 把工人建構收到與 Join 相同的閘門：`is_client || in_process_authority` 時 `save_manager`／`save_tx`／`network_snapshot_worker` 皆 `None`。`current_dimension`／`mutation_revisions` 初值對 embedded 不再從 presentation `SaveManager` 讀。
+- `State::new` 把工人建構收到與 Join 相同的閘門：`is_client || in_process_authority` 時 `save_manager`／`save_tx`／`network_snapshot_worker` 皆 `None`。`mutation_revisions` 對 embedded 不再從 presentation 讀（避免第二份 index）。`current_dimension` 用只讀 `peek_current_dimension` 讀 `dimension.dat`，不建可寫 `SaveManager`，避免 Nether/End 重開時前 16 個 `ChunkData` 被 `apply_remote_chunk_data` 丟掉。
 - leftover `LegacyOwner`（`!is_client && !in_process_authority`）仍建 `SaveQueue` + snapshot worker。leftover 存檔語意未刪。
 - 手動存檔／QUIT／視窗關閉／`Command::SaveAll` 仍走 `save_synchronously` → `EmbeddedRuntimeBridge::save_all`。autosave UI 只在 `is_legacy_owner()` 呼叫 `trigger_background_save`；embedded 不會 enqueue 到空 queue。
 - `NetworkSnapshotWorker`：**不**在 Singleplayer／Listen host 建構。型別與 leftover Host catch-up 呼叫點留下；rustdoc 寫明是 catch-up 編碼，不是權威存檔。未搬到 `network/`。

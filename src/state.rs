@@ -6310,8 +6310,12 @@ impl State {
                     Some(network_snapshot_worker),
                 )
             };
-        let current_dimension = if is_client || in_process_authority {
+        let current_dimension = if is_client {
             crate::dimension::Dimension::Overworld
+        } else if in_process_authority {
+            // Read-only sidecar. Do not construct a presentation SaveManager
+            // just to learn which dimension the runtime will project first.
+            crate::save::peek_current_dimension(&launch.world_dir)
         } else {
             save_manager
                 .as_ref()
