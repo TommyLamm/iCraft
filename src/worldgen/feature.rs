@@ -224,29 +224,44 @@ impl FeaturePlacer {
             }
         }
 
-        // Sugar cane near water.
-        if matches!(
-            surface_block,
-            BlockType::Grass | BlockType::Dirt | BlockType::Sand
-        ) && surface_y > 0
-        {
-            let near_water = self.is_near_water(blocks, lx, surface_y, lz, min_y_offset);
-            if near_water {
-                let cane_roll = hash_coord(self.seed, wx, surface_y, wz, 0x5A7A_317E);
-                if cane_roll % 100 < 10 {
-                    let height = (2 + (cane_roll >> 8) % 3) as i32;
-                    for dy in 1..=height {
-                        self.set_block_local(
-                            blocks,
-                            lx,
-                            surface_y + dy,
-                            lz,
-                            BlockType::SugarCane,
-                            min_y_offset,
-                        );
+        // Sugar cane near water. `surface_y` is the sea/lake floor for an
+        // underwater column, not the water surface, while a shore can be one
+        // block above sea level. Probe both the terrain surface and sea level
+        // so a valid bank beside water is not silently skipped.
+        for cane_base_y in [surface_y, SEA_LEVEL] {
+            if cane_base_y != surface_y && surface_y < SEA_LEVEL {
+                continue;
+            }
+            let Some(base) = self.block_at_local(blocks, lx, cane_base_y, lz, min_y_offset) else {
+                continue;
+            };
+            if !matches!(base, BlockType::Grass | BlockType::Dirt | BlockType::Sand)
+                || !self.is_near_water(blocks, lx, cane_base_y, lz, min_y_offset)
+                || self.block_at_local(blocks, lx, cane_base_y + 1, lz, min_y_offset)
+                    != Some(BlockType::Air)
+            {
+                continue;
+            }
+            let cane_roll = hash_coord(self.seed, wx, cane_base_y, wz, 0x5A7A_317E);
+            if cane_roll % 100 < 10 {
+                let height = (2 + (cane_roll >> 8) % 3) as i32;
+                for dy in 1..=height {
+                    if self.block_at_local(blocks, lx, cane_base_y + dy, lz, min_y_offset)
+                        != Some(BlockType::Air)
+                    {
+                        break;
                     }
+                    self.set_block_local(
+                        blocks,
+                        lx,
+                        cane_base_y + dy,
+                        lz,
+                        BlockType::SugarCane,
+                        min_y_offset,
+                    );
                 }
             }
+            break;
         }
     }
 
@@ -545,5 +560,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn sugar_cane_uses_the_water_surface_bank_not_the_underwater_floor() {
+        let seed = 12_345;
+        let placer = FeaturePlacer::new(seed);
+        let min_y_offset = 64usize;
+        let mut blocks: Vec<Vec<[BlockType; CHUNK_DEPTH]>> =
+            vec![vec![[BlockType::Air; CHUNK_DEPTH]; 384]; CHUNK_WIDTH];
+        let (x, z) = (1..CHUNK_WIDTH - 1)
+            .flat_map(|x| (1..CHUNK_DEPTH - 1).map(move |z| (x, z)))
+            .find(|(x, z)| {
+                hash_coord(seed, *x as i32, SEA_LEVEL, *z as i32, 0x5A7A_317E) % 100 < 10
+            })
+            .expect("fixture should contain a deterministic cane candidate");
+        blocks[x][(SEA_LEVEL + min_y_offset as i32) as usize][z] = BlockType::Dirt;
+        blocks[x + 1][(SEA_LEVEL + min_y_offset as i32) as usize][z] = BlockType::Water;
+
+        // The terrain surface is one block above sea level, which was the
+        // failing shoreline shape: water exists beside y=63, not y=64.
+        placer.place_column_features(
+            &mut blocks,
+            x as i32,
+            z as i32,
+            SEA_LEVEL + 1,
+            Biome::Plains,
+            x,
+            z,
+            min_y_offset,
+        );
+
+        assert_eq!(
+            blocks[x][(SEA_LEVEL + 1 + min_y_offset as i32) as usize][z],
+            BlockType::SugarCane
+        );
     }
 }

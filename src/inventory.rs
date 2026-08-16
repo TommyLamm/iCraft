@@ -1691,6 +1691,9 @@ impl Item {
     /// food, ...) plus cross-model plant blocks (flowers, tall grass, sugar
     /// cane).
     pub fn renders_flat(self) -> bool {
+        if matches!(self, Item::Torch | Item::RedstoneTorch | Item::Lever) {
+            return true;
+        }
         match self.properties().block_type {
             Some(block) => block.is_cross_model(),
             None => self != Item::Air,
@@ -3382,7 +3385,9 @@ mod tests {
         // Full-cube block items keep cube rendering.
         assert!(!Item::Stone.renders_flat());
         assert!(!Item::Grass.renders_flat());
-        assert!(!Item::Torch.renders_flat());
+        assert!(Item::Torch.renders_flat());
+        assert!(Item::RedstoneTorch.renders_flat());
+        assert!(Item::Lever.renders_flat());
         assert!(!Item::Air.renders_flat());
     }
 

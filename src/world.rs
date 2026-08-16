@@ -3581,7 +3581,15 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn empty(chunk_x: i32, chunk_z: i32) -> Self {
-        let height = crate::dimension::WorldHeight::OVERWORLD;
+        Self::empty_in_dimension(chunk_x, chunk_z, crate::dimension::Dimension::Overworld)
+    }
+
+    pub fn empty_in_dimension(
+        chunk_x: i32,
+        chunk_z: i32,
+        dimension: crate::dimension::Dimension,
+    ) -> Self {
+        let height = dimension.height();
         let section_count = height.section_count();
         Self {
             chunk_x,
@@ -4493,6 +4501,7 @@ impl Chunk {
                                     [world_x as f32 + offset[0], vy, world_z as f32 + offset[2]];
                                 local_uvs[corner_idx] = *uv;
                             }
+                            let vertex_start = v_list.len();
                             push_terrain_quad(
                                 v_list,
                                 i_list,
@@ -4503,6 +4512,14 @@ impl Chunk {
                                 ao,
                                 region_coord,
                             );
+                            if block == BlockType::Water && (level > 0 || falling) {
+                                for vertex in &mut v_list[vertex_start..] {
+                                    // Multiplier currently uses only values
+                                    // 0..2, leaving bit 13 available as a
+                                    // per-face flowing-fluid animation flag.
+                                    vertex.light_ao |= 1 << 13;
+                                }
+                            }
                         }
                     }
                 }
@@ -5821,6 +5838,29 @@ mod tests {
         let different = Chunk::new_with_seed(0, 0, 2);
         assert_eq!(first.heightmap, same.heightmap);
         assert_ne!(first.heightmap, different.heightmap);
+    }
+
+    #[test]
+    fn only_flowing_water_meshes_carry_the_animation_flag() {
+        let mut still = empty_test_chunk();
+        still.set_block_local(8, 1, 8, BlockType::Water);
+        still.set_fluid_level(8, 1, 8, 0);
+        let (_, _, still_vertices, _) =
+            still.generate_mesh(|x, y, z| test_chunk_lookup(&still, x, y, z));
+        assert!(!still_vertices.is_empty());
+        assert!(still_vertices
+            .iter()
+            .all(|vertex| vertex.light_ao & (1 << 13) == 0));
+
+        let mut flowing = empty_test_chunk();
+        flowing.set_block_local(8, 1, 8, BlockType::Water);
+        flowing.set_fluid_level(8, 1, 8, 1);
+        let (_, _, flowing_vertices, _) =
+            flowing.generate_mesh(|x, y, z| test_chunk_lookup(&flowing, x, y, z));
+        assert!(!flowing_vertices.is_empty());
+        assert!(flowing_vertices
+            .iter()
+            .all(|vertex| vertex.light_ao & (1 << 13) != 0));
     }
     use std::collections::HashSet;
 

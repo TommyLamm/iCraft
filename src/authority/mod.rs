@@ -13,7 +13,7 @@ use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::inventory::ItemStack;
 use crate::network::protocol::{
     BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
-    PlayerId, RejectReason, SessionSlotWire,
+    ItemWire, PlayerId, RejectReason, SessionSlotWire,
 };
 use crate::server_world::{ServerWorld, FIXED_DT};
 use contract::{
@@ -609,6 +609,7 @@ impl AuthorityCore {
                 .map(|session| (session.id, session.position))
                 .collect();
             let world_snapshot = self.world.tick(&players);
+            self.tick_item_pickups(dimension);
             let mut world_mutations = world_snapshot.mutations;
             // Redstone emits dispenser/dropper edges from inside the world
             // tick, but entity ids belong to AuthorityCore's global namespace.
@@ -675,6 +676,116 @@ impl AuthorityCore {
         };
         self.last_snapshot = snapshot.clone();
         snapshot
+    }
+
+    /// Settle dropped-item collection in the same authority that owns both
+    /// entities and inventories. Presentation roots must never delete a local
+    /// replica and award an item independently of this transaction.
+    fn tick_item_pickups(&mut self, dimension: Dimension) {
+        let ids: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|session| session.dimension == dimension as u8)
+            .map(|session| session.id)
+            .collect();
+
+        for id in ids {
+            let Some((position, game_mode)) = self
+                .sessions
+                .get(&id)
+                .map(|session| (session.position, session.game_mode))
+            else {
+                continue;
+            };
+            if !crate::game_rules::GameModePolicy::for_rules(game_mode, &self.world.rules)
+                .can_pickup
+            {
+                continue;
+            }
+
+            let mut candidates: Vec<_> = self
+                .world
+                .entities
+                .query_radius_types(
+                    glam::Vec3::from_array(position),
+                    1.5,
+                    &[crate::entity::EntityType::DroppedItem],
+                )
+                .filter(|entity| {
+                    entity.pickup_cooldown <= 0.0
+                        && (entity.dropped_stack.is_some() || entity.dropped_item.is_some())
+                })
+                .map(|entity| entity.id)
+                .collect();
+            candidates.sort_unstable();
+
+            for entity_id in candidates {
+                let Some(stack) = self.world.entities.get_by_id(entity_id).and_then(|entity| {
+                    entity.dropped_stack.or_else(|| {
+                        entity
+                            .dropped_item
+                            .map(|item| ItemStack::new(item, entity.dropped_count.max(1)))
+                    })
+                }) else {
+                    continue;
+                };
+                let slot = SessionInventorySlot::from_wire(
+                    ItemWire::from_stack(&stack),
+                    stack.can_break,
+                    stack.can_place_on,
+                );
+                let Some(mut gameplay) = self.sessions.get(&id).map(|session| session.gameplay)
+                else {
+                    continue;
+                };
+                if !gameplay.add_slot(slot) {
+                    continue;
+                }
+                gameplay.revision = self.world.revisions.allocate();
+                if let Some(session) = self.sessions.get_mut(&id) {
+                    session.gameplay = gameplay;
+                }
+                self.world.remove_authority_entity(entity_id);
+            }
+
+            let mut experience_orbs: Vec<_> = self
+                .world
+                .entities
+                .query_radius_types(
+                    glam::Vec3::from_array(position),
+                    1.5,
+                    &[crate::entity::EntityType::ExperienceOrb],
+                )
+                .filter(|entity| entity.pickup_cooldown <= 0.0 && entity.xp_value > 0)
+                .map(|entity| (entity.id, entity.xp_value))
+                .collect();
+            experience_orbs.sort_unstable_by_key(|(entity_id, _)| *entity_id);
+            if !experience_orbs.is_empty() {
+                let amount = experience_orbs
+                    .iter()
+                    .fold(0u32, |total, (_, value)| total.saturating_add(*value));
+                let Some(mut gameplay) = self.sessions.get(&id).map(|session| session.gameplay)
+                else {
+                    continue;
+                };
+                gameplay.experience = gameplay.experience.saturating_add(amount);
+                loop {
+                    let cost = 7u32.saturating_add(gameplay.experience_level.saturating_mul(2));
+                    if gameplay.experience < cost || cost == u32::MAX {
+                        break;
+                    }
+                    gameplay.experience -= cost;
+                    gameplay.experience_level = gameplay.experience_level.saturating_add(1);
+                }
+                gameplay.revision = self.world.revisions.allocate();
+                if let Some(session) = self.sessions.get_mut(&id) {
+                    session.gameplay = gameplay;
+                }
+                for (entity_id, _) in experience_orbs {
+                    self.world.remove_authority_entity(entity_id);
+                }
+            }
+        }
     }
 
     fn tick_session_domains(&mut self, dimension: Dimension) {
@@ -2661,7 +2772,13 @@ mod tests {
                 face,
                 hand: 0,
                 held,
-                block: if matches!(action, BlockActionKind::Place) {
+                block: if matches!(
+                    action,
+                    BlockActionKind::Place
+                        | BlockActionKind::IgnitePortal
+                        | BlockActionKind::InsertEnderEye
+                        | BlockActionKind::EnterPortal
+                ) {
                     block.to_wire()
                 } else {
                     BlockType::Air.to_wire()
@@ -2669,6 +2786,43 @@ mod tests {
                 look_milli,
             },
         }
+    }
+
+    #[test]
+    fn authority_collects_dropped_items_and_projects_inventory_revision() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        core.world.rules.do_mob_spawning = false;
+        let entity_id = 99_001;
+        assert!(core.world.spawn_dropped_item(
+            entity_id,
+            [8.25, 80.0, 8.25],
+            ItemStack::new(Item::Diamond, 3),
+        ));
+        assert!(core.world.spawn_experience_orb(99_002, [8.5, 80.0, 8.5], 9));
+
+        let before_revision = core.session(7).unwrap().gameplay.revision;
+        let snapshot = core.tick();
+
+        assert!(core.world.entities.get_by_id(entity_id).is_none());
+        let collected = core
+            .session(7)
+            .unwrap()
+            .gameplay
+            .inventory
+            .iter()
+            .flatten()
+            .find(|slot| slot.item.item == Item::Diamond as u32)
+            .copied()
+            .expect("diamond drop should enter the authority inventory");
+        assert_eq!(collected.item.count, 3);
+        assert!(core.world.entities.get_by_id(99_002).is_none());
+        assert_eq!(core.session(7).unwrap().gameplay.experience_level, 1);
+        assert_eq!(core.session(7).unwrap().gameplay.experience, 2);
+        assert!(core.session(7).unwrap().gameplay.revision > before_revision);
+        assert!(snapshot
+            .session_updates
+            .iter()
+            .any(|update| update.player_id == 7 && update.state.revision > before_revision));
     }
 
     #[test]
@@ -3164,6 +3318,106 @@ mod tests {
             BlockType::Stone
         );
         assert!(core.session(7).unwrap().gameplay.inventory[0].is_none());
+    }
+
+    #[test]
+    fn typed_portal_items_reach_end_eye_and_nether_ignition_actions() {
+        let target = (8, 81, 9);
+        let eye_stack = ItemStack::new(Item::EyeOfEnder, 1);
+        let eye_wire =
+            crate::network::protocol::SessionSlotWire::new(ItemWire::from_stack(&eye_stack), 0, 0);
+        let mut end = core(AuthorityTopology::Singleplayer);
+        end.world
+            .set_block(target.0, target.1, target.2, BlockType::EndPortalFrame, 0)
+            .unwrap();
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.inventory[0] = Some(SessionInventorySlot::from(eye_wire));
+        end.set_session_gameplay(7, gameplay);
+        assert_eq!(
+            end.world.get_block(target.0, target.1, target.2),
+            BlockType::EndPortalFrame
+        );
+        assert_eq!(
+            end.session(7).unwrap().gameplay.inventory[0],
+            Some(SessionInventorySlot::from(eye_wire))
+        );
+        assert!(end
+            .world
+            .has_block_line_of_sight([8.0, 80.0, 8.0], [315, -76, 946], target));
+        let inserted = end.submit_request(block_request(
+            117,
+            1,
+            BlockActionKind::InsertEnderEye,
+            target,
+            Some(eye_wire),
+            BlockType::EndPortalFrameFilled,
+            [0, 1, 0],
+            [315, -76, 946],
+            0,
+        ));
+        assert!(
+            matches!(inserted.outcome, GameplayOutcome::Accepted { .. }),
+            "unexpected end-eye response: {:?}",
+            inserted.outcome
+        );
+        assert_eq!(
+            end.world.get_block(target.0, target.1, target.2),
+            BlockType::EndPortalFrameFilled
+        );
+        assert!(end.session(7).unwrap().gameplay.inventory[0].is_none());
+
+        let mut nether = core(AuthorityTopology::Singleplayer);
+        // Complete 4x5 X-axis frame at z=9; target is its lower interior.
+        for x in 7..=10 {
+            nether
+                .world
+                .set_block(x, 80, 9, BlockType::Obsidian, 0)
+                .unwrap();
+            nether
+                .world
+                .set_block(x, 84, 9, BlockType::Obsidian, 0)
+                .unwrap();
+        }
+        for y in 81..=83 {
+            nether
+                .world
+                .set_block(7, y, 9, BlockType::Obsidian, 0)
+                .unwrap();
+            nether
+                .world
+                .set_block(10, y, 9, BlockType::Obsidian, 0)
+                .unwrap();
+        }
+        let flint_stack = ItemStack::new(Item::FlintAndSteel, 1);
+        let flint_wire = crate::network::protocol::SessionSlotWire::new(
+            ItemWire::from_stack(&flint_stack),
+            0,
+            0,
+        );
+        let mut gameplay = SessionGameplayState::default();
+        gameplay.inventory[0] = Some(SessionInventorySlot::from(flint_wire));
+        nether.set_session_gameplay(7, gameplay);
+        let ignited = nether.submit_request(block_request(
+            118,
+            1,
+            BlockActionKind::IgnitePortal,
+            target,
+            Some(flint_wire),
+            BlockType::Fire,
+            [0, 1, 0],
+            [257, -575, 771],
+            0,
+        ));
+        assert!(
+            matches!(ignited.outcome, GameplayOutcome::Accepted { .. }),
+            "unexpected nether ignition response: {:?}",
+            ignited.outcome
+        );
+        for x in 8..=9 {
+            for y in 81..=83 {
+                assert_eq!(nether.world.get_block(x, y, 9), BlockType::NetherPortal);
+            }
+        }
     }
 
     #[test]

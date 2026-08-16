@@ -253,11 +253,12 @@ pub fn spawn_mobs(
                     == crate::world::BlockType::Air
             {
                 let block_light = chunk_manager.get_block_light(spawn_x, spawn_y, spawn_z);
-                let effective_sky = if sky_light_level > 10 {
-                    sky_light_level
-                } else {
-                    4
-                };
+                // Position skylight already accounts for caves and roofs;
+                // clamp it by the current day/night ceiling instead of
+                // replacing every position with the global sky value.
+                let effective_sky = chunk_manager
+                    .get_sky_light(spawn_x, spawn_y, spawn_z)
+                    .min(sky_light_level);
                 let total_light = effective_sky.max(block_light);
 
                 if total_light <= 7 {

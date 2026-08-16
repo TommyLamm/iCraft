@@ -18,7 +18,8 @@ use std::collections::{BTreeMap, HashSet};
 pub struct TerrainVertex {
     /// Region-relative position in 1/32th block units.
     pub pos: [u16; 3],
-    /// Low byte: sky_light | (block_light << 4). Mid byte: face shading multiplier. High bits: discrete AO (0..3).
+    /// Low byte: sky/block light. Bits 8..12: face multiplier; bit 13:
+    /// flowing-fluid animation; high bits: discrete AO (0..3).
     pub light_ao: u16,
     /// Local tile UV scaled by 2048.0.
     pub local_uv: [u16; 2],

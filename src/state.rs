@@ -3130,6 +3130,7 @@ struct EmbeddedRuntimeBridge {
     topology: AuthorityTopology,
     next_request_id: u128,
     next_client_sequence: u64,
+    next_pose_sequence: u32,
     next_pose_sender_time_millis: u64,
     revisions: std::collections::HashMap<crate::dimension::Dimension, u64>,
     pending_request_dimensions: std::collections::HashMap<u128, crate::dimension::Dimension>,
@@ -3191,6 +3192,7 @@ impl EmbeddedRuntimeBridge {
             topology,
             next_request_id: 1,
             next_client_sequence: 1,
+            next_pose_sequence: 1,
             next_pose_sender_time_millis: 1,
             revisions: std::collections::HashMap::new(),
             pending_request_dimensions: std::collections::HashMap::new(),
@@ -3206,6 +3208,21 @@ impl EmbeddedRuntimeBridge {
             .authority
             .session(self.session_id)
             .map(|session| session.game_mode)
+    }
+
+    fn accelerate_daylight(&mut self, dimension: crate::dimension::Dimension, extra_ticks: u64) {
+        let _ = self.runtime.authority.with_world(dimension, |world| {
+            if world.rules.do_daylight_cycle {
+                world.time = world.time.wrapping_add(extra_ticks);
+            }
+        });
+    }
+
+    fn world_time(&self, dimension: crate::dimension::Dimension) -> Option<u64> {
+        self.runtime
+            .authority
+            .world_ref(dimension)
+            .map(|world| world.time)
     }
 
     fn topology(&self) -> AuthorityTopology {
@@ -3239,11 +3256,17 @@ impl EmbeddedRuntimeBridge {
 
     fn queue_position(
         &mut self,
-        sequence: u32,
         position: glam::Vec3,
         yaw: f32,
         pitch: f32,
     ) -> Result<(), crate::server_runtime::RuntimeInputError> {
+        // Embedded worlds do not use NetworkHandle::send_position, so the
+        // presentation's socket pose counter remains zero. Allocate a
+        // dedicated non-zero monotonic sequence here; ServerRuntime rejects
+        // sequence zero and duplicate sequences before updating the
+        // authoritative player position.
+        let sequence = self.next_pose_sequence;
+        self.next_pose_sequence = self.next_pose_sequence.wrapping_add(1).max(1);
         let sender_time_millis = self.next_pose_sender_time_millis;
         self.next_pose_sender_time_millis = self
             .next_pose_sender_time_millis
@@ -6845,7 +6868,7 @@ impl State {
             i32,
             Vec<crate::redstone::RedstoneComponentMetadata>,
         )> = Vec::new();
-        if !is_client {
+        if !is_client && !in_process_authority {
             let initial_radius = initial_chunk_radius(render_distance);
             for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
                 for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
@@ -7758,13 +7781,19 @@ impl State {
     pub fn tick_authority_boundary(
         &mut self,
     ) -> Option<crate::authority::contract::AuthoritySnapshot> {
-        let sequence = self.network_pose_sequence;
         let position = self.player_physics.position;
         let yaw = self.camera.yaw;
         let pitch = self.camera.pitch;
+        let accelerate_time = self.keys.f;
+        let dimension = self.current_dimension;
         let runtime = self.embedded_runtime.as_mut()?;
         let session_id = runtime.session_id();
-        let _ = runtime.queue_position(sequence, position, yaw, pitch);
+        let _ = runtime.queue_position(position, yaw, pitch);
+        if accelerate_time {
+            // The regular authority tick contributes one tick. Add the other
+            // 59 without running AI/world generation sixty times per frame.
+            runtime.accelerate_daylight(dimension, 59);
+        }
         let output = match runtime.tick() {
             Ok(output) => output,
             Err(error) => {
@@ -7773,12 +7802,15 @@ impl State {
                 return None;
             }
         };
+        let authoritative_world_time = runtime
+            .world_time(dimension)
+            .unwrap_or(output.snapshot.tick);
         for event in output.presentation_events {
             self.project_runtime_presentation_event(event, session_id);
         }
         self.project_authority_mutations(&output.snapshot.mutations);
         self.project_authority_sessions(&output.snapshot.session_updates);
-        self.world_time.ticks = output.snapshot.tick;
+        self.world_time.ticks = authoritative_world_time;
         Some(output.snapshot)
     }
 
@@ -9108,7 +9140,7 @@ impl State {
         sequence: u64,
         state: crate::network::protocol::EntityStateWire,
     ) {
-        if self.is_authoritative()
+        if (self.is_authoritative() && !self.has_in_process_runtime())
             || crate::dimension::Dimension::from_wire(dimension_wire)
                 != Some(self.current_dimension)
         {
@@ -9162,7 +9194,7 @@ impl State {
         sequence: u64,
         entity_id: u64,
     ) {
-        if self.is_authoritative()
+        if (self.is_authoritative() && !self.has_in_process_runtime())
             || crate::dimension::Dimension::from_wire(dimension_wire)
                 != Some(self.current_dimension)
         {
@@ -9182,7 +9214,7 @@ impl State {
     }
 
     fn update_replicated_entity_interpolation(&mut self) {
-        if self.is_authoritative() {
+        if self.is_authoritative() && !self.has_in_process_runtime() {
             return;
         }
         let target = self.network_time - ENTITY_INTERPOLATION_DELAY;
@@ -9646,7 +9678,7 @@ impl State {
                 weather,
                 weather_remaining_ticks,
             } => {
-                if !self.is_authoritative() {
+                if !self.is_authoritative() || self.has_in_process_runtime() {
                     self.world_time.ticks = ticks;
                     self.world_time.tick_accumulator = 0.0;
                     if let Some(current) = crate::weather::Weather::from_wire(weather) {
@@ -9659,12 +9691,12 @@ impl State {
                 }
             }
             NetworkInbound::WorldRulesSync { rules } => {
-                if !self.is_authoritative() {
+                if !self.is_authoritative() || self.has_in_process_runtime() {
                     self.set_world_rules(rules);
                 }
             }
             NetworkInbound::LightningStrike(strike) => {
-                if !self.is_authoritative()
+                if (!self.is_authoritative() || self.has_in_process_runtime())
                     && self.current_dimension == crate::dimension::Dimension::Overworld
                 {
                     self.apply_lightning_strike(strike);
@@ -11961,8 +11993,11 @@ impl State {
         }
 
         // 2. Dispatch chunk loads from precomputed spiral load queue
-        let available_load_slots =
-            MAX_CHUNK_LOAD_JOBS.saturating_sub(self.chunk_load_in_flight.len());
+        let available_load_slots = if self.has_in_process_runtime() {
+            0
+        } else {
+            MAX_CHUNK_LOAD_JOBS.saturating_sub(self.chunk_load_in_flight.len())
+        };
         let mut dispatched_loads = 0;
         while dispatched_loads < available_load_slots {
             if let Some(coord) = self.scheduler.pending_load_queue.pop_front() {
@@ -12708,7 +12743,7 @@ impl State {
         }
 
         // Dropped item & XP collection
-        if self.game_mode_policy().can_pickup {
+        if self.game_mode_policy().can_pickup && !has_in_process_runtime {
             let player_pos = self.player_physics.position;
             let to_collect: Vec<u64> = self
                 .entity_manager
@@ -15387,8 +15422,45 @@ impl State {
                 }
             }
             self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
+        } else if self.has_in_process_runtime() {
+            let mut chunk = crate::world::Chunk::empty_in_dimension(cx, cz, dimension);
+            Self::restore_chunk_payload(
+                &mut chunk,
+                &blocks,
+                &block_states,
+                &fluid_levels,
+                &block_entities,
+            );
+            self.chunk_manager.chunks.insert((cx, cz), chunk);
+            let lifetime = self.next_chunk_lifetime();
+            self.chunk_lifetimes.insert((cx, cz), lifetime);
+            self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
+            self.invalidate_chunk_mesh((cx, cz), DependencyReason::Network);
+            let mut dirty_chunks = std::collections::HashSet::new();
+            for (lighting_cx, lighting_cz) in [
+                (cx, cz),
+                (cx - 1, cz),
+                (cx + 1, cz),
+                (cx, cz - 1),
+                (cx, cz + 1),
+            ] {
+                if self
+                    .chunk_manager
+                    .chunks
+                    .contains_key(&(lighting_cx, lighting_cz))
+                {
+                    crate::lighting::propagate_chunk_lighting(
+                        &mut self.chunk_manager,
+                        lighting_cx,
+                        lighting_cz,
+                        &mut dirty_chunks,
+                    );
+                    self.invalidate_chunk_mesh((lighting_cx, lighting_cz), DependencyReason::Light);
+                }
+            }
+            self.invalidate_chunk_meshes(dirty_chunks, DependencyReason::Light);
         } else {
-            // Chunk not streamed in yet; buffer for deferred application.
+            // Network chunk not streamed in yet; buffer for deferred application.
             let should_replace = self
                 .pending_chunk_payloads
                 .get(&(cx, cz))
@@ -16677,6 +16749,7 @@ impl State {
         if (self.has_in_process_runtime() || !self.is_authoritative())
             && main_item != Item::Air
             && !main_item.properties().is_block
+            && !matches!(main_item, Item::FlintAndSteel | Item::EyeOfEnder)
         {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::ItemUse {
@@ -25485,7 +25558,7 @@ mod debug_tests {
     }
 
     #[test]
-    fn embedded_runtime_poses_use_monotonic_sender_time() {
+    fn embedded_runtime_poses_and_block_actions_use_monotonic_sequence() {
         let world_dir = embedded_test_world("pose");
         let role = MultiplayerRole::Singleplayer;
         let mut bridge =
@@ -25500,7 +25573,6 @@ mod debug_tests {
             .position;
         bridge
             .queue_position(
-                1,
                 glam::Vec3::new(initial[0] + 1.0, initial[1], initial[2]),
                 0.5,
                 0.1,
@@ -25518,7 +25590,6 @@ mod debug_tests {
 
         bridge
             .queue_position(
-                2,
                 glam::Vec3::new(first[0] + 1.0, first[1], first[2]),
                 0.5,
                 0.1,
@@ -25533,6 +25604,164 @@ mod debug_tests {
             .data
             .position;
         assert_eq!(second[0], first[0] + 1.0);
+
+        // Exercise the queued request path used by a mouse click after
+        // movement. A zero/duplicate pose sequence leaves the authority at
+        // the old position and makes this otherwise valid action fail reach
+        // and sightline validation.
+        let target = (
+            second[0].floor() as i32 + 3,
+            second[1].floor() as i32 + 2,
+            second[2].floor() as i32,
+        );
+        bridge.runtime.authority.world.ensure_chunk(
+            target.0.div_euclid(CHUNK_WIDTH as i32),
+            target.2.div_euclid(CHUNK_DEPTH as i32),
+        );
+        bridge
+            .runtime
+            .authority
+            .world
+            .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
+            .expect("test target should be writable");
+        bridge
+            .runtime
+            .authority
+            .session_mut(u64::MAX)
+            .expect("local authority session")
+            .game_mode = GameMode::Creative;
+        let held = bridge
+            .runtime
+            .authority
+            .session(u64::MAX)
+            .and_then(|session| session.gameplay.slot(session.gameplay.selected_hotbar_slot))
+            .flatten()
+            .map(crate::network::protocol::SessionSlotWire::from);
+        let eye = glam::Vec3::from_array(second) + glam::Vec3::new(0.0, 1.62, 0.0);
+        let look = (glam::Vec3::new(
+            target.0 as f32 + 0.5,
+            target.1 as f32 + 0.5,
+            target.2 as f32 + 0.5,
+        ) - eye)
+            .normalize();
+        bridge
+            .queue_request(crate::network::protocol::GameplayRequest {
+                request_id: 0,
+                client_sequence: 0,
+                session_id: 0,
+                dimension: crate::dimension::Dimension::Overworld as u8,
+                client_revision: 0,
+                operation: crate::network::protocol::GameplayOperation::BlockAction {
+                    action: crate::network::protocol::BlockActionKind::StartBreak,
+                    x: target.0,
+                    y: target.1,
+                    z: target.2,
+                    face: [-1, 0, 0],
+                    hand: 0,
+                    held,
+                    block: BlockType::Air.to_wire(),
+                    look_milli: [
+                        (look.x * 1_000.0).round() as i16,
+                        (look.y * 1_000.0).round() as i16,
+                        (look.z * 1_000.0).round() as i16,
+                    ],
+                },
+            })
+            .expect("block action should enter bounded FIFO");
+        let output = bridge.tick().expect("block action tick");
+        assert!(output.presentation_events.iter().any(|event| matches!(
+            event,
+            crate::server_runtime::RuntimePresentationEvent::GameplayResponse {
+                target: u64::MAX,
+                response,
+            } if matches!(
+                response.outcome,
+                crate::network::protocol::GameplayOutcome::Accepted { .. }
+            )
+        )));
+        assert_eq!(
+            bridge
+                .runtime
+                .authority
+                .world
+                .get_block(target.0, target.1, target.2),
+            BlockType::Air
+        );
+
+        let support = (target.0 + 1, target.1, target.2);
+        bridge
+            .runtime
+            .authority
+            .world
+            .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
+            .expect("placement support should be writable");
+        let stone_stack = ItemStack::new(Item::Stone, 1);
+        let stone_held = crate::network::protocol::SessionSlotWire::from(
+            crate::authority::contract::SessionInventorySlot::from_wire(
+                crate::network::protocol::ItemWire::from_stack(&stone_stack),
+                stone_stack.can_break,
+                stone_stack.can_place_on,
+            ),
+        );
+        {
+            let gameplay = &mut bridge
+                .runtime
+                .authority
+                .session_mut(u64::MAX)
+                .expect("local authority session")
+                .gameplay;
+            gameplay.selected_hotbar_slot = 0;
+            gameplay.inventory[0] = Some(stone_held.into());
+        }
+        let place_look = (glam::Vec3::new(
+            support.0 as f32 + 0.5,
+            support.1 as f32 + 0.5,
+            support.2 as f32 + 0.5,
+        ) - eye)
+            .normalize();
+        bridge
+            .queue_request(crate::network::protocol::GameplayRequest {
+                request_id: 0,
+                client_sequence: 0,
+                session_id: 0,
+                dimension: crate::dimension::Dimension::Overworld as u8,
+                client_revision: 0,
+                operation: crate::network::protocol::GameplayOperation::BlockAction {
+                    action: crate::network::protocol::BlockActionKind::Place,
+                    x: target.0,
+                    y: target.1,
+                    z: target.2,
+                    face: [-1, 0, 0],
+                    hand: 0,
+                    held: Some(stone_held),
+                    block: BlockType::Stone.to_wire(),
+                    look_milli: [
+                        (place_look.x * 1_000.0).round() as i16,
+                        (place_look.y * 1_000.0).round() as i16,
+                        (place_look.z * 1_000.0).round() as i16,
+                    ],
+                },
+            })
+            .expect("place action should enter bounded FIFO");
+        let output = bridge.tick().expect("place action tick");
+        assert!(output.presentation_events.iter().any(|event| matches!(
+            event,
+            crate::server_runtime::RuntimePresentationEvent::GameplayResponse {
+                target: u64::MAX,
+                response,
+            } if matches!(
+                response.outcome,
+                crate::network::protocol::GameplayOutcome::Accepted { .. }
+            )
+        )));
+        assert_eq!(
+            bridge
+                .runtime
+                .authority
+                .world
+                .get_block(target.0, target.1, target.2),
+            BlockType::Stone
+        );
 
         bridge.shutdown().expect("runtime save/shutdown");
         let _ = std::fs::remove_dir_all(world_dir);

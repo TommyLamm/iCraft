@@ -54,7 +54,9 @@ const MAX_PRESENTATION_EVENTS_PER_TICK: usize = 1_024;
 const MAX_PRESENTATION_CRITICAL_OVERFLOW: usize = MAX_INBOUND_EVENTS_PER_TICK;
 const MAX_PRESENTATION_QUEUE_LEN: usize =
     MAX_PRESENTATION_EVENTS_PER_TICK + MAX_PRESENTATION_CRITICAL_OVERFLOW;
-const MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK: usize = 16;
+// Chunk generation is synchronous today. Keep the fixed-tick stall bounded so
+// gameplay acknowledgements do not wait behind an entire render-distance ring.
+const MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK: usize = 1;
 // A validated maximum view distance of 32 covers a 65x65 chunk square.
 const MAX_PENDING_INITIAL_CHUNKS_PER_SESSION: usize = 65 * 65;
 const MAX_POSE_SPEED_BLOCKS_PER_SECOND: f32 = 100.0;
@@ -1051,7 +1053,13 @@ impl ServerRuntime {
         for closure in self.authority.take_container_closures() {
             self.close_runtime_container(closure.player_id, closure.dimension, closure.position);
         }
-        self.level.time = snapshot.tick;
+        // AuthoritySnapshot::tick is the fixed-step sequence, not the
+        // dimension's daylight clock (commands and debug acceleration can
+        // intentionally make those diverge).
+        self.level.time = self
+            .authority
+            .world_ref(Dimension::Overworld)
+            .map_or(snapshot.tick, |world| world.time);
         self.metrics.ticks = self.metrics.ticks.wrapping_add(1);
         self.metrics.players_online = self.players.len();
         self.metrics.loaded_chunks = self
@@ -2834,8 +2842,6 @@ impl ServerRuntime {
                 self.update_interest_for_at(id, dimension, position, snapshot.tick);
             }
         }
-        self.drain_initial_chunk_projections();
-
         let active_before = self.authority.world.dimension;
         for mutation in &snapshot.mutations {
             let Some(dimension) = Dimension::from_wire(mutation.dimension) else {
@@ -2955,6 +2961,10 @@ impl ServerRuntime {
             }
             self.send_session_update(update.player_id, snapshot.tick, dimension, update.state);
         }
+        // Queue mutations before synchronous catch-up generation so reliable
+        // gameplay ordering is preserved. One chunk must still make progress
+        // every tick; otherwise sustained automation can starve initial view.
+        self.drain_initial_chunk_projections();
         self.authority.activate_dimension(active_before);
     }
 
@@ -3133,7 +3143,11 @@ impl ServerRuntime {
 
     fn drain_initial_chunk_projections(&mut self) {
         let mut ids: Vec<_> = self.players.keys().copied().collect();
-        ids.sort_unstable();
+        // The in-process presentation cannot render until its first chunk
+        // arrives. Give that session the first bounded slot, then retain
+        // deterministic numeric ordering for network peers.
+        let local_session_id = self.local_session_id;
+        ids.sort_unstable_by_key(|id| (Some(*id) != local_session_id, *id));
         let mut projected = 0usize;
         let mut inspected = 0usize;
         while projected < MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK

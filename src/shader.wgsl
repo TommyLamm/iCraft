@@ -147,6 +147,7 @@ struct TerrainVertexOutput {
     @location(2) @interpolate(flat) light_level: f32,
     @location(3) world_pos: vec3<f32>,
     @location(4) ao: f32,
+    @location(5) @interpolate(flat) flowing_fluid: f32,
 };
 
 @vertex
@@ -159,7 +160,8 @@ fn vs_terrain(model: TerrainVertexInput) -> TerrainVertexOutput {
     out.atlas_tile = vec2<f32>(f32(model.atlas_tile.x), f32(model.atlas_tile.y));
 
     let light_ao_raw = model.pos_light_ao.w;
-    out.light_level = f32(light_ao_raw & 0x3FFFu);
+    out.light_level = f32(light_ao_raw & 0x1FFFu);
+    out.flowing_fluid = f32((light_ao_raw >> 13u) & 0x01u);
 
     let ao_raw = (light_ao_raw >> 14u) & 0x03u;
     // CPU packs AO as a four-level discrete code. Keep this mapping exactly
@@ -183,7 +185,7 @@ fn fs_terrain(in: TerrainVertexOutput) -> @location(0) vec4<f32> {
     var local_uv = in.local_uv;
     let is_water = all(in.atlas_tile == vec2<f32>(10.0, 0.0));
     let is_lava = all(in.atlas_tile == vec2<f32>(15.0, 2.0));
-    if (is_water) {
+    if (is_water && in.flowing_fluid > 0.5) {
         local_uv.y = local_uv.y + camera.total_time * 0.8;
     } else if (is_lava) {
         local_uv.y = local_uv.y + camera.total_time * 0.2;
