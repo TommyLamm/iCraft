@@ -316,7 +316,15 @@ const CLIENT_QUEUE_CAPACITY: usize = 64;
 const HOST_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Handshake is shorter than the post-auth idle timeout so unauthenticated
+/// sockets cannot occupy a pre-auth slot for a full 15s.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const RELIABLE_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Matches the host display cap (`message.chars().take(256)`).
+const MAX_CHAT_CHARS: usize = 256;
+const DEFAULT_POSE_RATE_PER_SECOND: u32 = 20;
+const DEFAULT_CHAT_RATE_PER_SECOND: u32 = 8;
+const PRE_AUTH_CONNECTION_MULTIPLIER: usize = 2;
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
@@ -326,6 +334,9 @@ pub struct ServerConfig {
     pub motd: String,
     pub whitelist: HashSet<String>,
     pub request_rate_per_second: u32,
+    pub pose_rate_per_second: u32,
+    pub chat_rate_per_second: u32,
+    pub handshake_timeout: Duration,
 }
 
 impl Default for ServerConfig {
@@ -337,6 +348,9 @@ impl Default for ServerConfig {
             motd: "iCraft server".to_string(),
             whitelist: HashSet::new(),
             request_rate_per_second: 120,
+            pose_rate_per_second: DEFAULT_POSE_RATE_PER_SECOND,
+            chat_rate_per_second: DEFAULT_CHAT_RATE_PER_SECOND,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
         }
     }
 }
@@ -823,19 +837,32 @@ type Sessions = Arc<Mutex<HashMap<PlayerId, ClientSession>>>;
 /// may use the legacy unbounded sender.  The trait keeps NetworkServer's
 /// protocol logic independent of that queue choice and makes `try_send`
 /// semantics explicit for bounded channels.
+///
+/// `Full` is per-connection ingress backpressure. Callers must not treat it
+/// as a dead host or kick unrelated clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostEventSendError {
+    Full,
+    Closed,
+}
+
 pub trait HostEventSender: Clone + Send + Sync + 'static {
-    fn send(&self, event: ServerToHost) -> Result<(), ()>;
+    fn send(&self, event: ServerToHost) -> Result<(), HostEventSendError>;
 }
 
 impl HostEventSender for std_mpsc::Sender<ServerToHost> {
-    fn send(&self, event: ServerToHost) -> Result<(), ()> {
-        std_mpsc::Sender::send(self, event).map_err(|_| ())
+    fn send(&self, event: ServerToHost) -> Result<(), HostEventSendError> {
+        std_mpsc::Sender::send(self, event).map_err(|_| HostEventSendError::Closed)
     }
 }
 
 impl HostEventSender for std_mpsc::SyncSender<ServerToHost> {
-    fn send(&self, event: ServerToHost) -> Result<(), ()> {
-        self.try_send(event).map_err(|_| ())
+    fn send(&self, event: ServerToHost) -> Result<(), HostEventSendError> {
+        match self.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(std_mpsc::TrySendError::Full(_)) => Err(HostEventSendError::Full),
+            Err(std_mpsc::TrySendError::Disconnected(_)) => Err(HostEventSendError::Closed),
+        }
     }
 }
 
@@ -856,7 +883,7 @@ impl MeteredHostEventSender {
 }
 
 impl HostEventSender for MeteredHostEventSender {
-    fn send(&self, event: ServerToHost) -> Result<(), ()> {
+    fn send(&self, event: ServerToHost) -> Result<(), HostEventSendError> {
         // Increment before publishing: a consumer on another thread may take
         // the event as soon as `try_send` succeeds. Failed publication rolls
         // the reservation back, keeping the gauge race-free.
@@ -866,13 +893,47 @@ impl HostEventSender for MeteredHostEventSender {
             Err(std_mpsc::TrySendError::Full(_)) => {
                 self.metrics.dequeue();
                 self.metrics.record_queue_full();
-                Err(())
+                Err(HostEventSendError::Full)
             }
             Err(std_mpsc::TrySendError::Disconnected(_)) => {
                 self.metrics.dequeue();
-                Err(())
+                Err(HostEventSendError::Closed)
             }
         }
+    }
+}
+
+fn chat_exceeds_display_cap(message: &str) -> bool {
+    message.chars().count() > MAX_CHAT_CHARS
+}
+
+struct PreAuthSlot {
+    count: Arc<AtomicUsize>,
+}
+
+impl PreAuthSlot {
+    fn try_acquire(count: &Arc<AtomicUsize>, cap: usize) -> Option<Self> {
+        let cap = cap.max(1);
+        loop {
+            let current = count.load(Ordering::Relaxed);
+            if current >= cap {
+                return None;
+            }
+            if count
+                .compare_exchange_weak(current, current + 1, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(Self {
+                    count: Arc::clone(count),
+                });
+            }
+        }
+    }
+}
+
+impl Drop for PreAuthSlot {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -1146,6 +1207,7 @@ pub struct NetworkServer<S: HostEventSender = std_mpsc::Sender<ServerToHost>> {
     server_to_host: S,
     config: ServerConfig,
     metrics: NetworkMetrics,
+    pre_auth: Arc<AtomicUsize>,
 }
 
 impl<S: HostEventSender> NetworkServer<S> {
@@ -1254,6 +1316,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                     server_to_host,
                     config,
                     metrics,
+                    pre_auth: Arc::new(AtomicUsize::new(0)),
                 };
                 server.run(listener, host_to_server).await;
             });
@@ -1270,6 +1333,19 @@ impl<S: HostEventSender> NetworkServer<S> {
                 accepted = listener.accept() => {
                     match accepted {
                         Ok((stream, peer_addr)) => {
+                            let pre_auth_cap = self
+                                .config
+                                .max_players
+                                .max(1)
+                                .saturating_mul(PRE_AUTH_CONNECTION_MULTIPLIER);
+                            let Some(pre_auth) = PreAuthSlot::try_acquire(&self.pre_auth, pre_auth_cap)
+                            else {
+                                eprintln!(
+                                    "[NetworkServer] Rejecting {peer_addr}: pre-auth connection cap ({pre_auth_cap})"
+                                );
+                                drop(stream);
+                                continue;
+                            };
                             eprintln!("[NetworkServer] Accepted TCP connection from {peer_addr}");
                             let sessions = Arc::clone(&self.sessions);
                             let next_player_id = Arc::clone(&self.next_player_id);
@@ -1288,6 +1364,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                                     server_to_host,
                                     config,
                                     metrics,
+                                    Some(pre_auth),
                                 )
                                 .await;
                             });
@@ -1439,11 +1516,37 @@ impl<S: HostEventSender> NetworkServer<S> {
         }
 
         if let Some(request) = forward {
-            if server_to_host
-                .send(ServerToHost::GameplayRequest { id, request })
-                .is_err()
-            {
-                return Err("host channel closed (GameplayRequest)".into());
+            match server_to_host.send(ServerToHost::GameplayRequest {
+                id,
+                request: request.clone(),
+            }) {
+                Ok(()) => {}
+                Err(HostEventSendError::Full) => {
+                    let failed = Self::send_to(
+                        sessions,
+                        id,
+                        Packet::GameplayResponse {
+                            protocol_version: PROTOCOL_VERSION,
+                            response: {
+                                let mut sessions_guard = sessions.lock().await;
+                                let Some(session) = sessions_guard.get_mut(&id) else {
+                                    return Err("authenticated session disappeared".into());
+                                };
+                                session.gameplay.in_flight.remove(&request.request_id);
+                                session
+                                    .gameplay
+                                    .rejection(request.request_id, RejectReason::QueueFull)
+                            },
+                        },
+                    )
+                    .await;
+                    if !failed.is_empty() {
+                        return Err("gameplay response queue is unavailable".into());
+                    }
+                }
+                Err(HostEventSendError::Closed) => {
+                    return Err("host channel closed (GameplayRequest)".into());
+                }
             }
         }
         Ok(())
@@ -1458,8 +1561,9 @@ impl<S: HostEventSender> NetworkServer<S> {
         server_to_host: S,
         config: ServerConfig,
         metrics: NetworkMetrics,
+        pre_auth: Option<PreAuthSlot>,
     ) {
-        let handshake_result = time::timeout(CLIENT_TIMEOUT, connection.recv()).await;
+        let handshake_result = time::timeout(config.handshake_timeout, connection.recv()).await;
         if let Ok(Ok(packet)) = &handshake_result {
             metrics.record_inbound(packet);
         }
@@ -1695,6 +1799,8 @@ impl<S: HostEventSender> NetworkServer<S> {
         });
 
         let mut request_rate = RequestRateLimiter::new(config.request_rate_per_second);
+        let mut pose_rate = RequestRateLimiter::new(config.pose_rate_per_second);
+        let mut chat_rate = RequestRateLimiter::new(config.chat_rate_per_second);
 
         // Re-check and reserve the authenticated identity while inserting the
         // transport session.  The handshake preflight above is only an early
@@ -1740,6 +1846,9 @@ impl<S: HostEventSender> NetworkServer<S> {
             send_task.abort();
             return;
         }
+        // Authenticated sessions count against max_players, not the pre-auth
+        // handshake cap.
+        drop(pre_auth);
 
         if !reliable_send(
             &roster_tx,
@@ -1817,7 +1926,10 @@ impl<S: HostEventSender> NetworkServer<S> {
                             pitch,
                             ..
                         })) => {
-                            if server_to_host.send(ServerToHost::ClientPosition {
+                            if !pose_rate.allow() {
+                                continue;
+                            }
+                            match server_to_host.send(ServerToHost::ClientPosition {
                                 id,
                                 sequence,
                                 sender_time_millis,
@@ -1826,9 +1938,13 @@ impl<S: HostEventSender> NetworkServer<S> {
                                 z,
                                 yaw,
                                 pitch,
-                            }).is_err() {
-                                disconnect_reason = "host channel closed (ClientPosition)".into();
-                                break;
+                            }) {
+                                Ok(()) => {}
+                                Err(HostEventSendError::Full) => {}
+                                Err(HostEventSendError::Closed) => {
+                                    disconnect_reason = "host channel closed (ClientPosition)".into();
+                                    break;
+                                }
                             }
                         }
                         Ok(Ok(Packet::PlayerAction { action, .. })) => {
@@ -1929,9 +2045,16 @@ impl<S: HostEventSender> NetworkServer<S> {
                             }
                         }
                         Ok(Ok(Packet::ChatMessage { message, .. })) => {
-                            if server_to_host.send(ServerToHost::ChatFromClient { id, message }).is_err() {
-                                disconnect_reason = "host channel closed (ChatFromClient)".into();
-                                break;
+                            if chat_exceeds_display_cap(&message) || !chat_rate.allow() {
+                                continue;
+                            }
+                            match server_to_host.send(ServerToHost::ChatFromClient { id, message }) {
+                                Ok(()) => {}
+                                Err(HostEventSendError::Full) => {}
+                                Err(HostEventSendError::Closed) => {
+                                    disconnect_reason = "host channel closed (ChatFromClient)".into();
+                                    break;
+                                }
                             }
                         }
                         Ok(Ok(Packet::ChunkAck {
@@ -2495,6 +2618,7 @@ impl<S: HostEventSender> NetworkServer<S> {
                 | HostToServer::BroadcastWorldRules { .. }
                 | HostToServer::BroadcastLightningStrike { .. }
                 | HostToServer::BroadcastSleepStateSync { .. }
+                | HostToServer::BroadcastContainerSlotUpdate { .. }
         );
         let (packet, recipient) = match command {
             HostToServer::BroadcastBlockChange {
@@ -3232,11 +3356,12 @@ mod tests {
             })
             .is_ok());
         assert_eq!(metrics.snapshot().queue_depth, 1);
-        assert!(sender
-            .send(ServerToHost::Disconnected {
+        assert_eq!(
+            sender.send(ServerToHost::Disconnected {
                 reason: "full".into(),
-            })
-            .is_err());
+            }),
+            Err(HostEventSendError::Full)
+        );
         assert_eq!(metrics.snapshot().queue_depth, 1);
         assert_eq!(metrics.snapshot().queue_full, 1);
 
@@ -4173,6 +4298,7 @@ mod tests {
             server_to_host: event_tx.clone(),
             config: ServerConfig::default(),
             metrics: metrics.clone(),
+            pre_auth: Arc::new(AtomicUsize::new(0)),
         };
 
         let observer = tokio::spawn(async move {
@@ -4260,6 +4386,7 @@ mod tests {
             server_to_host: event_tx,
             config: ServerConfig::default(),
             metrics: metrics.clone(),
+            pre_auth: Arc::new(AtomicUsize::new(0)),
         };
 
         time::timeout(
@@ -4307,6 +4434,7 @@ mod tests {
                 task_event_tx,
                 ServerConfig::default(),
                 NetworkMetrics::default(),
+                None,
             )
             .await;
         });
@@ -4671,6 +4799,7 @@ mod tests {
                 event_tx,
                 ServerConfig::default(),
                 NetworkMetrics::default(),
+                None,
             )
             .await;
         });
@@ -5111,6 +5240,407 @@ mod tests {
             fifth,
             Packet::Disconnect { reason, .. } if reason == "invalid username"
         ));
+        server.stop().await;
+    }
+
+    fn item_use_request(request_id: u128, client_sequence: u64) -> GameplayRequest {
+        GameplayRequest {
+            request_id,
+            client_sequence,
+            session_id: 999_999,
+            dimension: 0,
+            client_revision: 0,
+            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+        }
+    }
+
+    fn pose_packet(id: PlayerId, sequence: u32) -> Packet {
+        Packet::PlayerPosition {
+            protocol_version: PROTOCOL_VERSION,
+            id,
+            sequence,
+            sender_time_millis: u64::from(sequence),
+            x: 0.0,
+            y: 64.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+        }
+    }
+
+    fn drain_host_events(server: &TestServer) -> Vec<ServerToHost> {
+        let mut events = Vec::new();
+        while let Ok(event) = server.event_rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    #[test]
+    fn chat_display_cap_is_256_chars() {
+        assert!(!chat_exceeds_display_cap(&"a".repeat(256)));
+        assert!(chat_exceeds_display_cap(&"a".repeat(257)));
+        assert!(!chat_exceeds_display_cap(&"😀".repeat(256)));
+        assert!(chat_exceeds_display_cap(&"😀".repeat(257)));
+    }
+
+    #[tokio::test]
+    async fn oversized_chat_is_rejected_before_host_enqueue() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut flooder, flooder_id) = server.connect("flood").await;
+        let (mut peer, peer_id) = server.connect("peer").await;
+
+        flooder
+            .send(&Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
+                sender: "flood".into(),
+                message: "x".repeat(257),
+            })
+            .await
+            .unwrap();
+        flooder.send(&pose_packet(flooder_id, 1)).await.unwrap();
+        for sequence in 2..80 {
+            flooder
+                .send(&pose_packet(flooder_id, sequence))
+                .await
+                .unwrap();
+        }
+
+        peer.send(&Packet::GameplayRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request: item_use_request(42, 1),
+        })
+        .await
+        .unwrap();
+
+        let forwarded = server
+            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
+            .await;
+        assert!(matches!(
+            forwarded,
+            ServerToHost::GameplayRequest { id, request }
+                if id == peer_id && request.request_id == 42
+        ));
+
+        let events = drain_host_events(&server);
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                ServerToHost::ChatFromClient { message, .. } if message.chars().count() > MAX_CHAT_CHARS
+            )),
+            "oversized chat entered the host queue: {events:?}"
+        );
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            ServerToHost::ClientLeft { id } if *id == peer_id
+        )));
+
+        server
+            .host_tx
+            .send(HostToServer::SendGameplayResponse {
+                to: peer_id,
+                response: GameplayResponse {
+                    request_id: 42,
+                    server_sequence: 1,
+                    outcome: crate::network::protocol::GameplayOutcome::Accepted { revision: 1 },
+                },
+            })
+            .unwrap();
+        let response = recv_matching(&mut peer, |packet| {
+            matches!(packet, Packet::GameplayResponse { .. })
+        })
+        .await;
+        assert!(matches!(
+            response,
+            Packet::GameplayResponse { response, .. } if response.request_id == 42
+        ));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn chat_and_pose_rate_limits_are_independent() {
+        let server = TestServer::start_with_config(
+            0xCAFE_BABE,
+            1,
+            ServerConfig {
+                pose_rate_per_second: 1,
+                chat_rate_per_second: 1,
+                ..ServerConfig::default()
+            },
+        );
+        let (mut client, id) = server.connect("limiter").await;
+        let _ = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ClientJoined { .. }))
+            .await;
+
+        client.send(&pose_packet(id, 1)).await.unwrap();
+        client.send(&pose_packet(id, 2)).await.unwrap();
+        client
+            .send(&Packet::ChatMessage {
+                protocol_version: PROTOCOL_VERSION,
+                sender: "limiter".into(),
+                message: "after-pose".into(),
+            })
+            .await
+            .unwrap();
+
+        let pose = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ClientPosition { .. }))
+            .await;
+        assert!(matches!(
+            pose,
+            ServerToHost::ClientPosition { id: event_id, sequence: 1, .. } if event_id == id
+        ));
+        let chat = server
+            .next_event_matching(|event| matches!(event, ServerToHost::ChatFromClient { .. }))
+            .await;
+        assert!(matches!(
+            chat,
+            ServerToHost::ChatFromClient { id: event_id, message }
+                if event_id == id && message == "after-pose"
+        ));
+        time::sleep(Duration::from_millis(30)).await;
+        assert!(drain_host_events(&server)
+            .iter()
+            .all(|event| !matches!(event, ServerToHost::ClientPosition { sequence: 2, .. })));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn host_queue_full_backpressures_pose_without_kicking_peer() {
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let (host_tx, host_rx) = std_mpsc::channel();
+        let (event_tx, event_rx) = std_mpsc::sync_channel(4);
+        let metrics = NetworkMetrics::default();
+        let handle = NetworkServer::spawn_with_config_and_metrics(
+            addr.clone(),
+            0xCAFE_BABE,
+            1,
+            host_rx,
+            event_tx,
+            ServerConfig {
+                max_players: 4,
+                pose_rate_per_second: 1_000,
+                chat_rate_per_second: 1_000,
+                ..ServerConfig::default()
+            },
+            metrics,
+        );
+        let connect = |username: &'static str| async {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let stream = loop {
+                match tokio::net::TcpStream::connect(&addr).await {
+                    Ok(stream) if stream.local_addr().ok() != stream.peer_addr().ok() => {
+                        break stream;
+                    }
+                    _ if Instant::now() < deadline => {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Ok(_) => panic!("server did not start before the connection deadline"),
+                    Err(error) => panic!("server did not start: {error}"),
+                }
+            };
+            let mut connection = Connection::new(stream);
+            connection
+                .send(&Packet::Handshake {
+                    protocol_version: PROTOCOL_VERSION,
+                    username: username.into(),
+                })
+                .await
+                .unwrap();
+            let id = match time::timeout(Duration::from_secs(2), connection.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                Packet::LoginSuccess { player_id, .. } => player_id,
+                packet => panic!("expected login success, got {packet:?}"),
+            };
+            (connection, id)
+        };
+        let (mut flooder, flooder_id) = connect("flood").await;
+        let (mut peer, peer_id) = connect("peer").await;
+        {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut joined = 0u8;
+            while joined < 2 {
+                match event_rx.try_recv() {
+                    Ok(ServerToHost::ClientJoined { .. }) => joined += 1,
+                    Ok(_) => {}
+                    Err(std_mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(_) => panic!("host event channel closed before both clients joined"),
+                }
+            }
+        }
+        for sequence in 1..=16 {
+            flooder
+                .send(&pose_packet(flooder_id, sequence))
+                .await
+                .unwrap();
+        }
+        peer.send(&Packet::GameplayRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request: item_use_request(7, 1),
+        })
+        .await
+        .unwrap();
+        time::sleep(Duration::from_millis(50)).await;
+        let mut saw_peer_request = false;
+        let mut peer_left = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                ServerToHost::GameplayRequest { id, request }
+                    if id == peer_id && request.request_id == 7 =>
+                {
+                    saw_peer_request = true;
+                }
+                ServerToHost::ClientLeft { id } if id == peer_id => peer_left = true,
+                _ => {}
+            }
+        }
+        assert!(!peer_left, "host-queue Full must not kick the peer");
+        if !saw_peer_request {
+            peer.send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: item_use_request(8, 2),
+            })
+            .await
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut recovered = false;
+            while Instant::now() < deadline {
+                if let Ok(ServerToHost::GameplayRequest { id, request }) = event_rx.try_recv() {
+                    if id == peer_id && request.request_id == 8 {
+                        recovered = true;
+                        break;
+                    }
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                recovered,
+                "peer GameplayRequest must complete after pose flood backpressure"
+            );
+        }
+        let _ = host_tx.send(HostToServer::Stop);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn broadcast_container_slot_is_reliable_or_evicts_slow_viewer() {
+        let server = TestServer::start(0xCAFE_BABE, 1);
+        let (mut fast, _) = server.connect("fast").await;
+        let (slow, slow_id) = server.connect("slow").await;
+
+        for index in 0..(CLIENT_QUEUE_CAPACITY + 8) {
+            server
+                .host_tx
+                .send(HostToServer::BroadcastChat {
+                    sender: "pad".into(),
+                    message: format!("pad-{index}"),
+                })
+                .unwrap();
+            let _ = time::timeout(
+                Duration::from_millis(80),
+                recv_matching(&mut fast, |packet| {
+                    matches!(packet, Packet::ChatMessage { .. })
+                }),
+            )
+            .await;
+        }
+
+        server
+            .host_tx
+            .send(HostToServer::BroadcastContainerSlotUpdate {
+                dimension: 0,
+                revision: 11,
+                x: 8,
+                y: 80,
+                z: 8,
+                slot_index: 3,
+                slot: None,
+            })
+            .unwrap();
+
+        let fast_slot = recv_matching(&mut fast, |packet| {
+            matches!(
+                packet,
+                Packet::ContainerSlotUpdate {
+                    revision: 11,
+                    slot_index: 3,
+                    ..
+                }
+            )
+        })
+        .await;
+        assert!(matches!(
+            fast_slot,
+            Packet::ContainerSlotUpdate {
+                x: 8,
+                y: 80,
+                z: 8,
+                ..
+            }
+        ));
+
+        let mut slow = slow;
+        let mut slow_got_slot = false;
+        let mut slow_kicked = false;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !slow_got_slot && !slow_kicked {
+            while let Ok(event) = server.event_rx.try_recv() {
+                if matches!(event, ServerToHost::ClientLeft { id } if id == slow_id) {
+                    slow_kicked = true;
+                }
+            }
+            match time::timeout(Duration::from_millis(50), slow.recv()).await {
+                Ok(Ok(Packet::ContainerSlotUpdate { revision: 11, .. })) => {
+                    slow_got_slot = true;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => slow_kicked = true,
+                Err(_) => {}
+            }
+        }
+        assert!(
+            slow_got_slot || slow_kicked,
+            "slow viewer must receive the slot or be kicked; silent chest fork is forbidden"
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn pre_auth_connections_are_capped_at_twice_max_players() {
+        let server = TestServer::start_with_config(
+            0xCAFE_BABE,
+            1,
+            ServerConfig {
+                max_players: 1,
+                handshake_timeout: Duration::from_millis(200),
+                ..ServerConfig::default()
+            },
+        );
+        let _hold_a = server.connect_stream().await;
+        time::sleep(Duration::from_millis(40)).await;
+        let _hold_b = server.connect_stream().await;
+        time::sleep(Duration::from_millis(40)).await;
+
+        let mut excess = Connection::new(server.connect_stream().await);
+        let excess_result = time::timeout(Duration::from_millis(500), excess.recv()).await;
+        assert!(
+            matches!(excess_result, Ok(Err(_)) | Err(_)),
+            "excess pre-auth socket must be closed immediately, got {excess_result:?}"
+        );
+
+        drop(_hold_a);
+        drop(_hold_b);
+        time::sleep(Duration::from_millis(300)).await;
+        let (_joined, packet) = handshake_once(&server, "late").await;
+        assert!(matches!(packet, Packet::LoginSuccess { .. }));
         server.stop().await;
     }
 }

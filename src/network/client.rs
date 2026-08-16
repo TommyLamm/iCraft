@@ -1,5 +1,6 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -12,30 +13,100 @@ use super::protocol::{
 };
 use super::transport::Connection;
 
+/// Bounded network-client → game-thread queue. A malicious server cannot grow
+/// this without bound; sustained overflow disconnects the join client.
+pub const CLIENT_TO_GAME_QUEUE_CAPACITY: usize = 256;
+const CLIENT_TO_GAME_OVERFLOW_LIMIT: u32 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientQueueError {
+    Full,
+    Closed,
+}
+
 /// The client/game boundary is the app-level inbound queue (network client ->
 /// game thread).  Account ownership only after the synchronous send accepts it;
 /// transport socket writes are intentionally not included because the OS owns
 /// that buffering.  Reliable replication (including revision-gated catch-up)
 /// remains FIFO on this same inbound boundary.
 fn send_to_game(
-    sender: &Sender<ClientToGame>,
+    sender: &SyncSender<ClientToGame>,
     event: ClientToGame,
-) -> Result<(), std::sync::mpsc::SendError<ClientToGame>> {
+) -> Result<(), ClientQueueError> {
     let bytes = std::mem::size_of_val(&event) as u64;
-    crate::perf::tracked_send(
-        sender,
-        event,
-        bytes,
-        &crate::perf::queue_stats(crate::perf::QueueCategory::Inbound),
-    )
+    let stats = crate::perf::queue_stats(crate::perf::QueueCategory::Inbound);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis().min(u64::MAX as u128) as u64);
+    stats.enqueue(bytes, now_ms);
+    match sender.try_send(event) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => {
+            stats.dequeue(bytes);
+            stats.drop_item();
+            Err(ClientQueueError::Full)
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            stats.dequeue(bytes);
+            stats.drop_item();
+            Err(ClientQueueError::Closed)
+        }
+    }
 }
 
-#[derive(Clone)]
-struct ClientEventSender(Sender<ClientToGame>);
+struct ClientEventSender {
+    sender: SyncSender<ClientToGame>,
+    overflow_streak: Cell<u32>,
+    dead: Cell<bool>,
+}
 
 impl ClientEventSender {
-    fn send(&self, event: ClientToGame) -> Result<(), std::sync::mpsc::SendError<ClientToGame>> {
-        send_to_game(&self.0, event)
+    fn new(sender: SyncSender<ClientToGame>) -> Self {
+        Self {
+            sender,
+            overflow_streak: Cell::new(0),
+            dead: Cell::new(false),
+        }
+    }
+
+    fn is_dead(&self) -> bool {
+        self.dead.get()
+    }
+
+    fn mark_dead(&self, reason: &str) {
+        self.dead.set(true);
+        let _ = send_to_game(
+            &self.sender,
+            ClientToGame::Disconnected {
+                reason: reason.into(),
+            },
+        );
+    }
+
+    fn send(&self, event: ClientToGame) -> Result<(), ClientQueueError> {
+        if self.dead.get() {
+            return Err(ClientQueueError::Closed);
+        }
+        match send_to_game(&self.sender, event) {
+            Ok(()) => {
+                self.overflow_streak.set(0);
+                Ok(())
+            }
+            Err(ClientQueueError::Full) => {
+                let streak = self.overflow_streak.get().saturating_add(1);
+                self.overflow_streak.set(streak);
+                if streak >= CLIENT_TO_GAME_OVERFLOW_LIMIT {
+                    self.mark_dead("inbound queue overflow");
+                    Err(ClientQueueError::Full)
+                } else {
+                    Err(ClientQueueError::Full)
+                }
+            }
+            Err(ClientQueueError::Closed) => {
+                self.dead.set(true);
+                Err(ClientQueueError::Closed)
+            }
+        }
     }
 }
 
@@ -603,10 +674,10 @@ impl NetworkClient {
         server_addr: String,
         username: String,
         game_to_client: Receiver<GameToClient>,
-        client_to_game: Sender<ClientToGame>,
+        client_to_game: SyncSender<ClientToGame>,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
-            let client_to_game = ClientEventSender(client_to_game);
+            let client_to_game = ClientEventSender::new(client_to_game);
             let runtime = match tokio::runtime::Runtime::new() {
                 Ok(runtime) => runtime,
                 Err(error) => {
@@ -992,7 +1063,10 @@ async fn run_client(
                         state,
                         ..
                     }) => {
-                        if state.validate_bounds().is_ok()
+                        if session_player_id != player_id {
+                            // Owner-targeted projection only. A malicious
+                            // server must not enqueue foreign session snapshots.
+                        } else if state.validate_bounds().is_ok()
                             && replication_gate.accept_session(
                                 session_player_id,
                                 dimension,
@@ -1000,7 +1074,7 @@ async fn run_client(
                                 state.revision,
                             )
                         {
-                            if session_player_id == player_id && dimension == current_dimension {
+                            if dimension == current_dimension {
                                 last_client_revision =
                                     last_client_revision.max(state.revision);
                             }
@@ -1048,6 +1122,10 @@ async fn run_client(
                         let _ = client_to_game.send(ClientToGame::Disconnected { reason: "connection lost".into() });
                         break;
                     }
+                }
+                if client_to_game.is_dead() {
+                    eprintln!("[NetworkClient] Disconnecting: inbound queue overflow");
+                    break;
                 }
             }
             _ = tick.tick() => {
@@ -1432,7 +1510,7 @@ mod tests {
         let server = NetworkServer::spawn(addr.clone(), 0xCAFE_BABE, 1, host_rx, server_tx);
 
         let (game_tx_a, game_rx_a) = mpsc::channel();
-        let (event_tx_a, event_rx_a) = mpsc::channel();
+        let (event_tx_a, event_rx_a) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client_a = NetworkClient::spawn(addr.clone(), "steve".into(), game_rx_a, event_tx_a);
         let first = wait_for_event(&event_rx_a);
         let first_id = match first {
@@ -1452,7 +1530,7 @@ mod tests {
             .expect("first join missing");
 
         let (game_tx_b, game_rx_b) = mpsc::channel();
-        let (event_tx_b, event_rx_b) = mpsc::channel();
+        let (event_tx_b, event_rx_b) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client_b = NetworkClient::spawn(addr, "alex".into(), game_rx_b, event_tx_b);
         let second_id = match wait_for_event(&event_rx_b) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -1499,7 +1577,7 @@ mod tests {
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
 
         let (game_tx, game_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "catchup".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -1718,7 +1796,7 @@ mod tests {
         );
 
         let (game_tx_a, game_rx_a) = mpsc::channel();
-        let (event_tx_a, event_rx_a) = mpsc::channel();
+        let (event_tx_a, event_rx_a) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client_a = NetworkClient::spawn(addr.clone(), "slow".into(), game_rx_a, event_tx_a);
         let id_a = match wait_for_event(&event_rx_a) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -1730,7 +1808,7 @@ mod tests {
         ));
 
         let (game_tx_b, game_rx_b) = mpsc::channel();
-        let (event_tx_b, event_rx_b) = mpsc::channel();
+        let (event_tx_b, event_rx_b) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client_b = NetworkClient::spawn(addr, "fast".into(), game_rx_b, event_tx_b);
         let id_b = match wait_for_event(&event_rx_b) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -1889,7 +1967,7 @@ mod tests {
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
         let (game_tx, game_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "ordering".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -2032,7 +2110,7 @@ mod tests {
         let server = NetworkServer::spawn(addr.clone(), 0xCAFE_BABE, 1, host_rx, server_tx);
 
         let (game_tx, game_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "steve".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -2083,7 +2161,7 @@ mod tests {
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
         let (game_tx, game_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "legacy-client".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -2248,8 +2326,8 @@ mod tests {
         let server = NetworkServer::spawn(addr.clone(), 0xDEAD_BEEF, 0, host_rx, server_tx);
 
         let (_game_tx, game_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
-        let client = NetworkClient::spawn(addr, "host_quit_witness".into(), game_rx, event_tx);
+        let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
+        let client = NetworkClient::spawn(addr, "quit_witness".into(), game_rx, event_tx);
 
         match wait_for_event(&event_rx) {
             ClientToGame::Connected { seed, gamemode, .. } => {
@@ -2525,7 +2603,7 @@ mod tests {
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
 
         let (game_tx, game_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "container-close".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -2622,7 +2700,7 @@ mod tests {
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
 
         let (game_tx, game_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client = NetworkClient::spawn(addr, "replica".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
             ClientToGame::Connected { player_id, .. } => player_id,
@@ -2791,5 +2869,114 @@ mod tests {
         ));
         stats.cancel();
         assert_eq!(stats.cancels(), 1);
+    }
+
+    #[test]
+    fn client_event_sender_disconnects_on_sustained_overflow() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let sender = ClientEventSender::new(tx);
+        sender
+            .send(ClientToGame::StatusUpdate {
+                message: "hold".into(),
+            })
+            .unwrap();
+        let mut saw_full = false;
+        for index in 0..(CLIENT_TO_GAME_OVERFLOW_LIMIT + 4) {
+            let result = sender.send(ClientToGame::StatusUpdate {
+                message: format!("overflow-{index}"),
+            });
+            if result == Err(ClientQueueError::Full) {
+                saw_full = true;
+            }
+        }
+        assert!(saw_full);
+        assert!(sender.is_dead());
+        drop(rx);
+    }
+
+    #[test]
+    fn non_local_player_session_update_is_not_enqueued() {
+        let _guard = network_test_guard();
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut connection = crate::network::transport::Connection::new(stream);
+                let _ = connection.recv().await.unwrap();
+                connection
+                    .send(&Packet::LoginSuccess {
+                        protocol_version: PROTOCOL_VERSION,
+                        player_id: 1,
+                        seed: 1,
+                        gamemode: 1,
+                    })
+                    .await
+                    .unwrap();
+                let mut foreign = SessionGameplayWire::default();
+                foreign.revision = 3;
+                connection
+                    .send(&Packet::PlayerSessionUpdate {
+                        protocol_version: PROTOCOL_VERSION,
+                        sequence: 1,
+                        player_id: 99,
+                        dimension: 0,
+                        state: foreign,
+                    })
+                    .await
+                    .unwrap();
+                let mut local = SessionGameplayWire::default();
+                local.revision = 4;
+                connection
+                    .send(&Packet::PlayerSessionUpdate {
+                        protocol_version: PROTOCOL_VERSION,
+                        sequence: 2,
+                        player_id: 1,
+                        dimension: 0,
+                        state: local,
+                    })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            });
+        });
+
+        let (game_tx, game_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
+        let client = NetworkClient::spawn(addr, "owner".into(), game_rx, event_tx);
+        assert!(matches!(
+            wait_for_event(&event_rx),
+            ClientToGame::Connected { player_id: 1, .. }
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut local_update = None;
+        while std::time::Instant::now() < deadline && local_update.is_none() {
+            match event_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(ClientToGame::PlayerSessionUpdate { player_id: 99, .. }) => {
+                    panic!("foreign player_id session snapshot entered the join-client queue")
+                }
+                Ok(event @ ClientToGame::PlayerSessionUpdate { player_id: 1, .. }) => {
+                    local_update = Some(event);
+                }
+                Ok(ClientToGame::StatusUpdate { .. }) => {}
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => panic!("client event channel failed: {error}"),
+            }
+        }
+        assert!(matches!(
+            local_update,
+            Some(ClientToGame::PlayerSessionUpdate {
+                player_id: 1,
+                state,
+                ..
+            }) if state.revision == 4
+        ));
+        game_tx.send(GameToClient::Disconnect).unwrap();
+        client.join().unwrap();
+        server.join().unwrap();
     }
 }

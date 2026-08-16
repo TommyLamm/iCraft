@@ -68,7 +68,8 @@ struct HeadlessClient {
 impl HeadlessClient {
     fn connect(address: &str, username: &str) -> Self {
         let (commands, command_rx) = mpsc::channel();
-        let (event_tx, inbound) = mpsc::channel();
+        let (event_tx, inbound) =
+            mpsc::sync_channel(icraft::network::client::CLIENT_TO_GAME_QUEUE_CAPACITY);
         let client_thread = NetworkClient::spawn(
             address.to_string(),
             username.to_string(),

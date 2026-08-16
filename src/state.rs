@@ -7528,7 +7528,9 @@ impl State {
                 username,
             } => {
                 let (game_to_client, game_commands) = std::sync::mpsc::channel();
-                let (client_events, client_to_game) = std::sync::mpsc::channel();
+                let (client_events, client_to_game) = std::sync::mpsc::sync_channel(
+                    crate::network::client::CLIENT_TO_GAME_QUEUE_CAPACITY,
+                );
                 let thread = crate::network::client::NetworkClient::spawn(
                     format!("{server_addr}:{port}"),
                     username.clone(),

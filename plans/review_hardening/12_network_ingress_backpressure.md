@@ -23,17 +23,17 @@
 
 ## 精確 acceptance
 
-- [ ] Chat 在 `run_client` enqueue **之前**拒 >256 字元（或 bytes，與現有顯示 cap 一致）
+- [x] Chat 在 `run_client` enqueue **之前**拒 >256 字元（或 bytes，與現有顯示 cap 一致）
   的訊息，不進 host queue。
-- [ ] Chat 與 pose 有獨立速率上限。`TrySendError::Full` 對該連線做入口背壓
+- [x] Chat 與 pose 有獨立速率上限。`TrySendError::Full` 對該連線做入口背壓
   （丟 pose、拒 chat），**不得**把其他客戶端當死 host 踢掉。
-- [ ] `BroadcastContainerSlotUpdate` 走可靠路徑，或對每個 viewer 送 targeted 可靠更新。
+- [x] `BroadcastContainerSlotUpdate` 走可靠路徑，或對每個 viewer 送 targeted 可靠更新。
   enqueue 失敗的處理與其他可靠包相同（短等後踢慢客戶端），不得默默丟 slot delta。
-- [ ] `NetworkClient` 改有界 channel；持續溢位斷線。非本機 `player_id` 的
+- [x] `NetworkClient` 改有界 channel；持續溢位斷線。非本機 `player_id` 的
   `PlayerSessionUpdate` 在進 queue 前丟掉。
-- [ ] 未完成握手的並發連線有上限（建議 `2 * max_players`），超過停止 accept 或立即關
+- [x] 未完成握手的並發連線有上限（建議 `2 * max_players`），超過停止 accept 或立即關
   新 socket。握手超時可短於現有 15s（寫進測試能接受的值）。
-- [ ] 測試：單 client 灌 pose／超長 chat，第二 client 仍能完成 GameplayRequest；
+- [x] 測試：單 client 灌 pose／超長 chat，第二 client 仍能完成 GameplayRequest；
   超長 chat 不在 host queue；容器 slot 在 viewer queue 壓力下仍送達或該 viewer 被踢
   （不得靜默與主機箱子分叉）。
 
@@ -56,3 +56,41 @@
 - 有界 bincode（03）。
 - Handshake 身份（04）。
 - TLS。
+
+## 實作與證據
+
+Chat 在 `run_client` enqueue 前用現有顯示 cap（`chars().count() > 256`）拒絕，
+超長字串不進 `HOST_EVENT_QUEUE`。Pose 預設 20/s、chat 預設 8/s，與 GameplayRequest
+120/s 分開計量；`HostEventSendError::Full` 只背壓該連線（丟 pose、拒 chat，
+GameplayRequest 回 `QueueFull`），`Closed` 才當死 host。
+
+`BroadcastContainerSlotUpdate` 併入 `reliable_broadcast`。enqueue 失敗與其他可靠包
+相同：`RELIABLE_ENQUEUE_TIMEOUT`（250ms）後 `evict_slow_clients`，不得 `best_effort`
+默默丟 slot delta。
+
+`NetworkClient` 改 `sync_channel(256)`；連續 16 次 `try_send` Full 斷線。非本機
+`player_id` 的 `PlayerSessionUpdate` 在進 queue 前丟掉。未完成握手的並發連線上限
+`2 * max_players`，超過立即 `drop` 新 socket。握手超時改 5s（`ServerConfig::
+handshake_timeout`，測試可再縮）。
+
+驗證：
+
+```
+cargo test --test review_hardening_ingress
+  2 passed
+  pose_and_oversized_chat_flood_does_not_block_peer_gameplay
+  oversized_chat_from_join_client_is_not_relayed
+
+cargo test --lib network::
+  101 passed
+  含 oversized_chat_is_rejected_before_host_enqueue、
+  chat_and_pose_rate_limits_are_independent、
+  host_queue_full_backpressures_pose_without_kicking_peer、
+  broadcast_container_slot_is_reliable_or_evicts_slow_viewer、
+  pre_auth_connections_are_capped_at_twice_max_players、
+  client_event_sender_disconnects_on_sustained_overflow、
+  non_local_player_session_update_is_not_enqueued
+```
+
+剩餘：`ClientAction`／`CatchupAck` 等控制事件仍把 Full 當該連線失敗（不是 pose／chat
+flood 路徑）。`game_to_client` 仍 unbounded。有界 bincode、handshake 身份、TLS 不在本計劃。
