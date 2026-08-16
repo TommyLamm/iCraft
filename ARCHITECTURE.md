@@ -1,8 +1,8 @@
 # Architecture
 
-> Last verified: 2026-08-16 at `4e552ed` (`tommy-dev`).
-> Change range reviewed: the 20 commits after `b3912c6` through `4e552ed`
-> (inclusive of the current `HEAD`).
+> Last verified: 2026-08-16 at `4474f89` (`tommy-dev`).
+> Change range reviewed: the 20 commits after `b3912c6` through `4e552ed`,
+> plus P0 code-simplification 11–13 (`f8c45f6`..`4474f89`).
 > Source code is authoritative; `plans/`, `docs/superpowers/`, and most of
 > `plans/03_performance/` are design/history records, not a description of the live runtime.
 >
@@ -20,18 +20,24 @@ The desktop uses `winit`, `wgpu`, and `rodio`; shared simulation uses a determin
 | --- | --- | --- |
 | `icraft` | `src/main.rs` | Desktop menu/game, input, presentation, and optional embedded server. `--microbench` runs the built-in microbench instead. |
 | `icraft-server` | `src/bin/icraft-server.rs` | Headless fixed-tick server, TCP sessions, console commands, metrics, and synchronous save/shutdown. |
-| `icraft` library | `src/lib.rs` | Exposes shared authority, world, network, persistence, and test APIs to the server and integration tests. |
+| `icraft` library | `src/lib.rs` | Public contract for `icraft-server` and `tests/`: authority, world, network, persistence, and the thin `presentation_inventory_policy` cut. |
 
 The desktop binary declares its module tree directly instead of importing the
 library crate. Shared source files are therefore compiled once for the desktop
-target and again through `src/lib.rs` for the server/tests. Presentation modules
-(`menu`, `camera`, `texture`, `src/presentation/`) stay desktop-only so
-`icraft-server` does not compile the wgpu menu or GPU terrain. Small transport-independent presentation policies live in
+target and again through `src/lib.rs` for the server/tests. Only modules that
+`tests/` or `src/bin/icraft-server.rs` actually `use icraft::…` stay `pub`; the
+rest are `pub(crate)`. `sim_harness`, `final_acceptance`, and the library
+`microbench` compile only under `cfg(test)` or feature `harness` (not default).
+Desktop `--microbench` uses `src/main.rs`'s own `mod microbench` and does not
+need that feature. Presentation modules (`menu`, `camera`, `texture`,
+`src/presentation/`) stay desktop-only and must not be added to `lib.rs`, so
+`icraft-server` does not compile the wgpu menu or GPU terrain. Small
+transport-independent presentation policies live in
 `presentation_inventory_policy` so the server and headless tests can verify the
-boundary without importing the UI. `chunk_render` and `perf` remain shared due
-to world mesh types and queue metrics. `#[global_allocator]` is installed only
-in `src/main.rs`; the dynamic-resolution controller is compiled only into the
-desktop tree.
+boundary without importing the UI. `chunk_render` and `perf` still compile into
+the library as crate-internal modules because of world mesh types and queue
+metrics. `#[global_allocator]` is installed only in `src/main.rs`; the
+dynamic-resolution controller is compiled only into the desktop tree.
 
 ## Runtime topologies
 
@@ -76,8 +82,8 @@ All server-side paths -> AuthorityCore -> one ServerWorld per loaded dimension
 | Owner | Canonical state |
 | --- | --- |
 | `ServerRuntime` | Transport/session lifecycle, player files, interest sets, tick scheduling, projection routing, saves, and metrics. |
-| `AuthorityCore` | Authenticated sessions, request sequencing/idempotency, gameplay state, dimension routing, fixed-tick ordering, and global authority entity IDs. |
-| `ServerWorld` | Chunks, blocks, raw fluid, block entities, entities, revisions, time, redstone, hoppers, fluids, random ticks, furnaces, spawning, and entity AI/physics. |
+| `AuthorityCore` | Authenticated sessions, request sequencing/idempotency, gameplay state, dimension routing, fixed-tick ordering, the live `AuthoritySnapshot`, and global authority entity IDs. |
+| `ServerWorld` | Chunks, blocks, raw fluid, block entities, entities, revisions, time, redstone, hoppers, fluids, random ticks, furnaces, spawning, and entity AI/physics. No snapshot field; `tick` returns a snapshot that `AuthorityCore` stores. |
 | `State` / renderer `ChunkManager` | Presentation copies only: streamed chunks, meshes, GPU allocations, particles, UI, interpolation, and feedback. |
 | `SaveManager` | Durable level, player, chunk, entity, dimension, and mutation-revision data. |
 
@@ -111,7 +117,16 @@ Important rules:
 - Revisions are dimension-scoped. Network and save gates use
   `(dimension, revision)`; the aggregate snapshot revision is only a summary.
 - Sessions and dimensions use stable sorted iteration so topology and transport
-  arrival order do not change fixed-tick checksums.
+  arrival order do not change fixed-tick checksums. `AuthorityCore::tick` and
+  the checksum pass walk `world`/`world_mut(dimension)` by `BTreeMap` key.
+  They do not call `activate_dimension` to swap a slot. After the pass,
+  `active_dimension` is restored to the value from the start of the tick so
+  State, runtime metrics, and save keep a stable compatibility view.
+  `activate_dimension` remains the request-routing helper (`submit_request`,
+  session dimension changes, respawn) and is not a second tick path.
+- Session chat commands are executed by `AuthorityCore::apply_command`.
+  `State` chat parsing is leftover presentation feedback. The dedicated
+  console is a separate admin surface and does not go through `commands::parse`.
 - Per-session interest is both the projection boundary and the chunk
   materialization gate. View, simulation, entity, and open-container interest
   are tracked separately and processed with bounded budgets. Columns that leave
@@ -140,7 +155,8 @@ Important rules:
 `ServerRuntime::tick_with_output` performs one 50 ms server step:
 
 1. Drain at most the bounded inbound-event budget.
-2. Tick `AuthorityCore` once for every loaded dimension.
+2. Tick `AuthorityCore` once for every loaded dimension, addressing each
+   world by key rather than activating it as a slot.
 3. Within each dimension, advance session domains, mining and portal travel,
    then `ServerWorld` time, redstone, hoppers, fluids, random ticks, furnaces,
    spawning, entities, and deferred dispenser/dropper actions.
@@ -308,7 +324,7 @@ explicit development/test override.
 | Rendering | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling.rs`, `src/block_model.rs`, `src/mob_renderer.rs`, `src/hand_renderer.rs`, `src/particles.rs`, `src/texture.rs`, `src/shader.wgsl` |
 | Networking | `src/network/{protocol,transport,server,client}.rs` |
 | Persistence and resources | `src/save.rs`, `src/resources.rs`, `src/localization.rs`, `src/audio.rs`, `src/accessibility.rs` |
-| Tests and performance | inline `#[cfg(test)]`, `tests/`, `src/sim_harness.rs`, `src/final_acceptance.rs`, `src/microbench.rs`, `plans/03_performance/` |
+| Tests and performance | inline `#[cfg(test)]`, `tests/` plus `tests/common/tcp_harness.rs`, `src/sim_harness.rs` / `src/final_acceptance.rs` / lib `microbench` (`cfg(test)` or feature `harness`), desktop `src/microbench.rs`, `plans/03_performance/` |
 
 `State` is still the desktop composition root. GPU terrain arenas, inbound
 staging, interpolation, leftover world tick, and render prepare/encode live in
@@ -328,9 +344,13 @@ session lifecycle, corrupt restore, chunk residency, and projection-only joins.
 stability, invalid-dimension non-mutation, dimension-local revisions, stale-place
 conservation, and join projection behavior. `final_acceptance` / `sim_harness`
 are explicitly recipe/physics smoke over `ChunkManager`, not an authority closed
-loop; Listen/Dedicated TCP is covered by Plan30–34 and the review-hardening
-suites. Rendering, window, audio-device, DPI, Host+Join visuals, long soak, and
-fixed-scene GPU performance still require manual or artifact-based checks.
+loop; they are not part of the default library surface. Listen/Dedicated TCP is
+covered by Plan30–34 and the review-hardening suites. Shared listen-bind /
+`temp_world` / `session_slot` builders live in `tests/common/tcp_harness.rs`;
+scenario-specific `properties()` and distinct temp-path rules stay local.
+Adversarial frames and ingress flooders still use raw `TcpStream`. Rendering,
+window, audio-device, DPI, Host+Join visuals, long soak, and fixed-scene GPU
+performance still require manual or artifact-based checks.
 
 ```text
 cargo fmt --all -- --check
