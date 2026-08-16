@@ -108,6 +108,8 @@ Survival/Creative、生命飢餓氧氣、日夜天氣、流體、基礎敵對／
 | 33 | [TCP 釣魚生命週期 revision](33_tcp_fishing_lifecycle_revision.md) | 已完成；fresh TCP input 綁定最新 owner revision，自主 fixed tick 不污染 client-authored baseline；Embedded/Listen/Dedicated cast→reel、duplicate/cancel、loot/XP/耐久、privacy 與 stale/out-of-order 均通過 |
 | 34 | [容器破壞內容物守恆](34_container_break_inventory_conservation.md) | 已完成 bounded authority/TCP evidence；五類容器完整 ItemStack metadata/count 掉落、atomic BE removal、duplicate/stale/reconnect/save 守恆；Listen/Dedicated owner/observer projection 通過 |
 
+2026-08-16 架構審查發現：Plan31／34 的 **typed** 路徑是對的，但現役 `BlockUse`／`ContainerClick` 適配器與若干生命週期／signed-Y／存檔洞仍繞過契約。後續硬化計劃不編號進本表，見 [`../review_hardening/README.md`](../review_hardening/README.md)（01–15）。
+
 官方資料也佐證上述族群屬於基礎體驗：
 
 - [合成指南](https://www.minecraft.net/en-us/article/how-craft)包含配方書與熔爐配方。
