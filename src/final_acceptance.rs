@@ -1,10 +1,10 @@
-//! Headless acceptance harness for Plan 17.
+//! Headless recipe / physics smoke for Plan 17/19 workflows.
 //!
-//! The harness intentionally exercises the deterministic simulation seams that
-//! are available without a GPU or a live network socket. Dedicated/listen
-//! rows remain scenario-specific blocked rows unless a true TCP player vector
-//! proves the whole scenario; Plan30's bounded domain vector is not a blanket
-//! network E2E claim.
+//! This module walks `SimHarness` (`ChunkManager` + local inventory), not
+//! `AuthorityCore`. Passing rows prove CPU recipe and block-entity physics,
+//! not a 20 Hz authority closed loop. Listen / Dedicated coverage lives in
+//! the Plan30–34 TCP vectors and review-hardening 01/02 — those tests are
+//! the network contract, not a "missing ingress" blocker here.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AcceptanceScenario {
@@ -94,18 +94,8 @@ pub fn run_headless(
     }
 }
 
-const fn network_block_reason(scenario: AcceptanceScenario) -> &'static str {
-    match scenario {
-        AcceptanceScenario::Foundation => {
-            "Plan30 TCP domain subset passes, but canonical block-action/mining ingress is missing (Plan31)"
-        }
-        AcceptanceScenario::Progression => {
-            "Plan30 TCP domain subset passes, but player travel/completion ingress is missing (Plan32)"
-        }
-        AcceptanceScenario::SocialAutomation => {
-            "Plan30 TCP domain subset passes, but player-authored block/automation ingress is missing (Plan31)"
-        }
-    }
+const fn network_block_reason(_scenario: AcceptanceScenario) -> &'static str {
+    "Listen/Dedicated recipe rows are not this CPU physics smoke. Real TCP coverage lives in Plan30-34 (plan30_real_transport_acceptance, plan31_authoritative_block_actions, plan32_progression_travel, plan33_tcp_fishing_lifecycle, plan34_container_break_inventory_conservation) and review-hardening 01/02 (review_hardening_block_use_rejected, review_hardening_container_click)."
 }
 
 fn assertion(name: &'static str, passed: bool) -> AcceptanceAssertion {
@@ -822,7 +812,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn singleplayer_headless_scenarios_pass() {
+    fn singleplayer_recipe_physics_smoke_passes() {
         for scenario in AcceptanceScenario::ALL {
             let report = run_headless(scenario, AcceptanceTopology::Singleplayer);
             assert!(
@@ -835,20 +825,34 @@ mod tests {
     }
 
     #[test]
-    fn network_rows_keep_scenario_specific_blockers() {
+    fn network_recipe_rows_point_at_plan30_34_tcp_vectors() {
         for scenario in AcceptanceScenario::ALL {
             for topology in [
                 AcceptanceTopology::ListenServer,
                 AcceptanceTopology::DedicatedTwoClients,
             ] {
                 let report = run_headless(scenario, topology);
-                assert!(!report.passed());
-                let reason = report.blocked_reason.expect("network blocker");
-                assert!(reason.contains(match scenario {
-                    AcceptanceScenario::Foundation => "Plan31",
-                    AcceptanceScenario::Progression => "Plan32",
-                    AcceptanceScenario::SocialAutomation => "Plan31",
-                }));
+                assert!(
+                    !report.passed(),
+                    "this harness is recipe/physics smoke, not Listen/Dedicated authority"
+                );
+                let reason = report
+                    .blocked_reason
+                    .expect("network row is not this smoke harness");
+                assert!(
+                    reason.contains("Plan30-34")
+                        && reason.contains("plan31_authoritative_block_actions")
+                        && reason.contains("plan34_container_break_inventory_conservation"),
+                    "network rows must point at Plan30-34 TCP vectors: {reason}"
+                );
+                assert!(
+                    reason.contains("review_hardening"),
+                    "network rows must point at review-hardening 01/02 TCP vectors: {reason}"
+                );
+                assert!(
+                    !reason.contains("missing"),
+                    "must not lock Plan31/32 as unfinished: {reason}"
+                );
             }
         }
     }

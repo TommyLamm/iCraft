@@ -4643,6 +4643,52 @@ mod tests {
     }
 
     #[test]
+    fn failed_region_write_does_not_replace_in_memory_region_cache() {
+        let world_dir = unique_test_dir("region_cache_write_failure");
+        let old_snapshots = [
+            same_region_snapshot(0, 0, BlockType::Brick),
+            same_region_snapshot(1, 0, BlockType::Cobblestone),
+        ];
+        let new_snapshots = [
+            same_region_snapshot(0, 0, BlockType::Obsidian),
+            same_region_snapshot(1, 0, BlockType::StoneBrick),
+        ];
+
+        let mut manager = SaveManager::new(&world_dir);
+        manager
+            .save_chunks_batch_in(crate::dimension::Dimension::Overworld, &old_snapshots)
+            .unwrap();
+        assert_saved_marker(&mut manager, 0, 0, BlockType::Brick);
+        let cached_before = manager
+            .region_cache
+            .get(&(crate::dimension::Dimension::Overworld, 0, 0))
+            .expect("successful write must populate the region cache")
+            .chunks
+            .clone();
+
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(1));
+        assert!(matches!(
+            manager.save_chunks_batch_in(crate::dimension::Dimension::Overworld, &new_snapshots),
+            Err(SaveError::Io { .. })
+        ));
+        ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(0));
+
+        let cached_after = manager
+            .region_cache
+            .get(&(crate::dimension::Dimension::Overworld, 0, 0))
+            .expect("failed write must leave the previous cache entry")
+            .chunks
+            .clone();
+        assert_eq!(
+            cached_after, cached_before,
+            "a failed region replacement must not publish the in-memory region"
+        );
+        assert_saved_marker(&mut manager, 0, 0, BlockType::Brick);
+        assert_saved_marker(&mut manager, 1, 0, BlockType::Cobblestone);
+        fs::remove_dir_all(world_dir).unwrap();
+    }
+
+    #[test]
     fn same_region_batch_survives_process_crash_before_and_after_replace() {
         let world_dir = unique_test_dir("same_region_batch_crash");
         let old_snapshots = [

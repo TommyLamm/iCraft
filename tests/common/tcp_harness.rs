@@ -2,9 +2,46 @@ use icraft::network::client::{ClientToGame, GameToClient, NetworkClient};
 use icraft::network::protocol::{GameplayRequest, GameplayResponse};
 use icraft::server_runtime::ServerRuntime;
 use std::collections::VecDeque;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Loopback port reservation that keeps the OS listener until the server bind.
+///
+/// Dropping a `TcpListener` before the server binds is a TOCTOU hole: another
+/// process can steal the ephemeral port. Hold this until the caller is ready
+/// to bind, then `release()` immediately before that bind, or keep the
+/// listener if the server can take over the already-bound socket.
+pub struct HeldLoopback {
+    listener: Option<TcpListener>,
+    addr: SocketAddr,
+}
+
+impl HeldLoopback {
+    pub fn bind() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback test port");
+        let addr = listener.local_addr().expect("read loopback port");
+        Self {
+            listener: Some(listener),
+            addr,
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Drop the reservation so a server can bind this exact port.
+    pub fn release(mut self) -> u16 {
+        drop(self.listener.take());
+        self.addr.port()
+    }
+}
 
 pub const STEP_SLEEP: Duration = Duration::from_millis(5);
 pub const EVENT_TIMEOUT: Duration = Duration::from_secs(30);

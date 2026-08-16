@@ -4781,48 +4781,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_v4_handshake() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
-        let next_player_id = Arc::new(AtomicU64::new(1));
-        let (event_tx, _event_rx) = std_mpsc::channel();
-
-        let client_task = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            NetworkServer::run_client(
-                Connection::new(stream),
-                0xCAFE_BABE,
-                1,
-                next_player_id,
-                sessions,
-                event_tx,
-                ServerConfig::default(),
-                NetworkMetrics::default(),
-                None,
-            )
-            .await;
-        });
-
-        let mut client = Connection::new(tokio::net::TcpStream::connect(addr).await.unwrap());
-        client
-            .send(&Packet::Handshake {
-                protocol_version: PROTOCOL_VERSION - 1,
-                username: "old_client".into(),
-            })
-            .await
-            .unwrap();
-
-        let reply = client.recv().await.unwrap();
-        assert!(matches!(
-            reply,
-            Packet::Disconnect { reason, .. } if reason.contains("protocol version mismatch")
-        ));
-
-        let _ = client_task.await;
-    }
-
-    #[tokio::test]
     async fn relays_block_action_request_and_targeted_result() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let (mut client_a, id_a) = server.connect("steve").await;

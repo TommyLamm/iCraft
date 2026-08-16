@@ -1,9 +1,10 @@
-//! Deterministic CPU-only gameplay harness used by the Plan 19 acceptance
-//! scenarios.  The harness deliberately exposes small, typed operations which
-//! call the same recipe, inventory, block-entity, random-tick, structure,
-//! dimension, entity and save seams used by the runtime.  Its fixture only
-//! establishes deterministic starting terrain; progression results are produced
-//! by those operations rather than by pre-seeding target blocks/entities.
+//! Deterministic CPU-only recipe / physics smoke used by Plan 19 workflows.
+//!
+//! This is not an `AuthorityCore` closed loop. The harness exposes typed
+//! operations that call the same recipe, inventory, block-entity, random-tick,
+//! structure, dimension, entity and save seams used by local simulation.
+//! Its fixture only establishes deterministic starting terrain; progression
+//! results come from those operations rather than pre-seeded targets.
 
 use crate::block_entity::{default_stub_for_block, BlockEntity};
 use crate::chunk_manager::ChunkManager;
@@ -55,7 +56,7 @@ pub struct TradeResult {
 
 /// A small deterministic simulation world.  Public fields intentionally expose
 /// the same CPU state used by the old fixed-step tests; gameplay mutations go
-/// through methods below so acceptance tests can describe real user actions.
+/// through methods below so recipe/physics smoke can describe real user actions.
 pub struct SimHarness {
     pub chunks: ChunkManager,
     pub lighting_dirty: std::collections::HashSet<(i32, i32)>,

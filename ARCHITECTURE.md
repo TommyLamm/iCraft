@@ -230,8 +230,11 @@ protocol boundaries rather than adding more cross-domain logic to either root.
 
 Most automated coverage is headless: inline unit tests plus integration tests
 for persistence, authority parity, real TCP, block actions, travel, fishing,
-waterlogging, and container conservation. Rendering, window, audio-device, DPI,
-and fixed-scene GPU performance still require manual or artifact-based checks.
+waterlogging, and container conservation. `final_acceptance` / `sim_harness`
+are recipe/physics smoke over `ChunkManager`, not an authority closed loop;
+Listen/Dedicated TCP is locked by Plan30–34 and review-hardening 01/02.
+Rendering, window, audio-device, DPI, and fixed-scene GPU performance still
+require manual or artifact-based checks.
 
 ```text
 cargo fmt --all -- --check
