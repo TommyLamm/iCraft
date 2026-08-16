@@ -49,6 +49,7 @@ Dedicated
   icraft-server -> ServerRuntime -> NetworkServer
 
 All server-side paths -> AuthorityCore -> one ServerWorld per loaded dimension
+  (worlds live in a BTreeMap keyed by Dimension; active_dimension is a key)
 ```
 
 - `App` owns the `Menu`/`State` transition, OS events, frame deadlines, resize,

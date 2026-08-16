@@ -69,10 +69,10 @@ fn server_difficulty_is_strict_and_pvp_remains_independent() {
     )
     .expect("peaceful config should construct");
     assert_eq!(
-        runtime.authority.world.difficulty,
+        runtime.authority.world_mut_active().difficulty,
         ServerDifficulty::Peaceful
     );
-    assert!(runtime.authority.world.rules.pvp);
+    assert!(runtime.authority.world_mut_active().rules.pvp);
     runtime.shutdown().expect("shutdown should persist cleanly");
     let _ = fs::remove_dir_all(world_dir);
 }
@@ -142,7 +142,7 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
         },
     )
     .expect("embedded listen topology should construct");
-    assert_eq!(embedded.authority.world.difficulty, ServerDifficulty::Hard);
+    assert_eq!(embedded.authority.world_mut_active().difficulty, ServerDifficulty::Hard);
     embedded
         .save_all()
         .expect("save should persist difficulty policy");
@@ -156,14 +156,14 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
         EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(4, "reloaded")),
     )
     .expect("reloaded embedded runtime");
-    assert_eq!(reloaded.authority.world.difficulty, ServerDifficulty::Hard);
+    assert_eq!(reloaded.authority.world_mut_active().difficulty, ServerDifficulty::Hard);
     reloaded.shutdown().expect("reloaded shutdown");
 
     let dedicated_props = properties("dedicated", "hard");
     let dedicated_dir = dedicated_props.world_dir.clone();
     let mut dedicated = ServerRuntime::new(dedicated_props).expect("dedicated runtime");
     assert_eq!(dedicated.authority.topology, AuthorityTopology::Dedicated);
-    assert_eq!(dedicated.authority.world.difficulty, ServerDifficulty::Hard);
+    assert_eq!(dedicated.authority.world_mut_active().difficulty, ServerDifficulty::Hard);
     dedicated.shutdown().expect("dedicated shutdown");
 
     let _ = fs::remove_dir_all(world_dir);

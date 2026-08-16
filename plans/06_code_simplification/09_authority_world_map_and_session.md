@@ -28,15 +28,15 @@
 
 ## 精確 acceptance
 
-- [ ] `AuthorityCore` 的維度世界只存在 `BTreeMap<Dimension, ServerWorld>`（或等價有序 map）。`active_dimension: Dimension` 是 **key**，不是被搬來搬去的值。
-- [ ] `world()`／`world_mut()`／`revision_for_dimension` 是 map lookup。`with_world` 若還存在，不得再 swap 整顆 `ServerWorld`。
-- [ ] 可觀察語意保留：`set_session_dimension` 之後，讀「active world」得到目標維度的那顆 `ServerWorld`。既有 `dimension_transfer_updates_session_and_world_contract`、`dimension_worlds_are_parked_without_chunk_aliasing` 必須改寫成測 **key + map**，不得再要求 `mem::replace`。
-- [ ] Tick、snapshot fanout、save／metrics 仍用排序過的維度迭代（`Ord` 已是 `as u8`）。不得改成 `HashMap` 迭代。
-- [ ] `PlayerSessionState` 刪除五個影子 interest 集合。讀取改 `session.interest.*`。測試改 assert `interest`。
-- [ ] `PlayerSessionState` 不再複製權威已擁有、且 runtime 只是為了投影而 mirror 的 gameplay 欄位——**僅限**確認沒有 TCP／save 讀取之後。pose clock、teleport allowance、pending chunks、projected revision、storage 留下。不確定就留，並在證據列出。
-- [ ] `AuthorityBoundary` 標 `#[cfg(test)]`，或刪除並讓那兩個測試直接建 `AuthorityCore`。刪未使用的 `sync_*`／`seed_bonus_chest`。`set_dimension` 與 `set_session_dimension` 若重複，留一個。
-- [ ] 維度在 runtime 是 `Dimension`、在 wire 是 `u8` 的轉換仍只發生在邊界，不進 tick。
-- [ ] Plan32 travel、session lifecycle、residency、invariants 期望值不變（除了明確改去讀影子欄位的 assert）。
+- [x] `AuthorityCore` 的維度世界只存在 `BTreeMap<Dimension, ServerWorld>`（或等價有序 map）。`active_dimension: Dimension` 是 **key**，不是被搬來搬去的值。
+- [x] `world()`／`world_mut()`／`revision_for_dimension` 是 map lookup。`with_world` 若還存在，不得再 swap 整顆 `ServerWorld`。
+- [x] 可觀察語意保留：`set_session_dimension` 之後，讀「active world」得到目標維度的那顆 `ServerWorld`。既有 `dimension_transfer_updates_session_and_world_contract`、`dimension_worlds_are_parked_without_chunk_aliasing` 必須改寫成測 **key + map**，不得再要求 `mem::replace`。
+- [x] Tick、snapshot fanout、save／metrics 仍用排序過的維度迭代（`Ord` 已是 `as u8`）。不得改成 `HashMap` 迭代。
+- [x] `PlayerSessionState` 刪除五個影子 interest 集合。讀取改 `session.interest.*`。測試改 assert `interest`。
+- [x] `PlayerSessionState` 不再複製權威已擁有、且 runtime 只是為了投影而 mirror 的 gameplay 欄位——**僅限**確認沒有 TCP／save 讀取之後。pose clock、teleport allowance、pending chunks、projected revision、storage 留下。不確定就留，並在證據列出。
+- [x] `AuthorityBoundary` 標 `#[cfg(test)]`，或刪除並讓那兩個測試直接建 `AuthorityCore`。刪未使用的 `sync_*`／`seed_bonus_chest`。`set_dimension` 與 `set_session_dimension` 若重複，留一個。
+- [x] 維度在 runtime 是 `Dimension`、在 wire 是 `u8` 的轉換仍只發生在邊界，不進 tick。
+- [x] Plan32 travel、session lifecycle、residency、invariants 期望值不變（除了明確改去讀影子欄位的 assert）。
 
 ## 預計檔案與測試
 
@@ -66,3 +66,42 @@
 - 把 `impl Ord for Dimension` 搬到 `dimension.rs`（可做，但是可選；搬的話比較鍵必須仍是 `as u8`）。
 - 拆 `handle_event`／`handle_join_with_storage` 大函式（證據可列切點）。
 - 改 container click 的 clone-then-commit。
+
+## 實作與證據
+
+`AuthorityCore` 不再有被 `mem::replace` 搬移的 `world: ServerWorld` slot。每個已載入維度都住在 `worlds: BTreeMap<Dimension, ServerWorld>`，`active_dimension` 只是 map key。
+
+- `world()` / `world_mut_active()` 查目前 key；`world_ref(dim)` / `world_mut(dim)` 查任意已載入維度。
+- `activate_dimension` 只改 key（必要時 `ensure_dimension` 插入新世界）。
+- `with_world` 直接 `worlds.get_mut`，不 swap、不改 active key。
+- `tick` 仍依 `dimensions()`（BTreeMap 鍵序，`Dimension` as `u8`）迭代，結束後把 active key 設回 `active_before_tick`。
+- `route_authority_snapshot` 改走 `world_ref` / `world_mut(dim)`，不再 activate/restore 整顆世界。
+- `dimension_transfer_updates_session_and_world_contract` 與 `dimension_worlds_are_parked_without_chunk_aliasing` 改 assert `active_dimension()` + `world_ref(dim)`。
+
+`PlayerSessionState` 刪除五個影子集合：`interest_chunks`、`simulation_chunks`、`entity_interest`、`simulation_entity_interest`、`container_viewers`。routing / 測試改讀 `session.interest.chunks`、`simulation_chunks`、`entities`、`simulation_entities`、`open_containers`。`set_session_dimension` 成功後清 `session.interest.open_containers`。
+
+留下的 `PlayerSessionState` gameplay / transport 欄位（確認仍有 TCP 或 save 讀取）：
+
+- `data: PlayerData` — `save_player` clone 後寫 player 檔；pose / interest / respawn 也讀 `data.position`。
+- `effects` — join 投影 `send_player_effects`，dedicated save 寫入 effect vector。
+- `dimension` — runtime 路由與 save 的 current dimension fallback。
+- `last_client_sequence` — ingress 序號。
+- pose clock（`last_pose_sequence` / `last_pose_sender_time_millis` / `last_pose_received_at`）、`teleport_allowance`、`pending_initial_chunks`、`last_projected_session_revision`、`storage` 依計劃留下。
+
+沒有再刪其他 mirror 欄位。沒有合併 `SessionContract` 與 `PlayerSessionState`。
+
+`AuthorityBoundary` 標 `#[cfg(test)]`，只留測試用的 `new` / `set_position` / `set_dimension`。刪除 `sync_villager` / `sync_vehicle` / `sync_entity` / `seed_bonus_chest` 與重複的 `set_session_dimension`。`ARCHITECTURE.md` 已寫它是 unit-test helper，無需再改。
+
+驗收（全部通過）：
+
+```
+cargo test --lib authority::                                          # 56 passed
+cargo test --test review_hardening_session_lifecycle -- --test-threads=1  # 3 passed
+cargo test --test review_hardening_invariants -- --test-threads=1         # 6 passed
+cargo test --test review_hardening_chunk_residency -- --test-threads=1    # 4 passed
+cargo test --test plan32_progression_travel -- --test-threads=1           # 5 passed
+cargo test --test runtime_topology_parity -- --test-threads=1             # 6 passed
+cargo check --all-targets
+```
+
+未跑 repo-wide full suite。

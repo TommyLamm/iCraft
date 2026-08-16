@@ -151,8 +151,8 @@ fn core_with_pick() -> AuthorityCore {
     let pick = ItemStack::new(Item::StonePickaxe, 1);
     gameplay.inventory[0] = Some(tcp_slot(pick));
     assert!(core.set_session_gameplay(SESSION_ID, gameplay));
-    core.world.ensure_chunk(0, 0);
-    core.world.ensure_chunk(1, 0);
+    core.world_mut_active().ensure_chunk(0, 0);
+    core.world_mut_active().ensure_chunk(1, 0);
     core
 }
 
@@ -188,7 +188,7 @@ fn break_request(
 }
 
 fn dropped_stacks(core: &AuthorityCore) -> Vec<ItemStack> {
-    core.world
+    core.world()
         .entities
         .entities
         .iter()
@@ -199,7 +199,7 @@ fn dropped_stacks(core: &AuthorityCore) -> Vec<ItemStack> {
 
 fn dropped_entities(core: &AuthorityCore) -> Vec<(u64, ItemStack)> {
     let mut entities: Vec<_> = core
-        .world
+        .world()
         .entities
         .entities
         .iter()
@@ -329,14 +329,14 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
         rich_stack(ContainerKind::Chest, 1),
     ];
     let axe = ItemStack::new(Item::StoneAxe, 1);
-    runtime.authority.world.ensure_chunk(0, 0);
-    runtime.authority.world.ensure_chunk(1, 0);
+    runtime.authority.world_mut_active().ensure_chunk(0, 0);
+    runtime.authority.world_mut_active().ensure_chunk(1, 0);
     runtime
         .authority
-        .world
+        .world_mut_active()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed TCP chest block");
-    runtime.authority.world.chunks.set_block_entity(
+    runtime.authority.world_mut_active().chunks.set_block_entity(
         TARGET.0,
         TARGET.1,
         TARGET.2,
@@ -407,7 +407,7 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
             |runtime, views| {
                 runtime
                     .authority
-                    .world
+                    .world()
                     .get_block(TARGET.0, TARGET.1, TARGET.2)
                     == BlockType::Air
                     && views.iter().all(|client| {
@@ -515,7 +515,7 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
     assert_eq!(
         runtime
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Air
     );
@@ -539,13 +539,13 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
     assert_eq!(
         restored
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Air
     );
     assert!(restored
         .authority
-        .world
+        .world()
         .get_block_entity(TARGET.0, TARGET.1, TARGET.2)
         .is_none());
     let restored_stack_multiset = dropped_stack_multiset(&restored.authority);
@@ -580,10 +580,10 @@ fn stale_state_failure_preserves_container_and_session_resources() {
         rich_stack(ContainerKind::Chest, 1),
     ];
     let source_entity = ContainerKind::Chest.entity(stacks);
-    core.world
+    core.world_mut_active()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed atomicity chest");
-    core.world
+    core.world_mut_active()
         .chunks
         .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(source_entity.clone()));
     let axe = ItemStack::new(Item::StoneAxe, 1);
@@ -599,17 +599,17 @@ fn stale_state_failure_preserves_container_and_session_resources() {
     // A state change invalidates the latched mining progress while preserving
     // the chest block entity. The next fixed tick must clear only that stale
     // progress, never run the Plan34 commit.
-    core.world
+    core.world_mut_active()
         .chunks
         .set_block_state(TARGET.0, TARGET.1, TARGET.2, 1);
     let _ = core.tick();
     let after_failure = core.session(SESSION_ID).unwrap().gameplay;
     assert_eq!(
-        core.world.get_block(TARGET.0, TARGET.1, TARGET.2),
+        core.world().get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Chest
     );
     assert_eq!(
-        core.world.get_block_entity(TARGET.0, TARGET.1, TARGET.2),
+        core.world().get_block_entity(TARGET.0, TARGET.1, TARGET.2),
         Some(&source_entity)
     );
     assert!(dropped_entities(&core).is_empty());
@@ -648,10 +648,10 @@ fn double_chest_break_only_drops_target_half() {
         ..BlockState::default()
     }
     .encode();
-    core.world
+    core.world_mut_active()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, left_state)
         .expect("seed double chest target");
-    core.world
+    core.world_mut_active()
         .set_block(
             partner.0,
             partner.1,
@@ -660,10 +660,10 @@ fn double_chest_break_only_drops_target_half() {
             right_state,
         )
         .expect("seed double chest partner");
-    core.world
+    core.world_mut_active()
         .chunks
         .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(target_entity.clone()));
-    core.world.chunks.set_block_entity(
+    core.world_mut_active().chunks.set_block_entity(
         partner.0,
         partner.1,
         partner.2,
@@ -680,24 +680,24 @@ fn double_chest_break_only_drops_target_half() {
     ));
     for _ in 0..600 {
         let _ = core.tick();
-        if core.world.get_block(TARGET.0, TARGET.1, TARGET.2) == BlockType::Air {
+        if core.world().get_block(TARGET.0, TARGET.1, TARGET.2) == BlockType::Air {
             break;
         }
     }
     assert_eq!(
-        core.world.get_block(TARGET.0, TARGET.1, TARGET.2),
+        core.world().get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Air
     );
     assert_eq!(
-        core.world.get_block(partner.0, partner.1, partner.2),
+        core.world().get_block(partner.0, partner.1, partner.2),
         BlockType::Chest
     );
     assert!(core
-        .world
+        .world()
         .get_block_entity(TARGET.0, TARGET.1, TARGET.2)
         .is_none());
     assert_eq!(
-        core.world.get_block_entity(partner.0, partner.1, partner.2),
+        core.world().get_block_entity(partner.0, partner.1, partner.2),
         Some(&partner_entity)
     );
     let actual = dropped_entities(&core);
@@ -737,10 +737,10 @@ fn authority_matrix_conserves_two_noncontiguous_metadata_stacks_and_retries() {
         let tool_stack = ItemStack::new(tool, 1);
         gameplay.inventory[0] = Some(tcp_slot(tool_stack));
         assert!(core.set_session_gameplay(SESSION_ID, gameplay));
-        core.world
+        core.world_mut_active()
             .set_block(TARGET.0, TARGET.1, TARGET.2, kind.block(), 0)
             .expect("seed container block");
-        core.world
+        core.world_mut_active()
             .chunks
             .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(kind.entity(stacks)));
         let request = break_request(&core, next_request_id, next_sequence, tool);
@@ -762,17 +762,17 @@ fn authority_matrix_conserves_two_noncontiguous_metadata_stacks_and_retries() {
 
         for _ in 0..600 {
             let _ = core.tick();
-            if core.world.get_block(TARGET.0, TARGET.1, TARGET.2) == BlockType::Air {
+            if core.world().get_block(TARGET.0, TARGET.1, TARGET.2) == BlockType::Air {
                 break;
             }
         }
         assert_eq!(
-            core.world.get_block(TARGET.0, TARGET.1, TARGET.2),
+            core.world().get_block(TARGET.0, TARGET.1, TARGET.2),
             BlockType::Air,
             "{kind:?} committed block break"
         );
         assert!(core
-            .world
+            .world()
             .get_block_entity(TARGET.0, TARGET.1, TARGET.2)
             .is_none());
         let actual = dropped_stacks(&core);

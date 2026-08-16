@@ -36,7 +36,7 @@ fn new_core() -> AuthorityCore {
         true,
     ))
     .expect("register Plan02 session");
-    core.world.ensure_chunk(0, 0);
+    core.world_mut_active().ensure_chunk(0, 0);
     core
 }
 
@@ -85,14 +85,14 @@ fn rejected(response: &GameplayResponse, reason: RejectReason) {
 }
 
 fn seed_chest(core: &mut AuthorityCore, slots: &[(usize, ItemStack)]) {
-    core.world
+    core.world_mut_active()
         .set_block(CHEST.0, CHEST.1, CHEST.2, BlockType::Chest, 0)
         .expect("seed chest block");
     let mut chest = ChestBlockEntity::new();
     for (index, stack) in slots {
         chest.set_stack(*index, Some(*stack));
     }
-    core.world
+    core.world_mut_active()
         .chunks
         .set_block_entity(CHEST.0, CHEST.1, CHEST.2, Some(BlockEntity::Chest(chest)));
 }
@@ -220,7 +220,7 @@ fn conserved_totals(
         }
     }
     if let Some(slots) =
-        ContainerSessionManager::get_container_slots(&core.world.chunks, CHEST.0, CHEST.1, CHEST.2)
+        ContainerSessionManager::get_container_slots(&core.world().chunks, CHEST.0, CHEST.1, CHEST.2)
     {
         for slot in slots.into_iter().flatten() {
             add_stack(&mut totals, slot);
@@ -230,7 +230,7 @@ fn conserved_totals(
 }
 
 fn chest_slot(core: &AuthorityCore, index: u16) -> Option<ItemStack> {
-    ContainerSessionManager::get_container_slots(&core.world.chunks, CHEST.0, CHEST.1, CHEST.2)
+    ContainerSessionManager::get_container_slots(&core.world().chunks, CHEST.0, CHEST.1, CHEST.2)
         .and_then(|slots| slots.get(usize::from(index)).copied().flatten())
 }
 
@@ -394,7 +394,7 @@ fn full_inventory_extract_is_rejected_and_conserves() {
 fn brew_locked_hotbar_stack_cannot_be_clicked_into_chest() {
     let mut core = new_core();
     seed_chest(&mut core, &[]);
-    core.world
+    core.world_mut_active()
         .set_block(
             BREW_STAND.0,
             BREW_STAND.1,

@@ -760,13 +760,6 @@ pub struct PlayerSessionState {
     pub dimension: Dimension,
     pub last_client_sequence: u64,
     pub interest: InterestSet,
-    /// Compatibility projections retained for existing presentation bridges;
-    /// all routing decisions use `interest` as the source of truth.
-    pub interest_chunks: HashSet<(i32, i32)>,
-    pub simulation_chunks: HashSet<(i32, i32)>,
-    pub entity_interest: HashSet<u64>,
-    pub simulation_entity_interest: HashSet<u64>,
-    pub container_viewers: BTreeSet<(i32, i32, i32)>,
     pub effects: Vec<PlayerEffectWire>,
     pending_initial_chunks: VecDeque<(Dimension, i32, i32)>,
     last_projected_session_revision: Option<(Dimension, u64)>,
@@ -794,11 +787,6 @@ impl PlayerSessionState {
             dimension,
             last_client_sequence: 0,
             interest: InterestSet::new(dimension, view_distance, simulation_distance),
-            interest_chunks: HashSet::new(),
-            simulation_chunks: HashSet::new(),
-            entity_interest: HashSet::new(),
-            simulation_entity_interest: HashSet::new(),
-            container_viewers: BTreeSet::new(),
             effects: Vec::new(),
             pending_initial_chunks: VecDeque::new(),
             last_projected_session_revision: None,
@@ -1020,7 +1008,7 @@ impl ServerRuntime {
             },
             options.topology,
         );
-        authority.world.time = level.time;
+        authority.world_mut_active().time = level.time;
         let mut runtime = Self {
             properties,
             level,
@@ -1345,7 +1333,6 @@ impl ServerRuntime {
         };
         session.dimension = dimension;
         session.interest.open_containers.clear();
-        session.container_viewers.clear();
         self.update_interest_for(id, dimension, position);
         true
     }
@@ -1382,7 +1369,6 @@ impl ServerRuntime {
             session.data.position = transfer.position;
             session.teleport_allowance = Some(transfer.position);
             session.interest.open_containers.clear();
-            session.container_viewers.clear();
             session.pending_initial_chunks.clear();
             session.last_projected_session_revision = None;
         }
@@ -1599,7 +1585,6 @@ impl ServerRuntime {
                     session.data.position = respawn_position;
                     session.dimension = dimension;
                     session.interest.open_containers.clear();
-                    session.container_viewers.clear();
                     session.teleport_allowance = Some(respawn_position);
                     if let Some((gameplay, game_mode, position)) = authority_state {
                         session.data.position = position;
@@ -2247,11 +2232,9 @@ impl ServerRuntime {
             match action {
                 ContainerAction::Close => {
                     session.interest.open_containers.remove(&position);
-                    session.container_viewers.remove(&position);
                 }
                 ContainerAction::Open | ContainerAction::Click => {
                     session.interest.open_containers.insert(position);
-                    session.container_viewers.insert(position);
                 }
             }
         }
@@ -2580,9 +2563,6 @@ impl ServerRuntime {
             .get_mut(&id)
             .is_some_and(|session| session.interest.open_containers.remove(&position));
         if was_open {
-            if let Some(session) = self.players.get_mut(&id) {
-                session.container_viewers.remove(&position);
-            }
             self.send_container_close(id, dimension, position);
         }
     }
@@ -2912,12 +2892,10 @@ impl ServerRuntime {
         }
         self.drain_initial_chunk_projections();
 
-        let active_before = self.authority.world.dimension;
         for mutation in &snapshot.mutations {
             let Some(dimension) = Dimension::from_wire(mutation.dimension) else {
                 continue;
             };
-            self.authority.activate_dimension(dimension);
             if !self.routed_mutations.insert((dimension, mutation.revision)) {
                 continue;
             }
@@ -2933,7 +2911,10 @@ impl ServerRuntime {
                 mutation.raw_fluid,
             );
 
-            let entity = self.authority.world.get_block_entity(x, y, z).cloned();
+            let entity = self
+                .authority
+                .world_ref(dimension)
+                .and_then(|world| world.get_block_entity(x, y, z).cloned());
             let block_entity_targets = self.queue_interest_update(
                 dimension,
                 mutation.revision,
@@ -2959,7 +2940,11 @@ impl ServerRuntime {
                 InterestKind::Container(mutation.position),
             );
             if !container_targets.is_empty() {
-                if let Some(slots) = self.authority.world.container_slots_wire(mutation.position) {
+                if let Some(slots) = self
+                    .authority
+                    .world_mut(dimension)
+                    .and_then(|world| world.container_slots_wire(mutation.position))
+                {
                     for (slot_index, slot) in slots.into_iter().enumerate() {
                         let slot_index = slot_index.min(u16::MAX as usize) as u16;
                         for target in &container_targets {
@@ -2986,15 +2971,18 @@ impl ServerRuntime {
         // Entity AI runs inside AuthorityCore::tick.  Emit state only to
         // sessions whose simulation-distance set contains that entity.
         for dimension in self.authority.dimensions() {
-            self.authority.activate_dimension(dimension);
             let mut entities: Vec<_> = self
                 .authority
-                .world
-                .entities
-                .entities
-                .iter()
-                .map(|entity| (entity.id, entity_state_wire(entity)))
-                .collect();
+                .world_ref(dimension)
+                .map(|world| {
+                    world
+                        .entities
+                        .entities
+                        .iter()
+                        .map(|entity| (entity.id, entity_state_wire(entity)))
+                        .collect()
+                })
+                .unwrap_or_default();
             entities.sort_by_key(|(id, _)| *id);
             for (entity_id, state) in entities {
                 let targets = self.queue_interest_update(
@@ -3031,7 +3019,6 @@ impl ServerRuntime {
             }
             self.send_session_update(update.player_id, snapshot.tick, dimension, update.state);
         }
-        self.authority.activate_dimension(active_before);
     }
 
     fn update_interest(&mut self, session: &mut PlayerSessionState) {
@@ -3064,11 +3051,6 @@ impl ServerRuntime {
         session
             .interest
             .update_simulation_entities(simulation_entities);
-        session.interest_chunks = session.interest.chunks.clone();
-        session.simulation_chunks = session.interest.simulation_chunks.clone();
-        session.entity_interest = session.interest.entities.clone();
-        session.simulation_entity_interest = session.interest.simulation_entities.clone();
-        session.container_viewers = session.interest.open_containers.clone();
     }
 
     fn update_interest_for(&mut self, id: u64, dimension: Dimension, position: [f32; 3]) {
@@ -3143,11 +3125,6 @@ impl ServerRuntime {
             session
                 .interest
                 .update_simulation_entities(simulation_entities);
-            session.interest_chunks = session.interest.chunks.clone();
-            session.simulation_chunks = session.interest.simulation_chunks.clone();
-            session.entity_interest = session.interest.entities.clone();
-            session.simulation_entity_interest = session.interest.simulation_entities.clone();
-            session.container_viewers = session.interest.open_containers.clone();
             session
                 .pending_initial_chunks
                 .retain(|(queued_dimension, cx, cz)| {
@@ -3157,9 +3134,6 @@ impl ServerRuntime {
             (entity_delta, old_dimension, departed_containers)
         };
         for position in departed_containers {
-            if let Some(session) = self.players.get_mut(&id) {
-                session.container_viewers.remove(&position);
-            }
             let _ = self.authority.with_world(old_dimension, |world| {
                 world.close_container_viewer_forced(id, position)
             });
@@ -3315,7 +3289,7 @@ impl ServerRuntime {
     }
 
     fn ensure_spawn_chunk(&mut self) {
-        self.authority.world.ensure_chunk(
+        self.authority.world_mut_active().ensure_chunk(
             self.level.spawn_x.div_euclid(16),
             self.level.spawn_z.div_euclid(16),
         );
@@ -4377,7 +4351,7 @@ mod tests {
         let mut runtime = ServerRuntime::new(properties).unwrap();
         runtime.handle_join(1, "alex".into()).unwrap();
         runtime.handle_join(2, "steve".into()).unwrap();
-        let before = runtime.authority.world.get_block(8, 80, 8);
+        let before = runtime.authority.world().get_block(8, 80, 8);
         let first = runtime
             .submit_request(
                 1,
@@ -4427,7 +4401,7 @@ mod tests {
             }
         ));
         assert!(second.server_sequence > first.server_sequence);
-        assert_eq!(runtime.authority.world.get_block(8, 80, 8), before);
+        assert_eq!(runtime.authority.world().get_block(8, 80, 8), before);
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
     }
@@ -4461,10 +4435,10 @@ mod tests {
         assert!(runtime.set_session_dimension(2, Dimension::Nether));
         runtime.update_interest_for(1, Dimension::Overworld, [8.0, 80.0, 8.0]);
         runtime.update_interest_for(2, Dimension::Nether, [8.0, 80.0, 8.0]);
-        assert!(runtime.players[&1].entity_interest.contains(&101));
-        assert!(!runtime.players[&1].entity_interest.contains(&202));
-        assert!(runtime.players[&2].entity_interest.contains(&202));
-        assert!(!runtime.players[&2].entity_interest.contains(&101));
+        assert!(runtime.players[&1].interest.entities.contains(&101));
+        assert!(!runtime.players[&1].interest.entities.contains(&202));
+        assert!(runtime.players[&2].interest.entities.contains(&202));
+        assert!(!runtime.players[&2].interest.entities.contains(&101));
 
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
@@ -4790,11 +4764,11 @@ mod tests {
     fn interest_evict_drops_origin_after_long_walk_and_metrics_match() {
         let (mut runtime, _input) = embedded_runtime("residency_walk");
         runtime.run_for_ticks(8).unwrap();
-        assert!(runtime.authority.world.chunks.chunks.contains_key(&(0, 0)));
-        assert!(!runtime.authority.world.chunks.chunks.contains_key(&(8, 0)));
+        assert!(runtime.authority.world_mut_active().chunks.chunks.contains_key(&(0, 0)));
+        assert!(!runtime.authority.world_mut_active().chunks.chunks.contains_key(&(8, 0)));
         assert!(runtime.teleport_session(99, [32.0 * 16.0 + 8.0, 80.0, 8.0]));
         runtime.tick().unwrap();
-        assert!(!runtime.authority.world.chunks.chunks.contains_key(&(0, 0)));
+        assert!(!runtime.authority.world_mut_active().chunks.chunks.contains_key(&(0, 0)));
         let loaded: usize = runtime
             .authority
             .dimensions()

@@ -78,14 +78,15 @@ impl Default for AuthorityConfig {
 /// only registers sessions, submits envelopes and consumes snapshots.
 pub struct AuthorityCore {
     pub topology: AuthorityTopology,
-    pub world: ServerWorld,
+    /// Key of the currently selected world in `worlds`.  Never a moved value:
+    /// every loaded dimension stays in the map for its lifetime.
+    active_dimension: Dimension,
     /// Immutable world-creation inputs used when a dimension has not been
     /// visited yet.  Each dimension then owns an independent parked world so
     /// switching cannot reinterpret one dimension's chunks as another's.
     config: AuthorityConfig,
-    /// All non-active dimensions.  The active compatibility world above is
-    /// moved in and out of this map for each routed operation/tick, so no
-    /// dimension has a shadow or aliased chunk/entity collection.
+    /// Every loaded dimension, including the active one.  Iteration is
+    /// `BTreeMap` order (`Dimension` as `u8`) so tick/save/checksum stay stable.
     worlds: BTreeMap<Dimension, ServerWorld>,
     sessions: BTreeMap<PlayerId, SessionContract>,
     last_snapshot: AuthoritySnapshot,
@@ -112,15 +113,16 @@ pub struct DimensionTransferIntent {
     pub position: [f32; 3],
 }
 
-/// Presentation roots use this small in-process boundary for Singleplayer and
-/// Host.  It keeps the exact same `AuthorityCore` request/tick path as the
-/// dedicated binary while exposing no transport details to `State`.
+/// Test-only helper around `AuthorityCore`. Desktop Singleplayer/Host use
+/// `ServerRuntime` instead; this type is not a production presentation path.
+#[cfg(test)]
 pub struct AuthorityBoundary {
     pub topology: AuthorityTopology,
     pub core: AuthorityCore,
     pub session_id: PlayerId,
 }
 
+#[cfg(test)]
 impl AuthorityBoundary {
     pub fn new(
         config: AuthorityConfig,
@@ -147,174 +149,30 @@ impl AuthorityBoundary {
         }
     }
 
-    pub fn tick(&mut self) -> AuthoritySnapshot {
-        self.core.tick()
-    }
-
-    pub fn submit(&mut self, mut request: GameplayRequest) -> GameplayResponse {
-        request.session_id = self.session_id;
-        self.core.submit_request(request)
-    }
-
-    pub fn submit_for_session(
-        &mut self,
-        session_id: PlayerId,
-        mut request: GameplayRequest,
-    ) -> GameplayResponse {
-        request.session_id = session_id;
-        self.core.submit_request(request)
-    }
-
-    pub fn register_session(
-        &mut self,
-        id: PlayerId,
-        username: impl Into<String>,
-        dimension: u8,
-        position: [f32; 3],
-        operator: bool,
-        cheats_enabled: bool,
-    ) {
-        if let Some(session) = self.core.session_mut(id) {
-            session.username = username.into();
-            session.dimension = dimension;
-            session.position = position;
-            session.operator = operator;
-            session.cheats_enabled = cheats_enabled;
-            return;
-        }
-        let _ = self.core.register_session(SessionContract::new(
-            id,
-            username,
-            dimension,
-            position,
-            operator,
-            cheats_enabled,
-        ));
-    }
-
-    pub fn set_session_position(&mut self, id: PlayerId, position: [f32; 3]) {
-        if let Some(session) = self.core.session_mut(id) {
-            session.position = position;
-        }
-    }
-
     pub fn set_position(&mut self, position: [f32; 3]) {
         if let Some(session) = self.core.session_mut(self.session_id) {
             session.position = position;
         }
     }
 
-    /// Atomically update the in-process session's dimension.  Presentation
-    /// roots use this seam before rebuilding their local render cache so a
-    /// portal transfer cannot leave the authority session in the old world.
+    /// Wire-dimension wrapper around `AuthorityCore::set_session_dimension`.
     pub fn set_dimension(&mut self, dimension: u8) -> bool {
-        let Some(
-            crate::dimension::Dimension::Overworld
-            | crate::dimension::Dimension::Nether
-            | crate::dimension::Dimension::End,
-        ) = crate::dimension::Dimension::from_wire(dimension)
-        else {
+        let Some(target) = Dimension::from_wire(dimension) else {
             return false;
         };
-        let target = crate::dimension::Dimension::from_wire(dimension).expect("validated above");
         self.core.set_session_dimension(self.session_id, target)
-    }
-
-    pub fn set_session_dimension(&mut self, id: PlayerId, dimension: u8) -> bool {
-        let Some(
-            crate::dimension::Dimension::Overworld
-            | crate::dimension::Dimension::Nether
-            | crate::dimension::Dimension::End,
-        ) = crate::dimension::Dimension::from_wire(dimension)
-        else {
-            return false;
-        };
-        let target = crate::dimension::Dimension::from_wire(dimension).expect("validated above");
-        self.core.set_session_dimension(id, target)
-    }
-
-    pub fn session_gameplay(&self, id: PlayerId) -> Option<SessionGameplayUpdate> {
-        self.core.session_gameplay(id)
-    }
-
-    pub fn set_session_gameplay(&mut self, id: PlayerId, gameplay: SessionGameplayState) -> bool {
-        self.core.set_session_gameplay(id, gameplay)
-    }
-
-    pub fn sync_villager(
-        &mut self,
-        villager_id: u64,
-        position: [f32; 3],
-        profession: crate::village::poi::VillagerProfession,
-        level: crate::village::trade::VillagerLevel,
-        offers: Vec<crate::village::trade::TradeOffer>,
-    ) -> bool {
-        self.core
-            .world
-            .ensure_villager(villager_id, position, profession, level, offers)
-    }
-
-    pub fn sync_vehicle(
-        &mut self,
-        vehicle_id: u64,
-        entity_type: crate::entity::EntityType,
-        position: [f32; 3],
-    ) -> bool {
-        self.core
-            .world
-            .ensure_vehicle(vehicle_id, entity_type, position)
-    }
-
-    pub fn sync_entity(
-        &mut self,
-        entity_id: u64,
-        entity_type: crate::entity::EntityType,
-        position: [f32; 3],
-        health: f32,
-    ) -> bool {
-        self.core
-            .world
-            .ensure_entity(entity_id, entity_type, position, health)
-    }
-
-    pub fn set_game_mode(&mut self, game_mode: crate::inventory::GameMode) {
-        if let Some(session) = self.core.session_mut(self.session_id) {
-            session.game_mode = game_mode;
-        }
-    }
-
-    pub fn set_rules(&mut self, rules: WorldRules) {
-        self.core.set_rules(rules);
-    }
-
-    pub fn take_pending_mutations(&mut self) -> Vec<WorldMutation> {
-        self.core.take_pending_mutations()
-    }
-
-    pub fn block_entity_at(
-        &self,
-        position: (i32, i32, i32),
-    ) -> Option<crate::block_entity::BlockEntity> {
-        self.core
-            .world
-            .get_block_entity(position.0, position.1, position.2)
-            .cloned()
-    }
-
-    pub fn seed_bonus_chest(&mut self, position: (i32, i32, i32)) {
-        if let Some(mutation) = self.core.world.place_bonus_chest(position) {
-            self.core.pending_mutations.push(mutation);
-        }
     }
 }
 
 impl AuthorityCore {
     pub fn new(config: AuthorityConfig, topology: AuthorityTopology) -> Self {
+        let mut worlds = BTreeMap::new();
+        worlds.insert(config.dimension, Self::new_world(config, config.dimension));
         Self {
             topology,
-            world: Self::new_world(config, config.dimension),
+            active_dimension: config.dimension,
             config,
-            worlds: BTreeMap::new(),
+            worlds,
             sessions: BTreeMap::new(),
             last_snapshot: AuthoritySnapshot::empty(),
             fixed_tick: 0,
@@ -338,76 +196,73 @@ impl AuthorityCore {
     }
 
     fn ensure_dimension(&mut self, target: Dimension) {
-        if self.world.dimension == target || self.worlds.contains_key(&target) {
+        if self.worlds.contains_key(&target) {
             return;
         }
         self.worlds
             .insert(target, Self::new_world(self.config, target));
     }
 
-    /// Move the compatibility `world` view to a dimension without aliasing
-    /// chunk/entity state.  The previous active world is retained in the map.
+    /// Select `target` as the active-dimension key.  The world stays in the
+    /// map; this never moves a `ServerWorld` value.
     pub fn activate_dimension(&mut self, target: Dimension) {
-        if self.world.dimension == target {
+        if self.active_dimension == target {
             return;
         }
-        let current = self.world.dimension;
-        let next = self
-            .worlds
-            .remove(&target)
-            .unwrap_or_else(|| Self::new_world(self.config, target));
-        let previous = std::mem::replace(&mut self.world, next);
-        self.worlds.insert(current, previous);
+        self.ensure_dimension(target);
+        self.active_dimension = target;
     }
 
     pub fn active_dimension(&self) -> Dimension {
-        self.world.dimension
+        self.active_dimension
     }
 
-    /// Read a dimension without changing the active compatibility view.
+    /// Shared map lookup of the currently active dimension.
+    pub fn world(&self) -> &ServerWorld {
+        self.worlds
+            .get(&self.active_dimension)
+            .expect("active dimension missing from world map")
+    }
+
+    /// Mutable map lookup of the currently active dimension.
+    pub fn world_mut_active(&mut self) -> &mut ServerWorld {
+        let dim = self.active_dimension;
+        self.worlds
+            .get_mut(&dim)
+            .expect("active dimension missing from world map")
+    }
+
+    /// Read a loaded dimension without changing the active key.
     pub fn world_ref(&self, dimension: Dimension) -> Option<&ServerWorld> {
-        if self.world.dimension == dimension {
-            Some(&self.world)
-        } else {
-            self.worlds.get(&dimension)
-        }
+        self.worlds.get(&dimension)
     }
 
-    /// Mutably access a loaded dimension without changing the active view.
-    /// Callers that need to create a missing dimension should use
-    /// `with_world`, which restores the previous active view automatically.
+    /// Mutably access a loaded dimension without changing the active key.
+    /// Callers that need to create a missing dimension should use `with_world`.
     pub fn world_mut(&mut self, dimension: Dimension) -> Option<&mut ServerWorld> {
-        if self.world.dimension == dimension {
-            Some(&mut self.world)
-        } else {
-            self.worlds.get_mut(&dimension)
-        }
+        self.worlds.get_mut(&dimension)
     }
 
-    /// Execute a bounded operation against one dimension and restore the
-    /// caller's active compatibility view before returning.
+    /// Execute a bounded operation against one dimension.  Does not swap
+    /// worlds or change `active_dimension`.
     pub fn with_world<R>(
         &mut self,
         dimension: Dimension,
         operation: impl FnOnce(&mut ServerWorld) -> R,
     ) -> R {
-        let active = self.world.dimension;
         self.ensure_dimension(dimension);
-        self.activate_dimension(dimension);
-        let result = operation(&mut self.world);
-        self.activate_dimension(active);
-        result
+        let world = self
+            .worlds
+            .get_mut(&dimension)
+            .expect("ensure_dimension inserts the target world");
+        operation(world)
     }
 
-    /// Return every dimension with an authoritative world, including the
-    /// active compatibility world.  Ordering is stable for deterministic tick
+    /// Return every dimension with an authoritative world.  Ordering is the
+    /// `BTreeMap` key order (`Dimension` as `u8`) for deterministic tick
     /// and persistence traversal.
     pub fn dimensions(&self) -> Vec<Dimension> {
-        let mut dimensions: Vec<_> = self.worlds.keys().copied().collect();
-        dimensions.push(self.world.dimension);
-        dimensions.sort_unstable();
-        dimensions.dedup();
-        dimensions
+        self.worlds.keys().copied().collect()
     }
 
     fn cleanup_session_lifecycle(&mut self, id: PlayerId, dimension: Dimension) {
@@ -440,12 +295,9 @@ impl AuthorityCore {
         let mut candidate = self.next_authority_entity_id.max(AUTHORITY_ENTITY_ID_START);
         loop {
             let entity_exists = self
-                .world_ref(self.world.dimension)
-                .is_some_and(|world| world.entities.get_by_id(candidate).is_some())
-                || self
-                    .worlds
-                    .values()
-                    .any(|world| world.entities.get_by_id(candidate).is_some());
+                .worlds
+                .values()
+                .any(|world| world.entities.get_by_id(candidate).is_some());
             let hook_exists = self.sessions.values().any(|session| {
                 session
                     .gameplay
@@ -469,14 +321,10 @@ impl AuthorityCore {
     /// revision is only a compatibility summary and must not be used for a
     /// cross-dimension stale check.
     pub fn revision_for_dimension(&self, dimension: Dimension) -> u64 {
-        if self.world.dimension == dimension {
-            self.world.revisions.current()
-        } else {
-            self.worlds
-                .get(&dimension)
-                .map(|world| world.revisions.current())
-                .unwrap_or(0)
-        }
+        self.worlds
+            .get(&dimension)
+            .map(|world| world.revisions.current())
+            .unwrap_or(0)
     }
 
     /// Activate the session's target dimension while preserving the boundary
@@ -506,7 +354,6 @@ impl AuthorityCore {
     pub fn set_rules(&mut self, rules: WorldRules) {
         let rules = rules.normalized();
         self.config.rules = rules;
-        self.world.rules = rules;
         for world in self.worlds.values_mut() {
             world.rules = rules;
         }
@@ -579,13 +426,9 @@ impl AuthorityCore {
     /// Active-world compatibility revision. Use `revision_for_dimension` for
     /// request/client gates when a session may be in another dimension.
     pub fn current_revision(&self) -> u64 {
-        self.world.revisions.current()
+        self.world().revisions.current()
     }
 
-    /// Revision for one dimension's independent namespace. Request gates and
-    /// ACKs use this value for the session's dimension; the aggregate snapshot
-    /// revision is only a compatibility summary and must not be used for a
-    /// cross-dimension stale check.
     /// Execute one fixed tick for every loaded dimension. Sessions are sorted
     /// by their BTreeMap key within each dimension, so AI/automation and
     /// mutation order do not depend on transport arrival order. Revisions are
@@ -593,7 +436,7 @@ impl AuthorityCore {
     /// routing/persistence identity.
     pub fn tick(&mut self) -> AuthoritySnapshot {
         self.fixed_tick = self.fixed_tick.wrapping_add(1).max(1);
-        let active_before_tick = self.world.dimension;
+        let active_before_tick = self.active_dimension;
         let dimensions = self.dimensions();
         let mut mutations_by_dimension: BTreeMap<Dimension, Vec<WorldMutation>> = BTreeMap::new();
 
@@ -608,22 +451,24 @@ impl AuthorityCore {
                 .filter(|session| session.dimension == dimension as u8)
                 .map(|session| (session.id, session.position))
                 .collect();
-            let world_snapshot = self.world.tick(&players);
+            let world_snapshot = self.world_mut_active().tick(&players);
             let mut world_mutations = world_snapshot.mutations;
             // Redstone emits dispenser/dropper edges from inside the world
             // tick, but entity ids belong to AuthorityCore's global namespace.
             // Drain and execute them here before collecting pending revisions
             // so source/target block entities and spawned entities share one
             // deterministic snapshot boundary.
-            let actions = self.world.take_pending_redstone_actions();
+            let actions = self.world_mut_active().take_pending_redstone_actions();
             for action in actions {
                 let candidate = self.next_unique_entity_id();
-                let spawned = self.world.execute_redstone_dispense(action, candidate);
+                let spawned = self
+                    .world_mut_active()
+                    .execute_redstone_dispense(action, candidate);
                 if spawned {
                     self.claim_entity_id(candidate);
                 }
             }
-            world_mutations.extend(self.world.take_pending_mutations());
+            world_mutations.extend(self.world_mut_active().take_pending_mutations());
             mutations_by_dimension.insert(dimension, world_mutations);
         }
 
@@ -651,8 +496,8 @@ impl AuthorityCore {
                 .get(&dimension)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            revision = revision.max(self.world.revisions.current());
-            checksums.push((dimension, self.world.checksum(entries)));
+            revision = revision.max(self.world_mut_active().revisions.current());
+            checksums.push((dimension, self.world().checksum(entries)));
         }
         // Keep the public active-world compatibility view stable for State,
         // ServerRuntime metrics, and save callers after the multi-world pass.
@@ -708,7 +553,7 @@ impl AuthorityCore {
                 .min(ATTACK_COOLDOWN_TICKS);
 
             if let Some(pending) = candidate.brew {
-                let block = self.world.get_block(
+                let block = self.world().get_block(
                     pending.station[0],
                     pending.station[1],
                     pending.station[2],
@@ -723,7 +568,7 @@ impl AuthorityCore {
 
             let previous_hook = original.fishing_hook;
             if candidate.fishing_hook.is_some() {
-                match self.world.fishing_context(
+                match self.world().fishing_context(
                     &candidate,
                     position,
                     game_mode != GameMode::Creative,
@@ -740,9 +585,9 @@ impl AuthorityCore {
             if candidate == original {
                 continue;
             }
-            self.world
+            self.world_mut_active()
                 .sync_authority_hook(previous_hook, candidate.fishing_hook, id);
-            let revision = self.world.revisions.allocate();
+            let revision = self.world_mut_active().revisions.allocate();
             candidate.revision = revision;
             if let Some(session) = self.sessions.get_mut(&id) {
                 session.gameplay = candidate;
@@ -781,7 +626,7 @@ impl AuthorityCore {
             }
             let target = (progress.target[0], progress.target[1], progress.target[2]);
             let Some(block) = self
-                .world
+                .world_mut_active()
                 .chunks
                 .get_loaded_block(target.0, target.1, target.2)
             else {
@@ -789,7 +634,7 @@ impl AuthorityCore {
                 continue;
             };
             let expected_block = crate::world::BlockType::from_wire(progress.block);
-            let expected_state = self.world.get_block_state(target.0, target.1, target.2);
+            let expected_state = self.world().get_block_state(target.0, target.1, target.2);
             if expected_block != Some(block) || expected_state != progress.state {
                 self.clear_mining_progress(id);
                 continue;
@@ -806,7 +651,7 @@ impl AuthorityCore {
             }
             if block == crate::world::BlockType::Air
                 || !self
-                    .world
+                    .world_mut_active()
                     .has_block_line_of_sight(position, progress.look_milli, target)
             {
                 self.clear_mining_progress(id);
@@ -833,7 +678,7 @@ impl AuthorityCore {
                 continue;
             }
             let held_stack = stack_from_slot(progress.held);
-            let policy = crate::game_rules::GameModePolicy::for_rules(game_mode, &self.world.rules);
+            let policy = crate::game_rules::GameModePolicy::for_rules(game_mode, &self.world().rules);
             if !policy.can_break_stack(held_stack.as_ref(), block) {
                 self.clear_mining_progress(id);
                 continue;
@@ -852,12 +697,14 @@ impl AuthorityCore {
             let next = progress.progress_milli.saturating_add(step);
             if next >= 1_000 {
                 let _ = self.commit_mining_break(id, dimension, target, held_stack, game_mode);
-            } else if let Some(session) = self.sessions.get_mut(&id) {
-                if let Some(active) = session.gameplay.mining.as_mut() {
-                    active.progress_milli = next;
+            } else {
+                let revision = self.world_mut_active().revisions.allocate();
+                if let Some(session) = self.sessions.get_mut(&id) {
+                    if let Some(active) = session.gameplay.mining.as_mut() {
+                        active.progress_milli = next;
+                    }
+                    session.gameplay.revision = revision;
                 }
-                let revision = self.world.revisions.allocate();
-                session.gameplay.revision = revision;
             }
         }
     }
@@ -866,8 +713,11 @@ impl AuthorityCore {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        if session.gameplay.mining.take().is_some() {
-            let revision = self.world.revisions.allocate();
+        if session.gameplay.mining.take().is_none() {
+            return;
+        }
+        let revision = self.world_mut_active().revisions.allocate();
+        if let Some(session) = self.sessions.get_mut(&id) {
             session.gameplay.revision = revision;
         }
     }
@@ -920,8 +770,8 @@ impl AuthorityCore {
             let py = position[1].floor() as i32;
             let pz = position[2].floor() as i32;
 
-            let feet = self.world.get_block(px, py, pz);
-            let body = self.world.get_block(px, py + 1, pz);
+            let feet = self.world().get_block(px, py, pz);
+            let body = self.world().get_block(px, py + 1, pz);
 
             if feet == BlockType::EndGateway || body == BlockType::EndGateway {
                 if dimension == Dimension::End {
@@ -937,7 +787,7 @@ impl AuthorityCore {
                     // advance the next inbound pose.
                     if self.execute_portal_dimension_transfer(id, dimension, target_pos.to_array())
                     {
-                        let revision = self.world.revisions.allocate();
+                        let revision = self.world_mut_active().revisions.allocate();
                         if let Some(session) = self.sessions.get_mut(&id) {
                             session.last_revision = revision;
                             session.gameplay.revision = revision;
@@ -1080,7 +930,7 @@ impl AuthorityCore {
             return false;
         }
         let Some(old_block) = self
-            .world
+            .world()
             .chunks
             .get_loaded_block(target.0, target.1, target.2)
         else {
@@ -1089,14 +939,14 @@ impl AuthorityCore {
         };
         if old_block == crate::world::BlockType::Air
             || crate::world::BlockType::from_wire(progress.block) != Some(old_block)
-            || self.world.get_block_state(target.0, target.1, target.2) != progress.state
+            || self.world().get_block_state(target.0, target.1, target.2) != progress.state
         {
             self.clear_mining_progress(id);
             return false;
         }
         let rewards = crate::authority::mining::calculate_block_break_rewards(
             old_block,
-            self.world.get_block_state(target.0, target.1, target.2),
+            self.world().get_block_state(target.0, target.1, target.2),
             target,
             held_stack.as_ref(),
             game_mode,
@@ -1132,7 +982,7 @@ impl AuthorityCore {
         // preflight above has succeeded, and keep the source entity untouched
         // until the block mutation commits.
         let mut drops = rewards.drops;
-        if let Some(block_entity) = self.world.get_block_entity(target.0, target.1, target.2) {
+        if let Some(block_entity) = self.world().get_block_entity(target.0, target.1, target.2) {
             let slots: Box<dyn Iterator<Item = &ItemStack> + '_> = match block_entity {
                 BlockEntity::Chest(chest) => Box::new(chest.inventory.slots.iter().flatten()),
                 BlockEntity::Furnace(furnace) => Box::new(furnace.slots.iter().flatten()),
@@ -1167,17 +1017,17 @@ impl AuthorityCore {
         let mut prepared_ids = Vec::with_capacity(entity_ids.len());
         for (entity_id, stack) in entity_ids.iter().copied().zip(drops.iter().copied()) {
             if !self
-                .world
+                .world_mut_active()
                 .spawn_dropped_item(entity_id, drop_position, stack)
             {
                 for prepared_id in prepared_ids {
-                    self.world.remove_authority_entity(prepared_id);
+                    self.world_mut_active().remove_authority_entity(prepared_id);
                 }
                 return false;
             }
             prepared_ids.push(entity_id);
         }
-        let Ok(Some(mutation)) = self.world.set_block(
+        let Ok(Some(mutation)) = self.world_mut_active().set_block(
             target.0,
             target.1,
             target.2,
@@ -1185,7 +1035,7 @@ impl AuthorityCore {
             0,
         ) else {
             for prepared_id in prepared_ids {
-                self.world.remove_authority_entity(prepared_id);
+                self.world_mut_active().remove_authority_entity(prepared_id);
             }
             return false;
         };
@@ -1271,7 +1121,7 @@ impl AuthorityCore {
         let session_position = session.position;
         let operator = session.operator || session.cheats_enabled;
         if let Err(reason) =
-            self.world
+            self.world()
                 .validate_request(&request, session_dimension, session_position, operator)
         {
             return self.reject_for_session(id, request_id, reason, None);
@@ -1307,8 +1157,8 @@ impl AuthorityCore {
                 z,
                 slot,
             } => match ContainerAction::from_wire(*action) {
-                Some(ContainerAction::Open) => self.world.open_container(*x, *y, *z, *slot, id),
-                Some(ContainerAction::Close) => self.world.close_container(*x, *y, *z, *slot, id),
+                Some(ContainerAction::Open) => self.world_mut_active().open_container(*x, *y, *z, *slot, id),
+                Some(ContainerAction::Close) => self.world_mut_active().close_container(*x, *y, *z, *slot, id),
                 Some(ContainerAction::Click) => {
                     self.apply_container_click(id, (*x, *y, *z), *slot, true, None)
                 }
@@ -1326,7 +1176,7 @@ impl AuthorityCore {
             GameplayOperation::Combat { target, action } => {
                 self.apply_authoritative_combat(&request, id, *target, *action)
             }
-            GameplayOperation::Sleep { x, y, z } => self.world.sleep_player(*x, *y, *z, id),
+            GameplayOperation::Sleep { x, y, z } => self.world_mut_active().sleep_player(*x, *y, *z, id),
             GameplayOperation::Trade {
                 villager_id,
                 offer_index,
@@ -1355,8 +1205,8 @@ impl AuthorityCore {
                 self.apply_transaction_operation(id, &request.operation)
             }
         };
-        self.pending_mutations
-            .extend(self.world.take_pending_mutations());
+        let pending_world_mutations = self.world_mut_active().take_pending_mutations();
+        self.pending_mutations.extend(pending_world_mutations);
         let response = match result {
             Ok(mutation) => {
                 if let Some(mutation) = mutation {
@@ -1364,7 +1214,7 @@ impl AuthorityCore {
                 }
                 let revision = mutation
                     .map(|mutation| mutation.revision)
-                    .unwrap_or_else(|| self.world.revisions.allocate());
+                    .unwrap_or_else(|| self.world_mut_active().revisions.allocate());
                 GameplayResponse {
                     request_id,
                     server_sequence: revision,
@@ -1466,7 +1316,7 @@ impl AuthorityCore {
             return Err(RejectReason::Unauthorized);
         };
         let original = gameplay;
-        self.world
+        self.world_mut_active()
             .apply_trade(&mut gameplay, villager_id, offer_index, position)?;
         if !preserves_brew_locks(&original, &gameplay) {
             return Err(RejectReason::InvalidState);
@@ -1485,7 +1335,7 @@ impl AuthorityCore {
         let Some(position) = self.sessions.get(&session_id).map(|s| s.position) else {
             return Err(RejectReason::Unauthorized);
         };
-        let mounted = self.world.apply_mount(session_id, entity_id, position)?;
+        let mounted = self.world_mut_active().apply_mount(session_id, entity_id, position)?;
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.gameplay.mounted_entity = mounted;
         }
@@ -1509,7 +1359,7 @@ impl AuthorityCore {
         let Some(dimension) = Dimension::from_wire(session.dimension) else {
             return Err(RejectReason::InvalidDimension);
         };
-        if dimension != self.world.dimension {
+        if dimension != self.world().dimension {
             return Err(RejectReason::InvalidDimension);
         }
         if matches!(action, BlockActionKind::CancelBreak) {
@@ -1522,7 +1372,7 @@ impl AuthorityCore {
             let expected =
                 crate::world::BlockType::from_wire(block_wire).ok_or(RejectReason::InvalidState)?;
             let actual = self
-                .world
+                .world_mut_active()
                 .chunks
                 .get_loaded_block(position.0, position.1, position.2)
                 .ok_or(RejectReason::InvalidState)?;
@@ -1574,7 +1424,7 @@ impl AuthorityCore {
             }
         };
         if !self
-            .world
+            .world()
             .valid_coordinate(position.0, position.1, position.2)
         {
             return Err(RejectReason::InvalidCoordinate);
@@ -1583,7 +1433,7 @@ impl AuthorityCore {
         match action {
             BlockActionKind::StartBreak => {
                 let Some(target_block) = self
-                    .world
+                    .world_mut_active()
                     .chunks
                     .get_loaded_block(position.0, position.1, position.2)
                 else {
@@ -1591,20 +1441,20 @@ impl AuthorityCore {
                 };
                 if target_block == crate::world::BlockType::Air
                     || !self
-                        .world
+                        .world_mut_active()
                         .has_block_line_of_sight(session.position, look_milli, position)
                 {
                     return Err(RejectReason::InvalidState);
                 }
                 let policy = crate::game_rules::GameModePolicy::for_rules(
                     session.game_mode,
-                    &self.world.rules,
+                    &self.world().rules,
                 );
                 if !policy.can_break_stack(current_stack.as_ref(), target_block) {
                     return Err(RejectReason::PermissionDenied);
                 }
                 let target_state = self
-                    .world
+                    .world()
                     .get_block_state(position.0, position.1, position.2);
                 let progress = MiningProgressState {
                     dimension: dimension as u8,
@@ -1647,7 +1497,7 @@ impl AuthorityCore {
             BlockActionKind::Place => {
                 let block = crate::world::BlockType::from_wire(block_wire)
                     .ok_or(RejectReason::InvalidState)?;
-                if !self.world.has_block_line_of_sight(
+                if !self.world().has_block_line_of_sight(
                     session.position,
                     look_milli,
                     (
@@ -1664,7 +1514,7 @@ impl AuthorityCore {
                     position.2.saturating_sub(i32::from(face[2])),
                 );
                 let Some(support_block) = self
-                    .world
+                    .world_mut_active()
                     .chunks
                     .get_loaded_block(support.0, support.1, support.2)
                 else {
@@ -1672,7 +1522,7 @@ impl AuthorityCore {
                 };
                 let policy = crate::game_rules::GameModePolicy::for_rules(
                     session.game_mode,
-                    &self.world.rules,
+                    &self.world().rules,
                 );
                 let Some(held_stack) = current_stack.as_ref() else {
                     return Err(RejectReason::PermissionDenied);
@@ -1702,7 +1552,7 @@ impl AuthorityCore {
                         next_gameplay.inventory[index] = None;
                     }
                 }
-                let mutation = self.world.apply_block_place(position, face, block)?;
+                let mutation = self.world_mut_active().apply_block_place(position, face, block)?;
                 let Some(session) = self.sessions.get_mut(&session_id) else {
                     return Err(RejectReason::Unauthorized);
                 };
@@ -1714,7 +1564,7 @@ impl AuthorityCore {
                     return Err(RejectReason::PermissionDenied);
                 };
                 if held_stack.item != crate::inventory::Item::FlintAndSteel
-                    || self.world.get_block(position.0, position.1, position.2)
+                    || self.world().get_block(position.0, position.1, position.2)
                         != crate::world::BlockType::Air
                 {
                     return Err(RejectReason::InvalidState);
@@ -1724,10 +1574,10 @@ impl AuthorityCore {
                     position.1.saturating_sub(i32::from(face[1])),
                     position.2.saturating_sub(i32::from(face[2])),
                 );
-                if self.world.get_block(support.0, support.1, support.2)
+                if self.world().get_block(support.0, support.1, support.2)
                     != crate::world::BlockType::Obsidian
                     || !self
-                        .world
+                        .world_mut_active()
                         .has_block_line_of_sight(session.position, look_milli, support)
                 {
                     return Err(RejectReason::InvalidState);
@@ -1749,7 +1599,7 @@ impl AuthorityCore {
                 if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
                     return Err(RejectReason::InvalidState);
                 }
-                let mutation = self.world.set_block(
+                let mutation = self.world_mut_active().set_block(
                     position.0,
                     position.1,
                     position.2,
@@ -1770,10 +1620,10 @@ impl AuthorityCore {
                     return Err(RejectReason::PermissionDenied);
                 };
                 if held_stack.item != crate::inventory::Item::EyeOfEnder
-                    || self.world.get_block(position.0, position.1, position.2)
+                    || self.world().get_block(position.0, position.1, position.2)
                         != crate::world::BlockType::EndPortalFrame
                     || !self
-                        .world
+                        .world_mut_active()
                         .has_block_line_of_sight(session.position, look_milli, position)
                 {
                     return Err(RejectReason::InvalidState);
@@ -1796,7 +1646,7 @@ impl AuthorityCore {
                 if !preserves_brew_locks(&session.gameplay, &next_gameplay) {
                     return Err(RejectReason::InvalidState);
                 }
-                let mutation = self.world.set_block(
+                let mutation = self.world_mut_active().set_block(
                     position.0,
                     position.1,
                     position.2,
@@ -1925,8 +1775,8 @@ impl AuthorityCore {
                 }
                 let hook_id = self.next_unique_entity_id();
                 let context = fishing::FishingDomainContext {
-                    world_seed: self.world.seed as u64
-                        ^ (u64::from(self.world.dimension as u8) << 32),
+                    world_seed: self.world().seed as u64
+                        ^ (u64::from(self.world().dimension as u8) << 32),
                     hook_entity_id: hook_id,
                     player_position_milli: position_to_milli(position)?,
                     open_water: false,
@@ -1943,7 +1793,7 @@ impl AuthorityCore {
                     return Err(RejectReason::InvalidState);
                 }
                 let context = self
-                    .world
+                    .world_mut_active()
                     .fishing_context(&candidate, position, game_mode != GameMode::Creative)
                     .map_err(map_fishing_error)?;
                 fishing::reel(&mut candidate, session_id, hand, context)
@@ -1951,14 +1801,14 @@ impl AuthorityCore {
             }
             2 => {
                 let context = self
-                    .world
+                    .world_mut_active()
                     .fishing_context(&candidate, position, game_mode != GameMode::Creative)
                     .map_err(map_fishing_error)?;
                 fishing::cancel(&mut candidate, hand, context).map_err(map_fishing_error)?;
             }
             _ => return Err(RejectReason::InvalidState),
         }
-        self.world
+        self.world_mut_active()
             .sync_authority_hook(previous_hook, candidate.fishing_hook, session_id);
         let Some(session) = self.sessions.get_mut(&session_id) else {
             return Err(RejectReason::Unauthorized);
@@ -1983,7 +1833,7 @@ impl AuthorityCore {
             return Err(RejectReason::Unauthorized);
         };
         let is_viewer = self
-            .world
+            .world_mut_active()
             .container_viewers
             .get(&position)
             .is_some_and(|viewers| viewers.contains(&session_id));
@@ -1991,7 +1841,7 @@ impl AuthorityCore {
             return Err(RejectReason::PermissionDenied);
         }
         let slot_index = usize::from(slot);
-        let Some(mut slots) = self.world.container_item_slots(position) else {
+        let Some(mut slots) = self.world_mut_active().container_item_slots(position) else {
             return Err(RejectReason::InvalidState);
         };
         if slot_index >= slots.len() {
@@ -2037,7 +1887,7 @@ impl AuthorityCore {
             return Err(RejectReason::Unauthorized);
         };
         session.gameplay = candidate;
-        match self.world.commit_container_item_slots(position, &slots) {
+        match self.world_mut_active().commit_container_item_slots(position, &slots) {
             Ok(mutation) => Ok(Some(mutation)),
             Err(reason) => {
                 if let Some(session) = self.sessions.get_mut(&session_id) {
@@ -2067,7 +1917,7 @@ impl AuthorityCore {
         let mut mutation = None;
         match operation {
             GameplayOperation::FurnaceTakeOutput { x, y, z, count } => {
-                mutation = Some(self.world.take_furnace_output(
+                mutation = Some(self.world_mut_active().take_furnace_output(
                     &mut candidate,
                     [*x, *y, *z],
                     *count,
@@ -2089,13 +1939,13 @@ impl AuthorityCore {
                     (2, None) => WorkstationContext::personal_crafting(),
                     (3, Some(position)) => WorkstationContext::at(
                         position,
-                        self.world.get_block(position[0], position[1], position[2]),
+                        self.world().get_block(position[0], position[1], position[2]),
                     ),
                     _ => return Err(RejectReason::InvalidState),
                 };
                 transactions::execute_craft(
                     &mut candidate,
-                    &self.world.recipe_manager,
+                    &self.world().recipe_manager,
                     context,
                     *grid,
                     *sources,
@@ -2115,8 +1965,8 @@ impl AuthorityCore {
                 let position = [*x, *y, *z];
                 let context = WorkstationContext::enchanting(
                     position,
-                    self.world.get_block(*x, *y, *z),
-                    self.world.bookshelf_power(position),
+                    self.world().get_block(*x, *y, *z),
+                    self.world().bookshelf_power(position),
                 );
                 transactions::execute_enchant(&mut candidate, context, *source, *option)
                     .map_err(map_transaction_error)?;
@@ -2133,7 +1983,7 @@ impl AuthorityCore {
                 bottles,
             } => {
                 let position = [*x, *y, *z];
-                let context = WorkstationContext::at(position, self.world.get_block(*x, *y, *z));
+                let context = WorkstationContext::at(position, self.world().get_block(*x, *y, *z));
                 match *action {
                     0 => {
                         let ingredient = ingredient.ok_or(RejectReason::InvalidState)?;
@@ -2167,7 +2017,7 @@ impl AuthorityCore {
                     return Err(RejectReason::InvalidState);
                 }
                 let position = [*x, *y, *z];
-                let context = WorkstationContext::at(position, self.world.get_block(*x, *y, *z));
+                let context = WorkstationContext::at(position, self.world().get_block(*x, *y, *z));
                 transactions::execute_anvil(&mut candidate, context, *left, *right, rename)
                     .map_err(map_transaction_error)?;
             }
@@ -2229,7 +2079,7 @@ impl AuthorityCore {
         let cooldown_ready = attacker.gameplay.attack_cooldown_ticks >= ATTACK_COOLDOWN_TICKS;
 
         if let Some(target_session) = self.sessions.get(&target).cloned() {
-            if !self.world.rules.pvp
+            if !self.world().rules.pvp
                 || target_session.dimension != attacker.dimension
                 || matches!(
                     target_session.game_mode,
@@ -2251,7 +2101,7 @@ impl AuthorityCore {
                 target_look_milli: look_from_angles(target_session.yaw, target_session.pitch)?,
                 cooldown_ready,
                 has_line_of_sight: self
-                    .world
+                    .world_mut_active()
                     .has_line_of_sight(attacker.position, target_session.position),
                 attacker_used_axe: profile.used_axe,
                 knockback_milli: profile.knockback_milli,
@@ -2271,14 +2121,14 @@ impl AuthorityCore {
             let mut attacker_gameplay = attacker.gameplay;
             attacker_gameplay.attack_cooldown_ticks = 0;
 
-            if outcome.death.is_some() && !self.world.rules.keep_inventory {
+            if outcome.death.is_some() && !self.world().rules.keep_inventory {
                 target_snapshot.gameplay.inventory = [None; contract::SESSION_INVENTORY_SLOTS];
                 target_snapshot.gameplay.experience = 0;
                 target_snapshot.gameplay.experience_level = 0;
             }
             if outcome.death.is_some() {
                 target_snapshot.gameplay.mounted_entity = None;
-                self.world.remove_passenger(target);
+                self.world_mut_active().remove_passenger(target);
             }
             self.sessions
                 .get_mut(&session_id)
@@ -2289,7 +2139,7 @@ impl AuthorityCore {
                 .ok_or(RejectReason::InvalidState)?
                 .gameplay = target_snapshot.gameplay;
             self.pending_session_revisions.insert(target);
-            if !self.world.rules.keep_inventory {
+            if !self.world().rules.keep_inventory {
                 if let Some(death) = outcome.death {
                     self.spawn_death_outcome(target_session.position, death);
                 }
@@ -2297,7 +2147,7 @@ impl AuthorityCore {
             return Ok(None);
         }
 
-        let Some(entity) = self.world.entities.get_by_id(target) else {
+        let Some(entity) = self.world().entities.get_by_id(target) else {
             return Err(RejectReason::InvalidState);
         };
         let target_entity_type = entity.entity_type;
@@ -2338,7 +2188,7 @@ impl AuthorityCore {
             target_look_milli: look_from_angles(entity.yaw, entity.pitch)?,
             cooldown_ready,
             has_line_of_sight: self
-                .world
+                .world_mut_active()
                 .has_line_of_sight(attacker.position, target_hit_position.to_array()),
             attacker_used_axe: profile.used_axe,
             knockback_milli: profile.knockback_milli,
@@ -2356,11 +2206,11 @@ impl AuthorityCore {
             .ok_or(RejectReason::Unauthorized)?
             .gameplay = attacker_gameplay;
         if target_snapshot.health_milli == 0 {
-            let _ = self.world.entities.remove_by_id(target);
+            let _ = self.world_mut_active().entities.remove_by_id(target);
             if target_entity_type == crate::entity::EntityType::EnderDragon {
-                self.world.handle_dragon_completion();
+                self.world_mut_active().handle_dragon_completion();
             }
-        } else if let Some(entity) = self.world.entities.get_by_id_mut(target) {
+        } else if let Some(entity) = self.world_mut_active().entities.get_by_id_mut(target) {
             entity.health = target_snapshot.health_milli as f32 / 1_000.0;
             entity.velocity = glam::Vec3::new(
                 target_snapshot.velocity_milli[0] as f32 / 1_000.0,
@@ -2381,13 +2231,13 @@ impl AuthorityCore {
         for slot in death.drops {
             let id = self.next_unique_entity_id();
             self.claim_entity_id(id);
-            let _ = self.world.spawn_authority_drop(id, slot, position);
+            let _ = self.world_mut_active().spawn_authority_drop(id, slot, position);
         }
         if death.experience > 0 {
             let id = self.next_unique_entity_id();
             self.claim_entity_id(id);
             let _ = self
-                .world
+                .world_mut_active()
                 .spawn_authority_experience(id, death.experience, position);
         }
     }
@@ -2429,8 +2279,8 @@ impl AuthorityCore {
         }
         self.cleanup_session_lifecycle(id, dimension);
         self.activate_dimension(dimension);
-        let hardcore = self.world.rules.hardcore;
-        let revision = self.world.revisions.allocate();
+        let hardcore = self.world().rules.hardcore;
+        let revision = self.world_mut_active().revisions.allocate();
         let Some(session) = self.sessions.get_mut(&id) else {
             return false;
         };
@@ -2492,7 +2342,7 @@ impl AuthorityCore {
                 ) {
                     return Err(RejectReason::PermissionDenied);
                 }
-                if !self.world.dimension.height().contains_y(position[1]) {
+                if !self.world().dimension.height().contains_y(position[1]) {
                     return Err(RejectReason::InvalidCoordinate);
                 }
                 let Some(session) = self.sessions.get_mut(&session_id) else {
@@ -2532,15 +2382,15 @@ impl AuthorityCore {
                 Ok(None)
             }
             crate::commands::Command::GameRule { rule, value } => {
-                self.world.set_gamerule(&rule, value.as_deref())?;
+                self.world_mut_active().set_gamerule(&rule, value.as_deref())?;
                 Ok(None)
             }
             crate::commands::Command::Time(crate::commands::TimeCommand::Set(time)) => {
-                self.world.set_time(time);
+                self.world_mut_active().set_time(time);
                 Ok(None)
             }
             crate::commands::Command::Time(crate::commands::TimeCommand::Add(time)) => {
-                self.world.add_time(time);
+                self.world_mut_active().add_time(time);
                 Ok(None)
             }
             crate::commands::Command::Help(_)
@@ -2556,7 +2406,7 @@ impl AuthorityCore {
     }
 
     fn rejected(&mut self, request_id: u128, reason: RejectReason) -> GameplayResponse {
-        let revision = self.world.revisions.allocate();
+        let revision = self.world_mut_active().revisions.allocate();
         GameplayResponse {
             request_id,
             server_sequence: revision,
@@ -2900,7 +2750,7 @@ mod tests {
     #[test]
     fn leftover_block_use_is_unsupported_and_does_not_drain_a_mutation() {
         let mut core = core(AuthorityTopology::Singleplayer);
-        let before = core.world.get_block(8, 80, 8);
+        let before = core.world().get_block(8, 80, 8);
         let request = GameplayRequest {
             request_id: 21,
             client_sequence: 1,
@@ -2922,14 +2772,14 @@ mod tests {
             }
         ));
         assert!(core.take_pending_mutations().is_empty());
-        assert_eq!(core.world.get_block(8, 80, 8), before);
+        assert_eq!(core.world().get_block(8, 80, 8), before);
     }
 
     #[test]
     fn typed_mining_fixed_tick_breaks_once_and_cancel_is_idempotent() {
         let mut core = core(AuthorityTopology::Dedicated);
         let target = (8, 81, 9);
-        core.world
+        core.world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
             .unwrap();
 
@@ -2977,13 +2827,13 @@ mod tests {
                 .count();
         }
         assert_eq!(
-            core.world.get_block(target.0, target.1, target.2),
+            core.world().get_block(target.0, target.1, target.2),
             BlockType::Air
         );
         assert_eq!(target_mutations, 1);
         assert!(core.session(7).unwrap().gameplay.mining.is_none());
         assert_eq!(
-            core.world
+            core.world_mut_active()
                 .entities
                 .entities
                 .iter()
@@ -3017,7 +2867,7 @@ mod tests {
         ));
         assert_eq!(core.submit_request(cancel), first_cancel);
         assert_eq!(
-            core.world
+            core.world_mut_active()
                 .entities
                 .entities
                 .iter()
@@ -3086,7 +2936,7 @@ mod tests {
         let mut creative = core(AuthorityTopology::Singleplayer);
         creative.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Creative;
         creative
-            .world
+            .world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
             .unwrap();
         let mut creative_gameplay = SessionGameplayState::default();
@@ -3109,7 +2959,7 @@ mod tests {
             GameplayOutcome::Accepted { .. }
         ));
         assert_eq!(
-            creative.world.get_block(target.0, target.1, target.2),
+            creative.world().get_block(target.0, target.1, target.2),
             BlockType::Air
         );
         assert_eq!(
@@ -3117,7 +2967,7 @@ mod tests {
             Some(SessionInventorySlot::from(pick_wire))
         );
         assert!(creative
-            .world
+            .world()
             .entities
             .entities
             .iter()
@@ -3126,7 +2976,7 @@ mod tests {
         let mut adventure = core(AuthorityTopology::Dedicated);
         adventure.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
         adventure
-            .world
+            .world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
             .unwrap();
         let mut allowed = SessionGameplayState::default();
@@ -3159,14 +3009,14 @@ mod tests {
             let _ = adventure.tick();
         }
         assert_eq!(
-            adventure.world.get_block(target.0, target.1, target.2),
+            adventure.world().get_block(target.0, target.1, target.2),
             BlockType::Air
         );
 
         let mut denied = core(AuthorityTopology::Dedicated);
         denied.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
         denied
-            .world
+            .world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
             .unwrap();
         let mut untagged = SessionGameplayState::default();
@@ -3191,13 +3041,13 @@ mod tests {
             }
         ));
         assert_eq!(
-            denied.world.get_block(target.0, target.1, target.2),
+            denied.world().get_block(target.0, target.1, target.2),
             BlockType::Stone
         );
 
         let mut empty_hand = core(AuthorityTopology::Dedicated);
         empty_hand
-            .world
+            .world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Dirt, 0)
             .unwrap();
         assert!(matches!(
@@ -3229,10 +3079,10 @@ mod tests {
             0,
         );
         let mut core = core(AuthorityTopology::Dedicated);
-        core.world
+        core.world_mut_active()
             .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
             .unwrap();
-        core.world
+        core.world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Air, 0)
             .unwrap();
         let mut gameplay = SessionGameplayState::default();
@@ -3256,7 +3106,7 @@ mod tests {
             accepted.outcome
         );
         assert_eq!(
-            core.world.get_block(target.0, target.1, target.2),
+            core.world().get_block(target.0, target.1, target.2),
             BlockType::Stone
         );
         assert_eq!(
@@ -3291,16 +3141,16 @@ mod tests {
                 .count,
             1
         );
-        assert_eq!(core.world.get_block(8, 81, 10), BlockType::Air);
+        assert_eq!(core.world().get_block(8, 81, 10), BlockType::Air);
 
         // The same typed path is valid across an explicitly loaded chunk
         // boundary; unloaded front/support chunks are never synthesized by
         // the action itself.
-        core.world.ensure_chunk(1, 0);
+        core.world_mut_active().ensure_chunk(1, 0);
         core.session_mut(7).unwrap().position = [15.0, 80.0, 8.0];
         let support_cross = (16, 80, 8);
         let target_cross = (16, 81, 8);
-        core.world
+        core.world_mut_active()
             .set_block(
                 support_cross.0,
                 support_cross.1,
@@ -3309,7 +3159,7 @@ mod tests {
                 0,
             )
             .unwrap();
-        core.world
+        core.world_mut_active()
             .set_block(
                 target_cross.0,
                 target_cross.1,
@@ -3340,7 +3190,7 @@ mod tests {
         ));
         assert!(matches!(cross.outcome, GameplayOutcome::Accepted { .. }));
         assert_eq!(
-            core.world
+            core.world()
                 .get_block(target_cross.0, target_cross.1, target_cross.2),
             BlockType::Stone
         );
@@ -3357,7 +3207,7 @@ mod tests {
             0,
         );
         let start = |core: &mut AuthorityCore, request_id: u128| {
-            core.world
+            core.world_mut_active()
                 .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
                 .unwrap();
             let mut gameplay = SessionGameplayState::default();
@@ -3393,7 +3243,7 @@ mod tests {
         assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
         let _ = cancelled.tick();
         assert_eq!(
-            cancelled.world.get_block(target.0, target.1, target.2),
+            cancelled.world().get_block(target.0, target.1, target.2),
             BlockType::Stone
         );
 
@@ -3412,7 +3262,7 @@ mod tests {
         let _ = held_changed.tick();
         assert!(held_changed.session(7).unwrap().gameplay.mining.is_none());
         assert_eq!(
-            held_changed.world.get_block(target.0, target.1, target.2),
+            held_changed.world().get_block(target.0, target.1, target.2),
             BlockType::Stone
         );
 
@@ -3426,7 +3276,7 @@ mod tests {
         let _ = slot_switched.tick();
         assert!(slot_switched.session(7).unwrap().gameplay.mining.is_none());
         assert_eq!(
-            slot_switched.world.get_block(target.0, target.1, target.2),
+            slot_switched.world().get_block(target.0, target.1, target.2),
             BlockType::Stone
         );
 
@@ -3436,20 +3286,20 @@ mod tests {
         let _ = moved.tick();
         assert!(moved.session(7).unwrap().gameplay.mining.is_none());
         assert_eq!(
-            moved.world.get_block(target.0, target.1, target.2),
+            moved.world().get_block(target.0, target.1, target.2),
             BlockType::Stone
         );
 
         let mut replaced = core(AuthorityTopology::Dedicated);
         start(&mut replaced, 124);
         replaced
-            .world
+            .world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Dirt, 0)
             .unwrap();
         let _ = replaced.tick();
         assert!(replaced.session(7).unwrap().gameplay.mining.is_none());
         assert_eq!(
-            replaced.world.get_block(target.0, target.1, target.2),
+            replaced.world().get_block(target.0, target.1, target.2),
             BlockType::Dirt
         );
     }
@@ -3467,10 +3317,10 @@ mod tests {
         );
         let mut core = core(AuthorityTopology::Dedicated);
         core.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Adventure;
-        core.world
+        core.world_mut_active()
             .set_block(support.0, support.1, support.2, BlockType::Stone, 0)
             .unwrap();
-        core.world
+        core.world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Air, 0)
             .unwrap();
         let mut gameplay = SessionGameplayState::default();
@@ -3489,7 +3339,7 @@ mod tests {
         ));
         assert!(matches!(placed.outcome, GameplayOutcome::Accepted { .. }));
         assert!(core
-            .world
+            .world()
             .get_block_entity(target.0, target.1, target.2)
             .is_some());
         assert!(core.session(7).unwrap().gameplay.inventory[0].is_none());
@@ -3520,11 +3370,11 @@ mod tests {
             let _ = core.tick();
         }
         assert_eq!(
-            core.world.get_block(target.0, target.1, target.2),
+            core.world().get_block(target.0, target.1, target.2),
             BlockType::Air
         );
         assert!(core
-            .world
+            .world()
             .get_block_entity(target.0, target.1, target.2)
             .is_none());
     }
@@ -3539,7 +3389,7 @@ mod tests {
             0,
         );
         let mut core = core(AuthorityTopology::Dedicated);
-        core.world
+        core.world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::Stone, 0)
             .unwrap();
         let mut gameplay = SessionGameplayState::default();
@@ -3585,7 +3435,7 @@ mod tests {
             0xaa,
         );
         let mut core = core(AuthorityTopology::Dedicated);
-        core.world
+        core.world_mut_active()
             .set_block(target.0, target.1, target.2, BlockType::DiamondOre, 0)
             .unwrap();
         let mut gameplay = SessionGameplayState::default();
@@ -3611,20 +3461,20 @@ mod tests {
             let _ = core.tick();
         }
         assert_eq!(
-            core.world.get_block(target.0, target.1, target.2),
+            core.world().get_block(target.0, target.1, target.2),
             BlockType::Air
         );
         assert_eq!(core.session(7).unwrap().gameplay.experience, 4);
         assert_eq!(core.session(7).unwrap().gameplay.experience_level, 1);
         assert!(core.session(7).unwrap().gameplay.inventory[0].is_none());
         assert!(core
-            .world
+            .world()
             .entities
             .entities
             .iter()
             .all(|entity| entity.entity_type != EntityType::ExperienceOrb));
         let dropped = core
-            .world
+            .world()
             .entities
             .entities
             .iter()
@@ -3639,24 +3489,28 @@ mod tests {
         let mut core = core(AuthorityTopology::Dedicated);
         let lever = (7, 80, 8);
         let source = (8, 80, 8);
-        core.world
+        core.world_mut_active()
             .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
             .unwrap();
-        core.world
+        core.world_mut_active()
             .set_block(source.0, source.1, source.2, BlockType::Dispenser, 0)
             .unwrap();
-        core.world.redstone.on_block_changed(
-            &core.world.chunks,
+        {
+            let world = core.world_mut_active();
+            world.redstone.on_block_changed(
+            &world.chunks,
             lever,
             crate::redstone::Direction::East,
-        );
-        core.world.redstone.on_block_changed(
-            &core.world.chunks,
+        ); }
+        {
+            let world = core.world_mut_active();
+            world.redstone.on_block_changed(
+            &world.chunks,
             source,
             crate::redstone::Direction::South,
-        );
+        ); }
         if let Some(entity) = core
-            .world
+            .world_mut_active()
             .chunks
             .get_block_entity_mut(source.0, source.1, source.2)
         {
@@ -3665,7 +3519,7 @@ mod tests {
 
         let first = core.tick();
         assert_eq!(
-            core.world
+            core.world_mut_active()
                 .entities
                 .entities
                 .iter()
@@ -3674,7 +3528,7 @@ mod tests {
             1
         );
         let arrow_id = core
-            .world
+            .world()
             .entities
             .entities
             .iter()
@@ -3693,7 +3547,7 @@ mod tests {
             .iter()
             .all(|mutation| mutation.position != source));
         assert_eq!(
-            core.world
+            core.world_mut_active()
                 .entities
                 .entities
                 .iter()
@@ -3702,26 +3556,30 @@ mod tests {
             1
         );
 
-        core.world
+        core.world_mut_active()
             .set_block(lever.0, lever.1, lever.2, BlockType::Lever, 0)
             .unwrap();
-        core.world.redstone.on_block_changed(
-            &core.world.chunks,
+        {
+            let world = core.world_mut_active();
+            world.redstone.on_block_changed(
+            &world.chunks,
             lever,
             crate::redstone::Direction::East,
-        );
+        ); }
         let _ = core.tick();
-        core.world
+        core.world_mut_active()
             .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
             .unwrap();
-        core.world.redstone.on_block_changed(
-            &core.world.chunks,
+        {
+            let world = core.world_mut_active();
+            world.redstone.on_block_changed(
+            &world.chunks,
             lever,
             crate::redstone::Direction::East,
-        );
+        ); }
         let _ = core.tick();
         assert_eq!(
-            core.world
+            core.world_mut_active()
                 .entities
                 .entities
                 .iter()
@@ -3884,11 +3742,20 @@ mod tests {
         assert!(boundary.set_dimension(crate::dimension::Dimension::Nether as u8));
         assert_eq!(boundary.core.session(7).unwrap().dimension, 1);
         assert_eq!(
-            boundary.core.world.dimension,
+            boundary.core.active_dimension(),
+            crate::dimension::Dimension::Nether
+        );
+        let nether = boundary
+            .core
+            .world_ref(crate::dimension::Dimension::Nether)
+            .expect("nether world stays in the map");
+        assert_eq!(nether.dimension, crate::dimension::Dimension::Nether);
+        assert_eq!(
+            nether.chunks.dimension,
             crate::dimension::Dimension::Nether
         );
         assert_eq!(
-            boundary.core.world.chunks.dimension,
+            boundary.core.world_mut_active().dimension,
             crate::dimension::Dimension::Nether
         );
     }
@@ -3907,15 +3774,35 @@ mod tests {
         let marker = BlockType::Glass;
         boundary
             .core
-            .world
+            .world_mut(crate::dimension::Dimension::Overworld)
+            .expect("overworld world")
             .set_block(1_234, 100, -2_345, marker, 0)
             .unwrap();
-        assert_eq!(boundary.core.world.get_block(1_234, 100, -2_345), marker);
+        assert_eq!(
+            boundary
+                .core
+                .world_ref(crate::dimension::Dimension::Overworld)
+                .expect("overworld world")
+                .get_block(1_234, 100, -2_345),
+            marker
+        );
 
         assert!(boundary.set_dimension(crate::dimension::Dimension::Nether as u8));
-        assert_ne!(boundary.core.world.get_block(1_234, 100, -2_345), marker);
-        assert!(boundary.core.world.valid_coordinate(1_234, 127, -2_345));
-        assert!(!boundary.core.world.valid_coordinate(1_234, 128, -2_345));
+        assert_eq!(
+            boundary.core.active_dimension(),
+            crate::dimension::Dimension::Nether
+        );
+        assert_ne!(boundary.core.world().get_block(1_234, 100, -2_345), marker);
+        assert!(boundary.core.world().valid_coordinate(1_234, 127, -2_345));
+        assert!(!boundary.core.world().valid_coordinate(1_234, 128, -2_345));
+        assert_eq!(
+            boundary
+                .core
+                .world_ref(crate::dimension::Dimension::Overworld)
+                .expect("overworld remains in the map")
+                .get_block(1_234, 100, -2_345),
+            marker
+        );
         boundary.set_position([154.25, 67.0, -293.5]);
         assert_eq!(
             boundary.core.session(7).unwrap().position,
@@ -3923,7 +3810,18 @@ mod tests {
         );
 
         assert!(boundary.set_dimension(crate::dimension::Dimension::Overworld as u8));
-        assert_eq!(boundary.core.world.get_block(1_234, 100, -2_345), marker);
+        assert_eq!(
+            boundary.core.active_dimension(),
+            crate::dimension::Dimension::Overworld
+        );
+        assert_eq!(
+            boundary
+                .core
+                .world_ref(crate::dimension::Dimension::Overworld)
+                .expect("overworld world")
+                .get_block(1_234, 100, -2_345),
+            marker
+        );
         assert_eq!(boundary.core.session(7).unwrap().dimension, 0);
     }
 
@@ -3962,7 +3860,7 @@ mod tests {
         core.activate_dimension(Dimension::Overworld);
         let snapshot = core.tick();
         assert_eq!(snapshot.tick, 1);
-        assert_eq!(core.world.dimension, Dimension::Overworld);
+        assert_eq!(core.world_mut_active().dimension, Dimension::Overworld);
         assert!(snapshot
             .session_updates
             .iter()
@@ -3973,12 +3871,12 @@ mod tests {
             .any(|update| update.player_id == 8 && update.dimension == Dimension::Nether as u8));
 
         core.activate_dimension(Dimension::Overworld);
-        assert_eq!(core.world.time, 1);
-        assert_eq!(core.world.get_block(8, 80, 8), BlockType::Glass);
+        assert_eq!(core.world_mut_active().time, 1);
+        assert_eq!(core.world().get_block(8, 80, 8), BlockType::Glass);
         let overworld_revision = core.revision_for_dimension(Dimension::Overworld);
         core.activate_dimension(Dimension::Nether);
-        assert_eq!(core.world.time, 1);
-        assert_eq!(core.world.get_block(8, 80, 8), BlockType::Obsidian);
+        assert_eq!(core.world_mut_active().time, 1);
+        assert_eq!(core.world().get_block(8, 80, 8), BlockType::Obsidian);
         let nether_revision = core.revision_for_dimension(Dimension::Nether);
         assert_eq!(overworld_revision, nether_revision);
 
@@ -4002,7 +3900,7 @@ mod tests {
             }
         ));
         core.activate_dimension(Dimension::Overworld);
-        assert_eq!(core.world.get_block(8, 80, 8), BlockType::Glass);
+        assert_eq!(core.world().get_block(8, 80, 8), BlockType::Glass);
 
         // An active Nether compatibility view must not make a leftover
         // Overworld BlockUse mutate; routing still selects the session world.
@@ -4026,8 +3924,8 @@ mod tests {
             }
         ));
         core.activate_dimension(Dimension::Overworld);
-        assert_eq!(core.world.get_block(8, 80, 8), BlockType::Glass);
-        assert_ne!(core.world.get_block(9, 80, 8), BlockType::Glass);
+        assert_eq!(core.world().get_block(8, 80, 8), BlockType::Glass);
+        assert_ne!(core.world().get_block(9, 80, 8), BlockType::Glass);
     }
 
     #[test]
@@ -4068,10 +3966,10 @@ mod tests {
         attacker.attack_cooldown_ticks = ATTACK_COOLDOWN_TICKS;
         assert!(core.set_session_gameplay(7, attacker));
         let target = core
-            .world
+            .world_mut_active()
             .entities
             .spawn(EntityType::Zombie, glam::Vec3::new(8.0, 80.0, 9.0));
-        let before = core.world.entities.get_by_id(target).unwrap().health;
+        let before = core.world_mut_active().entities.get_by_id(target).unwrap().health;
         let response = core.submit_request(GameplayRequest {
             request_id: 31,
             client_sequence: 1,
@@ -4084,7 +3982,7 @@ mod tests {
             matches!(response.outcome, GameplayOutcome::Accepted { .. }),
             "unexpected combat response: {response:?}"
         );
-        assert!(core.world.entities.get_by_id(target).unwrap().health < before);
+        assert!(core.world_mut_active().entities.get_by_id(target).unwrap().health < before);
     }
 
     #[test]
@@ -4105,7 +4003,7 @@ mod tests {
             4,
             1,
         )];
-        assert!(core.world.ensure_villager(
+        assert!(core.world_mut_active().ensure_villager(
             villager,
             [9.0, 80.0, 8.0],
             crate::village::poi::VillagerProfession::Farmer,
@@ -4155,7 +4053,7 @@ mod tests {
 
         let vehicle = 901;
         assert!(core
-            .world
+            .world_mut_active()
             .ensure_vehicle(vehicle, EntityType::Boat, [9.0, 80.0, 8.0],));
         let response = core.submit_request(GameplayRequest {
             request_id: 33,
@@ -4171,7 +4069,7 @@ mod tests {
             Some(vehicle)
         );
         assert!(core
-            .world
+            .world_mut_active()
             .entities
             .get_by_id(vehicle)
             .unwrap()

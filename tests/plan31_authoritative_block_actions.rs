@@ -151,16 +151,16 @@ fn cancel_request(
 }
 
 fn prepare(runtime: &mut ServerRuntime, owner: u64, observer: u64, target_block: BlockType) {
-    runtime.authority.world.ensure_chunk(0, 0);
-    runtime.authority.world.ensure_chunk(1, 0);
+    runtime.authority.world_mut_active().ensure_chunk(0, 0);
+    runtime.authority.world_mut_active().ensure_chunk(1, 0);
     runtime
         .authority
-        .world
+        .world_mut_active()
         .set_block(TARGET.0, TARGET.1, TARGET.2, target_block, 0)
         .expect("seed mining target");
     runtime
         .authority
-        .world
+        .world_mut_active()
         .set_block(
             PLACE_SUPPORT.0,
             PLACE_SUPPORT.1,
@@ -259,7 +259,7 @@ fn run_embedded_vector() {
     assert_eq!(
         runtime
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Stone
     );
@@ -276,7 +276,7 @@ fn run_embedded_vector() {
         events.extend(output.presentation_events);
         if runtime
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2)
             == BlockType::Air
         {
@@ -286,7 +286,7 @@ fn run_embedded_vector() {
     assert_eq!(
         runtime
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Air
     );
@@ -455,14 +455,14 @@ fn run_tcp_vector(label: &str, listen: bool) {
     assert_eq!(
         runtime
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Obsidian
     );
 
     runtime
         .authority
-        .world
+        .world_mut_active()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::CoalOre, 0)
         .expect("seed bounded XP mining target after cancel");
 
@@ -486,7 +486,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
             |runtime, views| {
                 runtime
                     .authority
-                    .world
+                    .world()
                     .get_block(TARGET.0, TARGET.1, TARGET.2)
                     == BlockType::Air
                     && views.iter().all(|client| {
@@ -583,7 +583,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
             |runtime, views| {
                 runtime
                     .authority
-                    .world
+                    .world()
                     .get_block(PLACE_TARGET.0, PLACE_TARGET.1, PLACE_TARGET.2)
                     == BlockType::Chest
                     && views.iter().all(|client| {
@@ -642,7 +642,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
             |runtime, views| {
                 runtime
                     .authority
-                    .world
+                    .world()
                     .get_block(PLACE_TARGET.0, PLACE_TARGET.1, PLACE_TARGET.2)
                     == BlockType::Air
                     && views.iter().all(|client| {
@@ -673,7 +673,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
     // connection-scoped and must not survive into the replacement session.
     runtime
         .authority
-        .world
+        .world_mut_active()
         .set_block(
             RECONNECT_TARGET.0,
             RECONNECT_TARGET.1,
@@ -755,7 +755,7 @@ fn run_tcp_vector(label: &str, listen: bool) {
         .session(reconnected_id)
         .is_some_and(|session| session.gameplay.mining.is_none()));
     assert_eq!(
-        runtime.authority.world.get_block(
+        runtime.authority.world().get_block(
             RECONNECT_TARGET.0,
             RECONNECT_TARGET.1,
             RECONNECT_TARGET.2,
@@ -778,14 +778,14 @@ fn run_tcp_vector(label: &str, listen: bool) {
     assert_eq!(
         restored
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Air
     );
     assert_eq!(
         restored
             .authority
-            .world
+            .world()
             .get_block(PLACE_TARGET.0, PLACE_TARGET.1, PLACE_TARGET.2),
         BlockType::Air
     );

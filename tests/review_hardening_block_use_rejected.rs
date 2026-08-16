@@ -31,10 +31,10 @@ fn properties(label: &str) -> ServerProperties {
 }
 
 fn seed_chest_and_inventory(runtime: &mut ServerRuntime, player_id: u64) {
-    runtime.authority.world.ensure_chunk(0, 0);
+    runtime.authority.world_mut_active().ensure_chunk(0, 0);
     runtime
         .authority
-        .world
+        .world_mut_active()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed chest through authoritative set_block");
     let mut gameplay = SessionGameplayState::default();
@@ -63,7 +63,7 @@ fn inventory_wire(
 fn dropped_item_count(runtime: &ServerRuntime) -> usize {
     runtime
         .authority
-        .world
+        .world()
         .entities
         .entities
         .iter()
@@ -92,7 +92,7 @@ fn assert_block_use_rejected(
     assert_eq!(
         runtime
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         expected_block,
         "BlockUse must not mutate the target cell"
@@ -130,7 +130,7 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
     assert_eq!(
         runtime
             .authority
-            .world
+            .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         BlockType::Chest
     );
@@ -226,7 +226,7 @@ fn embedded_block_use_air_cannot_clear_chest() {
     assert!(
         runtime
             .authority
-            .world
+            .world()
             .get_block_entity(TARGET.0, TARGET.1, TARGET.2)
             .is_some(),
         "rejected Air BlockUse must not delete the chest block entity"

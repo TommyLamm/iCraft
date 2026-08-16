@@ -120,7 +120,7 @@ fn seed_place_support(core: &mut AuthorityCore, dimension: Dimension, support: (
 }
 
 fn dropped_item_count(core: &AuthorityCore) -> usize {
-    core.world
+    core.world()
         .entities
         .entities
         .iter()
@@ -139,7 +139,7 @@ fn checksum_after_inbound(order: [u64; 2]) -> u64 {
             .expect("fixture session");
         register(&mut core, id, name, Dimension::Overworld);
     }
-    core.world
+    core.world_mut_active()
         .entities
         .spawn(EntityType::Zombie, glam::Vec3::new(10.0, 80.0, 10.0));
     for (index, id) in order.iter().copied().enumerate() {
@@ -177,7 +177,7 @@ fn invalid_dimension_envelope_is_rejected_without_world_or_inventory_mutation() 
     register(&mut core, ALEX, "alex", Dimension::Overworld);
     give_stone(&mut core, ALEX, 2);
     seed_place_support(&mut core, Dimension::Overworld, (8, 80, 8));
-    let before_block = core.world.get_block(8, 81, 8);
+    let before_block = core.world().get_block(8, 81, 8);
     let before_count = core
         .session(ALEX)
         .unwrap()
@@ -213,7 +213,7 @@ fn invalid_dimension_envelope_is_rejected_without_world_or_inventory_mutation() 
         "unexpected invalid-dimension response: {:?}",
         response.outcome
     );
-    assert_eq!(core.world.get_block(8, 81, 8), before_block);
+    assert_eq!(core.world().get_block(8, 81, 8), before_block);
     assert_eq!(
         core.session(ALEX)
             .unwrap()
@@ -270,7 +270,7 @@ fn nether_mutations_do_not_invalidate_overworld_client_revision() {
         overworld.outcome
     );
     core.activate_dimension(Dimension::Overworld);
-    assert_eq!(core.world.get_block(8, 81, 8), BlockType::Stone);
+    assert_eq!(core.world().get_block(8, 81, 8), BlockType::Stone);
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn stale_block_place_does_not_consume_held_stack_or_create_drops() {
         .count_item(Item::Stone as u32);
     assert_eq!(held_after_place, 1);
     let drops_after_place = dropped_item_count(&core);
-    let second_target = core.world.get_block(9, 81, 8);
+    let second_target = core.world().get_block(9, 81, 8);
 
     let stale = core.submit_request(place_request(
         ALEX,
@@ -331,8 +331,8 @@ fn stale_block_place_does_not_consume_held_stack_or_create_drops() {
         held_after_place
     );
     assert_eq!(dropped_item_count(&core), drops_after_place);
-    assert_eq!(core.world.get_block(9, 81, 8), second_target);
-    assert_eq!(core.world.get_block(8, 81, 8), BlockType::Stone);
+    assert_eq!(core.world().get_block(9, 81, 8), second_target);
+    assert_eq!(core.world().get_block(8, 81, 8), BlockType::Stone);
 }
 
 /// Join-client presentation sink: apply only revision-gated projections.

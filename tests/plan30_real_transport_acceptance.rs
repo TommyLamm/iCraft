@@ -64,7 +64,7 @@ fn reset_persistent_domains(runtime: &mut ServerRuntime, id: u64) {
         .and_then(|session| session.gameplay.fishing_hook)
         .map(|hook| hook.entity_id);
     if let Some(hook) = hook {
-        runtime.authority.world.remove_authority_entity(hook);
+        runtime.authority.world_mut_active().remove_authority_entity(hook);
     }
     let revision = current_revision(runtime, id);
     if let Some(session) = runtime.authority.session_mut(id) {
@@ -82,7 +82,7 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     let anvil_position = (8, 80, 12);
     runtime
         .authority
-        .world
+        .world_mut_active()
         .set_block(
             furnace_position.0,
             furnace_position.1,
@@ -93,7 +93,7 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
         .expect("fixture furnace block");
     runtime
         .authority
-        .world
+        .world_mut_active()
         .set_block(
             brew_position.0,
             brew_position.1,
@@ -108,14 +108,14 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     ] {
         runtime
             .authority
-            .world
+            .world_mut_active()
             .set_block(position.0, position.1, position.2, block, 0)
             .expect("fixture workstation block");
     }
     let mut furnace = FurnaceBlockEntity::new();
     furnace.slots[2] = Some(ItemStack::new(Item::IronIngot, 2));
     furnace.accumulated_xp = 4.0;
-    runtime.authority.world.chunks.set_block_entity(
+    runtime.authority.world_mut_active().chunks.set_block_entity(
         furnace_position.0,
         furnace_position.1,
         furnace_position.2,

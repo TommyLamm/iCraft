@@ -54,7 +54,7 @@ fn fresh_tcp_request(
 }
 
 fn prepare(runtime: &mut ServerRuntime, owner: u64, observer: u64) {
-    runtime.authority.world.ensure_chunk(0, 0);
+    runtime.authority.world_mut_active().ensure_chunk(0, 0);
     let mut owner_gameplay = SessionGameplayState::default();
     owner_gameplay.inventory[0] = Some(session_slot(ItemStack::new(Item::FishingRod, 1)));
     owner_gameplay.selected_hotbar_slot = 0;
@@ -97,17 +97,17 @@ fn seed_water_under_hook(runtime: &mut ServerRuntime, owner: u64) {
     );
     runtime
         .authority
-        .world
+        .world_mut_active()
         .ensure_chunk(position.0.div_euclid(16), position.2.div_euclid(16));
     if runtime
         .authority
-        .world
+        .world()
         .get_block(position.0, position.1, position.2)
         != BlockType::Water
     {
         runtime
             .authority
-            .world
+            .world_mut_active()
             .set_block(position.0, position.1, position.2, BlockType::Water, 0)
             .expect("seed deterministic Plan33 open water");
     }
@@ -253,7 +253,7 @@ fn run_embedded() {
     );
     assert!(runtime
         .authority
-        .world
+        .world_mut_active()
         .entities
         .get_by_id(hook_id)
         .is_none());
@@ -446,7 +446,7 @@ fn run_tcp(label: &str, listen: bool) {
     );
     assert!(runtime
         .authority
-        .world
+        .world_mut_active()
         .entities
         .get_by_id(hook_id)
         .is_none());

@@ -148,7 +148,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     restarted.login_session(10, "Bob").unwrap();
     restarted.set_session_dimension(10, Dimension::End);
     let _ = restarted.drain_routed_updates();
-    let old = restarted.authority.world.get_block(8, 80, 8);
+    let old = restarted.authority.world().get_block(8, 80, 8);
     let response = restarted
         .submit_request(
             9,
@@ -173,7 +173,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
             reason: icraft::network::protocol::RejectReason::Unsupported
         }
     ));
-    assert_eq!(restarted.authority.world.get_block(8, 80, 8), old);
+    assert_eq!(restarted.authority.world().get_block(8, 80, 8), old);
     let updates = restarted.drain_routed_updates();
     assert!(updates.iter().all(|update| update.target != 10
         || update.dimension != Dimension::Overworld
