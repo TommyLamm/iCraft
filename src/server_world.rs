@@ -12,6 +12,8 @@ use crate::authority::fishing::{FishingDomainContext, FishingDomainError};
 use crate::authority::transactions::{self, WorkstationContext};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
+use crate::container_sessions::ContainerSessionManager;
+use crate::inventory::ItemStack;
 use crate::commands::{self, Command, TimeCommand};
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::{EntityManager, EntityType};
@@ -253,6 +255,35 @@ impl ServerWorld {
             BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => None,
         };
         Some(stack.as_ref().map(ItemWire::from_stack))
+    }
+
+    pub fn container_item_slots(
+        &self,
+        position: (i32, i32, i32),
+    ) -> Option<Vec<Option<ItemStack>>> {
+        ContainerSessionManager::get_container_slots(
+            &self.chunks,
+            position.0,
+            position.1,
+            position.2,
+        )
+    }
+
+    pub fn commit_container_item_slots(
+        &mut self,
+        position: (i32, i32, i32),
+        slots: &[Option<ItemStack>],
+    ) -> Result<WorldMutation, WorldDispatchError> {
+        if !ContainerSessionManager::set_container_slots(
+            &mut self.chunks,
+            position.0,
+            position.1,
+            position.2,
+            slots,
+        ) {
+            return Err(WorldDispatchError::new(RejectReason::InvalidState));
+        }
+        Ok(self.touch_revision(position.0, position.1, position.2))
     }
 
     pub fn container_slots_wire(
@@ -1412,109 +1443,16 @@ impl ServerWorld {
                 }
             }
             ContainerAction::Click => {
-                let is_viewer = self
-                    .container_viewers
-                    .get(&position)
-                    .is_some_and(|viewers| viewers.contains(&player_id));
-                if !is_viewer {
-                    return Err(WorldDispatchError::new(RejectReason::PermissionDenied));
-                }
-                if let Some(dragged) = dragged {
-                    self.replace_container_slot(position, slot, dragged)?;
-                } else {
-                    self.extract_container_slot(position, slot)?;
-                }
+                // Container clicks are a session inventory transaction in
+                // AuthorityCore. The world dispatcher must not write a
+                // client-authored ItemWire or evaporate an extracted stack.
+                let _ = dragged;
+                return Err(WorldDispatchError::new(RejectReason::Unsupported));
             }
         }
         Ok(Some(
             state_mutation.unwrap_or_else(|| self.touch_revision(x, y, z)),
         ))
-    }
-
-    /// The compact gameplay envelope carries a slot but no cursor payload.
-    /// A click therefore performs the deterministic server-side primitive of
-    /// extracting one item; the resulting slot is returned through the
-    /// `SendContainerClickResult` adapter. Rich cursor/drag payloads remain a
-    /// protocol extension, never a renderer-side mutation.
-    fn extract_container_slot(
-        &mut self,
-        position: (i32, i32, i32),
-        slot: u16,
-    ) -> Result<(), WorldDispatchError> {
-        let slot = usize::from(slot);
-        let Some(entity) = self
-            .chunks
-            .get_block_entity_mut(position.0, position.1, position.2)
-        else {
-            return Err(WorldDispatchError::new(RejectReason::InvalidState));
-        };
-        let stack = match entity {
-            BlockEntity::Chest(chest) => &mut chest.inventory.slots[slot],
-            BlockEntity::Furnace(furnace) => &mut furnace.slots[slot],
-            BlockEntity::Hopper(hopper) => &mut hopper.slots[slot],
-            BlockEntity::Dispenser(dispenser) => &mut dispenser.slots[slot],
-            BlockEntity::Dropper(dropper) => &mut dropper.slots[slot],
-            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {
-                return Err(WorldDispatchError::new(RejectReason::InvalidState));
-            }
-        };
-        let Some(existing) = stack.as_mut() else {
-            return Err(WorldDispatchError::new(RejectReason::InvalidState));
-        };
-        existing.count = existing.count.saturating_sub(1);
-        if existing.count == 0 {
-            *stack = None;
-        }
-        match entity {
-            BlockEntity::Chest(chest) => chest.revision = chest.revision.wrapping_add(1),
-            BlockEntity::Furnace(furnace) => furnace.revision = furnace.revision.wrapping_add(1),
-            BlockEntity::Hopper(hopper) => hopper.revision = hopper.revision.wrapping_add(1),
-            BlockEntity::Dispenser(dispenser) => {
-                dispenser.revision = dispenser.revision.wrapping_add(1)
-            }
-            BlockEntity::Dropper(dropper) => dropper.revision = dropper.revision.wrapping_add(1),
-            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {}
-        }
-        Ok(())
-    }
-
-    fn replace_container_slot(
-        &mut self,
-        position: (i32, i32, i32),
-        slot: u16,
-        wire: &ItemWire,
-    ) -> Result<(), WorldDispatchError> {
-        let Some(value) = wire.to_stack() else {
-            return Err(WorldDispatchError::new(RejectReason::InvalidState));
-        };
-        let slot = usize::from(slot);
-        let Some(entity) = self
-            .chunks
-            .get_block_entity_mut(position.0, position.1, position.2)
-        else {
-            return Err(WorldDispatchError::new(RejectReason::InvalidState));
-        };
-        match entity {
-            BlockEntity::Chest(chest) => chest.inventory.slots[slot] = Some(value),
-            BlockEntity::Furnace(furnace) => furnace.slots[slot] = Some(value),
-            BlockEntity::Hopper(hopper) => hopper.slots[slot] = Some(value),
-            BlockEntity::Dispenser(dispenser) => dispenser.slots[slot] = Some(value),
-            BlockEntity::Dropper(dropper) => dropper.slots[slot] = Some(value),
-            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {
-                return Err(WorldDispatchError::new(RejectReason::InvalidState));
-            }
-        }
-        match entity {
-            BlockEntity::Chest(chest) => chest.revision = chest.revision.wrapping_add(1),
-            BlockEntity::Furnace(furnace) => furnace.revision = furnace.revision.wrapping_add(1),
-            BlockEntity::Hopper(hopper) => hopper.revision = hopper.revision.wrapping_add(1),
-            BlockEntity::Dispenser(dispenser) => {
-                dispenser.revision = dispenser.revision.wrapping_add(1)
-            }
-            BlockEntity::Dropper(dropper) => dropper.revision = dropper.revision.wrapping_add(1),
-            BlockEntity::Sign(_) | BlockEntity::Spawner(_) | BlockEntity::Observer(_) => {}
-        }
-        Ok(())
     }
 
     fn dispatch_command(&mut self, input: &str, _operator: bool) -> Result<(), WorldDispatchError> {

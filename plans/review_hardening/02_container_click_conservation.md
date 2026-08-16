@@ -49,3 +49,42 @@
 - 新容器種類、雙箱 UI、shift-click 配方移動的完整 vanilla 矩陣（可先支援現有 simulate 行為）。
 - Listen-host `BroadcastContainerSlotUpdate` 丟包（12）。
 - Embedded 物品欄 UI 改送 click（06，依賴本計劃）。
+
+## 實作與證據
+
+- Click 改由 `AuthorityCore::apply_container_click` 做單一 clone-commit：複製
+  `SessionGameplayState` + 容器槽，用 `simulate_container_click`，兩邊都成功才
+  `set_session_gameplay` 並 `commit_container_item_slots`（寫回 block entity、
+  bump 容器與世界 revision）。
+- 客戶端 `dragged: Some(item)` 只當聲稱：必須與 session cursor 或熱鍵欄上
+  metadata 完全相同的 stack 相符；否則 `RejectReason::InvalidState`。偽造鑽石
+  不會寫進箱子。
+- `dragged: None` 抽出進 session 物品欄；物品欄滿則整筆 reject，容器不變。
+- Brew 鎖定沿用 `transactions::brew_locks_slot` / `preserves_brew_locks`。
+  Brewing stand 不是 `ContainerAccess` 容器，對它 click 已 fail-closed
+  （`InvalidState`）。
+- 非 viewer 仍 `PermissionDenied`。`ServerWorld::dispatch` 的 Click 臂改回
+  `Unsupported`，刪除生產路徑上的 `replace_container_slot` /
+  `extract_container_slot`。
+- `route_container_result` 投影權威容器槽 + session cursor，並送出
+  `PlayerSessionUpdate`，不再 echo 客戶端 payload。
+- 頭測改為伺服器先種箱子內容，再讓客戶端 click 真實持有物。
+
+驗證：
+
+```
+cargo test --test review_hardening_container_click -- --nocapture
+  9 passed
+
+cargo test --test plan34_container_break_inventory_conservation -- --nocapture
+  debug：3/4（authority 守恆三則通過）
+  debug TCP listen 第一個 tick 6–11s > harness 5s，未進破箱斷言
+  release：4 passed
+
+cargo test --test headless_server_authority -- --nocapture
+  debug：tcp_dispenser passed；two_clients 在認證等待超時
+  release：two_clients passed（含伺服器種箱後 click 真實持有物與重啟守恆）
+
+cargo check --all-targets
+  ok
+```

@@ -1,5 +1,6 @@
+use icraft::authority::contract::{SessionGameplayState, SessionInventorySlot};
 use icraft::authority::interest::InterestKind;
-use icraft::block_entity::{BlockEntity, DispenserBlockEntity};
+use icraft::block_entity::{BlockEntity, ChestBlockEntity, DispenserBlockEntity};
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
@@ -645,8 +646,31 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     alice.clear_events();
     bob.clear_events();
     runtime.drain_routed_updates();
+    let dirt = ItemStack::new(Item::Dirt, 1);
+    let mut chest = ChestBlockEntity::new();
+    chest.set_stack(0, Some(dirt));
+    runtime.authority.world.chunks.set_block_entity(
+        CHEST_POSITION.0,
+        CHEST_POSITION.1,
+        CHEST_POSITION.2,
+        Some(BlockEntity::Chest(chest)),
+    );
+    let stone_stack = ItemStack::new(Item::Stone, 2);
+    let stone = ItemWire::from_stack(&stone_stack);
+    let mut alice_gameplay = runtime
+        .authority
+        .session(alice_id)
+        .map(|session| session.gameplay)
+        .unwrap_or_else(SessionGameplayState::default);
+    alice_gameplay.inventory[0] = Some(SessionInventorySlot::from_wire(
+        stone,
+        stone_stack.can_break,
+        stone_stack.can_place_on,
+    ));
+    assert!(runtime
+        .authority
+        .set_session_gameplay(alice_id, alice_gameplay));
     const CLICK_REQUEST: u128 = 0xA005;
-    let stone = ItemWire::from_stack(&ItemStack::new(Item::Stone, 2));
     alice.send(GameToClient::GameplayRequest {
         request: request(
             CLICK_REQUEST,
@@ -682,7 +706,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         .take_click_result(0)
         .expect("alice receives the authoritative clicked slot");
     assert_eq!(slot, Some(stone));
-    assert_eq!(dragged, Some(stone));
+    assert_eq!(dragged, Some(ItemWire::from_stack(&dirt)));
     let click_container_targets: BTreeSet<_> = runtime
         .drain_routed_updates()
         .iter()

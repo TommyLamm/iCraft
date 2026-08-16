@@ -8081,6 +8081,7 @@ impl State {
             index += 1;
         }
         state.inventory[index] = Self::session_slot_from_stack(self.inventory.offhand);
+        state.cursor = Self::session_slot_from_stack(self.inventory.dragged);
         state.mounted_entity = self.mount_manager.get_vehicle(0);
         state
     }
@@ -8104,6 +8105,7 @@ impl State {
         // authority while preserving health, XP, mining and all other
         // server-owned gameplay fields.
         authoritative.inventory = gameplay.inventory;
+        authoritative.cursor = gameplay.cursor;
         authoritative.selected_hotbar_slot = self.inventory.selected.min(8) as u8;
         let _ = runtime
             .runtime

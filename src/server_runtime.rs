@@ -2082,7 +2082,7 @@ impl ServerRuntime {
                     } => {
                         let action = ContainerAction::from_wire(action)
                             .expect("authority accepted only a typed container action");
-                        self.route_container_result(id, *revision, x, y, z, slot, action, None);
+                        self.route_container_result(id, *revision, x, y, z, slot, action);
                         // Container open/close changes the authoritative chest
                         // block state.  It is published by the next snapshot
                         // (including a double-chest partner mutation), so do
@@ -2093,7 +2093,7 @@ impl ServerRuntime {
                         y,
                         z,
                         slot,
-                        dragged,
+                        dragged: _,
                         is_left: _,
                     } => {
                         self.route_container_result(
@@ -2104,7 +2104,6 @@ impl ServerRuntime {
                             z,
                             slot,
                             ContainerAction::Click,
-                            dragged.as_ref(),
                         );
                         let dimension = self
                             .authority
@@ -2141,7 +2140,6 @@ impl ServerRuntime {
         z: i32,
         slot: u16,
         action: ContainerAction,
-        dragged: Option<&crate::network::protocol::ItemWire>,
     ) {
         let position = (x, y, z);
         let dimension = self
@@ -2217,6 +2215,18 @@ impl ServerRuntime {
                     .world_mut(dimension)
                     .and_then(|world| world.container_slot_wire(position, slot))
                     .flatten();
+                let session_state = self
+                    .authority
+                    .session(id)
+                    .map(|session| session.gameplay);
+                let dragged = session_state.and_then(|state| state.cursor).map(|slot| slot.item);
+                if let Some(state) = session_state {
+                    if let Some(session) = self.players.get_mut(&id) {
+                        session.last_projected_session_revision =
+                            Some((dimension, state.revision));
+                    }
+                    self.send_session_update(id, revision, dimension, state);
+                }
                 if self.local_session_id == Some(id) {
                     self.push_presentation_event(RuntimePresentationEvent::ContainerClickResult {
                         target: id,
@@ -2224,7 +2234,7 @@ impl ServerRuntime {
                         success: true,
                         slot_index: slot,
                         slot: slot_value,
-                        dragged: dragged.copied(),
+                        dragged,
                     });
                 } else {
                     self.enqueue_host(HostToServer::SendContainerClickResult {
@@ -2233,7 +2243,7 @@ impl ServerRuntime {
                         success: true,
                         slot_index: slot,
                         slot: slot_value,
-                        dragged: dragged.copied(),
+                        dragged,
                     });
                 }
                 for target in container_targets {
@@ -3328,7 +3338,8 @@ fn stack_from_session_slot(
 
 /// Convert the persisted player payload into the compact authority gameplay
 /// contract.  The 41 slots retain ItemWire metadata and Adventure masks; the
-/// renderer's drag/crafting UI fields deliberately remain presentation-only.
+/// real dragged cursor is restored so container-click conservation survives
+/// save/join. Catalog-only creative cursors are already stripped by the save codec.
 fn gameplay_from_player_data(data: &PlayerData) -> SessionGameplayState {
     let inventory = data.inventory.to_inventory();
     let mut slots = [None; SESSION_INVENTORY_SLOTS];
@@ -3352,6 +3363,7 @@ fn gameplay_from_player_data(data: &PlayerData) -> SessionGameplayState {
     gameplay.experience_level = data.experience_level;
     gameplay.selected_hotbar_slot = inventory.selected.min(8) as u8;
     gameplay.inventory = slots;
+    gameplay.cursor = session_slot_from_stack(inventory.dragged.as_ref());
     gameplay
 }
 
@@ -3377,6 +3389,7 @@ fn apply_gameplay_to_player_data(data: &mut PlayerData, gameplay: SessionGamepla
         inventory.armor[index] = stack_from_session_slot(slot);
     }
     inventory.offhand = stack_from_session_slot(gameplay.inventory[40]);
+    inventory.dragged = stack_from_session_slot(gameplay.cursor);
     inventory.selected = usize::from(gameplay.selected_hotbar_slot.min(8));
     data.inventory = crate::save::InventoryData::from(&inventory);
 }

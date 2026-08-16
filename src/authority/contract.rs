@@ -210,6 +210,10 @@ pub struct SessionGameplayState {
     pub fishing_hook: Option<SessionFishingHookState>,
     pub brew: Option<SessionBrewState>,
     pub mining: Option<MiningProgressState>,
+    /// Authority-owned dragged stack for container clicks. Not projected
+    /// through `SessionGameplayWire`; `ContainerClickResult.dragged` and the
+    /// persisted player `Inventory.dragged` field carry it across the runtime.
+    pub cursor: Option<SessionInventorySlot>,
     pub revision: u64,
 }
 
@@ -236,6 +240,7 @@ impl Default for SessionGameplayState {
             fishing_hook: None,
             brew: None,
             mining: None,
+            cursor: None,
             revision: 0,
         }
     }
@@ -354,6 +359,7 @@ impl From<SessionGameplayWire> for SessionGameplayState {
             fishing_hook: state.fishing_hook.map(Into::into),
             brew: state.brew.map(Into::into),
             mining: state.mining.map(Into::into),
+            cursor: None,
             revision: state.revision,
         }
     }

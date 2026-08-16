@@ -12,8 +12,8 @@ use crate::dimension::Dimension;
 use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::inventory::ItemStack;
 use crate::network::protocol::{
-    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
-    PlayerId, RejectReason, SessionSlotWire,
+    BlockActionKind, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
+    GameplayResponse, ItemWire, PlayerId, RejectReason, SessionSlotWire,
 };
 use crate::server_world::{ServerWorld, FIXED_DT};
 use contract::{
@@ -1464,6 +1464,29 @@ impl AuthorityCore {
             | GameplayOperation::UseState { .. } => {
                 Some(self.apply_transaction_operation(session_id, &request.operation))
             }
+            GameplayOperation::ContainerClick {
+                x,
+                y,
+                z,
+                slot,
+                is_left,
+                dragged,
+            } => Some(self.apply_container_click(
+                session_id,
+                (*x, *y, *z),
+                *slot,
+                *is_left,
+                dragged.as_ref(),
+            )),
+            GameplayOperation::Container {
+                action,
+                x,
+                y,
+                z,
+                slot,
+            } if ContainerAction::from_wire(*action) == Some(ContainerAction::Click) => {
+                Some(self.apply_container_click(session_id, (*x, *y, *z), *slot, true, None))
+            }
             _ => None,
         }
     }
@@ -1934,6 +1957,87 @@ impl AuthorityCore {
         };
         session.gameplay = candidate;
         Ok(None)
+    }
+
+    fn apply_container_click(
+        &mut self,
+        session_id: PlayerId,
+        position: (i32, i32, i32),
+        slot: u16,
+        is_left: bool,
+        claimed: Option<&ItemWire>,
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        let Some(original) = self
+            .sessions
+            .get(&session_id)
+            .map(|session| session.gameplay)
+        else {
+            return Err(RejectReason::Unauthorized);
+        };
+        let is_viewer = self
+            .world
+            .container_viewers
+            .get(&position)
+            .is_some_and(|viewers| viewers.contains(&session_id));
+        if !is_viewer {
+            return Err(RejectReason::PermissionDenied);
+        }
+        let slot_index = usize::from(slot);
+        let Some(mut slots) = self.world.container_item_slots(position) else {
+            return Err(RejectReason::InvalidState);
+        };
+        if slot_index >= slots.len() {
+            return Err(RejectReason::InvalidState);
+        }
+
+        let mut candidate = original;
+        if let Some(claimed) = claimed {
+            if !slot_wire_matches(candidate.cursor, claimed) {
+                if candidate.cursor.is_some() {
+                    return Err(RejectReason::InvalidState);
+                }
+                let Some(source) = find_hotbar_source(&candidate, claimed) else {
+                    return Err(RejectReason::InvalidState);
+                };
+                if transactions::brew_locks_slot(&candidate, source as u8) {
+                    return Err(RejectReason::InvalidState);
+                }
+                candidate.cursor = candidate.inventory[source].take();
+            }
+        }
+
+        let (next_slot, next_cursor) = crate::container_sessions::simulate_container_click(
+            slots[slot_index],
+            candidate.cursor.and_then(stack_from_session_inventory),
+            is_left,
+        );
+        let extract_into_inventory = original.cursor.is_none() && claimed.is_none();
+        candidate.cursor = next_cursor.as_ref().map(session_slot_from_item_stack);
+        if extract_into_inventory {
+            if let Some(extracted) = candidate.cursor.take() {
+                if !candidate.add_slot(extracted) {
+                    return Err(RejectReason::InvalidState);
+                }
+            }
+        }
+        if !preserves_brew_locks(&original, &candidate) {
+            return Err(RejectReason::InvalidState);
+        }
+        slots[slot_index] = next_slot;
+
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err(RejectReason::Unauthorized);
+        };
+        session.gameplay = candidate;
+        match self.world.commit_container_item_slots(position, &slots) {
+            Ok(mutation) => Ok(Some(mutation)),
+            Err(error) => {
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    session.gameplay = original;
+                }
+                Err(error.reason())
+            }
+        }
     }
 
     fn apply_transaction_operation(
@@ -2487,6 +2591,37 @@ fn stack_from_slot(slot: Option<SessionSlotWire>) -> Option<crate::inventory::It
     stack.can_break = slot.can_break;
     stack.can_place_on = slot.can_place_on;
     Some(stack)
+}
+
+fn stack_from_session_inventory(slot: SessionInventorySlot) -> Option<crate::inventory::ItemStack> {
+    let mut stack = slot.item.to_stack()?;
+    stack.can_break = slot.can_break;
+    stack.can_place_on = slot.can_place_on;
+    Some(stack)
+}
+
+fn session_slot_from_item_stack(stack: &crate::inventory::ItemStack) -> SessionInventorySlot {
+    SessionInventorySlot::from_wire(
+        ItemWire::from_stack(stack),
+        stack.can_break,
+        stack.can_place_on,
+    )
+}
+
+fn slot_wire_matches(slot: Option<SessionInventorySlot>, claimed: &ItemWire) -> bool {
+    slot.is_some_and(|slot| {
+        slot.item == *claimed
+            && slot.can_break == claimed.can_break
+            && slot.can_place_on == claimed.can_place_on
+    })
+}
+
+fn find_hotbar_source(gameplay: &SessionGameplayState, claimed: &ItemWire) -> Option<usize> {
+    let selected = usize::from(gameplay.selected_hotbar_slot.min(8));
+    if slot_wire_matches(gameplay.inventory[selected], claimed) {
+        return Some(selected);
+    }
+    (0..9).find(|&index| slot_wire_matches(gameplay.inventory[index], claimed))
 }
 
 fn held_slot_index(gameplay: &SessionGameplayState, hand: u8) -> Result<u8, RejectReason> {
