@@ -1,5 +1,5 @@
 use crate::chunk_manager::ChunkManager;
-use crate::world::{RenderType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{RenderType, CHUNK_DEPTH, CHUNK_WIDTH};
 use std::collections::{HashSet, VecDeque};
 
 pub struct LightNode {
@@ -317,7 +317,8 @@ pub fn update_sky_light_after_placed(
         });
 
         if old_val == 15 {
-            for y in (0..wy).rev() {
+            let height = chunk_manager.dimension.height();
+            for y in (height.min_y()..wy).rev() {
                 let val = chunk_manager.get_sky_light(wx, y, wz);
                 if val == 0 {
                     break;
@@ -350,15 +351,16 @@ pub fn update_sky_light_after_removed(
     dirty_chunks: &mut HashSet<(i32, i32)>,
 ) {
     let mut propagate_queue = VecDeque::new();
+    let height = chunk_manager.dimension.height();
 
-    let above_sky = if wy == CHUNK_HEIGHT as i32 - 1 {
-        true
+    let above_sky = if wy + 1 >= height.max_y_exclusive() {
+        chunk_manager.dimension.has_sky_light()
     } else {
         chunk_manager.get_sky_light(wx, wy + 1, wz) == 15
     };
 
     if above_sky {
-        for y in (0..=wy).rev() {
+        for y in (height.min_y()..=wy).rev() {
             let block = chunk_manager.get_block(wx, y, wz);
             if block.properties().render_type == RenderType::Opaque {
                 break;
@@ -384,7 +386,7 @@ pub fn update_sky_light_after_removed(
         ];
         for &(dx, dy, dz) in &dirs {
             let ny = wy + dy;
-            if ny >= 0 && ny < CHUNK_HEIGHT as i32 {
+            if height.contains_y(ny) {
                 let val = chunk_manager.get_sky_light(wx + dx, ny, wz + dz);
                 if val > max_neighbor {
                     max_neighbor = val;
@@ -486,7 +488,7 @@ pub fn update_block_light_after_removed(
         ];
         for &(dx, dy, dz) in &dirs {
             let ny = wy + dy;
-            if ny >= 0 && ny < CHUNK_HEIGHT as i32 {
+            if chunk_manager.dimension.height().contains_y(ny) {
                 let val = chunk_manager.get_block_light(wx + dx, ny, wz + dz);
                 if val > max_neighbor {
                     max_neighbor = val;
@@ -526,15 +528,14 @@ pub fn propagate_chunk_lighting(
         (0, 0, -1),
     ];
 
+    let height = chunk_manager.dimension.height();
     if let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) {
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 let wx = start_x + x as i32;
                 let wz = start_z + z as i32;
 
-                for y in 0..CHUNK_HEIGHT {
-                    let wy = y as i32 + (chunk.min_section_y as i32 * 16);
-
+                for wy in height.min_y()..height.max_y_exclusive() {
                     // 1. Seed sky light only where a loaded, transparent
                     // neighbor actually needs light. Treating every chunk
                     // boundary as dirty creates thousands of useless nodes.
@@ -546,8 +547,7 @@ pub fn propagate_chunk_lighting(
                             let local_nx = x as i32 + dx;
                             let local_ny = wy + dy;
                             let local_nz = z as i32 + dz;
-                            let min_y = chunk.min_section_y as i32 * 16;
-                            if local_ny < min_y || local_ny >= min_y + CHUNK_HEIGHT as i32 {
+                            if !height.contains_y(local_ny) {
                                 continue;
                             }
 
@@ -611,8 +611,7 @@ pub fn propagate_chunk_lighting(
                             let local_nx = x as i32 + dx;
                             let local_ny = wy + dy;
                             let local_nz = z as i32 + dz;
-                            let min_y = chunk.min_section_y as i32 * 16;
-                            if local_ny < min_y || local_ny >= min_y + CHUNK_HEIGHT as i32 {
+                            if !height.contains_y(local_ny) {
                                 continue;
                             }
 
@@ -678,7 +677,7 @@ pub fn propagate_chunk_lighting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{BlockType, Chunk};
+    use crate::world::{BlockType, Chunk, CHUNK_HEIGHT};
 
     #[test]
     fn initial_lighting_reaches_horizontal_cave_entrance() {
@@ -756,5 +755,63 @@ mod tests {
         propagate_block_light(&mut chunk_manager, &mut block_queue, &mut dirty_chunks);
         assert!(block_queue.is_empty());
         assert_eq!(chunk_manager.get_block_light(8, 63, 8), 13);
+    }
+
+    fn empty_fully_lit_overworld_column() -> ChunkManager {
+        let mut chunk_manager = ChunkManager::new(0);
+        let mut chunk = Chunk::empty(0, 0);
+        let height = crate::dimension::WorldHeight::OVERWORLD;
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                for wy in height.min_y()..height.max_y_exclusive() {
+                    chunk.set_block_local(x, wy, z, BlockType::Air);
+                    chunk.set_sky_light(x, wy, z, 15);
+                    chunk.set_block_light(x, wy, z, 0);
+                }
+            }
+        }
+        chunk_manager.chunks.insert((0, 0), chunk);
+        chunk_manager
+    }
+
+    #[test]
+    fn placing_opaque_at_y5_zeros_sky_below_zero() {
+        let mut chunk_manager = empty_fully_lit_overworld_column();
+        // A full Y=5 slab so neighboring columns cannot refill sky from the side.
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                chunk_manager.set_block(x as i32, 5, z as i32, BlockType::Stone);
+            }
+        }
+        let mut dirty_chunks = HashSet::new();
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                update_sky_light_after_placed(
+                    &mut chunk_manager,
+                    x as i32,
+                    5,
+                    z as i32,
+                    &mut dirty_chunks,
+                );
+            }
+        }
+        assert_eq!(chunk_manager.get_sky_light(8, 5, 8), 0);
+        assert_eq!(chunk_manager.get_sky_light(8, -8, 8), 0);
+    }
+
+    #[test]
+    fn breaking_block_at_y256_receives_sky_from_y257() {
+        let mut chunk_manager = empty_fully_lit_overworld_column();
+        chunk_manager.set_block(8, 256, 8, BlockType::Stone);
+        chunk_manager.set_sky_light(8, 256, 8, 0);
+        for y in crate::dimension::WorldHeight::OVERWORLD.min_y()..256 {
+            chunk_manager.set_sky_light(8, y, 8, 0);
+        }
+        assert_eq!(chunk_manager.get_sky_light(8, 257, 8), 15);
+
+        chunk_manager.set_block(8, 256, 8, BlockType::Air);
+        let mut dirty_chunks = HashSet::new();
+        update_sky_light_after_removed(&mut chunk_manager, 8, 256, 8, &mut dirty_chunks);
+        assert_eq!(chunk_manager.get_sky_light(8, 256, 8), 15);
     }
 }

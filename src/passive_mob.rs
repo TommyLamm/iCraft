@@ -366,8 +366,9 @@ pub fn spawn_passive_mobs(
     let spawn_z = (player_pos.z + angle.sin() * dist) as i32;
 
     // Find highest solid block
+    let height = chunk_manager.dimension.height();
     let mut highest_y = None;
-    for y in (0..crate::world::CHUNK_HEIGHT as i32).rev() {
+    for y in (height.min_y()..height.max_y_exclusive()).rev() {
         if chunk_manager
             .get_block(spawn_x, y, spawn_z)
             .properties()
@@ -380,7 +381,7 @@ pub fn spawn_passive_mobs(
 
     if let Some(solid_y) = highest_y {
         let spawn_y = solid_y + 1;
-        if spawn_y > 0 && spawn_y < (crate::world::CHUNK_HEIGHT as i32 - 2) {
+        if height.contains_y(spawn_y) && height.contains_y(spawn_y + 1) {
             let block_below = chunk_manager.get_block(spawn_x, solid_y, spawn_z);
             let block_feet = chunk_manager.get_block(spawn_x, spawn_y, spawn_z);
             let block_head = chunk_manager.get_block(spawn_x, spawn_y + 1, spawn_z);

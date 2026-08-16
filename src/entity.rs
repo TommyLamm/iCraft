@@ -552,6 +552,12 @@ impl Entity {
             self.pickup_cooldown = (self.pickup_cooldown - dt).max(0.0);
         }
 
+        // Unloaded columns must not be sampled as Air. Freeze this tick so
+        // drops cannot fall through unmaterialized terrain.
+        if self.physics_region_unloaded(chunk_manager, dt) {
+            return;
+        }
+
         // Apply gravity
         let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
             8.0 // slow glide
@@ -589,21 +595,42 @@ impl Entity {
         self.velocity.z *= friction;
     }
 
+    fn physics_region_unloaded(&self, chunk_manager: &ChunkManager, dt: f32) -> bool {
+        let current = self.get_aabb();
+        if aabb_touches_unloaded_column(chunk_manager, &current) {
+            return true;
+        }
+        let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
+            8.0
+        } else {
+            32.0
+        };
+        let mut vel = self.velocity;
+        vel.y -= gravity * dt;
+        let mut predicted = current;
+        predicted.min += vel * dt;
+        predicted.max += vel * dt;
+        aabb_touches_unloaded_column(chunk_manager, &predicted)
+    }
+
     fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
         let entity_aabb = self.get_aabb();
+        let height = chunk_manager.dimension.height();
         let min_x = entity_aabb.min.x.floor() as i32;
         let max_x = entity_aabb.max.x.floor() as i32;
         let min_y =
-            (entity_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+            (entity_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let max_y =
-            (entity_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+            (entity_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let min_z = entity_aabb.min.z.floor() as i32;
         let max_z = entity_aabb.max.z.floor() as i32;
 
         for x in min_x..=max_x {
             for y in min_y..=max_y {
                 for z in min_z..=max_z {
-                    let block = chunk_manager.get_block(x, y, z);
+                    let Some(block) = chunk_manager.get_loaded_block(x, y, z) else {
+                        continue;
+                    };
                     if block.properties().is_solid {
                         let block_aabb = AABB::new(
                             Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
@@ -640,6 +667,21 @@ impl Entity {
             }
         }
     }
+}
+
+fn aabb_touches_unloaded_column(chunk_manager: &ChunkManager, aabb: &AABB) -> bool {
+    let min_x = aabb.min.x.floor() as i32;
+    let max_x = aabb.max.x.floor() as i32;
+    let min_z = aabb.min.z.floor() as i32;
+    let max_z = aabb.max.z.floor() as i32;
+    for x in min_x..=max_x {
+        for z in min_z..=max_z {
+            if !chunk_manager.is_block_loaded(x, 0, z) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 use std::collections::HashMap;
@@ -1116,11 +1158,19 @@ mod tests {
         assert!(ray_intersects_aabb(ray_origin, ray_dir_away, &aabb).is_none());
     }
 
+    fn loaded_air_column() -> ChunkManager {
+        let mut chunk_manager = ChunkManager::new(4);
+        chunk_manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::empty(0, 0));
+        chunk_manager
+    }
+
     #[test]
     fn test_chicken_slow_fall() {
-        let mut chicken = Entity::new(1, EntityType::Chicken, Vec3::new(0.0, 10.0, 0.0));
+        let mut chicken = Entity::new(1, EntityType::Chicken, Vec3::new(0.5, 10.0, 0.5));
         chicken.velocity.y = -10.0;
-        let chunk_manager = ChunkManager::new(4);
+        let chunk_manager = loaded_air_column();
         chicken.update_physics(0.1, &chunk_manager);
         assert!(chicken.velocity.y >= -2.01 && chicken.velocity.y <= -1.99);
     }
@@ -1137,8 +1187,8 @@ mod tests {
     fn dropped_item_falls_with_gravity() {
         let mut item = Entity::new(2, EntityType::DroppedItem, Vec3::new(0.5, 20.0, 0.5));
         item.dropped_item = Some(crate::inventory::Item::Stone);
-        let chunk_manager = ChunkManager::new(4);
-        // No solid block below within the chunk; gravity should pull it down.
+        let chunk_manager = loaded_air_column();
+        // Loaded air column; gravity should pull it down.
         item.update_physics(0.5, &chunk_manager);
         assert!(
             item.velocity.y < 0.0,
@@ -1152,19 +1202,10 @@ mod tests {
 
     #[test]
     fn dropped_item_lands_on_solid_block() {
-        // Build a chunk manager with a single solid stone block at world
-        // (0, 10, 0). We start from a generated chunk but clear it so the only
-        // solid block is our test floor.
-        let mut chunk_manager = ChunkManager::new(4);
+        // Empty signed-Y column with a single solid stone floor at y=10.
+        let mut chunk_manager = loaded_air_column();
         let _ = chunk_manager.chunks.insert((0, 0), {
-            let mut c = crate::world::Chunk::new(0, 0);
-            for x in 0..crate::world::CHUNK_WIDTH {
-                for y in 0..crate::world::CHUNK_HEIGHT {
-                    for z in 0..crate::world::CHUNK_DEPTH {
-                        c.set_block_local(x, y as i32, z, crate::world::BlockType::Air);
-                    }
-                }
-            }
+            let mut c = crate::world::Chunk::empty(0, 0);
             // Place a 2x2 stone floor at y=10 covering the item's footprint.
             for fx in 0..2 {
                 for fz in 0..2 {
@@ -1193,10 +1234,56 @@ mod tests {
     }
 
     #[test]
+    fn dropped_item_lands_on_solid_block_below_y_zero() {
+        let mut chunk_manager = loaded_air_column();
+        let _ = chunk_manager.chunks.insert((0, 0), {
+            let mut c = crate::world::Chunk::empty(0, 0);
+            for fx in 0..2 {
+                for fz in 0..2 {
+                    c.set_block_local(fx, -10, fz, crate::world::BlockType::Stone);
+                }
+            }
+            c
+        });
+        let mut item = Entity::new(5, EntityType::DroppedItem, Vec3::new(0.5, -8.0, 0.5));
+        item.dropped_item = Some(crate::inventory::Item::Stone);
+        for _ in 0..400 {
+            item.update_physics(0.05, &chunk_manager);
+        }
+        assert!(
+            item.on_ground,
+            "dropped item should rest on the Y=-10 solid block"
+        );
+        assert!(
+            item.position.y >= -9.1 && item.position.y <= -8.9,
+            "dropped item should rest on top of y=-10 (got y={})",
+            item.position.y
+        );
+    }
+
+    #[test]
+    fn dropped_item_freezes_when_column_is_unloaded() {
+        // Policy: skip physics this tick when any occupied/predicted column is
+        // unloaded. Missing terrain must not be treated as air.
+        let chunk_manager = ChunkManager::new(4);
+        let mut item = Entity::new(6, EntityType::DroppedItem, Vec3::new(0.5, -9.0, 0.5));
+        item.dropped_item = Some(crate::inventory::Item::Stone);
+        item.velocity = Vec3::new(0.0, -8.0, 0.0);
+        let start = item.position;
+        item.update_physics(0.05, &chunk_manager);
+        assert_eq!(
+            item.position, start,
+            "unloaded column must freeze the entity instead of falling through air"
+        );
+        assert_eq!(item.velocity, Vec3::new(0.0, -8.0, 0.0));
+        assert!(!item.on_ground);
+    }
+
+    #[test]
     fn dropped_item_pickup_cooldown_decreases() {
         let mut item = Entity::new(4, EntityType::DroppedItem, Vec3::new(0.5, 20.0, 0.5));
         item.pickup_cooldown = 0.5;
-        let chunk_manager = ChunkManager::new(4);
+        let chunk_manager = loaded_air_column();
         item.update_physics(0.3, &chunk_manager);
         assert!(
             (item.pickup_cooldown - 0.2).abs() < 1e-4,

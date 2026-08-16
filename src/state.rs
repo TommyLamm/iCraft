@@ -6360,6 +6360,7 @@ impl State {
             &camera,
             config.width as f32 / config.height as f32,
             settings.render_distance as u32,
+            current_dimension.height().height(),
             &world_time,
             0.0,
             false,
@@ -6897,9 +6898,7 @@ impl State {
                         }
                         let metadata = data.redstone_metadata();
                         if let Err(error) = data.restore_to_chunk(&mut chunk) {
-                            eprintln!(
-                                "[Save] skipping corrupt saved chunk ({cx}, {cz}): {error}"
-                            );
+                            eprintln!("[Save] skipping corrupt saved chunk ({cx}, {cz}): {error}");
                             continue;
                         }
                         if !metadata.is_empty() {
@@ -12093,6 +12092,7 @@ impl State {
                     &self.camera,
                     self.config.width as f32 / self.config.height as f32,
                     self.chunk_manager.render_distance as u32,
+                    self.chunk_manager.dimension.height().height(),
                     &self.world_time,
                     self.total_time,
                     is_underwater,
@@ -12908,12 +12908,13 @@ impl State {
 
         // Cactus damage check
         let player_aabb = self.player_physics.get_aabb();
+        let height = self.chunk_manager.dimension.height();
         let min_x = player_aabb.min.x.floor() as i32;
         let max_x = player_aabb.max.x.floor() as i32;
         let min_y =
-            (player_aabb.min.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+            (player_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let max_y =
-            (player_aabb.max.y.floor() as i32).clamp(0, crate::world::CHUNK_HEIGHT as i32 - 1);
+            (player_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
         let min_z = player_aabb.min.z.floor() as i32;
         let max_z = player_aabb.max.z.floor() as i32;
 
@@ -14033,6 +14034,7 @@ impl State {
             &presentation_camera,
             self.config.width as f32 / self.config.height as f32,
             self.chunk_manager.render_distance as u32,
+            self.chunk_manager.dimension.height().height(),
             &self.world_time,
             self.total_time,
             is_underwater,
@@ -23425,7 +23427,10 @@ impl State {
             // keep the label readable at the horizontal screen edge.
             let view_proj = self.camera.build_view_projection_matrix(
                 aspect,
-                crate::camera::render_far_plane(self.chunk_manager.render_distance as u32),
+                crate::camera::render_far_plane(
+                    self.chunk_manager.render_distance as u32,
+                    self.chunk_manager.dimension.height().height(),
+                ),
             );
             for remote in self.remote_players.values() {
                 if remote.username.trim().is_empty() {

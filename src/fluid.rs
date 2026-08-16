@@ -247,9 +247,6 @@ fn is_supported(
     wz: i32,
     fluid_type: BlockType,
 ) -> bool {
-    if wy == 0 {
-        return true;
-    }
     let below = chunk_manager.get_block(wx, wy - 1, wz);
     below != BlockType::Air && below != fluid_type && !below.properties().is_passable
 }
@@ -412,5 +409,25 @@ mod tests {
 
         assert_eq!(manager.pending_fluid_updates(false), 0);
         assert_eq!(manager.get_block(8, 119, 8), BlockType::Air);
+    }
+
+    #[test]
+    fn y_zero_is_not_automatic_support_for_infinite_source() {
+        let mut manager = ChunkManager::new(1);
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+        manager.set_block(8, 0, 8, BlockType::Water);
+        manager.set_block(10, 0, 8, BlockType::Water);
+        manager.set_block(9, 0, 8, BlockType::Water);
+        manager.set_fluid_level(9, 0, 8, 1);
+        manager.set_fluid_falling(9, 0, 8, false);
+
+        tick_fluids(&mut manager, false, 64);
+
+        assert_eq!(manager.get_block(9, 0, 8), BlockType::Water);
+        assert_ne!(
+            manager.get_fluid_level(9, 0, 8),
+            0,
+            "Y=0 over air must not form an infinite source"
+        );
     }
 }

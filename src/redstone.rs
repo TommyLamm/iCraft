@@ -1,5 +1,5 @@
 use crate::chunk_manager::ChunkManager;
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -261,14 +261,14 @@ impl SavedComparatorMode {
 
 /// Persistent redstone component metadata for a single block inside a chunk.
 ///
-/// `local_x`/`local_y`/`local_z` are chunk-local coordinates (0..16, 0..256,
-/// 0..16). Only components whose `ComponentState` differs from the runtime
-/// default are serialized, so freshly-placed or never-interacted components
-/// round-trip as an empty vector.
+/// `local_x`/`local_z` are chunk-local (0..16). `local_y` is signed world Y
+/// (`i16`), matching block-entity coordinates. Only components whose
+/// `ComponentState` differs from the runtime default are serialized, so
+/// freshly-placed or never-interacted components round-trip as an empty vector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedstoneComponentMetadata {
     pub local_x: u8,
-    pub local_y: u8,
+    pub local_y: i16,
     pub local_z: u8,
     pub facing: SavedDirection,
     pub repeater_delay: u8,
@@ -541,7 +541,7 @@ impl RedstoneSystem {
     /// their own block position, so each one belongs to exactly one chunk.
     pub fn collect_chunk_metadata(
         &self,
-        _manager: &ChunkManager,
+        manager: &ChunkManager,
         cx: i32,
         cz: i32,
     ) -> Vec<RedstoneComponentMetadata> {
@@ -558,7 +558,7 @@ impl RedstoneSystem {
             {
                 continue;
             }
-            if pos.1 < 0 || pos.1 >= CHUNK_HEIGHT as i32 {
+            if !manager.dimension.height().contains_y(pos.1) {
                 continue;
             }
             // `sync_loaded_chunks` evicts components whose block was replaced,
@@ -568,7 +568,7 @@ impl RedstoneSystem {
             }
             metadata.push(RedstoneComponentMetadata {
                 local_x: local_x as u8,
-                local_y: pos.1 as u8,
+                local_y: pos.1 as i16,
                 local_z: local_z as u8,
                 facing: state.facing.into(),
                 repeater_delay: state.repeater_delay,
@@ -2644,6 +2644,32 @@ mod tests {
         assert_eq!(metadata_chunk_1.len(), 1);
         assert_eq!(metadata_chunk_1[0].local_x, 1);
         assert_eq!(metadata_chunk_1[0].repeater_delay, 2);
+    }
+
+    #[test]
+    fn sidecar_preserves_signed_world_y() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        manager.set_block(4, -20, 5, BlockType::Repeater);
+        system.on_block_changed(&mut manager, (4, -20, 5), Direction::East);
+        system.set_repeater_delay((4, -20, 5), 3);
+        manager.set_block(4, 256, 5, BlockType::Repeater);
+        system.on_block_changed(&mut manager, (4, 256, 5), Direction::West);
+        system.set_repeater_delay((4, 256, 5), 2);
+
+        let metadata = system.collect_chunk_metadata(&manager, 0, 0);
+        let ys: Vec<i16> = metadata.iter().map(|entry| entry.local_y).collect();
+        assert!(
+            ys.contains(&-20),
+            "negative world Y must persist, got {ys:?}"
+        );
+        assert!(ys.contains(&256), "Y>=256 must persist, got {ys:?}");
+
+        let mut reloaded = RedstoneSystem::new();
+        reloaded.tick(&mut manager, &[]);
+        reloaded.restore_chunk_metadata(&manager, 0, 0, &metadata);
+        assert_eq!(reloaded.repeater_delay((4, -20, 5)), Some(3));
+        assert_eq!(reloaded.repeater_delay((4, 256, 5)), Some(2));
     }
 
     #[test]

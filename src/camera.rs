@@ -1,4 +1,4 @@
-use crate::world::{CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{CHUNK_DEPTH, CHUNK_WIDTH};
 use glam::{Mat4, Vec3};
 
 const FAR_PLANE_MARGIN: f32 = 32.0;
@@ -36,12 +36,12 @@ impl Camera {
     }
 }
 
-pub fn render_far_plane(render_distance: u32) -> f32 {
+pub fn render_far_plane(render_distance: u32, world_height: u32) -> f32 {
     let chunk_radius = render_distance as f32;
     let horizontal_x = chunk_radius * CHUNK_WIDTH as f32;
     let horizontal_z = chunk_radius * CHUNK_DEPTH as f32;
     let horizontal_corner = horizontal_x.hypot(horizontal_z);
-    horizontal_corner.hypot(CHUNK_HEIGHT as f32) + FAR_PLANE_MARGIN
+    horizontal_corner.hypot(world_height as f32) + FAR_PLANE_MARGIN
 }
 
 // 用於 Uniform 上傳的對齊結構體
@@ -81,12 +81,13 @@ impl CameraUniform {
         camera: &Camera,
         aspect: f32,
         render_distance: u32,
+        world_height: u32,
         world_time: &WorldTime,
         total_time: f32,
         is_underwater: bool,
     ) {
-        let view_proj =
-            camera.build_view_projection_matrix(aspect, render_far_plane(render_distance));
+        let view_proj = camera
+            .build_view_projection_matrix(aspect, render_far_plane(render_distance, world_height));
         self.view_proj = view_proj.to_cols_array_2d();
         self.inv_view_proj = view_proj.inverse().to_cols_array_2d();
         self.camera_pos = [camera.position.x, camera.position.y, camera.position.z, 0.0];
@@ -199,21 +200,23 @@ mod tests {
 
     #[test]
     fn far_plane_covers_the_render_distance_corner() {
+        let world_height = crate::dimension::WorldHeight::OVERWORLD.height();
         for render_distance in [2, 8, 16, 32] {
             let corner_distance = render_distance as f32 * 16.0 * std::f32::consts::SQRT_2;
-            assert!(render_far_plane(render_distance) >= corner_distance + 32.0);
+            assert!(render_far_plane(render_distance, world_height) >= corner_distance + 32.0);
         }
     }
 
     #[test]
     fn far_plane_covers_the_vertical_render_distance_corner() {
+        let world_height = crate::dimension::WorldHeight::OVERWORLD.height();
         for render_distance in [2, 8, 16, 32] {
             let target = Vec3::new(
                 render_distance as f32 * CHUNK_WIDTH as f32,
-                CHUNK_HEIGHT as f32,
+                world_height as f32,
                 render_distance as f32 * CHUNK_DEPTH as f32,
             );
-            let far_plane = render_far_plane(render_distance);
+            let far_plane = render_far_plane(render_distance, world_height);
             assert!(far_plane >= target.length() + FAR_PLANE_MARGIN);
 
             let direction = target.normalize();

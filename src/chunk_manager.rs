@@ -238,6 +238,10 @@ impl ChunkManager {
         Some(((cx, cz), (bx, wy, bz)))
     }
 
+    /// Returns the block at the coordinate. Air fallback applies when the
+    /// column is loaded (empty cell) or Y is outside world height. Unloaded
+    /// columns also currently return Air for historical callers; collision
+    /// and support must use `get_loaded_block` / `is_block_loaded` instead.
     pub fn get_block(&self, wx: i32, wy: i32, wz: i32) -> BlockType {
         self.get_loaded_block(wx, wy, wz).unwrap_or(BlockType::Air)
     }

@@ -515,10 +515,14 @@ impl SimHarness {
     pub fn random_tick_block(&mut self, pos: (i32, i32, i32), rng: u64) -> bool {
         let block = self.chunks.get_block(pos.0, pos.1, pos.2);
         let state = self.chunks.get_block_state(pos.0, pos.1, pos.2);
-        let request =
-            crate::world_tick::evaluate_random_tick_at(pos, block, state, rng, |x, y, z| {
-                Some(self.chunks.get_block(x, y, z))
-            });
+        let request = crate::world_tick::evaluate_random_tick_at(
+            pos,
+            block,
+            state,
+            rng,
+            self.chunks.dimension.height(),
+            |x, y, z| Some(self.chunks.get_block(x, y, z)),
+        );
         let Some(request) = request else { return false };
         self.chunks.set_block(
             request.pos.0,

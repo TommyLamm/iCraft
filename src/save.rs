@@ -1152,6 +1152,26 @@ struct LegacyRedstoneComponentMetadata {
     note: u8,
 }
 
+/// Sidecar shape after the latch was added but while Y was still `u8`.
+/// Old payloads treated Y as 0..256 world Y; 236 stays 236, never -20.
+#[derive(Serialize, Deserialize)]
+struct LegacyU8YRedstoneComponentMetadata {
+    local_x: u8,
+    local_y: u8,
+    local_z: u8,
+    facing: crate::redstone::SavedDirection,
+    repeater_delay: u8,
+    comparator_mode: crate::redstone::SavedComparatorMode,
+    note: u8,
+    last_powered: bool,
+}
+
+fn migrate_legacy_u8_redstone_y(local_y: u8) -> i16 {
+    // Historical saves stored 0..256 world Y. Do not reinterpret high values
+    // as wrapped signed Y (236 must stay 236, not -20).
+    local_y as i16
+}
+
 impl ChunkSaveData {
     pub fn from_chunk(chunk: &Chunk) -> io::Result<Self> {
         Self::from_chunk_with_redstone(chunk, &[])
@@ -1254,6 +1274,27 @@ impl ChunkSaveData {
                         return Some(current);
                     }
                 }
+                if let Ok(legacy) =
+                    bincode::deserialize::<Vec<LegacyU8YRedstoneComponentMetadata>>(&bytes)
+                {
+                    if bincode::serialize(&legacy).ok().as_deref() == Some(bytes.as_slice()) {
+                        return Some(
+                            legacy
+                                .into_iter()
+                                .map(|entry| crate::redstone::RedstoneComponentMetadata {
+                                    local_x: entry.local_x,
+                                    local_y: migrate_legacy_u8_redstone_y(entry.local_y),
+                                    local_z: entry.local_z,
+                                    facing: entry.facing,
+                                    repeater_delay: entry.repeater_delay,
+                                    comparator_mode: entry.comparator_mode,
+                                    note: entry.note,
+                                    last_powered: entry.last_powered,
+                                })
+                                .collect(),
+                        );
+                    }
+                }
                 bincode::deserialize::<Vec<LegacyRedstoneComponentMetadata>>(&bytes)
                     .ok()
                     .map(|legacy| {
@@ -1261,7 +1302,7 @@ impl ChunkSaveData {
                             .into_iter()
                             .map(|entry| crate::redstone::RedstoneComponentMetadata {
                                 local_x: entry.local_x,
-                                local_y: entry.local_y,
+                                local_y: migrate_legacy_u8_redstone_y(entry.local_y),
                                 local_z: entry.local_z,
                                 facing: entry.facing,
                                 repeater_delay: entry.repeater_delay,
@@ -3757,7 +3798,9 @@ mod tests {
         );
         let snapshot_data = snapshot.try_to_chunk_save_data().unwrap();
         let mut snapshot_restored = Chunk::new(0, 0);
-        snapshot_data.restore_to_chunk(&mut snapshot_restored).unwrap();
+        snapshot_data
+            .restore_to_chunk(&mut snapshot_restored)
+            .unwrap();
         assert_eq!(
             snapshot_restored.get_block_entity(2, 64, 2),
             Some(&crate::block_entity::BlockEntity::Hopper(hopper))
@@ -3919,6 +3962,47 @@ mod tests {
                 last_powered: false,
             }]
         );
+    }
+
+    #[test]
+    fn legacy_u8_redstone_y_236_stays_236_not_negative_twenty() {
+        let legacy = vec![LegacyU8YRedstoneComponentMetadata {
+            local_x: 2,
+            local_y: 236,
+            local_z: 3,
+            facing: crate::redstone::SavedDirection::North,
+            repeater_delay: 1,
+            comparator_mode: crate::redstone::SavedComparatorMode::Compare,
+            note: 0,
+            last_powered: true,
+        }];
+        let mut saved = ChunkSaveData::from_chunk(&Chunk::new(0, 0)).unwrap();
+        saved.redstone_metadata = compress_bytes(&bincode::serialize(&legacy).unwrap()).unwrap();
+
+        let decoded = saved.redstone_metadata();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(
+            decoded[0].local_y, 236,
+            "old u8 236 must stay world Y 236, not wrap to -20"
+        );
+        assert!(decoded[0].last_powered);
+    }
+
+    #[test]
+    fn signed_redstone_y_roundtrips_negative_world_y() {
+        let metadata = vec![crate::redstone::RedstoneComponentMetadata {
+            local_x: 4,
+            local_y: -20,
+            local_z: 5,
+            facing: crate::redstone::SavedDirection::East,
+            repeater_delay: 2,
+            comparator_mode: crate::redstone::SavedComparatorMode::Compare,
+            note: 0,
+            last_powered: false,
+        }];
+        let saved =
+            ChunkSaveData::from_chunk_with_redstone(&Chunk::empty(0, 0), &metadata).unwrap();
+        assert_eq!(saved.redstone_metadata(), metadata);
     }
 
     #[test]
@@ -4594,7 +4678,8 @@ mod tests {
         let manager = SaveManager::new(&world_dir);
         let source = world_dir.join("corrupt-region.bin");
         let destination = world_dir.join("salvaged-region.bin");
-        let valid = bincode::serialize(&ChunkSaveData::from_chunk(&Chunk::new(0, 0)).unwrap()).unwrap();
+        let valid =
+            bincode::serialize(&ChunkSaveData::from_chunk(&Chunk::new(0, 0)).unwrap()).unwrap();
         let region = RegionData {
             chunks: [((0, 0), valid), ((1, 0), b"broken chunk".to_vec())]
                 .into_iter()
@@ -5197,7 +5282,10 @@ mod tests {
         fs::write(path, bincode::serialize(&region).unwrap()).unwrap();
     }
 
-    fn with_corrupt_inner_blocks(payload: &[u8], mutate: impl FnOnce(&mut ChunkSaveData)) -> Vec<u8> {
+    fn with_corrupt_inner_blocks(
+        payload: &[u8],
+        mutate: impl FnOnce(&mut ChunkSaveData),
+    ) -> Vec<u8> {
         let mut data = deserialize_chunk_save_data(payload).unwrap();
         mutate(&mut data);
         bincode::serialize(&data).unwrap()

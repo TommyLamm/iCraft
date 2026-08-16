@@ -1,6 +1,7 @@
 use crate::chunk_manager::ChunkManager;
+use crate::dimension::WorldHeight;
 use crate::inventory::ItemStack;
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
 use crate::world_mutation::{BlockMutationRequest, MutationCause};
 
 /// Statistics for random tick sampling per frame.
@@ -25,7 +26,7 @@ pub fn deterministic_rng(seed: u64, salt: u64) -> u64 {
 
 /// Checks if a water block is within 4 blocks horizontally (x, z offset <= 4)
 /// and within -1..=1 vertically of the farmland block.
-pub fn is_water_nearby<F>(pos: (i32, i32, i32), mut get_block: F) -> bool
+pub fn is_water_nearby<F>(pos: (i32, i32, i32), height: WorldHeight, mut get_block: F) -> bool
 where
     F: FnMut(i32, i32, i32) -> Option<BlockType>,
 {
@@ -34,7 +35,7 @@ where
         for dz in -4..=4 {
             for dy in -1..=1 {
                 let target_y = fy + dy;
-                if target_y >= 0 && target_y < CHUNK_HEIGHT as i32 {
+                if height.contains_y(target_y) {
                     if let Some(BlockType::Water) = get_block(fx + dx, target_y, fz + dz) {
                         return true;
                     }
@@ -51,6 +52,7 @@ pub fn evaluate_random_tick_at<F>(
     block: BlockType,
     state: u8,
     rng_val: u64,
+    height: WorldHeight,
     mut get_block: F,
 ) -> Option<BlockMutationRequest>
 where
@@ -72,7 +74,7 @@ where
                 });
             }
 
-            let water_near = is_water_nearby(pos, &mut get_block);
+            let water_near = is_water_nearby(pos, height, &mut get_block);
             if water_near {
                 if moisture < 7 {
                     return Some(BlockMutationRequest {
@@ -380,6 +382,7 @@ pub fn sample_random_ticks(
                 block,
                 state,
                 rng_val,
+                chunk_manager.dimension.height(),
                 |x, y, z| Some(chunk_manager.get_block(x, y, z)),
             ) {
                 requests.push(req);
@@ -619,6 +622,8 @@ fn transfer_one(
 mod tests {
     use super::*;
 
+    const H: WorldHeight = WorldHeight::OVERWORLD;
+
     #[test]
     fn test_deterministic_rng_reproducibility() {
         let r1 = deterministic_rng(12345, 99);
@@ -633,10 +638,10 @@ mod tests {
         map.insert((10, 64, 10), BlockType::Farmland);
         map.insert((13, 64, 12), BlockType::Water);
 
-        let found = is_water_nearby((10, 64, 10), |x, y, z| map.get(&(x, y, z)).copied());
+        let found = is_water_nearby((10, 64, 10), H, |x, y, z| map.get(&(x, y, z)).copied());
         assert!(found);
 
-        let not_found = is_water_nearby((10, 64, 10), |x, y, z| {
+        let not_found = is_water_nearby((10, 64, 10), H, |x, y, z| {
             if (x, y, z) == (18, 64, 10) {
                 Some(BlockType::Water)
             } else {
@@ -647,12 +652,22 @@ mod tests {
     }
 
     #[test]
+    fn water_below_y_zero_hydrates_farmland_at_y_zero() {
+        let mut map = std::collections::HashMap::new();
+        map.insert((0, 0, 0), BlockType::Farmland);
+        map.insert((1, -1, 0), BlockType::Water);
+        assert!(is_water_nearby((0, 0, 0), H, |x, y, z| map
+            .get(&(x, y, z))
+            .copied()));
+    }
+
+    #[test]
     fn test_farmland_hydration_mutation() {
         let mut map = std::collections::HashMap::new();
         map.insert((0, 64, 0), BlockType::Farmland);
         map.insert((2, 64, 0), BlockType::Water);
 
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 0, 123, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 0, 123, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
 
@@ -668,7 +683,7 @@ mod tests {
         map.insert((0, 64, 0), BlockType::Farmland);
         map.insert((0, 65, 0), BlockType::Stone);
 
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 7, 123, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Farmland, 7, 123, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
 
@@ -682,9 +697,10 @@ mod tests {
     fn test_leaf_decay_without_log() {
         let map: std::collections::HashMap<(i32, i32, i32), BlockType> =
             std::collections::HashMap::new();
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, |x, y, z| {
-            map.get(&(x, y, z)).copied()
-        });
+        let req =
+            evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, H, |x, y, z| {
+                map.get(&(x, y, z)).copied()
+            });
         assert!(req.is_some());
         let r = req.unwrap();
         assert_eq!(r.new_block, BlockType::Air);
@@ -694,9 +710,10 @@ mod tests {
     fn test_leaf_preservation_with_log() {
         let mut map = std::collections::HashMap::new();
         map.insert((0, 63, 0), BlockType::OakLog);
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, |x, y, z| {
-            map.get(&(x, y, z)).copied()
-        });
+        let req =
+            evaluate_random_tick_at((0, 64, 0), BlockType::OakLeaves, 0, 123, H, |x, y, z| {
+                map.get(&(x, y, z)).copied()
+            });
         assert!(req.is_none());
     }
 
@@ -705,7 +722,7 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert((0, 64, 0), BlockType::Grass);
         map.insert((0, 65, 0), BlockType::Stone);
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Grass, 0, 123, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Grass, 0, 123, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
         assert!(req.is_some());
@@ -718,7 +735,7 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert((0, 64, 0), BlockType::Cactus);
         map.insert((0, 65, 0), BlockType::Air);
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Cactus, 0, 3, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Cactus, 0, 3, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
         assert!(req.is_some());
@@ -731,7 +748,7 @@ mod tests {
     fn test_falling_sand() {
         let map: std::collections::HashMap<(i32, i32, i32), BlockType> =
             std::collections::HashMap::new();
-        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Sand, 0, 123, |x, y, z| {
+        let req = evaluate_random_tick_at((0, 64, 0), BlockType::Sand, 0, 123, H, |x, y, z| {
             map.get(&(x, y, z)).copied()
         });
         assert!(req.is_some());
