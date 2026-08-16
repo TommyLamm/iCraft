@@ -5,6 +5,67 @@
 //! inventory writeback is a narrow exception for embedded hotbar/inventory
 //! UI and is never used on a join client.
 
+/// Desktop / embedded session topology. Kept out of the wgpu menu so the
+/// dedicated server and join-projection tests can use it without compiling
+/// the presentation UI.
+#[derive(Debug, Clone)]
+pub enum MultiplayerRole {
+    Singleplayer,
+    Host {
+        port: u16,
+    },
+    Client {
+        server_addr: String,
+        port: u16,
+        username: String,
+    },
+}
+
+impl MultiplayerRole {
+    pub fn is_join_client(&self) -> bool {
+        matches!(self, MultiplayerRole::Client { .. })
+    }
+}
+
+/// How the presentation root may populate a chunk column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationChunkLoadPolicy {
+    /// Singleplayer / host: generate locally (save overlay is separate).
+    GenerateLocally,
+    /// Join client: never generate. Wait for revision-gated `ChunkData`.
+    AwaitAuthoritativePayload,
+}
+
+pub fn presentation_chunk_load_policy(role: &MultiplayerRole) -> PresentationChunkLoadPolicy {
+    if role.is_join_client() {
+        PresentationChunkLoadPolicy::AwaitAuthoritativePayload
+    } else {
+        PresentationChunkLoadPolicy::GenerateLocally
+    }
+}
+
+pub fn presentation_may_generate_chunks(role: &MultiplayerRole) -> bool {
+    !role.is_join_client()
+}
+
+/// Join clients must not write presentation chunks (farmland, unsupported-break,
+/// or any other local `set_block`). Plan 06 can AND this with "no embedded".
+pub fn presentation_may_mutate_chunks(role: &MultiplayerRole) -> bool {
+    !role.is_join_client()
+}
+
+/// Testable load-schedule gate. `generate` is invoked only when the role is
+/// allowed to materialize a local column.
+pub fn schedule_presentation_chunk_load<T>(
+    policy: PresentationChunkLoadPolicy,
+    generate: impl FnOnce() -> T,
+) -> Option<T> {
+    match policy {
+        PresentationChunkLoadPolicy::GenerateLocally => Some(generate()),
+        PresentationChunkLoadPolicy::AwaitAuthoritativePayload => None,
+    }
+}
+
 /// True when the presentation `ChunkManager` / local player may still own
 /// world, container, entity, and XP mutations (legacy path without a runtime).
 pub fn should_mutate_presentation_world(has_in_process_runtime: bool, is_client: bool) -> bool {

@@ -36,7 +36,7 @@
 | 11 | [Interest 驅動 chunk 駐留](11_interest_chunk_residency.md) | P2 | 已完成 | 無 |
 | 12 | [網路入口背壓與可靠容器廣播](12_network_ingress_backpressure.md) | P2 | 已完成 | 02 |
 | 13 | [持久化雙寫、inflate 與 symlink](13_persistence_integrity.md) | P2 | 已完成 | 04、05 |
-| 14 | [桌面 hitch、surface 與 lib 樹](14_desktop_runtime_hygiene.md) | P2 | 待執行 | 無 |
+| 14 | [桌面 hitch、surface 與 lib 樹](14_desktop_runtime_hygiene.md) | P2 | 已完成 | 無 |
 | 15 | [測試契約硬化](15_verification_contract.md) | P2 | 待執行 | 01、02 至少已合併 |
 
 ## 4. 與其他路線的關係

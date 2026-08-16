@@ -48,9 +48,6 @@ unsafe impl GlobalAlloc for AllocTracker {
     }
 }
 
-#[global_allocator]
-static GLOBAL_ALLOCATOR: AllocTracker = AllocTracker;
-
 pub fn alloc_count() -> u64 {
     ALLOC_COUNT.load(Ordering::Relaxed)
 }
@@ -751,20 +748,6 @@ mod tests {
         let p = PerfRecorder::<4>::new().summary(ScopeId::Lighting);
         assert_eq!(p.samples, 0);
         assert_eq!(p.average_nanos, 0);
-    }
-
-    #[test]
-    fn thread_alloc_count_is_local_to_calling_thread() {
-        let handle = std::thread::spawn(|| {
-            let _allocation = Box::new([0u8; 64]);
-        });
-        let caller_after_spawn = thread_alloc_count();
-        handle.join().unwrap();
-        assert_eq!(thread_alloc_count(), caller_after_spawn);
-
-        let before = thread_alloc_count();
-        let _allocation = Box::new([0u8; 64]);
-        assert!(thread_alloc_count() > before);
     }
 
     #[test]

@@ -960,7 +960,7 @@ impl ServerRuntime {
             )));
         }
         let save_manager = SaveManager::new(&world_dir);
-        let creation = crate::menu::load_world_creation_options(&world_dir);
+        let creation = crate::save::load_world_creation_options(&world_dir);
         let existing_level = save_manager.load_level().map_err(ServerConfigError::Io)?;
         let mut level = existing_level.unwrap_or_else(|| LevelData {
             seed: properties.seed as u32,

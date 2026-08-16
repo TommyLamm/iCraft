@@ -1,7 +1,7 @@
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::Dimension;
 use crate::entity::{Entity, EntityManager, EntityType};
-use crate::menu::Difficulty;
+use crate::game_rules::Difficulty;
 use crate::world::BlockType;
 use glam::Vec3;
 use std::collections::HashMap;

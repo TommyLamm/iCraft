@@ -1,6 +1,6 @@
 use icraft::chunk_manager::ChunkManager;
 use icraft::dimension::Dimension;
-use icraft::menu::{
+use icraft::presentation_inventory_policy::{
     presentation_chunk_load_policy, presentation_may_generate_chunks,
     presentation_may_mutate_chunks, schedule_presentation_chunk_load, MultiplayerRole,
     PresentationChunkLoadPolicy,

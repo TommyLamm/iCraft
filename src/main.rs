@@ -17,6 +17,8 @@ mod container_sessions;
 mod crafting;
 mod culling;
 mod dimension;
+#[allow(dead_code)]
+mod dynamic_resolution;
 mod enchantment;
 mod entity;
 pub mod final_acceptance;
@@ -66,6 +68,9 @@ mod worldgen;
 use app::App;
 use winit::event_loop::EventLoop;
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: perf::AllocTracker = perf::AllocTracker;
+
 fn wants_microbench<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -94,5 +99,19 @@ mod tests {
     fn microbench_flag_is_selected_without_affecting_other_args() {
         assert!(wants_microbench(["mc", "--microbench"]));
         assert!(!wants_microbench(["mc", "--help"]));
+    }
+
+    #[test]
+    fn thread_alloc_count_is_local_to_calling_thread() {
+        let handle = std::thread::spawn(|| {
+            let _allocation = Box::new([0u8; 64]);
+        });
+        let caller_after_spawn = crate::perf::thread_alloc_count();
+        handle.join().unwrap();
+        assert_eq!(crate::perf::thread_alloc_count(), caller_after_spawn);
+
+        let before = crate::perf::thread_alloc_count();
+        let _allocation = Box::new([0u8; 64]);
+        assert!(crate::perf::thread_alloc_count() > before);
     }
 }

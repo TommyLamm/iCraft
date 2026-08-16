@@ -40,8 +40,45 @@ impl WorldType {
     }
 }
 
+/// Desktop / world-meta difficulty. Dedicated `server.properties` still uses
+/// [`ServerDifficulty`]; the two stay separate so a renderer setting cannot
+/// silently become server policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Difficulty {
+    Peaceful,
+    Easy,
+    Normal,
+    Hard,
+}
+
+impl Difficulty {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Peaceful => "PEACEFUL",
+            Self::Easy => "EASY",
+            Self::Normal => "NORMAL",
+            Self::Hard => "HARD",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "peaceful" => Self::Peaceful,
+            "easy" => Self::Easy,
+            "hard" => Self::Hard,
+            _ => Self::Normal,
+        }
+    }
+
+    pub fn step(self, delta: i32) -> Self {
+        let values = [Self::Peaceful, Self::Easy, Self::Normal, Self::Hard];
+        let index = values.iter().position(|value| *value == self).unwrap_or(2) as i32;
+        values[(index + delta).rem_euclid(values.len() as i32) as usize]
+    }
+}
+
 /// Server-owned difficulty policy.  This is deliberately separate from the
-/// renderer/menu `Difficulty` enum: dedicated and embedded runtimes consume
+/// renderer/menu [`Difficulty`] enum: dedicated and embedded runtimes consume
 /// the same value parsed from `server.properties`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerDifficulty {

@@ -4,8 +4,8 @@
 //! bounded, and produces typed arguments before any world mutation is
 //! attempted.  The executor in `State` remains the authority gate.
 
+use crate::game_rules::Difficulty;
 use crate::inventory::{GameMode, Item};
-use crate::menu::Difficulty;
 
 pub const MAX_COMMAND_BYTES: usize = 256;
 pub const MAX_COMMAND_ARGS: usize = 16;

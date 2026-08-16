@@ -27,9 +27,82 @@ pub const NETWORK_SNAPSHOT_QUEUE_CAPACITY: usize = 8;
 /// Existing coordinates remain updatable at the limit; new coordinates are
 /// refused explicitly so an unloaded chunk's revision is never evicted.
 pub const MUTATION_REVISION_INDEX_CAPACITY: usize = 65_536;
+const WORLD_META_FILE: &str = "world.meta";
 
 fn default_mutation_revision_index_capacity() -> usize {
     MUTATION_REVISION_INDEX_CAPACITY
+}
+
+/// Creation-time fields from `world.meta`, with a level.dat fallback for
+/// legacy worlds. Lives here so the dedicated server can read them without
+/// compiling the wgpu menu.
+pub fn load_world_creation_options(world_dir: &Path) -> crate::game_rules::WorldCreationOptions {
+    load_world_creation_options_from_meta(world_dir)
+        .or_else(|| load_world_creation_options_from_level(world_dir))
+        .unwrap_or_default()
+}
+
+fn parse_meta_bool(value: &str, fallback: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" => true,
+        "false" | "0" | "off" => false,
+        _ => fallback,
+    }
+}
+
+fn parse_meta_game_mode(value: &str) -> GameMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "creative" => GameMode::Creative,
+        "adventure" => GameMode::Adventure,
+        "spectator" => GameMode::Spectator,
+        _ => GameMode::Survival,
+    }
+}
+
+fn load_world_creation_options_from_meta(
+    world_dir: &Path,
+) -> Option<crate::game_rules::WorldCreationOptions> {
+    let contents = fs::read_to_string(world_dir.join(WORLD_META_FILE)).ok()?;
+    let mut options = crate::game_rules::WorldCreationOptions::default();
+    let mut saw_name = false;
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "name" if !value.trim().is_empty() => saw_name = true,
+            "world_type" => options.world_type = crate::game_rules::WorldType::parse(value),
+            "generate_structures" => {
+                options.generate_structures = parse_meta_bool(value, options.generate_structures)
+            }
+            "bonus_chest" => options.bonus_chest = parse_meta_bool(value, options.bonus_chest),
+            "cheats" | "cheats_enabled" => {
+                options.cheats_enabled = parse_meta_bool(value, options.cheats_enabled)
+            }
+            "hardcore" => options.hardcore = parse_meta_bool(value, options.hardcore),
+            "game_mode" => options.game_mode = parse_meta_game_mode(value),
+            _ => {}
+        }
+    }
+    saw_name.then_some(options)
+}
+
+fn load_world_creation_options_from_level(
+    world_dir: &Path,
+) -> Option<crate::game_rules::WorldCreationOptions> {
+    if !world_dir.join("level.dat").is_file() || !world_dir.join("player.dat").is_file() {
+        return None;
+    }
+    let manager = SaveManager::new(world_dir);
+    let (level, player) = manager.load_player_and_level().ok()?;
+    Some(crate::game_rules::WorldCreationOptions {
+        world_type: level.world_type,
+        generate_structures: level.generate_structures,
+        bonus_chest: level.bonus_chest,
+        cheats_enabled: level.cheats_enabled,
+        hardcore: level.hardcore || level.rules.hardcore,
+        game_mode: player.game_mode,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

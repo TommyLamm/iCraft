@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-08-16 at `review-hardening/11-chunk-residency`.
+> Last verified: 2026-08-16 at `tommy-dev`.
 > Source code is authoritative; `plans/`, `docs/superpowers/`, and most of
 > `plans/performance/` are design/history records, not a description of the live runtime.
 >
@@ -22,7 +22,9 @@ The desktop uses `winit`, `wgpu`, and `rodio`; shared simulation uses a determin
 
 The desktop binary declares its module tree directly instead of importing the
 library crate. Shared source files are therefore compiled once for the desktop
-target and again through `src/lib.rs` for the server/tests.
+target and again through `src/lib.rs` for the server/tests. Presentation modules
+(`menu`, `camera`, `texture`) stay desktop-only so `icraft-server` does not
+compile the wgpu menu. `#[global_allocator]` is installed only in `src/main.rs`.
 
 ## Runtime topologies
 
@@ -139,8 +141,10 @@ opaque/cutout terrain, entities, translucent terrain, particles, mining overlay,
 first-person hand, colored/textured UI, crosshair, and text/lines.
 
 On Windows, menu and game initialization force DX12 because the Vulkan path has
-a known NVIDIA driver crash. Dynamic resolution currently renders at native
-scale; re-enabling it requires an offscreen target, upscale pass, and native UI.
+a known NVIDIA driver crash. The desktop compiles `dynamic_resolution` for
+scale control; it currently still renders at native scale. Re-enabling a scaled
+offscreen target requires an upscale pass and native UI. Lost/Outdated surfaces
+resize from `window.inner_size()` (at least 1×1); Timeout skips present.
 
 ## World model
 

@@ -6,6 +6,8 @@ pub const UNLOAD_HYSTERESIS: i32 = 2;
 pub const MAX_INTEGRATE_TIME_MS: u64 = 3;
 pub const MAX_INTEGRATE_MESHES: usize = 4;
 pub const MAX_INTEGRATE_UPLOAD_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
+pub const MAX_INTEGRATE_LOADS: usize = 2;
+pub const MAX_INTEGRATE_LOAD_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
 pub const MAX_DIRTY_MESH_QUEUE: usize = 16_384;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -53,6 +55,14 @@ impl SectionMeshScheduler {
         let work = self.pending[&key];
         self.priority
             .insert((work.distance_sq, key.cx, key.section_y, key.cz));
+        // Latest-wins per section; overflow evicts the farthest pending key so
+        // view-distance 16 (~26k Overworld sections) cannot grow unbounded.
+        if self.pending.len() > MAX_DIRTY_MESH_QUEUE {
+            if let Some(farthest) = self.priority.pop_last() {
+                self.pending
+                    .remove(&SectionKey::new(farthest.1, farthest.2, farthest.3));
+            }
+        }
     }
     pub fn pop_nearest(
         &mut self,
@@ -404,5 +414,46 @@ mod tests {
         scheduler.mark_in_flight(work);
         assert!(!scheduler.complete(SectionIdentity::new(key, 1, 7)));
         assert!(scheduler.complete(work.identity));
+    }
+
+    #[test]
+    fn section_scheduler_overwrite_keeps_latest_identity() {
+        let key = SectionKey::new(1, 0, 2);
+        let mut scheduler = SectionMeshScheduler::new();
+        scheduler.enqueue(
+            SectionIdentity::new(key, 4, 9),
+            DependencyReason::Block,
+            (0, 0),
+        );
+        scheduler.enqueue(
+            SectionIdentity::new(key, 8, 9),
+            DependencyReason::ChunkLoad,
+            (0, 0),
+        );
+        assert_eq!(scheduler.len(), 1);
+        let work = scheduler.pop_nearest((0, 0), 16).unwrap();
+        assert_eq!(work.identity.revision, 8);
+        assert_eq!(work.reason, DependencyReason::ChunkLoad);
+        assert_eq!(scheduler.len(), 0);
+    }
+
+    #[test]
+    fn section_scheduler_caps_pending_at_max_dirty_mesh_queue() {
+        let mut scheduler = SectionMeshScheduler::new();
+        let player = (0, 0);
+        for i in 0..=MAX_DIRTY_MESH_QUEUE {
+            let key = SectionKey::new(i as i32, 0, 0);
+            scheduler.enqueue(
+                SectionIdentity::new(key, 1, 1),
+                DependencyReason::Block,
+                player,
+            );
+        }
+        assert_eq!(scheduler.len(), MAX_DIRTY_MESH_QUEUE);
+        let nearest = scheduler.pop_nearest(player, i32::MAX).unwrap();
+        assert_eq!(nearest.identity.key, SectionKey::new(0, 0, 0));
+        assert!(scheduler.pop_nearest(player, i32::MAX).is_some_and(
+            |work| work.identity.key != SectionKey::new(MAX_DIRTY_MESH_QUEUE as i32, 0, 0)
+        ));
     }
 }

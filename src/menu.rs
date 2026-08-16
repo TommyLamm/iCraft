@@ -1,5 +1,8 @@
 use crate::game_rules::{WorldCreationOptions, WorldType};
+
+pub use crate::game_rules::Difficulty;
 use crate::inventory::GameMode;
+pub use crate::presentation_inventory_policy::MultiplayerRole;
 use crate::{
     accessibility::AccessibilitySettings,
     localization::TranslationCatalog,
@@ -35,40 +38,6 @@ fn finite_clamped_setting(value: f32, fallback: f32, min: f32, max: f32) -> f32 
         value.clamp(min, max)
     } else {
         fallback
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Difficulty {
-    Peaceful,
-    Easy,
-    Normal,
-    Hard,
-}
-
-impl Difficulty {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Peaceful => "PEACEFUL",
-            Self::Easy => "EASY",
-            Self::Normal => "NORMAL",
-            Self::Hard => "HARD",
-        }
-    }
-
-    fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "peaceful" => Self::Peaceful,
-            "easy" => Self::Easy,
-            "hard" => Self::Hard,
-            _ => Self::Normal,
-        }
-    }
-
-    fn step(self, delta: i32) -> Self {
-        let values = [Self::Peaceful, Self::Easy, Self::Normal, Self::Hard];
-        let index = values.iter().position(|value| *value == self).unwrap_or(2) as i32;
-        values[(index + delta).rem_euclid(values.len() as i32) as usize]
     }
 }
 
@@ -742,64 +711,6 @@ fn parse_key(value: &str) -> Option<KeyCode> {
 }
 
 #[derive(Debug, Clone)]
-pub enum MultiplayerRole {
-    Singleplayer,
-    Host {
-        port: u16,
-    },
-    Client {
-        server_addr: String,
-        port: u16,
-        username: String,
-    },
-}
-
-impl MultiplayerRole {
-    pub fn is_join_client(&self) -> bool {
-        matches!(self, MultiplayerRole::Client { .. })
-    }
-}
-
-/// How the presentation root may populate a chunk column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresentationChunkLoadPolicy {
-    /// Singleplayer / host: generate locally (save overlay is separate).
-    GenerateLocally,
-    /// Join client: never generate. Wait for revision-gated `ChunkData`.
-    AwaitAuthoritativePayload,
-}
-
-pub fn presentation_chunk_load_policy(role: &MultiplayerRole) -> PresentationChunkLoadPolicy {
-    if role.is_join_client() {
-        PresentationChunkLoadPolicy::AwaitAuthoritativePayload
-    } else {
-        PresentationChunkLoadPolicy::GenerateLocally
-    }
-}
-
-pub fn presentation_may_generate_chunks(role: &MultiplayerRole) -> bool {
-    !role.is_join_client()
-}
-
-/// Join clients must not write presentation chunks (farmland, unsupported-break,
-/// or any other local `set_block`). Plan 06 can AND this with "no embedded".
-pub fn presentation_may_mutate_chunks(role: &MultiplayerRole) -> bool {
-    !role.is_join_client()
-}
-
-/// Testable load-schedule gate. `generate` is invoked only when the role is
-/// allowed to materialize a local column.
-pub fn schedule_presentation_chunk_load<T>(
-    policy: PresentationChunkLoadPolicy,
-    generate: impl FnOnce() -> T,
-) -> Option<T> {
-    match policy {
-        PresentationChunkLoadPolicy::GenerateLocally => Some(generate()),
-        PresentationChunkLoadPolicy::AwaitAuthoritativePayload => None,
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct WorldLaunch {
     pub world_dir: PathBuf,
     pub seed: u32,
@@ -906,17 +817,7 @@ impl WorldMetadata {
 /// Legacy worlds use the documented defaults until their next authoritative
 /// level save writes the richer binary fields.
 pub fn load_world_creation_options(world_dir: &Path) -> WorldCreationOptions {
-    WorldMetadata::load(world_dir)
-        .or_else(|| legacy_metadata(world_dir))
-        .map(|metadata| WorldCreationOptions {
-            world_type: metadata.world_type,
-            generate_structures: metadata.generate_structures,
-            bonus_chest: metadata.bonus_chest,
-            cheats_enabled: metadata.cheats_enabled,
-            hardcore: metadata.hardcore,
-            game_mode: metadata.game_mode,
-        })
-        .unwrap_or_default()
+    crate::save::load_world_creation_options(world_dir)
 }
 
 #[derive(Debug, Clone)]
@@ -4406,6 +4307,11 @@ fn hash(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(127.1, 311.7)))
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation_inventory_policy::{
+        presentation_chunk_load_policy, presentation_may_generate_chunks,
+        presentation_may_mutate_chunks, schedule_presentation_chunk_load,
+        PresentationChunkLoadPolicy,
+    };
     use std::collections::HashMap;
 
     #[test]

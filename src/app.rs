@@ -89,6 +89,11 @@ fn frame_delta(last_render_time: Instant, now: Instant) -> f32 {
     now.duration_since(last_render_time).as_secs_f32()
 }
 
+fn presentable_window_size(window: &Window) -> winit::dpi::PhysicalSize<u32> {
+    let size = window.inner_size();
+    winit::dpi::PhysicalSize::new(size.width.max(1), size.height.max(1))
+}
+
 fn next_game_mode_command(mode: crate::inventory::GameMode) -> &'static str {
     match mode {
         crate::inventory::GameMode::Creative => "survival",
@@ -445,9 +450,11 @@ impl ApplicationHandler for App {
                         }
                         match menu.render() {
                             Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost) => menu.resize(menu.window.inner_size()),
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                                menu.resize(presentable_window_size(&menu.window))
+                            }
+                            Err(wgpu::SurfaceError::Timeout) => {}
                             Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                            Err(error) => eprintln!("{error:?}"),
                         }
                     }
                     Some(Runtime::Game(state)) => {
@@ -457,9 +464,11 @@ impl ApplicationHandler for App {
                         }
                         match state.render() {
                             Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                                state.resize(presentable_window_size(&state.window))
+                            }
+                            Err(wgpu::SurfaceError::Timeout) => {}
                             Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                            Err(error) => eprintln!("{error:?}"),
                         }
                     }
                     None => {}

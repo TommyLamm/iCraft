@@ -10,17 +10,19 @@ use crate::chunk_render::{
 };
 use crate::chunk_schedule::DependencyReason;
 use crate::crafting::RecipeManager;
+use crate::game_rules::Difficulty;
 use crate::interaction::{raycast, RaycastTargetPolicy};
 use crate::inventory::{
     CreativeTab, GameMode, Inventory, Item, ItemStack, ToolType, CREATIVE_COLUMNS, CREATIVE_ROWS,
     CREATIVE_VISIBLE_SLOTS,
 };
-use crate::menu::{Difficulty, GameSettings, MultiplayerRole, WorldLaunch};
+use crate::menu::{GameSettings, WorldLaunch};
 use crate::physics::{
     block_placement_decision, player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB,
     PLAYER_STANDING_HEIGHT,
 };
 use crate::player::{DamageSource, PlayerState};
+use crate::presentation_inventory_policy::MultiplayerRole;
 use crate::presentation_inventory_policy::{
     presentation_inventory_decision, should_mutate_presentation_world,
     should_sync_authority_inventory_from_local, should_writeback_after_inventory_click,
@@ -6246,8 +6248,8 @@ impl State {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width,
-            height: size.height,
+            width: size.width.max(1),
+            height: size.height.max(1),
             present_mode: if settings.vsync {
                 wgpu::PresentMode::Fifo
             } else if surface_caps
@@ -6349,7 +6351,7 @@ impl State {
         audio_manager.set_weather_volume(settings.weather_volume);
 
         // Load save data if exists
-        let creation_options = crate::menu::load_world_creation_options(&launch.world_dir);
+        let creation_options = crate::save::load_world_creation_options(&launch.world_dir);
         let mut game_mode = launch.game_mode;
         let mut inventory = match launch.game_mode {
             GameMode::Creative => Inventory::new_creative(),
@@ -7872,7 +7874,7 @@ impl State {
     }
 
     fn presentation_may_mutate_chunks(&self) -> bool {
-        crate::menu::presentation_may_mutate_chunks(&self.role)
+        crate::presentation_inventory_policy::presentation_may_mutate_chunks(&self.role)
     }
 
     /// True when this presentation root is backed by the shared headless
@@ -8939,6 +8941,11 @@ impl State {
     }
 
     fn schedule_player_catchup(&mut self, player_id: crate::network::protocol::PlayerId) {
+        // Restoring NetworkHandle::Host requires deleting this path or wiring
+        // it to ServerRuntime. Embedded runtime already owns catch-up.
+        if self.has_in_process_runtime() {
+            return;
+        }
         let entries = self
             .mutation_revisions
             .entries_in(self.current_dimension)
@@ -8958,6 +8965,12 @@ impl State {
     }
 
     fn process_join_catchups(&mut self) {
+        // Restoring NetworkHandle::Host requires deleting this path or wiring
+        // it to ServerRuntime. Catch-up and mutation-index persist are
+        // authority work; an in-process runtime already owns them.
+        if self.has_in_process_runtime() {
+            return;
+        }
         if !matches!(self.role, MultiplayerRole::Host { .. })
             || self.network_snapshot_worker.is_none()
         {
@@ -10083,6 +10096,12 @@ impl State {
                 is_left,
                 dragged,
             } => {
+                // Restoring NetworkHandle::Host requires deleting this path or
+                // wiring it to ServerRuntime. Container clicks are authority
+                // transactions; an in-process runtime already owns them.
+                if self.has_in_process_runtime() {
+                    return;
+                }
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
                     if let Some(session) = self.container_sessions.find_by_player(id) {
                         let session = session.clone();
@@ -11704,6 +11723,8 @@ impl State {
 
         let mut integrated_meshes = 0;
         let mut integrated_bytes = 0u64;
+        let mut integrated_loads = 0;
+        let mut integrated_load_bytes = 0u64;
 
         loop {
             let result = if let Some(res) = self.pending_worker_results.pop_front() {
@@ -11729,10 +11750,10 @@ impl State {
             match result {
                 TerrainWorkerResult::Loaded(result) => {
                     let expected = self.chunk_load_in_flight.get(&result.coord).copied();
-                    if expected == Some(result.lifetime) {
-                        self.chunk_load_in_flight.remove(&result.coord);
-                    }
                     if result.restore_failed {
+                        if expected == Some(result.lifetime) {
+                            self.chunk_load_in_flight.remove(&result.coord);
+                        }
                         continue;
                     }
                     let r = self.chunk_manager.render_distance;
@@ -11747,9 +11768,25 @@ impl State {
                         || (result.coord.1 - player_chunk.1).abs() > r
                         || self.chunk_manager.chunks.contains_key(&result.coord)
                     {
+                        if expected == Some(result.lifetime) {
+                            self.chunk_load_in_flight.remove(&result.coord);
+                        }
                         self.perf_counters.stale_results =
                             self.perf_counters.stale_results.saturating_add(1);
                         continue;
+                    }
+                    let elapsed = integrate_started.elapsed();
+                    if integrated_loads >= crate::chunk_schedule::MAX_INTEGRATE_LOADS
+                        || integrated_load_bytes >= crate::chunk_schedule::MAX_INTEGRATE_LOAD_BYTES
+                        || elapsed
+                            >= Duration::from_millis(crate::chunk_schedule::MAX_INTEGRATE_TIME_MS)
+                    {
+                        self.pending_worker_results
+                            .push_front(TerrainWorkerResult::Loaded(result));
+                        break;
+                    }
+                    if expected == Some(result.lifetime) {
+                        self.chunk_load_in_flight.remove(&result.coord);
                     }
 
                     let (cx, cz) = result.coord;
@@ -11772,10 +11809,13 @@ impl State {
                             ),
                         }
                     }
+                    let load_bytes = result.chunk.memory_usage() as u64;
                     self.chunk_manager.chunks.insert(result.coord, result.chunk);
                     self.chunk_lifetimes.insert(result.coord, result.lifetime);
                     self.chunk_meshes.insert(result.coord, ChunkMesh::pending());
                     self.invalidate_chunk_mesh(result.coord, DependencyReason::ChunkLoad);
+                    integrated_loads += 1;
+                    integrated_load_bytes = integrated_load_bytes.saturating_add(load_bytes);
 
                     // Restore persisted redstone component metadata before any
                     // redstone tick runs, so freshly-rebuilt `ComponentState`
@@ -11938,8 +11978,8 @@ impl State {
         {
             return;
         }
-        if crate::menu::schedule_presentation_chunk_load(
-            crate::menu::presentation_chunk_load_policy(&self.role),
+        if crate::presentation_inventory_policy::schedule_presentation_chunk_load(
+            crate::presentation_inventory_policy::presentation_chunk_load_policy(&self.role),
             || (),
         )
         .is_none()
@@ -12212,7 +12252,6 @@ impl State {
 
     pub fn set_paused(&mut self, paused: bool) {
         self.is_paused = paused;
-        println!("[Debug] set_paused called with: {}", paused);
         if paused {
             self.clear_movement_input();
         }
@@ -19319,7 +19358,10 @@ impl State {
                 }
                 SlotType::ContainerSlot(slot_index)
                     if self.has_in_process_runtime()
-                        || matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) =>
+                        || matches!(
+                            self.role,
+                            crate::presentation_inventory_policy::MultiplayerRole::Client { .. }
+                        ) =>
                 {
                     if self.has_in_process_runtime() {
                         if let Some(container_pos) = self.container_target {
@@ -20263,7 +20305,10 @@ impl State {
                 }
             }
         }
-        if matches!(self.role, crate::menu::MultiplayerRole::Client { .. }) {
+        if matches!(
+            self.role,
+            crate::presentation_inventory_policy::MultiplayerRole::Client { .. }
+        ) {
             if let Some(pos) = self.container_target {
                 if let crate::state::NetworkHandle::Client { game_to_client, .. } = &self.network {
                     let _ = game_to_client.tracked_send(
