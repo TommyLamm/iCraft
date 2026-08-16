@@ -222,7 +222,7 @@
 - 驗證：三者通過。
 
 #### 13.33 更新文件
-- [ ] 檔案：`ARCHITECTURE.md`、`track.md`、`plans/progress.md`、`plans/implementation/10_bug_audit.md`
+- [ ] 檔案：`ARCHITECTURE.md`、`track.md`、`plans/basic_gameplay/progress.md`、`plans/implementation/10_bug_audit.md`
 - 步驟：方塊儲存、模型、碰撞、紅石段落說明 block-state 系統；W1 標記已修復。
 - 驗證：文件與實作一致。
 

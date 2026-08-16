@@ -71,7 +71,7 @@
 - 驗收：autosave 與多人加入時 F3 顯示 queue 深度變化。
 
 ### 1.6 建立固定 seed 場景
-- [ ] 檔案：`performance/benchmarks/`（新增目錄與場景描述檔）
+- [ ] 檔案：`plans/performance/benchmarks/`（新增目錄與場景描述檔）
 - 步驟：建立以下可重播場景的描述與 seed：
   1. 開放地形，視距 8/16，靜止及快速旋轉。
   2. 洞穴或建築內，大量 Chunk 在視錐內但被遮擋。
@@ -84,11 +84,11 @@
 - 驗收：每個場景有明確 seed、座標、操作步驟與預期瓶頸。
 
 ### 1.7 記錄正式硬件基線
-- [ ] 檔案：`performance/baselines/`（新增目錄）
+- [ ] 檔案：`plans/performance/baselines/`（新增目錄）
 - 步驟：
   1. 在固定場景下執行 `cargo run --release`，記錄 CPU/GPU frame time 的 p50、p95、p99 和 1% low。
   2. 記錄 working set、queue depth 與 upload bytes。
-  3. 保存為 `performance/baselines/<date>_<hardware>.md`。
+  3. 保存為 `plans/performance/baselines/<date>_<hardware>.md`。
 - 驗收：每個場景有 before 基線報告，供後續任務比較。
 
 ## 驗收條件

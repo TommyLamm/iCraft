@@ -7,6 +7,6 @@ before/after artifact. It has incomplete host metadata and no replayable raw
 frame stream, so it cannot support an R9 performance claim.
 
 R9 baselines must be captured on the same host and commit as the corresponding
-after run. Use `performance/tools/New-R9Manifest.ps1` at capture time and keep
+after run. Use `plans/performance/tools/New-R9Manifest.ps1` at capture time and keep
 the generated manifest beside the raw JSONL files. Do not hand-edit this
 directory with numbers from an unrelated machine or run.

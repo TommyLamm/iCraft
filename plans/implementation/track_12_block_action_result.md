@@ -165,7 +165,7 @@
 - 驗證：三者通過。
 
 #### 12.23 更新文件
-- [ ] 檔案：`ARCHITECTURE.md`、`track.md`、`plans/progress.md`、`plans/implementation/10_bug_audit.md`
+- [ ] 檔案：`ARCHITECTURE.md`、`track.md`、`plans/basic_gameplay/progress.md`、`plans/implementation/10_bug_audit.md`
 - 步驟：多人段落說明權威 action-result 流程、`ItemWire`、ACK 機制；G1 標記已修復。
 - 驗證：文件與實作一致。
 

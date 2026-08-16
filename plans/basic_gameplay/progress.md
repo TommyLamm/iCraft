@@ -2,6 +2,19 @@
 
 > **整體進度**: 28 / 30 任務完成
 > **當前階段**: P3 — 進階功能
+>
+> **審查硬化路線（2026-08-16）**: 0 / 15 待執行 → [`../review_hardening/README.md`](../review_hardening/README.md)
+
+### 審查硬化路線（2026-08-16）
+
+全專案五軸 review 後的契約修復，**不是**新的 Minecraft 功能缺口。
+一次只跑一份：[`../review_hardening/prompt.md`](../review_hardening/prompt.md)。
+
+| 級 | 計劃 | 狀態 |
+| --- | --- | --- |
+| P0 | [01 BlockUse](../review_hardening/01_close_block_use_mutation.md) · [02 容器 click](../review_hardening/02_container_click_conservation.md) · [03 有界 decode](../review_hardening/03_bounded_bincode_decode.md) · [04 身份](../review_hardening/04_handshake_identity.md) · [05 restore](../review_hardening/05_fail_closed_chunk_restore.md) | 待執行 |
+| P1 | [06 Embedded 表現層](../review_hardening/06_embedded_presentation_no_mutation.md) · [07 Join 投影](../review_hardening/07_join_client_projection_only.md) · [08 session 生命週期](../review_hardening/08_authority_session_lifecycle.md) · [09 Signed-Y](../review_hardening/09_signed_y_completion.md) · [10 世界生成](../review_hardening/10_worldgen_ore_structure_floor.md) | 待執行 |
+| P2 | [11 chunk 駐留](../review_hardening/11_interest_chunk_residency.md) · [12 網路背壓](../review_hardening/12_network_ingress_backpressure.md) · [13 持久化](../review_hardening/13_persistence_integrity.md) · [14 桌面／lib](../review_hardening/14_desktop_runtime_hygiene.md) · [15 測試契約](../review_hardening/15_verification_contract.md) | 待執行 |
 
 ### Minecraft foundation-gap route — Plan 18/19 acceptance convergence
 
@@ -116,13 +129,13 @@ P3 [█████████░] 88.9%
 
 ### 2026-07-27
 - 🔧 完成 Task 12：Host Authoritative Block Action-Result 驗證與 Network Protocol v5 升級
-  - 修改文件：`src/inventory.rs`, `src/network/protocol.rs`, `src/network/server.rs`, `src/network/client.rs`, `src/state.rs`, `ARCHITECTURE.md`, `track.md`, `plans/progress.md`, `plans/implementation/track_12_block_action_result.md`
+  - 修改文件：`src/inventory.rs`, `src/network/protocol.rs`, `src/network/server.rs`, `src/network/client.rs`, `src/state.rs`, `ARCHITECTURE.md`, `track.md`, `plans/basic_gameplay/progress.md`, `plans/implementation/track_12_block_action_result.md`
   - 關鍵決策：升級通訊協定版本至 Protocol v5，新增 `ItemWire` / `PotionWire` 序列化結構以支援物品耐久、附魔 (4-bit kind/level)、藥水與自訂名稱傳輸。加入 `BlockActionRequest` 與 targeted `BlockActionResult` 封包。Host 為方塊動作唯一權威：檢查點 reach (5.0 + 1.5 預算)、區塊載入與放置條件；執行破壞/放置後向廣播 `BlockChange`，並單獨發送 targeted ACK 回請求用戶端。用戶端於收到成功 ACK 後才觸發物品欄消耗、計算掉落物收集、工具耐久扣減與 MineBlock 成就觸發。重構提取 `calculate_block_break_rewards` 共用掉落/XP/ exhaustion 算式。
   - 驗證：`cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過，新增 10+ 項 protocol、server relay、block action result 與 rewards 測試（共 337 項單元與整合測試全部通過）。
 
 ### 2026-07-25
 - 🔧 完成 Task 10 後續項 G3：紅石組件元資料 (facing/delay/comparator_mode/note) 持久化
-  - 修改文件：`src/redstone.rs`, `src/save.rs`, `src/state.rs`, `plans/implementation/10_bug_audit.md`, `ARCHITECTURE.md`, `track.md`, `plans/progress.md`
+  - 修改文件：`src/redstone.rs`, `src/save.rs`, `src/state.rs`, `plans/implementation/10_bug_audit.md`, `ARCHITECTURE.md`, `track.md`, `plans/basic_gameplay/progress.md`
   - 關鍵決策：實作 `ChunkSaveData` 的 `redstone_metadata` sidecar 結構與序列化／反序列化邏輯。區塊存檔與卸載時寫入紅石組件狀態，區塊載入與生成時於首次紅石 tick 前自動還原；提供 `deserialize_chunk_save_data` 的 legacy fallback，無縫相容舊版 6 欄位存檔。
   - 驗證：`cargo fmt --all -- --check`、`cargo test --release` 通過，新增 6 項紅石與存檔單元測試（共 310 項單元測試 + 1 項整合測試全部通過）；`cargo check --release` 與 `git diff --check` 通過。
 - 🔧 完成 Task 10 潛在 Bug 審計的快速收尾 pass (By Codex, sub-agent 交付已審核；最後依使用者要求停止再派 sub-agent)
@@ -134,45 +147,45 @@ P3 [█████████░] 88.9%
 
 ### 2026-07-24
 - ✅ 修復開啟物品欄仍會旋轉視角 (By inventory-camera sub-agent, reviewed by Codex)
-  - 修改文件：`src/app.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/09_inventory_camera_lock.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/app.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/09_inventory_camera_lock.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：raw `DeviceEvent::MouseMotion` 統一先經純 `allows_camera_look`，pause、inventory、advancements、chat、connection lost、death 或失焦任一成立都不寫入 yaw/pitch；允許時才套 sensitivity 與 ±89° pitch clamp。`WindowEvent::CursorMoved` 仍無條件映射到 UI NDC，故物品欄 hover/click 不受影響。游標模式集中為單一路徑：純 gameplay 嘗試 Locked、失敗 fallback Confined 並隱藏，其餘狀態使用 None 並顯示；pause、chat、inventory、advancements、death、respawn 及 focus 轉換都呼叫同一同步函式。E 只在 pressed 且非 repeat 時切換，inventory 與 advancement 開啟時先建立目標 blocker 再關另一 UI，避免中途重抓與重疊。Task 8 的 Creative catalog wheel、scroll clamp 及 cursor cleanup 保持不變。
   - 根審查：以 CodeGraph 追查 Focused/MouseMotion/Keyboard 到 camera/cursor 的資料流，核對七項 blocker、所有直接 grab/visible 呼叫、UI NDC、死亡／重生與 Creative catalog 回歸；析構時保留獨立安全釋放。
   - 驗證：七項 blocker truth table、disabled/enabled mouse delta、sensitivity、上下 pitch clamp、UI NDC、E repeat 與 Creative catalog wheel regression 通過；`cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過，共 243 項單元測試與 1 項整合測試。
   - 備註：Windows 實際 Locked→Confined fallback、E/L/Esc、失焦／回焦及死亡／重生的 winit grab/visible 時序保留為人工驗收。
 - ✅ 新增 Creative 原版式物品目錄 (By creative-inventory sub-agent, reviewed by Codex)
-  - 修改文件：`src/inventory.rs`, `src/state.rs`, `src/app.rs`, `ARCHITECTURE.md`, `plans/implementation/08_creative_inventory.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/inventory.rs`, `src/state.rs`, `src/app.rs`, `ARCHITECTURE.md`, `plans/implementation/08_creative_inventory.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：Creative 在沒有開啟工作站時，以虛擬無限供應目錄取代不完整的預置背包；`CREATIVE_ITEMS` 精確列出全部 144 個非 Air 物品，並由 All、Blocks、Tools、Combat、Food & Brewing、Redstone、Misc 七個頁籤完整分割。介面顯示可逐列滾動的 9×5 目錄、自適應 scrollbar 與九個真實快捷欄格；左鍵取得該物品最大堆疊，右鍵取得一個，虛擬格不修改 main inventory。游標來源追蹤只丟棄 catalog 生成物，真實快捷欄物品必須無損回收，容量不足時保留游標，避免遺失或複製。物品欄開啟期間的滾輪只捲目錄，不切換快捷欄；SplashPotion 預設帶 water+splash metadata。Survival 與 Crafting Table、Enchanting、Brewing、Anvil 仍走原標準介面。
   - 根審查：以 CodeGraph 追查 catalog→slot→click/close→wheel 的完整資料流，核對清單／分類、虛擬格唯讀、快捷欄交換守恆、工作站 gate、關閉安全與 `FOOD+BREW` 向量字形。
   - 驗證：catalog 唯一性／屬性／分類分割、9×5 window／scroll clamp、左右供應、虛擬格 no-op、hotbar merge/swap、真實游標容量不足、SplashPotion、wheel routing，以及 4:3／16:9／21:9 tabs/slots/scrollbar/hotbar 無重疊測試通過；`cargo fmt --all -- --check`、`cargo check --release`、`cargo test --release` 通過，共 238 項單元測試與 1 項整合測試。
   - 備註：實際 GPU 視窗中瀏覽 144 種物品、分類、滾動、tooltip 與拖到快捷欄仍保留為人工驗收。
 - ✅ 新增可調 Weather 音量 (By rain-volume sub-agent, reviewed by Codex)
-  - 修改文件：`src/audio.rs`, `src/menu.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/07_weather_volume.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/audio.rs`, `src/menu.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/07_weather_volume.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：`GameSettings` 新增向後相容的 `weather_volume`，舊設定缺鍵使用較安靜的 0.4，載入／保存會 clamp 超界值並安全處理 NaN。AudioManager 把已合成的 `Master×Sound` base 再按類別套用 Weather，故 Rain/Thunder 為 `Master×Sound×Weather`，其他 SFX 不受影響；active loop 保存 SoundId，Master 或 Weather 改動時立即刷新正在播放的雨聲。主選單 Options 與 pause menu 都加入 Weather 控制，State 只從 `self.settings` 同步 mixer，不再由 mixer 反推 master。
   - 驗證：舊檔預設、超界/NaN、save/load roundtrip、Rain/Thunder 與普通 SFX gain、idle Sink active Rain loop 0→恢復、主選單行列及 pause Weather/Quit hit region 測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 226 項單元測試與 1 項整合測試。
   - 備註：雨天主／暫停選單調整、聽感及重啟持久化的實際視窗操作保留為人工驗收。
 - ✅ 修復 Survival 怪物攻擊 (By combat sub-agent, reviewed by Codex)
-  - 修改文件：`src/app.rs`, `src/state.rs`, `src/mob.rs`, `ARCHITECTURE.md`, `plans/implementation/06_survival_combat.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/app.rs`, `src/state.rs`, `src/mob.rs`, `ARCHITECTURE.md`, `plans/implementation/06_survival_combat.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：所有左鍵 press 統一先走 authoritative melee；只選 4 格內最近、仍存活且具生命值的合法 combat entity，因此 RemotePlayer、掉落物、粒子與非戰鬥投射物不會吞點擊。Survival miss 才保留 held-mining latch，命中或 invulnerability-window 攔截會消耗 press 並阻止挖到怪物身後方塊；Creative miss 才走瞬間破壞。傷害、擊退、Strength、Fire Aspect、Looting、掉落、XP 與工具耐久沿用既有路徑。一般活體恰好 0 HP 現在會清除，非活體與 boss-owned 實體仍由各自生命週期管理。joined client 因沒有權威 mob replication，不建立會分歧的本地傷害。
   - Review 修正：初版雖攔截 press，App 仍預先鎖住 `left_mouse_pressed=true`，下一幀可能挖身後方塊；改由 `handle_primary_press()` 回傳是否保留 held mining，並在所有 UI gate 前處理 Left release。
   - 驗證：Survival/Creative hit-miss-latch 決策、最近合法 target、死目標跳過、invulnerability、致死 damage/knockback/fire 及 0 HP living/nonliving cleanup 測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 219 項單元測試與 1 項整合測試。
   - 備註：空手／武器攻擊敵對與被動怪物的實際視窗操作保留為人工驗收。
 - ✅ 修復火把模型 (By torch-model sub-agent, reviewed by Codex)：加入正確 3D 地面火把
-  - 修改文件：`src/world.rs`, `ARCHITECTURE.md`, `plans/implementation/05_torch_model.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/world.rs`, `ARCHITECTURE.md`, `plans/implementation/05_torch_model.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：在非完整 cube 的逐方塊 mesh 路徑加入專用 `append_torch_mesh`，生成置中的 X/Z `7/16..9/16`、Y `0..10/16` 六面 cuboid。沿用既有 outward CW face order，side/top/bottom 分別取 atlas `(4,2)` 內 half-texel inset 子區域；所有頂點以來源格 sky/block light、AO 1.0 送入 shader，不加入一般立方體面陰影。Cutout、非 solid、14 級光源、地面支撐及支撐移除清光保持不變；因缺少可存檔／同步的通用 facing state，本次不虛構壁掛火把。
   - 驗證：精確 24 vertices／36 indices 與 2×2×10 bounds、六面 winding、三類 UV、AO/packed light、屬性、支撐移除與光照清理測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 214 項單元測試與 1 項整合測試。
   - 備註：各角度實際查看模型及透明邊緣的視窗操作保留為人工驗收。
 - ✅ 修復方塊放置碰撞 (By placement sub-agent, reviewed by Codex)：禁止把 solid 方塊放進玩家
-  - 修改文件：`src/physics.rs`, `src/state.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `plans/implementation/04_player_placement_collision.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/physics.rs`, `src/state.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `plans/implementation/04_player_placement_collision.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：抽出統一玩家／單位方塊 AABB 與純放置 policy，只拒絕三軸都有正體積重疊的 solid 方塊，因此面／邊／角接觸及 Torch 等 non-solid 方塊仍合法。本地與 joined client 都在放置副作用或送出 request 前預檢；Host 保留 server 驗證過的 session ID，以本地當前 AABB 及所有遠端玩家 `snapshots.back()` 的最新權威位置做最終裁決。Host request 與 client 收到的權威 block change 使用不同事件類型，client 不會以延遲 render pose 重驗 Host 結果。
   - 驗證：AABB 座標、重疊／接觸邊界、non-solid、最新權威快照、未知姿勢、Host/Client 事件分流及 server authenticated ID 端到端測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 210 項單元測試與 1 項整合測試。
   - 備註：單人腳下／頭部及 Host + Join 互相放置的實際視窗操作保留為人工驗收。
 - ✅ 新增額外功能 (By Codex)：Minecraft 式 Creative 飛行
-  - 修改文件：`src/app.rs`, `src/physics.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/03_creative_flight.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/app.rs`, `src/physics.rs`, `src/state.rs`, `ARCHITECTURE.md`, `plans/implementation/03_creative_flight.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：以事件時間追蹤 300 ms、忽略 key repeat 的 Jump 雙擊；Creative 中雙擊切換 transient flight，WASD 維持相機 yaw 水平移動，Space／Shift 升降，同時按下不產生垂直速度，衝刺飛行為兩倍水平速度。飛行略過重力、流體阻力／浮力及摔落傷害，但沿用 X/Y/Z solid collision；下降碰地退出，撞天花板只停止上升。模式切 Survival、死亡、重生與切維度會安全退出並重設 fall-distance，暫停／背包／聊天／進度介面／失焦只清輸入與 pending tap，保留 hover。飛行狀態及速度不持久化，F3 會標示 `FLYING`。
   - 驗證：雙擊邊界、repeat、停用/reset、新雙擊配對、落地退出、hover、升降、牆／頂／地碰撞、水／熔岩、衝刺速度、持久化速度與非飛行重力／摔落傷害回歸測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 201 項單元測試與 1 項整合測試。
   - 備註：第一／第三人稱鏡頭、實際 Host + Join 位置同步與模式切換手感需在互動式遊戲視窗人工驗收。
 - ✅ 修復任務 #25 後續問題 (By Codex)：低延遲多人遊戲的遠端玩家移動閃現
-  - 修改文件：`src/state.rs`, `src/mob.rs`, `src/network/protocol.rs`, `src/network/transport.rs`, `src/network/client.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `plans/implementation/02_multiplayer_smoothing.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/state.rs`, `src/mob.rs`, `src/network/protocol.rs`, `src/network/transport.rs`, `src/network/client.rs`, `src/network/server.rs`, `ARCHITECTURE.md`, `plans/implementation/02_multiplayer_smoothing.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：協議提升至 v3，pose 加入 wrapping sequence 與 sender timestamp；遠端玩家改用 32 筆有界快照，以 100 ms 延遲找真正包住 target 的兩點插值，批量到達仍保留 sender cadence，並拒絕非法、重複和亂序資料。短缺最新點時只做限速且最多 100 ms 的外推，長 gap 或大位移清空歷史並 snap。client 與 server 對尚未發送的 pose 採 latest-wins，但可靠 world/chat 資料仍逐筆傳送；TCP 啟用 `TCP_NODELAY` 並將 header/payload 合為一次 write。RemotePlayer 的採樣速度不再被 mob update 清除。
   - 驗證：20 Hz→144 Hz 單調平滑採樣、sender cadence、yaw wrap、非法／重複／亂序、外推上限、teleport、protocol roundtrip、server relay/latest-wins、舊協議 handshake 拒絕、transport no-delay 與 RemotePlayer velocity 專項測試通過；`cargo fmt -- --check`、`cargo check --release`、`cargo test --release` 通過，共 191 項單元測試與 1 項整合測試。
   - 備註：本環境未自動操作兩個實際遊戲視窗；Host + Join 的走動、衝刺、跳躍及急轉向視覺 smoke test 保留為發佈前人工驗收。
@@ -180,7 +193,7 @@ P3 [█████████░] 88.9%
 ### 2026-07-23
 - ✅ 完成任務 #30 (By Codex)：渲染優化
   - 新增文件：`src/chunk_render.rs`
-  - 修改文件：`src/camera.rs`, `src/main.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/shader.wgsl`, `src/state.rs`, `src/world.rs`, `ARCHITECTURE.md`, `plans/p3/30_render_optimization.md`, `plans/progress.md`, `track.md`
+  - 修改文件：`src/camera.rs`, `src/main.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/shader.wgsl`, `src/state.rs`, `src/world.rs`, `ARCHITECTURE.md`, `plans/basic_gameplay/p3/30_render_optimization.md`, `plans/basic_gameplay/progress.md`, `track.md`
   - 關鍵決策：新增獨立 `TerrainVertex` 與 tile-local UV terrain shader，使完整立方體能按材質、光照與 uniform AO 保守合併並重複 atlas tile；特殊模型、流體與薄雪保留精確路徑。Chunk 生成和三層 LOD mesh 由有界 Rayon jobs 執行，主線程只建立一格 halo snapshot、整合光照和上傳 GPU；dimension generation、chunk lifetime 與 mesh revision 防止卸載、切維度或修改後的過期結果覆蓋新資料。渲染按實際 bounds 做 wgpu 0..1 深度視錐剔除，不透明前到後、透明後到前排序，並依距離選 L0 完整 greedy、L1 surface、L2 4×4 coarse surface；surface skirts 同樣合併。相機 far plane 覆蓋方形視距角落，F3 改報實際 visible chunks、submitted draw calls 與 triangles。
   - 驗證：`cargo fmt -- --check`、`cargo check --release`、`cargo test --release`；182 項單元測試與 1 項整合測試全部通過。新增 terrain vertex layout、六平面視錐、near/far、剔除、透明/不透明排序、LOD 邊界/縮減、greedy 材質/光照/AO、UV 重複、halo snapshot、worker token 過期與 WGSL validation 測試。
   - 備註：`Render distance = 16` 的 60+ FPS 為硬件／場景相關人工驗收，本環境未自動操作世界進行可靠 FPS 量測；非同步與提交量的功能路徑已由測試覆蓋。
@@ -189,7 +202,7 @@ P3 [█████████░] 88.9%
 
 ### 2026-07-22
 - ✅ 完成任務 #25 (By Codex)：多人遊戲 - 子任務 6/6 聊天、遠端玩家渲染與斷線處理
-  - 修改文件：`src/state.rs`, `src/app.rs`, `src/mob_renderer.rs`, `src/network/server.rs`, `src/network/client.rs`, `ARCHITECTURE.md`, `plans/progress.md`, `docs/superpowers/plans/2026-07-22-multiplayer-06-chat-rendering-disconnect.md`
+  - 修改文件：`src/state.rs`, `src/app.rs`, `src/mob_renderer.rs`, `src/network/server.rs`, `src/network/client.rs`, `ARCHITECTURE.md`, `plans/basic_gameplay/progress.md`, `docs/superpowers/plans/2026-07-22-multiplayer-06-chat-rendering-disconnect.md`
   - 關鍵決策：`State` 維護 50 筆聊天 ring buffer、文字輸入與連線遺失狀態；`T`/`Enter`/`Esc` 透過既有 `winit` 路由開啟、送出與取消聊天，聊天期間清空移動鍵並抑制視角/互動。Server 不信任 client packet 內的 sender，而以已驗證 `PlayerId` 交由 Host roster 解析 username，再以可靠佇列廣播。`RemotePlayer` 使用共享 mob cuboid path 組成頭、身體、雙臂與雙腿，插值速度驅動步行擺動；名稱以 camera view-projection 投影到螢幕並水平 clamp。Client 斷線會停止網路 gameplay command、清除 remote entity、凍結世界並顯示可返回主選單的非破壞性 overlay，client 暫存世界不會寫回 host save。
   - 驗證：`cargo fmt --check`、`cargo check --release`、`cargo test` 全部通過；149 項單元測試與 1 項整合測試通過。新增聊天 sender 防偽/可靠雙 client relay、client bridge 往返、聊天 ring buffer/清洗、名稱投影、斷線 entity 清理、host bind failure 回報與六部件 avatar mesh 測試；既有 position/action、block sync、host-stop 與 thread join 測試共同覆蓋多人驗收資料路徑。
   - 備註：本環境未執行兩個實際遊戲視窗的人工視覺 smoke test；UI/網格、雙 client 資料流、斷線與清理均有自動測試覆蓋，仍建議發佈前以 Host + 2 Join 視窗確認視覺尺寸與操作手感。
@@ -199,7 +212,7 @@ P3 [█████████░] 88.9%
   - 驗證：`cargo fmt --check`、`cargo check --release`、`cargo test` 通過；140 項單元測試與 1 項整合測試全部通過。新增 block wire roundtrip、遠端邊界 block 的光照/mesh dependency、權威/純視覺爆炸、可靠 `BlockChange`、定向 `ChunkData` 與 `TimeSync` 端到端測試。
   - 備註：兩個實際遊戲視窗中的方塊/流體/爆炸視覺與 join-mid-game GUI smoke test 仍需人工互動驗證；資料協議、server/client relay 與 CPU mutation path 已由自動測試覆蓋。
 - 🔧 補完任務 #25 子任務 3/6 未完成驗證步驟 (By GLM-5.2)：Step 7 編譯冒煙與 Step 2 雙實例煙霧測試
-  - 修改文件：`src/network/client.rs`, `docs/superpowers/plans/2026-07-22-multiplayer-03-client-bridge.md`, `plans/progress.md`
+  - 修改文件：`src/network/client.rs`, `docs/superpowers/plans/2026-07-22-multiplayer-03-client-bridge.md`, `plans/basic_gameplay/progress.md`
   - 關鍵決策：完成子任務 3 計畫中最後兩個未勾選 checkbox。Step 7 以 `cargo check --release` 通過（僅 2 項 Sub-tasks 4-6 預留變體的既有 dead-code 警告，無錯誤），並以 release binary 啟動單一與雙實例各持續 8 秒與 6 秒無 panic、無 stderr，覆蓋「binary 啟動且伺服器執行緒不崩潰」需求。Step 2 新增自動化整合測試 `host_stop_notifies_client_and_threads_join_without_hanging`，驗證主機停止伺服器後 client 收到 `ClientToGame::Disconnected` 且雙背景執行緒於 3 秒逾時內乾淨 join 無 panic，補足「quitting either side cleans up the background thread without hanging」需求；既有 `connects_and_receives_join_for_second_client` 已覆蓋 seed 傳播與 `PlayerJoin`。
   - 驗證：`cargo fmt --check` 通過；`cargo check --release` 通過；`cargo test --release` 共 134 項單元測試與 1 項整合測試全部通過（含新增 1 項 host-stop 清理測試）。
   - 備註：兩視窗 Host/Join 點擊進入世界的完整 GUI 流程仍需互動式 Windows UI 自動化，維持手動檢查；資料路徑（seed 傳播、join 通知、disconnect 清理、執行緒拆解）已由自動測試完整覆蓋。
@@ -359,7 +372,7 @@ P3 [█████████░] 88.9%
 - 📋 建立專案計畫，拆分 P0~P3 共 30 個任務
 - 📋 建立進度追蹤文件
 - ✅ 完成任務 Task 11：Host 遠端方塊請求 Reach 驗證
-  - 修改文件：`src/state.rs`, `ARCHITECTURE.md`, `track.md`, `plans/progress.md`, `plans/implementation/10_bug_audit.md`
+  - 修改文件：`src/state.rs`, `ARCHITECTURE.md`, `track.md`, `plans/basic_gameplay/progress.md`, `plans/implementation/10_bug_audit.md`
   - 關鍵決策：Host 處理 `set_block_and_broadcast` 之前驗證 requester 最新權威位置與目標方塊距離是否在 `BLOCK_REACH` (5.0) + `BLOCK_REACH_TOLERANCE` (1.5) 即 6.5 格以內，無快照或超標請求直接拒絕。
 
 

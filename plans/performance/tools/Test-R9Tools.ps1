@@ -3,7 +3,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $tools = $PSScriptRoot
-$repo = (Resolve-Path (Join-Path $tools '../..')).Path
+$repo = (Resolve-Path (Join-Path $tools '../../..')).Path
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "icraft-r9-tools-$PID"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 function Assert([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }

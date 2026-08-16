@@ -32,7 +32,7 @@
 ## 驗證
 
 - `cargo test --all-targets`：496 passed、3 ignored；integration 1 passed。
-- `pwsh -NoProfile -File performance/tools/Test-R9Tools.ps1`：PASS。
+- `pwsh -NoProfile -File plans/performance/tools/Test-R9Tools.ps1`：PASS。
 - `cargo test --all-targets --release`：496 passed、3 ignored；integration
   1 passed。
 - `cargo clippy --all-targets --all-features`：PASS（專案既有 warnings 未設

@@ -77,7 +77,7 @@ plans/minecraft_foundation_gap/02_chest_storage.md
   invariants 和 verification 說明。
 - 將 {{PLAN_FILE}} 的狀態與 checkbox 更新為真實結果；未完成項保持未勾選並說明原因。
 - 更新 plans/minecraft_foundation_gap/README.md 的對應狀態，但不要改動其他計劃的狀態。
-- 如既有 plans/progress.md 或 track.md 對本功能有直接聲明，同步修正；不要重寫無關歷史。
+- 如既有 plans/basic_gameplay/progress.md 或 track.md 對本功能有直接聲明，同步修正；不要重寫無關歷史。
 - 除非使用者明確要求，不要自行 commit、push 或建立 PR。若有 commit 要求，整份計劃最多 3 個聚焦 commit。
 - 完成本計劃後立即停止，不要開始下一份。
 

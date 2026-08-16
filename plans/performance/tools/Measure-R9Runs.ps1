@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$InputPath,
-    [string]$OutputPath = 'performance/reports/r9-summary.json',
+    [string]$OutputPath = 'plans/performance/reports/r9-summary.json',
     [string]$ManifestPath
 )
 

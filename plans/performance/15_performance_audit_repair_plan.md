@@ -3,14 +3,14 @@
 > 審核日期：2026-07-29  
 > 審核基線：`master` / `5f1ee4d`  
 > 狀態：修復續作已落地；01–14 仍受第 6 節實機 artifact gate 約束
-> 範圍：`performance/01`–`14`、`performance/14_performance_optimization.md`、`ARCHITECTURE.md` 與其對應實作  
+> 範圍：`plans/performance/01`–`14`、`plans/performance/14_performance_optimization.md`、`ARCHITECTURE.md` 與其對應實作  
 > 原則：先修資料遺失、世界分歧與畫面錯誤，再補完未落實的優化，最後才重新宣告性能成果。
 
 ## 1. 原始審核結論（歷史基線）
 
 下表記錄 2026-07-29、commit `5f1ee4d` 的原始審核結果，不代表目前
 working tree 的 runtime 狀態。後續 R0–R9 修復與當前證據以各
-`performance/repair/` 文件、`performance/performance_track.md` 及本文件
+`plans/performance/repair/` 文件、`plans/performance/performance_track.md` 及本文件
 第 6 節為準。即使 runtime 修復已落地，在實機 before/after artifact 完成前，
 01–14 仍維持 `Partial`。
 
@@ -48,7 +48,7 @@ working tree 的 runtime 狀態。後續 R0–R9 修復與當前證據以各
 | Async LOS 永遠 visible | `src/culling.rs:347-394, 406-493`。 |
 | Dynamic resolution 畫面錯誤 | `src/state.rs:12658-12671, 12902-12911`；沒有 scaled render target/upscale。 |
 | Multiplayer authority 分歧 | `src/state.rs:6517-6528, 6598-6606, 6848-6865`；`src/mob.rs:617-633`；`src/network/protocol.rs:210-302`。 |
-| 驗收 artifact 不足 | `performance/performance_track.md:24-26, 270-273`；`performance/baselines/2026-07-28_windows_dx12.md:7-61`。 |
+| 驗收 artifact 不足 | `plans/performance/performance_track.md:24-26, 270-273`；`plans/performance/baselines/2026-07-28_windows_dx12.md:7-61`。 |
 
 ## 2. P0：先修 correctness / durability blockers
 

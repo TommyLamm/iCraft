@@ -2,7 +2,7 @@
 
 > Last verified: 2026-08-16 at `b3912c6` (`tommy-dev`).
 > Source code is authoritative; `plans/`, `docs/superpowers/`, and most of
-> `performance/` are design/history records, not a description of the live runtime.
+> `plans/performance/` are design/history records, not a description of the live runtime.
 >
 > Review scope: Cargo targets, both entrypoints, desktop lifecycle, embedded and
 > dedicated runtimes, authority/world ownership, TCP protocol, persistence,
@@ -211,7 +211,7 @@ explicit development/test override.
 | Rendering | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling.rs`, `src/block_model.rs`, `src/mob_renderer.rs`, `src/hand_renderer.rs`, `src/particles.rs`, `src/texture.rs`, `src/shader.wgsl` |
 | Networking | `src/network/{protocol,transport,server,client}.rs` |
 | Persistence and resources | `src/save.rs`, `src/resources.rs`, `src/localization.rs`, `src/audio.rs`, `src/accessibility.rs` |
-| Tests and performance | inline `#[cfg(test)]`, `tests/`, `src/sim_harness.rs`, `src/final_acceptance.rs`, `src/microbench.rs`, `performance/` |
+| Tests and performance | inline `#[cfg(test)]`, `tests/`, `src/sim_harness.rs`, `src/final_acceptance.rs`, `src/microbench.rs`, `plans/performance/` |
 
 `state.rs` is the largest coupling hotspot and mixes presentation with legacy
 simulation. `server_runtime.rs` is the transport/session/save composition root.

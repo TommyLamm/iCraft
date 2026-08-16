@@ -95,11 +95,11 @@
 - 驗證：三者皆通過。
 
 ### 11.10 更新文件
-- [x] 檔案：`ARCHITECTURE.md`、`track.md`、`plans/progress.md`、`plans/implementation/10_bug_audit.md`
+- [x] 檔案：`ARCHITECTURE.md`、`track.md`、`plans/basic_gameplay/progress.md`、`plans/implementation/10_bug_audit.md`
 - 步驟：
-  1. `ARCHITECTURE.md` 多人段落說明 host 對遠端方塊請求做 reach 驗證（常數值、容差、拒絕策略）。
-  2. `track.md` 加入 Task 11 列與 working notes。
-  3. `plans/progress.md` 更新日誌新增一條。
+  1. `ARCHITECTURE.md` 多人段落新增 reach 驗證描述。
+  2. `track.md` 標註 N3 完成。
+  3. `plans/basic_gameplay/progress.md` 更新日誌新增一條。
   4. `10_bug_audit.md` 將 N3 標記為已修復。
 - 驗證：文件與實作一致。
 

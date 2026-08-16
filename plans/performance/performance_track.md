@@ -65,7 +65,7 @@
 
 固定 scene matrix、JSONL schema validator、summary percentile calculator、硬件
 manifest capture、PGO fail-closed comparison 與報告模板已建立，並由
-`performance/tools/Test-R9Tools.ps1` 驗證。這些是量測前的可重播工具，不是 GPU
+`plans/performance/tools/Test-R9Tools.ps1` 驗證。這些是量測前的可重播工具，不是 GPU
 結果；目前沒有八場景 before/after raw artifact 或 PGO A/B 數據，因此 01–14
 仍維持 `Partial`，不得填入性能改善百分比。
 

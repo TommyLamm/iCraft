@@ -4,7 +4,7 @@
 
 ## 目標
 
-完成 `plans/p3/30_render_optimization.md` 的視錐剔除、Greedy Meshing、背景
+完成 `plans/basic_gameplay/p3/30_render_optimization.md` 的視錐剔除、Greedy Meshing、背景
 Mesh 生成、Chunk 排序與三級 LOD，並讓 F3 顯示實際提交的 Chunk、Draw Call
 和三角形數。
 

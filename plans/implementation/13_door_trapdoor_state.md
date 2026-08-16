@@ -139,7 +139,7 @@
 22. 右鍵互動開關門：在 `handle_click` 的 redstone interact 分支加入
     OakDoor/OakTrapdoor，toggle open bit 並更新 mesh。
 23. 更新 `ARCHITECTURE.md`（方塊儲存、模型、碰撞、紅石段落）、`track.md`、
-    `plans/progress.md`、`plans/implementation/10_bug_audit.md` 的 W1 狀態。
+    `plans/basic_gameplay/progress.md`、`plans/implementation/10_bug_audit.md` 的 W1 狀態。
 
 ## 驗證
 

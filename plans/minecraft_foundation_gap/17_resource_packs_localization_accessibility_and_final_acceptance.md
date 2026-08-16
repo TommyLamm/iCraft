@@ -62,14 +62,14 @@ layers are skipped with one deduplicated diagnostic, while the original first-va
   Progression/Social 場景標成網路 E2E；canonical block/automation ingress 仍由
   Plan31、travel/completion 由 Plan32 補齊。
 - [x] 建人工 QA checklist：視覺、音效、輸入、無障礙、GPU 性能、保存／重啟。
-- [x] 更新 `README.md`、`ARCHITECTURE.md`、`plans/progress.md`，刪除／標記已過時舊計劃聲明。
+- [x] 更新 `README.md`、`ARCHITECTURE.md`、`plans/basic_gameplay/progress.md`，刪除／標記已過時舊計劃聲明。
 - [x] 產生已知差異表，按「基礎缺口」「內容差異」「明確不支援」分類，禁止用百分比自評替代。
 
 ## 主要文件
 
 - 建議新增：`src/resources/*`、`src/localization.rs`、`src/accessibility.rs`
 - 修改：`src/texture.rs`、`src/audio.rs`、`src/menu.rs`、`src/state.rs`、所有顯示文字來源
-- 修改：`README.md`、`ARCHITECTURE.md`、`plans/progress.md`、測試 harness
+- 修改：`README.md`、`ARCHITECTURE.md`、`plans/basic_gameplay/progress.md`、測試 harness
 
 ## 驗收
 

@@ -1,13 +1,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Command,
-    [string]$OutputRoot = 'performance/reports/r9-runs',
+    [string]$OutputRoot = 'plans/performance/reports/r9-runs',
     [int]$Repetitions = 5,
     [int]$WarmupSeconds = 15,
     [int]$SampleSeconds = 30,
     [ValidateSet(16)][int]$RenderDistance = 16,
     [ValidateSet('before', 'after', 'non-pgo', 'pgo')][string]$Phase = 'before',
-    [string]$SceneManifestPath = 'performance/benchmarks/r9-scenes.json',
+    [string]$SceneManifestPath = 'plans/performance/benchmarks/r9-scenes.json',
     [string[]]$SceneIds = @('01', '02', '03', '04', '05', '06', '07', '08'),
     [switch]$DryRun
 )

@@ -39,7 +39,7 @@ Host 收到 joined client 的方塊放置／破壞請求時，必須驗證目標
 4. 將 reach 檢查抽成獨立純函式 `block_within_reach(
    player_pos: Vec3, block_pos: (i32,i32,i32)) -> bool`，方便單元測試。
 5. 更新 `ARCHITECTURE.md` 多人段落，說明 host 對遠端方塊請求做 reach 驗證。
-6. 更新 `track.md`、`plans/progress.md`、`plans/implementation/10_bug_audit.md`
+6. 更新 `track.md`、`plans/basic_gameplay/progress.md`、`plans/implementation/10_bug_audit.md`
    的 N3 狀態。
 
 ## 驗證

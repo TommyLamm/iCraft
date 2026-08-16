@@ -116,7 +116,7 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
 
 - Plan 17 的 `[x]` 只代表基礎程式骨架或已通過的 headless unit；真 E2E、consumer 接線、視覺／
   音效／DPI／30 分鐘 soak 與網路拓撲需在本計劃或人工 QA 中有 dated artifact 才可勾選。
-- 更新 `17_qa_checklist.md`、`17_known_differences.md`、`plans/progress.md` 與 `ARCHITECTURE.md`，
+- 更新 `17_qa_checklist.md`、`17_known_differences.md`、`plans/basic_gameplay/progress.md` 與 `ARCHITECTURE.md`，
   把 fixture harness、未接線 consumer、Accessibility presentation 缺口和 Plan 18 hand-off 分流。
 - 新增測試報告格式，對每一場景、拓撲、保存重載與人工 QA artifact 記錄 pass／blocked／failed，
   不得用 enum 數量或百分比自評替代。
@@ -131,7 +131,7 @@ resource-pack consumers，以及尚未完成的視覺／輸入證據補成可重
   與對應 tests（B）
 - `src/accessibility.rs`、`src/menu.rs`、`src/state.rs`、`src/audio.rs` 與 layout/state tests（C）
 - `plans/minecraft_foundation_gap/17_qa_checklist.md`、`17_known_differences.md`、
-  `plans/progress.md`、`ARCHITECTURE.md`（D）
+  `plans/basic_gameplay/progress.md`、`ARCHITECTURE.md`（D）
 
 不得在本計劃直接改動 Plan 18 的 authority protocol／server migration；只接入其公開 contract
 來執行 topology harness。

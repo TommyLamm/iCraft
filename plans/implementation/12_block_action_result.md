@@ -127,8 +127,8 @@ Joined client 的生存模式放置／破壞經過 host 權威驗證，host 回�
 15. 移除舊的 `RequestBlockChange` / `ClientBlockChange` 路徑（或保留作為
     host→client 的 authoritative `BlockChange` 廣播，但 client→host 改用
     `BlockActionRequest`）。
-16. 更新 `ARCHITECTURE.md` 多人段落、`track.md`、`plans/progress.md`、
-    `plans/implementation/10_bug_audit.md` 的 G1 狀態。
+16. 更新 `ARCHITECTURE.md` 多人段落、`track.md`、`plans/basic_gameplay/progress.md`、
+    `plans/implementation/10_bug_audit.md` 的 N1 狀態。
 
 ## 驗證
 

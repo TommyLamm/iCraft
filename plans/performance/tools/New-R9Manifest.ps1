@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$OutputPath = 'performance/reports/r9-manifest.json',
+    [string]$OutputPath = 'plans/performance/reports/r9-manifest.json',
     [string]$RepoRoot = '.',
     [string]$SettingsPath,
     [string]$WgpuBackend,

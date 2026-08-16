@@ -48,8 +48,8 @@ gate leaves the non-PGO release as the selected build.
 ## Reproduction and verification
 
 ```powershell
-pwsh performance/tools/Validate-R9Jsonl.ps1 -Path <raw.jsonl>
-pwsh performance/tools/Measure-R9Runs.ps1 -InputPath <raw-root> -ManifestPath <manifest.json>
+pwsh plans/performance/tools/Validate-R9Jsonl.ps1 -Path <raw.jsonl>
+pwsh plans/performance/tools/Measure-R9Runs.ps1 -InputPath <raw-root> -ManifestPath <manifest.json>
 git diff --check
 ```
 

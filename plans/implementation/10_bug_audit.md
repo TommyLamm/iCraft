@@ -22,7 +22,7 @@
    不 commit、不改文件。
 6. [x] 根代理用 CodeGraph 審查每條修復與影響面，必要時退回同一 sub-agent
    修正。
-7. [x] 更新本文件、`track.md`、`plans/progress.md`、`ARCHITECTURE.md`，
+7. [x] 更新本文件、`track.md`、`plans/basic_gameplay/progress.md`、`ARCHITECTURE.md`，
    以單一 Task 10 commit 收束。
 
 ## 審計結果

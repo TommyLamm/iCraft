@@ -4,8 +4,8 @@
 > **涉及面**: 流體物理、渲染管線、玩家交互、水下效果  
 > **前置條件**: P0 (多 Chunk + 透明渲染)
 > 
-> **設計規格書**: [fluid-simulation-design.md](file:///f:/Desktop/MC/docs/superpowers/specs/2026-07-19-fluid-simulation-design.md)
-> **實作計畫**: [fluid-simulation.md](file:///f:/Desktop/MC/docs/superpowers/plans/2026-07-19-fluid-simulation.md)
+> **設計規格書**: [fluid-simulation-design.md](../../../docs/superpowers/specs/2026-07-19-fluid-simulation-design.md)
+> **實作計畫**: [fluid-simulation.md](../../../docs/superpowers/plans/2026-07-19-fluid-simulation.md)
 
 ---
 

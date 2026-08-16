@@ -4,8 +4,8 @@
 > **涉及面**: 世界生成、噪聲算法、邊界鄰居投影、流動植物、模擬更新、碰撞傷害  
 > **前置條件**: P0 任務 1 (多 Chunk) + 任務 2 (方塊類型)
 > 
-> **設計規格書**: [trees-biomes-design-spec.md](file:///f:/Desktop/MC/docs/superpowers/specs/2026-07-19-trees-biomes-design-spec.md)
-> **實作計畫**: [trees-biomes.md](file:///f:/Desktop/MC/docs/superpowers/plans/2026-07-19-trees-biomes.md)
+> **設計規格書**: [trees-biomes-design-spec.md](../../../docs/superpowers/specs/2026-07-19-trees-biomes-design-spec.md)
+> **實作計畫**: [trees-biomes.md](../../../docs/superpowers/plans/2026-07-19-trees-biomes.md)
 
 ---
 

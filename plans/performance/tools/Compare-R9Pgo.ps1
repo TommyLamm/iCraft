@@ -4,14 +4,14 @@ param(
     [Parameter(Mandatory)][string]$InstrumentedBuildCommand,
     [Parameter(Mandatory)][string]$OptimizedBuildCommand,
     [Parameter(Mandatory)][string]$WorkloadCommand,
-    [string]$OutputRoot = 'performance/reports/r9-pgo',
+    [string]$OutputRoot = 'plans/performance/reports/r9-pgo',
     [string]$LlvmProfdata = 'llvm-profdata',
     [ValidateSet(5)][int]$Repetitions = 5,
     [string]$BaselineRuns,
     [string]$PgoRuns,
     [string]$BaselineSummaryPath,
     [string]$PgoSummaryPath,
-    [string]$OutputPath = 'performance/reports/r9-pgo-comparison.json',
+    [string]$OutputPath = 'plans/performance/reports/r9-pgo-comparison.json',
     [switch]$DryRun
 )
 

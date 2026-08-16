@@ -4,8 +4,8 @@
 > **涉及面**: AI 行為、模型渲染、繁殖系統、掉落物  
 > **前置條件**: P1 任務 10 (實體框架)
 > 
-> **設計規格書**: [passive-mobs-design-spec.md](file:///f:/Desktop/MC/docs/superpowers/specs/2026-07-19-passive-mobs-design-spec.md)
-> **實作計畫**: [passive-mobs.md](file:///f:/Desktop/MC/docs/superpowers/plans/2026-07-19-passive-mobs.md)
+> **設計規格書**: [passive-mobs-design-spec.md](../../../docs/superpowers/specs/2026-07-19-passive-mobs-design-spec.md)
+> **實作計畫**: [passive-mobs.md](../../../docs/superpowers/plans/2026-07-19-passive-mobs.md)
 
 ---
 
