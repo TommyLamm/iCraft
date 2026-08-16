@@ -4,9 +4,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
-use super::protocol::Packet;
+use super::protocol::{Packet, MAX_PACKET_SIZE};
 
-const MAX_PACKET_SIZE: u32 = 2 * 1024 * 1024;
 const LEN_HEADER: usize = 4;
 
 pub struct Connection {
@@ -65,7 +64,7 @@ impl ConnectionReader {
                 self.buf.extend_from_slice(&tmp[..n]);
             }
             let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
-            if len > MAX_PACKET_SIZE {
+            if len as usize > MAX_PACKET_SIZE {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("packet length {len} exceeds maximum {MAX_PACKET_SIZE}"),
@@ -255,5 +254,38 @@ mod tests {
 
         assert_eq!(r1, p1);
         assert_eq!(r2, p2);
+    }
+
+    #[tokio::test]
+    async fn recv_rejects_length_header_above_max_packet_size() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(addr).await.unwrap();
+        let mut server_stream = listener.accept().await.unwrap().0;
+
+        let (reader_half, _writer_half) = client_stream.into_split();
+        let mut reader = ConnectionReader {
+            stream: reader_half,
+            buf: Vec::new(),
+            frame_len: None,
+        };
+
+        // 2 MiB + 1, plus a short body that must not be allocated as the frame.
+        let header = 0x0020_0001u32.to_be_bytes();
+        server_stream.write_all(&header).await.unwrap();
+        server_stream.write_all(&[0u8; 16]).await.unwrap();
+        server_stream.flush().await.unwrap();
+
+        let error = reader.recv().await.expect_err("oversized length header");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds maximum"));
+        assert!(reader.frame_len.is_none());
+        assert!(
+            reader.buf.len() < MAX_PACKET_SIZE,
+            "body must not be reserved at the advertised length"
+        );
     }
 }
