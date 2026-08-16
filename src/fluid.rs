@@ -16,14 +16,11 @@ pub struct FluidMutation {
     pub raw_fluid: u8,
 }
 
-/// Advances only fluid cells affected by a block change. Work is capped so a
-/// large flow can span several frames without blocking rendering.
+/// 測試／leftover renderer；權威禁止。
 ///
-/// Returns the dirty chunk coordinates and the list of raw fluid mutations
-/// applied this tick. The mutation list lets a multiplayer host broadcast the
-/// exact cells that changed so connected clients render the same flow without
-/// running the fluid simulation themselves.
-pub fn tick_fluids(
+/// Walks every loaded column (`columns == None`). Authority must call
+/// [`tick_fluids_in_columns`] with the simulation union instead.
+pub fn tick_all_loaded_fluids(
     chunk_manager: &mut ChunkManager,
     is_lava: bool,
     max_updates: usize,
@@ -31,6 +28,16 @@ pub fn tick_fluids(
     tick_fluids_in_columns(chunk_manager, is_lava, max_updates, None)
 }
 
+/// Authority fluid tick. Advances only fluid cells affected by a block change,
+/// capped so a large flow can span several frames.
+///
+/// `columns` is the simulation-union residency set. Do not pass `None` from
+/// authority; that path is leftover-only via [`tick_all_loaded_fluids`].
+///
+/// Returns the dirty chunk coordinates and the list of raw fluid mutations
+/// applied this tick. The mutation list lets a multiplayer host broadcast the
+/// exact cells that changed so connected clients render the same flow without
+/// running the fluid simulation themselves.
 pub fn tick_fluids_in_columns(
     chunk_manager: &mut ChunkManager,
     is_lava: bool,
@@ -296,7 +303,7 @@ mod tests {
         manager.chunks.insert((0, 0), Chunk::new(0, 0));
 
         assert_eq!(manager.pending_fluid_updates(false), 0);
-        assert!(tick_fluids(&mut manager, false, 64).0.is_empty());
+        assert!(tick_all_loaded_fluids(&mut manager, false, 64).0.is_empty());
         assert_eq!(manager.pending_fluid_updates(false), 0);
     }
 
@@ -307,7 +314,7 @@ mod tests {
         let source = (8, 120, 8);
         manager.set_block(source.0, source.1, source.2, BlockType::Water);
 
-        let (dirty, mutations) = tick_fluids(&mut manager, false, 128);
+        let (dirty, mutations) = tick_all_loaded_fluids(&mut manager, false, 128);
 
         assert!(!dirty.is_empty());
         assert_eq!(manager.get_block(8, 119, 8), BlockType::Water);
@@ -334,7 +341,7 @@ mod tests {
         );
 
         let before = manager.get_fluid_raw(flowing.0, flowing.1, flowing.2);
-        let (_, mutations) = tick_fluids(&mut manager, false, 64);
+        let (_, mutations) = tick_all_loaded_fluids(&mut manager, false, 64);
         assert!(mutations.iter().any(|mutation| {
             mutation.position == flowing
                 && mutation.block == BlockType::Water
@@ -351,7 +358,7 @@ mod tests {
         manager.set_block(slab.0, slab.1, slab.2, BlockType::OakSlab);
         assert!(manager.set_waterlogged(slab.0, slab.1, slab.2, true));
 
-        let (_, mutations) = tick_fluids(&mut manager, false, 128);
+        let (_, mutations) = tick_all_loaded_fluids(&mut manager, false, 128);
         assert_eq!(
             manager.get_block(below.0, below.1, below.2),
             BlockType::Water
@@ -377,7 +384,7 @@ mod tests {
         let mut dirty = HashSet::new();
         let mut mutations = Vec::new();
         for _ in 0..8 {
-            let (next_dirty, next_mutations) = tick_fluids(&mut manager, false, 128);
+            let (next_dirty, next_mutations) = tick_all_loaded_fluids(&mut manager, false, 128);
             dirty.extend(next_dirty);
             mutations.extend(next_mutations);
             if manager.pending_fluid_updates(false) == 0 {
@@ -404,7 +411,7 @@ mod tests {
         manager.set_block(source.0, source.1, source.2, BlockType::Water);
 
         for _ in 0..32 {
-            tick_fluids(&mut manager, false, 256);
+            tick_all_loaded_fluids(&mut manager, false, 256);
             if manager.pending_fluid_updates(false) == 0 {
                 break;
             }
@@ -413,7 +420,7 @@ mod tests {
 
         manager.set_block(source.0, source.1, source.2, BlockType::Air);
         for _ in 0..2048 {
-            tick_fluids(&mut manager, false, 256);
+            tick_all_loaded_fluids(&mut manager, false, 256);
             if manager.pending_fluid_updates(false) == 0 {
                 break;
             }
@@ -433,7 +440,7 @@ mod tests {
         manager.set_fluid_level(9, 0, 8, 1);
         manager.set_fluid_falling(9, 0, 8, false);
 
-        tick_fluids(&mut manager, false, 64);
+        tick_all_loaded_fluids(&mut manager, false, 64);
 
         assert_eq!(manager.get_block(9, 0, 8), BlockType::Water);
         assert_ne!(

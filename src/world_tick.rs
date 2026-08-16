@@ -224,43 +224,9 @@ where
             }
             None
         }
-        BlockType::Cactus => {
-            let mut height = 1;
-            let mut check_y = y - 1;
-            while get_block(x, check_y, z) == Some(BlockType::Cactus) {
-                height += 1;
-                check_y -= 1;
-            }
-            if height < 3 && get_block(x, y + 1, z) == Some(BlockType::Air) && rng_val % 3 == 0 {
-                Some(BlockMutationRequest {
-                    pos: (x, y + 1, z),
-                    new_block: BlockType::Cactus,
-                    new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
-                })
-            } else {
-                None
-            }
-        }
+        BlockType::Cactus => try_grow_column(pos, BlockType::Cactus, 3, rng_val, &mut get_block),
         BlockType::SugarCane => {
-            let mut height = 1;
-            let mut check_y = y - 1;
-            while get_block(x, check_y, z) == Some(BlockType::SugarCane) {
-                height += 1;
-                check_y -= 1;
-            }
-            if height < 3 && get_block(x, y + 1, z) == Some(BlockType::Air) && rng_val % 3 == 0 {
-                Some(BlockMutationRequest {
-                    pos: (x, y + 1, z),
-                    new_block: BlockType::SugarCane,
-                    new_state: 0,
-                    new_entity: None,
-                    cause: MutationCause::System,
-                })
-            } else {
-                None
-            }
+            try_grow_column(pos, BlockType::SugarCane, 3, rng_val, &mut get_block)
         }
         BlockType::Ice => {
             if rng_val % 4 == 0 {
@@ -320,8 +286,41 @@ where
     }
 }
 
-/// Samples random ticks across loaded chunks in the ChunkManager.
-pub fn sample_random_ticks(
+fn try_grow_column<F>(
+    pos: (i32, i32, i32),
+    block: BlockType,
+    max_h: i32,
+    rng_val: u64,
+    mut get_block: F,
+) -> Option<BlockMutationRequest>
+where
+    F: FnMut(i32, i32, i32) -> Option<BlockType>,
+{
+    let (x, y, z) = pos;
+    let mut height = 1;
+    let mut check_y = y - 1;
+    while get_block(x, check_y, z) == Some(block) {
+        height += 1;
+        check_y -= 1;
+    }
+    if height < max_h && get_block(x, y + 1, z) == Some(BlockType::Air) && rng_val % 3 == 0 {
+        Some(BlockMutationRequest {
+            pos: (x, y + 1, z),
+            new_block: block,
+            new_state: 0,
+            new_entity: None,
+            cause: MutationCause::System,
+        })
+    } else {
+        None
+    }
+}
+
+/// 測試／leftover renderer；權威禁止。
+///
+/// Walks every loaded column (`columns == None`). Authority must call
+/// [`sample_random_ticks_in_columns`] with the simulation union instead.
+pub fn sample_all_loaded_random_ticks(
     chunk_manager: &ChunkManager,
     world_seed: u64,
     game_tick: u64,
@@ -338,6 +337,9 @@ pub fn sample_random_ticks(
     )
 }
 
+/// Authority random-tick sampler. `columns` is the simulation-union residency
+/// set. Do not pass `None` from authority; that path is leftover-only via
+/// [`sample_all_loaded_random_ticks`].
 pub fn sample_random_ticks_in_columns(
     chunk_manager: &ChunkManager,
     columns: Option<&BTreeSet<(i32, i32)>>,
@@ -440,19 +442,22 @@ pub struct HopperTickResult {
     pub budget_exhausted: bool,
 }
 
-/// Compatibility wrapper used by focused world-tick tests and callers that do
-/// not own an entity manager.  It still uses the same atomic transfer path.
-pub fn tick_hoppers(chunk_manager: &mut ChunkManager, max_transfers_per_tick: usize) -> usize {
-    tick_hoppers_with_entities(chunk_manager, None, max_transfers_per_tick).transfers
+/// 測試／leftover renderer；權威禁止。
+///
+/// Walks every loaded column (`columns == None`). Authority must call
+/// [`tick_hoppers_in_columns`] with the simulation union instead.
+pub fn tick_all_loaded_hoppers(
+    chunk_manager: &mut ChunkManager,
+    max_transfers_per_tick: usize,
+) -> usize {
+    tick_all_loaded_hoppers_with_entities(chunk_manager, None, max_transfers_per_tick).transfers
 }
 
-/// Ticks active hoppers across loaded chunks.  A transfer is planned against
-/// cloned source/target entities and committed only after both sided-capability
-/// checks succeed, so a failed destination never consumes the source slot.
-/// Dropped item entities are considered after container pulls and are removed
-/// or decremented only after the hopper accepts one complete metadata-bearing
-/// stack item.
-pub fn tick_hoppers_with_entities(
+/// 測試／leftover renderer；權威禁止。
+///
+/// Walks every loaded column (`columns == None`). Authority must call
+/// [`tick_hoppers_in_columns`] with the simulation union instead.
+pub fn tick_all_loaded_hoppers_with_entities(
     chunk_manager: &mut ChunkManager,
     entity_manager: Option<&mut crate::entity::EntityManager>,
     max_transfers_per_tick: usize,
@@ -460,6 +465,14 @@ pub fn tick_hoppers_with_entities(
     tick_hoppers_in_columns(chunk_manager, entity_manager, max_transfers_per_tick, None)
 }
 
+/// Authority hopper tick. A transfer is planned against cloned source/target
+/// entities and committed only after both sided-capability checks succeed, so
+/// a failed destination never consumes the source slot. Dropped item entities
+/// are considered after container pulls and are removed or decremented only
+/// after the hopper accepts one complete metadata-bearing stack item.
+///
+/// `columns` is the simulation-union residency set. Do not pass `None` from
+/// authority; that path is leftover-only via [`tick_all_loaded_hoppers`].
 pub fn tick_hoppers_in_columns(
     chunk_manager: &mut ChunkManager,
     mut entity_manager: Option<&mut crate::entity::EntityManager>,
@@ -514,58 +527,26 @@ pub fn tick_hoppers_in_columns(
             continue;
         }
 
-        let mut transferred = false;
         let delta = facing.delta();
         let target_pos = (x + delta.0, y + delta.1, z + delta.2);
-        if chunk_manager.is_block_loaded(target_pos.0, target_pos.1, target_pos.2) {
-            let source = chunk_manager.get_block_entity(x, y, z).cloned();
-            let target = chunk_manager
-                .get_block_entity(target_pos.0, target_pos.1, target_pos.2)
-                .cloned();
-            if let (Some(source), Some(target)) = (source, target) {
-                result.container_checks = result.container_checks.saturating_add(1);
-                if let Some((source_after, target_after)) =
-                    transfer_one(&source, Some(facing), &target, Some(facing.opposite()))
-                {
-                    chunk_manager.set_block_entity(x, y, z, Some(source_after));
-                    chunk_manager.set_block_entity(
-                        target_pos.0,
-                        target_pos.1,
-                        target_pos.2,
-                        Some(target_after),
-                    );
-                    result.changed_positions.push((x, y, z));
-                    result.changed_positions.push(target_pos);
-                    transferred = true;
-                }
-            }
-        }
+        let mut transferred = try_container_transfer(
+            chunk_manager,
+            (x, y, z),
+            Some(facing),
+            target_pos,
+            Some(facing.opposite()),
+            &mut result,
+        );
 
         if !transferred {
-            let above_pos = (x, y + 1, z);
-            if chunk_manager.is_block_loaded(above_pos.0, above_pos.1, above_pos.2) {
-                let source = chunk_manager
-                    .get_block_entity(above_pos.0, above_pos.1, above_pos.2)
-                    .cloned();
-                let target = chunk_manager.get_block_entity(x, y, z).cloned();
-                if let (Some(source), Some(target)) = (source, target) {
-                    result.container_checks = result.container_checks.saturating_add(1);
-                    if let Some((source_after, target_after)) =
-                        transfer_one(&source, Some(Direction::Down), &target, Some(Direction::Up))
-                    {
-                        chunk_manager.set_block_entity(
-                            above_pos.0,
-                            above_pos.1,
-                            above_pos.2,
-                            Some(source_after),
-                        );
-                        chunk_manager.set_block_entity(x, y, z, Some(target_after));
-                        result.changed_positions.push(above_pos);
-                        result.changed_positions.push((x, y, z));
-                        transferred = true;
-                    }
-                }
-            }
+            transferred = try_container_transfer(
+                chunk_manager,
+                (x, y + 1, z),
+                Some(Direction::Down),
+                (x, y, z),
+                Some(Direction::Up),
+                &mut result,
+            );
         }
 
         if !transferred {
@@ -637,6 +618,51 @@ pub fn tick_hoppers_in_columns(
     result.changed_positions.dedup();
     result.budget_exhausted = budget > 0 && result.transfers >= budget;
     result
+}
+
+fn try_container_transfer(
+    chunk_manager: &mut ChunkManager,
+    source_pos: (i32, i32, i32),
+    source_side: Option<crate::redstone::Direction>,
+    target_pos: (i32, i32, i32),
+    target_side: Option<crate::redstone::Direction>,
+    result: &mut HopperTickResult,
+) -> bool {
+    if !chunk_manager.is_block_loaded(source_pos.0, source_pos.1, source_pos.2)
+        || !chunk_manager.is_block_loaded(target_pos.0, target_pos.1, target_pos.2)
+    {
+        return false;
+    }
+    let source = chunk_manager
+        .get_block_entity(source_pos.0, source_pos.1, source_pos.2)
+        .cloned();
+    let target = chunk_manager
+        .get_block_entity(target_pos.0, target_pos.1, target_pos.2)
+        .cloned();
+    let Some((source, target)) = source.zip(target) else {
+        return false;
+    };
+    result.container_checks = result.container_checks.saturating_add(1);
+    let Some((source_after, target_after)) =
+        transfer_one(&source, source_side, &target, target_side)
+    else {
+        return false;
+    };
+    chunk_manager.set_block_entity(
+        source_pos.0,
+        source_pos.1,
+        source_pos.2,
+        Some(source_after),
+    );
+    chunk_manager.set_block_entity(
+        target_pos.0,
+        target_pos.1,
+        target_pos.2,
+        Some(target_after),
+    );
+    result.changed_positions.push(source_pos);
+    result.changed_positions.push(target_pos);
+    true
 }
 
 fn transfer_one(
@@ -849,7 +875,7 @@ mod tests {
 
         // Execute hopper ticks
         // First tick: top hopper pulls 1 IronOre from top chest
-        tick_hoppers(&mut manager, 64);
+        tick_all_loaded_hoppers(&mut manager, 64);
         let top_h_be = manager.get_block_entity(0, 65, 0).unwrap();
         assert_eq!(
             top_h_be.get_stack(0),
@@ -862,7 +888,7 @@ mod tests {
         }
 
         // Second tick: top hopper pushes 1 IronOre into Furnace slot 0
-        tick_hoppers(&mut manager, 64);
+        tick_all_loaded_hoppers(&mut manager, 64);
         let furn_be = manager.get_block_entity(0, 64, 0).unwrap();
         assert_eq!(
             furn_be.get_stack(0),
@@ -917,7 +943,7 @@ mod tests {
 
         let recipes = RecipeManager::new();
         for _ in 0..1800 {
-            let _ = tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK);
+            let _ = tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK);
             if let Some(BlockEntity::Furnace(furnace)) = manager.get_block_entity_mut(0, 64, 0) {
                 let _ = furnace.tick(&recipes);
             }
@@ -969,7 +995,7 @@ mod tests {
         }
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(full)));
 
-        let result = tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK);
+        let result = tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK);
         assert_eq!(result, 0);
         assert_eq!(
             manager.get_block_entity(0, 64, 0).unwrap().get_stack(0),
@@ -997,7 +1023,7 @@ mod tests {
         manager.set_block_entity(15, 64, 0, Some(BlockEntity::Hopper(hopper)));
 
         // x=16 belongs to an unloaded chunk.  The source remains untouched.
-        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
+        assert_eq!(tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
         assert_eq!(
             manager
                 .get_block_entity(15, 64, 0)
@@ -1010,7 +1036,7 @@ mod tests {
             .insert((1, 0), crate::world::Chunk::new(1, 0));
         manager.set_block(16, 64, 0, BlockType::Chest);
         manager.set_block_entity(16, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
-        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 1);
+        assert_eq!(tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 1);
         assert_eq!(
             manager
                 .get_block_entity(16, 64, 0)
@@ -1043,7 +1069,7 @@ mod tests {
             ))),
         );
 
-        let result = tick_hoppers(&mut manager, 1);
+        let result = tick_all_loaded_hoppers(&mut manager, 1);
         assert_eq!(result, 1);
         assert!(manager
             .get_block_entity(0, 64, 0)
@@ -1074,7 +1100,7 @@ mod tests {
         manager.set_block(1, 64, 0, BlockType::Chest);
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
 
-        assert_eq!(tick_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
+        assert_eq!(tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
         assert_eq!(
             manager.get_block_entity(0, 64, 0).unwrap().get_stack(0),
             Some(&ItemStack::new(Item::Stone, 1))
@@ -1115,7 +1141,7 @@ mod tests {
             entity.dropped_count = stack.count;
         }
 
-        let result = tick_hoppers_with_entities(&mut manager, Some(&mut entities), 1);
+        let result = tick_all_loaded_hoppers_with_entities(&mut manager, Some(&mut entities), 1);
         assert_eq!(result.transfers, 1);
         assert_eq!(
             manager.get_block_entity(0, 64, 0).unwrap().get_stack(0),

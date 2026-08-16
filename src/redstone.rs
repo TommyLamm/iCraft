@@ -1205,13 +1205,15 @@ impl RedstoneSystem {
             };
 
             match block {
-                BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
-                    let target = if state.signal.power > 0 {
-                        BlockType::RedstoneTorch
-                    } else {
-                        BlockType::RedstoneTorchOff
-                    };
-                    set_block_record(manager, pos, target, &mut update.mutations);
+                BlockType::RedstoneTorch
+                | BlockType::RedstoneTorchOff
+                | BlockType::Comparator
+                | BlockType::ComparatorPowered
+                | BlockType::RedstoneLamp
+                | BlockType::RedstoneLampLit => {
+                    if let Some(target) = powered_variant(block, state.signal.power > 0) {
+                        set_block_record(manager, pos, target, &mut update.mutations);
+                    }
                 }
                 BlockType::Repeater | BlockType::RepeaterPowered => {
                     let behind = sub(pos, state.facing.delta());
@@ -1229,64 +1231,26 @@ impl RedstoneSystem {
                         });
                     }
                 }
-                BlockType::Comparator | BlockType::ComparatorPowered => {
-                    let target = if state.signal.power > 0 {
-                        BlockType::ComparatorPowered
-                    } else {
-                        BlockType::Comparator
-                    };
-                    set_block_record(manager, pos, target, &mut update.mutations);
-                }
-                BlockType::RedstoneLamp | BlockType::RedstoneLampLit => {
-                    let target = if state.signal.power > 0 {
-                        BlockType::RedstoneLampLit
-                    } else {
-                        BlockType::RedstoneLamp
-                    };
-                    set_block_record(manager, pos, target, &mut update.mutations);
-                }
-                BlockType::OakDoor | BlockType::OakDoorOpen => {
-                    let target = if state.signal.power > 0 {
-                        BlockType::OakDoorOpen
-                    } else {
-                        BlockType::OakDoor
-                    };
+                BlockType::OakDoor
+                | BlockType::OakDoorOpen
+                | BlockType::OakTrapdoor
+                | BlockType::OakTrapdoorOpen => {
                     let is_open = state.signal.power > 0;
-                    let cur_raw = manager.get_block_state(pos.0, pos.1, pos.2);
-                    let mut bstate = crate::world::BlockState::decode(cur_raw);
-                    if bstate.is_open != is_open {
-                        bstate.is_open = is_open;
-                        set_block_record_with_state(
-                            manager,
-                            pos,
-                            target,
-                            bstate.encode(),
-                            &mut update.mutations,
-                        );
-                    } else {
-                        set_block_record(manager, pos, target, &mut update.mutations);
-                    }
-                }
-                BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => {
-                    let target = if state.signal.power > 0 {
-                        BlockType::OakTrapdoorOpen
-                    } else {
-                        BlockType::OakTrapdoor
-                    };
-                    let is_open = state.signal.power > 0;
-                    let cur_raw = manager.get_block_state(pos.0, pos.1, pos.2);
-                    let mut bstate = crate::world::BlockState::decode(cur_raw);
-                    if bstate.is_open != is_open {
-                        bstate.is_open = is_open;
-                        set_block_record_with_state(
-                            manager,
-                            pos,
-                            target,
-                            bstate.encode(),
-                            &mut update.mutations,
-                        );
-                    } else {
-                        set_block_record(manager, pos, target, &mut update.mutations);
+                    if let Some(target) = powered_variant(block, is_open) {
+                        let cur_raw = manager.get_block_state(pos.0, pos.1, pos.2);
+                        let mut bstate = crate::world::BlockState::decode(cur_raw);
+                        if bstate.is_open != is_open {
+                            bstate.is_open = is_open;
+                            set_block_record_with_state(
+                                manager,
+                                pos,
+                                target,
+                                bstate.encode(),
+                                &mut update.mutations,
+                            );
+                        } else {
+                            set_block_record(manager, pos, target, &mut update.mutations);
+                        }
                     }
                 }
                 BlockType::Piston
@@ -1404,6 +1368,47 @@ impl RedstoneSystem {
         };
         set_block_record(manager, pos, target, mutations);
     }
+}
+
+fn powered_variant(block: BlockType, powered: bool) -> Option<BlockType> {
+    Some(match block {
+        BlockType::RedstoneTorch | BlockType::RedstoneTorchOff => {
+            if powered {
+                BlockType::RedstoneTorch
+            } else {
+                BlockType::RedstoneTorchOff
+            }
+        }
+        BlockType::Comparator | BlockType::ComparatorPowered => {
+            if powered {
+                BlockType::ComparatorPowered
+            } else {
+                BlockType::Comparator
+            }
+        }
+        BlockType::RedstoneLamp | BlockType::RedstoneLampLit => {
+            if powered {
+                BlockType::RedstoneLampLit
+            } else {
+                BlockType::RedstoneLamp
+            }
+        }
+        BlockType::OakDoor | BlockType::OakDoorOpen => {
+            if powered {
+                BlockType::OakDoorOpen
+            } else {
+                BlockType::OakDoor
+            }
+        }
+        BlockType::OakTrapdoor | BlockType::OakTrapdoorOpen => {
+            if powered {
+                BlockType::OakTrapdoorOpen
+            } else {
+                BlockType::OakTrapdoor
+            }
+        }
+        _ => return None,
+    })
 }
 
 fn desired_power(

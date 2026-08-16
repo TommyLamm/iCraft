@@ -8,7 +8,9 @@ use crate::chunk_manager::ChunkManager;
 use crate::dimension::Dimension;
 use crate::entity::{EntityIterationKind, EntityManager, EntityType};
 use crate::inventory::{GameMode, Item};
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH, SECTION_SIZE};
+use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH, SECTION_SIZE};
+#[cfg(test)]
+use crate::world::CHUNK_HEIGHT;
 use glam::Vec3;
 
 pub type BlockPos = (i32, i32, i32);
@@ -971,7 +973,10 @@ pub fn active_boss_hud(entities: &EntityManager) -> Option<BossHud> {
 }
 
 fn open_surface_y(chunks: &ChunkManager, wx: i32, wz: i32) -> Option<i32> {
-    (1..CHUNK_HEIGHT as i32 - 2).rev().find_map(|y| {
+    let height = chunks.dimension.height();
+    let min_y = height.min_y() + 1;
+    let max_y = height.max_y_exclusive() - 2;
+    (min_y..max_y).rev().find_map(|y| {
         let floor = chunks.get_block(wx, y, wz);
         let feet = chunks.get_block(wx, y + 1, wz);
         let head = chunks.get_block(wx, y + 2, wz);

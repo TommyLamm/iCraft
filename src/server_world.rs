@@ -1600,6 +1600,7 @@ impl ServerWorld {
         }
 
         // These systems mutate actual block entities/chunks, not a shadow map.
+        // Simulation-union only — do not call tick_all_loaded_*.
         let _ = crate::world_tick::tick_hoppers_in_columns(
             &mut self.chunks,
             Some(&mut self.entities),

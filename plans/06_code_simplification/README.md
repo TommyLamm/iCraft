@@ -40,7 +40,7 @@
 | 04 | [TCP 測試 helper 收斂](04_tcp_test_helpers.md) | P0 | 已完成 | 無 |
 | 05 | [Embedded 不再建 desktop 存檔工人](05_embedded_save_ownership.md) | P1 | 已完成 | 無 |
 | 06 | [點擊／物品欄／挖掘 cancel 去重](06_presentation_click_and_inventory.md) | P1 | 已完成 | 02 |
-| 07 | [世界 tick helper 與 signed-Y 掃描](07_world_helpers_and_signed_y.md) | P1 | 待實作 | 無 |
+| 07 | [世界 tick helper 與 signed-Y 掃描](07_world_helpers_and_signed_y.md) | P1 | 已完成 | 無 |
 | 08 | [網路 leftover 只收不發](08_network_legacy_egress.md) | P1 | 待實作 | 無 |
 | 09 | [權威 world map 與 session 影子欄位](09_authority_world_map_and_session.md) | P2 | 待實作 | 03 |
 | 10 | [`state.rs` 模組拆分](10_state_module_split.md) | P2 | 待實作 | 02（建議 06 已合併） |

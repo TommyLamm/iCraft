@@ -191,7 +191,8 @@ fn is_under_sun(
     }
 
     // Check if there is any solid block above
-    for y in (my + 1)..320 {
+    let max_y = chunk_manager.dimension.height().max_y_exclusive();
+    for y in (my + 1)..max_y {
         if chunk_manager.get_block(mx, y, mz).properties().is_solid {
             return false;
         }

@@ -1,6 +1,6 @@
 use crate::world::{
     BlockSupportStatus, BlockType, Chunk, MeshVoxel, SectionHaloSnapshot, SectionKey, CHUNK_DEPTH,
-    CHUNK_HEIGHT, CHUNK_WIDTH, FLUID_FALLING_BIT, FLUID_LEVEL_MASK, FLUID_RESERVED_MASK,
+    CHUNK_WIDTH, FLUID_FALLING_BIT, FLUID_LEVEL_MASK, FLUID_RESERVED_MASK,
     FLUID_WATERLOGGED_BIT, SECTION_SIZE,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -547,11 +547,13 @@ impl ChunkManager {
 
         let min_x = cx * CHUNK_WIDTH as i32;
         let min_z = cz * CHUNK_DEPTH as i32;
+        let height = self.dimension.height();
+        let y_range = (height.min_y() + 1)..height.max_y_exclusive();
         let mut candidates = Vec::new();
 
         for x in min_x..min_x + CHUNK_WIDTH as i32 {
             for z in min_z..min_z + CHUNK_DEPTH as i32 {
-                for y in 1..CHUNK_HEIGHT as i32 {
+                for y in y_range.clone() {
                     if matches!(
                         self.get_loaded_block(x, y, z),
                         Some(BlockType::SugarCane | BlockType::Cactus)
@@ -564,7 +566,7 @@ impl ChunkManager {
 
         for z in min_z..min_z + CHUNK_DEPTH as i32 {
             for x in [min_x - 1, min_x + CHUNK_WIDTH as i32] {
-                for y in 1..CHUNK_HEIGHT as i32 {
+                for y in y_range.clone() {
                     if matches!(
                         self.get_loaded_block(x, y, z),
                         Some(BlockType::SugarCane | BlockType::Cactus)
@@ -576,7 +578,7 @@ impl ChunkManager {
         }
         for x in min_x..min_x + CHUNK_WIDTH as i32 {
             for z in [min_z - 1, min_z + CHUNK_DEPTH as i32] {
-                for y in 1..CHUNK_HEIGHT as i32 {
+                for y in y_range.clone() {
                     if matches!(
                         self.get_loaded_block(x, y, z),
                         Some(BlockType::SugarCane | BlockType::Cactus)

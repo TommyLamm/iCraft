@@ -12498,7 +12498,7 @@ impl State {
             self.water_tick_timer = 0.0;
             let lighting_started = Instant::now();
             let (mut dirty, mutations) =
-                crate::fluid::tick_fluids(&mut self.chunk_manager, false, 2048);
+                crate::fluid::tick_all_loaded_fluids(&mut self.chunk_manager, false, 2048);
             for mutation in mutations {
                 let (x, y, z) = mutation.position;
                 self.broadcast_block_change_with_raw(x, y, z, mutation.block, mutation.raw_fluid);
@@ -12518,7 +12518,7 @@ impl State {
             self.lava_tick_timer = 0.0;
             let lighting_started = Instant::now();
             let (mut dirty, mutations) =
-                crate::fluid::tick_fluids(&mut self.chunk_manager, true, 512);
+                crate::fluid::tick_all_loaded_fluids(&mut self.chunk_manager, true, 512);
             for mutation in mutations {
                 let (x, y, z) = mutation.position;
                 self.broadcast_block_change_with_raw(x, y, z, mutation.block, mutation.raw_fluid);
@@ -12564,7 +12564,7 @@ impl State {
                 .observer_pulses
                 .saturating_add(observer_pulses);
             self.update_hopper_power_states();
-            let hopper_result = crate::world_tick::tick_hoppers_with_entities(
+            let hopper_result = crate::world_tick::tick_all_loaded_hoppers_with_entities(
                 &mut self.chunk_manager,
                 Some(&mut self.entity_manager),
                 64,
@@ -13325,7 +13325,7 @@ impl State {
                 crate::perf::ScopeId::PassiveMobs,
                 passive_mobs_started.elapsed(),
             );
-            let (mut mutations, _stats) = crate::world_tick::sample_random_ticks(
+            let (mut mutations, _stats) = crate::world_tick::sample_all_loaded_random_ticks(
                 &self.chunk_manager,
                 self.world_seed as u64,
                 self.world_time.ticks,

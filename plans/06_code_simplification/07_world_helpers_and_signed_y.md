@@ -26,16 +26,16 @@ Signed-Y：`ARCHITECTURE.md` 要求用 `Dimension::height()`／`world.rs` helper
 
 ## 精確 acceptance
 
-- [ ] `*_in_columns`（或要求 `&BTreeSet<(i32,i32)>`）是流體／隨機刻／漏斗的公開權威入口。`columns == None` 走遍所有已載入 column 的路徑改名為 `tick_all_loaded_*`（或 `#[cfg(test)]`），rustdoc 寫明「測試／leftover renderer；權威禁止」。
-- [ ] `ServerWorld` 繼續傳 simulation union，不得改成 `tick_all_loaded_*`。
-- [ ] Hopper 兩段 container 轉移共用一個 helper（例如 `try_container_transfer`）。Item pickup 仍分開。面向、冷卻、cooldown 數字不變。
-- [ ] 仙人掌／甘蔗抽 `try_grow_column(block, max_h, rng)`。農田濕度那兩行保持原樣（含寫死 7）。
-- [ ] 紅石 powered 方塊用表或 `powered_variant(block, powered)`。Piston／dispenser／TNT 上升緣保持獨立。
-- [ ] `1..CHUNK_HEIGHT` 的 **掃描迴圈**改走該維度的 `WorldHeight`（`min_y+1 .. max_y` 或既有 helper），謂語不變。`is_under_sun` 用 `height.max_y_exclusive()`，不要寫死 320。
-- [ ] **不得**改 `support_status_at` 的 `y <= 0` 判斷。
-- [ ] **不得**合併 `physics::resolve_collisions` 與 `entity::resolve_collisions`（實體仍是整方塊 AABB）。
-- [ ] **不得**合併 `spawn_mobs` 與 `SpawningSystem` 的距離／上限。
-- [ ] `tests/review_hardening_chunk_residency.rs`、waterlogging、難度權威測試期望值不變。
+- [x] `*_in_columns`（或要求 `&BTreeSet<(i32,i32)>`）是流體／隨機刻／漏斗的公開權威入口。`columns == None` 走遍所有已載入 column 的路徑改名為 `tick_all_loaded_*`（或 `#[cfg(test)]`），rustdoc 寫明「測試／leftover renderer；權威禁止」。
+- [x] `ServerWorld` 繼續傳 simulation union，不得改成 `tick_all_loaded_*`。
+- [x] Hopper 兩段 container 轉移共用一個 helper（例如 `try_container_transfer`）。Item pickup 仍分開。面向、冷卻、cooldown 數字不變。
+- [x] 仙人掌／甘蔗抽 `try_grow_column(block, max_h, rng)`。農田濕度那兩行保持原樣（含寫死 7）。
+- [x] 紅石 powered 方塊用表或 `powered_variant(block, powered)`。Piston／dispenser／TNT 上升緣保持獨立。
+- [x] `1..CHUNK_HEIGHT` 的 **掃描迴圈**改走該維度的 `WorldHeight`（`min_y+1 .. max_y` 或既有 helper），謂語不變。`is_under_sun` 用 `height.max_y_exclusive()`，不要寫死 320。
+- [x] **不得**改 `support_status_at` 的 `y <= 0` 判斷。
+- [x] **不得**合併 `physics::resolve_collisions` 與 `entity::resolve_collisions`（實體仍是整方塊 AABB）。
+- [x] **不得**合併 `spawn_mobs` 與 `SpawningSystem` 的距離／上限。
+- [x] `tests/review_hardening_chunk_residency.rs`、waterlogging、難度權威測試期望值不變。
 
 ## 預計檔案與測試
 
@@ -65,3 +65,29 @@ Signed-Y：`ARCHITECTURE.md` 要求用 `Dimension::height()`／`world.rs` helper
 - 把 `Brain` 接到 tick。
 - 刪 `world_mutation::apply_batch`（leftover renderer 仍用）。
 - lighting sky／block 泛型合併。
+
+## 實作與證據
+
+`WorldHeight` 已有 `min_y()`／`max_y_exclusive()`／`contains_y()`，沒有另發明第二套高度型別。掃描迴圈改用 `(min_y + 1)..max_y_exclusive()`（`open_surface_y` 仍留 2 格頭頂空間）。
+
+改動：
+
+- 無界 wrapper 改名並加上「測試／leftover renderer；權威禁止」：`tick_fluids` → `tick_all_loaded_fluids`、`sample_random_ticks` → `sample_all_loaded_random_ticks`、`tick_hoppers` → `tick_all_loaded_hoppers`、`tick_hoppers_with_entities` → `tick_all_loaded_hoppers_with_entities`。`*_in_columns` 仍是權威入口。`ServerWorld` 繼續傳 simulation union，並註明不得改成 `tick_all_loaded_*`。leftover `state.rs`／`sim_harness` 只改呼叫名稱。
+- Hopper 面向轉移與上方容器轉移抽 `try_container_transfer`。Item pickup、facing、cooldown `8` 未動。
+- 仙人掌／甘蔗抽 `try_grow_column(block, max_h, rng)`。農田濕度仍寫死 `7u8`。
+- 紅石 torch／comparator／lamp／door／trapdoor 走 `powered_variant(block, powered)`。Piston／dispenser／TNT／noteblock 上升緣保持獨立。
+- 掃描迴圈：`check_and_break_unsupported_for_loaded_chunk`、`open_surface_y` 改走該維度 `WorldHeight`。`is_under_sun` 用 `height.max_y_exclusive()`，不再寫死 320。
+- 未改 `support_status_at` 的 `y <= 0`。未合併兩套 `resolve_collisions`。未合併 `spawn_mobs`／`SpawningSystem`。
+
+測試：
+
+- `cargo test --lib world_tick::` — 17 passed
+- `cargo test --lib fluid::` — 7 passed
+- `cargo test --lib redstone::` — 29 passed
+- `cargo test --lib chunk_manager::` — 14 passed, 2 failed（`missing_boundary_chunk_is_unknown_until_loaded_and_never_forced`、`loading_a_boundary_obstruction_revalidates_neighboring_cactus`）。同兩測在乾淨 HEAD 也紅（worldgen 甘蔗 y=58..61 被 revalidate）；期望值未改。
+- `cargo test --lib boss::` — 21 passed
+- `cargo test --lib mob::` — 15 passed
+- `cargo test --test review_hardening_chunk_residency -- --test-threads=1` — 4 passed
+- `cargo test --test waterlogging_authority -- --test-threads=1` — 5 passed
+- `cargo test --test difficulty_authority -- --test-threads=1` — 3 passed
+- `cargo check --all-targets` — ok

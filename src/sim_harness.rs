@@ -1086,7 +1086,7 @@ impl SimHarness {
         &mut self,
         furnace: (i32, i32, i32),
     ) -> crate::world_tick::HopperTickResult {
-        let result = crate::world_tick::tick_hoppers_with_entities(
+        let result = crate::world_tick::tick_all_loaded_hoppers_with_entities(
             &mut self.chunks,
             Some(&mut self.entities),
             64,
@@ -1178,8 +1178,8 @@ impl SimHarness {
     }
 
     pub fn tick(&mut self) {
-        let _ = crate::fluid::tick_fluids(&mut self.chunks, false, 64);
-        let _ = crate::fluid::tick_fluids(&mut self.chunks, true, 64);
+        let _ = crate::fluid::tick_all_loaded_fluids(&mut self.chunks, false, 64);
+        let _ = crate::fluid::tick_all_loaded_fluids(&mut self.chunks, true, 64);
         let occupants = [(
             self.player.position.x.floor() as i32,
             self.player.position.y.floor() as i32,
