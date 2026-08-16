@@ -5,8 +5,15 @@
 //! world delta only when this module says that its authenticated dimension and
 //! interest set contain the changed object.
 
+use crate::chunk_schedule::UNLOAD_HYSTERESIS;
 use crate::dimension::Dimension;
 use std::collections::{BTreeSet, HashSet};
+
+/// Same extra Chebyshev ring the client uses before unloading a column.
+pub const RESIDENCY_HYSTERESIS: i32 = UNLOAD_HYSTERESIS;
+/// Spawn may keep a Chebyshev ring when a dimension has no sessions.
+pub const SPAWN_RESIDENCY_RADIUS: i32 = 1;
+pub const SPAWN_RESIDENCY_CAP: usize = 9;
 
 pub const MAX_INTEREST_UPDATES_PER_TICK: usize = 8_192;
 
@@ -169,6 +176,50 @@ pub fn chunks_around(position: [f32; 3], distance: u8) -> HashSet<ChunkCoord> {
     chunks
 }
 
+/// Client-matching unload hysteresis: Chebyshev `view + UNLOAD_HYSTERESIS`.
+pub fn residency_hysteresis_chunks(position: [f32; 3], view_distance: u8) -> HashSet<ChunkCoord> {
+    let cx = (position[0] / 16.0).floor() as i32;
+    let cz = (position[2] / 16.0).floor() as i32;
+    let radius = i32::from(view_distance).saturating_add(RESIDENCY_HYSTERESIS);
+    let mut chunks = HashSet::with_capacity(
+        ((radius.saturating_mul(2).saturating_add(1)).pow(2) as usize).min(4096),
+    );
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            chunks.insert((cx.saturating_add(dx), cz.saturating_add(dz)));
+        }
+    }
+    chunks
+}
+
+/// Union of every session's simulation columns, used as the tick walk set.
+pub fn union_simulation_chunks<'a, I>(sets: I) -> BTreeSet<ChunkCoord>
+where
+    I: IntoIterator<Item = &'a InterestSet>,
+{
+    let mut union = BTreeSet::new();
+    for set in sets {
+        union.extend(set.simulation_chunks.iter().copied());
+    }
+    union
+}
+
+/// Capped spawn ring kept only while a dimension has no sessions.
+pub fn capped_spawn_residency(spawn_x: i32, spawn_z: i32) -> BTreeSet<ChunkCoord> {
+    let cx = spawn_x.div_euclid(16);
+    let cz = spawn_z.div_euclid(16);
+    let mut chunks = BTreeSet::new();
+    for dx in -SPAWN_RESIDENCY_RADIUS..=SPAWN_RESIDENCY_RADIUS {
+        for dz in -SPAWN_RESIDENCY_RADIUS..=SPAWN_RESIDENCY_RADIUS {
+            if chunks.len() >= SPAWN_RESIDENCY_CAP {
+                return chunks;
+            }
+            chunks.insert((cx.saturating_add(dx), cz.saturating_add(dz)));
+        }
+    }
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +261,37 @@ mod tests {
         let moved = interest.update_position(Dimension::Nether, [0.0, 64.0, 0.0]);
         assert_eq!(moved.departed.len(), initial.entered.len());
         assert_eq!(moved.entered.len(), initial.entered.len());
+    }
+
+    #[test]
+    fn residency_hysteresis_matches_client_chebyshev_ring() {
+        let chunks = residency_hysteresis_chunks([8.0, 64.0, 8.0], 2);
+        let radius = 2 + RESIDENCY_HYSTERESIS;
+        assert!(chunks.contains(&(0, 0)));
+        assert!(chunks.contains(&(radius, 0)));
+        assert!(chunks.contains(&(radius, radius)));
+        assert!(!chunks.contains(&(radius + 1, 0)));
+        assert!(!chunks.contains(&(8, 0)));
+        assert_eq!(chunks.len(), ((radius * 2 + 1) * (radius * 2 + 1)) as usize);
+    }
+
+    #[test]
+    fn spawn_residency_is_capped_and_simulation_union_is_per_session() {
+        let spawn = capped_spawn_residency(8, 8);
+        assert!(spawn.contains(&(0, 0)));
+        assert!(spawn.len() <= SPAWN_RESIDENCY_CAP);
+        assert_eq!(
+            spawn.len(),
+            ((SPAWN_RESIDENCY_RADIUS * 2 + 1) as usize).pow(2)
+        );
+
+        let mut near = InterestSet::new(Dimension::Overworld, 4, 1);
+        near.update_position(Dimension::Overworld, [8.0, 64.0, 8.0]);
+        let mut far = InterestSet::new(Dimension::Overworld, 4, 1);
+        far.update_position(Dimension::Overworld, [32.0 * 16.0 + 8.0, 64.0, 8.0]);
+        let union = union_simulation_chunks([&near, &far]);
+        assert!(union.contains(&(0, 0)));
+        assert!(union.contains(&(32, 0)));
+        assert!(!union.contains(&(8, 0)));
     }
 }

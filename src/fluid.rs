@@ -1,6 +1,6 @@
 use crate::chunk_manager::{mark_block_mesh_dependencies, ChunkManager};
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH, FLUID_LEVEL_MASK};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 type BlockPos = (i32, i32, i32);
 
@@ -28,6 +28,15 @@ pub fn tick_fluids(
     is_lava: bool,
     max_updates: usize,
 ) -> (HashSet<(i32, i32)>, Vec<FluidMutation>) {
+    tick_fluids_in_columns(chunk_manager, is_lava, max_updates, None)
+}
+
+pub fn tick_fluids_in_columns(
+    chunk_manager: &mut ChunkManager,
+    is_lava: bool,
+    max_updates: usize,
+    columns: Option<&BTreeSet<(i32, i32)>>,
+) -> (HashSet<(i32, i32)>, Vec<FluidMutation>) {
     let mut dirty_chunks = HashSet::new();
     let mut mutations: Vec<FluidMutation> = Vec::new();
     let target_type = if is_lava {
@@ -53,6 +62,9 @@ pub fn tick_fluids(
         let cx = wx.div_euclid(CHUNK_WIDTH as i32);
         let cz = wz.div_euclid(CHUNK_DEPTH as i32);
         if !chunk_manager.chunks.contains_key(&(cx, cz)) {
+            continue;
+        }
+        if columns.is_some_and(|allowed| !allowed.contains(&(cx, cz))) {
             continue;
         }
 

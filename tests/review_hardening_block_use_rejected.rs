@@ -92,9 +92,7 @@ fn seed_chest_and_inventory(runtime: &mut ServerRuntime, player_id: u64) {
         .expect("seed chest through authoritative set_block");
     let mut gameplay = SessionGameplayState::default();
     gameplay.inventory[0] = Some(slot(ItemStack::new(Item::Diamond, 4)));
-    runtime
-        .authority
-        .set_session_gameplay(player_id, gameplay);
+    runtime.authority.set_session_gameplay(player_id, gameplay);
     if let Some(player) = runtime.players.get_mut(&player_id) {
         player.data.position = OWNER_POSITION;
     }
@@ -212,10 +210,11 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
         .presentation_events
         .iter()
         .find_map(|event| match event {
-            RuntimePresentationEvent::GameplayResponse {
-                target,
-                response,
-            } if *target == OWNER_ID && response.request_id == 1 => Some(response),
+            RuntimePresentationEvent::GameplayResponse { target, response }
+                if *target == OWNER_ID && response.request_id == 1 =>
+            {
+                Some(response)
+            }
             _ => None,
         })
         .expect("embedded BlockUse response");
@@ -228,7 +227,9 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
         BlockType::Chest,
     );
 
-    runtime.shutdown().expect("shutdown embedded Plan01 runtime");
+    runtime
+        .shutdown()
+        .expect("shutdown embedded Plan01 runtime");
     let _ = fs::remove_dir_all(world_dir);
 }
 
@@ -284,7 +285,9 @@ fn embedded_block_use_air_cannot_clear_chest() {
         "rejected Air BlockUse must not delete the chest block entity"
     );
 
-    runtime.shutdown().expect("shutdown embedded Plan01 runtime");
+    runtime
+        .shutdown()
+        .expect("shutdown embedded Plan01 runtime");
     let _ = fs::remove_dir_all(world_dir);
 }
 

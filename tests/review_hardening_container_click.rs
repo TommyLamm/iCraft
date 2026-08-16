@@ -135,22 +135,51 @@ fn click(
     )
 }
 
-fn identity_key(stack: &ItemStack) -> (u32, u32, [u8; 6], Option<(u8, u8, u16, bool)>, [u8; 24], u128, u128)
-{
+fn identity_key(
+    stack: &ItemStack,
+) -> (
+    u32,
+    u32,
+    [u8; 6],
+    Option<(u8, u8, u16, bool)>,
+    [u8; 24],
+    u128,
+    u128,
+) {
     let wire = ItemWire::from_stack(stack);
     (
         wire.item,
         wire.durability as u32,
         wire.enchantments,
-        wire.potion
-            .map(|potion| (potion.kind, potion.level, potion.duration_seconds, potion.splash)),
+        wire.potion.map(|potion| {
+            (
+                potion.kind,
+                potion.level,
+                potion.duration_seconds,
+                potion.splash,
+            )
+        }),
         wire.custom_name,
         wire.can_break,
         wire.can_place_on,
     )
 }
 
-fn add_stack(totals: &mut BTreeMap<(u32, u32, [u8; 6], Option<(u8, u8, u16, bool)>, [u8; 24], u128, u128), u32>, stack: ItemStack) {
+fn add_stack(
+    totals: &mut BTreeMap<
+        (
+            u32,
+            u32,
+            [u8; 6],
+            Option<(u8, u8, u16, bool)>,
+            [u8; 24],
+            u128,
+            u128,
+        ),
+        u32,
+    >,
+    stack: ItemStack,
+) {
     if stack.count == 0 || stack.item == Item::Air {
         return;
     }
@@ -164,7 +193,20 @@ fn stack_from_slot(slot: SessionInventorySlot) -> Option<ItemStack> {
     Some(stack)
 }
 
-fn conserved_totals(core: &AuthorityCore) -> BTreeMap<(u32, u32, [u8; 6], Option<(u8, u8, u16, bool)>, [u8; 24], u128, u128), u32> {
+fn conserved_totals(
+    core: &AuthorityCore,
+) -> BTreeMap<
+    (
+        u32,
+        u32,
+        [u8; 6],
+        Option<(u8, u8, u16, bool)>,
+        [u8; 24],
+        u128,
+        u128,
+    ),
+    u32,
+> {
     let mut totals = BTreeMap::new();
     let gameplay = core.session(SESSION_ID).unwrap().gameplay;
     for slot in gameplay.inventory.into_iter().flatten() {
@@ -206,11 +248,9 @@ fn rich_stack(item: Item, count: u32, variant: u8) -> ItemStack {
         duration_seconds: 30 + u16::from(variant),
         splash: variant != 0,
     });
-    stack.custom_name.set(if variant == 0 {
-        "Plan02 A"
-    } else {
-        "Plan02 B"
-    });
+    stack
+        .custom_name
+        .set(if variant == 0 { "Plan02 A" } else { "Plan02 B" });
     stack.can_break = 1u128 << (BlockType::Stone as u8);
     stack.can_place_on = 1u128 << (BlockType::Dirt as u8);
     stack
@@ -297,7 +337,10 @@ fn left_click_swaps_different_stacks_and_keeps_totals() {
     assert_eq!(chest_slot(&core, 0), Some(held));
     let gameplay = core.session(SESSION_ID).unwrap().gameplay;
     assert!(gameplay.inventory[0].is_none());
-    assert_eq!(gameplay.cursor.map(stack_from_slot), Some(Some(chest_stack)));
+    assert_eq!(
+        gameplay.cursor.map(stack_from_slot),
+        Some(Some(chest_stack))
+    );
 }
 
 #[test]
@@ -397,14 +440,7 @@ fn brew_locked_hotbar_stack_cannot_be_clicked_into_chest() {
     let before_inventory = core.session(SESSION_ID).unwrap().gameplay.inventory;
 
     rejected(
-        &click(
-            &mut core,
-            3,
-            3,
-            0,
-            true,
-            Some(ItemWire::from_stack(&wart)),
-        ),
+        &click(&mut core, 3, 3, 0, true, Some(ItemWire::from_stack(&wart))),
         RejectReason::InvalidState,
     );
 
@@ -481,11 +517,7 @@ fn legacy_container_click_envelope_extracts_into_inventory() {
     assert_eq!(conserved_totals(&core), before);
     assert!(chest_slot(&core, 2).is_none());
     assert_eq!(
-        core.session(SESSION_ID)
-            .unwrap()
-            .gameplay
-            .inventory[0]
-            .and_then(stack_from_slot),
+        core.session(SESSION_ID).unwrap().gameplay.inventory[0].and_then(stack_from_slot),
         Some(ItemStack::new(Item::Coal, 3))
     );
 }

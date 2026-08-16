@@ -9,16 +9,17 @@ use crate::authority::contract::{
     SessionInventorySlot, WorldMutation,
 };
 use crate::authority::fishing::{FishingDomainContext, FishingDomainError};
+use crate::authority::interest::chunks_around;
 use crate::authority::transactions::{self, WorkstationContext};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
-use crate::container_sessions::ContainerSessionManager;
-use crate::inventory::ItemStack;
 use crate::commands::{self, Command, TimeCommand};
+use crate::container_sessions::ContainerSessionManager;
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::{EntityManager, EntityType};
 use crate::fluid::FluidMutation;
 use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
+use crate::inventory::ItemStack;
 use crate::network::protocol::{
     ContainerAction, GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
 };
@@ -343,6 +344,56 @@ impl ServerWorld {
     /// must never write these coordinates.
     pub fn failed_restore_chunks(&self) -> &BTreeSet<(i32, i32)> {
         &self.failed_restore_chunks
+    }
+
+    fn column_in_set(&self, columns: &BTreeSet<(i32, i32)>, x: i32, z: i32) -> bool {
+        columns.contains(&(x.div_euclid(16), z.div_euclid(16)))
+    }
+
+    /// Drop columns outside `keep` after the caller has flushed dirty ones
+    /// that this session restored or generated. A failed serialize/save leaves
+    /// the column resident so player builds are not discarded.
+    pub fn evict_unkept_chunks<F>(&mut self, keep: &BTreeSet<(i32, i32)>, mut flush: F)
+    where
+        F: FnMut(i32, i32, ChunkSaveData) -> std::io::Result<()>,
+    {
+        let mut evict: Vec<_> = self
+            .chunks
+            .chunks
+            .keys()
+            .copied()
+            .filter(|key| !keep.contains(key))
+            .collect();
+        evict.sort_unstable();
+        for (cx, cz) in evict {
+            if self.failed_restore_chunks.contains(&(cx, cz)) {
+                self.remove_resident_chunk(cx, cz);
+                continue;
+            }
+            let dirty = self.chunks.dirty_chunks.is_dirty(cx, cz);
+            if dirty {
+                let Some(chunk) = self.chunks.chunks.get(&(cx, cz)) else {
+                    continue;
+                };
+                let metadata = self.redstone.collect_chunk_metadata(&self.chunks, cx, cz);
+                let Ok(mut data) = ChunkSaveData::from_chunk_with_redstone(chunk, &metadata) else {
+                    continue;
+                };
+                data.mutation_revision = self.chunk_revision(cx, cz);
+                if flush(cx, cz, data).is_err() {
+                    continue;
+                }
+            }
+            self.remove_resident_chunk(cx, cz);
+        }
+    }
+
+    fn remove_resident_chunk(&mut self, cx: i32, cz: i32) {
+        self.chunks.chunks.remove(&(cx, cz));
+        self.chunks.dirty_chunks.remove(cx, cz);
+        self.chunk_revisions.remove(&(cx, cz));
+        self.block_revisions
+            .retain(|&(x, _y, z), _| x.div_euclid(16) != cx || z.div_euclid(16) != cz);
     }
 
     /// Restore a persisted chunk into the authoritative map. The payload is
@@ -1576,6 +1627,14 @@ impl ServerWorld {
             .collect();
         occupants.sort_unstable();
         occupants.dedup();
+        let simulation_distance = self.chunks.render_distance.clamp(0, 32) as u8;
+        let mut simulation_chunks = BTreeSet::new();
+        for (_, position) in players {
+            if position.iter().all(|value| value.is_finite()) {
+                simulation_chunks.extend(chunks_around(*position, simulation_distance));
+            }
+        }
+
         let redstone = self.redstone.tick(&mut self.chunks, &occupants);
         let mut redstone_mutations = redstone.mutations;
         self.pending_redstone_actions.extend(
@@ -1586,6 +1645,9 @@ impl ServerWorld {
         );
         redstone_mutations.sort_by_key(|mutation| mutation.pos);
         for mutation in redstone_mutations {
+            if !self.column_in_set(&simulation_chunks, mutation.pos.0, mutation.pos.2) {
+                continue;
+            }
             if let Ok(Some(event)) = self.set_block(
                 mutation.pos.0,
                 mutation.pos.1,
@@ -1598,14 +1660,19 @@ impl ServerWorld {
         }
 
         // These systems mutate actual block entities/chunks, not a shadow map.
-        let _ = crate::world_tick::tick_hoppers_with_entities(
+        let _ = crate::world_tick::tick_hoppers_in_columns(
             &mut self.chunks,
             Some(&mut self.entities),
             MAX_AUTOMATION_TRANSFERS,
+            Some(&simulation_chunks),
         );
         for is_lava in [false, true] {
-            let (_, fluid_mutations) =
-                crate::fluid::tick_fluids(&mut self.chunks, is_lava, MAX_FLUID_UPDATES);
+            let (_, fluid_mutations) = crate::fluid::tick_fluids_in_columns(
+                &mut self.chunks,
+                is_lava,
+                MAX_FLUID_UPDATES,
+                Some(&simulation_chunks),
+            );
             for mutation in fluid_mutations {
                 mutations.push(self.record_fluid_mutation(mutation));
             }
@@ -1614,8 +1681,9 @@ impl ServerWorld {
         // Random ticks (crop growth, fire and leaf decay) run in the same
         // deterministic headless world as redstone/fluid automation.  The
         // renderer never performs a second random-tick pass for a boundary.
-        let (mut random_ticks, _) = crate::world_tick::sample_random_ticks(
+        let (mut random_ticks, _) = crate::world_tick::sample_random_ticks_in_columns(
             &self.chunks,
+            Some(&simulation_chunks),
             self.seed as u64,
             self.time,
             self.dimension as u8,
@@ -1628,6 +1696,9 @@ impl ServerWorld {
         }
         random_ticks.sort_by_key(|mutation| mutation.pos);
         for mutation in random_ticks {
+            if !self.column_in_set(&simulation_chunks, mutation.pos.0, mutation.pos.2) {
+                continue;
+            }
             if let Ok(Some(event)) = self.set_block(
                 mutation.pos.0,
                 mutation.pos.1,
@@ -1639,7 +1710,7 @@ impl ServerWorld {
             }
         }
 
-        mutations.extend(self.tick_furnaces());
+        mutations.extend(self.tick_furnaces(&simulation_chunks));
 
         self.tick_entities(players);
         mutations.sort_by_key(|mutation| mutation.revision);
@@ -1920,9 +1991,12 @@ impl ServerWorld {
         false
     }
 
-    fn tick_furnaces(&mut self) -> Vec<WorldMutation> {
+    fn tick_furnaces(&mut self, simulation_chunks: &BTreeSet<(i32, i32)>) -> Vec<WorldMutation> {
         let mut positions = Vec::new();
-        for (&(cx, cz), chunk) in &self.chunks.chunks {
+        for &(cx, cz) in simulation_chunks {
+            let Some(chunk) = self.chunks.chunks.get(&(cx, cz)) else {
+                continue;
+            };
             for (local, entity) in chunk.iter_block_entities() {
                 if matches!(entity, BlockEntity::Furnace(_)) {
                     positions.push((
@@ -3068,5 +3142,64 @@ mod tests {
         );
         assert_eq!(gameplay, before);
         assert_eq!(world.entities.get_by_id(21).unwrap().offers[0].uses, 0);
+    }
+
+    #[test]
+    fn tick_automation_walks_simulation_columns_not_residency() {
+        let mut world = ServerWorld::new(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            WorldRules::default(),
+            2,
+        );
+        world.set_block(8, 80, 8, BlockType::Hopper, 0).unwrap();
+        world.set_block(128, 80, 8, BlockType::Hopper, 0).unwrap();
+        if let Some(BlockEntity::Hopper(hopper)) = world.chunks.get_block_entity_mut(8, 80, 8) {
+            hopper.transfer_cooldown = 6;
+        }
+        if let Some(BlockEntity::Hopper(hopper)) = world.chunks.get_block_entity_mut(128, 80, 8) {
+            hopper.transfer_cooldown = 6;
+        }
+        world.tick(&[(7, [8.0, 80.0, 8.0])]);
+        let near = match world.get_block_entity(8, 80, 8) {
+            Some(BlockEntity::Hopper(hopper)) => hopper.transfer_cooldown,
+            _ => panic!("near hopper"),
+        };
+        let far = match world.get_block_entity(128, 80, 8) {
+            Some(BlockEntity::Hopper(hopper)) => hopper.transfer_cooldown,
+            _ => panic!("far hopper"),
+        };
+        assert_eq!(near, 5);
+        assert_eq!(far, 6);
+        assert!(world.chunks.chunks.contains_key(&(8, 0)));
+    }
+
+    #[test]
+    fn evict_flushes_dirty_then_removes_unkept_columns() {
+        let mut world = ServerWorld::new(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            WorldRules::default(),
+            2,
+        );
+        world
+            .set_block(128, 80, 8, BlockType::DiamondOre, 0)
+            .unwrap();
+        assert!(world.chunks.chunks.contains_key(&(8, 0)));
+        let mut flushed = Vec::new();
+        let keep = BTreeSet::from([(0, 0)]);
+        world.evict_unkept_chunks(&keep, |cx, cz, data| {
+            flushed.push((cx, cz, data.mutation_revision));
+            Ok(())
+        });
+        assert!(!world.chunks.chunks.contains_key(&(8, 0)));
+        assert!(world.chunks.chunks.contains_key(&(0, 0)));
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].0, 8);
+        assert_eq!(flushed[0].1, 0);
     }
 }

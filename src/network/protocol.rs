@@ -577,7 +577,8 @@ impl GameplayOperation {
             z,
             face: [0, 0, 0],
             hand: 0,
-            held: held_item.map(|item| SessionSlotWire::new(item, item.can_break, item.can_place_on)),
+            held: held_item
+                .map(|item| SessionSlotWire::new(item, item.can_break, item.can_place_on)),
             block,
             look_milli: [0, 0, 1000],
         })

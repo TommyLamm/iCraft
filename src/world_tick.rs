@@ -3,6 +3,7 @@ use crate::dimension::WorldHeight;
 use crate::inventory::ItemStack;
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
 use crate::world_mutation::{BlockMutationRequest, MutationCause};
+use std::collections::BTreeSet;
 
 /// Statistics for random tick sampling per frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -327,19 +328,48 @@ pub fn sample_random_ticks(
     dimension: u8,
     max_sections_per_tick: usize,
 ) -> (Vec<BlockMutationRequest>, RandomTickStats) {
+    sample_random_ticks_in_columns(
+        chunk_manager,
+        None,
+        world_seed,
+        game_tick,
+        dimension,
+        max_sections_per_tick,
+    )
+}
+
+pub fn sample_random_ticks_in_columns(
+    chunk_manager: &ChunkManager,
+    columns: Option<&BTreeSet<(i32, i32)>>,
+    world_seed: u64,
+    game_tick: u64,
+    dimension: u8,
+    max_sections_per_tick: usize,
+) -> (Vec<BlockMutationRequest>, RandomTickStats) {
     let mut requests = Vec::new();
     let mut stats = RandomTickStats::default();
 
     let mut eligible_sections = Vec::new();
-    for (&(cx, cz), chunk) in &chunk_manager.chunks {
+    let collect_section = |cx: i32, cz: i32, chunk: &crate::world::Chunk, eligible: &mut Vec<_>| {
         for (sec_idx, section_opt) in chunk.sections.iter().enumerate() {
             let Some(section) = section_opt else {
                 continue;
             };
             if section.random_tick_count() > 0 {
                 let sec_y = chunk.section_y_at_index(sec_idx);
-                eligible_sections.push((cx, cz, sec_y));
+                eligible.push((cx, cz, sec_y));
             }
+        }
+    };
+    if let Some(columns) = columns {
+        for &(cx, cz) in columns {
+            if let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) {
+                collect_section(cx, cz, chunk, &mut eligible_sections);
+            }
+        }
+    } else {
+        for (&(cx, cz), chunk) in &chunk_manager.chunks {
+            collect_section(cx, cz, chunk, &mut eligible_sections);
         }
     }
 
@@ -424,8 +454,17 @@ pub fn tick_hoppers(chunk_manager: &mut ChunkManager, max_transfers_per_tick: us
 /// stack item.
 pub fn tick_hoppers_with_entities(
     chunk_manager: &mut ChunkManager,
+    entity_manager: Option<&mut crate::entity::EntityManager>,
+    max_transfers_per_tick: usize,
+) -> HopperTickResult {
+    tick_hoppers_in_columns(chunk_manager, entity_manager, max_transfers_per_tick, None)
+}
+
+pub fn tick_hoppers_in_columns(
+    chunk_manager: &mut ChunkManager,
     mut entity_manager: Option<&mut crate::entity::EntityManager>,
     max_transfers_per_tick: usize,
+    columns: Option<&BTreeSet<(i32, i32)>>,
 ) -> HopperTickResult {
     use crate::block_entity::BlockEntity;
     use crate::redstone::Direction;
@@ -433,7 +472,7 @@ pub fn tick_hoppers_with_entities(
     let budget = max_transfers_per_tick.min(MAX_HOPPER_TRANSFERS_PER_TICK);
     let mut result = HopperTickResult::default();
     let mut hoppers = Vec::new();
-    for (&(cx, cz), chunk) in &chunk_manager.chunks {
+    let mut collect = |cx: i32, cz: i32, chunk: &crate::world::Chunk| {
         for (pos, entity) in &chunk.block_entities {
             if let BlockEntity::Hopper(h) = entity {
                 hoppers.push((
@@ -445,6 +484,17 @@ pub fn tick_hoppers_with_entities(
                     h.is_powered,
                 ));
             }
+        }
+    };
+    if let Some(columns) = columns {
+        for &(cx, cz) in columns {
+            if let Some(chunk) = chunk_manager.chunks.get(&(cx, cz)) {
+                collect(cx, cz, chunk);
+            }
+        }
+    } else {
+        for (&(cx, cz), chunk) in &chunk_manager.chunks {
+            collect(cx, cz, chunk);
         }
     }
     hoppers.sort_unstable_by_key(|&(x, y, z, _, _, _)| (x, y, z));

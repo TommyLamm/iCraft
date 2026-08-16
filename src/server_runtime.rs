@@ -11,7 +11,8 @@ use crate::authority::contract::{
     SessionInventorySlot, SESSION_INVENTORY_SLOTS,
 };
 use crate::authority::interest::{
-    InterestKind, InterestSet, RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
+    capped_spawn_residency, residency_hysteresis_chunks, InterestKind, InterestSet,
+    RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
 };
 use crate::authority::{AuthorityConfig, AuthorityCore, DimensionTransferIntent};
 use crate::dimension::Dimension;
@@ -1099,6 +1100,7 @@ impl ServerRuntime {
             self.apply_authority_dimension_transfer(transfer);
         }
         self.route_authority_snapshot(&snapshot);
+        self.evict_uninteresting_chunks();
         for closure in self.authority.take_container_closures() {
             self.close_runtime_container(closure.player_id, closure.dimension, closure.position);
         }
@@ -2098,7 +2100,8 @@ impl ServerRuntime {
         // authenticated player already has interest in the target, load the
         // target and its adjacent support chunk now; otherwise valid
         // place/break input was rejected as InvalidState until the background
-        // projection queue happened to catch up.
+        // projection queue happened to catch up. Out-of-interest BlockAction
+        // must not call ensure_chunk.
         if let GameplayOperation::BlockAction { x, z, face, .. } = &operation {
             let target = (*x, *z);
             let support = (
@@ -3328,6 +3331,53 @@ impl ServerRuntime {
             self.level.spawn_x.div_euclid(16),
             self.level.spawn_z.div_euclid(16),
         );
+    }
+
+    fn residency_keep_set(&self, dimension: Dimension) -> BTreeSet<(i32, i32)> {
+        let mut keep = BTreeSet::new();
+        let mut any_session = false;
+        for session in self.players.values() {
+            if session.dimension != dimension {
+                continue;
+            }
+            any_session = true;
+            keep.extend(session.interest.chunks.iter().copied());
+            keep.extend(session.interest.simulation_chunks.iter().copied());
+            keep.extend(residency_hysteresis_chunks(
+                session.data.position,
+                session.interest.view_distance,
+            ));
+        }
+        if !any_session {
+            keep.extend(capped_spawn_residency(
+                self.level.spawn_x,
+                self.level.spawn_z,
+            ));
+        }
+        keep
+    }
+
+    fn evict_uninteresting_chunks(&mut self) {
+        let dimensions = self.authority.dimensions();
+        for dimension in dimensions {
+            let keep = self.residency_keep_set(dimension);
+            let mut flush_error = None;
+            let save_manager = &mut self.save_manager;
+            self.authority.with_world(dimension, |world| {
+                world.evict_unkept_chunks(&keep, |cx, cz, data| {
+                    save_manager
+                        .save_chunk_in(dimension, cx, cz, data)
+                        .map_err(|error| {
+                            let io_error = io::Error::new(io::ErrorKind::Other, error.to_string());
+                            flush_error = Some(format!("({cx}, {cz}): {io_error}"));
+                            io_error
+                        })
+                });
+            });
+            if let Some(error) = flush_error {
+                eprintln!("[ServerRuntime] evict flush failed in {dimension:?} {error}");
+            }
+        }
     }
 
     fn save_player(&self, session: &PlayerSessionState) -> io::Result<()> {
@@ -4727,6 +4777,65 @@ mod tests {
         runtime.login_session(2, "ALEX").unwrap();
         assert_eq!(runtime.players.get(&2).unwrap().username, "alex");
 
+        let _ = runtime.shutdown();
+        let _ = fs::remove_dir_all(&runtime.world_dir);
+    }
+
+    #[test]
+    fn interest_evict_drops_origin_after_long_walk_and_metrics_match() {
+        let (mut runtime, _input) = embedded_runtime("residency_walk");
+        runtime.run_for_ticks(8).unwrap();
+        assert!(runtime.authority.world.chunks.chunks.contains_key(&(0, 0)));
+        assert!(!runtime.authority.world.chunks.chunks.contains_key(&(8, 0)));
+        assert!(runtime.teleport_session(99, [32.0 * 16.0 + 8.0, 80.0, 8.0]));
+        runtime.tick().unwrap();
+        assert!(!runtime.authority.world.chunks.chunks.contains_key(&(0, 0)));
+        let loaded: usize = runtime
+            .authority
+            .dimensions()
+            .into_iter()
+            .filter_map(|dimension| runtime.authority.world_ref(dimension))
+            .map(|world| world.chunks.chunks.len())
+            .sum();
+        assert_eq!(runtime.metrics.loaded_chunks, loaded);
+        let _ = runtime.shutdown();
+        let _ = fs::remove_dir_all(&runtime.world_dir);
+    }
+
+    #[test]
+    fn empty_dimension_keeps_only_capped_spawn_ring() {
+        let mut properties = ServerProperties::default();
+        properties.bind = "127.0.0.1".into();
+        properties.port = 25581;
+        properties.view_distance = 2;
+        properties.simulation_distance = 2;
+        properties.world_dir = temp_dir("spawn_ring");
+        let (mut runtime, _input) = ServerRuntime::new_embedded(
+            properties,
+            EmbeddedRuntimeOptions {
+                topology: AuthorityTopology::Dedicated,
+                transport: TransportMode::Disabled,
+                local_session: None,
+            },
+        )
+        .unwrap();
+        runtime.authority.with_world(Dimension::Overworld, |world| {
+            world.ensure_chunk(0, 0);
+            world.ensure_chunk(8, 0);
+            world.ensure_chunk(-3, 2);
+        });
+        runtime.tick().unwrap();
+        let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
+        assert!(world.chunks.chunks.contains_key(&(0, 0)));
+        assert!(!world.chunks.chunks.contains_key(&(8, 0)));
+        assert!(world.chunks.chunks.len() <= crate::authority::interest::SPAWN_RESIDENCY_CAP);
+        let keep = crate::authority::interest::capped_spawn_residency(
+            runtime.level.spawn_x,
+            runtime.level.spawn_z,
+        );
+        for key in world.chunks.chunks.keys() {
+            assert!(keep.contains(key));
+        }
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
     }

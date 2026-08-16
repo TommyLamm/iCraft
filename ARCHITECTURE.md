@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-08-16 at `b3912c6` (`tommy-dev`).
+> Last verified: 2026-08-16 at `review-hardening/11-chunk-residency`.
 > Source code is authoritative; `plans/`, `docs/superpowers/`, and most of
 > `plans/performance/` are design/history records, not a description of the live runtime.
 >
@@ -86,7 +86,11 @@ Important rules:
   arrival order do not change fixed-tick checksums.
 - Per-session interest is both the projection boundary and the chunk
   materialization gate. View, simulation, entity, and open-container interest
-  are tracked separately and processed with bounded budgets.
+  are tracked separately and processed with bounded budgets. Columns that leave
+  every session's view and simulation sets (plus the same hysteresis the client
+  uses) are flushed if dirty and evicted; a dimension with no sessions may keep
+  a capped spawn ring. Random ticks, fluids, hoppers, and furnaces walk the
+  simulation union, not the unbounded residency map.
 - `State::sync_authority_gameplay_from_local` is a narrow transition exception:
   embedded inventory UI may write back only inventory and selected hotbar slot.
   Health, hunger, XP, mining, mounts, and other authority-owned fields must stay

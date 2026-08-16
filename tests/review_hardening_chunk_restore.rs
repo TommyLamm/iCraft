@@ -109,12 +109,7 @@ fn save_all_does_not_replace_empty_inner_zlib_with_generated_terrain() {
 
     let mut runtime = dedicated_runtime(world_dir.clone());
     assert!(
-        !runtime
-            .authority
-            .world
-            .chunks
-            .chunks
-            .contains_key(&(0, 0)),
+        !runtime.authority.world.chunks.chunks.contains_key(&(0, 0)),
         "failed restore must not insert the column"
     );
     assert!(runtime
@@ -154,9 +149,7 @@ fn player_modified_chunk_with_corrupt_inner_zlib_is_not_rewritten_as_generated()
 
     assert_eq!(region_chunk_payload(&path, 0, 0), corrupt_payload);
     let reloaded = SaveManager::new(&world_dir).load_chunk(0, 0).unwrap();
-    assert!(reloaded
-        .restore_to_chunk(&mut Chunk::empty(0, 0))
-        .is_err());
+    assert!(reloaded.restore_to_chunk(&mut Chunk::empty(0, 0)).is_err());
     fs::remove_dir_all(world_dir).unwrap();
 }
 

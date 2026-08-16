@@ -23,7 +23,10 @@ struct RawServer {
 impl RawServer {
     fn start() -> Self {
         let reserved = TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
-        let addr = reserved.local_addr().expect("read reserved addr").to_string();
+        let addr = reserved
+            .local_addr()
+            .expect("read reserved addr")
+            .to_string();
         drop(reserved);
 
         let (host_tx, host_rx) = mpsc::channel();

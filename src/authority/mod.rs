@@ -990,6 +990,10 @@ impl AuthorityCore {
                     let target_pos = {
                         self.ensure_dimension(target_dim);
                         let target_world = self.world_mut(target_dim).unwrap();
+                        // Portal linking is the only tick-path ensure outside
+                        // interest/budget: the destination column pair is
+                        // materialized so the frame can be written, then it
+                        // becomes a normal evict candidate once nobody is there.
                         let target_y = target_world
                             .safe_spawn_y(scaled.x.floor() as i32, scaled.z.floor() as i32);
                         let (portal_blocks, spawn_vec) =

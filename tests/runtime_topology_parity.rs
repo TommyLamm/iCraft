@@ -886,14 +886,16 @@ fn listen_runtime_routes_local_response_to_tick_output() {
         .submit_request(local_id, leftover_block_use(local_id, revision, 42))
         .unwrap();
     let output = runtime.tick_with_output().unwrap();
-    assert!(response_for(&output.presentation_events, local_id, 42).is_some_and(|response| {
-        matches!(
-            response.outcome,
-            GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
-            }
-        )
-    }));
+    assert!(
+        response_for(&output.presentation_events, local_id, 42).is_some_and(|response| {
+            matches!(
+                response.outcome,
+                GameplayOutcome::Rejected {
+                    reason: RejectReason::Unsupported
+                }
+            )
+        })
+    );
     assert!(!output
         .snapshot
         .mutations
