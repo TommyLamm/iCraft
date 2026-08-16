@@ -25,8 +25,8 @@ The desktop uses `winit`, `wgpu`, and `rodio`; shared simulation uses a determin
 The desktop binary declares its module tree directly instead of importing the
 library crate. Shared source files are therefore compiled once for the desktop
 target and again through `src/lib.rs` for the server/tests. Presentation modules
-(`menu`, `camera`, `texture`) stay desktop-only so `icraft-server` does not
-compile the wgpu menu. Small transport-independent presentation policies live in
+(`menu`, `camera`, `texture`, `src/presentation/`) stay desktop-only so
+`icraft-server` does not compile the wgpu menu or GPU terrain. Small transport-independent presentation policies live in
 `presentation_inventory_policy` so the server and headless tests can verify the
 boundary without importing the UI. `chunk_render` and `perf` remain shared due
 to world mesh types and queue metrics. `#[global_allocator]` is installed only
@@ -301,7 +301,7 @@ explicit development/test override.
 
 | Area | Primary files |
 | --- | --- |
-| Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/presentation_inventory_policy.rs` |
+| Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/presentation/`, `src/presentation_inventory_policy.rs` |
 | Authority and dedicated runtime | `src/authority/`, `src/server_world.rs`, `src/server_runtime.rs`, `src/bin/icraft-server.rs` |
 | World storage and generation | `src/world.rs`, `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/`, `src/loot.rs` |
 | Gameplay systems | `src/player.rs`, `src/physics.rs`, `src/inventory.rs`, `src/recipes.rs`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss.rs`, `src/ai/` |
@@ -310,8 +310,11 @@ explicit development/test override.
 | Persistence and resources | `src/save.rs`, `src/resources.rs`, `src/localization.rs`, `src/audio.rs`, `src/accessibility.rs` |
 | Tests and performance | inline `#[cfg(test)]`, `tests/`, `src/sim_harness.rs`, `src/final_acceptance.rs`, `src/microbench.rs`, `plans/03_performance/` |
 
-`state.rs` is the largest coupling hotspot and mixes presentation with legacy
-simulation. `server_runtime.rs` is the transport/session/save composition root.
+`State` is still the desktop composition root. GPU terrain arenas, inbound
+staging, interpolation, leftover world tick, and render prepare/encode live in
+desktop-only `src/presentation/` (not exported from `lib.rs`). `state.rs` still
+owns `EmbeddedRuntimeBridge` and the large field list. `server_runtime.rs` is
+the transport/session/save composition root.
 Start changes at the narrow domain module, then verify the projection and save/
 protocol boundaries rather than adding more cross-domain logic to either root.
 
