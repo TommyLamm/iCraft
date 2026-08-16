@@ -43,6 +43,7 @@ mod passive_mob;
 mod perf;
 pub(crate) mod physics;
 mod player;
+mod presentation_click;
 mod presentation_inventory_policy;
 pub mod rail;
 pub mod recipes;

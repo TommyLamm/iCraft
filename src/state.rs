@@ -22,6 +22,10 @@ use crate::physics::{
     PLAYER_STANDING_HEIGHT,
 };
 use crate::player::{DamageSource, PlayerState};
+use crate::presentation_click::{
+    collect_inventory_ui_hits, resolve_world_click, InventoryHit, InventoryHitProbe, WorldClickHit,
+    WorldClickIntent,
+};
 use crate::presentation_inventory_policy::MultiplayerRole;
 use crate::presentation_inventory_policy::{
     PresentationInventoryAction, PresentationInventoryTarget, PresentationTopology,
@@ -8638,6 +8642,27 @@ impl State {
         })
     }
 
+    /// Cancel the live authority mining latch. `mining_cancel_sent` still
+    /// lives in `submit_local_authority_block_action` so duplicate CancelBreak
+    /// packets are suppressed.
+    fn cancel_authority_break(&mut self) {
+        if !self.presentation_topology().is_legacy_owner() {
+            if let Some(previous) = self.mining_target {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::CancelBreak,
+                    previous.x as i32,
+                    previous.y as i32,
+                    previous.z as i32,
+                    [0, 0, 0],
+                    BlockType::Air,
+                );
+            }
+        }
+        self.mining_target = None;
+        self.mining_held = None;
+        self.mining_progress = 0.0;
+    }
+
     fn submit_local_authority_block_action(
         &mut self,
         action: crate::network::protocol::BlockActionKind,
@@ -14310,18 +14335,7 @@ impl State {
                     let target_changed = self.mining_target != Some(target);
                     let held_changed = self.mining_held != held;
                     if target_changed || held_changed {
-                        if authority_mining {
-                            if let Some(previous) = self.mining_target {
-                                let _ = self.submit_local_authority_block_action(
-                                    crate::network::protocol::BlockActionKind::CancelBreak,
-                                    previous.x as i32,
-                                    previous.y as i32,
-                                    previous.z as i32,
-                                    [0, 0, 0],
-                                    BlockType::Air,
-                                );
-                            }
-                        }
+                        self.cancel_authority_break();
                         self.mining_target = Some(target);
                         self.mining_progress = 0.0;
                         self.mining_held = held;
@@ -14355,56 +14369,13 @@ impl State {
                         }
                     }
                 } else {
-                    if authority_mining {
-                        if let Some(previous) = self.mining_target {
-                            let _ = self.submit_local_authority_block_action(
-                                crate::network::protocol::BlockActionKind::CancelBreak,
-                                previous.x as i32,
-                                previous.y as i32,
-                                previous.z as i32,
-                                [0, 0, 0],
-                                BlockType::Air,
-                            );
-                        }
-                    }
-                    self.mining_target = None;
-                    self.mining_held = None;
-                    self.mining_progress = 0.0;
+                    self.cancel_authority_break();
                 }
             } else {
-                if authority_mining {
-                    if let Some(previous) = self.mining_target {
-                        let _ = self.submit_local_authority_block_action(
-                            crate::network::protocol::BlockActionKind::CancelBreak,
-                            previous.x as i32,
-                            previous.y as i32,
-                            previous.z as i32,
-                            [0, 0, 0],
-                            BlockType::Air,
-                        );
-                    }
-                }
-                self.mining_target = None;
-                self.mining_held = None;
-                self.mining_progress = 0.0;
+                self.cancel_authority_break();
             }
         } else {
-            let authority_mining = !self.presentation_topology().is_legacy_owner();
-            if authority_mining {
-                if let Some(previous) = self.mining_target {
-                    let _ = self.submit_local_authority_block_action(
-                        crate::network::protocol::BlockActionKind::CancelBreak,
-                        previous.x as i32,
-                        previous.y as i32,
-                        previous.z as i32,
-                        [0, 0, 0],
-                        BlockType::Air,
-                    );
-                }
-            }
-            self.mining_target = None;
-            self.mining_held = None;
-            self.mining_progress = 0.0;
+            self.cancel_authority_break();
         }
 
         self.perf_recorder
@@ -17215,234 +17186,144 @@ impl State {
     }
 
     pub fn handle_click(&mut self, is_left_click: bool) {
-        if !self.is_authoritative() {
-            let direction = Vec3::new(
-                self.camera.yaw.cos() * self.camera.pitch.cos(),
-                self.camera.pitch.sin(),
-                self.camera.yaw.sin() * self.camera.pitch.cos(),
-            )
-            .normalize_or_zero();
-            let target_policy = if is_left_click {
-                RaycastTargetPolicy::Break
-            } else {
-                RaycastTargetPolicy::Place
-            };
-            if let Some(hit) = raycast(
-                self.camera.position,
-                direction,
-                5.0,
-                &self.chunk_manager,
-                target_policy,
-            ) {
-                if !is_left_click {
-                    let clicked = (
-                        hit.block_pos.x as i32,
-                        hit.block_pos.y as i32,
-                        hit.block_pos.z as i32,
-                    );
-                    let clicked_block = self
-                        .chunk_manager
-                        .get_block(clicked.0, clicked.1, clicked.2);
-                    let held_item = self.inventory.hotbar[self.inventory.selected]
-                        .map(|stack| stack.item)
-                        .unwrap_or(Item::Air);
-                    if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
-                        let target = hit.block_pos + hit.normal;
-                        let _ = self.submit_local_authority_block_action(
-                            crate::network::protocol::BlockActionKind::IgnitePortal,
-                            target.x as i32,
-                            target.y as i32,
-                            target.z as i32,
-                            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                            BlockType::Fire,
-                        );
-                        return;
-                    }
-                    if clicked_block == BlockType::EndPortalFrame && held_item == Item::EyeOfEnder {
-                        let _ = self.submit_local_authority_block_action(
-                            crate::network::protocol::BlockActionKind::InsertEnderEye,
-                            clicked.0,
-                            clicked.1,
-                            clicked.2,
-                            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                            BlockType::EndPortalFrameFilled,
-                        );
-                        return;
-                    }
-                    if clicked_block == BlockType::Bed {
-                        let _ = self.submit_local_authority_operation(
-                            crate::network::protocol::GameplayOperation::Sleep {
-                                x: clicked.0,
-                                y: clicked.1,
-                                z: clicked.2,
-                            },
-                        );
-                        return;
-                    }
-                    if matches!(
-                        clicked_block,
-                        BlockType::Chest
-                            | BlockType::EndCityChest
-                            | BlockType::Furnace
-                            | BlockType::FurnaceLit
-                            | BlockType::Hopper
-                            | BlockType::Dispenser
-                            | BlockType::Dropper
-                            | BlockType::CraftingTable
-                            | BlockType::EnchantingTable
-                            | BlockType::BrewingStand
-                            | BlockType::Anvil
-                    ) {
-                        // `open_chest` emits the typed Container::Open
-                        // envelope for Join Clients and never opens a local
-                        // inventory before an authority result arrives.
-                        self.open_chest(clicked);
-                        return;
-                    }
-                }
-                if is_left_click {
-                    let _ = self.submit_local_authority_block_action(
-                        crate::network::protocol::BlockActionKind::StartBreak,
-                        hit.block_pos.x as i32,
-                        hit.block_pos.y as i32,
-                        hit.block_pos.z as i32,
-                        [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                        BlockType::Air,
-                    );
-                    self.mining_target = Some(hit.block_pos);
-                    self.mining_progress = 0.0;
-                    self.mining_held = self.selected_mining_held();
-                } else if let Some(block) = self.inventory.get_selected_block() {
-                    let target = hit.block_pos + hit.normal;
-                    let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
-                    if !self.can_place_block_at(x, y, z, block) {
-                        return;
-                    }
-                    let _ = self.submit_local_authority_block_action(
-                        crate::network::protocol::BlockActionKind::Place,
-                        x,
-                        y,
-                        z,
-                        [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                        block,
-                    );
-                }
-            }
-            return;
+        match self.presentation_topology() {
+            PresentationTopology::JoinClient => self.handle_join_world_click(is_left_click),
+            PresentationTopology::Embedded => self.handle_authority_click(is_left_click),
+            PresentationTopology::LegacyOwner => self.legacy_handle_click(is_left_click),
         }
+    }
 
-        if self.has_in_process_runtime() {
-            self.handle_authority_click(is_left_click);
-            return;
+    fn look_direction(&self) -> Vec3 {
+        Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        )
+        .normalize_or_zero()
+    }
+
+    fn prepare_world_click(&self, is_left_click: bool) -> (WorldClickIntent, Option<Vec3>) {
+        let direction = self.look_direction();
+        let target_policy = if is_left_click {
+            RaycastTargetPolicy::Break
+        } else {
+            RaycastTargetPolicy::Place
+        };
+        let Some(hit) = raycast(
+            self.camera.position,
+            direction,
+            5.0,
+            &self.chunk_manager,
+            target_policy,
+        ) else {
+            return (WorldClickIntent::Miss, None);
+        };
+        let clicked = [
+            hit.block_pos.x as i32,
+            hit.block_pos.y as i32,
+            hit.block_pos.z as i32,
+        ];
+        let place_pos = hit.block_pos + hit.normal;
+        let place = [place_pos.x as i32, place_pos.y as i32, place_pos.z as i32];
+        let clicked_block = self
+            .chunk_manager
+            .get_block(clicked[0], clicked[1], clicked[2]);
+        let held_item = self.inventory.hotbar[self.inventory.selected]
+            .map(|stack| stack.item)
+            .unwrap_or(Item::Air);
+        let selected_block = self.inventory.get_selected_block();
+        let can_break = self.can_break_current_block(clicked_block);
+        let can_place = selected_block
+            .map(|block| self.can_place_block_at(place[0], place[1], place[2], block))
+            .unwrap_or(true);
+        let intent = resolve_world_click(
+            self.presentation_topology(),
+            is_left_click,
+            Some(WorldClickHit {
+                clicked,
+                place,
+                face: [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                clicked_block,
+            }),
+            held_item,
+            selected_block,
+            can_break,
+            can_place,
+        );
+        (intent, Some(hit.block_pos))
+    }
+
+    fn handle_join_world_click(&mut self, is_left_click: bool) {
+        let (intent, hit_pos) = self.prepare_world_click(is_left_click);
+        match intent {
+            WorldClickIntent::Miss | WorldClickIntent::Rejected => {}
+            WorldClickIntent::StartBreak { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::StartBreak,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::Air,
+                );
+                self.mining_target = hit_pos;
+                self.mining_progress = 0.0;
+                self.mining_held = self.selected_mining_held();
+            }
+            WorldClickIntent::IgnitePortal { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::IgnitePortal,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::Fire,
+                );
+            }
+            WorldClickIntent::InsertEnderEye { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::InsertEnderEye,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::EndPortalFrameFilled,
+                );
+            }
+            WorldClickIntent::Sleep { x, y, z } => {
+                let _ = self.submit_local_authority_operation(
+                    crate::network::protocol::GameplayOperation::Sleep { x, y, z },
+                );
+            }
+            WorldClickIntent::OpenContainer { x, y, z, .. } => {
+                // `open_chest` emits the typed Container::Open envelope for
+                // Join Clients and never opens a local inventory before an
+                // authority result arrives.
+                self.open_chest((x, y, z));
+            }
+            WorldClickIntent::Place {
+                x,
+                y,
+                z,
+                face,
+                block,
+            } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::Place,
+                    x,
+                    y,
+                    z,
+                    face,
+                    block,
+                );
+            }
         }
+    }
 
-        if !is_left_click {
-            let held_stack = self.inventory.hotbar[self.inventory.selected];
-            let held_item = held_stack
-                .map(|s| s.item)
-                .unwrap_or(crate::inventory::Item::Air);
-            if let Some(potion) = held_stack.and_then(|stack| stack.potion) {
-                if potion.splash || held_item == Item::SplashPotion {
-                    let dir = Vec3::new(
-                        self.camera.yaw.cos() * self.camera.pitch.cos(),
-                        self.camera.pitch.sin(),
-                        self.camera.yaw.sin() * self.camera.pitch.cos(),
-                    )
-                    .normalize_or_zero();
-                    let id = self.entity_manager.spawn(
-                        crate::entity::EntityType::SplashPotion,
-                        self.camera.position + dir * 0.5,
-                    );
-                    if let Some(projectile) = self.entity_manager.get_by_id_mut(id) {
-                        projectile.velocity = dir * 12.0;
-                        projectile.potion = Some(potion);
-                        projectile.life_time = 3.0;
-                    }
-                } else {
-                    let healing = self.potion_effects.apply(potion);
-                    self.player_state.health =
-                        (self.player_state.health + healing).min(self.player_state.max_health);
-                }
-                self.inventory
-                    .use_selected_item(self.game_mode == GameMode::Creative);
-                return;
-            }
-            if held_item == Item::MilkBucket {
-                self.potion_effects.active.clear();
-                if self.game_mode_policy().hunger_enabled {
-                    self.inventory.replace_selected_item(Item::Bucket);
-                }
-                return;
-            }
-            if held_item == Item::Bow {
-                let enchantments = held_stack
-                    .map(|stack| stack.enchantments)
-                    .unwrap_or_default();
-                let infinity = enchantments.level_of(crate::enchantment::Enchantment::Infinity) > 0;
-                if self.game_mode == GameMode::Creative
-                    || infinity
-                    || self.inventory.remove_one(Item::Arrow)
-                {
-                    let dir = Vec3::new(
-                        self.camera.yaw.cos() * self.camera.pitch.cos(),
-                        self.camera.pitch.sin(),
-                        self.camera.yaw.sin() * self.camera.pitch.cos(),
-                    )
-                    .normalize_or_zero();
-                    let id = self.entity_manager.spawn(
-                        crate::entity::EntityType::Arrow,
-                        self.camera.position + dir * 0.6,
-                    );
-                    if let Some(arrow) = self.entity_manager.get_by_id_mut(id) {
-                        arrow.velocity = dir * 22.0;
-                        arrow.friendly_projectile = true;
-                        arrow.projectile_damage = 4.0
-                            + enchantments.level_of(crate::enchantment::Enchantment::Power(1))
-                                as f32
-                                * 1.25;
-                    }
-                }
-                return;
-            }
-            if let Some(food_props) = held_item.food_properties() {
-                if self.player_state.hunger < 20.0
-                    || food_props.always_edible
-                    || self.game_mode == GameMode::Creative
-                {
-                    if let Some(ref mut eating) = self.player_state.eating_state {
-                        if eating.item == held_item && eating.slot == self.inventory.selected {
-                            eating.ticks_remaining = eating.ticks_remaining.saturating_sub(1);
-                            if eating.ticks_remaining == 0 {
-                                self.player_state.hunger =
-                                    (self.player_state.hunger + food_props.hunger).min(20.0);
-                                self.player_state.saturation = (self.player_state.saturation
-                                    + food_props.saturation)
-                                    .min(self.player_state.hunger);
-                                let is_creative = self.game_mode == GameMode::Creative;
-                                self.inventory.use_selected_item(is_creative);
-                                if let Some(ret) = food_props.return_item {
-                                    let _ = self
-                                        .inventory
-                                        .add_stack(crate::inventory::ItemStack::new(ret, 1));
-                                }
-                                self.trigger_advancement(
-                                    crate::advancements::AdvancementTrigger::EatFood(held_item),
-                                );
-                                self.player_state.eating_state = None;
-                            }
-                            return;
-                        }
-                    } else {
-                        self.player_state.eating_state = Some(crate::player::ActiveEatingState {
-                            item: held_item,
-                            slot: self.inventory.selected,
-                            ticks_remaining: food_props.use_duration_ticks,
-                            total_duration: food_props.use_duration_ticks,
-                        });
-                        return;
-                    }
-                }
-            }
+    /// Leftover renderer-owned click path. Live Embedded / Join never enter here.
+    fn legacy_handle_click(&mut self, is_left_click: bool) {
+        if !is_left_click && self.legacy_try_use_held_item() {
+            return;
         }
 
         let dir = Vec3::new(
@@ -18452,99 +18333,150 @@ impl State {
         }
     }
 
+    /// Leftover potions / bow / food / milk. Live Embedded / Join never call this.
+    fn legacy_try_use_held_item(&mut self) -> bool {
+        let held_stack = self.inventory.hotbar[self.inventory.selected];
+        let held_item = held_stack
+            .map(|s| s.item)
+            .unwrap_or(crate::inventory::Item::Air);
+        if let Some(potion) = held_stack.and_then(|stack| stack.potion) {
+            if potion.splash || held_item == Item::SplashPotion {
+                let dir = self.look_direction();
+                let id = self.entity_manager.spawn(
+                    crate::entity::EntityType::SplashPotion,
+                    self.camera.position + dir * 0.5,
+                );
+                if let Some(projectile) = self.entity_manager.get_by_id_mut(id) {
+                    projectile.velocity = dir * 12.0;
+                    projectile.potion = Some(potion);
+                    projectile.life_time = 3.0;
+                }
+            } else {
+                let healing = self.potion_effects.apply(potion);
+                self.player_state.health =
+                    (self.player_state.health + healing).min(self.player_state.max_health);
+            }
+            self.inventory
+                .use_selected_item(self.game_mode == GameMode::Creative);
+            return true;
+        }
+        if held_item == Item::MilkBucket {
+            self.potion_effects.active.clear();
+            if self.game_mode_policy().hunger_enabled {
+                self.inventory.replace_selected_item(Item::Bucket);
+            }
+            return true;
+        }
+        if held_item == Item::Bow {
+            let enchantments = held_stack
+                .map(|stack| stack.enchantments)
+                .unwrap_or_default();
+            let infinity = enchantments.level_of(crate::enchantment::Enchantment::Infinity) > 0;
+            if self.game_mode == GameMode::Creative
+                || infinity
+                || self.inventory.remove_one(Item::Arrow)
+            {
+                let dir = self.look_direction();
+                let id = self.entity_manager.spawn(
+                    crate::entity::EntityType::Arrow,
+                    self.camera.position + dir * 0.6,
+                );
+                if let Some(arrow) = self.entity_manager.get_by_id_mut(id) {
+                    arrow.velocity = dir * 22.0;
+                    arrow.friendly_projectile = true;
+                    arrow.projectile_damage = 4.0
+                        + enchantments.level_of(crate::enchantment::Enchantment::Power(1)) as f32
+                            * 1.25;
+                }
+            }
+            return true;
+        }
+        if let Some(food_props) = held_item.food_properties() {
+            if self.player_state.hunger < 20.0
+                || food_props.always_edible
+                || self.game_mode == GameMode::Creative
+            {
+                if let Some(ref mut eating) = self.player_state.eating_state {
+                    if eating.item == held_item && eating.slot == self.inventory.selected {
+                        eating.ticks_remaining = eating.ticks_remaining.saturating_sub(1);
+                        if eating.ticks_remaining == 0 {
+                            self.player_state.hunger =
+                                (self.player_state.hunger + food_props.hunger).min(20.0);
+                            self.player_state.saturation = (self.player_state.saturation
+                                + food_props.saturation)
+                                .min(self.player_state.hunger);
+                            let is_creative = self.game_mode == GameMode::Creative;
+                            self.inventory.use_selected_item(is_creative);
+                            if let Some(ret) = food_props.return_item {
+                                let _ = self
+                                    .inventory
+                                    .add_stack(crate::inventory::ItemStack::new(ret, 1));
+                            }
+                            self.trigger_advancement(
+                                crate::advancements::AdvancementTrigger::EatFood(held_item),
+                            );
+                            self.player_state.eating_state = None;
+                        }
+                        return true;
+                    }
+                } else {
+                    self.player_state.eating_state = Some(crate::player::ActiveEatingState {
+                        item: held_item,
+                        slot: self.inventory.selected,
+                        ticks_remaining: food_props.use_duration_ticks,
+                        total_duration: food_props.use_duration_ticks,
+                    });
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Translate local presentation input into the transport-independent
     /// gameplay envelope.  Unsupported interactions are deliberately rejected
     /// by the core; they never fall back to mutating renderer chunks.
     fn handle_authority_click(&mut self, is_left_click: bool) {
-        let direction = Vec3::new(
-            self.camera.yaw.cos() * self.camera.pitch.cos(),
-            self.camera.pitch.sin(),
-            self.camera.yaw.sin() * self.camera.pitch.cos(),
-        )
-        .normalize_or_zero();
-        let target_policy = if is_left_click {
-            RaycastTargetPolicy::Break
-        } else {
-            RaycastTargetPolicy::Place
-        };
-        let Some(hit) = raycast(
-            self.camera.position,
-            direction,
-            5.0,
-            &self.chunk_manager,
-            target_policy,
-        ) else {
-            return;
-        };
-        let clicked = (
-            hit.block_pos.x as i32,
-            hit.block_pos.y as i32,
-            hit.block_pos.z as i32,
-        );
-        if is_left_click {
-            if !self.can_break_current_block(
-                self.chunk_manager
-                    .get_block(clicked.0, clicked.1, clicked.2),
-            ) {
-                return;
+        let (intent, hit_pos) = self.prepare_world_click(is_left_click);
+        match intent {
+            WorldClickIntent::Miss | WorldClickIntent::Rejected => {}
+            WorldClickIntent::StartBreak { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::StartBreak,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::Air,
+                );
+                self.mining_target = hit_pos;
+                self.mining_progress = 0.0;
+                self.mining_held = self.selected_mining_held();
+                self.network
+                    .send_action(crate::network::protocol::Action::Break);
             }
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::StartBreak,
-                clicked.0,
-                clicked.1,
-                clicked.2,
-                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                BlockType::Air,
-            );
-            self.mining_target = Some(hit.block_pos);
-            self.mining_progress = 0.0;
-            self.mining_held = self.selected_mining_held();
-            self.network
-                .send_action(crate::network::protocol::Action::Break);
-            return;
-        }
-
-        let clicked_block = self
-            .chunk_manager
-            .get_block(clicked.0, clicked.1, clicked.2);
-        let held_item = self.inventory.hotbar[self.inventory.selected]
-            .map(|stack| stack.item)
-            .unwrap_or(Item::Air);
-        if clicked_block == BlockType::Obsidian && held_item == Item::FlintAndSteel {
-            let target = hit.block_pos + hit.normal;
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::IgnitePortal,
-                target.x as i32,
-                target.y as i32,
-                target.z as i32,
-                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                BlockType::Fire,
-            );
-            return;
-        }
-        if clicked_block == BlockType::EndPortalFrame && held_item == Item::EyeOfEnder {
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::InsertEnderEye,
-                clicked.0,
-                clicked.1,
-                clicked.2,
-                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                BlockType::EndPortalFrameFilled,
-            );
-            return;
-        }
-        if matches!(
-            clicked_block,
-            BlockType::Chest
-                | BlockType::EndCityChest
-                | BlockType::Furnace
-                | BlockType::FurnaceLit
-                | BlockType::Hopper
-                | BlockType::Dispenser
-                | BlockType::Dropper
-        ) {
-            let response =
-                self.submit_authority_request(crate::network::protocol::GameplayRequest {
+            WorldClickIntent::IgnitePortal { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::IgnitePortal,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::Fire,
+                );
+            }
+            WorldClickIntent::InsertEnderEye { x, y, z, face } => {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::InsertEnderEye,
+                    x,
+                    y,
+                    z,
+                    face,
+                    BlockType::EndPortalFrameFilled,
+                );
+            }
+            WorldClickIntent::Sleep { x, y, z } => {
+                let _ = self.submit_authority_request(crate::network::protocol::GameplayRequest {
                     request_id: 0,
                     client_sequence: 0,
                     session_id: 0,
@@ -18554,71 +18486,59 @@ impl State {
                         .as_ref()
                         .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
                         .unwrap_or_default(),
-                    operation: crate::network::protocol::GameplayOperation::Container {
-                        action: crate::network::protocol::ContainerAction::Open.to_wire(),
-                        x: clicked.0,
-                        y: clicked.1,
-                        z: clicked.2,
-                        slot: 0,
-                    },
+                    operation: crate::network::protocol::GameplayOperation::Sleep { x, y, z },
                 });
-            if matches!(
-                response.as_ref().map(|response| &response.outcome),
-                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
-            ) {
-                let _ = self.project_authority_container(clicked);
             }
-            return;
-        }
-        if clicked_block == BlockType::Bed {
-            let _ = self.submit_authority_request(crate::network::protocol::GameplayRequest {
-                request_id: 0,
-                client_sequence: 0,
-                session_id: 0,
-                dimension: self.current_dimension as u8,
-                client_revision: self
-                    .embedded_runtime
-                    .as_ref()
-                    .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                    .unwrap_or_default(),
-                operation: crate::network::protocol::GameplayOperation::Sleep {
-                    x: clicked.0,
-                    y: clicked.1,
-                    z: clicked.2,
-                },
-            });
-            return;
-        }
-
-        let target = hit.block_pos + hit.normal;
-        let (x, y, z) = (target.x as i32, target.y as i32, target.z as i32);
-        let Some(block) = self.inventory.get_selected_block() else {
-            // Keep the ingress typed even when no placeable stack is held. The
-            // authority rejects this bounded request without touching the
-            // world; legacy BlockUse is not a mutation fallback.
-            let _ = self.submit_local_authority_block_action(
-                crate::network::protocol::BlockActionKind::Place,
+            WorldClickIntent::OpenContainer { x, y, z, .. } => {
+                let response =
+                    self.submit_authority_request(crate::network::protocol::GameplayRequest {
+                        request_id: 0,
+                        client_sequence: 0,
+                        session_id: 0,
+                        dimension: self.current_dimension as u8,
+                        client_revision: self
+                            .embedded_runtime
+                            .as_ref()
+                            .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
+                            .unwrap_or_default(),
+                        operation: crate::network::protocol::GameplayOperation::Container {
+                            action: crate::network::protocol::ContainerAction::Open.to_wire(),
+                            x,
+                            y,
+                            z,
+                            slot: 0,
+                        },
+                    });
+                if matches!(
+                    response.as_ref().map(|response| &response.outcome),
+                    Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
+                ) {
+                    let _ = self.project_authority_container((x, y, z));
+                }
+            }
+            WorldClickIntent::Place {
                 x,
                 y,
                 z,
-                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                BlockType::Air,
-            );
-            return;
-        };
-        if !self.can_place_block_at(x, y, z, block) {
-            return;
+                face,
+                block,
+            } => {
+                // Empty-hand Place stays Embedded-only (resolver). Keep the
+                // ingress typed; the authority rejects Air without a fallback.
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::Place,
+                    x,
+                    y,
+                    z,
+                    face,
+                    block,
+                );
+                if block != BlockType::Air {
+                    self.network
+                        .send_action(crate::network::protocol::Action::Place);
+                }
+            }
         }
-        let _ = self.submit_local_authority_block_action(
-            crate::network::protocol::BlockActionKind::Place,
-            x,
-            y,
-            z,
-            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-            block,
-        );
-        self.network
-            .send_action(crate::network::protocol::Action::Place);
     }
 
     pub fn is_creative_catalog_open(&self) -> bool {
@@ -19056,239 +18976,244 @@ impl State {
             .should_writeback_after_inventory_click(self.presentation_inventory_click_target())
     }
 
-    pub fn handle_inventory_click(&mut self, is_left: bool) {
-        if !self.presentation_topology().is_legacy_owner() {
-            let mouse_x = self.mouse_ndc[0];
-            let mouse_y = self.mouse_ndc[1];
-            if self.active_station == Some(StationKind::Merchant) && is_left {
-                let mut offer_y = 0.28;
-                for idx in 0..self.active_merchant_offers.len() {
-                    if mouse_x >= -0.35
-                        && mouse_x <= 0.35
-                        && mouse_y >= offer_y - 0.04
-                        && mouse_y <= offer_y + 0.03
-                    {
-                        let _ = self.execute_active_merchant_trade(idx);
-                        return;
-                    }
-                    offer_y -= 0.09;
-                    if offer_y < -0.30 {
-                        break;
-                    }
-                }
-            }
-            let clicked_slot =
-                self.get_inventory_slots()
-                    .into_iter()
-                    .find(|&(_, x0, x1, y0, y1)| {
-                        mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
-                    });
-            let target = match clicked_slot.map(|(slot, _, _, _, _)| slot) {
-                Some(SlotType::ContainerSlot(_)) => {
-                    Some(PresentationInventoryTarget::ContainerSlot)
-                }
-                Some(SlotType::AnvilOutput | SlotType::EnchantInput | SlotType::EnchantLapis) => {
-                    Some(PresentationInventoryTarget::Workstation)
-                }
-                Some(_) => Some(PresentationInventoryTarget::PlayerInventory),
-                None => self.presentation_inventory_click_target(),
-            };
-            match target.map(|target| self.presentation_topology().inventory_decision(target)) {
-                Some(PresentationInventoryAction::SendAuthorityOp) => {
-                    if let Some((SlotType::ContainerSlot(slot), _, _, _, _)) = clicked_slot {
-                        if let Some(position) = self.container_target {
-                            let _ = self.submit_local_authority_container_action(
-                                position,
-                                crate::network::protocol::ContainerAction::Click,
-                                slot as u16,
-                                is_left,
-                            );
-                        }
-                    }
-                    return;
-                }
-                Some(PresentationInventoryAction::Reject) | None => {
-                    // Join-client clicks and embedded workstation / empty-space
-                    // throws must not consume items or spawn drops.
-                    if !self.is_authoritative()
-                        || !matches!(target, Some(PresentationInventoryTarget::PlayerInventory))
-                    {
-                        return;
-                    }
-                }
-                Some(PresentationInventoryAction::LocalMutate) => {}
-            }
-        }
+    fn probe_inventory_click(&self, is_left: bool) -> InventoryHitProbe<SlotType> {
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
-        let creative_catalog = self.is_creative_catalog_open();
-        if creative_catalog && is_left {
-            for (index, tab) in CreativeTab::TABS.into_iter().enumerate() {
-                if creative_tab_rect(index).contains(mouse_x, mouse_y) {
+        let ui = collect_inventory_ui_hits(
+            mouse_x,
+            mouse_y,
+            is_left,
+            self.active_station == Some(StationKind::Merchant),
+            self.active_merchant_offers.len(),
+            self.recipe_book_open,
+            self.active_station == Some(StationKind::Enchanting),
+        );
+        let creative_tab = if self.is_creative_catalog_open() && is_left {
+            (0..CreativeTab::TABS.len())
+                .find(|&index| creative_tab_rect(index).contains(mouse_x, mouse_y))
+        } else {
+            None
+        };
+        let slot = self
+            .get_inventory_slots()
+            .into_iter()
+            .find(|&(_, x0, x1, y0, y1)| {
+                mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
+            })
+            .map(|(slot, _, _, _, _)| slot);
+        InventoryHitProbe {
+            merchant: ui.merchant,
+            creative_tab,
+            recipe_book_toggle: ui.recipe_book_toggle,
+            recipe_book: ui.recipe_book,
+            enchant: ui.enchant,
+            slot,
+        }
+    }
+
+    fn submit_inventory_container_click(&mut self, slot: usize, is_left: bool) {
+        if let Some(position) = self.container_target {
+            let _ = self.submit_local_authority_container_action(
+                position,
+                crate::network::protocol::ContainerAction::Click,
+                slot as u16,
+                is_left,
+            );
+        }
+    }
+
+    pub fn handle_inventory_click(&mut self, is_left: bool) {
+        let probe = self.probe_inventory_click(is_left);
+        match (self.presentation_topology(), probe.authority_hit()) {
+            (
+                PresentationTopology::JoinClient | PresentationTopology::Embedded,
+                InventoryHit::Merchant { offer_index },
+            ) => {
+                let _ = self.execute_active_merchant_trade(offer_index);
+            }
+            (
+                PresentationTopology::JoinClient | PresentationTopology::Embedded,
+                InventoryHit::Slot(SlotType::ContainerSlot(slot)),
+            ) => {
+                self.submit_inventory_container_click(slot, is_left);
+            }
+            (
+                PresentationTopology::Embedded,
+                InventoryHit::Slot(
+                    SlotType::AnvilOutput | SlotType::EnchantInput | SlotType::EnchantLapis,
+                ),
+            ) => {
+                // Workstation: reject. Must not consume items or spawn drops.
+            }
+            (PresentationTopology::Embedded, InventoryHit::Slot(_)) => {
+                // Embedded player-inventory writeback exception.
+                self.legacy_apply_inventory_ui_hit(probe, is_left);
+            }
+            (PresentationTopology::JoinClient, _) => {
+                // Join must not consume or drop.
+            }
+            (PresentationTopology::Embedded, _) => {
+                // Embedded workstation / empty-space throws must not consume.
+            }
+            (PresentationTopology::LegacyOwner, _) => {
+                self.legacy_apply_inventory_ui_hit(probe, is_left);
+            }
+        }
+    }
+
+    /// Leftover local inventory mutate (and Embedded player-inventory writeback).
+    fn legacy_apply_inventory_ui_hit(&mut self, probe: InventoryHitProbe<SlotType>, is_left: bool) {
+        match probe.ui_hit() {
+            InventoryHit::CreativeTab { index } => {
+                if let Some(tab) = CreativeTab::TABS.get(index).copied() {
                     self.audio_manager
                         .play_sound(crate::audio::SoundId::UiClick);
                     self.inventory.select_creative_tab(tab);
-                    return;
                 }
             }
-        }
-        let slots = self.get_inventory_slots();
-
-        if is_left && mouse_x >= -0.45 && mouse_x <= -0.37 && mouse_y >= 0.35 && mouse_y <= 0.43 {
-            self.recipe_book_open = !self.recipe_book_open;
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::UiClick);
-            return;
-        }
-
-        if self.active_station == Some(StationKind::Merchant) && is_left {
-            let mut offer_y = 0.28;
-            for idx in 0..self.active_merchant_offers.len() {
-                if mouse_x >= -0.35
-                    && mouse_x <= 0.35
-                    && mouse_y >= offer_y - 0.04
-                    && mouse_y <= offer_y + 0.03
+            InventoryHit::RecipeBookToggle => {
+                self.recipe_book_open = !self.recipe_book_open;
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
+            }
+            InventoryHit::Merchant { offer_index } => {
+                if self
+                    .active_merchant_offers
+                    .get(offer_index)
+                    .is_some_and(|offer| !offer.is_out_of_stock())
                 {
-                    if !self.active_merchant_offers[idx].is_out_of_stock() {
-                        let _ = self.execute_active_merchant_trade(idx);
-                    }
+                    let _ = self.execute_active_merchant_trade(offer_index);
+                }
+            }
+            InventoryHit::RecipeBook => {
+                if self
+                    .presentation_topology()
+                    .inventory_decision(PresentationInventoryTarget::Workstation)
+                    != PresentationInventoryAction::LocalMutate
+                {
                     return;
                 }
-                offer_y -= 0.09;
-                if offer_y < -0.30 {
-                    break;
-                }
-            }
-        }
-
-        if self.recipe_book_open
-            && is_left
-            && mouse_x >= -0.85
-            && mouse_x <= -0.48
-            && mouse_y >= -0.45
-            && mouse_y <= 0.45
-        {
-            if self
-                .presentation_topology()
-                .inventory_decision(PresentationInventoryTarget::Workstation)
-                != PresentationInventoryAction::LocalMutate
-            {
-                return;
-            }
-            let smelting_recipes = self.recipe_manager.get_smelting_recipes();
-            let mut line_y = 0.34;
-            for r in smelting_recipes {
-                if mouse_y >= line_y - 0.05 && mouse_y <= line_y + 0.02 {
-                    if let Some(pos) = self.container_target {
-                        let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                        if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
-                            if let Some((inv_slot_idx, stack)) = self.inventory.find_item(r.input) {
-                                let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
-                                let (bx, by, bz) = (
-                                    pos.0.rem_euclid(16) as u8,
-                                    pos.1 as i16,
-                                    pos.2.rem_euclid(16) as u8,
-                                );
-                                if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                                    if let Some(crate::block_entity::BlockEntity::Furnace(
-                                        ref mut f,
-                                    )) = chunk.get_block_entity_mut(bx, by, bz)
+                let mouse_y = self.mouse_ndc[1];
+                let smelting_recipes = self.recipe_manager.get_smelting_recipes();
+                let mut line_y = 0.34;
+                for r in smelting_recipes {
+                    if mouse_y >= line_y - 0.05 && mouse_y <= line_y + 0.02 {
+                        if let Some(pos) = self.container_target {
+                            let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                            if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
+                                if let Some((inv_slot_idx, stack)) =
+                                    self.inventory.find_item(r.input)
+                                {
+                                    let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
+                                    let (bx, by, bz) = (
+                                        pos.0.rem_euclid(16) as u8,
+                                        pos.1 as i16,
+                                        pos.2.rem_euclid(16) as u8,
+                                    );
+                                    if let Some(chunk) =
+                                        self.chunk_manager.chunks.get_mut(&(cx, cz))
                                     {
-                                        if f.slots[0].is_none() {
-                                            f.slots[0] = Some(stack);
-                                            self.inventory.remove_at_slot(inv_slot_idx);
-                                            self.audio_manager
-                                                .play_sound(crate::audio::SoundId::UiClick);
+                                        if let Some(crate::block_entity::BlockEntity::Furnace(
+                                            ref mut f,
+                                        )) = chunk.get_block_entity_mut(bx, by, bz)
+                                        {
+                                            if f.slots[0].is_none() {
+                                                f.slots[0] = Some(stack);
+                                                self.inventory.remove_at_slot(inv_slot_idx);
+                                                self.audio_manager
+                                                    .play_sound(crate::audio::SoundId::UiClick);
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                        break;
                     }
-                    break;
-                }
-                line_y -= 0.07;
-                if line_y < -0.40 {
-                    break;
+                    line_y -= 0.07;
+                    if line_y < -0.40 {
+                        break;
+                    }
                 }
             }
-            return;
-        }
+            InventoryHit::Enchant { option_index } => {
+                if self
+                    .presentation_topology()
+                    .inventory_decision(PresentationInventoryTarget::Workstation)
+                    != PresentationInventoryAction::LocalMutate
+                {
+                    return;
+                }
+                self.perform_enchantment(option_index);
+            }
+            InventoryHit::Empty => {
+                let Some(dragged) = self.inventory.dragged else {
+                    return;
+                };
+                if !self.presentation_topology().should_mutate_world() {
+                    return;
+                }
+                let mouse_x = self.mouse_ndc[0];
+                let mouse_y = self.mouse_ndc[1];
+                let creative_catalog = self.is_creative_catalog_open();
+                let aspect = self.size.width as f32 / self.size.height as f32;
+                if creative_catalog
+                    && is_left
+                    && creative_scroll_track_rect(aspect).contains(mouse_x, mouse_y)
+                {
+                    return;
+                }
+                if is_left {
+                    self.throw_dropped_item(dragged.item, dragged.count);
+                    self.inventory.dragged = None;
+                    self.inventory.creative_drag_origin = None;
+                } else {
+                    self.throw_dropped_item(dragged.item, 1);
+                    if dragged.count > 1 {
+                        self.inventory.dragged = Some(ItemStack {
+                            count: dragged.count - 1,
+                            ..dragged
+                        });
+                    } else {
+                        self.inventory.dragged = None;
+                        self.inventory.creative_drag_origin = None;
+                    }
+                }
+            }
+            InventoryHit::Slot(slot_type) => {
+                self.audio_manager
+                    .play_sound(crate::audio::SoundId::UiClick);
+                let slot_item = self.get_item_at_slot(slot_type);
+                let creative_catalog = self.is_creative_catalog_open();
 
-        if self.active_station == Some(StationKind::Enchanting) && is_left {
-            for index in 0..3 {
-                let y1 = 0.28 - index as f32 * 0.12;
-                let y0 = y1 - 0.09;
-                if mouse_x >= 0.02 && mouse_x <= 0.62 && mouse_y >= y0 && mouse_y <= y1 {
-                    if self
-                        .presentation_topology()
-                        .inventory_decision(PresentationInventoryTarget::Workstation)
-                        != PresentationInventoryAction::LocalMutate
-                    {
+                match slot_type {
+                    SlotType::Creative(item) => {
+                        self.inventory.creative_supply(item, is_left);
                         return;
                     }
-                    self.perform_enchantment(index);
-                    return;
+                    SlotType::Hotbar(index) if creative_catalog => {
+                        self.inventory.click_creative_hotbar(index, is_left);
+                        return;
+                    }
+                    _ => {}
                 }
-            }
-        }
 
-        let clicked_slot = slots.into_iter().find(|&(_, x0, x1, y0, y1)| {
-            mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
-        });
-
-        if let Some((slot_type, _, _, _, _)) = clicked_slot {
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::UiClick);
-            let slot_item = self.get_item_at_slot(slot_type);
-
-            match slot_type {
-                SlotType::Creative(item) => {
-                    self.inventory.creative_supply(item, is_left);
-                    return;
+                if let Some(dragged) = self.inventory.dragged {
+                    if !self.slot_accepts(slot_type, dragged) {
+                        return;
+                    }
                 }
-                SlotType::Hotbar(index) if creative_catalog => {
-                    self.inventory.click_creative_hotbar(index, is_left);
-                    return;
-                }
-                _ => {}
-            }
 
-            if let Some(dragged) = self.inventory.dragged {
-                if !self.slot_accepts(slot_type, dragged) {
-                    return;
-                }
-            }
-
-            match slot_type {
-                SlotType::CraftOutput => {
-                    if let Some(output) = slot_item {
-                        self.trigger_advancement(
-                            crate::advancements::AdvancementTrigger::CraftItem(output.item),
-                        );
-                        // Can only take from output slot
-                        let max_stack = output.item.properties().max_stack;
-                        if self.inventory.dragged.is_none() {
-                            self.inventory.dragged = Some(output);
-                            // Consume craft input ingredients
-                            for slot in self.inventory.craft_input.iter_mut() {
-                                if let Some(stack) = slot {
-                                    if stack.count > 1 {
-                                        stack.count -= 1;
-                                    } else {
-                                        *slot = None;
-                                    }
-                                }
-                            }
-                            let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-                            self.inventory.craft_output = self
-                                .recipe_manager
-                                .match_recipe(&self.inventory.craft_input, grid_size);
-                        } else if let Some(ref mut dragged) = self.inventory.dragged {
-                            if dragged.can_merge_with(&output)
-                                && dragged.count + output.count <= max_stack
-                            {
-                                dragged.count += output.count;
+                match slot_type {
+                    SlotType::CraftOutput => {
+                        if let Some(output) = slot_item {
+                            self.trigger_advancement(
+                                crate::advancements::AdvancementTrigger::CraftItem(output.item),
+                            );
+                            // Can only take from output slot
+                            let max_stack = output.item.properties().max_stack;
+                            if self.inventory.dragged.is_none() {
+                                self.inventory.dragged = Some(output);
                                 // Consume craft input ingredients
                                 for slot in self.inventory.craft_input.iter_mut() {
                                     if let Some(stack) = slot {
@@ -19303,223 +19228,269 @@ impl State {
                                 self.inventory.craft_output = self
                                     .recipe_manager
                                     .match_recipe(&self.inventory.craft_input, grid_size);
+                            } else if let Some(ref mut dragged) = self.inventory.dragged {
+                                if dragged.can_merge_with(&output)
+                                    && dragged.count + output.count <= max_stack
+                                {
+                                    dragged.count += output.count;
+                                    // Consume craft input ingredients
+                                    for slot in self.inventory.craft_input.iter_mut() {
+                                        if let Some(stack) = slot {
+                                            if stack.count > 1 {
+                                                stack.count -= 1;
+                                            } else {
+                                                *slot = None;
+                                            }
+                                        }
+                                    }
+                                    let grid_size =
+                                        if self.inventory.is_table_open { 3 } else { 2 };
+                                    self.inventory.craft_output = self
+                                        .recipe_manager
+                                        .match_recipe(&self.inventory.craft_input, grid_size);
+                                }
                             }
                         }
                     }
-                }
-                SlotType::AnvilOutput => {
-                    if self
-                        .presentation_topology()
-                        .inventory_decision(PresentationInventoryTarget::Workstation)
-                        != PresentationInventoryAction::LocalMutate
+                    SlotType::AnvilOutput => {
+                        if self
+                            .presentation_topology()
+                            .inventory_decision(PresentationInventoryTarget::Workstation)
+                            != PresentationInventoryAction::LocalMutate
+                        {
+                            return;
+                        }
+                        if let Some(output) = self.anvil.output {
+                            let affordable = self.game_mode == GameMode::Creative
+                                || self.player_state.experience_level >= self.anvil.cost as u32;
+                            if affordable && self.inventory.dragged.is_none() {
+                                if self.game_mode == GameMode::Survival {
+                                    self.player_state.spend_levels(self.anvil.cost as u32);
+                                }
+                                self.inventory.dragged = Some(output);
+                                self.anvil.left = None;
+                                self.anvil.right = None;
+                                self.anvil.rename.clear();
+                                self.anvil.refresh();
+                            }
+                        }
+                    }
+                    SlotType::ContainerSlot(slot_index)
+                        if !self.presentation_topology().is_legacy_owner() =>
                     {
-                        return;
-                    }
-                    if let Some(output) = self.anvil.output {
-                        let affordable = self.game_mode == GameMode::Creative
-                            || self.player_state.experience_level >= self.anvil.cost as u32;
-                        if affordable && self.inventory.dragged.is_none() {
-                            if self.game_mode == GameMode::Survival {
-                                self.player_state.spend_levels(self.anvil.cost as u32);
+                        if self.has_in_process_runtime() {
+                            if let Some(container_pos) = self.container_target {
+                                let _ = self.submit_local_authority_container_action(
+                                    container_pos,
+                                    crate::network::protocol::ContainerAction::Click,
+                                    slot_index as u16,
+                                    is_left,
+                                );
                             }
-                            self.inventory.dragged = Some(output);
-                            self.anvil.left = None;
-                            self.anvil.right = None;
-                            self.anvil.rename.clear();
-                            self.anvil.refresh();
+                            return;
                         }
-                    }
-                }
-                SlotType::ContainerSlot(slot_index)
-                    if !self.presentation_topology().is_legacy_owner() =>
-                {
-                    if self.has_in_process_runtime() {
-                        if let Some(container_pos) = self.container_target {
-                            let _ = self.submit_local_authority_container_action(
-                                container_pos,
-                                crate::network::protocol::ContainerAction::Click,
-                                slot_index as u16,
-                                is_left,
+                        let Some(container_pos) = self.container_target else {
+                            return;
+                        };
+                        if let crate::state::NetworkHandle::Client { game_to_client, .. } =
+                            &self.network
+                        {
+                            let dragged = self
+                                .inventory
+                                .dragged
+                                .as_ref()
+                                .map(crate::network::protocol::ItemWire::from_stack);
+                            let _ = game_to_client.tracked_send(
+                                crate::network::client::GameToClient::ContainerClickRequest {
+                                    dimension: self.current_dimension as u8,
+                                    revision: self
+                                        .chunk_manager
+                                        .get_block_entity(
+                                            container_pos.0,
+                                            container_pos.1,
+                                            container_pos.2,
+                                        )
+                                        .map(crate::block_entity::BlockEntity::revision)
+                                        .unwrap_or(0),
+                                    slot_index: slot_index as u16,
+                                    is_left,
+                                    dragged,
+                                },
                             );
                         }
                         return;
                     }
-                    let Some(container_pos) = self.container_target else {
-                        return;
-                    };
-                    if let crate::state::NetworkHandle::Client { game_to_client, .. } =
-                        &self.network
-                    {
-                        let dragged = self
-                            .inventory
-                            .dragged
-                            .as_ref()
-                            .map(crate::network::protocol::ItemWire::from_stack);
-                        let _ = game_to_client.tracked_send(
-                            crate::network::client::GameToClient::ContainerClickRequest {
-                                dimension: self.current_dimension as u8,
-                                revision: self
-                                    .chunk_manager
-                                    .get_block_entity(
-                                        container_pos.0,
-                                        container_pos.1,
-                                        container_pos.2,
-                                    )
-                                    .map(crate::block_entity::BlockEntity::revision)
-                                    .unwrap_or(0),
-                                slot_index: slot_index as u16,
-                                is_left,
-                                dragged,
-                            },
-                        );
-                    }
-                    return;
-                }
-                _ => {
-                    // Normal slots (Backpack, Hotbar, Armor, CraftInput, ContainerSlot for host)
-                    if self.keys.shift && is_left && self.inventory.dragged.is_none() {
-                        if let Some(stack) = slot_item {
-                            match slot_type {
-                                SlotType::ContainerSlot(_) => {
-                                    self.check_claim_furnace_xp(slot_type);
-                                    if let Some(remainder) = self.inventory.add_stack(stack) {
-                                        self.set_item_at_slot(slot_type, Some(remainder));
-                                    } else {
-                                        self.set_item_at_slot(slot_type, None);
+                    _ => {
+                        // Normal slots (Backpack, Hotbar, Armor, CraftInput, ContainerSlot for host)
+                        if self.keys.shift && is_left && self.inventory.dragged.is_none() {
+                            if let Some(stack) = slot_item {
+                                match slot_type {
+                                    SlotType::ContainerSlot(_) => {
+                                        self.check_claim_furnace_xp(slot_type);
+                                        if let Some(remainder) = self.inventory.add_stack(stack) {
+                                            self.set_item_at_slot(slot_type, Some(remainder));
+                                        } else {
+                                            self.set_item_at_slot(slot_type, None);
+                                        }
+                                        return;
                                     }
-                                    return;
-                                }
-                                SlotType::Hotbar(_) | SlotType::Backpack(_) => {
-                                    if let Some(pos) = self.container_target {
-                                        let block =
-                                            self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                                        if matches!(
-                                            block,
-                                            BlockType::Furnace | BlockType::FurnaceLit
-                                        ) {
-                                            let is_fuel = self.recipe_manager.is_fuel(stack.item);
-                                            let is_smeltable = self
-                                                .recipe_manager
-                                                .match_smelting(stack.item)
-                                                .is_some();
-                                            let target_slot_idx = if is_smeltable {
-                                                Some(0)
-                                            } else if is_fuel {
-                                                Some(1)
-                                            } else {
-                                                None
-                                            };
-                                            if let Some(target_slot) = target_slot_idx {
-                                                let target_type =
-                                                    SlotType::ContainerSlot(target_slot);
-                                                let target_item =
-                                                    self.get_item_at_slot(target_type);
-                                                let max_s = stack.item.properties().max_stack;
-                                                match target_item {
-                                                    None => {
-                                                        self.set_item_at_slot(
-                                                            target_type,
-                                                            Some(stack),
-                                                        );
-                                                        self.set_item_at_slot(slot_type, None);
-                                                        return;
-                                                    }
-                                                    Some(t_stack)
-                                                        if t_stack.can_merge_with(&stack)
-                                                            && t_stack.count < max_s =>
-                                                    {
-                                                        let space = max_s - t_stack.count;
-                                                        let transfer = space.min(stack.count);
-                                                        self.set_item_at_slot(
-                                                            target_type,
-                                                            Some(ItemStack {
-                                                                count: t_stack.count + transfer,
-                                                                ..t_stack
-                                                            }),
-                                                        );
-                                                        if stack.count > transfer {
+                                    SlotType::Hotbar(_) | SlotType::Backpack(_) => {
+                                        if let Some(pos) = self.container_target {
+                                            let block =
+                                                self.chunk_manager.get_block(pos.0, pos.1, pos.2);
+                                            if matches!(
+                                                block,
+                                                BlockType::Furnace | BlockType::FurnaceLit
+                                            ) {
+                                                let is_fuel =
+                                                    self.recipe_manager.is_fuel(stack.item);
+                                                let is_smeltable = self
+                                                    .recipe_manager
+                                                    .match_smelting(stack.item)
+                                                    .is_some();
+                                                let target_slot_idx = if is_smeltable {
+                                                    Some(0)
+                                                } else if is_fuel {
+                                                    Some(1)
+                                                } else {
+                                                    None
+                                                };
+                                                if let Some(target_slot) = target_slot_idx {
+                                                    let target_type =
+                                                        SlotType::ContainerSlot(target_slot);
+                                                    let target_item =
+                                                        self.get_item_at_slot(target_type);
+                                                    let max_s = stack.item.properties().max_stack;
+                                                    match target_item {
+                                                        None => {
                                                             self.set_item_at_slot(
-                                                                slot_type,
+                                                                target_type,
+                                                                Some(stack),
+                                                            );
+                                                            self.set_item_at_slot(slot_type, None);
+                                                            return;
+                                                        }
+                                                        Some(t_stack)
+                                                            if t_stack.can_merge_with(&stack)
+                                                                && t_stack.count < max_s =>
+                                                        {
+                                                            let space = max_s - t_stack.count;
+                                                            let transfer = space.min(stack.count);
+                                                            self.set_item_at_slot(
+                                                                target_type,
                                                                 Some(ItemStack {
-                                                                    count: stack.count - transfer,
-                                                                    ..stack
+                                                                    count: t_stack.count + transfer,
+                                                                    ..t_stack
                                                                 }),
                                                             );
-                                                        } else {
-                                                            self.set_item_at_slot(slot_type, None);
+                                                            if stack.count > transfer {
+                                                                self.set_item_at_slot(
+                                                                    slot_type,
+                                                                    Some(ItemStack {
+                                                                        count: stack.count
+                                                                            - transfer,
+                                                                        ..stack
+                                                                    }),
+                                                                );
+                                                            } else {
+                                                                self.set_item_at_slot(
+                                                                    slot_type, None,
+                                                                );
+                                                            }
+                                                            return;
                                                         }
-                                                        return;
+                                                        _ => {}
                                                     }
-                                                    _ => {}
                                                 }
                                             }
                                         }
                                     }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
-                    }
 
-                    let max_stack = slot_item
-                        .map(|s| s.item.properties().max_stack)
-                        .unwrap_or(64);
+                        let max_stack = slot_item
+                            .map(|s| s.item.properties().max_stack)
+                            .unwrap_or(64);
 
-                    if is_left {
-                        // Left Click interaction
-                        if let Some(dragged) = self.inventory.dragged {
-                            if let Some(slot) = slot_item {
-                                if slot.can_merge_with(&dragged) {
-                                    // Stack them
-                                    let space = max_stack.saturating_sub(slot.count);
-                                    let transfer = space.min(dragged.count);
-                                    let new_slot_count = slot.count + transfer;
-                                    let new_drag_count = dragged.count - transfer;
+                        if is_left {
+                            // Left Click interaction
+                            if let Some(dragged) = self.inventory.dragged {
+                                if let Some(slot) = slot_item {
+                                    if slot.can_merge_with(&dragged) {
+                                        // Stack them
+                                        let space = max_stack.saturating_sub(slot.count);
+                                        let transfer = space.min(dragged.count);
+                                        let new_slot_count = slot.count + transfer;
+                                        let new_drag_count = dragged.count - transfer;
 
-                                    self.set_item_at_slot(
-                                        slot_type,
-                                        Some(ItemStack {
-                                            count: new_slot_count,
-                                            ..slot
-                                        }),
-                                    );
-                                    if new_drag_count > 0 {
-                                        self.inventory.dragged = Some(ItemStack {
-                                            count: new_drag_count,
-                                            ..dragged
-                                        });
+                                        self.set_item_at_slot(
+                                            slot_type,
+                                            Some(ItemStack {
+                                                count: new_slot_count,
+                                                ..slot
+                                            }),
+                                        );
+                                        if new_drag_count > 0 {
+                                            self.inventory.dragged = Some(ItemStack {
+                                                count: new_drag_count,
+                                                ..dragged
+                                            });
+                                        } else {
+                                            self.inventory.dragged = None;
+                                        }
                                     } else {
-                                        self.inventory.dragged = None;
+                                        // Swap slot and dragged
+                                        self.set_item_at_slot(slot_type, Some(dragged));
+                                        self.inventory.dragged = Some(slot);
                                     }
                                 } else {
-                                    // Swap slot and dragged
+                                    // Put dragged in empty slot
                                     self.set_item_at_slot(slot_type, Some(dragged));
-                                    self.inventory.dragged = Some(slot);
+                                    self.inventory.dragged = None;
                                 }
                             } else {
-                                // Put dragged in empty slot
-                                self.set_item_at_slot(slot_type, Some(dragged));
-                                self.inventory.dragged = None;
+                                // Pickup entire slot
+                                if let Some(slot) = slot_item {
+                                    self.check_claim_furnace_xp(slot_type);
+                                    self.inventory.dragged = Some(slot);
+                                    self.set_item_at_slot(slot_type, None);
+                                }
                             }
                         } else {
-                            // Pickup entire slot
-                            if let Some(slot) = slot_item {
-                                self.check_claim_furnace_xp(slot_type);
-                                self.inventory.dragged = Some(slot);
-                                self.set_item_at_slot(slot_type, None);
-                            }
-                        }
-                    } else {
-                        // Right Click interaction
-                        if let Some(dragged) = self.inventory.dragged {
-                            if let Some(slot) = slot_item {
-                                if slot.can_merge_with(&dragged) && slot.count < max_stack {
-                                    // Drop 1
+                            // Right Click interaction
+                            if let Some(dragged) = self.inventory.dragged {
+                                if let Some(slot) = slot_item {
+                                    if slot.can_merge_with(&dragged) && slot.count < max_stack {
+                                        // Drop 1
+                                        self.set_item_at_slot(
+                                            slot_type,
+                                            Some(ItemStack {
+                                                count: slot.count + 1,
+                                                ..slot
+                                            }),
+                                        );
+                                        if dragged.count > 1 {
+                                            self.inventory.dragged = Some(ItemStack {
+                                                count: dragged.count - 1,
+                                                ..dragged
+                                            });
+                                        } else {
+                                            self.inventory.dragged = None;
+                                        }
+                                    } else if !slot.can_merge_with(&dragged) {
+                                        // Swap (like left click swap)
+                                        self.set_item_at_slot(slot_type, Some(dragged));
+                                        self.inventory.dragged = Some(slot);
+                                    }
+                                } else {
+                                    // Drop 1 in empty slot
                                     self.set_item_at_slot(
                                         slot_type,
                                         Some(ItemStack {
-                                            count: slot.count + 1,
-                                            ..slot
+                                            count: 1,
+                                            ..dragged
                                         }),
                                     );
                                     if dragged.count > 1 {
@@ -19530,88 +19501,40 @@ impl State {
                                     } else {
                                         self.inventory.dragged = None;
                                     }
-                                } else if !slot.can_merge_with(&dragged) {
-                                    // Swap (like left click swap)
-                                    self.set_item_at_slot(slot_type, Some(dragged));
-                                    self.inventory.dragged = Some(slot);
                                 }
                             } else {
-                                // Drop 1 in empty slot
-                                self.set_item_at_slot(
-                                    slot_type,
-                                    Some(ItemStack {
-                                        count: 1,
-                                        ..dragged
-                                    }),
-                                );
-                                if dragged.count > 1 {
+                                // Split stack in slot
+                                if let Some(slot) = slot_item {
+                                    let take = (slot.count + 1) / 2;
+                                    let keep = slot.count - take;
                                     self.inventory.dragged = Some(ItemStack {
-                                        count: dragged.count - 1,
-                                        ..dragged
+                                        count: take,
+                                        ..slot
                                     });
-                                } else {
-                                    self.inventory.dragged = None;
-                                }
-                            }
-                        } else {
-                            // Split stack in slot
-                            if let Some(slot) = slot_item {
-                                let take = (slot.count + 1) / 2;
-                                let keep = slot.count - take;
-                                self.inventory.dragged = Some(ItemStack {
-                                    count: take,
-                                    ..slot
-                                });
-                                if keep > 0 {
-                                    self.set_item_at_slot(
-                                        slot_type,
-                                        Some(ItemStack {
-                                            count: keep,
-                                            ..slot
-                                        }),
-                                    );
-                                } else {
-                                    self.set_item_at_slot(slot_type, None);
+                                    if keep > 0 {
+                                        self.set_item_at_slot(
+                                            slot_type,
+                                            Some(ItemStack {
+                                                count: keep,
+                                                ..slot
+                                            }),
+                                        );
+                                    } else {
+                                        self.set_item_at_slot(slot_type, None);
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    // If we clicked a craft input slot, recalculate craft output
-                    if let SlotType::CraftInput(_) = slot_type {
-                        let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
-                        self.inventory.craft_output = self
-                            .recipe_manager
-                            .match_recipe(&self.inventory.craft_input, grid_size);
+                        // If we clicked a craft input slot, recalculate craft output
+                        if let SlotType::CraftInput(_) = slot_type {
+                            let grid_size = if self.inventory.is_table_open { 3 } else { 2 };
+                            self.inventory.craft_output = self
+                                .recipe_manager
+                                .match_recipe(&self.inventory.craft_input, grid_size);
+                        }
+                        self.refresh_workstations();
                     }
-                    self.refresh_workstations();
-                }
-            }
-        } else if let Some(dragged) = self.inventory.dragged {
-            if !self.presentation_topology().should_mutate_world() {
-                return;
-            }
-            let aspect = self.size.width as f32 / self.size.height as f32;
-            if creative_catalog
-                && is_left
-                && creative_scroll_track_rect(aspect).contains(mouse_x, mouse_y)
-            {
-                return;
-            }
-            if is_left {
-                self.throw_dropped_item(dragged.item, dragged.count);
-                self.inventory.dragged = None;
-                self.inventory.creative_drag_origin = None;
-            } else {
-                self.throw_dropped_item(dragged.item, 1);
-                if dragged.count > 1 {
-                    self.inventory.dragged = Some(ItemStack {
-                        count: dragged.count - 1,
-                        ..dragged
-                    });
-                } else {
-                    self.inventory.dragged = None;
-                    self.inventory.creative_drag_origin = None;
                 }
             }
         }
