@@ -69,34 +69,39 @@ impl OreGenerator {
 
     /// Places ore veins into a chunk's dense block array.
     ///
-    /// locks[x][local_y][z] where local_y is an index into the full
-    /// signed-height array (0..=height-1, with min_y_offset added to get
-    /// the world Y).
+    /// `blocks[x][local_y][z]` where `local_y = world_y + min_y_offset`
+    /// (same conversion as `Chunk::new_with_seed`: `local_y = world_y - min_y`
+    /// and `min_y_offset = -min_y` for Overworld).
     pub fn place_ores(
         &self,
         blocks: &mut [Vec<[BlockType; CHUNK_DEPTH]>],
         chunk_x: i32,
-        _chunk_z: i32,
+        chunk_z: i32,
         min_y_offset: usize,
     ) {
         for (ci, config) in self.configs.iter().enumerate() {
             for attempt in 0..config.frequency {
-                let h = hash_coord(self.seed, chunk_x, ci as i32, attempt as i32, 0x0E_60_51);
+                let h = hash_coord(
+                    self.seed,
+                    chunk_x,
+                    ci as i32,
+                    chunk_z,
+                    0x0E_60_51 ^ (attempt as u32).wrapping_mul(0x9E37_79B9),
+                );
                 let lx = (h & 0xF) as usize;
                 let lz = ((h >> 4) & 0xF) as usize;
+                if lx >= blocks.len() || lz >= CHUNK_DEPTH {
+                    continue;
+                }
 
                 // Y in the config range, mapped to local array index.
                 let range = (config.max_y - config.min_y + 1).max(1) as u32;
                 let wy = config.min_y + ((h >> 8) % range) as i32;
-                let ly = wy as i32 - min_y_offset as i32;
-                if ly < 0 || (ly as usize) >= blocks.len() {
+                let ly = wy + min_y_offset as i32;
+                if ly < 0 || (ly as usize) >= blocks[lx].len() {
                     continue;
                 }
                 let ly = ly as usize;
-
-                if ly >= blocks.len() {
-                    continue;
-                }
 
                 if blocks[lx][ly][lz] != BlockType::Stone {
                     continue;
@@ -127,8 +132,7 @@ impl OreGenerator {
 
                     if nx < CHUNK_WIDTH
                         && nz < CHUNK_DEPTH
-                        && ny < blocks.len()
-                        && ny > 0
+                        && ny < blocks[nx].len()
                         && blocks[nx][ny][nz] == BlockType::Stone
                     {
                         blocks[nx][ny][nz] = config.block;
@@ -158,15 +162,17 @@ mod tests {
             .any(|c| c.block == BlockType::RedstoneOre && c.min_y < 0));
     }
 
+    fn stone_column() -> Vec<Vec<[BlockType; CHUNK_DEPTH]>> {
+        vec![vec![[BlockType::Stone; CHUNK_DEPTH]; 384]; CHUNK_WIDTH]
+    }
+
     #[test]
     fn ore_placement_is_deterministic() {
         let a = OreGenerator::new(12345);
         let b = OreGenerator::new(12345);
         let min_y_offset = 64usize;
-        let mut blocks_a: Vec<Vec<[BlockType; CHUNK_DEPTH]>> =
-            vec![vec![[BlockType::Stone; CHUNK_DEPTH]; 384]; CHUNK_WIDTH];
-        let mut blocks_b: Vec<Vec<[BlockType; CHUNK_DEPTH]>> =
-            vec![vec![[BlockType::Stone; CHUNK_DEPTH]; 384]; CHUNK_WIDTH];
+        let mut blocks_a = stone_column();
+        let mut blocks_b = stone_column();
         a.place_ores(&mut blocks_a, 3, -2, min_y_offset);
         b.place_ores(&mut blocks_b, 3, -2, min_y_offset);
         for x in 0..CHUNK_WIDTH {
@@ -176,5 +182,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ores_place_at_configured_world_y() {
+        let gen = OreGenerator::new(12345);
+        let min_y_offset = 64i32;
+        let mut blocks = stone_column();
+        for cx in 0..8 {
+            for cz in 0..8 {
+                gen.place_ores(&mut blocks, cx, cz, min_y_offset as usize);
+            }
+        }
+
+        let mut diamond_below_16 = false;
+        let mut coal_near_sea = false;
+        let mut diamond_count = 0usize;
+        let mut diamond_only_in_wrong_local_band = true;
+
+        for x in 0..CHUNK_WIDTH {
+            for ly in 0..384 {
+                let wy = ly as i32 - min_y_offset;
+                for z in 0..CHUNK_DEPTH {
+                    match blocks[x][ly][z] {
+                        BlockType::DiamondOre => {
+                            diamond_count += 1;
+                            // Vein growth can spill a few blocks past max_y=16.
+                            assert!(
+                                wy >= -64 && wy <= 16 + 8,
+                                "diamond at world Y={wy} (local {ly}) outside config band"
+                            );
+                            if wy < 16 {
+                                diamond_below_16 = true;
+                            }
+                            if ly >= 16 {
+                                diamond_only_in_wrong_local_band = false;
+                            }
+                        }
+                        BlockType::CoalOre if (40..=80).contains(&wy) => {
+                            coal_near_sea = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        assert!(
+            diamond_count > 0 && diamond_below_16,
+            "diamond must exist at configured world Y < 16, not a -64 local-band misfire"
+        );
+        assert!(
+            !diamond_only_in_wrong_local_band,
+            "diamonds must not only occupy local 0..16 (world Y -64..-49)"
+        );
+        assert!(
+            coal_near_sea,
+            "coal must appear near sea level (world Y 40..80)"
+        );
+    }
+
+    #[test]
+    fn ore_hash_includes_chunk_z() {
+        let gen = OreGenerator::new(1);
+        let min_y_offset = 64usize;
+        let mut a = stone_column();
+        let mut b = stone_column();
+        gen.place_ores(&mut a, 3, 0, min_y_offset);
+        gen.place_ores(&mut b, 3, 1, min_y_offset);
+        assert_ne!(
+            a, b,
+            "identical X with different Z must not share the ore hash"
+        );
     }
 }

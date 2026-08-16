@@ -1,5 +1,5 @@
 use super::gen::*;
-use super::placement::get_structure_candidate_in_region;
+use super::placement::{get_structure_candidate_in_region, origin_y_for};
 use super::types::*;
 use crate::dimension::Dimension;
 use crate::world::Chunk;
@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub struct StructureManager {
-    starts: Mutex<HashMap<(Dimension, i32, i32), Vec<StructureStart>>>,
+    starts: Mutex<HashMap<(u32, Dimension, i32, i32), Vec<StructureStart>>>,
 }
 
 impl StructureManager {
@@ -24,7 +24,7 @@ impl StructureManager {
         region_x: i32,
         region_z: i32,
     ) -> Vec<StructureStart> {
-        let key = (dimension, region_x, region_z);
+        let key = (seed, dimension, region_x, region_z);
         {
             let lock = self.starts.lock().unwrap();
             if let Some(starts) = lock.get(&key) {
@@ -48,14 +48,7 @@ impl StructureManager {
             {
                 let origin_x = chunk_x * 16 + 2;
                 let origin_z = chunk_z * 16 + 2;
-                let origin_y = match id {
-                    StructureId::Dungeon => 20 + ((seed.wrapping_add(chunk_x as u32) % 30) as i32),
-                    StructureId::Mineshaft => 25,
-                    StructureId::Village => 64,
-                    StructureId::Stronghold => 22,
-                    StructureId::NetherFortress => 55,
-                    StructureId::EndCity => 64,
-                };
+                let origin_y = origin_y_for(id, seed, chunk_x, chunk_z);
 
                 let start = match id {
                     StructureId::Dungeon => {
@@ -165,6 +158,29 @@ mod tests {
             assert_eq!(s1.origin_z, s2.origin_z);
             assert_eq!(s1.pieces.len(), s2.pieces.len());
         }
+    }
+
+    #[test]
+    fn structure_cache_does_not_share_across_seeds() {
+        let manager = StructureManager::new();
+        let seed_a = 1u32;
+        let seed_b = 999_999u32;
+        let starts_a = manager.get_or_generate_starts(Dimension::Overworld, seed_a, 0, 0);
+        let starts_b = manager.get_or_generate_starts(Dimension::Overworld, seed_b, 0, 0);
+        let starts_a_again = manager.get_or_generate_starts(Dimension::Overworld, seed_a, 0, 0);
+
+        let key = |starts: &[StructureStart]| {
+            starts
+                .iter()
+                .map(|s| (s.id, s.origin_x, s.origin_y, s.origin_z))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(key(&starts_a), key(&starts_a_again));
+        assert_ne!(
+            key(&starts_a),
+            key(&starts_b),
+            "two seeds must not reuse the same region cache entry"
+        );
     }
 
     #[test]

@@ -1,6 +1,29 @@
 use super::types::StructureId;
 use crate::dimension::Dimension;
 
+/// Shared origin Y for `/locate` and actual structure placement.
+///
+/// Village uses the generated surface height, clamped to Overworld bounds.
+/// Dungeon Y is a deterministic function of seed and chunk so locate matches
+/// the start written by `StructureManager`.
+pub fn origin_y_for(id: StructureId, seed: u32, chunk_x: i32, chunk_z: i32) -> i32 {
+    match id {
+        StructureId::Dungeon => 20 + ((seed.wrapping_add(chunk_x as u32) % 30) as i32),
+        StructureId::Mineshaft => 25,
+        StructureId::Village => {
+            let origin_x = chunk_x * 16 + 2;
+            let origin_z = chunk_z * 16 + 2;
+            let ctx = crate::worldgen::WorldGenContext::new(seed);
+            let surface = ctx.surface_height_at(origin_x, origin_z);
+            let height = Dimension::Overworld.height();
+            surface.clamp(height.min_y(), height.max_y_exclusive() - 1)
+        }
+        StructureId::Stronghold => 22,
+        StructureId::NetherFortress => 55,
+        StructureId::EndCity => 64,
+    }
+}
+
 pub fn hash_structure(seed: u32, salt: u32, x: i32, z: i32) -> u64 {
     let mut state = (seed as u64) ^ ((salt as u64) << 32);
     state ^= (x as u64).wrapping_mul(0x9E37_79B9);

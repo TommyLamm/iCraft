@@ -19,15 +19,15 @@
 
 ## 精確 acceptance
 
-- [ ] `place_ores` 用 `local_y = wy + min_y_offset`（或與 `Chunk::new_with_seed` 同一轉換），
+- [x] `place_ores` 用 `local_y = wy + min_y_offset`（或與 `Chunk::new_with_seed` 同一轉換），
   邊界檢查 `ly >= blocks[lx].len()`。鑽石出現在設定的世界 Y（<16），煤在海平面附近，
   且位置是世界 Y 不是 -64 附近的錯位。hash 含 `chunk_z`。
-- [ ] 結構 cache key 含 `seed`（或每個 `ServerWorld`／`WorldGenContext` 自有 manager，
+- [x] 結構 cache key 含 `seed`（或每個 `ServerWorld`／`WorldGenContext` 自有 manager，
   去掉跨世界 `OnceLock`）。兩個不同 seed 的世界在同一行程不得共用 region 結果。
-- [ ] 預設 Overworld `get_block_local(x, min_y, z) == Bedrock`。不得在基岩下留可挖石頭。
-- [ ] 樹：鄰 chunk 樹幹產生的落在本 chunk 的葉子必須寫入。測試：樹在 local X=15，
+- [x] 預設 Overworld `get_block_local(x, min_y, z) == Bedrock`。不得在基岩下留可挖石頭。
+- [x] 樹：鄰 chunk 樹幹產生的落在本 chunk 的葉子必須寫入。測試：樹在 local X=15，
   鄰 chunk X=0 看得到葉子。
-- [ ] `/locate` 與實際 placement 共用同一個 `origin_y_for(id, seed, chunk)`
+- [x] `/locate` 與實際 placement 共用同一個 `origin_y_for(id, seed, chunk)`
   （至少地牢；村莊改採 `surface_height` 並 clamp 到 `Dimension::height()`）。
 
 ## 預計檔案與測試
@@ -51,3 +51,21 @@
 - Superflat 仍先跑完整 density（可選清理，不要綁 acceptance）。
 - 興趣驅動 evict（11）。
 - 結構密度對齊完整 vanilla spacing。
+
+## 實作與證據
+
+### 行為
+
+- `place_ores`：`local_y = wy + min_y_offset`（與 `Chunk::new_with_seed` 的 `wy - min_y` 同一轉換），邊界改查 `blocks[lx].len()`。vein 鄰居同樣用高度而不是 `blocks.len()`（寬 16）。hash 納入 `chunk_z`。
+- `StructureManager` cache key 改為 `(seed, Dimension, region_x, region_z)`。process-global `OnceLock` 仍在，但兩 seed 不再共用 region starts。
+- 預設 Overworld 基岩改 `Dimension::Overworld.height().min_y()`（-64）。`wy <= min_y` 一律 Bedrock，基岩下不再留石頭。Superflat 原本就是 Y=-64，未改。
+- `place_trees` 不再在樹幹落在鄰 chunk 時 `continue`。`place_oak` 等改吃 signed local XZ，只寫入落在本 column 的葉子。
+- 新增 `origin_y_for(id, seed, chunk_x, chunk_z)`，locate 與 `StructureManager` 共用。地牢維持 `20 + (seed + chunk_x) % 30`；村莊改 `surface_height` 並 clamp 到 Overworld `height()`。
+
+### 測試
+
+- `cargo test --lib worldgen::`：24 passed（含 `ores_place_at_configured_world_y`、`ore_hash_includes_chunk_z`、`neighbor_trunk_at_x15_writes_leaves_into_chunk_x0`、`overworld_floor_is_bedrock_at_min_y`）。`ores_place_at_configured_world_y` / `ore_hash_includes_chunk_z` 修前失敗、修後通過。
+- `cargo test --lib structure::`：7 passed（含 `structure_cache_does_not_share_across_seeds`、`locate_dungeon_y_matches_placement`、`village_origin_y_uses_surface_height`）。
+- `cargo test --lib dimension::`：11 passed（含 `default_overworld_floor_is_bedrock_at_min_y`、`superflat_generation_is_signed_height_and_deterministic`、`fresh_overworld_spawn_region_contains_trees_and_ground_flora`）。
+- `cargo fmt`：通過。
+- `cargo check --all-targets`：通過（C: 空間不足，改用 `CARGO_TARGET_DIR=F:\tmp\icraft-plan10-target`）。

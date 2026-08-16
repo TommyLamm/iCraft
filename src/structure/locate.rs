@@ -1,4 +1,4 @@
-use super::placement::get_structure_candidate_in_region;
+use super::placement::{get_structure_candidate_in_region, origin_y_for};
 use super::types::StructureId;
 use crate::dimension::Dimension;
 
@@ -28,14 +28,7 @@ pub fn locate_structure(
                 {
                     let origin_x = chunk_x * 16 + 2;
                     let origin_z = chunk_z * 16 + 2;
-                    let origin_y = match id {
-                        StructureId::Dungeon => 25,
-                        StructureId::Mineshaft => 25,
-                        StructureId::Village => 64,
-                        StructureId::Stronghold => 22,
-                        StructureId::NetherFortress => 55,
-                        StructureId::EndCity => 64,
-                    };
+                    let origin_y = origin_y_for(id, world_seed, chunk_x, chunk_z);
 
                     let dx = (origin_x - current_pos.0) as f64;
                     let dz = (origin_z - current_pos.2) as f64;
@@ -81,5 +74,45 @@ mod tests {
         let (x, _y, z) = pos1.unwrap();
         // Ensure not fixed (2,2) chunk (which was x=34, z=34)
         assert!(x != 34 || z != 34);
+    }
+
+    #[test]
+    fn locate_dungeon_y_matches_placement() {
+        let seed = 1234567;
+        let pos = locate_structure(StructureId::Dungeon, (0, 64, 0), seed, Dimension::Overworld)
+            .expect("dungeon candidate");
+        let chunk_x = pos.0.div_euclid(16);
+        let chunk_z = pos.2.div_euclid(16);
+        assert_eq!(
+            pos.1,
+            origin_y_for(StructureId::Dungeon, seed, chunk_x, chunk_z)
+        );
+
+        let manager = crate::structure::StructureManager::new();
+        let region_x = chunk_x.div_euclid(24);
+        let region_z = chunk_z.div_euclid(24);
+        let starts = manager.get_or_generate_starts(Dimension::Overworld, seed, region_x, region_z);
+        let dungeon = starts
+            .iter()
+            .find(|s| s.id == StructureId::Dungeon)
+            .expect("placed dungeon");
+        assert_eq!(dungeon.origin_x, pos.0);
+        assert_eq!(dungeon.origin_y, pos.1);
+        assert_eq!(dungeon.origin_z, pos.2);
+    }
+
+    #[test]
+    fn village_origin_y_uses_surface_height() {
+        let seed = 424242;
+        let chunk_x = 2;
+        let chunk_z = -3;
+        let y = origin_y_for(StructureId::Village, seed, chunk_x, chunk_z);
+        let ctx = crate::worldgen::WorldGenContext::new(seed);
+        let surface = ctx.surface_height_at(chunk_x * 16 + 2, chunk_z * 16 + 2);
+        let height = Dimension::Overworld.height();
+        assert_eq!(
+            y,
+            surface.clamp(height.min_y(), height.max_y_exclusive() - 1)
+        );
     }
 }

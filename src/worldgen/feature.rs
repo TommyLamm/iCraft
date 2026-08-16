@@ -96,45 +96,40 @@ impl FeaturePlacer {
             }
 
             let tree_height = 4 + ((h >> 16) % 4) as i32;
+            // Local coords may fall outside this chunk when the trunk lives in a
+            // neighbor. Still place the tree so overhanging leaves write here.
             let local_x = n_world_x - chunk_x * CHUNK_WIDTH as i32;
             let local_z = n_world_z - chunk_z * CHUNK_DEPTH as i32;
-            if local_x < 0
-                || local_x >= CHUNK_WIDTH as i32
-                || local_z < 0
-                || local_z >= CHUNK_DEPTH as i32
-            {
-                continue;
-            }
 
             match biome {
                 Biome::Taiga => self.place_spruce(
                     blocks,
-                    local_x as usize,
-                    local_z as usize,
+                    local_x,
+                    local_z,
                     surface_h + 1,
                     tree_height + 2,
                     min_y_offset,
                 ),
                 Biome::BirchForest => self.place_birch(
                     blocks,
-                    local_x as usize,
-                    local_z as usize,
+                    local_x,
+                    local_z,
                     surface_h + 1,
                     tree_height + 1,
                     min_y_offset,
                 ),
                 Biome::Jungle => self.place_jungle(
                     blocks,
-                    local_x as usize,
-                    local_z as usize,
+                    local_x,
+                    local_z,
                     surface_h + 1,
                     tree_height + 3,
                     min_y_offset,
                 ),
                 _ => self.place_oak(
                     blocks,
-                    local_x as usize,
-                    local_z as usize,
+                    local_x,
+                    local_z,
                     surface_h + 1,
                     tree_height,
                     min_y_offset,
@@ -162,7 +157,8 @@ impl FeaturePlacer {
         let roll = vegetation_hash % 100;
 
         // Find the surface block.
-        let Some(surface_block) = self.block_at_local(blocks, lx, surface_y, lz, min_y_offset)
+        let Some(surface_block) =
+            self.block_at_local(blocks, lx as i32, surface_y, lz as i32, min_y_offset)
         else {
             return;
         };
@@ -172,27 +168,27 @@ impl FeaturePlacer {
             if roll < 10 {
                 self.set_block_local(
                     blocks,
-                    lx,
+                    lx as i32,
                     surface_y + 1,
-                    lz,
+                    lz as i32,
                     BlockType::TallGrass,
                     min_y_offset,
                 );
             } else if roll < 12 {
                 self.set_block_local(
                     blocks,
-                    lx,
+                    lx as i32,
                     surface_y + 1,
-                    lz,
+                    lz as i32,
                     BlockType::Dandelion,
                     min_y_offset,
                 );
             } else if roll < 13 {
                 self.set_block_local(
                     blocks,
-                    lx,
+                    lx as i32,
                     surface_y + 1,
-                    lz,
+                    lz as i32,
                     BlockType::Poppy,
                     min_y_offset,
                 );
@@ -202,7 +198,14 @@ impl FeaturePlacer {
                 } else {
                     BlockType::Melon
                 };
-                self.set_block_local(blocks, lx, surface_y + 1, lz, veg, min_y_offset);
+                self.set_block_local(
+                    blocks,
+                    lx as i32,
+                    surface_y + 1,
+                    lz as i32,
+                    veg,
+                    min_y_offset,
+                );
             }
         }
 
@@ -214,9 +217,9 @@ impl FeaturePlacer {
                 for dy in 1..=height {
                     self.set_block_local(
                         blocks,
-                        lx,
+                        lx as i32,
                         surface_y + dy,
-                        lz,
+                        lz as i32,
                         BlockType::Cactus,
                         min_y_offset,
                     );
@@ -238,9 +241,9 @@ impl FeaturePlacer {
                     for dy in 1..=height {
                         self.set_block_local(
                             blocks,
-                            lx,
+                            lx as i32,
                             surface_y + dy,
-                            lz,
+                            lz as i32,
                             BlockType::SugarCane,
                             min_y_offset,
                         );
@@ -263,7 +266,7 @@ impl FeaturePlacer {
             let nz = lz as i32 + dz;
             if nx >= 0 && nx < CHUNK_WIDTH as i32 && nz >= 0 && nz < CHUNK_DEPTH as i32 {
                 if let Some(BlockType::Water) =
-                    self.block_at_local(blocks, nx as usize, ly, nz as usize, min_y_offset)
+                    self.block_at_local(blocks, nx, ly, nz, min_y_offset)
                 {
                     return true;
                 }
@@ -275,16 +278,21 @@ impl FeaturePlacer {
     fn block_at_local(
         &self,
         blocks: &[Vec<[BlockType; CHUNK_DEPTH]>],
-        x: usize,
+        x: i32,
         wy: i32,
-        z: usize,
+        z: i32,
         min_y_offset: usize,
     ) -> Option<BlockType> {
+        if x < 0 || z < 0 {
+            return None;
+        }
+        let x = x as usize;
+        let z = z as usize;
         // Overworld dense arrays start at world Y=-64, while callers pass
         // min_y_offset=64. Convert world Y to local Y by adding that offset.
         // Subtracting it placed trees/plants 128 blocks too low.
         let ly = wy.saturating_add(min_y_offset as i32);
-        if ly >= 0 && (ly as usize) < blocks.get(x)?.len() {
+        if ly >= 0 && z < CHUNK_DEPTH && (ly as usize) < blocks.get(x)?.len() {
             Some(blocks[x][ly as usize][z])
         } else {
             None
@@ -294,14 +302,20 @@ impl FeaturePlacer {
     fn set_block_local(
         &self,
         blocks: &mut [Vec<[BlockType; CHUNK_DEPTH]>],
-        x: usize,
+        x: i32,
         wy: i32,
-        z: usize,
+        z: i32,
         block: BlockType,
         min_y_offset: usize,
     ) {
+        if x < 0 || z < 0 {
+            return;
+        }
+        let x = x as usize;
+        let z = z as usize;
         let ly = wy.saturating_add(min_y_offset as i32);
         if ly >= 0
+            && z < CHUNK_DEPTH
             && blocks
                 .get(x)
                 .is_some_and(|column| (ly as usize) < column.len())
@@ -313,8 +327,8 @@ impl FeaturePlacer {
     fn place_oak(
         &self,
         blocks: &mut [Vec<[BlockType; CHUNK_DEPTH]>],
-        lx: usize,
-        lz: usize,
+        lx: i32,
+        lz: i32,
         start_y: i32,
         height: i32,
         min_y_offset: usize,
@@ -336,29 +350,21 @@ impl FeaturePlacer {
                     if radius == 2 && dx.abs() == 2 && dz.abs() == 2 {
                         continue;
                     }
-                    let bx = lx as i32 + dx;
-                    let bz = lz as i32 + dz;
-                    if bx >= 0 && bx < CHUNK_WIDTH as i32 && bz >= 0 && bz < CHUNK_DEPTH as i32 {
-                        let current = self.block_at_local(
+                    let bx = lx + dx;
+                    let bz = lz + dz;
+                    let current = self.block_at_local(blocks, bx, start_y + ly, bz, min_y_offset);
+                    if matches!(
+                        current,
+                        None | Some(BlockType::Air) | Some(BlockType::OakLeaves)
+                    ) {
+                        self.set_block_local(
                             blocks,
-                            bx as usize,
+                            bx,
                             start_y + ly,
-                            bz as usize,
+                            bz,
+                            BlockType::OakLeaves,
                             min_y_offset,
                         );
-                        if matches!(
-                            current,
-                            None | Some(BlockType::Air) | Some(BlockType::OakLeaves)
-                        ) {
-                            self.set_block_local(
-                                blocks,
-                                bx as usize,
-                                start_y + ly,
-                                bz as usize,
-                                BlockType::OakLeaves,
-                                min_y_offset,
-                            );
-                        }
                     }
                 }
             }
@@ -368,8 +374,8 @@ impl FeaturePlacer {
     fn place_birch(
         &self,
         blocks: &mut [Vec<[BlockType; CHUNK_DEPTH]>],
-        lx: usize,
-        lz: usize,
+        lx: i32,
+        lz: i32,
         start_y: i32,
         height: i32,
         min_y_offset: usize,
@@ -387,26 +393,18 @@ impl FeaturePlacer {
         for ly in (height - 3)..=height {
             for dx in -1..=1 {
                 for dz in -1..=1 {
-                    let bx = lx as i32 + dx;
-                    let bz = lz as i32 + dz;
-                    if bx >= 0 && bx < CHUNK_WIDTH as i32 && bz >= 0 && bz < CHUNK_DEPTH as i32 {
-                        let current = self.block_at_local(
+                    let bx = lx + dx;
+                    let bz = lz + dz;
+                    let current = self.block_at_local(blocks, bx, start_y + ly, bz, min_y_offset);
+                    if matches!(current, None | Some(BlockType::Air)) {
+                        self.set_block_local(
                             blocks,
-                            bx as usize,
+                            bx,
                             start_y + ly,
-                            bz as usize,
+                            bz,
+                            BlockType::BirchLeaves,
                             min_y_offset,
                         );
-                        if matches!(current, None | Some(BlockType::Air)) {
-                            self.set_block_local(
-                                blocks,
-                                bx as usize,
-                                start_y + ly,
-                                bz as usize,
-                                BlockType::BirchLeaves,
-                                min_y_offset,
-                            );
-                        }
                     }
                 }
             }
@@ -416,8 +414,8 @@ impl FeaturePlacer {
     fn place_spruce(
         &self,
         blocks: &mut [Vec<[BlockType; CHUNK_DEPTH]>],
-        lx: usize,
-        lz: usize,
+        lx: i32,
+        lz: i32,
         start_y: i32,
         height: i32,
         min_y_offset: usize,
@@ -439,26 +437,18 @@ impl FeaturePlacer {
                     if radius == 2 && dx.abs() == 2 && dz.abs() == 2 {
                         continue;
                     }
-                    let bx = lx as i32 + dx;
-                    let bz = lz as i32 + dz;
-                    if bx >= 0 && bx < CHUNK_WIDTH as i32 && bz >= 0 && bz < CHUNK_DEPTH as i32 {
-                        let current = self.block_at_local(
+                    let bx = lx + dx;
+                    let bz = lz + dz;
+                    let current = self.block_at_local(blocks, bx, start_y + ly, bz, min_y_offset);
+                    if matches!(current, None | Some(BlockType::Air)) {
+                        self.set_block_local(
                             blocks,
-                            bx as usize,
+                            bx,
                             start_y + ly,
-                            bz as usize,
+                            bz,
+                            BlockType::SpruceLeaves,
                             min_y_offset,
                         );
-                        if matches!(current, None | Some(BlockType::Air)) {
-                            self.set_block_local(
-                                blocks,
-                                bx as usize,
-                                start_y + ly,
-                                bz as usize,
-                                BlockType::SpruceLeaves,
-                                min_y_offset,
-                            );
-                        }
                     }
                 }
             }
@@ -468,8 +458,8 @@ impl FeaturePlacer {
     fn place_jungle(
         &self,
         blocks: &mut [Vec<[BlockType; CHUNK_DEPTH]>],
-        lx: usize,
-        lz: usize,
+        lx: i32,
+        lz: i32,
         start_y: i32,
         height: i32,
         min_y_offset: usize,
@@ -491,26 +481,18 @@ impl FeaturePlacer {
                     if radius == 2 && dx.abs() == 2 && dz.abs() == 2 {
                         continue;
                     }
-                    let bx = lx as i32 + dx;
-                    let bz = lz as i32 + dz;
-                    if bx >= 0 && bx < CHUNK_WIDTH as i32 && bz >= 0 && bz < CHUNK_DEPTH as i32 {
-                        let current = self.block_at_local(
+                    let bx = lx + dx;
+                    let bz = lz + dz;
+                    let current = self.block_at_local(blocks, bx, start_y + ly, bz, min_y_offset);
+                    if matches!(current, None | Some(BlockType::Air)) {
+                        self.set_block_local(
                             blocks,
-                            bx as usize,
+                            bx,
                             start_y + ly,
-                            bz as usize,
+                            bz,
+                            BlockType::OakLeaves,
                             min_y_offset,
                         );
-                        if matches!(current, None | Some(BlockType::Air)) {
-                            self.set_block_local(
-                                blocks,
-                                bx as usize,
-                                start_y + ly,
-                                bz as usize,
-                                BlockType::OakLeaves,
-                                min_y_offset,
-                            );
-                        }
                     }
                 }
             }
@@ -545,5 +527,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn neighbor_trunk_at_x15_writes_leaves_into_chunk_x0() {
+        let placer = FeaturePlacer::new(1);
+        let min_y_offset = 64usize;
+        // Neighbor chunk local X=15 is this chunk's local X=-1.
+        let mut this_chunk: Vec<Vec<[BlockType; CHUNK_DEPTH]>> =
+            vec![vec![[BlockType::Air; CHUNK_DEPTH]; 384]; CHUNK_WIDTH];
+        placer.place_oak(&mut this_chunk, -1, 8, 70, 5, min_y_offset);
+
+        let mut found_leaf = false;
+        for y in 0..384 {
+            for z in 0..CHUNK_DEPTH {
+                if this_chunk[0][y][z] == BlockType::OakLeaves {
+                    found_leaf = true;
+                }
+                assert_ne!(
+                    this_chunk[0][y][z],
+                    BlockType::OakLog,
+                    "trunk at neighbor X=15 must not appear in this chunk"
+                );
+            }
+        }
+        assert!(
+            found_leaf,
+            "tree trunk at local X=15 of the west neighbor must write leaves at this chunk X=0"
+        );
     }
 }

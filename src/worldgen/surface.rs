@@ -129,9 +129,10 @@ pub fn block_for_column(
 ) -> Option<BlockType> {
     use BlockType::*;
 
-    // Bedrock and void protection at world bottom.
-    if wy <= -60 {
-        return Some(if wy == -60 { Bedrock } else { Stone });
+    // Bedrock floor at the dimension minimum. Nothing below is diggable stone.
+    let min_y = crate::dimension::Dimension::Overworld.height().min_y();
+    if wy <= min_y {
+        return Some(Bedrock);
     }
 
     let surface = BiomeSurfaceData::for_biome(biome);
@@ -196,6 +197,18 @@ mod tests {
             assert_ne!(data.top, BlockType::Air);
             assert_ne!(data.filler, BlockType::Air);
         }
+    }
+
+    #[test]
+    fn overworld_floor_is_bedrock_at_min_y() {
+        let ctx = WorldGenContext::new(12345);
+        let min_y = crate::dimension::Dimension::Overworld.height().min_y();
+        let floor = block_for_column(&ctx, 0, min_y, 0, 70, Biome::Plains);
+        assert_eq!(floor, Some(BlockType::Bedrock));
+        let below = block_for_column(&ctx, 0, min_y - 1, 0, 70, Biome::Plains);
+        assert_eq!(below, Some(BlockType::Bedrock));
+        let above = block_for_column(&ctx, 0, min_y + 1, 0, 70, Biome::Plains);
+        assert_ne!(above, Some(BlockType::Bedrock));
     }
 
     #[test]

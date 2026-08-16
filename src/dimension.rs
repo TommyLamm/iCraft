@@ -211,6 +211,8 @@ pub fn generate_chunk_with_options(
         Dimension::End => generate_end_chunk(chunk_x, chunk_z, seed),
     };
     if options.generate_structures {
+        // Process-global cache; StructureManager keys include world seed so two
+        // worlds in one process never replay each other's region starts.
         static STRUCTURE_MANAGER: std::sync::OnceLock<crate::structure::StructureManager> =
             std::sync::OnceLock::new();
         let manager = STRUCTURE_MANAGER.get_or_init(|| crate::structure::StructureManager::new());
@@ -1235,6 +1237,26 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn default_overworld_floor_is_bedrock_at_min_y() {
+        let min_y = Dimension::Overworld.height().min_y();
+        let chunk = generate_chunk(Dimension::Overworld, 0, 0, 42);
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                assert_eq!(
+                    chunk.get_block_local(x, min_y, z),
+                    BlockType::Bedrock,
+                    "default overworld must be bedrock at min_y={min_y}"
+                );
+                assert_ne!(
+                    chunk.get_block_local(x, min_y - 1, z),
+                    BlockType::Stone,
+                    "no diggable stone below the bedrock floor"
+                );
+            }
+        }
     }
 
     #[test]
