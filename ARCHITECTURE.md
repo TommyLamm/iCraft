@@ -1,7 +1,7 @@
 # Architecture
 
-> Last verified: 2026-08-16 at `3ab51aa` (`tommy-dev`).
-> Change range reviewed: P1 code-simplification 14–17 (`090fca1`..`3ab51aa`)
+> Last verified: 2026-08-17 at `e907760` (`tommy-dev`).
+> Change range reviewed: P1 code-simplification 14–17 and P2 18–20 (`090fca1`..`e907760`)
 > on top of the previously verified `4474f89` baseline (P0 11–13).
 > Source code is authoritative; `plans/`, `docs/superpowers/`, and most of
 > `plans/03_performance/` are design/history records, not a description of the live runtime.
@@ -232,7 +232,7 @@ clamped to 1×1), while Timeout skips the present without retry/log churn.
   paletted block/light storage and optional state/fluid arrays; block entities
   are stored inside their owning chunk.
 - World heights come from `Dimension::height()`: Overworld `-64..320`, Nether
-  `0..128`, and End `0..256`. Code must use the signed-Y helpers in `world.rs`
+  `0..128`, and End `0..256`. Code must use the signed-Y helpers in `src/world/`
   rather than hard-coded `0..256` bounds.
 - Collision, lighting, fluids, redstone sidecars, farmland hydration, passive
   spawning, camera range, and entity bounds all use that signed world height.
@@ -293,7 +293,7 @@ clamped to 1×1), while Timeout skips the present without retry/log churn.
 - Rayon workers generate/load chunks and mesh owned section snapshots. Results
   carry dimension, generation, lifetime, and revision identities and are
   discarded if stale.
-- `save.rs` provides the leftover desktop bounded latest-wins save worker for
+- `src/save/legacy_queue.rs` provides the leftover desktop bounded latest-wins save worker for
   `LegacyOwner` construction and unit tests. The active `ServerRuntime`
   authority performs its own autosave and synchronous shutdown flush through
   `SaveManager`. Embedded Singleplayer / listen-host presentation does not
@@ -350,11 +350,11 @@ explicit development/test override.
 | --- | --- |
 | Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/presentation/` (`legacy_sim`, `legacy_systems`, `legacy_interaction`, `frame`, inbound, interpolation, GPU terrain), `src/presentation_inventory_policy.rs` |
 | Authority and dedicated runtime | `src/authority/`, `src/server_world.rs`, `src/server_runtime.rs`, `src/server_runtime/session_sync.rs`, `src/bin/icraft-server.rs` |
-| World storage and generation | `src/world.rs`, `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/`, `src/loot.rs` |
+| World storage and generation | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/`, `src/loot.rs` |
 | Gameplay systems | `src/player.rs`, `src/physics.rs`, `src/inventory.rs`, `src/recipes.rs`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss.rs`, `src/ai/` |
 | Rendering | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling.rs`, `src/block_model.rs`, `src/mob_renderer.rs`, `src/hand_renderer.rs`, `src/particles.rs`, `src/texture.rs`, `src/shader.wgsl` |
-| Networking | `src/network/{protocol,transport,server,client}.rs` |
-| Persistence and resources | `src/save.rs`, `src/resources.rs`, `src/localization.rs`, `src/audio.rs`, `src/accessibility.rs` |
+| Networking | `src/network/` (`channels.rs`, `session.rs`, `ingress.rs`, `egress.rs`, `server.rs`, `protocol.rs`, `transport.rs`, `client.rs`) |
+| Persistence and resources | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`, `legacy_queue.rs`), `src/resources.rs`, `src/localization.rs`, `src/audio.rs`, `src/accessibility.rs` |
 | Tests and performance | inline `#[cfg(test)]`, `tests/` plus `tests/common/tcp_harness.rs`, `src/sim_harness.rs` / `src/final_acceptance.rs` / lib `microbench` (`cfg(test)` or feature `harness`), desktop `src/microbench.rs`, `plans/03_performance/` |
 
 `State` is still the desktop composition root. GPU terrain arenas, inbound
