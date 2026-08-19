@@ -5,7 +5,7 @@
 將下面 Prompt 中的 `{{PLAN_FILE}}` 替換成**一份且僅一份**編號計劃，例如：
 
 ```text
-plans/06_code_simplification/11_lib_surface_and_harness_cfg.md
+plans/06_code_simplification/21_legacy_owner_cfg.md
 ```
 
 不要一次填入多份計劃。完成該計劃並驗收後，另開新任務執行下一份。
