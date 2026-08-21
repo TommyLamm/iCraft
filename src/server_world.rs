@@ -579,9 +579,30 @@ impl ServerWorld {
         entity.dropped_item = Some(stack.item);
         entity.dropped_count = stack.count;
         entity.dropped_stack = Some(stack);
+        entity.velocity = Vec3::new(0.0, 1.5, 0.0);
         entity.pickup_cooldown = 0.5;
         self.entities.entities.push(entity);
         self.entities.rebuild_indexes();
+        true
+    }
+
+    pub fn spawn_authority_thrown_drop(
+        &mut self,
+        entity_id: u64,
+        slot: SessionInventorySlot,
+        position: [f32; 3],
+        velocity: [f32; 3],
+    ) -> bool {
+        if !velocity.iter().all(|component| component.is_finite())
+            || !self.spawn_authority_drop(entity_id, slot, position)
+        {
+            return false;
+        }
+        let Some(entity) = self.entities.get_by_id_mut(entity_id) else {
+            return false;
+        };
+        entity.velocity = Vec3::from_array(velocity);
+        entity.pickup_cooldown = 1.0;
         true
     }
 
@@ -905,6 +926,8 @@ impl ServerWorld {
         entity.dropped_item = Some(stack.item);
         entity.dropped_count = stack.count;
         entity.dropped_stack = Some(stack);
+        entity.velocity = Vec3::new(0.0, 1.5, 0.0);
+        entity.pickup_cooldown = 0.5;
         true
     }
 
@@ -1345,6 +1368,7 @@ impl ServerWorld {
                 Ok(None)
             }
             GameplayOperation::ItemUse { .. }
+            | GameplayOperation::DropItem { .. }
             | GameplayOperation::Combat { .. }
             | GameplayOperation::Trade { .. }
             | GameplayOperation::Mount { .. }
@@ -2059,6 +2083,7 @@ impl ServerWorld {
             if entity.entity_type.is_hostile()
                 && !matches!(self.difficulty, ServerDifficulty::Peaceful)
             {
+                entity.target_player = false;
                 if let Some((_, target)) =
                     player_positions.iter().min_by(|(_, left), (_, right)| {
                         entity
@@ -2067,12 +2092,31 @@ impl ServerWorld {
                             .total_cmp(&entity.position.distance_squared(Vec3::from_array(*right)))
                     })
                 {
-                    let direction =
-                        (Vec3::from_array(*target) - entity.position).normalize_or_zero();
-                    let speed = self.difficulty.hostile_chase_speed_milli() as f32 / 1_000.0;
-                    entity.velocity.x = direction.x * 1.2 * speed;
-                    entity.velocity.z = direction.z * 1.2 * speed;
-                    entity.target_player = true;
+                    let target_position = Vec3::from_array(*target);
+                    if entity.position.distance_squared(target_position) <= 16.0 * 16.0 {
+                        let direction = (target_position - entity.position).normalize_or_zero();
+                        let speed = self.difficulty.hostile_chase_speed_milli() as f32 / 1_000.0;
+                        entity.velocity.x = direction.x * 1.2 * speed;
+                        entity.velocity.z = direction.z * 1.2 * speed;
+                        entity.target_player = true;
+                        if direction.x != 0.0 || direction.z != 0.0 {
+                            entity.yaw = f32::atan2(direction.x, direction.z);
+                            entity.pitch = f32::asin(direction.y.clamp(-1.0, 1.0));
+                        }
+                        // Obstacle jump check
+                        let walk_dir = Vec3::new(direction.x, 0.0, direction.z).normalize_or_zero();
+                        let next_x = entity.position.x + walk_dir.x * 0.4;
+                        let next_z = entity.position.z + walk_dir.z * 0.4;
+                        let bx = next_x.floor() as i32;
+                        let bz = next_z.floor() as i32;
+                        let by = entity.position.y.floor() as i32;
+                        if entity.on_ground
+                            && chunks.get_block(bx, by, bz).properties().is_solid
+                            && !chunks.get_block(bx, by + 2, bz).properties().is_solid
+                        {
+                            entity.velocity.y = 8.0;
+                        }
+                    }
                 }
             }
             entity.ai_phase = entity.ai_phase.wrapping_add(1);

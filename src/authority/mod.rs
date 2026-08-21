@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const AUTHORITY_ENTITY_ID_START: u64 = 1 << 63;
 const ATTACK_COOLDOWN_TICKS: u16 = 5;
+const NETHER_PORTAL_CONTACT_SECONDS: f32 = 0.25;
 
 pub use contract::{
     common_gameplay_vectors, RevisionClock, AUTHORITY_CONTRACT_VERSION, FIXED_TICK_HZ,
@@ -609,6 +610,7 @@ impl AuthorityCore {
                 .map(|session| (session.id, session.position))
                 .collect();
             let world_snapshot = self.world.tick(&players);
+            self.tick_hostile_attacks(dimension);
             self.tick_item_pickups(dimension);
             let mut world_mutations = world_snapshot.mutations;
             // Redstone emits dispenser/dropper edges from inside the world
@@ -784,6 +786,147 @@ impl AuthorityCore {
                 for (entity_id, _) in experience_orbs {
                     self.world.remove_authority_entity(entity_id);
                 }
+            }
+        }
+    }
+
+    /// Resolve close-range hostile attacks in the same authority that owns
+    /// player health. The headless world moves mobs, while this layer applies
+    /// armor, shields, invulnerability frames, knockback and death settlement.
+    fn tick_hostile_attacks(&mut self, dimension: Dimension) {
+        use crate::authority::combat::{
+            AuthorityDamageInput, CombatantId, DamageEvent, PlayerCombatSnapshot,
+        };
+        use crate::inventory::GameMode;
+        use crate::player::DamageSource;
+        use glam::Vec3;
+
+        if matches!(self.world.difficulty, ServerDifficulty::Peaceful) {
+            return;
+        }
+
+        let mut attackers: Vec<_> = self
+            .world
+            .entities
+            .entities
+            .iter()
+            .filter_map(|entity| {
+                hostile_melee_damage_milli(entity.entity_type, self.world.difficulty).and_then(
+                    |damage| {
+                        (entity.health > 0.0
+                            && entity.target_player
+                            && entity.action_cooldown <= 0.0)
+                            .then_some((entity.id, entity.position, damage))
+                    },
+                )
+            })
+            .collect();
+        attackers.sort_unstable_by_key(|(entity_id, _, _)| *entity_id);
+
+        let mut deaths = Vec::new();
+        for (entity_id, attacker_position, damage) in attackers {
+            let target_id = self
+                .sessions
+                .values()
+                .filter(|session| {
+                    session.dimension == dimension as u8
+                        && !session.gameplay.is_dead
+                        && !matches!(session.game_mode, GameMode::Creative | GameMode::Spectator)
+                        && attacker_position.distance_squared(Vec3::from_array(session.position))
+                            <= 2.25 * 2.25
+                })
+                .min_by(|left, right| {
+                    attacker_position
+                        .distance_squared(Vec3::from_array(left.position))
+                        .total_cmp(
+                            &attacker_position.distance_squared(Vec3::from_array(right.position)),
+                        )
+                        .then_with(|| left.id.cmp(&right.id))
+                })
+                .map(|session| session.id);
+            let Some(target_id) = target_id else {
+                continue;
+            };
+            let Some(target) = self.sessions.get(&target_id).cloned() else {
+                continue;
+            };
+            if target.gameplay.invulnerability_ticks > 0
+                || !self
+                    .world
+                    .has_line_of_sight(attacker_position.to_array(), target.position)
+            {
+                continue;
+            }
+
+            let direction =
+                (Vec3::from_array(target.position) - attacker_position).normalize_or_zero();
+            let attacker_look_milli = [
+                (direction.x * 1_000.0).round() as i16,
+                (direction.y * 1_000.0).round() as i16,
+                (direction.z * 1_000.0).round() as i16,
+            ];
+            let (Ok(attacker_position_milli), Ok(target_position_milli), Ok(target_look_milli)) = (
+                position_to_milli(attacker_position.to_array()),
+                position_to_milli(target.position),
+                look_from_angles(target.yaw, target.pitch),
+            ) else {
+                continue;
+            };
+            let Ok(event) = DamageEvent::from_authority(AuthorityDamageInput {
+                event_id: (u128::from(self.fixed_tick) << 64) | u128::from(entity_id),
+                attacker: CombatantId::Entity(entity_id),
+                target: CombatantId::Player(target_id),
+                source: DamageSource::Mob,
+                base_damage_milli: damage,
+                attacker_position_milli,
+                target_position_milli,
+                attacker_look_milli,
+                target_look_milli,
+                cooldown_ready: true,
+                has_line_of_sight: true,
+                attacker_used_axe: false,
+                knockback_milli: 400,
+                fire_ticks: 0,
+                looting_level: 0,
+            }) else {
+                continue;
+            };
+            let mut snapshot = PlayerCombatSnapshot {
+                player_id: target_id,
+                gameplay: target.gameplay,
+                velocity_milli: target.gameplay.velocity_milli,
+                last_applied_event: None,
+            };
+            let Ok(outcome) = combat::resolve_player_hit(&event, &mut snapshot) else {
+                continue;
+            };
+            snapshot.gameplay.velocity_milli = snapshot.velocity_milli;
+            if outcome.death.is_some() {
+                snapshot.gameplay.mounted_entity = None;
+                self.world.remove_passenger(target_id);
+                if !self.world.rules.keep_inventory {
+                    snapshot.gameplay.inventory = [None; contract::SESSION_INVENTORY_SLOTS];
+                    snapshot.gameplay.experience = 0;
+                    snapshot.gameplay.experience_level = 0;
+                }
+            }
+            let revision = self.world.revisions.allocate();
+            snapshot.gameplay.revision = revision;
+            if let Some(session) = self.sessions.get_mut(&target_id) {
+                session.gameplay = snapshot.gameplay;
+                session.last_revision = revision;
+            }
+            if let Some(entity) = self.world.entities.get_by_id_mut(entity_id) {
+                entity.action_cooldown = 1.0;
+            }
+            if let Some(death) = outcome.death {
+                deaths.push((target.position, death));
+            }
+        }
+
+        if !self.world.rules.keep_inventory {
+            for (position, death) in deaths {
+                self.spawn_death_outcome(position, death);
             }
         }
     }
@@ -1077,7 +1220,7 @@ impl AuthorityCore {
 
             if feet == BlockType::NetherPortal || body == BlockType::NetherPortal {
                 let new_contact = contact_time + FIXED_DT;
-                if new_contact >= 1.0 || game_mode == GameMode::Creative {
+                if new_contact >= NETHER_PORTAL_CONTACT_SECONDS || game_mode == GameMode::Creative {
                     let target_dim = if dimension == Dimension::Nether {
                         Dimension::Overworld
                     } else {
@@ -1499,6 +1642,9 @@ impl AuthorityCore {
                 }
                 Some(Ok(None))
             }
+            GameplayOperation::DropItem { source, look_milli } => {
+                Some(self.apply_drop_item(session_id, *source, *look_milli))
+            }
             GameplayOperation::Combat { target, action } => {
                 Some(self.apply_authoritative_combat(request, session_id, *target, *action))
             }
@@ -1567,6 +1713,68 @@ impl AuthorityCore {
         }
     }
 
+    /// Debit and spawn a thrown stack as one authority-owned operation. This
+    /// is deliberately shared by embedded and socket sessions: presentation
+    /// roots only observe the resulting inventory/entity projections.
+    fn apply_drop_item(
+        &mut self,
+        session_id: PlayerId,
+        source: crate::network::protocol::SlotRefWire,
+        look_milli: [i16; 3],
+    ) -> Result<Option<WorldMutation>, RejectReason> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or(RejectReason::Unauthorized)?;
+        if crate::authority::transactions::brew_locks_slot(&session.gameplay, source.index)
+            || !session.gameplay.slot_matches(source)
+        {
+            return Err(RejectReason::InvalidState);
+        }
+
+        let current = session
+            .gameplay
+            .slot(source.index)
+            .flatten()
+            .ok_or(RejectReason::InvalidState)?;
+        let mut candidate = session.gameplay;
+        if !candidate.consume_slot_exact(source) {
+            return Err(RejectReason::InvalidState);
+        }
+        let mut dropped = current;
+        dropped.item.count = source.count;
+
+        let look = glam::Vec3::new(
+            f32::from(look_milli[0]) / 1_000.0,
+            f32::from(look_milli[1]) / 1_000.0,
+            f32::from(look_milli[2]) / 1_000.0,
+        )
+        .normalize_or_zero();
+        if look.length_squared() < 0.99 {
+            return Err(RejectReason::InvalidState);
+        }
+        let player_position = glam::Vec3::from_array(session.position);
+        let spawn_position = player_position + glam::Vec3::new(0.0, 1.5, 0.0) + look * 0.5;
+        let velocity = look * 4.0 + glam::Vec3::new(0.0, 1.5, 0.0);
+        let entity_id = self.next_unique_entity_id();
+        if !self.world.spawn_authority_thrown_drop(
+            entity_id,
+            dropped,
+            spawn_position.to_array(),
+            velocity.to_array(),
+        ) {
+            return Err(RejectReason::InvalidState);
+        }
+        self.claim_entity_id(entity_id);
+        candidate.revision = self.world.revisions.allocate();
+        self.sessions
+            .get_mut(&session_id)
+            .ok_or(RejectReason::Unauthorized)?
+            .gameplay = candidate;
+        Ok(None)
+    }
+
     fn apply_block_action(
         &mut self,
         session_id: PlayerId,
@@ -1601,12 +1809,12 @@ impl AuthorityCore {
                 .chunks
                 .get_loaded_block(position.0, position.1, position.2)
                 .ok_or(RejectReason::InvalidState)?;
-            let feet = (
-                session.position[0].floor() as i32,
-                session.position[1].floor() as i32,
-                session.position[2].floor() as i32,
+            let portal_vec = glam::Vec3::new(
+                position.0 as f32 + 0.5,
+                position.1 as f32 + 0.5,
+                position.2 as f32 + 0.5,
             );
-            let body = (feet.0, feet.1 + 1, feet.2);
+            let player_vec = glam::Vec3::from_array(session.position);
             if actual != expected
                 || !matches!(
                     actual,
@@ -1614,7 +1822,7 @@ impl AuthorityCore {
                         | crate::world::BlockType::EndPortal
                         | crate::world::BlockType::EndGateway
                 )
-                || (position != feet && position != body)
+                || portal_vec.distance(player_vec) > 3.0
                 || session.portal_cooldown > 0.0
             {
                 return Err(RejectReason::InvalidState);
@@ -2603,6 +2811,35 @@ fn preserves_brew_locks(before: &SessionGameplayState, after: &SessionGameplaySt
     })
 }
 
+fn hostile_melee_damage_milli(
+    entity_type: crate::entity::EntityType,
+    difficulty: ServerDifficulty,
+) -> Option<u32> {
+    use crate::entity::EntityType;
+
+    let base = match entity_type {
+        EntityType::Zombie | EntityType::Husk | EntityType::Drowned => 3_000,
+        EntityType::Skeleton | EntityType::Pillager | EntityType::Spider | EntityType::Slime => {
+            2_000
+        }
+        EntityType::Creeper | EntityType::Ghast => 6_000,
+        EntityType::Blaze | EntityType::Shulker | EntityType::Witch => 4_000,
+        EntityType::Piglin | EntityType::WitherSkeleton => 5_000,
+        EntityType::Enderman => 7_000,
+        EntityType::MagmaCube => 4_000,
+        EntityType::Ravager => 8_000,
+        EntityType::Wither => 8_000,
+        _ => return None,
+    };
+    let multiplier_milli = match difficulty {
+        ServerDifficulty::Peaceful => return None,
+        ServerDifficulty::Easy => 500,
+        ServerDifficulty::Normal => 1_000,
+        ServerDifficulty::Hard => 1_500,
+    };
+    Some(base * multiplier_milli / 1_000)
+}
+
 fn position_to_milli(position: [f32; 3]) -> Result<[i32; 3], RejectReason> {
     let mut result = [0; 3];
     for (index, value) in position.into_iter().enumerate() {
@@ -2798,6 +3035,10 @@ mod tests {
             [8.25, 80.0, 8.25],
             ItemStack::new(Item::Diamond, 3),
         ));
+        let dropped = core.world.entities.get_by_id_mut(entity_id).unwrap();
+        assert!(dropped.velocity.y > 0.0);
+        assert!(dropped.pickup_cooldown > 0.0);
+        dropped.pickup_cooldown = 0.0;
         assert!(core.world.spawn_experience_orb(99_002, [8.5, 80.0, 8.5], 9));
 
         let before_revision = core.session(7).unwrap().gameplay.revision;
@@ -2823,6 +3064,139 @@ mod tests {
             .session_updates
             .iter()
             .any(|update| update.player_id == 7 && update.state.revision > before_revision));
+    }
+
+    #[test]
+    fn player_drop_is_identical_in_embedded_and_dedicated_authority() {
+        for topology in [
+            AuthorityTopology::Singleplayer,
+            AuthorityTopology::ListenServer,
+            AuthorityTopology::Dedicated,
+        ] {
+            let mut core = core(topology);
+            core.world.rules.do_mob_spawning = false;
+            let slot = SessionInventorySlot::from_wire(
+                ItemWire::from_stack(&ItemStack::new(Item::Diamond, 5)),
+                0,
+                0,
+            );
+            let expected = crate::network::protocol::SessionSlotWire::from(slot);
+            core.sessions.get_mut(&7).unwrap().gameplay.inventory[0] = Some(slot);
+            let response = core.submit_request(GameplayRequest {
+                request_id: 41,
+                client_sequence: 1,
+                session_id: 7,
+                dimension: 0,
+                client_revision: core.revision_for_dimension(Dimension::Overworld),
+                operation: GameplayOperation::DropItem {
+                    source: crate::network::protocol::SlotRefWire {
+                        index: 0,
+                        count: 2,
+                        expected,
+                    },
+                    look_milli: [1_000, 0, 0],
+                },
+            });
+
+            assert!(matches!(response.outcome, GameplayOutcome::Accepted { .. }));
+            assert_eq!(
+                core.session(7).unwrap().gameplay.inventory[0]
+                    .unwrap()
+                    .item
+                    .count,
+                3
+            );
+            let dropped = core
+                .world
+                .entities
+                .get_entities_by_type(EntityType::DroppedItem)
+                .next()
+                .expect("drop must be owned by the server world");
+            assert_eq!(dropped.dropped_count, 2);
+            assert_eq!(dropped.dropped_item, Some(Item::Diamond));
+            assert!(dropped.velocity.x > 3.9);
+            assert!(dropped.pickup_cooldown >= 1.0);
+            assert!(dropped.position.y > 81.0);
+        }
+    }
+
+    #[test]
+    fn nearby_hostile_faces_and_damages_survival_player() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        core.world.rules.do_mob_spawning = false;
+        let zombie_id = core
+            .world
+            .entities
+            .spawn(EntityType::Zombie, glam::Vec3::new(8.8, 80.0, 8.0));
+
+        core.tick();
+
+        let zombie = core.world.entities.get_by_id(zombie_id).unwrap();
+        assert!(zombie.target_player);
+        assert!(zombie.action_cooldown > 0.0);
+        assert!(zombie.yaw.is_finite());
+        assert_eq!(core.session(7).unwrap().gameplay.health_milli, 17_000);
+        assert!(core.session(7).unwrap().gameplay.invulnerability_ticks > 0);
+    }
+
+    #[test]
+    fn every_non_dragon_hostile_has_an_authority_attack_profile() {
+        for entity_type in [
+            EntityType::Zombie,
+            EntityType::Skeleton,
+            EntityType::Creeper,
+            EntityType::Blaze,
+            EntityType::Piglin,
+            EntityType::Husk,
+            EntityType::Shulker,
+            EntityType::Enderman,
+            EntityType::Wither,
+            EntityType::WitherSkeleton,
+            EntityType::Spider,
+            EntityType::Slime,
+            EntityType::Witch,
+            EntityType::Drowned,
+            EntityType::Ghast,
+            EntityType::MagmaCube,
+            EntityType::Pillager,
+            EntityType::Ravager,
+        ] {
+            assert!(
+                hostile_melee_damage_milli(entity_type, ServerDifficulty::Normal).is_some(),
+                "{entity_type:?} must not chase without being able to damage"
+            );
+        }
+    }
+
+    #[test]
+    fn hostile_melee_does_not_damage_creative_player() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        core.world.rules.do_mob_spawning = false;
+        core.session_mut(7).unwrap().game_mode = crate::inventory::GameMode::Creative;
+        core.world
+            .entities
+            .spawn(EntityType::Zombie, glam::Vec3::new(8.8, 80.0, 8.0));
+
+        core.tick();
+
+        assert_eq!(core.session(7).unwrap().gameplay.health_milli, 20_000);
+    }
+
+    #[test]
+    fn distant_hostile_does_not_run_chase_ai() {
+        let mut core = core(AuthorityTopology::Singleplayer);
+        core.world.rules.do_mob_spawning = false;
+        let zombie_id = core
+            .world
+            .entities
+            .spawn(EntityType::Zombie, glam::Vec3::new(28.0, 80.0, 8.0));
+
+        core.tick();
+
+        let zombie = core.world.entities.get_by_id(zombie_id).unwrap();
+        assert!(!zombie.target_player);
+        assert_eq!(zombie.velocity.x, 0.0);
+        assert_eq!(core.session(7).unwrap().gameplay.health_milli, 20_000);
     }
 
     #[test]

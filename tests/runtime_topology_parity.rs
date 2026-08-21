@@ -482,6 +482,52 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
                 >= 4
         );
 
+        // Player-authored drops use this same runtime path in personal,
+        // listen and dedicated worlds. The inventory debit and entity spawn
+        // must appear in one accepted owner projection with replay safety.
+        let (drop_request, drop_output) = harness.request(GameplayOperation::DropItem {
+            source: harness.source(1, 1),
+            look_milli: [0, 0, 1_000],
+        });
+        let drop_response =
+            accepted_response(&drop_output, harness.session_id, drop_request.request_id);
+        assert_eq!(
+            owner_session_update(&drop_output, harness.session_id).hotbar[1]
+                .unwrap()
+                .item
+                .count,
+            3
+        );
+        let dropped_before_replay = harness
+            .runtime
+            .authority
+            .world
+            .entities
+            .get_entities_by_type(EntityType::DroppedItem)
+            .filter(|entity| entity.dropped_item == Some(icraft::inventory::Item::Stick))
+            .count();
+        assert_eq!(dropped_before_replay, 1);
+        let duplicate_drop = harness.replay(drop_request.clone());
+        assert_eq!(
+            response_for(
+                &duplicate_drop.presentation_events,
+                harness.session_id,
+                drop_request.request_id,
+            ),
+            Some(&drop_response)
+        );
+        assert_eq!(
+            harness
+                .runtime
+                .authority
+                .world
+                .entities
+                .get_entities_by_type(EntityType::DroppedItem)
+                .filter(|entity| entity.dropped_item == Some(icraft::inventory::Item::Stick))
+                .count(),
+            dropped_before_replay
+        );
+
         let (enchant_request, enchant_output) = harness.request(GameplayOperation::Enchant {
             x: 8,
             y: 80,

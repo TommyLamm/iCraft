@@ -1654,7 +1654,12 @@ pub fn render_mobs<'a>(
                 let yaw = time * 2.0;
                 let y_offset = (time * 3.0).sin() * 0.1;
 
-                let item = entity.dropped_item.unwrap_or(crate::inventory::Item::Air);
+                let item = entity
+                    .dropped_stack
+                    .as_ref()
+                    .map(|stack| stack.item)
+                    .or(entity.dropped_item)
+                    .unwrap_or(crate::inventory::Item::Air);
 
                 if item.renders_flat() {
                     let (col, row) = item.properties().tex_coords;
@@ -1669,10 +1674,7 @@ pub fn render_mobs<'a>(
                         light_val,
                     );
                 } else {
-                    let (col, row) = entity
-                        .dropped_item
-                        .map(|item| item.properties().tex_coords)
-                        .unwrap_or((0, 0));
+                    let (col, row) = item.properties().tex_coords;
 
                     add_cuboid(
                         cuboid_instances,

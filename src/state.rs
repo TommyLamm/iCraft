@@ -182,6 +182,17 @@ fn primary_press_decision(game_mode: GameMode, melee_consumed: bool) -> PrimaryP
     }
 }
 
+fn authority_block_action_held(
+    action: crate::network::protocol::BlockActionKind,
+    held: Option<crate::network::protocol::SessionSlotWire>,
+) -> Option<crate::network::protocol::SessionSlotWire> {
+    match action {
+        crate::network::protocol::BlockActionKind::CancelBreak
+        | crate::network::protocol::BlockActionKind::EnterPortal => None,
+        _ => held,
+    }
+}
+
 fn can_break_block(block: BlockType, game_mode: GameMode) -> bool {
     block != BlockType::Air
         && (crate::game_rules::GameModePolicy::for_mode(game_mode, true).can_break
@@ -8608,14 +8619,7 @@ impl State {
                 z,
                 face,
                 hand,
-                held: if matches!(
-                    action,
-                    crate::network::protocol::BlockActionKind::CancelBreak
-                ) {
-                    None
-                } else {
-                    held
-                },
+                held: authority_block_action_held(action, held),
                 block: if matches!(
                     action,
                     crate::network::protocol::BlockActionKind::Place
@@ -16087,6 +16091,55 @@ impl State {
         self.throw_dropped_stack(crate::inventory::ItemStack::new(item, count));
     }
 
+    fn authority_slot_index(slot: SlotType) -> Option<u8> {
+        match slot {
+            SlotType::Hotbar(index) if index < 9 => Some(index as u8),
+            SlotType::Backpack(index) if index < 27 => Some((index + 9) as u8),
+            SlotType::Armor(index) if index < 4 => Some((index + 36) as u8),
+            SlotType::Offhand => Some(40),
+            _ => None,
+        }
+    }
+
+    /// Submit a drop through the owner of gameplay state. Returns true when
+    /// an authority boundary accepted the input for asynchronous processing;
+    /// legacy local worlds return false and retain their direct simulation.
+    fn submit_authority_drop(&mut self, slot: SlotType, stack: ItemStack, count: u32) -> bool {
+        if !self.has_in_process_runtime() && self.is_authoritative() {
+            return false;
+        }
+        let Some(index) = Self::authority_slot_index(slot) else {
+            return true;
+        };
+        let Some(expected) = Self::session_slot_from_stack(Some(stack)).map(Into::into) else {
+            return true;
+        };
+        let Ok(count) = u16::try_from(count) else {
+            return true;
+        };
+        let look = Vec3::new(
+            self.camera.yaw.cos() * self.camera.pitch.cos(),
+            self.camera.pitch.sin(),
+            self.camera.yaw.sin() * self.camera.pitch.cos(),
+        )
+        .normalize_or_zero();
+        let _ = self.submit_local_authority_operation(
+            crate::network::protocol::GameplayOperation::DropItem {
+                source: crate::network::protocol::SlotRefWire {
+                    index,
+                    count,
+                    expected,
+                },
+                look_milli: [
+                    (look.x * 1_000.0).round() as i16,
+                    (look.y * 1_000.0).round() as i16,
+                    (look.z * 1_000.0).round() as i16,
+                ],
+            },
+        );
+        true
+    }
+
     /// Q pressed in the world: throw the selected hotbar item. One item is
     /// thrown, or the whole stack when `whole_stack` (Shift) is held.
     pub fn drop_held_item(&mut self, whole_stack: bool) {
@@ -16095,6 +16148,9 @@ impl State {
             return;
         };
         let count = if whole_stack { stack.count } else { 1 };
+        if self.submit_authority_drop(SlotType::Hotbar(selected), stack, count) {
+            return;
+        }
         self.throw_dropped_item(stack.item, count);
         if stack.count > count {
             self.inventory.hotbar[selected] = Some(ItemStack {
@@ -16147,6 +16203,9 @@ impl State {
             return;
         };
         let count = if whole_stack { stack.count } else { 1 };
+        if self.submit_authority_drop(slot_type, stack, count) {
+            return;
+        }
         self.throw_dropped_item(stack.item, count);
         if stack.count > count {
             self.set_item_at_slot(
@@ -26743,6 +26802,29 @@ mod reach_tests {
 #[cfg(test)]
 mod authority_projection_tests {
     use super::*;
+
+    #[test]
+    fn portal_entry_never_carries_the_held_stack_proof() {
+        let held = crate::network::protocol::SessionSlotWire::new(
+            crate::network::protocol::ItemWire::from_stack(&ItemStack::new(Item::Stone, 1)),
+            0,
+            0,
+        );
+        assert_eq!(
+            authority_block_action_held(
+                crate::network::protocol::BlockActionKind::EnterPortal,
+                Some(held),
+            ),
+            None
+        );
+        assert_eq!(
+            authority_block_action_held(
+                crate::network::protocol::BlockActionKind::Place,
+                Some(held),
+            ),
+            Some(held)
+        );
+    }
 
     #[test]
     fn session_inventory_projection_preserves_rich_stack_metadata() {

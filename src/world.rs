@@ -5012,7 +5012,11 @@ impl Chunk {
             for cell_z in (0..CHUNK_DEPTH).step_by(step) {
                 for cell_x in (0..CHUNK_WIDTH).step_by(step) {
                     let mut representative = MeshVoxel::default();
-                    'sample: for dy in 0..step {
+                    // Coarse terrain represents the highest visible material
+                    // in each cell. Bottom-first sampling replaced lake water
+                    // with its stone/sand bed, so still water vanished as soon
+                    // as a section switched to L1/L2.
+                    'sample: for dy in (0..step).rev() {
                         for dz in 0..step {
                             for dx in 0..step {
                                 let voxel =
@@ -5861,6 +5865,37 @@ mod tests {
         assert!(flowing_vertices
             .iter()
             .all(|vertex| vertex.light_ao & (1 << 13) != 0));
+    }
+
+    #[test]
+    fn section_lods_keep_still_water_above_solid_lake_bed() {
+        let key = SectionKey::new(0, 0, 0);
+        let halo = SectionHaloSnapshot::from_chunk(key, |x, y, z| MeshVoxel {
+            block: if (0..2).contains(&x) && (0..2).contains(&z) {
+                match y {
+                    0 => BlockType::Stone,
+                    1 => BlockType::Water,
+                    _ => BlockType::Air,
+                }
+            } else {
+                BlockType::Air
+            },
+            sky: 15,
+            ..MeshVoxel::default()
+        });
+
+        for step in [2, 4] {
+            let lod = Chunk::mesh_section_lod_from_halo(key, &halo, step);
+            assert!(
+                !lod.transparent.indices.is_empty(),
+                "L{step} must preserve the water surface instead of selecting its lake bed"
+            );
+            assert!(lod
+                .transparent
+                .vertices
+                .iter()
+                .all(|vertex| vertex.atlas_tile_u32() == (10, 0)));
+        }
     }
     use std::collections::HashSet;
 

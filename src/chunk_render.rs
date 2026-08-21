@@ -1568,4 +1568,18 @@ mod tests {
             search_from += branch_offset + branch.len();
         }
     }
+
+    #[test]
+    fn embedded_shader_keeps_translucent_water_fragments() {
+        let shader = include_str!("shader.wgsl");
+        assert!(shader.contains("let is_water = all(in.atlas_tile == vec2<f32>(10.0, 0.0))"));
+        assert!(
+            shader.contains("(!is_water && color.a < 0.5)"),
+            "ordinary terrain must retain its cutout alpha test"
+        );
+        assert!(
+            shader.contains("(is_water && color.a < 0.01)"),
+            "terrain alpha testing must not discard the translucent still-water tile"
+        );
+    }
 }

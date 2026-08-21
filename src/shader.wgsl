@@ -194,7 +194,7 @@ fn fs_terrain(in: TerrainVertexOutput) -> @location(0) vec4<f32> {
     let repeated_uv = fract(local_uv);
     let atlas_uv = (in.atlas_tile + vec2<f32>(0.005) + repeated_uv * 0.99) / 16.0;
     let color = textureSample(t_diffuse, s_diffuse, atlas_uv);
-    if (color.a < 0.5) {
+    if ((!is_water && color.a < 0.5) || (is_water && color.a < 0.01)) {
         discard;
     }
     return shade_world_fragment(color, in.light_level, in.world_pos, in.ao);
