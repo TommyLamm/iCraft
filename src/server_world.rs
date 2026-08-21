@@ -22,7 +22,7 @@ use crate::network::protocol::{
 };
 use crate::redstone::{RedstoneAction, RedstoneSystem};
 use crate::save::{ChunkSaveData, EntitySaveData, MutationRevisionIndex};
-use crate::world::BlockType;
+use crate::world::{BlockType, Chunk};
 use glam::Vec3;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -319,6 +319,26 @@ impl ServerWorld {
         self.chunk_revisions
             .insert((data.chunk_x, data.chunk_z), data.mutation_revision);
         self.revisions.observe(data.mutation_revision);
+    }
+
+    /// Integrate a chunk prepared by the runtime's background persistence /
+    /// generation worker.  The authority thread remains the sole owner of
+    /// world maps and revision clocks; workers only construct an owned CPU
+    /// chunk and never mutate live simulation state.
+    pub fn integrate_streamed_chunk(
+        &mut self,
+        chunk: Chunk,
+        mutation_revision: u64,
+        redstone_metadata: &[crate::redstone::RedstoneComponentMetadata],
+    ) {
+        let coord = (chunk.chunk_x, chunk.chunk_z);
+        self.chunks.chunks.insert(coord, chunk);
+        if !redstone_metadata.is_empty() {
+            self.redstone
+                .restore_chunk_metadata(&self.chunks, coord.0, coord.1, redstone_metadata);
+        }
+        self.chunk_revisions.insert(coord, mutation_revision);
+        self.revisions.observe(mutation_revision);
     }
 
     /// Restore persistent entities once during authority startup. Entity IDs

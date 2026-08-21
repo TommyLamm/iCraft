@@ -813,6 +813,20 @@ fn generated_end_city_loot_is_lazy_revisioned_and_persistent() {
         },
     )
     .unwrap();
+    restored
+        .ensure_authority_chunk_loaded(
+            Dimension::Nether,
+            fortress_chest.0.div_euclid(16),
+            fortress_chest.2.div_euclid(16),
+        )
+        .unwrap();
+    restored
+        .ensure_authority_chunk_loaded(
+            Dimension::End,
+            chest_pos.0.div_euclid(16),
+            chest_pos.2.div_euclid(16),
+        )
+        .unwrap();
     restored.authority.with_world(Dimension::Nether, |world| {
         assert!(matches!(
             world.get_block_entity(fortress_chest.0, fortress_chest.1, fortress_chest.2),

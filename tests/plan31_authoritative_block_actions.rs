@@ -826,6 +826,13 @@ fn run_tcp_vector(label: &str, listen: bool) {
         },
     )
     .expect("reload saved Plan31 world");
+    restored
+        .ensure_authority_chunk_loaded(
+            Dimension::Overworld,
+            TARGET.0.div_euclid(16),
+            TARGET.2.div_euclid(16),
+        )
+        .expect("lazy-load saved Plan31 target chunk");
     assert_eq!(
         restored
             .authority

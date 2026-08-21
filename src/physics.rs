@@ -197,6 +197,19 @@ impl PlayerPhysics {
         is_sneaking: bool,
         is_sprinting: bool,
     ) -> f32 {
+        // An absent chunk is reported as Air by the ordinary block lookup so
+        // world simulation can remain non-blocking.  Player collision cannot
+        // use that fallback: during initial join/dimension streaming it would
+        // apply gravity before the spawn column arrives and drop the player
+        // into the void.  Hold the pose (and discard stale fall momentum)
+        // until every column touched by the current hitbox is resident.
+        if !self.no_clip && !self.collision_columns_loaded(chunk_manager) {
+            self.velocity = Vec3::ZERO;
+            self.on_ground = false;
+            self.highest_y = self.position.y;
+            return 0.0;
+        }
+
         // Keep player integration bounded even when a caller hands us a long
         // render hitch.  A normal 50 ms tick takes four substeps; unusually
         // large timesteps are capped to the fixed catch-up budget while still
@@ -394,11 +407,22 @@ impl PlayerPhysics {
         let step = bounded_displacement / step_count as f32;
 
         for _ in 0..step_count {
+            let previous = self.position[axis];
             match axis {
                 0 => self.position.x += step,
                 1 => self.position.y += step,
                 2 => self.position.z += step,
                 _ => unreachable!("invalid movement axis"),
+            }
+
+            // Do not let a collidable player cross from resident terrain into
+            // a not-yet-streamed column.  Reverting only the attempted axis
+            // preserves sliding along a loaded chunk edge and lets the normal
+            // chunk scheduler catch up around the stable player position.
+            if !self.no_clip && !self.collision_columns_loaded(chunk_manager) {
+                self.position[axis] = previous;
+                self.velocity[axis] = 0.0;
+                break;
             }
             self.resolve_collisions(chunk_manager, axis);
 
@@ -412,6 +436,23 @@ impl PlayerPhysics {
                 break;
             }
         }
+    }
+
+    fn collision_columns_loaded(&self, chunk_manager: &ChunkManager) -> bool {
+        let player_aabb = self.get_aabb();
+        let min_x = player_aabb.min.x.floor() as i32;
+        let max_x = player_aabb.max.x.floor() as i32;
+        let min_z = player_aabb.min.z.floor() as i32;
+        let max_z = player_aabb.max.z.floor() as i32;
+
+        for x in min_x..=max_x {
+            for z in min_z..=max_z {
+                if !chunk_manager.is_block_loaded(x, 0, z) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
@@ -650,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_player_sneaking_speed() {
-        let chunk_manager = ChunkManager::new(2);
+        let chunk_manager = empty_chunk_manager();
         let mut physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
         physics.on_ground = false;
         let dt = 0.1;
@@ -662,7 +703,7 @@ mod tests {
 
     #[test]
     fn test_player_sprinting_speed() {
-        let chunk_manager = ChunkManager::new(2);
+        let chunk_manager = empty_chunk_manager();
         let mut physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
         physics.on_ground = true;
         let dt = 0.1;
@@ -670,6 +711,79 @@ mod tests {
         physics.update(dt, &chunk_manager, Vec3::new(1.0, 0.0, 0.0), false, true);
         // Sprint speed: 8.0 * 1.3 = 10.4
         assert_eq!(physics.velocity.x, 10.4);
+    }
+
+    #[test]
+    fn unloaded_spawn_column_holds_player_until_collision_data_arrives() {
+        let mut chunk_manager = ChunkManager::new(2);
+        let start = Vec3::new(8.5, 80.0, 8.5);
+        let mut physics = PlayerPhysics::new(start);
+        physics.velocity = Vec3::new(2.0, -20.0, -1.0);
+        physics.highest_y = 120.0;
+
+        for _ in 0..20 {
+            assert_eq!(
+                physics.update(
+                    PLAYER_PHYSICS_TICK_DT,
+                    &chunk_manager,
+                    Vec3::ZERO,
+                    false,
+                    false
+                ),
+                0.0
+            );
+        }
+        assert_eq!(physics.position, start);
+        assert_eq!(physics.velocity, Vec3::ZERO);
+        assert_eq!(physics.highest_y, start.y);
+
+        chunk_manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        physics.update(
+            PLAYER_PHYSICS_TICK_DT,
+            &chunk_manager,
+            Vec3::ZERO,
+            false,
+            false,
+        );
+        assert!(physics.position.y < start.y);
+        assert!(physics.velocity.y < 0.0);
+    }
+
+    #[test]
+    fn unloaded_neighbor_blocks_crossing_without_blocking_loaded_edge_motion() {
+        let mut chunk_manager = empty_chunk_manager();
+        let mut physics = PlayerPhysics::new(Vec3::new(15.6, 80.0, 8.5));
+        physics.set_flying(true);
+
+        physics.update(
+            PLAYER_PHYSICS_TICK_DT,
+            &chunk_manager,
+            Vec3::X,
+            false,
+            false,
+        );
+        assert_eq!(physics.position.x, 15.6);
+        assert_eq!(physics.velocity.x, 0.0);
+
+        // Movement parallel to the unavailable edge still works.
+        physics.update(
+            PLAYER_PHYSICS_TICK_DT,
+            &chunk_manager,
+            Vec3::Z,
+            false,
+            false,
+        );
+        assert!(physics.position.z > 8.5);
+
+        chunk_manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        physics.update(
+            PLAYER_PHYSICS_TICK_DT,
+            &chunk_manager,
+            Vec3::X,
+            false,
+            false,
+        );
+        assert!(physics.position.x > 15.6);
     }
 
     #[test]

@@ -59,10 +59,104 @@ const MAX_PRESENTATION_QUEUE_LEN: usize =
 const MAX_INITIAL_CHUNK_PROJECTIONS_PER_TICK: usize = 1;
 // A validated maximum view distance of 32 covers a 65x65 chunk square.
 const MAX_PENDING_INITIAL_CHUNKS_PER_SESSION: usize = 65 * 65;
+const AUTHORITY_CHUNK_LOAD_QUEUE_CAPACITY: usize = 2;
 const MAX_POSE_SPEED_BLOCKS_PER_SECOND: f32 = 100.0;
 const POSE_DISTANCE_SLACK_BLOCKS: f32 = 4.0;
 const MAX_POSE_DELTA_MILLIS: u64 = 250;
 const TELEPORT_ALLOWANCE_RADIUS: f32 = 8.0;
+
+enum AuthorityChunkWorkerRequest {
+    Load {
+        dimension: Dimension,
+        cx: i32,
+        cz: i32,
+        seed: u32,
+        world_type: crate::game_rules::WorldType,
+        generate_structures: bool,
+        revision_floor: u64,
+    },
+    Shutdown,
+}
+
+struct PreparedAuthorityChunk {
+    chunk: crate::world::Chunk,
+    mutation_revision: u64,
+    redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
+}
+
+struct AuthorityChunkWorkerResult {
+    dimension: Dimension,
+    cx: i32,
+    cz: i32,
+    prepared: io::Result<PreparedAuthorityChunk>,
+}
+
+fn spawn_authority_chunk_worker(
+    world_dir: PathBuf,
+) -> (
+    SyncSender<AuthorityChunkWorkerRequest>,
+    Receiver<AuthorityChunkWorkerResult>,
+    JoinHandle<()>,
+) {
+    let (request_tx, request_rx) =
+        mpsc::sync_channel::<AuthorityChunkWorkerRequest>(AUTHORITY_CHUNK_LOAD_QUEUE_CAPACITY);
+    let (result_tx, result_rx) = mpsc::channel::<AuthorityChunkWorkerResult>();
+    let thread = std::thread::spawn(move || {
+        let mut save_manager = SaveManager::new(world_dir);
+        while let Ok(request) = request_rx.recv() {
+            let AuthorityChunkWorkerRequest::Load {
+                dimension,
+                cx,
+                cz,
+                seed,
+                world_type,
+                generate_structures,
+                revision_floor,
+            } = request
+            else {
+                break;
+            };
+            let prepared = (|| {
+                let saved = save_manager.load_chunk_in_checked(dimension, cx, cz)?;
+                let mut chunk = crate::dimension::generate_chunk_with_options(
+                    dimension,
+                    cx,
+                    cz,
+                    seed,
+                    crate::dimension::WorldGenerationOptions {
+                        world_type,
+                        generate_structures,
+                    },
+                );
+                let (mutation_revision, redstone_metadata) = if let Some(data) = saved {
+                    let mutation_revision = data.mutation_revision.max(revision_floor);
+                    let redstone_metadata = data.redstone_metadata();
+                    data.restore_to_chunk(&mut chunk);
+                    (mutation_revision, redstone_metadata)
+                } else {
+                    (revision_floor, Vec::new())
+                };
+                Ok(PreparedAuthorityChunk {
+                    chunk,
+                    mutation_revision,
+                    redstone_metadata,
+                })
+            })();
+            if result_tx
+                .send(AuthorityChunkWorkerResult {
+                    dimension,
+                    cx,
+                    cz,
+                    prepared,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    (request_tx, result_rx, thread)
+}
 
 /// Socket ownership for an embedded authority runtime. `Disabled` creates no
 /// host-command channel or network thread; local inputs still use the same
@@ -858,6 +952,18 @@ pub struct ServerRuntime {
     routed_mutations: BTreeSet<(Dimension, u64)>,
     world_dir: PathBuf,
     save_manager: SaveManager,
+    /// Coordinates whose on-disk payload has been checked during this
+    /// process.  A missing entry means neither "air" nor "new terrain": the
+    /// runtime must consult persistence before generation or mutation.
+    restored_chunks: HashSet<(Dimension, i32, i32)>,
+    /// Includes revisions for chunks that remain unloaded.  Keeping this
+    /// separate from resident ServerWorld maps prevents a bounded/lazy
+    /// startup from dropping anti-stale history on the next save.
+    persisted_revisions: MutationRevisionIndex,
+    chunk_worker_tx: SyncSender<AuthorityChunkWorkerRequest>,
+    chunk_worker_rx: Receiver<AuthorityChunkWorkerResult>,
+    chunk_worker_thread: Option<JoinHandle<()>>,
+    chunk_load_in_flight: HashSet<(Dimension, i32, i32)>,
     default_game_mode: GameMode,
     host_tx: Option<SyncSender<HostToServer>>,
     host_rx: Receiver<ServerToHost>,
@@ -908,6 +1014,8 @@ impl ServerRuntime {
             )));
         }
         let save_manager = SaveManager::new(&world_dir);
+        let (chunk_worker_tx, chunk_worker_rx, chunk_worker_thread) =
+            spawn_authority_chunk_worker(world_dir.clone());
         let creation = crate::menu::load_world_creation_options(&world_dir);
         let existing_level = save_manager.load_level().map_err(ServerConfigError::Io)?;
         let mut level = existing_level.unwrap_or_else(|| LevelData {
@@ -976,6 +1084,12 @@ impl ServerRuntime {
             authority,
             world_dir,
             save_manager,
+            restored_chunks: HashSet::new(),
+            persisted_revisions: MutationRevisionIndex::default(),
+            chunk_worker_tx,
+            chunk_worker_rx,
+            chunk_worker_thread: Some(chunk_worker_thread),
+            chunk_load_in_flight: HashSet::new(),
             default_game_mode: creation.game_mode,
             host_tx,
             host_rx,
@@ -991,7 +1105,7 @@ impl ServerRuntime {
             stopped: false,
         };
         runtime.restore_authority_state()?;
-        runtime.ensure_spawn_chunk();
+        runtime.ensure_spawn_chunk()?;
         if let Some(profile) = options.local_session {
             runtime.handle_join_with_storage(profile.id, profile.username, profile.storage)?;
         }
@@ -1049,7 +1163,7 @@ impl ServerRuntime {
         for transfer in self.authority.take_pending_dimension_transfers() {
             self.apply_authority_dimension_transfer(transfer);
         }
-        self.route_authority_snapshot(&snapshot);
+        self.route_authority_snapshot(&snapshot)?;
         for closure in self.authority.take_container_closures() {
             self.close_runtime_container(closure.player_id, closure.dimension, closure.position);
         }
@@ -1124,6 +1238,12 @@ impl ServerRuntime {
             self.enqueue_stop();
         }
         self.stopped = true;
+        let _ = self
+            .chunk_worker_tx
+            .send(AuthorityChunkWorkerRequest::Shutdown);
+        if let Some(handle) = self.chunk_worker_thread.take() {
+            let _ = handle.join();
+        }
         if let Some(handle) = self.network_thread.take() {
             let _ = handle.join();
         }
@@ -1133,26 +1253,23 @@ impl ServerRuntime {
 
     fn restore_authority_state(&mut self) -> io::Result<()> {
         let revision_index = self.save_manager.load_mutation_revision_index();
+        self.persisted_revisions = revision_index.clone();
         let dimensions = [Dimension::Overworld, Dimension::Nether, Dimension::End];
         for dimension in dimensions {
-            let chunks = self.save_manager.load_saved_chunks_in(dimension)?;
             let revisions: Vec<_> = revision_index.entries_in(dimension).collect();
             let entities = self.save_manager.load_entities_in_checked(dimension)?;
-            // Do not materialize every possible dimension during restore just
-            // because the save layout has no data for it.  The active spawn
-            // world must remain initialized, while an untouched non-active
-            // dimension is created lazily on its first session/request.
-            if chunks.is_empty()
-                && revisions.is_empty()
+            // Chunk payloads are intentionally absent here. Scanning and
+            // inflating every region during application construction blocked
+            // the window event loop for large worlds. Coordinates are loaded
+            // one at a time by `ensure_authority_chunk_loaded` when spawn,
+            // interest, or an authenticated action actually needs them.
+            if revisions.is_empty()
                 && entities.is_empty()
                 && dimension != self.authority.active_dimension()
             {
                 continue;
             }
             self.authority.with_world(dimension, |world| {
-                for chunk in &chunks {
-                    world.restore_saved_chunk(chunk);
-                }
                 for ((_cx, _cz), revision) in revisions {
                     world.revisions.observe(revision);
                 }
@@ -1166,7 +1283,9 @@ impl ServerRuntime {
 
     fn save_authority_state(&mut self) -> io::Result<()> {
         let active_dimension = self.authority.active_dimension();
-        let mut merged_revisions = MutationRevisionIndex::default();
+        // Start from the complete persisted index. Most chunks deliberately
+        // remain unloaded, but their revision history must survive a save.
+        let mut merged_revisions = self.persisted_revisions.clone();
         for dimension in self.authority.dimensions() {
             let (chunks, entities, revisions) = self.authority.with_world(dimension, |world| {
                 let mut coordinates: Vec<_> = world.chunks.chunks.keys().copied().collect();
@@ -1206,6 +1325,7 @@ impl ServerRuntime {
         }
         self.save_manager
             .save_mutation_revision_index(&merged_revisions)?;
+        self.persisted_revisions = merged_revisions;
         self.save_manager.save_current_dimension(active_dimension)?;
         Ok(())
     }
@@ -1758,7 +1878,7 @@ impl ServerRuntime {
         // authority map before interest queries read its entities/chunks.
         self.update_interest(&mut session);
         self.players.insert(id, session);
-        let (mut chunks, mut entities) = self
+        let (mut chunks, mut entities, center_chunk) = self
             .players
             .get(&id)
             .map(|session| {
@@ -1770,10 +1890,18 @@ impl ServerRuntime {
                         .iter()
                         .copied()
                         .collect::<Vec<_>>(),
+                    (
+                        (session.data.position[0] / 16.0).floor() as i32,
+                        (session.data.position[2] / 16.0).floor() as i32,
+                    ),
                 )
             })
             .unwrap_or_default();
-        chunks.sort_unstable();
+        chunks.sort_unstable_by_key(|(cx, cz)| {
+            let dx = i64::from(*cx - center_chunk.0);
+            let dz = i64::from(*cz - center_chunk.1);
+            (dx * dx + dz * dz, *cx, *cz)
+        });
         entities.sort_unstable();
         if let Some(session) = self.players.get_mut(&id) {
             session.queue_initial_chunks(current_dimension, chunks.iter().copied());
@@ -2013,7 +2141,15 @@ impl ServerRuntime {
         // target and its adjacent support chunk now; otherwise valid
         // place/break input was rejected as InvalidState until the background
         // projection queue happened to catch up.
-        if let GameplayOperation::BlockAction { x, z, face, .. } = &operation {
+        if let GameplayOperation::BlockAction {
+            action,
+            x,
+            y,
+            z,
+            face,
+            ..
+        } = &operation
+        {
             let target = (*x, *z);
             let support = (
                 x.saturating_sub(i32::from(face[0])),
@@ -2029,10 +2165,93 @@ impl ServerRuntime {
                 })
                 .map(|session| session.dimension)
             {
-                let _ = self.authority.with_world(dimension, |world| {
-                    world.ensure_chunk(target.0.div_euclid(16), target.1.div_euclid(16));
-                    world.ensure_chunk(support.0.div_euclid(16), support.1.div_euclid(16));
-                });
+                self.ensure_authority_chunk_loaded(
+                    dimension,
+                    target.0.div_euclid(16),
+                    target.1.div_euclid(16),
+                )?;
+                self.ensure_authority_chunk_loaded(
+                    dimension,
+                    support.0.div_euclid(16),
+                    support.1.div_euclid(16),
+                )?;
+                self.project_loaded_chunk_to_waiting_sessions(
+                    dimension,
+                    target.0.div_euclid(16),
+                    target.1.div_euclid(16),
+                );
+                self.project_loaded_chunk_to_waiting_sessions(
+                    dimension,
+                    support.0.div_euclid(16),
+                    support.1.div_euclid(16),
+                );
+
+                // Portal authority may inspect/build the destination during
+                // the next fixed tick. Resolve its saved column first so a
+                // generated fallback cannot overwrite an existing Nether,
+                // End, or return-spawn chunk after the transfer.
+                if matches!(
+                    action,
+                    crate::network::protocol::BlockActionKind::EnterPortal
+                ) {
+                    let block = self
+                        .authority
+                        .world_ref(dimension)
+                        .map(|world| world.get_block(*x, *y, *z))
+                        .unwrap_or(crate::world::BlockType::Air);
+                    let session = self
+                        .authority
+                        .session(id)
+                        .map(|session| (session.position, session.spawn_point));
+                    let destination = session.and_then(|(position, spawn_point)| match block {
+                        crate::world::BlockType::NetherPortal => {
+                            let target_dimension = if dimension == Dimension::Nether {
+                                Dimension::Overworld
+                            } else {
+                                Dimension::Nether
+                            };
+                            let scaled = crate::dimension::transform_position(
+                                dimension,
+                                target_dimension,
+                                Vec3::from_array(position),
+                            );
+                            Some((
+                                target_dimension,
+                                scaled.x.floor() as i32,
+                                scaled.z.floor() as i32,
+                            ))
+                        }
+                        crate::world::BlockType::EndPortal => {
+                            let target_dimension = if dimension == Dimension::End {
+                                Dimension::Overworld
+                            } else {
+                                Dimension::End
+                            };
+                            let target = if target_dimension == Dimension::Overworld {
+                                spawn_point.unwrap_or([0, 65, 0])
+                            } else {
+                                [0, 65, 0]
+                            };
+                            Some((target_dimension, target[0], target[2]))
+                        }
+                        crate::world::BlockType::EndGateway if dimension == Dimension::End => {
+                            let target = if Vec3::from_array(position).length() < 300.0 {
+                                (1035, 11)
+                            } else {
+                                (0, 0)
+                            };
+                            Some((Dimension::End, target.0, target.1))
+                        }
+                        _ => None,
+                    });
+                    if let Some((target_dimension, target_x, target_z)) = destination {
+                        self.ensure_authority_chunk_loaded(
+                            target_dimension,
+                            target_x.div_euclid(16),
+                            target_z.div_euclid(16),
+                        )?;
+                    }
+                }
             }
         }
         let response = self.authority.submit_request(request.clone());
@@ -2830,7 +3049,7 @@ impl ServerRuntime {
     fn route_authority_snapshot(
         &mut self,
         snapshot: &crate::authority::contract::AuthoritySnapshot,
-    ) {
+    ) -> io::Result<()> {
         let mut session_ids: Vec<_> = self.players.keys().copied().collect();
         session_ids.sort_unstable();
         for id in session_ids {
@@ -2964,8 +3183,10 @@ impl ServerRuntime {
         // Queue mutations before synchronous catch-up generation so reliable
         // gameplay ordering is preserved. One chunk must still make progress
         // every tick; otherwise sustained automation can starve initial view.
-        self.drain_initial_chunk_projections();
+        let projection_result = self.drain_initial_chunk_projections();
         self.authority.activate_dimension(active_before);
+        projection_result?;
+        Ok(())
     }
 
     fn update_interest(&mut self, session: &mut PlayerSessionState) {
@@ -3141,7 +3362,8 @@ impl ServerRuntime {
         }
     }
 
-    fn drain_initial_chunk_projections(&mut self) {
+    fn drain_initial_chunk_projections(&mut self) -> io::Result<()> {
+        self.poll_authority_chunk_results()?;
         let mut ids: Vec<_> = self.players.keys().copied().collect();
         // The in-process presentation cannot render until its first chunk
         // arrives. Give that session the first bounded slot, then retain
@@ -3162,21 +3384,26 @@ impl ServerRuntime {
                 }
                 let next = self
                     .players
-                    .get_mut(id)
-                    .and_then(|session| session.pending_initial_chunks.pop_front());
+                    .get(id)
+                    .and_then(|session| session.pending_initial_chunks.front().copied());
                 let Some((dimension, cx, cz)) = next else {
                     continue;
                 };
                 made_progress = true;
                 inspected += 1;
-                // Interest is the authoritative chunk-loading boundary. Load
-                // only the bounded projection batch, nearest-first, so the
-                // server never stalls one tick generating the full view
-                // distance while block actions stop being rejected outside
-                // the spawn chunk.
-                let _ = self.authority.with_world(dimension, |world| {
-                    world.ensure_chunk(cx, cz);
-                });
+                // Interest is the authoritative chunk-loading boundary. CPU
+                // generation/decompression runs off the fixed/UI thread; keep
+                // the queue head in place until its owned result is ready so
+                // nearest-first projection order remains deterministic.
+                if !self.restored_chunks.contains(&(dimension, cx, cz)) {
+                    let _ = self.schedule_authority_chunk_load(dimension, cx, cz)?;
+                    return Ok(());
+                }
+                let popped = self
+                    .players
+                    .get_mut(id)
+                    .and_then(|session| session.pending_initial_chunks.pop_front());
+                debug_assert_eq!(popped, Some((dimension, cx, cz)));
                 let payload = self.authority.world_ref(dimension).and_then(|world| {
                     world.chunks.chunks.get(&(cx, cz)).map(|chunk| {
                         let mut data = ChunkSaveData::from_chunk(chunk);
@@ -3241,6 +3468,77 @@ impl ServerRuntime {
                 break;
             }
         }
+        Ok(())
+    }
+
+    /// An authenticated interaction can synchronously resolve a chunk before
+    /// its background initial projection reaches the front of every viewer's
+    /// queue. Send that baseline first so later block deltas are not held by
+    /// the client's revision gate waiting for a snapshot.
+    fn project_loaded_chunk_to_waiting_sessions(&mut self, dimension: Dimension, cx: i32, cz: i32) {
+        let payload = self.authority.world_ref(dimension).and_then(|world| {
+            world.chunks.chunks.get(&(cx, cz)).map(|chunk| {
+                let mut data = ChunkSaveData::from_chunk(chunk);
+                let revision = world.chunk_revision(cx, cz);
+                data.mutation_revision = revision;
+                (
+                    revision,
+                    chunk.min_section_y,
+                    chunk.sections.len().min(u16::MAX as usize) as u16,
+                    data.blocks,
+                    data.block_states,
+                    data.fluid_levels,
+                    data.block_entities,
+                )
+            })
+        });
+        let Some((
+            revision,
+            min_section_y,
+            section_count,
+            blocks,
+            block_states,
+            fluid_levels,
+            block_entities,
+        )) = payload
+        else {
+            return;
+        };
+
+        let key = (dimension, cx, cz);
+        let mut targets: Vec<_> = self
+            .players
+            .values()
+            .filter(|session| {
+                session
+                    .interest
+                    .wants(dimension, InterestKind::Chunk((cx, cz)))
+                    && session.pending_initial_chunks.contains(&key)
+            })
+            .map(|session| session.id)
+            .collect();
+        targets.sort_unstable();
+        for target in targets {
+            if let Some(session) = self.players.get_mut(&target) {
+                session
+                    .pending_initial_chunks
+                    .retain(|queued| *queued != key);
+            }
+            self.record_interest_update(target, dimension, revision, InterestKind::Chunk((cx, cz)));
+            self.send_chunk_projection(
+                target,
+                dimension,
+                cx,
+                cz,
+                revision,
+                min_section_y,
+                section_count,
+                blocks.clone(),
+                block_states.clone(),
+                fluid_levels.clone(),
+                block_entities.clone(),
+            );
+        }
     }
 
     fn valid_coordinate(&self, dimension: Dimension, x: i32, y: i32, z: i32) -> bool {
@@ -3249,11 +3547,130 @@ impl ServerRuntime {
             .is_some_and(|world| world.valid_coordinate(x, y, z))
     }
 
-    fn ensure_spawn_chunk(&mut self) {
-        self.authority.world.ensure_chunk(
+    /// Resolve one authoritative chunk exactly once from persistence before
+    /// allowing deterministic generation. Region caching keeps nearby lazy
+    /// loads cheap, while the one-projection-per-tick budget prevents this
+    /// synchronous seam from monopolizing the application event thread.
+    pub fn ensure_authority_chunk_loaded(
+        &mut self,
+        dimension: Dimension,
+        cx: i32,
+        cz: i32,
+    ) -> io::Result<()> {
+        if self.restored_chunks.contains(&(dimension, cx, cz)) {
+            return Ok(());
+        }
+
+        // An authenticated action may reach a coordinate whose presentation
+        // load is already running. Finish that exact background result rather
+        // than racing a second load that could overwrite the accepted edit.
+        while self.chunk_load_in_flight.contains(&(dimension, cx, cz)) {
+            let result = self.chunk_worker_rx.recv().map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "chunk worker disconnected")
+            })?;
+            self.integrate_authority_chunk_result(result)?;
+        }
+        if self.restored_chunks.contains(&(dimension, cx, cz)) {
+            return Ok(());
+        }
+
+        let mut saved = self.save_manager.load_chunk_in_checked(dimension, cx, cz)?;
+        if let Some(data) = saved.as_mut() {
+            data.mutation_revision = data
+                .mutation_revision
+                .max(self.persisted_revisions.latest(dimension, cx, cz));
+        }
+        self.authority.with_world(dimension, |world| {
+            if let Some(data) = saved.as_ref() {
+                world.restore_saved_chunk(data);
+            } else {
+                world.ensure_chunk(cx, cz);
+            }
+        });
+        self.restored_chunks.insert((dimension, cx, cz));
+        Ok(())
+    }
+
+    fn schedule_authority_chunk_load(
+        &mut self,
+        dimension: Dimension,
+        cx: i32,
+        cz: i32,
+    ) -> io::Result<bool> {
+        let key = (dimension, cx, cz);
+        if self.restored_chunks.contains(&key) || self.chunk_load_in_flight.contains(&key) {
+            return Ok(false);
+        }
+        let request = AuthorityChunkWorkerRequest::Load {
+            dimension,
+            cx,
+            cz,
+            seed: self.level.seed,
+            world_type: self.level.world_type,
+            generate_structures: self.level.generate_structures,
+            revision_floor: self.persisted_revisions.latest(dimension, cx, cz),
+        };
+        match self.chunk_worker_tx.try_send(request) {
+            Ok(()) => {
+                self.chunk_load_in_flight.insert(key);
+                Ok(true)
+            }
+            Err(TrySendError::Full(_)) => Ok(false),
+            Err(TrySendError::Disconnected(_)) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "chunk worker disconnected",
+            )),
+        }
+    }
+
+    fn integrate_authority_chunk_result(
+        &mut self,
+        result: AuthorityChunkWorkerResult,
+    ) -> io::Result<()> {
+        let key = (result.dimension, result.cx, result.cz);
+        self.chunk_load_in_flight.remove(&key);
+        let prepared = result.prepared?;
+        // A gameplay/system path can synchronously materialize and mutate the
+        // same chunk while the worker is preparing its older snapshot. Never
+        // let that stale result replace live authoritative state.
+        let already_live = self
+            .authority
+            .world_ref(result.dimension)
+            .is_some_and(|world| world.chunks.chunks.contains_key(&(result.cx, result.cz)));
+        if !already_live {
+            self.authority.with_world(result.dimension, |world| {
+                world.integrate_streamed_chunk(
+                    prepared.chunk,
+                    prepared.mutation_revision,
+                    &prepared.redstone_metadata,
+                );
+            });
+        }
+        self.restored_chunks.insert(key);
+        Ok(())
+    }
+
+    fn poll_authority_chunk_results(&mut self) -> io::Result<()> {
+        loop {
+            match self.chunk_worker_rx.try_recv() {
+                Ok(result) => self.integrate_authority_chunk_result(result)?,
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "chunk worker disconnected",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn ensure_spawn_chunk(&mut self) -> io::Result<()> {
+        self.ensure_authority_chunk_loaded(
+            self.level.spawn_dimension,
             self.level.spawn_x.div_euclid(16),
             self.level.spawn_z.div_euclid(16),
-        );
+        )
     }
 
     fn save_player(&self, session: &PlayerSessionState) -> io::Result<()> {
@@ -4430,6 +4847,12 @@ mod tests {
                 .level_of(crate::enchantment::Enchantment::Knockback(1)),
             2
         );
+        restored
+            .ensure_authority_chunk_loaded(Dimension::Overworld, 0, 0)
+            .unwrap();
+        restored
+            .ensure_authority_chunk_loaded(Dimension::Nether, 0, 0)
+            .unwrap();
         assert_eq!(
             restored
                 .authority
@@ -4448,6 +4871,99 @@ mod tests {
         );
 
         let _ = restored.shutdown();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn startup_restores_only_spawn_and_lazy_loads_saved_distant_chunks() {
+        let world_dir = temp_dir("lazy_chunk_restore");
+        let mut manager = SaveManager::new(&world_dir);
+        let mut distant = crate::world::Chunk::new(12, -9);
+        distant.set_block_local(3, 80, 5, BlockType::Obsidian);
+        let mut data = ChunkSaveData::from_chunk(&distant);
+        data.mutation_revision = 17;
+        manager
+            .save_chunk_in(Dimension::Overworld, 12, -9, data)
+            .unwrap();
+        let mut revisions = MutationRevisionIndex::default();
+        revisions
+            .ensure_at_least(Dimension::Overworld, 12, -9, 17)
+            .unwrap();
+        manager.save_mutation_revision_index(&revisions).unwrap();
+        drop(manager);
+
+        let mut properties = ServerProperties::default();
+        properties.bind = "127.0.0.1".into();
+        properties.port = 25574;
+        properties.world_dir = world_dir.clone();
+        let mut runtime = ServerRuntime::new_embedded(
+            properties,
+            EmbeddedRuntimeOptions {
+                topology: AuthorityTopology::Dedicated,
+                transport: TransportMode::Disabled,
+                local_session: None,
+            },
+        )
+        .unwrap()
+        .0;
+
+        assert!(runtime
+            .authority
+            .world_ref(Dimension::Overworld)
+            .is_some_and(|world| !world.chunks.chunks.contains_key(&(12, -9))));
+        assert_eq!(
+            runtime
+                .persisted_revisions
+                .latest(Dimension::Overworld, 12, -9),
+            17
+        );
+
+        runtime
+            .ensure_authority_chunk_loaded(Dimension::Overworld, 12, -9)
+            .unwrap();
+        let world = runtime.authority.world_ref(Dimension::Overworld).unwrap();
+        assert_eq!(
+            world.get_block(12 * 16 + 3, 80, -9 * 16 + 5),
+            BlockType::Obsidian
+        );
+        assert_eq!(world.chunk_revision(12, -9), 17);
+
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
+    fn embedded_join_projects_the_player_chunk_before_outer_view_distance() {
+        let (mut runtime, _input) = embedded_runtime("center_chunk_first");
+        let session = runtime.players.get(&99).unwrap();
+        let center = (
+            (session.data.position[0] / 16.0).floor() as i32,
+            (session.data.position[2] / 16.0).floor() as i32,
+        );
+        assert_eq!(
+            session.pending_initial_chunks.front().copied(),
+            Some((session.dimension, center.0, center.1))
+        );
+
+        let mut projected_center = false;
+        for _ in 0..400 {
+            let output = runtime.tick_with_output().unwrap();
+            projected_center |= output.presentation_events.iter().any(|event| {
+                matches!(
+                    event,
+                    RuntimePresentationEvent::ChunkData { cx, cz, .. }
+                        if (*cx, *cz) == center
+                )
+            });
+            if projected_center {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(projected_center);
+
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
         let _ = fs::remove_dir_all(world_dir);
     }
 

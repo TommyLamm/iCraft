@@ -2679,6 +2679,20 @@ impl SaveManager {
         cx: i32,
         cz: i32,
     ) -> Option<ChunkSaveData> {
+        self.load_chunk_in_checked(dimension, cx, cz).ok().flatten()
+    }
+
+    /// Load one exact chunk while preserving corruption/I/O errors for the
+    /// authoritative runtime.  Presentation callers retain the historical
+    /// best-effort `load_chunk_in` API, but a server must never silently
+    /// regenerate and later overwrite a saved chunk that merely failed to
+    /// decode.
+    pub fn load_chunk_in_checked(
+        &mut self,
+        dimension: crate::dimension::Dimension,
+        cx: i32,
+        cz: i32,
+    ) -> io::Result<Option<ChunkSaveData>> {
         let rx = cx.div_euclid(32);
         let rz = cz.div_euclid(32);
         let lx = cx.rem_euclid(32) as u8;
@@ -2688,16 +2702,20 @@ impl SaveManager {
             .join(format!("r.{}.{}.bin", rx, rz));
 
         if !self.region_cache.contains_key(&(dimension, rx, rz)) {
-            if region_file.exists() {
-                if let Ok(mut file) = File::open(&region_file) {
-                    let mut bytes = Vec::new();
-                    if file.read_to_end(&mut bytes).is_ok() {
-                        if let Ok(region_data) = bincode::deserialize::<RegionData>(&bytes) {
-                            self.region_cache.insert((dimension, rx, rz), region_data);
-                        }
-                    }
-                }
+            if !region_file.exists() {
+                return Ok(None);
             }
+            let bytes = fs::read(&region_file)?;
+            let region_data = bincode::deserialize::<RegionData>(&bytes).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "region decode failed for {}: {error}",
+                        region_file.display()
+                    ),
+                )
+            })?;
+            self.region_cache.insert((dimension, rx, rz), region_data);
         }
 
         if self.region_cache.contains_key(&(dimension, rx, rz)) {
@@ -2705,12 +2723,24 @@ impl SaveManager {
         }
         self.evict_lru_regions();
 
-        let region = self.region_cache.get(&(dimension, rx, rz))?;
+        let Some(region) = self.region_cache.get(&(dimension, rx, rz)) else {
+            return Ok(None);
+        };
 
         if let Some(chunk_bytes) = region.chunks.get(&(lx, lz)) {
             deserialize_chunk_save_data(chunk_bytes)
+                .map(Some)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "chunk ({cx}, {cz}) decode failed in {}",
+                            region_file.display()
+                        ),
+                    )
+                })
         } else {
-            None
+            Ok(None)
         }
     }
 
