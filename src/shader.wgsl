@@ -108,9 +108,16 @@ fn shade_world_fragment(
     let adjusted_sky_light = sky_light * sky_intensity;
     let max_light = max(adjusted_sky_light, block_light);
 
-    let ambient = 0.08;
-    let final_light = max(max_light / 15.0, ambient) * multiplier;
-    var fragment_color = color * (final_light * clamp(ao, 0.25, 1.0));
+    // Keep unlit terrain readable while retaining a clear day/night contrast.
+    // The old 8% floor was multiplied by face shading and AO, which could
+    // reduce valid surfaces to roughly 1% brightness.
+    let ambient = 0.22;
+    let normalized_light = clamp(max_light / 15.0, 0.0, 1.0);
+    let final_light = mix(ambient, 1.0, normalized_light) * multiplier;
+    let ao_light = mix(0.65, 1.0, clamp(ao, 0.25, 1.0));
+    // Lighting affects RGB, never material opacity. Multiplying translucent
+    // water's alpha by the light level made its texture effectively vanish.
+    var fragment_color = vec4<f32>(color.rgb * (final_light * ao_light), color.a);
     if (is_hurt > 0.5) {
         fragment_color = mix(fragment_color, vec4<f32>(1.0, 0.0, 0.0, 1.0), 0.5);
     }

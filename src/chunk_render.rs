@@ -1581,5 +1581,17 @@ mod tests {
             shader.contains("(is_water && color.a < 0.01)"),
             "terrain alpha testing must not discard the translucent still-water tile"
         );
+        assert!(
+            shader.contains("color.rgb * (final_light * ao_light), color.a"),
+            "world lighting must preserve the water texture's material opacity"
+        );
+    }
+
+    #[test]
+    fn embedded_shader_has_a_readable_low_light_floor() {
+        let shader = include_str!("shader.wgsl");
+        assert!(shader.contains("let ambient = 0.22"));
+        assert!(shader.contains("let final_light = mix(ambient, 1.0, normalized_light)"));
+        assert!(shader.contains("let ao_light = mix(0.65, 1.0"));
     }
 }

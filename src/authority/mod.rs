@@ -2910,16 +2910,18 @@ fn combat_profile(gameplay: &SessionGameplayState) -> Result<CombatProfile, Reje
 }
 
 fn look_from_angles(yaw: f32, pitch: f32) -> Result<[i16; 3], RejectReason> {
-    if !yaw.is_finite() || !pitch.is_finite() || pitch.abs() > 90.0 {
+    if !yaw.is_finite() || !pitch.is_finite() || pitch.abs() > std::f32::consts::FRAC_PI_2 + 0.001 {
         return Err(RejectReason::InvalidState);
     }
-    let yaw = yaw.to_radians();
-    let pitch = pitch.to_radians();
+    // Network and embedded poses carry the camera angles in radians.  Keep
+    // this axis convention identical to State's targeting ray: yaw 0 faces
+    // +X and positive pitch looks upward.  Treating these values as degrees
+    // caused valid melee hits to be rejected as not facing the animal.
     let horizontal = pitch.cos();
     let look = [
-        (-yaw.sin() * horizontal * 1_000.0).round() as i16,
-        (-pitch.sin() * 1_000.0).round() as i16,
         (yaw.cos() * horizontal * 1_000.0).round() as i16,
+        (pitch.sin() * 1_000.0).round() as i16,
+        (yaw.sin() * horizontal * 1_000.0).round() as i16,
     ];
     Ok(look)
 }
@@ -4511,7 +4513,7 @@ mod tests {
         let target = core
             .world
             .entities
-            .spawn(EntityType::Zombie, glam::Vec3::new(8.0, 80.0, 9.0));
+            .spawn(EntityType::Pig, glam::Vec3::new(9.0, 80.0, 8.0));
         let before = core.world.entities.get_by_id(target).unwrap().health;
         let response = core.submit_request(GameplayRequest {
             request_id: 31,
@@ -4526,6 +4528,19 @@ mod tests {
             "unexpected combat response: {response:?}"
         );
         assert!(core.world.entities.get_by_id(target).unwrap().health < before);
+    }
+
+    #[test]
+    fn authority_look_uses_camera_radians_and_axes() {
+        assert_eq!(look_from_angles(0.0, 0.0), Ok([1_000, 0, 0]));
+        assert_eq!(
+            look_from_angles(std::f32::consts::FRAC_PI_2, 0.0),
+            Ok([0, 0, 1_000])
+        );
+        assert_eq!(
+            look_from_angles(0.0, std::f32::consts::FRAC_PI_2),
+            Ok([0, 1_000, 0])
+        );
     }
 
     #[test]

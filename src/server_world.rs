@@ -14,7 +14,7 @@ use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
 use crate::commands::{self, Command, TimeCommand};
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
-use crate::entity::{EntityManager, EntityType};
+use crate::entity::{Entity, EntityManager, EntityType};
 use crate::fluid::FluidMutation;
 use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::network::protocol::{
@@ -30,6 +30,91 @@ const WORLD_BOUND: i32 = 30_000_000;
 pub const FIXED_DT: f32 = 1.0 / 20.0;
 const MAX_AUTOMATION_TRANSFERS: usize = 64;
 const MAX_FLUID_UPDATES: usize = 256;
+
+/// Deterministic passive-mob wandering owned by the headless authority.
+/// Embedded singleplayer intentionally does not run presentation-side AI, so
+/// livestock must receive movement here just like hostile mobs do.
+fn update_passive_wander(entity: &mut Entity, chunks: &ChunkManager, tick: u64) {
+    if !entity.entity_type.is_passive()
+        || entity.is_sitting
+        || entity.invulnerable_time > 0.0
+        || matches!(entity.entity_type, EntityType::Bat | EntityType::Squid)
+    {
+        return;
+    }
+
+    // Hold one decision for four seconds.  Mixing the stable entity id with
+    // the phase keeps the simulation reproducible across authority topologies.
+    let phase = tick / 80;
+    let mut random = entity.id ^ phase.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    random ^= random >> 30;
+    random = random.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    random ^= random >> 27;
+    random = random.wrapping_mul(0x94D0_49BB_1331_11EB);
+    random ^= random >> 31;
+
+    if random & 0x3 == 0 {
+        entity.velocity.x = 0.0;
+        entity.velocity.z = 0.0;
+        return;
+    }
+
+    let base_yaw = ((random >> 16) as u32 as f32 / u32::MAX as f32) * std::f32::consts::TAU;
+    let feet_y = entity.position.y.floor() as i32;
+    let mut chosen_yaw = None;
+    for turn in [
+        0.0,
+        std::f32::consts::FRAC_PI_2,
+        -std::f32::consts::FRAC_PI_2,
+        std::f32::consts::PI,
+    ] {
+        let yaw = base_yaw + turn;
+        let check_x = (entity.position.x + yaw.sin()).floor() as i32;
+        let check_z = (entity.position.z + yaw.cos()).floor() as i32;
+        let supported = chunks
+            .get_block(check_x, feet_y - 1, check_z)
+            .properties()
+            .is_solid
+            || chunks
+                .get_block(check_x, feet_y - 2, check_z)
+                .properties()
+                .is_solid;
+        if supported {
+            chosen_yaw = Some(yaw);
+            break;
+        }
+    }
+
+    let Some(yaw) = chosen_yaw else {
+        entity.velocity.x = 0.0;
+        entity.velocity.z = 0.0;
+        return;
+    };
+    entity.yaw = yaw;
+    let direction = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+    let speed = if entity.entity_type == EntityType::Horse {
+        1.35
+    } else {
+        1.0
+    };
+    entity.velocity.x = direction.x * speed;
+    entity.velocity.z = direction.z * speed;
+
+    let obstacle_x = (entity.position.x + direction.x * 0.45).floor() as i32;
+    let obstacle_z = (entity.position.z + direction.z * 0.45).floor() as i32;
+    if entity.on_ground
+        && chunks
+            .get_block(obstacle_x, feet_y, obstacle_z)
+            .properties()
+            .is_solid
+        && !chunks
+            .get_block(obstacle_x, feet_y + 1, obstacle_z)
+            .properties()
+            .is_solid
+    {
+        entity.velocity.y = 7.0;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldDispatchError {
@@ -2138,6 +2223,8 @@ impl ServerWorld {
                         }
                     }
                 }
+            } else if entity.entity_type.is_passive() {
+                update_passive_wander(entity, chunks, self.time);
             }
             entity.ai_phase = entity.ai_phase.wrapping_add(1);
             entity.ai_timer += FIXED_DT;
@@ -2956,6 +3043,55 @@ mod tests {
             world.tick(&[(7, [8.0, 80.0, 8.0])])
         };
         assert_eq!(make(), make());
+    }
+
+    #[test]
+    fn authority_tick_moves_passive_livestock() {
+        let mut rules = WorldRules::default();
+        rules.do_mob_spawning = false;
+        let mut world = ServerWorld::new(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            rules,
+            2,
+        );
+        world.ensure_chunk(0, 0);
+        for x in 4..=12 {
+            for z in 4..=12 {
+                world.chunks.set_block(x, 79, z, BlockType::Grass);
+            }
+        }
+        let pig_id = world
+            .entities
+            .spawn(EntityType::Pig, Vec3::new(8.0, 80.0, 8.0));
+        world.entities.get_by_id_mut(pig_id).unwrap().on_ground = true;
+
+        // Pick a deterministic phase in which this id elects to walk, then
+        // advance through the real ServerWorld tick integration point.
+        let moving_tick = (1..=320)
+            .find(|tick| {
+                let entity = world.entities.get_by_id_mut(pig_id).unwrap();
+                entity.velocity = Vec3::ZERO;
+                update_passive_wander(entity, &world.chunks, *tick);
+                entity.velocity.x != 0.0 || entity.velocity.z != 0.0
+            })
+            .expect("passive wander schedule must contain a moving phase");
+        {
+            let pig = world.entities.get_by_id_mut(pig_id).unwrap();
+            pig.position = Vec3::new(8.0, 80.0, 8.0);
+            pig.velocity = Vec3::ZERO;
+            pig.on_ground = true;
+        }
+        world.time = moving_tick - 1;
+        let before = world.entities.get_by_id(pig_id).unwrap().position;
+        world.tick(&[]);
+        let after = world.entities.get_by_id(pig_id).unwrap().position;
+        assert!(
+            Vec3::new(after.x - before.x, 0.0, after.z - before.z).length_squared() > 0.0,
+            "headless authority must advance passive mob movement"
+        );
     }
 
     #[test]

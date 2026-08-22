@@ -214,30 +214,11 @@ fn closest_melee_target(
         return None;
     }
     let direction = direction.normalize();
-    const MELEE_TYPES: [crate::entity::EntityType; 20] = [
-        crate::entity::EntityType::Zombie,
-        crate::entity::EntityType::Skeleton,
-        crate::entity::EntityType::Creeper,
-        crate::entity::EntityType::Pig,
-        crate::entity::EntityType::Cow,
-        crate::entity::EntityType::Sheep,
-        crate::entity::EntityType::Chicken,
-        crate::entity::EntityType::Blaze,
-        crate::entity::EntityType::Piglin,
-        crate::entity::EntityType::Husk,
-        crate::entity::EntityType::Shulker,
-        crate::entity::EntityType::EnderDragon,
-        crate::entity::EntityType::Wither,
-        crate::entity::EntityType::EndCrystal,
-        crate::entity::EntityType::Enderman,
-        crate::entity::EntityType::Villager,
-        crate::entity::EntityType::IronGolem,
-        crate::entity::EntityType::Pillager,
-        crate::entity::EntityType::Ravager,
-        crate::entity::EntityType::RemotePlayer,
-    ];
     entity_manager
-        .query_radius_types(origin, reach, &MELEE_TYPES)
+        // Query by the entity's combat capability instead of maintaining a
+        // second hard-coded type list.  The old list silently made newer
+        // passive mobs (wolf, cat, horse, bat and squid) unhittable.
+        .query_radius(origin, reach)
         .filter(|entity| is_legal_melee_target(entity))
         .filter_map(|entity| {
             crate::entity::ray_intersects_aabb(origin, direction, &entity.get_aabb())
@@ -3293,6 +3274,13 @@ impl EmbeddedRuntimeBridge {
                 z: position.z,
                 yaw,
                 pitch,
+            })
+    }
+
+    fn queue_respawn(&mut self) -> Result<(), crate::server_runtime::RuntimeInputError> {
+        self.input
+            .try_send(crate::network::server::ServerToHost::ClientRespawnRequest {
+                id: self.session_id,
             })
     }
 
@@ -16517,7 +16505,11 @@ impl State {
 
     pub fn respawn(&mut self) {
         if self.has_in_process_runtime() {
-            let _ = self.submit_local_authority_command("/respawn");
+            if let Some(runtime) = self.embedded_runtime.as_mut() {
+                if let Err(error) = runtime.queue_respawn() {
+                    self.save_error = Some(format!("Unable to request respawn: {error}"));
+                }
+            }
             return;
         }
         if !self.is_authoritative() {
@@ -25617,6 +25609,52 @@ mod debug_tests {
     }
 
     #[test]
+    fn embedded_runtime_respawn_uses_the_lifecycle_event_path() {
+        let world_dir = embedded_test_world("respawn");
+        let role = MultiplayerRole::Singleplayer;
+        let mut bridge =
+            EmbeddedRuntimeBridge::new(&role, world_dir.clone(), 1234, Difficulty::Normal, 8, true)
+                .expect("embedded runtime should construct");
+        let session_id = bridge.session_id();
+        let mut dead = bridge
+            .runtime
+            .authority
+            .session(session_id)
+            .expect("local authority session")
+            .gameplay;
+        dead.health_milli = 0;
+        dead.is_dead = true;
+        assert!(bridge
+            .runtime
+            .authority
+            .set_session_gameplay(session_id, dead));
+
+        bridge
+            .queue_respawn()
+            .expect("respawn should enter the bounded runtime FIFO");
+        let output = bridge.tick().expect("respawn tick should run");
+        assert!(output.presentation_events.iter().any(|event| matches!(
+            event,
+            crate::server_runtime::RuntimePresentationEvent::PlayerRespawnResult {
+                target,
+                dimension: 0,
+                ..
+            } if *target == session_id
+        )));
+        let gameplay = bridge
+            .runtime
+            .authority
+            .session(session_id)
+            .expect("respawned authority session")
+            .gameplay;
+        assert!(!gameplay.is_dead);
+        assert_eq!(gameplay.health_milli, gameplay.max_health_milli);
+
+        bridge.shutdown().expect("runtime save/shutdown");
+        let _ = std::fs::remove_dir_all(world_dir);
+    }
+
+    #[test]
     fn embedded_runtime_poses_and_block_actions_use_monotonic_sequence() {
         let world_dir = embedded_test_world("pose");
         let role = MultiplayerRole::Singleplayer;
@@ -26155,6 +26193,17 @@ mod debug_tests {
         assert_eq!(
             closest_melee_target(&endermen, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
             Some(10)
+        );
+
+        let mut horses = crate::entity::EntityManager::new();
+        horses
+            .entities
+            .push(Entity::new(11, EntityType::Horse, Vec3::new(0.0, 0.0, 2.0)));
+        horses.rebuild_indexes();
+        assert_eq!(
+            closest_melee_target(&horses, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
+            Some(11),
+            "new passive entity types must not require a second melee allow-list"
         );
     }
 
