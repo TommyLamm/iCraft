@@ -74,9 +74,9 @@
 | 18 | [`world.rs` 機械拆檔](18_world_module_split.md) | P2 | 已完成 | 07（建議 14） |
 | 19 | [`save.rs` 子模組拆分](19_save_module_split.md) | P2 | 已完成 | 05 |
 | 20 | [`network/server.rs` 拆檔](20_network_server_split.md) | P2 | 已完成 | 08（建議 17） |
-| 21 | [leftover 模擬改為 test／feature 才編譯](21_legacy_owner_cfg.md) | P0 | 未開始 | 15 |
-| 22 | [未接線 AI／刷怪原型改 cfg(test)](22_unused_prototypes_cfg.md) | P0 | 未開始 | 無 |
-| 23 | [`SoundMaterial` 抽出，audio 移出 library](23_sound_material_and_audio_fence.md) | P1 | 未開始 | 建議 21 |
+| 21 | [leftover 模擬改為 test／feature 才編譯](21_legacy_owner_cfg.md) | P0 | 已完成 | 15 |
+| 22 | [未接線 AI／刷怪原型改 cfg(test)](22_unused_prototypes_cfg.md) | P0 | 已完成 | 無 |
+| 23 | [`SoundMaterial` 抽出，audio 移出 library](23_sound_material_and_audio_fence.md) | P1 | 已完成 | 建議 21 |
 | 24 | [culling 連通／LOS 與 frustum 拆檔](24_culling_connectivity_split.md) | P1 | 已完成 | 無 |
 | 25 | [`is_authoritative()` 收成拓撲謂詞](25_topology_predicates.md) | P1 | 已完成 | 02（建議 21） |
 | 26 | [`AuthorityCore` tick／dispatch／portals 拆檔](26_authority_module_split.md) | P2 | 已完成 | 03、09、16 |
