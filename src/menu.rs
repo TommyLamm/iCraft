@@ -1170,6 +1170,183 @@ enum MenuScreen {
     ConfirmDelete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MenuRect {
+    pub x0: f32,
+    pub x1: f32,
+    pub y0: f32,
+    pub y1: f32,
+}
+
+impl MenuRect {
+    pub const fn new(x0: f32, x1: f32, y0: f32, y1: f32) -> Self {
+        Self { x0, x1, y0, y1 }
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+
+    pub fn as_array(&self) -> [f32; 4] {
+        [self.x0, self.x1, self.y0, self.y1]
+    }
+}
+
+const MAIN_BUTTON_RECTS: [MenuRect; 4] = [
+    MenuRect::new(-0.34, 0.34, 0.21, 0.34),
+    MenuRect::new(-0.34, 0.34, 0.03, 0.16),
+    MenuRect::new(-0.34, 0.34, -0.15, -0.02),
+    MenuRect::new(-0.34, 0.34, -0.33, -0.20),
+];
+
+const CONFIRM_DELETE_BUTTON_RECTS: [MenuRect; 2] = [
+    MenuRect::new(-0.48, -0.02, -0.16, -0.02),
+    MenuRect::new(0.02, 0.48, -0.16, -0.02),
+];
+
+const CREATE_WORLD_RECTS: [MenuRect; 11] = [
+    MenuRect::new(-0.52, 0.52, 0.34, 0.47),
+    MenuRect::new(-0.52, 0.52, 0.13, 0.26),
+    MenuRect::new(-0.52, 0.52, -0.08, 0.05),
+    MenuRect::new(-0.52, 0.52, -0.29, -0.16),
+    MenuRect::new(-0.52, 0.52, -0.42, -0.30),
+    MenuRect::new(-0.52, -0.02, -0.54, -0.43),
+    MenuRect::new(0.02, 0.52, -0.54, -0.43),
+    MenuRect::new(-0.52, -0.02, -0.69, -0.58),
+    MenuRect::new(0.02, 0.52, -0.69, -0.58),
+    MenuRect::new(-0.52, -0.02, -0.84, -0.71),
+    MenuRect::new(0.02, 0.52, -0.84, -0.71),
+];
+
+const OPTIONS_BOTTOM_RECTS: [MenuRect; 3] = [
+    MenuRect::new(-0.82, -0.30, -0.78, -0.64),
+    MenuRect::new(-0.25, 0.25, -0.78, -0.64),
+    MenuRect::new(0.30, 0.82, -0.78, -0.64),
+];
+
+fn options_button_rects() -> [MenuRect; 15] {
+    let mut rects = [MenuRect::new(0.0, 0.0, 0.0, 0.0); 15];
+    for row in 0..6 {
+        let top = OPTIONS_ROW_TOPS[row];
+        rects[row] = MenuRect::new(-0.82, -0.05, top - 0.13, top);
+        rects[row + 6] = MenuRect::new(0.05, 0.82, top - 0.13, top);
+    }
+    rects[12] = OPTIONS_BOTTOM_RECTS[0];
+    rects[13] = OPTIONS_BOTTOM_RECTS[1];
+    rects[14] = OPTIONS_BOTTOM_RECTS[2];
+    rects
+}
+
+const CONTROLS_SENSITIVITY_RECT: MenuRect = MenuRect::new(-0.48, 0.48, 0.49, 0.62);
+const CONTROLS_DONE_RECT: MenuRect = MenuRect::new(-0.25, 0.25, -0.78, -0.64);
+
+fn control_button_rect(index: usize) -> MenuRect {
+    let column = index / 4;
+    let row = index % 4;
+    let (x0, x1) = if column == 0 {
+        (-0.78, -0.04)
+    } else {
+        (0.04, 0.78)
+    };
+    let top = 0.38 - row as f32 * 0.19;
+    MenuRect::new(x0, x1, top - 0.14, top)
+}
+
+fn controls_button_rects() -> [MenuRect; 10] {
+    [
+        CONTROLS_SENSITIVITY_RECT,
+        control_button_rect(0),
+        control_button_rect(1),
+        control_button_rect(2),
+        control_button_rect(3),
+        control_button_rect(4),
+        control_button_rect(5),
+        control_button_rect(6),
+        control_button_rect(7),
+        CONTROLS_DONE_RECT,
+    ]
+}
+
+const ACCESSIBILITY_DONE_RECT: MenuRect = MenuRect::new(-0.25, 0.25, -0.78, -0.64);
+
+fn accessibility_button_rect(index: usize) -> MenuRect {
+    let column = index / 5;
+    let row = index % 5;
+    let (x0, x1) = if column == 0 {
+        (-0.82, -0.05)
+    } else {
+        (0.05, 0.82)
+    };
+    let top = 0.56 - row as f32 * 0.18;
+    MenuRect::new(x0, x1, top - 0.13, top)
+}
+
+fn accessibility_button_rects() -> [MenuRect; 11] {
+    [
+        accessibility_button_rect(0),
+        accessibility_button_rect(1),
+        accessibility_button_rect(2),
+        accessibility_button_rect(3),
+        accessibility_button_rect(4),
+        accessibility_button_rect(5),
+        accessibility_button_rect(6),
+        accessibility_button_rect(7),
+        accessibility_button_rect(8),
+        accessibility_button_rect(9),
+        ACCESSIBILITY_DONE_RECT,
+    ]
+}
+
+const RESOURCE_PACKS_BOTTOM_RECTS: [MenuRect; 3] = [
+    MenuRect::new(-0.78, -0.28, -0.78, -0.64),
+    MenuRect::new(-0.22, 0.22, -0.78, -0.64),
+    MenuRect::new(0.28, 0.78, -0.78, -0.64),
+];
+
+fn resource_pack_item_rect(visible_index: isize) -> MenuRect {
+    let top = 0.56 - visible_index as f32 * 0.14;
+    MenuRect::new(-0.78, 0.78, top - 0.11, top)
+}
+
+const WORLDS_BOTTOM_RECTS: [MenuRect; 6] = [
+    MenuRect::new(-0.72, -0.27, -0.64, -0.51),
+    MenuRect::new(-0.23, 0.23, -0.64, -0.51),
+    MenuRect::new(0.27, 0.72, -0.64, -0.51),
+    MenuRect::new(-0.72, -0.27, -0.84, -0.72),
+    MenuRect::new(-0.23, 0.23, -0.84, -0.72),
+    MenuRect::new(0.27, 0.72, -0.84, -0.72),
+];
+
+fn world_item_rect(visible_index: isize) -> MenuRect {
+    let top = 0.58 - visible_index as f32 * 0.19;
+    MenuRect::new(-0.72, 0.72, top - 0.15, top)
+}
+
+const MULTIPLAYER_MODE_RECTS: [MenuRect; 2] = [
+    MenuRect::new(-0.52, -0.02, 0.45, 0.58),
+    MenuRect::new(0.02, 0.52, 0.45, 0.58),
+];
+
+const MULTIPLAYER_HOST_PORT_RECT: MenuRect = MenuRect::new(-0.52, 0.52, 0.17, 0.30);
+
+const MULTIPLAYER_JOIN_FIELD_RECTS: [MenuRect; 3] = [
+    MenuRect::new(-0.56, -0.02, 0.17, 0.30),
+    MenuRect::new(-0.56, -0.02, -0.04, 0.09),
+    MenuRect::new(-0.56, -0.02, -0.25, -0.12),
+];
+
+const MULTIPLAYER_PING_RECT: MenuRect = MenuRect::new(0.04, 0.56, -0.24, -0.11);
+
+const MULTIPLAYER_BOTTOM_RECTS: [MenuRect; 2] = [
+    MenuRect::new(-0.52, -0.02, -0.58, -0.45),
+    MenuRect::new(0.02, 0.52, -0.58, -0.45),
+];
+
+fn recent_server_item_rect(index: usize) -> MenuRect {
+    let top = 0.34 - index as f32 * 0.10;
+    MenuRect::new(0.04, 0.56, top - 0.08, top)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextField {
     WorldName,
@@ -1216,29 +1393,31 @@ fn back_transition(
 
 fn multiplayer_focus_count(mode: MultiplayerMode, recent_count: usize) -> usize {
     if mode == MultiplayerMode::Join {
-        8 + recent_count.min(3)
+        MULTIPLAYER_MODE_RECTS.len()
+            + MULTIPLAYER_JOIN_FIELD_RECTS.len()
+            + recent_count.min(3)
+            + 1
+            + MULTIPLAYER_BOTTOM_RECTS.len()
     } else {
-        5
+        MULTIPLAYER_MODE_RECTS.len() + 1 + MULTIPLAYER_BOTTOM_RECTS.len()
     }
 }
 
 fn multiplayer_focus_rects(mode: MultiplayerMode, recent_count: usize) -> Vec<[f32; 4]> {
-    let mut rects = vec![[-0.52, -0.02, 0.45, 0.58], [0.02, 0.52, 0.45, 0.58]];
+    let mut rects = vec![
+        MULTIPLAYER_MODE_RECTS[0].as_array(),
+        MULTIPLAYER_MODE_RECTS[1].as_array(),
+    ];
     if mode == MultiplayerMode::Host {
-        rects.push([-0.52, 0.52, 0.17, 0.30]);
+        rects.push(MULTIPLAYER_HOST_PORT_RECT.as_array());
     } else {
-        rects.extend([
-            [-0.56, -0.02, 0.17, 0.30],
-            [-0.56, -0.02, -0.04, 0.09],
-            [-0.56, -0.02, -0.25, -0.12],
-        ]);
+        rects.extend(MULTIPLAYER_JOIN_FIELD_RECTS.iter().map(|r| r.as_array()));
         for index in 0..recent_count.min(3) {
-            let top = 0.34 - index as f32 * 0.10;
-            rects.push([0.04, 0.56, top - 0.08, top]);
+            rects.push(recent_server_item_rect(index).as_array());
         }
-        rects.push([0.04, 0.56, -0.24, -0.11]);
+        rects.push(MULTIPLAYER_PING_RECT.as_array());
     }
-    rects.extend([[-0.52, -0.02, -0.58, -0.45], [0.02, 0.52, -0.58, -0.45]]);
+    rects.extend(MULTIPLAYER_BOTTOM_RECTS.iter().map(|r| r.as_array()));
     rects
 }
 
@@ -1765,93 +1944,46 @@ impl Menu {
 
     fn focus_count(&self) -> usize {
         match self.screen {
-            MenuScreen::Main => 4,
-            MenuScreen::Options => 15,
-            MenuScreen::Controls => 10,
-            MenuScreen::Accessibility => 11,
-            MenuScreen::ResourcePacks => self.resource_packs.available().len() + 3,
+            MenuScreen::Main => MAIN_BUTTON_RECTS.len(),
+            MenuScreen::Options => options_button_rects().len(),
+            MenuScreen::Controls => controls_button_rects().len(),
+            MenuScreen::Accessibility => accessibility_button_rects().len(),
+            MenuScreen::ResourcePacks => {
+                self.resource_packs.available().len() + RESOURCE_PACKS_BOTTOM_RECTS.len()
+            }
             MenuScreen::Multiplayer => multiplayer_focus_count(
                 self.multiplayer_mode,
                 self.server_address_book.addresses().len(),
             ),
-            MenuScreen::Worlds => self.worlds.len() + 6,
-            MenuScreen::CreateWorld => 11,
-            MenuScreen::ConfirmDelete => 2,
+            MenuScreen::Worlds => self.worlds.len() + WORLDS_BOTTOM_RECTS.len(),
+            MenuScreen::CreateWorld => CREATE_WORLD_RECTS.len(),
+            MenuScreen::ConfirmDelete => CONFIRM_DELETE_BUTTON_RECTS.len(),
         }
     }
 
     fn focus_rect(&self) -> Option<[f32; 4]> {
         let rects = match self.screen {
-            MenuScreen::Main => vec![
-                [-0.34, 0.34, 0.21, 0.34],
-                [-0.34, 0.34, 0.03, 0.16],
-                [-0.34, 0.34, -0.15, -0.02],
-                [-0.34, 0.34, -0.33, -0.20],
-            ],
-            MenuScreen::Options => {
-                let mut rects = Vec::with_capacity(14);
-                for row in 0..6 {
-                    let top = OPTIONS_ROW_TOPS[row];
-                    rects.push([-0.82, -0.05, top - 0.13, top]);
-                }
-                for row in 0..6 {
-                    let top = OPTIONS_ROW_TOPS[row];
-                    rects.push([0.05, 0.82, top - 0.13, top]);
-                }
-                rects.push([-0.82, -0.30, -0.78, -0.64]);
-                rects.push([-0.25, 0.25, -0.78, -0.64]);
-                rects.push([0.30, 0.82, -0.78, -0.64]);
-                rects
-            }
-            MenuScreen::Controls => {
-                let mut rects = vec![[-0.48, 0.48, 0.49, 0.62]];
-                for index in 0..8 {
-                    let column = index / 4;
-                    let row = index % 4;
-                    let (x0, x1) = if column == 0 {
-                        (-0.78, -0.04)
-                    } else {
-                        (0.04, 0.78)
-                    };
-                    let top = 0.38 - row as f32 * 0.19;
-                    rects.push([x0, x1, top - 0.14, top]);
-                }
-                rects.push([-0.25, 0.25, -0.78, -0.64]);
-                rects
-            }
-            MenuScreen::Accessibility => {
-                let mut rects = Vec::with_capacity(11);
-                for index in 0..10 {
-                    let column = index / 5;
-                    let row = index % 5;
-                    let (x0, x1) = if column == 0 {
-                        (-0.82, -0.05)
-                    } else {
-                        (0.05, 0.82)
-                    };
-                    let top = 0.56 - row as f32 * 0.18;
-                    rects.push([x0, x1, top - 0.13, top]);
-                }
-                rects.push([-0.25, 0.25, -0.78, -0.64]);
-                rects
-            }
+            MenuScreen::Main => MAIN_BUTTON_RECTS.iter().map(|r| r.as_array()).collect(),
+            MenuScreen::Options => options_button_rects()
+                .iter()
+                .map(|r| r.as_array())
+                .collect(),
+            MenuScreen::Controls => controls_button_rects()
+                .iter()
+                .map(|r| r.as_array())
+                .collect(),
+            MenuScreen::Accessibility => accessibility_button_rects()
+                .iter()
+                .map(|r| r.as_array())
+                .collect(),
             MenuScreen::ResourcePacks => {
-                let mut rects = self
-                    .resource_packs
-                    .available()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| {
+                let mut rects = (0..self.resource_packs.available().len())
+                    .map(|index| {
                         let visible_index = index as isize - self.resource_pack_scroll as isize;
-                        let top = 0.56 - visible_index as f32 * 0.14;
-                        [-0.78, 0.78, top - 0.11, top]
+                        resource_pack_item_rect(visible_index).as_array()
                     })
                     .collect::<Vec<_>>();
-                rects.extend([
-                    [-0.78, -0.28, -0.78, -0.64],
-                    [-0.22, 0.22, -0.78, -0.64],
-                    [0.28, 0.78, -0.78, -0.64],
-                ]);
+                rects.extend(RESOURCE_PACKS_BOTTOM_RECTS.iter().map(|r| r.as_array()));
                 rects
             }
             MenuScreen::Multiplayer => multiplayer_focus_rects(
@@ -1862,35 +1994,15 @@ impl Menu {
                 let mut rects = (0..self.worlds.len())
                     .map(|index| {
                         let visible_index = index as isize - self.world_scroll as isize;
-                        let top = 0.58 - visible_index as f32 * 0.19;
-                        [-0.72, 0.72, top - 0.15, top]
+                        world_item_rect(visible_index).as_array()
                     })
                     .collect::<Vec<_>>();
-                rects.extend([
-                    [-0.72, -0.27, -0.64, -0.51],
-                    [-0.23, 0.23, -0.64, -0.51],
-                    [0.27, 0.72, -0.64, -0.51],
-                    [-0.72, -0.27, -0.84, -0.72],
-                    [-0.23, 0.23, -0.84, -0.72],
-                    [0.27, 0.72, -0.84, -0.72],
-                ]);
+                rects.extend(WORLDS_BOTTOM_RECTS.iter().map(|r| r.as_array()));
                 rects
             }
-            MenuScreen::CreateWorld => vec![
-                [-0.52, 0.52, 0.34, 0.47],
-                [-0.52, 0.52, 0.13, 0.26],
-                [-0.52, 0.52, -0.08, 0.05],
-                [-0.52, 0.52, -0.29, -0.16],
-                [-0.52, 0.52, -0.42, -0.30],
-                [-0.52, -0.02, -0.54, -0.43],
-                [0.02, 0.52, -0.54, -0.43],
-                [-0.52, -0.02, -0.69, -0.58],
-                [0.02, 0.52, -0.69, -0.58],
-                [-0.52, -0.02, -0.84, -0.71],
-                [0.02, 0.52, -0.84, -0.71],
-            ],
+            MenuScreen::CreateWorld => CREATE_WORLD_RECTS.iter().map(|r| r.as_array()).collect(),
             MenuScreen::ConfirmDelete => {
-                vec![[-0.48, -0.02, -0.16, -0.02], [0.02, 0.48, -0.16, -0.02]]
+                CONFIRM_DELETE_BUTTON_RECTS.iter().map(|r| r.as_array()).collect()
             }
         };
         rects
@@ -1903,42 +2015,42 @@ impl Menu {
         self.message = None;
         match self.screen {
             MenuScreen::Main => {
-                if hit(x, y, -0.34, 0.34, 0.21, 0.34) {
+                if MAIN_BUTTON_RECTS[0].contains(x, y) {
                     self.selected_role = MultiplayerRole::Singleplayer;
                     self.worlds = discover_worlds();
                     self.selected_world = self.worlds.first().map(|world| world.directory.clone());
                     self.world_scroll = 0;
                     self.screen = MenuScreen::Worlds;
-                } else if hit(x, y, -0.34, 0.34, 0.03, 0.16) {
+                } else if MAIN_BUTTON_RECTS[1].contains(x, y) {
                     self.active_field = None;
                     self.screen = MenuScreen::Multiplayer;
-                } else if hit(x, y, -0.34, 0.34, -0.15, -0.02) {
+                } else if MAIN_BUTTON_RECTS[2].contains(x, y) {
                     self.screen = MenuScreen::Options;
-                } else if hit(x, y, -0.34, 0.34, -0.33, -0.20) {
+                } else if MAIN_BUTTON_RECTS[3].contains(x, y) {
                     return MenuAction::Quit;
                 }
             }
             MenuScreen::Multiplayer => {
-                if hit(x, y, -0.52, -0.02, 0.45, 0.58) {
+                if MULTIPLAYER_MODE_RECTS[0].contains(x, y) {
                     self.multiplayer_mode = MultiplayerMode::Host;
                     self.active_field = None;
-                } else if hit(x, y, 0.02, 0.52, 0.45, 0.58) {
+                } else if MULTIPLAYER_MODE_RECTS[1].contains(x, y) {
                     self.multiplayer_mode = MultiplayerMode::Join;
                     self.active_field = None;
                 } else if self.multiplayer_mode == MultiplayerMode::Host
-                    && hit(x, y, -0.52, 0.52, 0.17, 0.30)
+                    && MULTIPLAYER_HOST_PORT_RECT.contains(x, y)
                 {
                     self.activate_field(TextField::HostPort);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
-                    && hit(x, y, -0.56, -0.02, 0.17, 0.30)
+                    && MULTIPLAYER_JOIN_FIELD_RECTS[0].contains(x, y)
                 {
                     self.activate_field(TextField::ServerAddress);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
-                    && hit(x, y, -0.56, -0.02, -0.04, 0.09)
+                    && MULTIPLAYER_JOIN_FIELD_RECTS[1].contains(x, y)
                 {
                     self.activate_field(TextField::JoinPort);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
-                    && hit(x, y, -0.56, -0.02, -0.25, -0.12)
+                    && MULTIPLAYER_JOIN_FIELD_RECTS[2].contains(x, y)
                 {
                     self.activate_field(TextField::Username);
                 } else if self.multiplayer_mode == MultiplayerMode::Join
@@ -1946,10 +2058,10 @@ impl Menu {
                 {
                     self.active_field = None;
                 } else if self.multiplayer_mode == MultiplayerMode::Join
-                    && hit(x, y, 0.04, 0.56, -0.24, -0.11)
+                    && MULTIPLAYER_PING_RECT.contains(x, y)
                 {
                     self.ping_selected_server();
-                } else if hit(x, y, -0.52, -0.02, -0.58, -0.45) {
+                } else if MULTIPLAYER_BOTTOM_RECTS[0].contains(x, y) {
                     let role = match self.multiplayer_mode {
                         MultiplayerMode::Host => self
                             .host_port
@@ -1988,7 +2100,7 @@ impl Menu {
                     self.selected_world = self.worlds.first().map(|world| world.directory.clone());
                     self.world_scroll = 0;
                     self.screen = MenuScreen::Worlds;
-                } else if hit(x, y, 0.02, 0.52, -0.58, -0.45) {
+                } else if MULTIPLAYER_BOTTOM_RECTS[1].contains(x, y) {
                     self.sync_and_save_multiplayer_settings();
                     self.active_field = None;
                     self.screen = MenuScreen::Main;
@@ -1996,18 +2108,18 @@ impl Menu {
             }
             MenuScreen::Worlds => {
                 for visible_index in 0..(self.worlds.len() - self.world_scroll).min(5) {
-                    let index = self.world_scroll + visible_index;
-                    let top = 0.58 - visible_index as f32 * 0.19;
-                    if hit(x, y, -0.72, 0.72, top - 0.15, top) {
+                    let rect = world_item_rect(visible_index as isize);
+                    if rect.contains(x, y) {
+                        let index = self.world_scroll + visible_index;
                         self.selected_world = Some(self.worlds[index].directory.clone());
                         return MenuAction::None;
                     }
                 }
-                if hit(x, y, -0.72, -0.27, -0.64, -0.51) {
+                if WORLDS_BOTTOM_RECTS[0].contains(x, y) {
                     if let Some(directory) = self.selected_world.clone() {
                         return self.launch_existing(&directory);
                     }
-                } else if hit(x, y, -0.23, 0.23, -0.64, -0.51) {
+                } else if WORLDS_BOTTOM_RECTS[1].contains(x, y) {
                     self.create_name = "NEW WORLD".to_string();
                     self.create_seed.clear();
                     self.create_mode = GameMode::Survival;
@@ -2018,11 +2130,11 @@ impl Menu {
                     self.create_cheats = false;
                     self.create_hardcore = false;
                     self.screen = MenuScreen::CreateWorld;
-                } else if hit(x, y, 0.27, 0.72, -0.64, -0.51) {
+                } else if WORLDS_BOTTOM_RECTS[2].contains(x, y) {
                     if self.selected_world.is_some() {
                         self.screen = MenuScreen::ConfirmDelete;
                     }
-                } else if hit(x, y, -0.72, -0.27, -0.84, -0.72) {
+                } else if WORLDS_BOTTOM_RECTS[3].contains(x, y) {
                     if let Some(directory) = self.selected_world.clone() {
                         let base = directory
                             .file_name()
@@ -2037,7 +2149,7 @@ impl Menu {
                             Err(error) => self.message = Some(format!("COPY FAILED: {error}")),
                         }
                     }
-                } else if hit(x, y, -0.23, 0.23, -0.84, -0.72) {
+                } else if WORLDS_BOTTOM_RECTS[4].contains(x, y) {
                     if let Some(directory) = self.selected_world.clone() {
                         let base = directory
                             .file_name()
@@ -2052,52 +2164,53 @@ impl Menu {
                             Err(error) => self.message = Some(format!("BACKUP FAILED: {error}")),
                         }
                     }
-                } else if hit(x, y, 0.27, 0.72, -0.84, -0.72) {
+                } else if WORLDS_BOTTOM_RECTS[5].contains(x, y) {
                     self.screen = MenuScreen::Main;
                 }
             }
             MenuScreen::CreateWorld => {
-                if hit(x, y, -0.52, 0.52, 0.34, 0.47) {
+                if CREATE_WORLD_RECTS[0].contains(x, y) {
                     self.activate_field(TextField::WorldName);
-                } else if hit(x, y, -0.52, 0.52, 0.13, 0.26) {
+                } else if CREATE_WORLD_RECTS[1].contains(x, y) {
                     self.activate_field(TextField::Seed);
-                } else if hit(x, y, -0.52, 0.52, -0.08, 0.05) {
+                } else if CREATE_WORLD_RECTS[2].contains(x, y) {
                     self.create_mode = match self.create_mode {
                         GameMode::Survival => GameMode::Creative,
                         GameMode::Creative => GameMode::Adventure,
                         GameMode::Adventure => GameMode::Spectator,
                         GameMode::Spectator => GameMode::Survival,
                     };
-                } else if hit(x, y, -0.52, 0.52, -0.29, -0.16) {
+                } else if CREATE_WORLD_RECTS[3].contains(x, y) {
                     self.create_difficulty =
                         self.create_difficulty.step(if x < 0.0 { -1 } else { 1 });
-                } else if hit(x, y, -0.52, 0.52, -0.42, -0.30) {
+                } else if CREATE_WORLD_RECTS[4].contains(x, y) {
                     self.create_world_type = match self.create_world_type {
                         WorldType::Default => WorldType::Superflat,
                         WorldType::Superflat => WorldType::Default,
                     };
-                } else if hit(x, y, -0.52, -0.02, -0.54, -0.43) {
+                } else if CREATE_WORLD_RECTS[5].contains(x, y) {
                     self.create_generate_structures = !self.create_generate_structures;
-                } else if hit(x, y, 0.02, 0.52, -0.54, -0.43) {
+                } else if CREATE_WORLD_RECTS[6].contains(x, y) {
                     self.create_hardcore = !self.create_hardcore;
                     if self.create_hardcore {
                         self.create_mode = GameMode::Survival;
                         self.create_difficulty = Difficulty::Hard;
                     }
-                } else if hit(x, y, -0.52, -0.02, -0.69, -0.58) {
+                } else if CREATE_WORLD_RECTS[7].contains(x, y) {
                     self.create_bonus_chest = !self.create_bonus_chest;
-                } else if hit(x, y, 0.02, 0.52, -0.69, -0.58) {
+                } else if CREATE_WORLD_RECTS[8].contains(x, y) {
                     self.create_cheats = !self.create_cheats;
-                } else if hit(x, y, -0.52, -0.02, -0.84, -0.71) {
+                } else if CREATE_WORLD_RECTS[9].contains(x, y) {
                     return self.create_world();
-                } else if hit(x, y, 0.02, 0.52, -0.84, -0.71) {
+                } else if CREATE_WORLD_RECTS[10].contains(x, y) {
                     self.active_field = None;
                     self.screen = MenuScreen::Worlds;
                 }
             }
             MenuScreen::Options => self.handle_options_click(x, y),
             MenuScreen::Controls => {
-                if hit(x, y, -0.48, 0.48, 0.49, 0.62) {
+                let rects = controls_button_rects();
+                if rects[0].contains(x, y) {
                     let delta = if x < 0.0 { -0.0002 } else { 0.0002 };
                     self.settings.sensitivity =
                         (self.settings.sensitivity + delta).clamp(0.0002, 0.006);
@@ -2115,26 +2228,18 @@ impl Menu {
                     ControlAction::Inventory,
                 ];
                 for (index, action) in actions.into_iter().enumerate() {
-                    let column = index / 4;
-                    let row = index % 4;
-                    let (x0, x1) = if column == 0 {
-                        (-0.78, -0.04)
-                    } else {
-                        (0.04, 0.78)
-                    };
-                    let top = 0.38 - row as f32 * 0.19;
-                    if hit(x, y, x0, x1, top - 0.14, top) {
+                    if rects[1 + index].contains(x, y) {
                         self.rebinding = Some(action);
                     }
                 }
-                if hit(x, y, -0.25, 0.25, -0.78, -0.64) {
+                if rects[9].contains(x, y) {
                     self.back();
                 }
             }
             MenuScreen::Accessibility => self.handle_accessibility_click(x, y),
             MenuScreen::ResourcePacks => self.handle_resource_pack_click(x, y),
             MenuScreen::ConfirmDelete => {
-                if hit(x, y, -0.48, -0.02, -0.16, -0.02) {
+                if CONFIRM_DELETE_BUTTON_RECTS[0].contains(x, y) {
                     if let Some(directory) = self.selected_world.as_deref() {
                         if let Some(world) = world_index_by_directory(&self.worlds, directory)
                             .and_then(|index| self.worlds.get(index))
@@ -2150,7 +2255,7 @@ impl Menu {
                     self.selected_world = self.worlds.first().map(|world| world.directory.clone());
                     self.world_scroll = self.world_scroll.min(self.worlds.len().saturating_sub(5));
                     self.screen = MenuScreen::Worlds;
-                } else if hit(x, y, 0.02, 0.48, -0.16, -0.02) {
+                } else if CONFIRM_DELETE_BUTTON_RECTS[1].contains(x, y) {
                     self.screen = MenuScreen::Worlds;
                 }
             }
@@ -2186,23 +2291,28 @@ impl Menu {
     }
 
     fn select_recent_server(&mut self, x: f32, y: f32) -> bool {
-        if !hit(x, y, 0.04, 0.56, -0.50, 0.34) {
-            return false;
+        for (index, target) in self
+            .server_address_book
+            .addresses()
+            .iter()
+            .take(3)
+            .enumerate()
+        {
+            if recent_server_item_rect(index).contains(x, y) {
+                let target = target.clone();
+                if let Some((host, port)) = split_host_port(&target) {
+                    self.server_address = host;
+                    self.join_port = port;
+                    self.sync_and_save_multiplayer_settings();
+                    self.message = Some(format!("SELECTED {target}"));
+                    return true;
+                } else {
+                    self.message = Some("INVALID SAVED SERVER ADDRESS".to_string());
+                    return true;
+                }
+            }
         }
-        let index = ((0.34 - y) / 0.10).floor() as usize;
-        let Some(target) = self.server_address_book.addresses().get(index).cloned() else {
-            return false;
-        };
-        if let Some((host, port)) = split_host_port(&target) {
-            self.server_address = host;
-            self.join_port = port;
-            self.sync_and_save_multiplayer_settings();
-            self.message = Some(format!("SELECTED {target}"));
-            true
-        } else {
-            self.message = Some("INVALID SAVED SERVER ADDRESS".to_string());
-            true
-        }
+        false
     }
 
     fn ping_selected_server(&mut self) {
@@ -2337,95 +2447,78 @@ impl Menu {
     }
 
     fn handle_options_click(&mut self, x: f32, y: f32) {
-        let left = x >= -0.82 && x <= -0.05;
-        let right = x >= 0.05 && x <= 0.82;
-        let row = options_row_at(y);
+        let rects = options_button_rects();
         let delta = if x < -0.43 || (x > 0.05 && x < 0.43) {
             -1.0
         } else {
             1.0
         };
-        match (left, right, row) {
-            (true, _, Some(0)) => {
-                self.settings.fov = (self.settings.fov + delta * 5.0).clamp(30.0, 120.0)
-            }
-            (true, _, Some(1)) => {
-                self.settings.render_distance =
-                    (self.settings.render_distance + delta as i32).clamp(2, 16)
-            }
-            (true, _, Some(2)) => {
-                self.settings.fullscreen = !self.settings.fullscreen;
-                apply_fullscreen(&self.window, self.settings.fullscreen);
-            }
-            (true, _, Some(3)) => {
-                if self.settings.vsync {
-                    let has_uncapped = self
+        if rects[0].contains(x, y) {
+            self.settings.fov = (self.settings.fov + delta * 5.0).clamp(30.0, 120.0);
+        } else if rects[1].contains(x, y) {
+            self.settings.render_distance =
+                (self.settings.render_distance + delta as i32).clamp(2, 16);
+        } else if rects[2].contains(x, y) {
+            self.settings.fullscreen = !self.settings.fullscreen;
+            apply_fullscreen(&self.window, self.settings.fullscreen);
+        } else if rects[3].contains(x, y) {
+            if self.settings.vsync {
+                let has_uncapped = self
+                    .supported_present_modes
+                    .contains(&wgpu::PresentMode::Mailbox)
+                    || self
                         .supported_present_modes
-                        .contains(&wgpu::PresentMode::Mailbox)
-                        || self
-                            .supported_present_modes
-                            .contains(&wgpu::PresentMode::Immediate);
-                    if !has_uncapped {
-                        self.message = Some("VSYNC REQUIRED ON THIS DISPLAY".to_string());
-                        return;
-                    }
-                    self.settings.vsync = false;
-                    self.config.present_mode = present_mode(false, &self.supported_present_modes);
-                } else {
-                    self.settings.vsync = true;
-                    self.config.present_mode = wgpu::PresentMode::Fifo;
+                        .contains(&wgpu::PresentMode::Immediate);
+                if !has_uncapped {
+                    self.message = Some("VSYNC REQUIRED ON THIS DISPLAY".to_string());
+                    return;
                 }
-                self.surface.configure(&self.device, &self.config);
+                self.settings.vsync = false;
+                self.config.present_mode = present_mode(false, &self.supported_present_modes);
+            } else {
+                self.settings.vsync = true;
+                self.config.present_mode = wgpu::PresentMode::Fifo;
             }
-            (true, _, Some(4)) => {
-                self.settings.difficulty = self.settings.difficulty.step(delta as i32)
-            }
-            (true, _, Some(5)) => {
-                self.settings.fps_cap = cycle_fps_cap(self.settings.fps_cap, delta as i32);
-            }
-            (_, true, Some(0)) => {
-                self.settings.master_volume =
-                    (self.settings.master_volume + delta * 0.1).clamp(0.0, 1.0)
-            }
-            (_, true, Some(1)) => {
-                self.settings.music_volume =
-                    (self.settings.music_volume + delta * 0.1).clamp(0.0, 1.0)
-            }
-            (_, true, Some(2)) => {
-                self.settings.sound_volume =
-                    (self.settings.sound_volume + delta * 0.1).clamp(0.0, 1.0)
-            }
-            (_, true, Some(3)) => {
-                self.settings.weather_volume =
-                    (self.settings.weather_volume + delta * 0.1).clamp(0.0, 1.0)
-            }
-            (_, true, Some(4)) => {
-                self.settings.language = self.settings.language.toggle();
-                self.refresh_catalog();
-            }
-            (_, true, Some(5)) => {
-                self.screen = MenuScreen::Accessibility;
-                return;
-            }
-            _ if hit(x, y, -0.82, -0.30, -0.78, -0.64) => {
-                self.screen = MenuScreen::ResourcePacks;
-                self.resource_pack_scroll = self
-                    .resource_pack_scroll
-                    .min(self.resource_packs.available().len().saturating_sub(5));
-                self.focus_index = 0;
-                return;
-            }
-            _ if hit(x, y, -0.25, 0.25, -0.78, -0.64) => {
-                self.screen = MenuScreen::Controls;
-                self.focus_index = 0;
-                return;
-            }
-            _ if hit(x, y, 0.30, 0.82, -0.78, -0.64) => {
-                self.screen = MenuScreen::Main;
-                self.focus_index = 0;
-                return;
-            }
-            _ => return,
+            self.surface.configure(&self.device, &self.config);
+        } else if rects[4].contains(x, y) {
+            self.settings.difficulty = self.settings.difficulty.step(delta as i32);
+        } else if rects[5].contains(x, y) {
+            self.settings.fps_cap = cycle_fps_cap(self.settings.fps_cap, delta as i32);
+        } else if rects[6].contains(x, y) {
+            self.settings.master_volume =
+                (self.settings.master_volume + delta * 0.1).clamp(0.0, 1.0);
+        } else if rects[7].contains(x, y) {
+            self.settings.music_volume =
+                (self.settings.music_volume + delta * 0.1).clamp(0.0, 1.0);
+        } else if rects[8].contains(x, y) {
+            self.settings.sound_volume =
+                (self.settings.sound_volume + delta * 0.1).clamp(0.0, 1.0);
+        } else if rects[9].contains(x, y) {
+            self.settings.weather_volume =
+                (self.settings.weather_volume + delta * 0.1).clamp(0.0, 1.0);
+        } else if rects[10].contains(x, y) {
+            self.settings.language = self.settings.language.toggle();
+            self.refresh_catalog();
+        } else if rects[11].contains(x, y) {
+            self.screen = MenuScreen::Accessibility;
+            return;
+        } else if rects[12].contains(x, y) {
+            self.screen = MenuScreen::ResourcePacks;
+            self.resource_pack_scroll = self
+                .resource_pack_scroll
+                .min(self.resource_packs.available().len().saturating_sub(5));
+            self.focus_index = 0;
+            return;
+        } else if rects[13].contains(x, y) {
+            self.screen = MenuScreen::Controls;
+            self.focus_index = 0;
+            return;
+        } else if rects[14].contains(x, y) {
+            self.screen = MenuScreen::Main;
+            self.focus_index = 0;
+            return;
+        } else {
+            return;
         }
         self.settings.save();
     }
@@ -2506,44 +2599,22 @@ impl Menu {
 
     fn build_ui(&self, vertices: &mut Vec<UiVertex>) {
         let aspect = self.size.height.max(1) as f32 / self.size.width.max(1) as f32;
-        let hovered = |x0, x1, y0, y1| hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, y0, y1);
         draw_rect(vertices, -1.0, 1.0, -1.0, 1.0, [0.02, 0.03, 0.04, 0.30]);
         let ui_start = vertices.len();
         match self.screen {
             MenuScreen::Main => {
                 draw_logo(vertices, aspect, &self.font_source);
-                draw_button(
-                    vertices,
-                    -0.34,
-                    0.34,
-                    0.21,
-                    0.34,
-                    hovered(-0.34, 0.34, 0.21, 0.34),
-                );
-                draw_button(
-                    vertices,
-                    -0.34,
-                    0.34,
-                    0.03,
-                    0.16,
-                    hovered(-0.34, 0.34, 0.03, 0.16),
-                );
-                draw_button(
-                    vertices,
-                    -0.34,
-                    0.34,
-                    -0.15,
-                    -0.02,
-                    hovered(-0.34, 0.34, -0.15, -0.02),
-                );
-                draw_button(
-                    vertices,
-                    -0.34,
-                    0.34,
-                    -0.33,
-                    -0.20,
-                    hovered(-0.34, 0.34, -0.33, -0.20),
-                );
+                let [x, y] = self.mouse_ndc;
+                for rect in MAIN_BUTTON_RECTS {
+                    draw_button(
+                        vertices,
+                        rect.x0,
+                        rect.x1,
+                        rect.y0,
+                        rect.y1,
+                        rect.contains(x, y),
+                    );
+                }
                 draw_centered_text(
                     vertices,
                     &self.tr("menu.singleplayer"),
@@ -2652,27 +2723,26 @@ impl Menu {
             &self.font_source,
         );
 
-        for (x0, x1, label, selected) in [
+        let [x, y] = self.mouse_ndc;
+        for (rect, label, selected) in [
             (
-                -0.52,
-                -0.02,
+                MULTIPLAYER_MODE_RECTS[0],
                 self.tr("menu.host_game"),
                 self.multiplayer_mode == MultiplayerMode::Host,
             ),
             (
-                0.02,
-                0.52,
+                MULTIPLAYER_MODE_RECTS[1],
                 self.tr("menu.join_game"),
                 self.multiplayer_mode == MultiplayerMode::Join,
             ),
         ] {
-            let hover = hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, 0.45, 0.58);
-            draw_button_state(vertices, x0, x1, 0.45, 0.58, hover, selected);
+            let hover = rect.contains(x, y);
+            draw_button_state(vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover, selected);
             draw_centered_text_in(
                 vertices,
                 &label,
-                x0,
-                x1,
+                rect.x0,
+                rect.x1,
                 0.488,
                 0.007,
                 aspect,
@@ -2686,23 +2756,24 @@ impl Menu {
                 vertices,
                 &self.tr("menu.port"),
                 &self.host_port,
-                -0.52,
-                0.52,
-                0.17,
-                0.30,
+                MULTIPLAYER_HOST_PORT_RECT.x0,
+                MULTIPLAYER_HOST_PORT_RECT.x1,
+                MULTIPLAYER_HOST_PORT_RECT.y0,
+                MULTIPLAYER_HOST_PORT_RECT.y1,
                 self.active_field == Some(TextField::HostPort),
                 aspect,
                 &self.font_source,
             ),
             MultiplayerMode::Join => {
+                let field_rects = MULTIPLAYER_JOIN_FIELD_RECTS;
                 draw_field(
                     vertices,
                     &self.tr("menu.server_address"),
                     &self.server_address,
-                    -0.56,
-                    -0.02,
-                    0.17,
-                    0.30,
+                    field_rects[0].x0,
+                    field_rects[0].x1,
+                    field_rects[0].y0,
+                    field_rects[0].y1,
                     self.active_field == Some(TextField::ServerAddress),
                     aspect,
                     &self.font_source,
@@ -2711,10 +2782,10 @@ impl Menu {
                     vertices,
                     &self.tr("menu.port"),
                     &self.join_port,
-                    -0.56,
-                    -0.02,
-                    -0.04,
-                    0.09,
+                    field_rects[1].x0,
+                    field_rects[1].x1,
+                    field_rects[1].y0,
+                    field_rects[1].y1,
                     self.active_field == Some(TextField::JoinPort),
                     aspect,
                     &self.font_source,
@@ -2723,10 +2794,10 @@ impl Menu {
                     vertices,
                     &self.tr("menu.username"),
                     &self.username,
-                    -0.56,
-                    -0.02,
-                    -0.25,
-                    -0.12,
+                    field_rects[2].x0,
+                    field_rects[2].x1,
+                    field_rects[2].y0,
+                    field_rects[2].y1,
                     self.active_field == Some(TextField::Username),
                     aspect,
                     &self.font_source,
@@ -2738,15 +2809,8 @@ impl Menu {
                     .take(3)
                     .enumerate()
                 {
-                    let top = 0.34 - index as f32 * 0.10;
-                    let hover = hit(
-                        self.mouse_ndc[0],
-                        self.mouse_ndc[1],
-                        0.04,
-                        0.56,
-                        top - 0.08,
-                        top,
-                    );
+                    let rect = recent_server_item_rect(index);
+                    let hover = rect.contains(x, y);
                     let label = self
                         .server_address_book
                         .result_for(address)
@@ -2764,39 +2828,33 @@ impl Menu {
                             format!("{} {state}", address)
                         })
                         .unwrap_or_else(|| address.clone());
-                    draw_button(vertices, 0.04, 0.56, top - 0.08, top, hover);
+                    draw_button(vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover);
                     draw_centered_text_in(
                         vertices,
                         &label.chars().take(34).collect::<String>(),
-                        0.04,
-                        0.56,
-                        top - 0.054,
+                        rect.x0,
+                        rect.x1,
+                        rect.y1 - 0.054,
                         0.0043,
                         aspect,
                         [1.0; 4],
                         &self.font_source,
                     );
                 }
+                let ping_rect = MULTIPLAYER_PING_RECT;
                 draw_button(
                     vertices,
-                    0.04,
-                    0.56,
-                    -0.24,
-                    -0.11,
-                    hit(
-                        self.mouse_ndc[0],
-                        self.mouse_ndc[1],
-                        0.04,
-                        0.56,
-                        -0.24,
-                        -0.11,
-                    ),
+                    ping_rect.x0,
+                    ping_rect.x1,
+                    ping_rect.y0,
+                    ping_rect.y1,
+                    ping_rect.contains(x, y),
                 );
                 draw_centered_text_in(
                     vertices,
                     &self.tr("menu.ping_server"),
-                    0.04,
-                    0.56,
+                    ping_rect.x0,
+                    ping_rect.x1,
                     -0.204,
                     0.0058,
                     aspect,
@@ -2810,17 +2868,17 @@ impl Menu {
             MultiplayerMode::Host => self.tr("menu.select_world"),
             MultiplayerMode::Join => self.tr("menu.connect"),
         };
-        for (x0, x1, label) in [
-            (-0.52, -0.02, confirm_label),
-            (0.02, 0.52, self.tr("menu.back")),
-        ] {
-            let hover = hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.58, -0.45);
-            draw_button(vertices, x0, x1, -0.58, -0.45, hover);
+        for (rect, label) in MULTIPLAYER_BOTTOM_RECTS.iter().zip([
+            confirm_label,
+            self.tr("menu.back"),
+        ]) {
+            let hover = rect.contains(x, y);
+            draw_button(vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover);
             draw_centered_text_in(
                 vertices,
                 &label,
-                x0,
-                x1,
+                rect.x0,
+                rect.x1,
                 -0.542,
                 0.007,
                 aspect,
@@ -2852,6 +2910,7 @@ impl Menu {
                 &self.font_source,
             );
         }
+        let [x, y] = self.mouse_ndc;
         for (visible_index, world) in self
             .worlds
             .iter()
@@ -2859,22 +2918,15 @@ impl Menu {
             .take(5)
             .enumerate()
         {
-            let top = 0.58 - visible_index as f32 * 0.19;
+            let rect = world_item_rect(visible_index as isize);
             let selected = self.selected_world.as_deref() == Some(world.directory.as_path());
-            let hover = hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.72,
-                0.72,
-                top - 0.15,
-                top,
-            );
-            draw_button_state(vertices, -0.72, 0.72, top - 0.15, top, hover, selected);
+            let hover = rect.contains(x, y);
+            draw_button_state(vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover, selected);
             draw_text(
                 vertices,
                 &world.metadata.name,
                 -0.68,
-                top - 0.055,
+                rect.y1 - 0.055,
                 0.008,
                 aspect,
                 [1.0; 4],
@@ -2902,7 +2954,7 @@ impl Menu {
                 vertices,
                 &detail,
                 -0.68,
-                top - 0.125,
+                rect.y1 - 0.125,
                 0.0055,
                 aspect,
                 [0.72, 0.76, 0.78, 1.0],
@@ -2921,24 +2973,24 @@ impl Menu {
                 &self.font_source,
             );
         }
-        for (x0, x1, label) in [
-            (-0.72, -0.27, self.tr("menu.play_selected")),
-            (-0.23, 0.23, self.tr("menu.create_new_world")),
-            (0.27, 0.72, self.tr("menu.delete")),
-        ] {
+        for (rect, label) in WORLDS_BOTTOM_RECTS[0..3].iter().zip([
+            self.tr("menu.play_selected"),
+            self.tr("menu.create_new_world"),
+            self.tr("menu.delete"),
+        ]) {
             draw_button(
                 vertices,
-                x0,
-                x1,
-                -0.64,
-                -0.51,
-                hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.64, -0.51),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
             );
             draw_centered_text_in(
                 vertices,
                 &label,
-                x0,
-                x1,
+                rect.x0,
+                rect.x1,
                 -0.602,
                 0.006,
                 aspect,
@@ -2946,24 +2998,24 @@ impl Menu {
                 &self.font_source,
             );
         }
-        for (x0, x1, label) in [
-            (-0.72, -0.27, self.tr("menu.copy")),
-            (-0.23, 0.23, self.tr("menu.backup")),
-            (0.27, 0.72, self.tr("menu.back")),
-        ] {
+        for (rect, label) in WORLDS_BOTTOM_RECTS[3..6].iter().zip([
+            self.tr("menu.copy"),
+            self.tr("menu.backup"),
+            self.tr("menu.back"),
+        ]) {
             draw_button(
                 vertices,
-                x0,
-                x1,
-                -0.84,
-                -0.72,
-                hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.84, -0.72),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
             );
             draw_centered_text_in(
                 vertices,
                 &label,
-                x0,
-                x1,
+                rect.x0,
+                rect.x1,
                 -0.805,
                 0.006,
                 aspect,
@@ -2984,14 +3036,16 @@ impl Menu {
             [1.0; 4],
             &self.font_source,
         );
+        let rects = CREATE_WORLD_RECTS;
+        let [x, y] = self.mouse_ndc;
         draw_field(
             vertices,
             &self.tr("menu.world_name"),
             &self.create_name,
-            -0.52,
-            0.52,
-            0.34,
-            0.47,
+            rects[0].x0,
+            rects[0].x1,
+            rects[0].y0,
+            rects[0].y1,
             self.active_field == Some(TextField::WorldName),
             aspect,
             &self.font_source,
@@ -3005,28 +3059,21 @@ impl Menu {
             vertices,
             &self.tr("menu.seed"),
             &seed,
-            -0.52,
-            0.52,
-            0.13,
-            0.26,
+            rects[1].x0,
+            rects[1].x1,
+            rects[1].y0,
+            rects[1].y1,
             self.active_field == Some(TextField::Seed),
             aspect,
             &self.font_source,
         );
         draw_button(
             vertices,
-            -0.52,
-            0.52,
-            -0.08,
-            0.05,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.52,
-                0.52,
-                -0.08,
-                0.05,
-            ),
+            rects[2].x0,
+            rects[2].x1,
+            rects[2].y0,
+            rects[2].y1,
+            rects[2].contains(x, y),
         );
         draw_centered_text(
             vertices,
@@ -3042,18 +3089,11 @@ impl Menu {
         );
         draw_button(
             vertices,
-            -0.52,
-            0.52,
-            -0.29,
-            -0.16,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.52,
-                0.52,
-                -0.29,
-                -0.16,
-            ),
+            rects[3].x0,
+            rects[3].x1,
+            rects[3].y0,
+            rects[3].y1,
+            rects[3].contains(x, y),
         );
         draw_centered_text(
             vertices,
@@ -3069,18 +3109,11 @@ impl Menu {
         );
         draw_button(
             vertices,
-            -0.52,
-            0.52,
-            -0.42,
-            -0.30,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.52,
-                0.52,
-                -0.42,
-                -0.30,
-            ),
+            rects[4].x0,
+            rects[4].x1,
+            rects[4].y0,
+            rects[4].y1,
+            rects[4].contains(x, y),
         );
         draw_centered_text(
             vertices,
@@ -3096,33 +3129,19 @@ impl Menu {
         );
         draw_button(
             vertices,
-            -0.52,
-            -0.02,
-            -0.54,
-            -0.43,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.52,
-                -0.02,
-                -0.54,
-                -0.43,
-            ),
+            rects[5].x0,
+            rects[5].x1,
+            rects[5].y0,
+            rects[5].y1,
+            rects[5].contains(x, y),
         );
         draw_button(
             vertices,
-            0.02,
-            0.52,
-            -0.54,
-            -0.43,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                0.02,
-                0.52,
-                -0.54,
-                -0.43,
-            ),
+            rects[6].x0,
+            rects[6].x1,
+            rects[6].y0,
+            rects[6].y1,
+            rects[6].contains(x, y),
         );
         let structures_value = self.on_off_label(self.create_generate_structures);
         let structures_text = self
@@ -3131,8 +3150,8 @@ impl Menu {
         draw_centered_text_in(
             vertices,
             &structures_text,
-            -0.52,
-            -0.02,
+            rects[5].x0,
+            rects[5].x1,
             -0.505,
             0.005,
             aspect,
@@ -3146,8 +3165,8 @@ impl Menu {
         draw_centered_text_in(
             vertices,
             &hardcore_text,
-            0.02,
-            0.52,
+            rects[6].x0,
+            rects[6].x1,
             -0.505,
             0.005,
             aspect,
@@ -3156,33 +3175,19 @@ impl Menu {
         );
         draw_button(
             vertices,
-            -0.52,
-            -0.02,
-            -0.69,
-            -0.58,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.52,
-                -0.02,
-                -0.69,
-                -0.58,
-            ),
+            rects[7].x0,
+            rects[7].x1,
+            rects[7].y0,
+            rects[7].y1,
+            rects[7].contains(x, y),
         );
         draw_button(
             vertices,
-            0.02,
-            0.52,
-            -0.69,
-            -0.58,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                0.02,
-                0.52,
-                -0.69,
-                -0.58,
-            ),
+            rects[8].x0,
+            rects[8].x1,
+            rects[8].y0,
+            rects[8].y1,
+            rects[8].contains(x, y),
         );
         let bonus_value = self.on_off_label(self.create_bonus_chest);
         let bonus_text = self
@@ -3191,8 +3196,8 @@ impl Menu {
         draw_centered_text_in(
             vertices,
             &bonus_text,
-            -0.52,
-            -0.02,
+            rects[7].x0,
+            rects[7].x1,
             -0.657,
             0.0048,
             aspect,
@@ -3206,8 +3211,8 @@ impl Menu {
         draw_centered_text_in(
             vertices,
             &cheats_text,
-            0.02,
-            0.52,
+            rects[8].x0,
+            rects[8].x1,
             -0.657,
             0.0048,
             aspect,
@@ -3216,39 +3221,25 @@ impl Menu {
         );
         draw_button(
             vertices,
-            -0.52,
-            -0.02,
-            -0.84,
-            -0.71,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.52,
-                -0.02,
-                -0.84,
-                -0.71,
-            ),
+            rects[9].x0,
+            rects[9].x1,
+            rects[9].y0,
+            rects[9].y1,
+            rects[9].contains(x, y),
         );
         draw_button(
             vertices,
-            0.02,
-            0.52,
-            -0.84,
-            -0.71,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                0.02,
-                0.52,
-                -0.84,
-                -0.71,
-            ),
+            rects[10].x0,
+            rects[10].x1,
+            rects[10].y0,
+            rects[10].y1,
+            rects[10].contains(x, y),
         );
         draw_centered_text_in(
             vertices,
             &self.tr("menu.create_world"),
-            -0.52,
-            -0.02,
+            rects[9].x0,
+            rects[9].x1,
             -0.798,
             0.007,
             aspect,
@@ -3258,8 +3249,8 @@ impl Menu {
         draw_centered_text_in(
             vertices,
             &self.tr("menu.cancel"),
-            0.02,
-            0.52,
+            rects[10].x0,
+            rects[10].x1,
             -0.798,
             0.007,
             aspect,
@@ -3319,29 +3310,24 @@ impl Menu {
             ),
             self.tr("menu.accessibility"),
         ];
+        let rects = options_button_rects();
+        let [x, y] = self.mouse_ndc;
         for (row, label) in left.iter().enumerate() {
-            let top = OPTIONS_ROW_TOPS[row];
+            let rect = rects[row];
             draw_button(
                 vertices,
-                -0.82,
-                -0.05,
-                top - 0.13,
-                top,
-                hit(
-                    self.mouse_ndc[0],
-                    self.mouse_ndc[1],
-                    -0.82,
-                    -0.05,
-                    top - 0.13,
-                    top,
-                ),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
             );
             draw_centered_text_in(
                 vertices,
                 label,
-                -0.82,
-                -0.05,
-                top - 0.092,
+                rect.x0,
+                rect.x1,
+                rect.y1 - 0.092,
                 0.0058,
                 aspect,
                 [1.0; 4],
@@ -3349,52 +3335,45 @@ impl Menu {
             );
         }
         for (row, label) in right.iter().enumerate() {
-            let top = OPTIONS_ROW_TOPS[row];
+            let rect = rects[6 + row];
             draw_button(
                 vertices,
-                0.05,
-                0.82,
-                top - 0.13,
-                top,
-                hit(
-                    self.mouse_ndc[0],
-                    self.mouse_ndc[1],
-                    0.05,
-                    0.82,
-                    top - 0.13,
-                    top,
-                ),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
             );
             draw_centered_text_in(
                 vertices,
                 label,
-                0.05,
-                0.82,
-                top - 0.092,
+                rect.x0,
+                rect.x1,
+                rect.y1 - 0.092,
                 0.0058,
                 aspect,
                 [1.0; 4],
                 &self.font_source,
             );
         }
-        for (x0, x1, label) in [
-            (-0.82, -0.30, self.tr("menu.resource_packs")),
-            (-0.25, 0.25, self.tr("menu.controls")),
-            (0.30, 0.82, self.tr("menu.done")),
-        ] {
+        for (rect, label) in OPTIONS_BOTTOM_RECTS.iter().zip([
+            self.tr("menu.resource_packs"),
+            self.tr("menu.controls"),
+            self.tr("menu.done"),
+        ]) {
             draw_button(
                 vertices,
-                x0,
-                x1,
-                -0.78,
-                -0.64,
-                hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.78, -0.64),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
             );
             draw_centered_text_in(
                 vertices,
                 &label,
-                x0,
-                x1,
+                rect.x0,
+                rect.x1,
                 -0.738,
                 0.006,
                 aspect,
@@ -3405,30 +3384,32 @@ impl Menu {
     }
 
     fn handle_accessibility_click(&mut self, x: f32, y: f32) {
-        let column = if x < 0.0 { 0 } else { 1 };
-        let row = ((0.56 - y) / 0.18).floor() as i32;
-        if (0..5).contains(&row) && x.abs() <= 0.84 {
-            let index = column * 5 + row as usize;
-            let setting = crate::accessibility::AccessibilityRow::ALL[index];
-            let delta = if x < -0.42 || (x > 0.05 && x < 0.42) {
-                -1
-            } else {
-                1
-            };
-            match setting {
-                crate::accessibility::AccessibilityRow::UiScale => {
-                    self.settings.accessibility.cycle_ui_scale(delta)
+        let rects = accessibility_button_rects();
+        for (index, rect) in rects[..10].iter().enumerate() {
+            if rect.contains(x, y) {
+                let setting = crate::accessibility::AccessibilityRow::ALL[index];
+                let delta = if x < -0.42 || (x > 0.05 && x < 0.42) {
+                    -1
+                } else {
+                    1
+                };
+                match setting {
+                    crate::accessibility::AccessibilityRow::UiScale => {
+                        self.settings.accessibility.cycle_ui_scale(delta)
+                    }
+                    crate::accessibility::AccessibilityRow::ChatScale => {
+                        self.settings.accessibility.cycle_chat_scale(delta)
+                    }
+                    crate::accessibility::AccessibilityRow::ChatOpacity => {
+                        self.settings.accessibility.cycle_chat_opacity(delta)
+                    }
+                    _ => self.settings.accessibility.toggle(setting),
                 }
-                crate::accessibility::AccessibilityRow::ChatScale => {
-                    self.settings.accessibility.cycle_chat_scale(delta)
-                }
-                crate::accessibility::AccessibilityRow::ChatOpacity => {
-                    self.settings.accessibility.cycle_chat_opacity(delta)
-                }
-                _ => self.settings.accessibility.toggle(setting),
+                self.settings.save();
+                return;
             }
-            self.settings.save();
-        } else if hit(x, y, -0.25, 0.25, -0.78, -0.64) {
+        }
+        if rects[10].contains(x, y) {
             self.screen = MenuScreen::Options;
             self.focus_index = 0;
         }
@@ -3440,27 +3421,31 @@ impl Menu {
             .len()
             .saturating_sub(self.resource_pack_scroll)
             .min(5);
-        let row = ((0.56 - y) / 0.14).floor() as usize;
-        if row < visible_count && y <= 0.56 && y >= 0.56 - visible_count as f32 * 0.14 {
-            let index = self.resource_pack_scroll + row;
-            if let Some(summary) = available.get(index) {
-                let mut selected = self.resource_packs.enabled_order().to_vec();
-                if let Some(position) = selected.iter().position(|id| id == &summary.manifest.id) {
-                    selected.remove(position);
-                } else {
-                    selected.push(summary.manifest.id.clone());
+        for row in 0..visible_count {
+            let rect = resource_pack_item_rect(row as isize);
+            if rect.contains(x, y) {
+                let index = self.resource_pack_scroll + row;
+                if let Some(summary) = available.get(index) {
+                    let mut selected = self.resource_packs.enabled_order().to_vec();
+                    if let Some(position) = selected.iter().position(|id| id == &summary.manifest.id) {
+                        selected.remove(position);
+                    } else {
+                        selected.push(summary.manifest.id.clone());
+                    }
+                    if let Err(error) = self.resource_packs.apply_enabled_order(&selected) {
+                        self.message = Some(format!("PACK REJECTED: {error}"));
+                    } else {
+                        self.refresh_catalog();
+                    }
                 }
-                if let Err(error) = self.resource_packs.apply_enabled_order(&selected) {
-                    self.message = Some(format!("PACK REJECTED: {error}"));
-                } else {
-                    self.refresh_catalog();
-                }
+                return;
             }
-        } else if hit(x, y, -0.78, -0.28, -0.78, -0.64) {
+        }
+        if RESOURCE_PACKS_BOTTOM_RECTS[0].contains(x, y) {
             self.settings.resource_packs = self.resource_packs.enabled_order().to_vec();
             self.settings.save();
             self.message = Some("PACKS APPLIED FOR NEXT WORLD".to_string());
-        } else if hit(x, y, -0.22, 0.22, -0.78, -0.64) {
+        } else if RESOURCE_PACKS_BOTTOM_RECTS[1].contains(x, y) {
             if let Err(error) = self.resource_packs.reload() {
                 self.message = Some(format!("PACK RELOAD FAILED: {error}"));
             } else if !self.settings.resource_packs.is_empty() {
@@ -3471,7 +3456,7 @@ impl Menu {
             } else {
                 self.refresh_catalog();
             }
-        } else if hit(x, y, 0.28, 0.78, -0.78, -0.64) {
+        } else if RESOURCE_PACKS_BOTTOM_RECTS[2].contains(x, y) {
             self.screen = MenuScreen::Options;
             self.focus_index = 0;
         }
@@ -3489,15 +3474,10 @@ impl Menu {
             &self.font_source,
         );
         let rows = crate::accessibility::AccessibilityRow::ALL;
+        let rects = accessibility_button_rects();
+        let [x, y] = self.mouse_ndc;
         for (index, setting) in rows.into_iter().enumerate() {
-            let column = index / 5;
-            let row = index % 5;
-            let (x0, x1) = if column == 0 {
-                (-0.82, -0.05)
-            } else {
-                (0.05, 0.82)
-            };
-            let top = 0.56 - row as f32 * 0.18;
+            let rect = rects[index];
             let value = match setting {
                 crate::accessibility::AccessibilityRow::UiScale => self.catalog.format_lookup(
                     "menu.ui_scale_value",
@@ -3531,45 +3511,32 @@ impl Menu {
             };
             draw_button(
                 vertices,
-                x0,
-                x1,
-                top - 0.13,
-                top,
-                hit(
-                    self.mouse_ndc[0],
-                    self.mouse_ndc[1],
-                    x0,
-                    x1,
-                    top - 0.13,
-                    top,
-                ),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
             );
             draw_centered_text_in(
                 vertices,
                 &value,
-                x0,
-                x1,
-                top - 0.092,
+                rect.x0,
+                rect.x1,
+                rect.y1 - 0.092,
                 0.0055,
                 aspect,
                 [1.0; 4],
                 &self.font_source,
             );
         }
+        let done_rect = rects[10];
         draw_button(
             vertices,
-            -0.25,
-            0.25,
-            -0.78,
-            -0.64,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.25,
-                0.25,
-                -0.78,
-                -0.64,
-            ),
+            done_rect.x0,
+            done_rect.x1,
+            done_rect.y0,
+            done_rect.y1,
+            done_rect.contains(x, y),
         );
         draw_centered_text(
             vertices,
@@ -3606,23 +3573,17 @@ impl Menu {
             );
         }
         let start = self.resource_pack_scroll.min(available.len());
+        let [x, y] = self.mouse_ndc;
         for (visible_index, summary) in available.iter().skip(start).take(5).enumerate() {
-            let top = 0.56 - visible_index as f32 * 0.14;
+            let rect = resource_pack_item_rect(visible_index as isize);
             let selected = summary.enabled;
             draw_button_state(
                 vertices,
-                -0.78,
-                0.78,
-                top - 0.11,
-                top,
-                hit(
-                    self.mouse_ndc[0],
-                    self.mouse_ndc[1],
-                    -0.78,
-                    0.78,
-                    top - 0.11,
-                    top,
-                ),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
                 selected,
             );
             let marker = if selected { "[X]" } else { "[ ]" };
@@ -3634,31 +3595,31 @@ impl Menu {
                 vertices,
                 &label,
                 -0.72,
-                top - 0.082,
+                rect.y1 - 0.082,
                 0.0058,
                 aspect,
                 [1.0; 4],
                 &self.font_source,
             );
         }
-        for (x0, x1, label) in [
-            (-0.78, -0.28, self.tr("menu.apply")),
-            (-0.22, 0.22, self.tr("menu.reload")),
-            (0.28, 0.78, self.tr("menu.back")),
-        ] {
+        for (rect, label) in RESOURCE_PACKS_BOTTOM_RECTS.iter().zip([
+            self.tr("menu.apply"),
+            self.tr("menu.reload"),
+            self.tr("menu.back"),
+        ]) {
             draw_button(
                 vertices,
-                x0,
-                x1,
-                -0.78,
-                -0.64,
-                hit(self.mouse_ndc[0], self.mouse_ndc[1], x0, x1, -0.78, -0.64),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
             );
             draw_centered_text_in(
                 vertices,
                 &label,
-                x0,
-                x1,
+                rect.x0,
+                rect.x1,
                 -0.738,
                 0.006,
                 aspect,
@@ -3693,20 +3654,15 @@ impl Menu {
             [1.0; 4],
             &self.font_source,
         );
+        let rects = controls_button_rects();
+        let [x, y] = self.mouse_ndc;
         draw_button(
             vertices,
-            -0.48,
-            0.48,
-            0.49,
-            0.62,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.48,
-                0.48,
-                0.49,
-                0.62,
-            ),
+            rects[0].x0,
+            rects[0].x1,
+            rects[0].y0,
+            rects[0].y1,
+            rects[0].contains(x, y),
         );
         draw_centered_text(
             vertices,
@@ -3734,29 +3690,15 @@ impl Menu {
             ControlAction::Inventory,
         ];
         for (index, action) in actions.into_iter().enumerate() {
-            let column = index / 4;
-            let row = index % 4;
-            let (x0, x1) = if column == 0 {
-                (-0.78, -0.04)
-            } else {
-                (0.04, 0.78)
-            };
-            let top = 0.38 - row as f32 * 0.19;
+            let rect = rects[1 + index];
             let active = self.rebinding == Some(action);
             draw_button_state(
                 vertices,
-                x0,
-                x1,
-                top - 0.14,
-                top,
-                hit(
-                    self.mouse_ndc[0],
-                    self.mouse_ndc[1],
-                    x0,
-                    x1,
-                    top - 0.14,
-                    top,
-                ),
+                rect.x0,
+                rect.x1,
+                rect.y0,
+                rect.y1,
+                rect.contains(x, y),
                 active,
             );
             let value = if active {
@@ -3773,9 +3715,9 @@ impl Menu {
                         ("value", &value),
                     ],
                 ),
-                x0,
-                x1,
-                top - 0.098,
+                rect.x0,
+                rect.x1,
+                rect.y1 - 0.098,
                 0.0065,
                 aspect,
                 [1.0; 4],
@@ -3784,18 +3726,11 @@ impl Menu {
         }
         draw_button(
             vertices,
-            -0.25,
-            0.25,
-            -0.78,
-            -0.64,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.25,
-                0.25,
-                -0.78,
-                -0.64,
-            ),
+            rects[9].x0,
+            rects[9].x1,
+            rects[9].y0,
+            rects[9].y1,
+            rects[9].contains(x, y),
         );
         draw_centered_text(
             vertices,
@@ -3842,41 +3777,29 @@ impl Menu {
             [0.85, 0.85, 0.85, 1.0],
             &self.font_source,
         );
+        let [x, y] = self.mouse_ndc;
+        let [del_rect, cancel_rect] = CONFIRM_DELETE_BUTTON_RECTS;
         draw_button(
             vertices,
-            -0.48,
-            -0.02,
-            -0.16,
-            -0.02,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                -0.48,
-                -0.02,
-                -0.16,
-                -0.02,
-            ),
+            del_rect.x0,
+            del_rect.x1,
+            del_rect.y0,
+            del_rect.y1,
+            del_rect.contains(x, y),
         );
         draw_button(
             vertices,
-            0.02,
-            0.48,
-            -0.16,
-            -0.02,
-            hit(
-                self.mouse_ndc[0],
-                self.mouse_ndc[1],
-                0.02,
-                0.48,
-                -0.16,
-                -0.02,
-            ),
+            cancel_rect.x0,
+            cancel_rect.x1,
+            cancel_rect.y0,
+            cancel_rect.y1,
+            cancel_rect.contains(x, y),
         );
         draw_centered_text_in(
             vertices,
             &self.tr("menu.delete"),
-            -0.48,
-            -0.02,
+            del_rect.x0,
+            del_rect.x1,
             -0.118,
             0.007,
             aspect,
@@ -3886,8 +3809,8 @@ impl Menu {
         draw_centered_text_in(
             vertices,
             &self.tr("menu.cancel"),
-            0.02,
-            0.48,
+            cancel_rect.x0,
+            cancel_rect.x1,
             -0.118,
             0.007,
             aspect,
@@ -3995,7 +3918,7 @@ fn control_label(catalog: &TranslationCatalog, action: ControlAction) -> String 
 }
 
 fn hit(x: f32, y: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> bool {
-    x >= x0 && x <= x1 && y >= y0 && y <= y1
+    MenuRect::new(x0, x1, y0, y1).contains(x, y)
 }
 
 fn draw_rect(vertices: &mut Vec<UiVertex>, x0: f32, x1: f32, y0: f32, y1: f32, color: [f32; 4]) {
@@ -4888,6 +4811,51 @@ key_pause = ESC
                 assert!((-1.0..=1.0).contains(&y0));
                 assert!((-1.0..=1.0).contains(&y1));
             }
+        }
+    }
+
+    #[test]
+    fn menu_rect_tables_are_valid_and_consistent() {
+        let mut all_rects = Vec::new();
+        all_rects.extend_from_slice(&MAIN_BUTTON_RECTS);
+        all_rects.extend_from_slice(&CONFIRM_DELETE_BUTTON_RECTS);
+        all_rects.extend_from_slice(&CREATE_WORLD_RECTS);
+        all_rects.extend_from_slice(&OPTIONS_BOTTOM_RECTS);
+        all_rects.extend_from_slice(&options_button_rects());
+        all_rects.extend_from_slice(&controls_button_rects());
+        all_rects.extend_from_slice(&accessibility_button_rects());
+        all_rects.extend_from_slice(&RESOURCE_PACKS_BOTTOM_RECTS);
+        all_rects.extend_from_slice(&WORLDS_BOTTOM_RECTS);
+        all_rects.extend_from_slice(&MULTIPLAYER_MODE_RECTS);
+        all_rects.push(MULTIPLAYER_HOST_PORT_RECT);
+        all_rects.extend_from_slice(&MULTIPLAYER_JOIN_FIELD_RECTS);
+        all_rects.push(MULTIPLAYER_PING_RECT);
+        all_rects.extend_from_slice(&MULTIPLAYER_BOTTOM_RECTS);
+
+        for i in 0..5 {
+            all_rects.push(world_item_rect(i));
+            all_rects.push(resource_pack_item_rect(i));
+        }
+        for i in 0..3 {
+            all_rects.push(recent_server_item_rect(i));
+        }
+
+        for rect in all_rects {
+            assert!(rect.x0 < rect.x1, "x0 ({}) must be < x1 ({})", rect.x0, rect.x1);
+            assert!(rect.y0 < rect.y1, "y0 ({}) must be < y1 ({})", rect.y0, rect.y1);
+            assert!((-1.0..=1.0).contains(&rect.x0));
+            assert!((-1.0..=1.0).contains(&rect.x1));
+            assert!((-1.0..=1.0).contains(&rect.y0));
+            assert!((-1.0..=1.0).contains(&rect.y1));
+
+            let cx = (rect.x0 + rect.x1) * 0.5;
+            let cy = (rect.y0 + rect.y1) * 0.5;
+            assert!(rect.contains(cx, cy));
+            assert!(hit(cx, cy, rect.x0, rect.x1, rect.y0, rect.y1));
+            assert!(!rect.contains(rect.x0 - 0.1, cy));
+            assert!(!rect.contains(rect.x1 + 0.1, cy));
+            assert!(!rect.contains(cx, rect.y0 - 0.1));
+            assert!(!rect.contains(cx, rect.y1 + 0.1));
         }
     }
 
