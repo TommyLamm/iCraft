@@ -30,43 +30,37 @@
 
 ## 精確 acceptance
 
-- [ ] `SoundMaterial` 不再定義在 `src/audio.rs`。放到 `src/world/block.rs` 或
-      `src/world/sound.rs`，由 `world` 模組 `pub use`。`BlockType::sound_material`
-      的對照表 bit-identical。
-- [ ] `src/world/block.rs` **不得** `use crate::audio`。
-- [ ] `update_mobs` 不再接受 `&mut crate::audio::AudioManager`。改為：
-      - 回傳／callback 一小組已存在的 `SoundId`（若 `SoundId` 仍在 audio，改用
-        不含 rodio 的事件 enum，desktop 再 map 到 `SoundId`），或
-      - leftover 呼叫端在 `update_mobs` 之後自己 `play_sound`。
-      單元測用 no-op sink。不得改 mob 傷害／爆炸／掉落數字。
-- [ ] `src/lib.rs` 刪除 `pub mod audio`。`src/main.rs` 改宣告 `mod audio`
-      （與 `presentation` 相同：desktop-only，不得加回 lib）。
-      desktop 既有 `crate::audio` 路徑用 `main.rs` 的 `mod` 消化；不要再
-      `pub use icraft::audio`。
-- [ ] `cargo check --bin icraft-server` 與 `cargo check --lib` 的 rustc JSON
-      **不得**出現 `src/audio.rs`。
-- [ ] `Cargo.toml` 的 `rodio`／`wgpu`／`winit` **保持** 普通依賴。不得開
-      `client` feature 或 workspace crate。
-- [ ] 既有測試期望值不變。`BlockType::sound_material` 單元測（若有）對照表不變。
+- [x] `SoundMaterial` 不再定義在 `src/audio.rs`。放到 `src/world/block.rs`，由 `world`
+      模組 `pub use`。`BlockType::sound_material` 的對照表 bit-identical。
+- [x] `src/world/block.rs` **不得** `use crate::audio`（已完全移除）。
+- [x] `update_mobs` 不再接受 `&mut crate::audio::AudioManager`。改為：
+      - 定義 `MobSoundEvent`，透過 callback `on_sound: impl FnMut(MobSoundEvent, Vec3)`
+        通知音效事件，由 desktop (`legacy_sim.rs`) 映射至 `SoundId` 並呼叫 `play_sound_3d`。
+      - 單元測試傳入 no-op sink `|_, _| {}`。未改動任何 mob 傷害／爆炸／掉落數字。
+- [x] `src/lib.rs` 刪除 `pub mod audio`。`src/main.rs` 改宣告 `mod audio`
+      （desktop-only）。desktop 既有 `crate::audio` 路徑由 `main.rs` 消化。
+- [x] `cargo check --bin icraft-server` 與 `cargo check --lib` 的 rustc JSON
+      **不再**出現 `src/audio.rs`。
+- [x] `Cargo.toml` 的 `rodio`／`wgpu`／`winit` **保持** 普通依賴。未修改 Cargo features。
+- [x] 既有測試期望值不變。`BlockType::sound_material` 對照表不變。
 
 ## 預計檔案與測試
 
-- 新增或修改：`src/world/block.rs` 或 `src/world/sound.rs`、`src/audio.rs`、
-      `src/mob.rs`、`src/lib.rs`、`src/main.rs`、leftover 呼叫端（若改 signature）。
+- 修改：`src/world/block.rs`、`src/audio.rs`、`src/mob.rs`、`src/lib.rs`、`src/main.rs`、`src/presentation/legacy_sim.rs`、`ARCHITECTURE.md`。
 - 測試：
-  - `cargo check --bin icraft-server`
-  - `cargo check --lib`
-  - `cargo check --bin icraft`
-  - `cargo test --lib world::`
-  - `cargo test --lib mob::`
-  - `cargo test --bin icraft interpolation_midpoint_and_clamps -- --test-threads=1`
-  - rustc JSON：server／lib 不含 `audio.rs`；desktop 仍含
+  - `cargo check --bin icraft-server`（通過，不再編譯 `src/audio.rs`）
+  - `cargo check --lib`（通過）
+  - `cargo check --bin icraft`（通過）
+  - `cargo test --lib world::`（通過，73 passed）
+  - `cargo test --lib mob::`（通過，15 passed）
+  - `cargo test --bin icraft interpolation_midpoint_and_clamps -- --test-threads=1`（通過，1 passed）
+  - rustc JSON：server／lib 不含 `audio.rs`；desktop 仍含（已驗證）
 
 ## 建議階段
 
-1. 搬 `SoundMaterial`，`world/block.rs` 去掉 `crate::audio`。`cargo test --lib world::`。
-2. 拿掉 `update_mobs` 的 `AudioManager` 參數。跑 `mob::`。
-3. `audio` 改由 `main.rs` 宣告。確認 server JSON 不再列 `audio.rs`。
+1. 搬 `SoundMaterial`，`world/block.rs` 去掉 `crate::audio`。`cargo test --lib world::`。（已完成）
+2. 拿掉 `update_mobs` 的 `AudioManager` 參數。跑 `mob::`。（已完成）
+3. `audio` 改由 `main.rs` 宣告。確認 server JSON 不再列 `audio.rs`。（已完成）
 
 ## 不在本計劃
 

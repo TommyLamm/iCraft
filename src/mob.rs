@@ -282,7 +282,15 @@ pub fn spawn_mobs(
     }
 }
 
-pub fn update_mobs(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobSoundEvent {
+    ArrowShoot,
+    CreeperIgnition,
+    Explosion,
+    PlayerDeath,
+}
+
+pub fn update_mobs<F>(
     entity_manager: &mut EntityManager,
     chunk_manager: &mut ChunkManager,
     dirty_meshes: &mut std::collections::HashSet<(i32, i32)>,
@@ -292,13 +300,15 @@ pub fn update_mobs(
     sky_light_level: u8,
     is_raining: bool,
     dt: f32,
-    audio_manager: &mut crate::audio::AudioManager,
-    listener_right: Vec3,
+    mut on_sound: F,
     player_invisible: bool,
     damage_multiplier: f32,
     is_host: bool,
     mob_griefing: bool,
-) -> Vec<(i32, i32, i32)> {
+) -> Vec<(i32, i32, i32)>
+where
+    F: FnMut(MobSoundEvent, Vec3),
+{
     if !is_host {
         return Vec::new();
     }
@@ -521,13 +531,7 @@ pub fn update_mobs(
                         arrows_to_spawn.push((spawn_pos, arrow_vel));
                         entity.action_cooldown = 2.0; // Shooting cooldown
 
-                        let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
-                        audio_manager.play_sound_3d(
-                            crate::audio::SoundId::ArrowShoot,
-                            spawn_pos,
-                            listener_pos,
-                            listener_right,
-                        );
+                        on_sound(MobSoundEvent::ArrowShoot, spawn_pos);
                     }
                 }
                 EntityType::Creeper => {
@@ -561,13 +565,7 @@ pub fn update_mobs(
                             entity.is_ignited = true;
                             entity.action_cooldown = 1.5; // Fuse duration
 
-                            let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
-                            audio_manager.play_sound_3d(
-                                crate::audio::SoundId::CreeperIgnition,
-                                entity.position,
-                                listener_pos,
-                                listener_right,
-                            );
+                            on_sound(MobSoundEvent::CreeperIgnition, entity.position);
                         }
                     } else if dist_sq > 12.25 {
                         if entity.is_ignited {
@@ -629,13 +627,7 @@ pub fn update_mobs(
             damage_multiplier,
         ));
 
-        let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
-        audio_manager.play_sound_3d(
-            crate::audio::SoundId::Explosion,
-            exp_pos,
-            listener_pos,
-            listener_right,
-        );
+        on_sound(MobSoundEvent::Explosion, exp_pos);
     }
 
     // Handle player taking damage
@@ -755,14 +747,8 @@ pub fn update_mobs(
         }
     }
 
-    let listener_pos = player_physics.position + Vec3::new(0.0, 1.6, 0.0);
     for death_pos in death_sounds {
-        audio_manager.play_sound_3d(
-            crate::audio::SoundId::PlayerDeath,
-            death_pos,
-            listener_pos,
-            listener_right,
-        );
+        on_sound(MobSoundEvent::PlayerDeath, death_pos);
     }
 
     // Clean up dead entities (health < 0 or health == 0)
@@ -928,7 +914,6 @@ mod tests {
             let mut chunk_meshes = std::collections::HashSet::new();
             let mut player_physics = PlayerPhysics::new(Vec3::new(0.0, 1.0, 0.0));
             let mut player_state = PlayerState::new();
-            let mut audio_manager = crate::audio::AudioManager::new();
 
             update_mobs(
                 &mut entity_manager,
@@ -940,8 +925,7 @@ mod tests {
                 0,
                 false,
                 0.0,
-                &mut audio_manager,
-                Vec3::X,
+                |_, _| {},
                 false,
                 1.0,
                 true,
@@ -969,7 +953,6 @@ mod tests {
         let mut chunk_meshes = std::collections::HashSet::new();
         let mut player_physics = PlayerPhysics::new(Vec3::new(0.0, 1.0, 0.0));
         let mut player_state = PlayerState::new();
-        let mut audio_manager = crate::audio::AudioManager::new();
 
         update_mobs(
             &mut entity_manager,
@@ -981,8 +964,7 @@ mod tests {
             15,
             false,
             0.1,
-            &mut audio_manager,
-            Vec3::X,
+            |_, _| {},
             false,
             1.0,
             true,
@@ -1015,7 +997,6 @@ mod tests {
         let mut chunk_meshes = std::collections::HashSet::new();
         let mut player_physics = PlayerPhysics::new(Vec3::new(2.0, 2.0, 0.0));
         let mut player_state = PlayerState::new();
-        let mut audio_manager = crate::audio::AudioManager::new();
 
         let removed = update_mobs(
             &mut entity_manager,
@@ -1027,8 +1008,7 @@ mod tests {
             0,
             false,
             0.2,
-            &mut audio_manager,
-            Vec3::X,
+            |_, _| {},
             false,
             1.0,
             true,
@@ -1058,7 +1038,6 @@ mod tests {
         let mut chunk_meshes = std::collections::HashSet::new();
         let mut player_physics = PlayerPhysics::new(Vec3::ZERO);
         let mut player_state = PlayerState::new();
-        let mut audio_manager = crate::audio::AudioManager::new();
         update_mobs(
             &mut entity_manager,
             &mut chunk_manager,
@@ -1069,8 +1048,7 @@ mod tests {
             15,
             false,
             0.1,
-            &mut audio_manager,
-            Vec3::X,
+            |_, _| {},
             false,
             1.0,
             true,
@@ -1116,7 +1094,6 @@ mod tests {
         let mut chunk_meshes = std::collections::HashSet::new();
         let mut player_physics = PlayerPhysics::new(Vec3::ZERO);
         let mut player_state = PlayerState::new();
-        let mut audio_manager = crate::audio::AudioManager::new();
 
         update_mobs(
             &mut entity_manager,
@@ -1128,8 +1105,7 @@ mod tests {
             15,
             false,
             0.1,
-            &mut audio_manager,
-            Vec3::X,
+            |_, _| {},
             false,
             1.0,
             true,

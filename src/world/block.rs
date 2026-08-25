@@ -1,7 +1,18 @@
-use crate::audio::SoundMaterial;
 use crate::inventory::{ToolMaterial, ToolType};
 use crate::redstone::Direction;
 use noise::{NoiseFn, Perlin};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SoundMaterial {
+    Grass,
+    Wood,
+    Sand,
+    Gravel,
+    Stone,
+    Snow,
+    Ice,
+    Glass,
+}
 
 pub const CHUNK_WIDTH: usize = 16;
 pub const CHUNK_HEIGHT: usize = 256;

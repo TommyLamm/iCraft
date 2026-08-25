@@ -1,23 +1,12 @@
 use crate::accessibility::{direction_from_basis, SubtitleDirection, SubtitleEvent, SubtitleQueue};
 use crate::resources::ResourcePackManager;
+pub use crate::world::SoundMaterial;
 use glam::Vec3;
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source, SpatialSink};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SoundMaterial {
-    Grass,
-    Wood,
-    Sand,
-    Gravel,
-    Stone,
-    Snow,
-    Ice,
-    Glass,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoundId {

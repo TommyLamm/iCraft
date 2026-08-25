@@ -43,10 +43,10 @@ API. `loot`, `recipes`, `voxel_shape`, and `worldgen` remain `pub(crate)`.
 `ai`, `spawning`, `sim_harness`, `final_acceptance`, and the library
 `microbench` compile only under `cfg(test)` or feature `harness` (not default).
 Desktop `--microbench` uses `src/main.rs`'s own `mod microbench` and does not
-need that feature. Presentation modules (`menu`, `camera`, `texture`,
-`src/presentation/`) stay desktop-only and must not be added to `lib.rs`, so
-`icraft-server` does not compile the wgpu menu or GPU terrain. Small
-transport-independent presentation policies live in
+need that feature. Presentation and audio modules (`menu`, `camera`, `audio`,
+`texture`, `src/presentation/`) stay desktop-only and must not be added to
+`lib.rs`, so `icraft-server` does not compile the wgpu menu, audio device, or
+GPU terrain. Small transport-independent presentation policies live in
 `presentation_inventory_policy` so the server and headless tests can verify the
 boundary without importing the UI. `#[global_allocator]` is installed only in
 `src/main.rs`; the dynamic-resolution controller is compiled only into the
@@ -352,13 +352,13 @@ explicit development/test override.
 
 | Area | Primary files |
 | --- | --- |
-| Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/presentation/` (`legacy_sim`, `legacy_systems`, `legacy_interaction`, `frame`, inbound, interpolation, GPU terrain), `src/presentation_inventory_policy.rs` |
+| Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/audio.rs`, `src/state.rs`, `src/presentation/` (`legacy_sim`, `legacy_systems`, `legacy_interaction`, `frame`, inbound, interpolation, GPU terrain), `src/presentation_inventory_policy.rs` |
 | Authority and dedicated runtime | `src/authority/`, `src/server_world.rs`, `src/server_runtime.rs`, `src/server_runtime/session_sync.rs`, `src/bin/icraft-server.rs` |
 | World storage and generation | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/`, `src/loot.rs` |
 | Gameplay systems | `src/player.rs`, `src/physics.rs`, `src/inventory.rs`, `src/recipes.rs`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss.rs`, `src/ai/` |
 | Rendering | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling.rs`, `src/block_model.rs`, `src/mob_renderer.rs`, `src/hand_renderer.rs`, `src/particles.rs`, `src/texture.rs`, `src/shader.wgsl` |
 | Networking | `src/network/` (`channels.rs`, `session.rs`, `ingress.rs`, `egress.rs`, `server.rs`, `protocol.rs`, `transport.rs`, `client.rs`) |
-| Persistence and resources | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`, `legacy_queue.rs`), `src/resources.rs`, `src/localization.rs`, `src/audio.rs`, `src/accessibility.rs` |
+| Persistence and resources | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`, `legacy_queue.rs`), `src/resources.rs`, `src/localization.rs`, `src/accessibility.rs` |
 | Tests and performance | inline `#[cfg(test)]`, `tests/` plus `tests/common/tcp_harness.rs`, `src/sim_harness.rs` / `src/final_acceptance.rs` / lib `microbench` (`cfg(test)` or feature `harness`), desktop `src/microbench.rs`, `plans/03_performance/` |
 
 `State` is still the desktop composition root. GPU terrain arenas, inbound

@@ -50,7 +50,6 @@ pub mod world;
 // compiling these files a second time into the binary crate.
 pub mod accessibility;
 pub mod advancements;
-pub mod audio;
 pub mod block_model;
 pub mod boss;
 pub mod chunk_render;

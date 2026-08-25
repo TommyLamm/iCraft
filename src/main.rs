@@ -6,7 +6,7 @@
 //! stay declared here and must not be added to `lib.rs`.
 
 pub use icraft::{
-    accessibility, advancements, audio, authority, block_entity, block_model, boss, brewing,
+    accessibility, advancements, authority, block_entity, block_model, boss, brewing,
     chunk_manager, chunk_render, chunk_schedule, commands, container_sessions, crafting, culling,
     dimension, enchantment, entity, fishing, fluid, game_rules, gpu_frame_resources, interaction,
     inventory, lighting, localization, mob, navigation, network, passive_mob, perf, physics,
@@ -16,6 +16,7 @@ pub use icraft::{
 };
 
 mod app;
+mod audio;
 mod camera;
 #[allow(dead_code)]
 mod dynamic_resolution;

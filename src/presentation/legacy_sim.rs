@@ -480,6 +480,8 @@ impl State {
                 crate::weather::Weather::Rain | crate::weather::Weather::Thunder
             );
             let mut mob_dirty_meshes = std::collections::HashSet::new();
+            let listener_pos = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
+            let audio_manager = &mut self.audio_manager;
             let exploded_blocks = crate::mob::update_mobs(
                 &mut self.entity_manager,
                 &mut self.chunk_manager,
@@ -490,8 +492,19 @@ impl State {
                 self.world_time.sky_light_level(),
                 is_raining,
                 dt,
-                &mut self.audio_manager,
-                right,
+                |event, pos| {
+                    let sound_id = match event {
+                        crate::mob::MobSoundEvent::ArrowShoot => crate::audio::SoundId::ArrowShoot,
+                        crate::mob::MobSoundEvent::CreeperIgnition => {
+                            crate::audio::SoundId::CreeperIgnition
+                        }
+                        crate::mob::MobSoundEvent::Explosion => crate::audio::SoundId::Explosion,
+                        crate::mob::MobSoundEvent::PlayerDeath => {
+                            crate::audio::SoundId::PlayerDeath
+                        }
+                    };
+                    audio_manager.play_sound_3d(sound_id, pos, listener_pos, right);
+                },
                 self.potion_effects.has_invisibility(),
                 crate::enchantment::protection_multiplier(&self.inventory.armor, false),
                 authoritative,
