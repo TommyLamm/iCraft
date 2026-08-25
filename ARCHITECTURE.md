@@ -39,8 +39,8 @@ modules that `tests/` or `src/bin/icraft-server.rs` actually `use icraft::…`
 (authority, world, network, persistence, and the thin
 `presentation_inventory_policy` cut). Additional desktop-shared modules are
 `pub` so the bin crate can re-export them; they are not a dedicated-server
-API. `ai`, `loot`, `recipes`, `spawning`, `voxel_shape`, and `worldgen`
-remain `pub(crate)`. `sim_harness`, `final_acceptance`, and the library
+API. `loot`, `recipes`, `voxel_shape`, and `worldgen` remain `pub(crate)`.
+`ai`, `spawning`, `sim_harness`, `final_acceptance`, and the library
 `microbench` compile only under `cfg(test)` or feature `harness` (not default).
 Desktop `--microbench` uses `src/main.rs`'s own `mod microbench` and does not
 need that feature. Presentation modules (`menu`, `camera`, `texture`,

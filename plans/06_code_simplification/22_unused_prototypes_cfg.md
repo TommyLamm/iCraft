@@ -21,36 +21,36 @@ Plan 01 只在 rustdoc 寫明「未接到權威 tick」。兩個原型仍是 `li
 
 ## 精確 acceptance
 
-- [ ] `src/lib.rs`：`ai`、`spawning` 改
-      `#[cfg(any(test, feature = "harness"))] pub(crate) mod`（或純 `#[cfg(test)]`，
-      證據寫明選哪個）。預設 `cargo check --lib` 與 `cargo check --bin icraft-server`
-      **不得**編譯 `src/ai/`、`src/spawning.rs`。
-- [ ] 執行前再 grep `Brain`、`SpawningSystem`、`BoundedPathfinder`、`crate::ai`、
-      `crate::spawning`。出現新的生產呼叫就從本計劃拿掉該項，寫進證據「未 cfg 原因」。
-- [ ] 不得改 `mob::spawn_mobs`、`passive_mob::spawn_passive_mobs`、
-      `ServerWorld::tick_entities` 的數字或呼叫順序。
-- [ ] `src/navigation.rs`（羅盤／地圖）留下，不得跟 `ai/navigation.rs` 合併或改名。
-- [ ] `cargo test --lib spawning::` 與 `cargo test --lib ai::`（若測試跟著模組走）
+- [x] `src/lib.rs`：`ai`、`spawning` 改
+      `#[cfg(any(test, feature = "harness"))] pub(crate) mod`（選用 `#[cfg(any(test, feature = "harness"))]`
+      保持與 `sim_harness`、`final_acceptance`、`microbench` 一致）。預設 `cargo check --lib`
+      與 `cargo check --bin icraft-server` **不再**編譯 `src/ai/`、`src/spawning.rs`。
+- [x] 執行前再 grep `Brain`、`SpawningSystem`、`BoundedPathfinder`、`crate::ai`、
+      `crate::spawning`，確認全無生產呼叫。
+- [x] 不得改 `mob::spawn_mobs`、`passive_mob::spawn_passive_mobs`、
+      `ServerWorld::tick_entities` 的數字或呼叫順序（未改動）。
+- [x] `src/navigation.rs`（羅盤／地圖）留下，不得跟 `ai/navigation.rs` 合併或改名（保留原樣）。
+- [x] `cargo test --lib spawning::` 與 `cargo test --lib ai::`（若測試跟著模組走）
       仍通過。期望值不變。
-- [ ] rustdoc 保留「未接到權威 tick；線上入口是 …」。
+- [x] rustdoc 保留「未接到權威 tick；線上入口是 …」。
 
 ## 預計檔案與測試
 
 - 修改：`src/lib.rs`，必要時 `src/ai/mod.rs`／`src/spawning.rs` 檔頭。
 - 測試：
-  - `cargo check --bin icraft-server`
-  - `cargo check --lib`
-  - `cargo test --lib spawning::`
-  - `cargo test --lib ai::`（若 `cfg(test)` 後仍看得到）
-  - `cargo test --lib mob::`
+  - `cargo check --bin icraft-server`（通過，不再有 `ai` / `spawning` 警告）
+  - `cargo check --lib`（通過）
+  - `cargo test --lib spawning::`（通過，4 passed）
+  - `cargo test --lib ai::`（通過，0 passed）
+  - `cargo test --lib mob::`（通過，15 passed）
   - rustc JSON：`cargo check --bin icraft-server --message-format=json` 不含
     `src/ai/`、`src/spawning.rs`
 
 ## 建議階段
 
-1. 再 grep 一次上表符號。有生產呼叫就停，不要硬 cfg。
-2. cfg 兩個 `mod`。`cargo check --bin icraft-server`。
-3. 跑 `spawning`／`mob` 單元測。補 JSON 證據。
+1. 再 grep 一次上表符號。有生產呼叫就停，不要硬 cfg。（已執行確認）
+2. cfg 兩個 `mod`。`cargo check --bin icraft-server`。（已完成）
+3. 跑 `spawning`／`mob` 單元測。補 JSON 證據。（已完成）
 
 ## 不在本計劃
 
@@ -58,3 +58,4 @@ Plan 01 只在 rustdoc 寫明「未接到權威 tick」。兩個原型仍是 `li
 - 把 `update_mobs` 改成 `Brain`。
 - leftover cfg（21）。
 - `navigation.rs` 改名為 maps。
+
