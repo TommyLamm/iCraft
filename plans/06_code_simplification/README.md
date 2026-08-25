@@ -79,7 +79,7 @@
 | 23 | [`SoundMaterial` 抽出，audio 移出 library](23_sound_material_and_audio_fence.md) | P1 | 未開始 | 建議 21 |
 | 24 | [culling 連通／LOS 與 frustum 拆檔](24_culling_connectivity_split.md) | P1 | 已完成 | 無 |
 | 25 | [`is_authoritative()` 收成拓撲謂詞](25_topology_predicates.md) | P1 | 已完成 | 02（建議 21） |
-| 26 | [`AuthorityCore` tick／dispatch／portals 拆檔](26_authority_module_split.md) | P2 | 未開始 | 03、09、16 |
+| 26 | [`AuthorityCore` tick／dispatch／portals 拆檔](26_authority_module_split.md) | P2 | 已完成 | 03、09、16 |
 | 27 | [`ServerRuntime` 投影／ingress 拆檔](27_server_runtime_split.md) | P2 | 未開始 | 16、17 |
 | 28 | [`EmbeddedRuntimeBridge` 與 inbound 拆檔](28_embedded_bridge_extract.md) | P2 | 未開始 | 15（建議 21、25） |
 | 29 | [`menu.rs` 按鈕座標單一 MenuRect 表](29_menu_rect_table.md) | P2 | 未開始 | 無 |
