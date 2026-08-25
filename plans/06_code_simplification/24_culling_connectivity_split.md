@@ -23,20 +23,20 @@
 
 ## 精確 acceptance
 
-- [ ] `src/culling.rs` 變成模組根（或 `src/culling/mod.rs`），並 `pub use` 舊路徑。
+- [x] `src/culling.rs` 變成模組根（或 `src/culling/mod.rs`），並 `pub use` 舊路徑。
       現有 `crate::culling::SectionConnectivity`／`is_los_blocked`／
       `traverse_section_visibility_with_scratch`／`EntityLosManager` **零改**。
-- [ ] 至少拆出（名稱可微調，責任不可混）：
+- [x] 至少拆出（名稱可微調，責任不可混）：
       - connectivity：`SectionConnectivity`、`SectionConnectivityState`、
         `is_section_occluder`、`compute_section_connectivity*`
       - los：`is_los_blocked`（權威／mesh 可共用的純函式）
       - visibility：`SectionVisibilityScratch`、`traverse_section_visibility_with_scratch`、
         `EntityLosManager`、`LosIdentity`、`CullingCounters`
-- [ ] 不得改 `SectionConnectivity::fail_open` 對 `Invalid => FULL`。
-- [ ] 不得改 `is_los_blocked` 的步進／occluder 回呼契約。
-- [ ] 不得改 traverse 的 fail-open 與 scratch 容量語意。
-- [ ] 不得把 `culling` 從 `lib.rs` 拿掉，不得把 `wgpu` 改 optional。
-- [ ] `cargo test --lib culling::` 期望值不變。
+- [x] 不得改 `SectionConnectivity::fail_open` 對 `Invalid => FULL`。
+- [x] 不得改 `is_los_blocked` 的步進／occluder 回呼契約。
+- [x] 不得改 traverse 的 fail-open 與 scratch 容量語意。
+- [x] 不得把 `culling` 從 `lib.rs` 拿掉，不得把 `wgpu` 改 optional。
+- [x] `cargo test --lib culling::` 期望值不變。
 
 ## 預計檔案與測試
 

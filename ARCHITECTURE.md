@@ -356,7 +356,7 @@ explicit development/test override.
 | Authority and dedicated runtime | `src/authority/`, `src/server_world.rs`, `src/server_runtime.rs`, `src/server_runtime/session_sync.rs`, `src/bin/icraft-server.rs` |
 | World storage and generation | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/`, `src/loot.rs` |
 | Gameplay systems | `src/player.rs`, `src/physics.rs`, `src/inventory.rs`, `src/recipes.rs`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss.rs`, `src/ai/` |
-| Rendering | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling.rs`, `src/block_model.rs`, `src/mob_renderer.rs`, `src/hand_renderer.rs`, `src/particles.rs`, `src/texture.rs`, `src/shader.wgsl` |
+| Rendering | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling/` (`connectivity.rs`, `los.rs`, `visibility.rs`), `src/block_model.rs`, `src/mob_renderer.rs`, `src/hand_renderer.rs`, `src/particles.rs`, `src/texture.rs`, `src/shader.wgsl` |
 | Networking | `src/network/` (`channels.rs`, `session.rs`, `ingress.rs`, `egress.rs`, `server.rs`, `protocol.rs`, `transport.rs`, `client.rs`) |
 | Persistence and resources | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`, `legacy_queue.rs`), `src/resources.rs`, `src/localization.rs`, `src/accessibility.rs` |
 | Tests and performance | inline `#[cfg(test)]`, `tests/` plus `tests/common/tcp_harness.rs`, `src/sim_harness.rs` / `src/final_acceptance.rs` / lib `microbench` (`cfg(test)` or feature `harness`), desktop `src/microbench.rs`, `plans/03_performance/` |
