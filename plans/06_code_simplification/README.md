@@ -83,7 +83,7 @@
 | 27 | [`ServerRuntime` 投影／ingress 拆檔](27_server_runtime_split.md) | P2 | 已完成 | 16、17 |
 | 28 | [`EmbeddedRuntimeBridge` 與 inbound 拆檔](28_embedded_bridge_extract.md) | P2 | 已完成 | 15（建議 21、25） |
 | 29 | [`menu.rs` 按鈕座標單一 MenuRect 表](29_menu_rect_table.md) | P2 | 已完成 | 無 |
-| 30 | [`inventory.rs` 目錄／click 拆檔](30_inventory_module_split.md) | P2 | 未開始 | 18 |
+| 30 | [`inventory.rs` 目錄／click 拆檔](30_inventory_module_split.md) | P2 | 已完成 | 18 |
 
 ## 5. 與其他路線的關係
 
