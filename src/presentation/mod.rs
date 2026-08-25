@@ -6,7 +6,8 @@
 //! `legacy_sim.rs`, `legacy_systems.rs`, `legacy_interaction.rs`, and
 //! `frame.rs` live in this directory but are loaded as children of `state`
 //! (`#[path]`) so leftover tick / render / interaction methods can see
-//! private `State` fields.
+//! private `State` fields. Leftover simulation and interaction modules compile
+//! only under `cfg(test)` or feature `legacy_owner`.
 
 pub(crate) mod bootstrap;
 pub(crate) mod gpu_terrain;

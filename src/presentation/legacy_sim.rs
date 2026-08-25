@@ -4,7 +4,8 @@
 //! `ServerRuntime` via `tick_authority_boundary` and only keep presentation
 //! (keys, sprint latch, footsteps, `update_chunks`). This module is a child of
 //! `state` (`#[path]`) so it can see private `State` fields without making
-//! leftover simulation authoritative.
+//! leftover simulation authoritative. Compiles only under `cfg(test)` or
+//! feature `legacy_owner`.
 
 use super::*;
 

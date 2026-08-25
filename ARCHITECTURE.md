@@ -30,7 +30,9 @@ declared in `src/main.rs`: `app`, `camera`, `dynamic_resolution`,
 `hand_renderer`, `menu`, `microbench`, `mob_renderer`, `particles`,
 `presentation`, `state`, and `texture`. `legacy_sim`, `legacy_systems`,
 `legacy_interaction`, and `frame` are `#[path]` children of `state`, not
-library modules.
+library modules; leftover simulation and interaction modules (`legacy_sim`,
+`legacy_systems`, `legacy_interaction`) compile only under `cfg(test)` or
+feature `legacy_owner` (not default).
 
 `lib.rs` has two `pub` layers. The server/tests contract is still only the
 modules that `tests/` or `src/bin/icraft-server.rs` actually `use icraft::…`
@@ -164,14 +166,16 @@ Important rules:
   `teleport_session` still sets `teleport_allowance` before `write_pose`.
   An accepted `GameplayOperation::Command` no longer re-parses the chat
   string; if the authority pose moved, the runtime calls `teleport_session`.
-- `State` still contains a large renderer-side leftover simulation path.
-  Current Singleplayer and Host launches disable it by having an embedded
-  runtime; new authoritative behavior belongs in `AuthorityCore`/`ServerWorld`,
-  not that path. Leftover click / item-use / block mutation lives in
-  `presentation/legacy_interaction.rs`; leftover village / raid / vehicle /
-  fishing / furnace / hopper ticks live in `presentation/legacy_systems.rs`;
-  leftover world-tick helpers stay in `presentation/legacy_sim.rs`. Live
-  `handle_click` is only a `PresentationTopology` gate.
+- `State` leftover simulation and interaction method bodies do not compile into
+  the default desktop binary (menu launches never reach them); leftover bodies
+  compile only under `cfg(test)` or feature `legacy_owner` (not default).
+  Current Singleplayer and Host launches run an embedded runtime; new authoritative
+  behavior belongs in `AuthorityCore`/`ServerWorld`, not that path. Leftover
+  click / item-use / block mutation lives in `presentation/legacy_interaction.rs`;
+  leftover village / raid / vehicle / fishing / furnace / hopper ticks live in
+  `presentation/legacy_systems.rs`; leftover world-tick helpers stay in
+  `presentation/legacy_sim.rs`. Live `handle_click` is only a `PresentationTopology`
+  gate (LegacyOwner debug-asserts when compiled without the feature).
 - `world_mutation::apply_batch` is an atomic helper used by the legacy renderer
   path. It is not the primary headless authority mutation root.
 
@@ -359,8 +363,9 @@ explicit development/test override.
 
 `State` is still the desktop composition root. GPU terrain arenas, inbound
 staging, interpolation, leftover world tick / leftover interaction / leftover
-systems, and render prepare/encode live in desktop-only `src/presentation/`
-(not exported from `lib.rs`; leftover files are `#[path]` children of `state`).
+systems (compiled only under `cfg(test)` or feature `legacy_owner`), and render
+prepare/encode live in desktop-only `src/presentation/` (not exported from
+`lib.rs`; leftover files are `#[path]` children of `state`).
 `state.rs` still owns `EmbeddedRuntimeBridge`, `handle_single_network_event`,
 and the large field list. `server_runtime.rs` is the transport/session/save
 composition root; mirrored session fields go through `session_sync.rs`.

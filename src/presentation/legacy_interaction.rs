@@ -2,7 +2,8 @@
 //!
 //! Live Embedded / Join never enter these leftover bodies. This module is a
 //! child of `state` (`#[path]`) so it can see private `State` fields without
-//! making leftover interaction authoritative.
+//! making leftover interaction authoritative. Compiles only under `cfg(test)` or
+//! feature `legacy_owner`.
 
 use super::*;
 

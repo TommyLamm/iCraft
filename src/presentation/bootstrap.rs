@@ -172,26 +172,38 @@ pub(crate) fn load_launch_world_state(
                 None,
             )
         } else {
-            // Leftover LegacyOwner: keep desktop SaveQueue semantics for
-            // tests/paths that still construct a presentation-owned world.
-            let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
-                crate::save::SaveManager::new(&launch.world_dir),
-            ));
-            let save_tx = crate::save::spawn_save_worker(
-                std::sync::Arc::clone(&save_manager),
-                crate::save::SAVE_QUEUE_CAPACITY,
-            );
-            let save_queue_stats = save_tx.stats();
-            let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
-                std::sync::Arc::clone(&save_manager),
-                crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
-            );
-            (
-                Some(save_manager),
-                Some(save_tx),
-                save_queue_stats,
-                Some(network_snapshot_worker),
-            )
+            #[cfg(any(test, feature = "legacy_owner"))]
+            {
+                // Leftover LegacyOwner: keep desktop SaveQueue semantics for
+                // tests/paths that still construct a presentation-owned world.
+                let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::save::SaveManager::new(&launch.world_dir),
+                ));
+                let save_tx = crate::save::spawn_save_worker(
+                    std::sync::Arc::clone(&save_manager),
+                    crate::save::SAVE_QUEUE_CAPACITY,
+                );
+                let save_queue_stats = save_tx.stats();
+                let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
+                    std::sync::Arc::clone(&save_manager),
+                    crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
+                );
+                (
+                    Some(save_manager),
+                    Some(save_tx),
+                    save_queue_stats,
+                    Some(network_snapshot_worker),
+                )
+            }
+            #[cfg(not(any(test, feature = "legacy_owner")))]
+            {
+                (
+                    None,
+                    None,
+                    std::sync::Arc::new(crate::save::SaveQueueStats::default()),
+                    None,
+                )
+            }
         };
     let current_dimension = if is_client {
         crate::dimension::Dimension::Overworld
@@ -200,22 +212,36 @@ pub(crate) fn load_launch_world_state(
         // just to learn which dimension the runtime will project first.
         crate::save::peek_current_dimension(&launch.world_dir)
     } else {
-        save_manager
-            .as_ref()
-            .expect("legacy owner owns SaveManager")
-            .lock()
-            .unwrap()
-            .load_current_dimension()
+        #[cfg(any(test, feature = "legacy_owner"))]
+        {
+            save_manager
+                .as_ref()
+                .expect("legacy owner owns SaveManager")
+                .lock()
+                .unwrap()
+                .load_current_dimension()
+        }
+        #[cfg(not(any(test, feature = "legacy_owner")))]
+        {
+            crate::dimension::Dimension::Overworld
+        }
     };
     let mutation_revisions = if is_client || in_process_authority {
         crate::save::MutationRevisionIndex::default()
     } else {
-        save_manager
-            .as_ref()
-            .expect("legacy owner owns SaveManager")
-            .lock()
-            .unwrap()
-            .load_mutation_revision_index()
+        #[cfg(any(test, feature = "legacy_owner"))]
+        {
+            save_manager
+                .as_ref()
+                .expect("legacy owner owns SaveManager")
+                .lock()
+                .unwrap()
+                .load_mutation_revision_index()
+        }
+        #[cfg(not(any(test, feature = "legacy_owner")))]
+        {
+            crate::save::MutationRevisionIndex::default()
+        }
     };
 
     let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
@@ -245,6 +271,7 @@ pub(crate) fn load_launch_world_state(
     let mut cheats_enabled = creation_options.cheats_enabled || is_client;
     let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
 
+    #[cfg(any(test, feature = "legacy_owner"))]
     let has_save = !is_client && !in_process_authority && {
         let mgr = save_manager
             .as_ref()
@@ -253,7 +280,10 @@ pub(crate) fn load_launch_world_state(
             .unwrap();
         mgr.load_player_and_level().is_ok()
     };
+    #[cfg(not(any(test, feature = "legacy_owner")))]
+    let has_save = false;
 
+    #[cfg(any(test, feature = "legacy_owner"))]
     if has_save {
         let (level, player) = {
             let mgr = save_manager

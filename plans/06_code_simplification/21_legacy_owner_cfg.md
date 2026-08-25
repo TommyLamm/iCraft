@@ -31,30 +31,30 @@ leftover 仍無條件編進 desktop binary，和活方法坐在同一個 `impl S
 
 ## 精確 acceptance
 
-- [ ] `Cargo.toml` 增加 feature `legacy_owner`（不要放進 `default`，不要跟
+- [x] `Cargo.toml` 增加 feature `legacy_owner`（不要放進 `default`，不要跟
       `harness` 綁在一起）。
-- [ ] `src/state.rs` 對三個 leftover `#[path]` 模組加
+- [x] `src/state.rs` 對三個 leftover `#[path]` 模組加
       `#[cfg(any(test, feature = "legacy_owner"))]`：
       `legacy_sim`、`legacy_systems`、`legacy_interaction`。
-- [ ] 所有 leftover 方法呼叫（至少 `legacy_tick_*`、`legacy_handle_click`、
+- [x] 所有 leftover 方法呼叫（至少 `legacy_tick_*`、`legacy_handle_click`、
       leftover `update_village_and_raid_systems`／`update_vehicles_and_fishing`／
       `update_furnaces`／`update_hopper_power_states`）同樣 cfg。
       預設 `tick_simulation` 在 Embedded／Join 下不得再出現這些識別名。
-- [ ] `handle_click` 的 `LegacyOwner` 臂：有 cfg 時呼叫 leftover；沒有 cfg 時
+- [x] `handle_click` 的 `LegacyOwner` 臂：有 cfg 時呼叫 leftover；沒有 cfg 時
       `debug_assert`／編譯期不可達，**不得**變成第三條活世界 mutate。
       執行前再 grep `legacy_handle_click`。
-- [ ] `State::apply_mutation_batch` 若仍無生產呼叫：與 leftover 一起 cfg。
+- [x] `State::apply_mutation_batch` 若仍無生產呼叫：與 leftover 一起 cfg。
       `src/world_mutation.rs` 模組留下（自己的單元測仍要跑）。
-- [ ] `bootstrap.rs` leftover `SaveQueue`／`SaveManager`／snapshot worker 建構
+- [x] `bootstrap.rs` leftover `SaveQueue`／`SaveManager`／snapshot worker 建構
       （`is_client || in_process_authority` 的 else 臂）同樣 cfg。
       Embedded／Join 仍是 `None`，不得突然又建第二個存檔工人。
-- [ ] `PresentationTopology::LegacyOwner` **留下**。`presentation_inventory_policy`
+- [x] `PresentationTopology::LegacyOwner` **留下**。`presentation_inventory_policy`
       的 `from(&Singleplayer, false)` 測試期望值不變。
-- [ ] `cargo check --bin icraft`（不開 feature、非 `--tests`）的 rustc JSON
+- [x] `cargo check --bin icraft`（不開 feature、非 `--tests`）的 rustc JSON
       **不得**出現 `legacy_sim.rs`／`legacy_systems.rs`／`legacy_interaction.rs`。
-- [ ] `cargo test --bin icraft` 仍編 leftover（因為 `cfg(test)`）。不得為了過關
+- [x] `cargo test --bin icraft` 仍編 leftover（因為 `cfg(test)`）。不得為了過關
       改測試期望值。
-- [ ] `ARCHITECTURE.md` leftover 句改成：選單啟動編不到 leftover 本體；
+- [x] `ARCHITECTURE.md` leftover 句改成：選單啟動編不到 leftover 本體；
       leftover 只在 `cfg(test)` 或 feature `legacy_owner` 編譯。
 
 ## 預計檔案與測試

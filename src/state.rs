@@ -57,10 +57,13 @@ pub use crate::presentation::gpu_terrain::{
 };
 pub use crate::presentation::network_inbound::NetworkHandle;
 
+#[cfg(any(test, feature = "legacy_owner"))]
 #[path = "presentation/legacy_sim.rs"]
 mod legacy_sim;
+#[cfg(any(test, feature = "legacy_owner"))]
 #[path = "presentation/legacy_systems.rs"]
 mod legacy_systems;
+#[cfg(any(test, feature = "legacy_owner"))]
 #[path = "presentation/legacy_interaction.rs"]
 mod legacy_interaction;
 #[path = "presentation/frame.rs"]
@@ -6262,6 +6265,7 @@ impl State {
         );
     }
 
+    #[cfg(any(test, feature = "legacy_owner"))]
     pub fn apply_mutation_batch(
         &mut self,
         requests: Vec<crate::world_mutation::BlockMutationRequest>,
@@ -6986,7 +6990,12 @@ impl State {
                 if self.has_in_process_runtime() {
                     let _ = self.submit_remote_authority_block_use(id, x, y, z, block);
                 } else {
+                    #[cfg(any(test, feature = "legacy_owner"))]
                     self.set_block_and_broadcast(id, x, y, z, block, state);
+                    #[cfg(not(any(test, feature = "legacy_owner")))]
+                    {
+                        let _ = (id, x, y, z, block, state);
+                    }
                 }
             }
             NetworkInbound::ClientBlockAction {
@@ -9756,12 +9765,18 @@ impl State {
         }
 
         // Tick item usage state machine
+        #[cfg(any(test, feature = "legacy_owner"))]
         if authoritative {
             self.legacy_tick_item_use();
         } else {
             self.player_state.using_item = None;
         }
+        #[cfg(not(any(test, feature = "legacy_owner")))]
+        {
+            self.player_state.using_item = None;
+        }
 
+        #[cfg(any(test, feature = "legacy_owner"))]
         if authoritative {
             self.legacy_tick_world_systems(dt);
         }
@@ -9771,6 +9786,7 @@ impl State {
         if !has_in_process_runtime {
             self.brewing.update(dt);
         }
+        #[cfg(any(test, feature = "legacy_owner"))]
         self.update_furnaces(dt);
         let effect_health = if has_in_process_runtime {
             0.0
@@ -10045,6 +10061,7 @@ impl State {
             self.player_state.sleep_timer += dt;
         }
 
+        #[cfg(any(test, feature = "legacy_owner"))]
         if authoritative {
             self.legacy_tick_night_skip();
         }
@@ -10135,6 +10152,7 @@ impl State {
             self.lava_damage_timer = 0.0;
         }
 
+        #[cfg(any(test, feature = "legacy_owner"))]
         if authoritative {
             self.legacy_tick_leaf_decay();
         }
@@ -10178,6 +10196,7 @@ impl State {
             self.cactus_damage_timer = 0.0;
         }
 
+        #[cfg(any(test, feature = "legacy_owner"))]
         if authoritative {
             self.legacy_tick_oxygen(dt);
         }
@@ -10185,12 +10204,14 @@ impl State {
         self.total_time += dt;
         self.end_flash_time = (self.end_flash_time - dt.max(0.0)).max(0.0);
 
+        #[cfg(any(test, feature = "legacy_owner"))]
         if authoritative {
             self.legacy_tick_owned_world(dt);
         }
 
-
+        #[cfg(any(test, feature = "legacy_owner"))]
         self.update_village_and_raid_systems(dt);
+        #[cfg(any(test, feature = "legacy_owner"))]
         self.update_vehicles_and_fishing(dt);
 
         self.broadcast_authoritative_replication(dt);
@@ -10603,6 +10624,7 @@ impl State {
                             );
                         }
                     }
+                    #[cfg(any(test, feature = "legacy_owner"))]
                     if !authority_mining {
                         let mining_time = self.calculate_mining_time(block);
                         if mining_time <= 0.0 {
@@ -13167,7 +13189,15 @@ impl State {
         match self.presentation_topology() {
             PresentationTopology::JoinClient => self.handle_join_world_click(is_left_click),
             PresentationTopology::Embedded => self.handle_authority_click(is_left_click),
+            #[cfg(any(test, feature = "legacy_owner"))]
             PresentationTopology::LegacyOwner => self.legacy_handle_click(is_left_click),
+            #[cfg(not(any(test, feature = "legacy_owner")))]
+            PresentationTopology::LegacyOwner => {
+                debug_assert!(
+                    false,
+                    "LegacyOwner topology is unreachable in production without feature = \"legacy_owner\""
+                );
+            }
         }
     }
 

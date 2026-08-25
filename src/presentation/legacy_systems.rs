@@ -3,7 +3,8 @@
 //! Live Singleplayer / Host never enter these methods: they already early-return
 //! when an embedded runtime or Join client is present. This module is a child
 //! of `state` (`#[path]`) so it can see private `State` fields without making
-//! leftover simulation authoritative.
+//! leftover simulation authoritative. Compiles only under `cfg(test)` or
+//! feature `legacy_owner`.
 
 use super::*;
 
