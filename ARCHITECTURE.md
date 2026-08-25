@@ -1,8 +1,8 @@
 # Architecture
 
-> Last verified: 2026-08-17 at `e907760` (`tommy-dev`).
-> Change range reviewed: P1 code-simplification 14–17 and P2 18–20 (`090fca1`..`e907760`)
-> on top of the previously verified `4474f89` baseline (P0 11–13).
+> Last verified: 2026-08-25 at `974b37b` (`tommy-dev`).
+> Change range reviewed: P0/P1/P2 code-simplification 21–30 (`11bab9c`..`974b37b`)
+> on top of the previously verified `e907760` baseline (P0–P2 01–20).
 > Source code is authoritative; `plans/`, `docs/superpowers/`, and most of
 > `plans/03_performance/` are design/history records, not a description of the live runtime.
 >
@@ -26,13 +26,13 @@ The desktop binary re-exports shared library modules
 (`pub use icraft::{world, inventory, server_runtime, …}`) so existing
 `crate::world` paths in the desktop tree still resolve. Shared source
 therefore compiles once, through `src/lib.rs`. Desktop-only modules stay
-declared in `src/main.rs`: `app`, `camera`, `dynamic_resolution`,
+declared in `src/main.rs`: `app`, `audio`, `camera`, `dynamic_resolution`,
 `hand_renderer`, `menu`, `microbench`, `mob_renderer`, `particles`,
-`presentation`, `state`, and `texture`. `legacy_sim`, `legacy_systems`,
-`legacy_interaction`, and `frame` are `#[path]` children of `state`, not
-library modules; leftover simulation and interaction modules (`legacy_sim`,
-`legacy_systems`, `legacy_interaction`) compile only under `cfg(test)` or
-feature `legacy_owner` (not default).
+`presentation`, `state`, and `texture`. `embedded_runtime`, `network_event`,
+`legacy_sim`, `legacy_systems`, `legacy_interaction`, and `frame` are `#[path]`
+children of `state`, not library modules; leftover simulation and interaction
+modules (`legacy_sim`, `legacy_systems`, `legacy_interaction`) compile only under
+`cfg(test)` or feature `legacy_owner` (not default).
 
 `lib.rs` has two `pub` layers. The server/tests contract is still only the
 modules that `tests/` or `src/bin/icraft-server.rs` actually `use icraft::…`
@@ -166,6 +166,10 @@ Important rules:
   `teleport_session` still sets `teleport_allowance` before `write_pose`.
   An accepted `GameplayOperation::Command` no longer re-parses the chat
   string; if the authority pose moved, the runtime calls `teleport_session`.
+- `State` no longer exposes an ambiguous `is_authoritative()` method. Code
+  branches explicitly query `presentation_topology().is_join_client()` (for
+  Join restriction and projection handling) or `presentation_topology().is_legacy_owner()`
+  (for leftover local simulation).
 - `State` leftover simulation and interaction method bodies do not compile into
   the default desktop binary (menu launches never reach them); leftover bodies
   compile only under `cfg(test)` or feature `legacy_owner` (not default).
@@ -176,6 +180,9 @@ Important rules:
   `presentation/legacy_systems.rs`; leftover world-tick helpers stay in
   `presentation/legacy_sim.rs`. Live `handle_click` is only a `PresentationTopology`
   gate (LegacyOwner debug-asserts when compiled without the feature).
+- `EmbeddedRuntimeBridge` and inbound event handling (`handle_single_network_event`)
+  are cleanly extracted to `src/presentation/embedded_runtime.rs` and
+  `src/presentation/network_event.rs` (mounted as `#[path]` submodules of `state.rs`).
 - `world_mutation::apply_batch` is an atomic helper used by the legacy renderer
   path. It is not the primary headless authority mutation root.
 
@@ -352,23 +359,28 @@ explicit development/test override.
 
 | Area | Primary files |
 | --- | --- |
-| Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/audio.rs`, `src/state.rs`, `src/presentation/` (`legacy_sim`, `legacy_systems`, `legacy_interaction`, `frame`, inbound, interpolation, GPU terrain), `src/presentation_inventory_policy.rs` |
-| Authority and dedicated runtime | `src/authority/`, `src/server_world.rs`, `src/server_runtime.rs`, `src/server_runtime/session_sync.rs`, `src/bin/icraft-server.rs` |
-| World storage and generation | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/`, `src/loot.rs` |
-| Gameplay systems | `src/player.rs`, `src/physics.rs`, `src/inventory.rs`, `src/recipes.rs`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/boss.rs`, `src/ai/` |
+| Desktop lifecycle and UI | `src/main.rs`, `src/app.rs`, `src/menu.rs` (using `MenuRect` coordinate tables), `src/audio.rs`, `src/state.rs`, `src/presentation/` (`embedded_runtime.rs`, `network_event.rs`, `legacy_sim.rs`, `legacy_systems.rs`, `legacy_interaction.rs`, `frame.rs`, inbound, interpolation, GPU terrain), `src/presentation_inventory_policy.rs` |
+| Authority and dedicated runtime | `src/authority/` (`mod.rs`, `tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`), `src/server_world.rs`, `src/server_runtime.rs` + `src/server_runtime/` (`ingress.rs`, `projection.rs`, `session_sync.rs`), `src/bin/icraft-server.rs` |
+| World storage and generation | `src/world/` (`block.rs` with `SoundMaterial`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/`, `src/loot.rs` |
+| Gameplay systems | `src/player.rs`, `src/physics.rs`, `src/inventory/` (`mod.rs`, `catalog.rs`, `stack.rs`, `click.rs`, `container.rs`, `tests.rs`), `src/recipes.rs`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs` (decoupled audio events), `src/passive_mob.rs`, `src/boss.rs`, `src/ai/` |
 | Rendering | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling/` (`connectivity.rs`, `los.rs`, `visibility.rs`), `src/block_model.rs`, `src/mob_renderer.rs`, `src/hand_renderer.rs`, `src/particles.rs`, `src/texture.rs`, `src/shader.wgsl` |
 | Networking | `src/network/` (`channels.rs`, `session.rs`, `ingress.rs`, `egress.rs`, `server.rs`, `protocol.rs`, `transport.rs`, `client.rs`) |
 | Persistence and resources | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`, `legacy_queue.rs`), `src/resources.rs`, `src/localization.rs`, `src/accessibility.rs` |
 | Tests and performance | inline `#[cfg(test)]`, `tests/` plus `tests/common/tcp_harness.rs`, `src/sim_harness.rs` / `src/final_acceptance.rs` / lib `microbench` (`cfg(test)` or feature `harness`), desktop `src/microbench.rs`, `plans/03_performance/` |
 
 `State` is still the desktop composition root. GPU terrain arenas, inbound
-staging, interpolation, leftover world tick / leftover interaction / leftover
-systems (compiled only under `cfg(test)` or feature `legacy_owner`), and render
-prepare/encode live in desktop-only `src/presentation/` (not exported from
-`lib.rs`; leftover files are `#[path]` children of `state`).
-`state.rs` still owns `EmbeddedRuntimeBridge`, `handle_single_network_event`,
-and the large field list. `server_runtime.rs` is the transport/session/save
-composition root; mirrored session fields go through `session_sync.rs`.
+staging, interpolation, `EmbeddedRuntimeBridge`, `handle_single_network_event`,
+leftover world tick / leftover interaction / leftover systems (compiled only under
+`cfg(test)` or feature `legacy_owner`), and render prepare/encode live in desktop-only
+`src/presentation/` (not exported from `lib.rs`; bridge, network dispatch, and
+leftover files are `#[path]` children of `state`). `src/menu.rs` button coordinates
+are unified under single-source-of-truth `MenuRect` tables.
+`AuthorityCore` delegates tick, portal travel, and request dispatch to `src/authority/`
+submodules (`tick.rs`, `portals.rs`, `dispatch.rs`). `src/server_runtime.rs` is the
+transport/session/save composition root, orchestrating bounded tick flow while delegating
+to `src/server_runtime/ingress.rs`, `projection.rs`, and `session_sync.rs`.
+`src/inventory/` is modularized into `catalog.rs`, `stack.rs`, `click.rs`, and
+`container.rs`.
 Start changes at the narrow domain module, then verify the projection and save/
 protocol boundaries rather than adding more cross-domain logic to either root.
 
