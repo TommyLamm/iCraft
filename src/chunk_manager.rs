@@ -989,7 +989,7 @@ mod tests {
     #[test]
     fn missing_boundary_chunk_is_unknown_until_loaded_and_never_forced() {
         let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
         manager.set_block(15, 99, 8, BlockType::Sand);
         manager.set_block(15, 100, 8, BlockType::SugarCane);
 
@@ -1010,7 +1010,7 @@ mod tests {
         assert_eq!(manager.get_block(15, 100, 8), BlockType::SugarCane);
         assert!(broken.is_empty());
 
-        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.chunks.insert((1, 0), Chunk::empty(1, 0));
         manager.set_block(16, 99, 8, BlockType::Water);
         manager.check_and_break_unsupported_for_loaded_chunk(
             1,
@@ -1025,7 +1025,7 @@ mod tests {
     #[test]
     fn loading_a_boundary_obstruction_revalidates_neighboring_cactus() {
         let mut manager = ChunkManager::new(2);
-        manager.chunks.insert((0, 0), Chunk::new(0, 0));
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
         manager.set_block(15, 99, 8, BlockType::Sand);
         manager.set_block(15, 100, 8, BlockType::Cactus);
         assert_eq!(
@@ -1033,7 +1033,7 @@ mod tests {
             BlockSupportStatus::Unknown
         );
 
-        manager.chunks.insert((1, 0), Chunk::new(1, 0));
+        manager.chunks.insert((1, 0), Chunk::empty(1, 0));
         manager.set_block(16, 100, 8, BlockType::Stone);
         let mut dirty = HashSet::new();
         let mut broken = Vec::new();

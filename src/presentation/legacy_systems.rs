@@ -18,7 +18,7 @@ impl State {
                 (self.player_state.hero_of_the_village_timer - dt).max(0.0);
         }
 
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             return;
         }
 
@@ -344,7 +344,7 @@ impl State {
         if !self.presentation_topology().is_legacy_owner() {
             return;
         }
-        if self.is_authoritative() {
+        if self.presentation_topology().is_legacy_owner() {
             let entity_ids: Vec<(u64, crate::entity::EntityType)> = self
                 .entity_manager
                 .entities

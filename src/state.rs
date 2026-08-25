@@ -1760,7 +1760,7 @@ impl State {
         if target == self.current_dimension {
             return;
         }
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             // Join Clients do not infer a portal transfer from their local
             // chunk cache.  The authority changes the session dimension and
             // the ordered PlayerSessionUpdate/ChunkData projection below
@@ -2052,9 +2052,9 @@ impl State {
     }
 
     fn apply_boss_events(&mut self, events: crate::boss::BossEvents) {
-        let authoritative = self.is_authoritative();
+        let is_legacy_owner = self.presentation_topology().is_legacy_owner();
         for hit in events.player_damage {
-            let can_receive_impact = authoritative
+            let can_receive_impact = is_legacy_owner
                 && self.game_mode != GameMode::Creative
                 && !self.player_state.is_dead
                 && self.player_state.invulnerable_time <= 0.0;
@@ -2067,7 +2067,7 @@ impl State {
             self.wither_effect_timer = self.wither_effect_timer.max(effect.duration);
         }
         for explosion in events.explosions {
-            if authoritative {
+            if is_legacy_owner {
                 let remove_entity_ids: Vec<u64> = self
                     .entity_manager
                     .entities
@@ -2085,7 +2085,7 @@ impl State {
                     self.entity_manager.remove_by_id(id);
                 }
             }
-            if explosion.break_blocks && authoritative {
+            if explosion.break_blocks && is_legacy_owner {
                 let mut dirty_meshes = std::collections::HashSet::new();
                 let removed = crate::mob::explode(
                     explosion.position,
@@ -2116,7 +2116,7 @@ impl State {
             .into_iter()
             .map(|placement| (placement.position, placement.block))
             .collect();
-        if authoritative {
+        if is_legacy_owner {
             self.apply_block_changes(&changes);
         }
         if events.dragon_completion.is_some() {
@@ -2124,7 +2124,7 @@ impl State {
             self.audio_manager
                 .play_sound(crate::audio::SoundId::Explosion);
             self.player_state.add_experience(120);
-            if authoritative {
+            if is_legacy_owner {
                 self.apply_block_changes(&[
                     ((96, 75, 0), BlockType::EndGateway),
                     ((1000, 65, 0), BlockType::EndGateway),
@@ -5216,10 +5216,6 @@ impl State {
         self.settings.save();
     }
 
-    pub fn is_authoritative(&self) -> bool {
-        !self.role.is_join_client()
-    }
-
     /// Presentation topology derived from role + in-process runtime presence.
     pub fn presentation_topology(&self) -> PresentationTopology {
         PresentationTopology::from(&self.role, self.embedded_runtime.is_some())
@@ -6637,7 +6633,7 @@ impl State {
         sequence: u64,
         state: crate::network::protocol::EntityStateWire,
     ) {
-        if self.is_authoritative()
+        if !self.presentation_topology().is_join_client()
             || crate::dimension::Dimension::from_wire(dimension_wire)
                 != Some(self.current_dimension)
         {
@@ -6691,7 +6687,7 @@ impl State {
         sequence: u64,
         entity_id: u64,
     ) {
-        if self.is_authoritative()
+        if !self.presentation_topology().is_join_client()
             || crate::dimension::Dimension::from_wire(dimension_wire)
                 != Some(self.current_dimension)
         {
@@ -6711,7 +6707,7 @@ impl State {
     }
 
     fn update_replicated_entity_interpolation(&mut self) {
-        if self.is_authoritative() {
+        if !self.presentation_topology().is_join_client() {
             return;
         }
         let target = self.network_time - ENTITY_INTERPOLATION_DELAY;
@@ -7124,7 +7120,7 @@ impl State {
                 death_reason,
             } => {
                 if self.local_player_id == Some(player_id)
-                    && !self.is_authoritative()
+                    && self.presentation_topology().is_join_client()
                     && sequence > self.client_player_health_sequence
                 {
                     self.client_player_health_sequence = sequence;
@@ -7147,7 +7143,7 @@ impl State {
                 effects,
             } => {
                 if self.local_player_id == Some(player_id)
-                    && !self.is_authoritative()
+                    && self.presentation_topology().is_join_client()
                     && sequence > self.client_player_effect_sequence
                 {
                     self.client_player_effect_sequence = sequence;
@@ -7180,7 +7176,7 @@ impl State {
                 weather,
                 weather_remaining_ticks,
             } => {
-                if !self.is_authoritative() {
+                if self.presentation_topology().is_join_client() {
                     self.world_time.ticks = ticks;
                     self.world_time.tick_accumulator = 0.0;
                     if let Some(current) = crate::weather::Weather::from_wire(weather) {
@@ -7193,12 +7189,12 @@ impl State {
                 }
             }
             NetworkInbound::WorldRulesSync { rules } => {
-                if !self.is_authoritative() {
+                if self.presentation_topology().is_join_client() {
                     self.set_world_rules(rules);
                 }
             }
             NetworkInbound::LightningStrike(strike) => {
-                if !self.is_authoritative()
+                if self.presentation_topology().is_join_client()
                     && self.current_dimension == crate::dimension::Dimension::Overworld
                 {
                     self.apply_lightning_strike(strike);
@@ -8180,7 +8176,7 @@ impl State {
         };
 
         if message.starts_with('/') {
-            if !self.is_authoritative() {
+            if self.presentation_topology().is_join_client() {
                 let status = self.translate("command.host_only");
                 push_chat_history(&mut self.chat_messages, "System".to_string(), status);
             } else if !self.cheats_enabled && !matches!(self.role, MultiplayerRole::Host { .. }) {
@@ -8573,7 +8569,7 @@ impl State {
         self.audio_manager
             .play_sound(crate::audio::SoundId::UiClick);
         self.shutdown_network();
-        if self.is_authoritative() {
+        if !self.presentation_topology().is_join_client() {
             if let Err(error) = self.save_synchronously() {
                 self.is_saving = false;
                 self.save_error = Some(error.to_string());
@@ -8644,10 +8640,7 @@ impl State {
     }
 
     pub fn trigger_background_save(&self) -> crate::save::SaveResult<()> {
-        if !self.is_authoritative() {
-            return Ok(());
-        }
-        if self.has_in_process_runtime() {
+        if !self.presentation_topology().is_legacy_owner() {
             // ServerRuntime owns authoritative chunk/entity/player persistence
             // and performs bounded autosaves from its fixed tick. State's
             // renderer cache must never be serialized as a second authority.
@@ -8749,7 +8742,7 @@ impl State {
     }
 
     pub fn save_synchronously(&mut self) -> crate::save::SaveResult<()> {
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             return Ok(());
         }
         if let Some(runtime) = self.embedded_runtime.as_mut() {
@@ -9366,7 +9359,7 @@ impl State {
         let world_seed = self.world_seed;
         let world_type = self.world_type;
         let generate_structures = self.generate_structures;
-        let authoritative = self.is_authoritative();
+        let is_legacy_owner = self.presentation_topology().is_legacy_owner();
         let save_manager = self.save_manager.clone();
         rayon::spawn(move || {
             let mut chunk = crate::dimension::generate_chunk_with_options(
@@ -9382,7 +9375,7 @@ impl State {
             let mut mutated = false;
             let mut restore_failed = false;
             let mut redstone_metadata = Vec::new();
-            if authoritative {
+            if is_legacy_owner {
                 if let Some(saved) = save_manager.as_ref().and_then(|manager| {
                     manager
                         .lock()
@@ -9754,7 +9747,7 @@ impl State {
         if has_in_process_runtime {
             let _ = self.tick_authority_boundary();
         }
-        let authoritative = self.presentation_topology().is_legacy_owner();
+        let is_legacy_owner = self.presentation_topology().is_legacy_owner();
 
         // Tick attack cooldown & shield disable ticks
         if self.player_state.attack_cooldown_ticks < self.player_state.attack_cooldown_max_ticks {
@@ -9766,7 +9759,7 @@ impl State {
 
         // Tick item usage state machine
         #[cfg(any(test, feature = "legacy_owner"))]
-        if authoritative {
+        if is_legacy_owner {
             self.legacy_tick_item_use();
         } else {
             self.player_state.using_item = None;
@@ -9777,7 +9770,7 @@ impl State {
         }
 
         #[cfg(any(test, feature = "legacy_owner"))]
-        if authoritative {
+        if is_legacy_owner {
             self.legacy_tick_world_systems(dt);
         }
 
@@ -9793,16 +9786,16 @@ impl State {
         } else {
             self.potion_effects.update(dt)
         };
-        if authoritative && effect_health > 0.0 {
+        if is_legacy_owner && effect_health > 0.0 {
             self.player_state.health =
                 (self.player_state.health + effect_health).min(self.player_state.max_health);
-        } else if authoritative && effect_health < 0.0 && self.player_state.health > 1.0 {
+        } else if is_legacy_owner && effect_health < 0.0 && self.player_state.health > 1.0 {
             self.take_damage(
                 (-effect_health).min(self.player_state.health - 1.0),
                 DamageSource::Mob,
             );
         }
-        if authoritative && self.wither_effect_timer > 0.0 {
+        if is_legacy_owner && self.wither_effect_timer > 0.0 {
             self.wither_effect_timer = (self.wither_effect_timer - dt).max(0.0);
             self.wither_damage_timer += dt;
             if self.wither_damage_timer >= 1.0 {
@@ -9879,7 +9872,7 @@ impl State {
             self.keys.w || self.keys.a || self.keys.s || self.keys.d,
             dt,
         );
-        if authoritative && sprint_exhaustion > 0.0 {
+        if is_legacy_owner && sprint_exhaustion > 0.0 {
             self.player_state.add_exhaustion(sprint_exhaustion);
         }
 
@@ -9899,7 +9892,7 @@ impl State {
         if self.current_dimension == crate::dimension::Dimension::Overworld {
             let weather_update = if !self.world_rules.do_weather_cycle {
                 crate::weather::WeatherUpdate::default()
-            } else if authoritative {
+            } else if is_legacy_owner {
                 self.weather.update_authoritative(elapsed_world_ticks, dt)
             } else {
                 self.weather.update_client(elapsed_world_ticks, dt);
@@ -9944,7 +9937,7 @@ impl State {
 
         // Jump exhaustion check
         let jumped = !was_flying && self.keys.space && self.player_physics.on_ground;
-        if authoritative && jumped && self.game_mode_policy().hunger_enabled {
+        if is_legacy_owner && jumped && self.game_mode_policy().hunger_enabled {
             self.player_state.add_exhaustion(0.05);
         }
         if jumped {
@@ -10009,7 +10002,7 @@ impl State {
             self.player_physics.position.z - old_pos.z,
         )
         .length();
-        if authoritative && self.game_mode_policy().hunger_enabled {
+        if is_legacy_owner && self.game_mode_policy().hunger_enabled {
             self.player_state.add_exhaustion(0.02 * horizontal_dist);
         }
 
@@ -10062,7 +10055,7 @@ impl State {
         }
 
         #[cfg(any(test, feature = "legacy_owner"))]
-        if authoritative {
+        if is_legacy_owner {
             self.legacy_tick_night_skip();
         }
 
@@ -10153,7 +10146,7 @@ impl State {
         }
 
         #[cfg(any(test, feature = "legacy_owner"))]
-        if authoritative {
+        if is_legacy_owner {
             self.legacy_tick_leaf_decay();
         }
 
@@ -10197,7 +10190,7 @@ impl State {
         }
 
         #[cfg(any(test, feature = "legacy_owner"))]
-        if authoritative {
+        if is_legacy_owner {
             self.legacy_tick_oxygen(dt);
         }
 
@@ -10205,7 +10198,7 @@ impl State {
         self.end_flash_time = (self.end_flash_time - dt.max(0.0)).max(0.0);
 
         #[cfg(any(test, feature = "legacy_owner"))]
-        if authoritative {
+        if is_legacy_owner {
             self.legacy_tick_owned_world(dt);
         }
 
@@ -10774,7 +10767,7 @@ impl State {
             }
         }
 
-        let accumulation_steps = if self.is_authoritative() {
+        let accumulation_steps = if self.presentation_topology().is_legacy_owner() {
             self.weather.take_snow_accumulation_steps(dt)
         } else {
             0
@@ -10802,7 +10795,7 @@ impl State {
             }
         }
 
-        if lightning_due && self.is_authoritative() {
+        if lightning_due && self.presentation_topology().is_legacy_owner() {
             self.strike_lightning();
         }
     }
@@ -10818,7 +10811,7 @@ impl State {
     fn strike_lightning(&mut self) {
         use crate::entity::EntityType;
 
-        if !self.is_authoritative() {
+        if !self.presentation_topology().is_legacy_owner() {
             return;
         }
         let player_pos = self.player_physics.position;
@@ -12462,7 +12455,7 @@ impl State {
             );
             return;
         }
-        if !self.is_authoritative() || !self.game_mode_policy().can_take_damage {
+        if !self.presentation_topology().is_legacy_owner() || !self.game_mode_policy().can_take_damage {
             return;
         }
 
@@ -12622,7 +12615,7 @@ impl State {
             let _ = self.submit_local_authority_command("/respawn");
             return;
         }
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             self.network.send_respawn_request();
             return;
         }
@@ -12737,7 +12730,7 @@ impl State {
         let melee_consumed = if !self.presentation_topology().is_legacy_owner() {
             self.submit_local_authority_combat()
         } else {
-            self.is_authoritative() && self.try_melee_attack()
+            self.presentation_topology().is_legacy_owner() && self.try_melee_attack()
         };
         let decision = primary_press_decision(self.game_mode, melee_consumed);
         if decision.instant_break {
@@ -12920,7 +12913,7 @@ impl State {
             return;
         }
 
-        if !self.is_authoritative() && main_item == Item::Shield {
+        if self.presentation_topology().is_join_client() && main_item == Item::Shield {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::UseState {
                     hand: 0,
@@ -13024,7 +13017,7 @@ impl State {
                 );
                 return;
             }
-            if !self.is_authoritative() && offhand_item == Item::Shield {
+            if self.presentation_topology().is_join_client() && offhand_item == Item::Shield {
                 let _ = self.submit_local_authority_operation(
                     crate::network::protocol::GameplayOperation::UseState {
                         hand: 1,
@@ -13090,7 +13083,7 @@ impl State {
             self.player_state.using_item = None;
             return;
         }
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             let hand = if self
                 .player_state
                 .using_item
@@ -13697,7 +13690,7 @@ impl State {
     }
 
     pub fn set_item_at_slot(&mut self, slot: SlotType, stack: Option<ItemStack>) {
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             return;
         }
         if matches!(slot, SlotType::ContainerSlot(_))
@@ -14644,7 +14637,7 @@ impl State {
         if !self.game_mode_policy().can_use_containers {
             return;
         }
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::Container {
                     action: crate::network::protocol::ContainerAction::Open.to_wire(),
@@ -15034,7 +15027,7 @@ impl State {
             }
             return accepted;
         }
-        if !self.is_authoritative() {
+        if self.presentation_topology().is_join_client() {
             if let Some(pos) = self.container_target {
                 let _ = self.submit_local_authority_operation(
                     crate::network::protocol::GameplayOperation::Container {
