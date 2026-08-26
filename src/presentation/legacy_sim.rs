@@ -472,74 +472,13 @@ impl State {
 
             // Update mobs
             self.update_player_projectiles(dt);
-            let yaw_sin = self.camera.yaw.sin();
-            let yaw_cos = self.camera.yaw.cos();
-            let right = Vec3::new(-yaw_sin, 0.0, yaw_cos).normalize_or_zero();
-            let is_raining = matches!(
-                self.weather.current,
-                crate::weather::Weather::Rain | crate::weather::Weather::Thunder
-            );
-            let mut mob_dirty_meshes = std::collections::HashSet::new();
-            let listener_pos = self.player_physics.position + Vec3::new(0.0, 1.6, 0.0);
-            let audio_manager = &mut self.audio_manager;
-            let exploded_blocks = crate::mob::update_mobs(
-                &mut self.entity_manager,
-                &mut self.chunk_manager,
-                &mut mob_dirty_meshes,
-                &mut self.player_physics,
-                &mut self.player_state,
-                self.game_mode,
-                self.world_time.sky_light_level(),
-                is_raining,
-                dt,
-                |event, pos| {
-                    let sound_id = match event {
-                        crate::mob::MobSoundEvent::ArrowShoot => crate::audio::SoundId::ArrowShoot,
-                        crate::mob::MobSoundEvent::CreeperIgnition => {
-                            crate::audio::SoundId::CreeperIgnition
-                        }
-                        crate::mob::MobSoundEvent::Explosion => crate::audio::SoundId::Explosion,
-                        crate::mob::MobSoundEvent::PlayerDeath => {
-                            crate::audio::SoundId::PlayerDeath
-                        }
-                    };
-                    audio_manager.play_sound_3d(sound_id, pos, listener_pos, right);
-                },
-                self.potion_effects.has_invisibility(),
-                crate::enchantment::protection_multiplier(&self.inventory.armor, false),
-                authoritative,
-                self.world_rules.mob_griefing,
-            );
-            self.invalidate_chunk_meshes(mob_dirty_meshes, DependencyReason::Mob);
-            for (x, y, z) in exploded_blocks {
-                self.broadcast_block_change(x, y, z, BlockType::Air);
-            }
             self.perf_recorder.record(
                 crate::perf::ScopeId::HostileMobs,
                 hostile_mobs_started.elapsed(),
             );
 
-            // Update passive mobs
+            // Passive mobs (daytime spawn)
             let passive_mobs_started = Instant::now();
-            let mut passive_dirty_meshes = std::collections::HashSet::new();
-            let grazed_blocks = crate::passive_mob::update_passive_mobs(
-                &mut self.entity_manager,
-                &mut self.chunk_manager,
-                &mut passive_dirty_meshes,
-                &self.player_physics,
-                &mut self.inventory,
-                self.game_mode,
-                dt,
-                self.total_time,
-                authoritative,
-                self.world_rules.mob_griefing,
-            );
-            self.invalidate_chunk_meshes(passive_dirty_meshes, DependencyReason::Mob);
-            for (x, y, z) in grazed_blocks {
-                self.broadcast_block_change(x, y, z, BlockType::Dirt);
-            }
-
-            // Spawn passive mobs (daytime spawn)
             if self.world_rules.do_mob_spawning
                 && self.current_dimension == crate::dimension::Dimension::Overworld
             {
