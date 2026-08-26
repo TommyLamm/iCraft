@@ -150,15 +150,6 @@ pub fn presentation_chunk_load_policy(role: &MultiplayerRole) -> PresentationChu
     }
 }
 
-/// Deprecated/test-compat alias of `presentation_chunk_load_policy == GenerateLocally`.
-pub fn presentation_may_generate_chunks(role: &MultiplayerRole) -> bool {
-    presentation_chunk_load_policy(role) == PresentationChunkLoadPolicy::GenerateLocally
-}
-
-/// Deprecated/test-compat alias of `presentation_chunk_load_policy == GenerateLocally`.
-pub fn presentation_may_mutate_chunks(role: &MultiplayerRole) -> bool {
-    presentation_chunk_load_policy(role) == PresentationChunkLoadPolicy::GenerateLocally
-}
 
 /// Testable load-schedule gate. `generate` is invoked only when the role is
 /// allowed to materialize a local column.

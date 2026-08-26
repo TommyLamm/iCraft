@@ -20,13 +20,13 @@
 
 ## 精確 acceptance
 
-- [ ] `State` 結構體中移除 `render_pipeline` 與 `trans_pipeline` 欄位及其在 `State::new` 中的管線編譯代碼。
-- [ ] `State` 結構體中移除 `mob_vertex_buffer`、`mob_index_buffer`、`particle_vertex_buffer`、`particle_index_buffer` 及其在 `State::new` 中的 GPU 緩衝區分配。
-- [ ] `State` 結構體中移除 `mob_vertices_scratch`、`mob_indices_scratch`、`particle_vertices_scratch`、`particle_indices_scratch` 欄位。
-- [ ] 移除 `mob_renderer.rs` 中的 `expand_mob_instances`、`render_mobs_legacy`、`render_local_player_legacy`。
-- [ ] 移除 `presentation_inventory_policy.rs` 中的 `presentation_may_generate_chunks` 與 `presentation_may_mutate_chunks`。
-- [ ] `cargo check --all-targets` 通過，無編譯錯誤。
-- [ ] 現有渲染測試與整合測試通過。
+- [x] `State` 結構體中移除 `render_pipeline` 與 `trans_pipeline` 欄位及其在 `State::new` 中的管線編譯代碼。
+- [x] `State` 結構體中移除 `mob_vertex_buffer`、`mob_index_buffer`、`particle_vertex_buffer`、`particle_index_buffer` 及其在 `State::new` 中的 GPU 緩衝區分配。
+- [x] `State` 結構體中移除 `mob_vertices_scratch`、`mob_indices_scratch`、`particle_vertices_scratch`、`particle_indices_scratch` 欄位。
+- [x] 移除 `mob_renderer.rs` 中的 `expand_mob_instances`、`render_mobs_legacy`、`render_local_player_legacy`。
+- [x] 移除 `presentation_inventory_policy.rs` 中的 `presentation_may_generate_chunks` 與 `presentation_may_mutate_chunks`。
+- [x] `cargo check --all-targets` 通過，無編譯錯誤。
+- [x] 現有渲染測試與整合測試通過。
 
 ## 預計檔案與測試
 
@@ -50,3 +50,20 @@
 
 - 修改地形著色器或實例化著色器（`shader.wgsl`）。
 - 更改任何現行渲染通道的順序。
+
+## 實作與證據
+
+### 修改內容
+1. **`src/state.rs`**：
+   - 移除 `render_pipeline` 與 `trans_pipeline` 結構體欄位及 `State::new` 中的管線編譯代碼。
+   - 移除 `mob_vertex_buffer`、`mob_index_buffer`、`particle_vertex_buffer`、`particle_index_buffer` 欄位與 `State::new` 緩衝區分配。
+   - 移除 `mob_vertices_scratch`、`mob_indices_scratch`、`particle_vertices_scratch`、`particle_indices_scratch`、`mob_num_indices`、`particle_num_indices`。
+2. **`src/mob_renderer.rs`**：
+   - 移除 `expand_mob_instances`、`render_mobs_legacy`、`render_local_player_legacy` 及舊頂點單元測試輔助。
+3. **`src/presentation_inventory_policy.rs`**：
+   - 移除相容別名 `presentation_may_generate_chunks` 與 `presentation_may_mutate_chunks`。
+
+### 驗證證據
+- `cargo test --lib presentation_inventory_policy::` (4 passed; 0 failed)
+- `cargo test --bin icraft mob_renderer::` (13 passed; 0 failed)
+- `cargo check --all-targets` (通過)

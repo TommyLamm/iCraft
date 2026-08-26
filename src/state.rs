@@ -1782,23 +1782,22 @@ impl State {
         self.player_physics.set_flying(false);
         self.jump_taps.reset();
         let source = self.current_dimension;
-        let tracker = self.chunk_manager.dirty_chunks.clone();
         if !self.has_in_process_runtime() {
-            for ((cx, cz), revision) in tracker.dirty_revisions() {
-                if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
-                    let redstone_metadata =
-                        self.redstone
-                            .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                    let snapshot =
-                        crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
-                            source,
-                            chunk,
-                            redstone_metadata,
-                        )
-                        .with_mutation_revision(self.mutation_revisions.latest(source, cx, cz));
-                    if let Err(error) = self.enqueue_chunk_save(snapshot, tracker.clone(), revision)
-                    {
-                        eprintln!("[Save] Could not queue dimension-switch chunk: {error}");
+            if let Some(save_manager) = self.save_manager.as_ref() {
+                let mut manager = save_manager.lock().unwrap_or_else(|e| e.into_inner());
+                for ((cx, cz), _) in self.chunk_manager.dirty_chunks.dirty_revisions() {
+                    if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
+                        let redstone_metadata =
+                            self.redstone
+                                .collect_chunk_metadata(&self.chunk_manager, cx, cz);
+                        if let Ok(data) =
+                            crate::save::ChunkSaveData::from_chunk_with_redstone(
+                                chunk,
+                                &redstone_metadata,
+                            )
+                        {
+                            let _ = manager.save_chunk_in(source, cx, cz, data);
+                        }
                     }
                 }
             }
@@ -2947,9 +2946,18 @@ enum CatchupStatus {
     AwaitingAck { since: Instant },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PlayerCatchupKey {
+    pub player_id: crate::network::protocol::PlayerId,
+    pub dimension: crate::dimension::Dimension,
+    pub cx: i32,
+    pub cz: i32,
+    pub revision: u64,
+}
+
 #[derive(Debug)]
 struct PlayerCatchupEntry {
-    key: crate::save::NetworkSnapshotKey,
+    key: PlayerCatchupKey,
     status: CatchupStatus,
     retries: u8,
 }
@@ -3035,8 +3043,6 @@ pub struct State {
     terrain_render_pipeline: wgpu::RenderPipeline,
     terrain_trans_pipeline: wgpu::RenderPipeline,
     region_bind_group_layout: wgpu::BindGroupLayout,
-    render_pipeline: wgpu::RenderPipeline,
-    trans_pipeline: wgpu::RenderPipeline,
     crack_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     pub camera: Camera,
@@ -3139,8 +3145,6 @@ pub struct State {
     particle_instances_scratch: Vec<crate::particles::ParticleInstance>,
     mob_cuboid_num_instances: u32,
     mob_quad_num_instances: u32,
-    mob_vertex_buffer: wgpu::Buffer,
-    mob_index_buffer: wgpu::Buffer,
     mob_num_indices: u32,
     hand_pipeline: wgpu::RenderPipeline,
     hand_vertex_buffer: wgpu::Buffer,
@@ -3150,8 +3154,6 @@ pub struct State {
     hand_camera_buffer: wgpu::Buffer,
     hand_camera_bind_group: wgpu::BindGroup,
     pub particles: crate::particles::ParticleSystem,
-    particle_vertex_buffer: wgpu::Buffer,
-    particle_index_buffer: wgpu::Buffer,
     particle_num_indices: u32,
     torch_smoke_timer: f32,
     total_time: f32,
@@ -3176,8 +3178,6 @@ pub struct State {
     pub cactus_damage_timer: f32,
     boss_maintenance_timer: f32,
     pub save_manager: Option<std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>>,
-    pub save_tx: Option<crate::save::SaveQueue>,
-    save_queue_stats: std::sync::Arc<crate::save::SaveQueueStats>,
     pub autosave_timer: f32,
     pub is_saving: bool,
     pub save_error: Option<String>,
@@ -3216,10 +3216,6 @@ pub struct State {
     pub entity_los_manager: crate::culling::EntityLosManager,
     visible_sections_scratch: std::collections::HashSet<(i32, i8, i32)>,
     section_visibility_scratch: crate::culling::SectionVisibilityScratch,
-    mob_vertices_scratch: Vec<Vertex>,
-    mob_indices_scratch: Vec<u32>,
-    particle_vertices_scratch: Vec<Vertex>,
-    particle_indices_scratch: Vec<u32>,
     hand_vertices_scratch: Vec<Vertex>,
     hand_indices_scratch: Vec<u32>,
     last_hand_mesh_key: Option<crate::hand_renderer::HandMeshKey>,
@@ -3324,7 +3320,6 @@ pub struct State {
     mutation_revision_generation: u64,
     mutation_index_persist_in_flight: Option<u64>,
     mutation_index_dirty: bool,
-    network_snapshot_worker: Option<crate::save::NetworkSnapshotWorker>,
     /// Host-only ACK-owned catch-up entries per joining client.
     pending_player_catchups:
         std::collections::HashMap<crate::network::protocol::PlayerId, Vec<PlayerCatchupEntry>>,
@@ -3563,9 +3558,6 @@ impl State {
 
         let crate::presentation::bootstrap::LaunchWorldState {
             save_manager,
-            save_tx,
-            save_queue_stats,
-            network_snapshot_worker,
             current_dimension,
             mutation_revisions: mut mutation_revisions,
             player_physics,
@@ -3707,43 +3699,6 @@ impl State {
             terrain_pipeline_layout,
         } = crate::presentation::bootstrap::create_pipelines(&device, &camera_bind_group_layout);
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
-
         let terrain_render_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Terrain Render Pipeline"),
@@ -3815,54 +3770,6 @@ impl State {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
-
-        let trans_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Translucent Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -4399,20 +4306,6 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let mob_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Mob Vertex Buffer"),
-            size: (std::mem::size_of::<Vertex>() * 8192) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mob_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Mob Index Buffer"),
-            size: (std::mem::size_of::<u32>() * 12288) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         // First-person hand buffers. Minecraft-style extruded tool silhouettes
         // need a few hundred vertices, still well below these fixed limits.
         let hand_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -4463,22 +4356,6 @@ impl State {
                 },
             ],
             label: Some("hand_camera_bind_group"),
-        });
-
-        let particle_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Particle Vertex Buffer"),
-            size: (std::mem::size_of::<Vertex>() * crate::particles::MAX_PARTICLES * 4)
-                as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let particle_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Particle Index Buffer"),
-            size: (std::mem::size_of::<u32>() * crate::particles::MAX_PARTICLES * 6)
-                as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         let (cuboid_proto_verts, cuboid_proto_inds) =
@@ -4708,8 +4585,6 @@ impl State {
             terrain_render_pipeline,
             terrain_trans_pipeline,
             region_bind_group_layout,
-            render_pipeline,
-            trans_pipeline,
             crack_pipeline,
             sky_pipeline,
             camera,
@@ -4801,8 +4676,6 @@ impl State {
             particle_instances_scratch: Vec::with_capacity(4096),
             mob_cuboid_num_instances: 0,
             mob_quad_num_instances: 0,
-            mob_vertex_buffer,
-            mob_index_buffer,
             mob_num_indices: 0,
             hand_pipeline,
             hand_vertex_buffer,
@@ -4811,8 +4684,6 @@ impl State {
             hand_camera_buffer,
             hand_camera_bind_group,
             particles,
-            particle_vertex_buffer,
-            particle_index_buffer,
             particle_num_indices: 0,
             torch_smoke_timer: 0.0,
             total_time: 0.0,
@@ -4829,8 +4700,6 @@ impl State {
             cactus_damage_timer: 0.0,
             boss_maintenance_timer: 0.0,
             save_manager,
-            save_tx,
-            save_queue_stats,
             autosave_timer: 0.0,
             is_saving: false,
             save_error: mutation_index_load_error,
@@ -4872,10 +4741,6 @@ impl State {
             section_visibility_scratch: crate::culling::SectionVisibilityScratch::with_capacity(
                 4096, 4096,
             ),
-            mob_vertices_scratch: Vec::with_capacity(1024),
-            mob_indices_scratch: Vec::with_capacity(1536),
-            particle_vertices_scratch: Vec::with_capacity(1024),
-            particle_indices_scratch: Vec::with_capacity(1536),
             hand_vertices_scratch: Vec::with_capacity(256),
             hand_indices_scratch: Vec::with_capacity(384),
             last_hand_mesh_key: None,
@@ -4953,7 +4818,6 @@ impl State {
             mutation_revision_generation: u64::from(mutation_index_dirty),
             mutation_index_persist_in_flight: None,
             mutation_index_dirty,
-            network_snapshot_worker,
             pending_player_catchups: std::collections::HashMap::new(),
             catchup_round_robin_cursor: 0,
         };
@@ -6101,7 +5965,7 @@ impl State {
             .mutation_revisions
             .entries_in(self.current_dimension)
             .map(|((cx, cz), revision)| PlayerCatchupEntry {
-                key: crate::save::NetworkSnapshotKey {
+                key: PlayerCatchupKey {
                     player_id,
                     dimension: self.current_dimension,
                     cx,
@@ -6116,233 +5980,11 @@ impl State {
     }
 
     fn process_join_catchups(&mut self) {
-        // Restoring NetworkHandle::Host requires deleting this path or wiring
-        // it to ServerRuntime. Catch-up and mutation-index persist are
-        // authority work; an in-process runtime already owns them.
+        // Catch-up and mutation-index persist are authority work;
+        // ServerRuntime already owns them.
         if self.has_in_process_runtime() {
             return;
         }
-        if !matches!(self.role, MultiplayerRole::Host { .. })
-            || self.network_snapshot_worker.is_none()
-        {
-            return;
-        }
-        let started = Instant::now();
-        let worker_results: Vec<_> = self
-            .network_snapshot_worker
-            .as_ref()
-            .map(|worker| {
-                worker
-                    .try_iter()
-                    .take(64)
-                    .take_while(|_| started.elapsed() < Duration::from_millis(1))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for result in worker_results {
-            match result {
-                crate::save::NetworkSnapshotWorkerResult::Snapshot(payload) => {
-                    let Some(entry) = self
-                        .pending_player_catchups
-                        .get_mut(&payload.key.player_id)
-                        .and_then(|entries| {
-                            entries.iter_mut().find(|entry| entry.key == payload.key)
-                        })
-                    else {
-                        continue;
-                    };
-                    match payload.result {
-                        Ok((
-                            blocks,
-                            block_states,
-                            block_entities,
-                            min_section_y,
-                            section_count,
-                        )) => {
-                            self.network.send_chunk_to(
-                                payload.key.dimension,
-                                payload.key.cx,
-                                payload.key.cz,
-                                payload.key.revision,
-                                min_section_y,
-                                section_count,
-                                blocks,
-                                block_states,
-                                block_entities,
-                                payload.key.player_id,
-                            );
-                            entry.status = CatchupStatus::ServerSubmission {
-                                since: Instant::now(),
-                            };
-                        }
-                        Err(error) => {
-                            eprintln!("[Network] Catch-up snapshot retry: {error}");
-                            entry.status = CatchupStatus::Pending;
-                        }
-                    }
-                }
-                crate::save::NetworkSnapshotWorkerResult::IndexPersisted { generation, result } => {
-                    if self.mutation_index_persist_in_flight == Some(generation) {
-                        self.mutation_index_persist_in_flight = None;
-                    }
-                    match result {
-                        Ok(()) if generation == self.mutation_revision_generation => {
-                            self.mutation_index_dirty = false;
-                        }
-                        Ok(()) => {
-                            self.mutation_index_dirty = true;
-                        }
-                        Err(error) => {
-                            eprintln!("[Network] Mutation revision index persist failed: {error}");
-                            self.mutation_index_dirty = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if self.has_in_process_runtime() {
-            // ServerRuntime's SaveManager is the only writer of
-            // mutation_revisions.bin. Presentation must not dual-write.
-            self.mutation_index_dirty = false;
-            self.mutation_index_persist_in_flight = None;
-        } else if self.mutation_index_dirty && self.mutation_index_persist_in_flight.is_none() {
-            let generation = self.mutation_revision_generation;
-            if self.network_snapshot_worker.as_ref().is_some_and(|worker| {
-                worker
-                    .try_persist_index(generation, self.mutation_revisions.clone())
-                    .is_ok()
-            }) {
-                self.mutation_index_persist_in_flight = Some(generation);
-            }
-        }
-
-        let now = Instant::now();
-        let mut disconnect = Vec::new();
-        for (&player_id, entries) in &mut self.pending_player_catchups {
-            for entry in entries.iter_mut() {
-                let timed_out = match entry.status {
-                    CatchupStatus::ServerSubmission { since }
-                    | CatchupStatus::AwaitingAck { since } => {
-                        now.duration_since(since) >= CATCHUP_ACK_TIMEOUT
-                    }
-                    CatchupStatus::Pending | CatchupStatus::WorkerInFlight => false,
-                };
-                if timed_out {
-                    entry.retries = entry.retries.saturating_add(1);
-                    entry.status = CatchupStatus::Pending;
-                    if entry.retries > MAX_CATCHUP_RETRIES {
-                        disconnect.push(player_id);
-                        break;
-                    }
-                }
-            }
-        }
-        disconnect.sort_unstable();
-        disconnect.dedup();
-        for player_id in disconnect {
-            self.pending_player_catchups.remove(&player_id);
-            self.network.disconnect_slow_catchup_client(
-                player_id,
-                format!(
-                    "catch-up ACK timed out after {} retries",
-                    MAX_CATCHUP_RETRIES
-                ),
-            );
-        }
-
-        let mut player_ids: Vec<_> = self.pending_player_catchups.keys().copied().collect();
-        player_ids.sort_unstable();
-        let mut submitted = 0usize;
-        let mut visited_without_submit = 0usize;
-        while submitted < MAX_CATCHUP_SUBMITS_PER_FRAME
-            && !player_ids.is_empty()
-            && visited_without_submit < player_ids.len()
-        {
-            let slot = self.catchup_round_robin_cursor % player_ids.len();
-            self.catchup_round_robin_cursor =
-                (self.catchup_round_robin_cursor + 1) % player_ids.len();
-            let player_id = player_ids[slot];
-            let player_pos = self
-                .remote_players
-                .get(&player_id)
-                .and_then(|remote| remote.snapshots.back().map(|snapshot| snapshot.position))
-                .unwrap_or(self.player_physics.position);
-            let candidate = self
-                .pending_player_catchups
-                .get(&player_id)
-                .and_then(|entries| {
-                    entries
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, entry)| entry.status == CatchupStatus::Pending)
-                        .min_by(|(_, left), (_, right)| {
-                            let distance = |entry: &PlayerCatchupEntry| {
-                                let center_x = (entry.key.cx * CHUNK_WIDTH as i32
-                                    + CHUNK_WIDTH as i32 / 2)
-                                    as f32;
-                                let center_z = (entry.key.cz * CHUNK_DEPTH as i32
-                                    + CHUNK_DEPTH as i32 / 2)
-                                    as f32;
-                                (center_x - player_pos.x).powi(2)
-                                    + (center_z - player_pos.z).powi(2)
-                            };
-                            distance(left)
-                                .partial_cmp(&distance(right))
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(index, entry)| (index, entry.key))
-                });
-            let Some((entry_index, key)) = candidate else {
-                visited_without_submit += 1;
-                continue;
-            };
-            let chunk = (key.dimension == self.current_dimension)
-                .then(|| self.chunk_manager.chunks.get(&(key.cx, key.cz)).cloned())
-                .flatten()
-                .map(Arc::new);
-            let allow_disk_fallback = !self.has_in_process_runtime();
-            if !allow_disk_fallback && chunk.is_none() {
-                // Runtime is authoritative; do not use presentation's
-                // independent region cache as a catch-up source.
-                visited_without_submit += 1;
-                continue;
-            }
-            let Some(worker) = self.network_snapshot_worker.as_ref() else {
-                break;
-            };
-            match worker.try_submit(crate::save::NetworkSnapshotRequest {
-                key,
-                chunk,
-                allow_disk_fallback,
-            }) {
-                Ok(()) => {
-                    if let Some(entry) = self
-                        .pending_player_catchups
-                        .get_mut(&player_id)
-                        .and_then(|entries| entries.get_mut(entry_index))
-                    {
-                        entry.status = CatchupStatus::WorkerInFlight;
-                    }
-                    submitted += 1;
-                    visited_without_submit = 0;
-                }
-                Err(crate::save::NetworkSnapshotSubmitError::Full) => break,
-                Err(crate::save::NetworkSnapshotSubmitError::Closed) => {
-                    eprintln!("[Network] Catch-up snapshot worker stopped");
-                    break;
-                }
-            }
-        }
-
-        self.pending_player_catchups
-            .retain(|_, entries| !entries.is_empty());
-        self.perf_counters.network_queue_depth = self
-            .pending_player_catchups
-            .values()
-            .map(|entries| entries.len() as u64)
-            .sum::<u64>()
-            .saturating_add(self.network_staging.len() as u64);
     }
 
     fn weather_sync_fields(&self) -> (u8, f32) {
@@ -7203,32 +6845,6 @@ impl State {
         }
     }
 
-    fn enqueue_chunk_save(
-        &self,
-        snapshot: crate::save::UncompressedChunkSnapshot,
-        tracker: crate::save::DirtyChunkSet,
-        revision: u64,
-    ) -> crate::save::SaveResult<()> {
-        let cx = snapshot.chunk_x;
-        let cz = snapshot.chunk_z;
-        if !tracker.begin_save(cx, cz, revision) {
-            return Ok(());
-        }
-        let Some(save_tx) = self.save_tx.as_ref() else {
-            tracker.acknowledge_failed(cx, cz, revision);
-            return Err(crate::save::SaveError::QueueClosed);
-        };
-        if let Err(error) = save_tx.send(crate::save::SaveCommand::SaveChunk {
-            snapshot,
-            revision,
-            tracker: tracker.clone(),
-        }) {
-            tracker.acknowledge_failed(cx, cz, revision);
-            return Err(error);
-        }
-        Ok(())
-    }
-
     pub fn trigger_background_save(&self) -> crate::save::SaveResult<()> {
         if !self.presentation_topology().is_legacy_owner() {
             // ServerRuntime owns authoritative chunk/entity/player persistence
@@ -7236,14 +6852,11 @@ impl State {
             // renderer cache must never be serialized as a second authority.
             return Ok(());
         }
-        let world_dir = self
-            .save_manager
-            .as_ref()
-            .expect("authoritative world owns SaveManager")
-            .lock()
-            .unwrap()
-            .world_dir
-            .clone();
+        let Some(save_manager) = self.save_manager.as_ref() else {
+            return Ok(());
+        };
+        let mut manager = save_manager.lock().unwrap_or_else(|error| error.into_inner());
+        let world_dir = manager.world_dir.clone();
         crate::menu::update_world_metadata(
             &world_dir,
             self.world_seed,
@@ -7281,46 +6894,32 @@ impl State {
             &self.inventory,
             self.advancement_manager.progress.clone(),
         );
-        self.save_tx
-            .as_ref()
-            .ok_or(crate::save::SaveError::QueueClosed)?
-            .send(crate::save::SaveCommand::SaveLevelAndPlayer(level, player))?;
+        manager
+            .save_player_and_level(&level, &player)
+            .map_err(|error| crate::save::SaveError::Io {
+                operation: "save player and level",
+                path: world_dir.join("player.dat"),
+                message: error.to_string(),
+            })?;
 
-        let tracker = self.chunk_manager.dirty_chunks.clone();
-        for ((cx, cz), revision) in tracker.dirty_revisions() {
-            if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
-                let redstone_metadata =
-                    self.redstone
-                        .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                let snapshot = crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
-                    self.current_dimension,
-                    chunk,
-                    redstone_metadata,
-                )
-                .with_mutation_revision(self.mutation_revisions.latest(
-                    self.current_dimension,
-                    cx,
-                    cz,
-                ));
-                self.enqueue_chunk_save(snapshot, tracker.clone(), revision)?;
+        for (&(cx, cz), chunk) in &self.chunk_manager.chunks {
+            let redstone_metadata = self
+                .redstone
+                .collect_chunk_metadata(&self.chunk_manager, cx, cz);
+            if let Ok(data) =
+                crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata)
+            {
+                let _ = manager.save_chunk_in(self.current_dimension, cx, cz, data);
             }
         }
-        self.save_manager
-            .as_ref()
-            .expect("authoritative world owns SaveManager")
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        manager
             .save_current_dimension(self.current_dimension)
             .map_err(|error| crate::save::SaveError::Io {
                 operation: "save current dimension",
                 path: world_dir.join("dimension.dat"),
                 message: error.to_string(),
             })?;
-        self.save_manager
-            .as_ref()
-            .expect("authoritative world owns SaveManager")
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        manager
             .save_mutation_revision_index(&self.mutation_revisions)
             .map_err(|error| crate::save::SaveError::Io {
                 operation: "save mutation revision index",
@@ -7351,15 +6950,6 @@ impl State {
             self.chunk_manager.dirty_chunks.mark_dirty(coord.0, coord.1);
         }
         self.trigger_background_save()?;
-
-        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        self.save_tx
-            .as_ref()
-            .ok_or(crate::save::SaveError::QueueClosed)?
-            .send(crate::save::SaveCommand::Flush(ack_tx))?;
-        ack_rx
-            .recv()
-            .map_err(|_| crate::save::SaveError::QueueClosed)??;
         println!("[Save] Synchronously saved world state.");
         Ok(())
     }
@@ -8082,22 +7672,21 @@ impl State {
                 });
                 if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
                     if self.presentation_topology().is_legacy_owner() {
-                        if let (Some(revision), Some(redstone_metadata)) =
+                        if let (Some(_revision), Some(redstone_metadata)) =
                             (revision, redstone_metadata)
                         {
-                            let snapshot =
-                                crate::save::UncompressedChunkSnapshot::from_chunk_with_redstone(
-                                    self.current_dimension,
-                                    &chunk,
-                                    redstone_metadata,
-                                )
-                                .with_mutation_revision(
-                                    self.mutation_revisions
-                                        .latest(self.current_dimension, cx, cz),
-                                );
-                            if let Err(error) = self.enqueue_chunk_save(snapshot, tracker, revision)
-                            {
-                                eprintln!("[Save] Could not queue unloaded chunk: {error}");
+                            if let Some(save_manager) = self.save_manager.as_ref() {
+                                if let Ok(data) =
+                                    crate::save::ChunkSaveData::from_chunk_with_redstone(
+                                        &chunk,
+                                        &redstone_metadata,
+                                    )
+                                {
+                                    let _ = save_manager
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .save_chunk_in(self.current_dimension, cx, cz, data);
+                                }
                             }
                         }
                     }
@@ -13930,7 +13519,6 @@ impl State {
                 .map(|(name, ns)| (name.to_string(), ns))
                 .collect()
         });
-        let save = &self.save_queue_stats;
         let reliable = self.perf_counters.network_inbound_reliable_pending;
         let latest = self.perf_counters.network_inbound_latest_pending;
         let now_ms = std::time::SystemTime::now()
@@ -13947,25 +13535,11 @@ impl State {
             .collect();
         categories.insert(
             crate::perf::QueueCategory::SaveProducer,
-            crate::perf::QueueCategorySample {
-                depth: save.depth().saturating_sub(save.in_flight()),
-                bytes: save.queued_bytes(),
-                oldest_age_ms: 0,
-                drops: save.dropped(),
-                retries: save.retries(),
-                cancels: save.cancels(),
-            },
+            crate::perf::QueueCategorySample::default(),
         );
         categories.insert(
             crate::perf::QueueCategory::SaveWorker,
-            crate::perf::QueueCategorySample {
-                depth: save.in_flight(),
-                bytes: save.in_flight_bytes(),
-                oldest_age_ms: 0,
-                drops: 0,
-                retries: save.retries(),
-                cancels: save.cancels(),
-            },
+            crate::perf::QueueCategorySample::default(),
         );
         let inbound = categories
             .get(&crate::perf::QueueCategory::Inbound)
@@ -15812,7 +15386,7 @@ mod debug_tests {
     }
 
     #[test]
-    fn host_inbound_block_request_preserves_authenticated_player_id() {
+    fn host_inbound_gameplay_request_preserves_authenticated_player_id() {
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
         let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
         let handle = NetworkHandle::Host {
@@ -15820,28 +15394,27 @@ mod debug_tests {
             host_to_server: outbound_tx,
             thread: None,
         };
+        let request = crate::network::protocol::GameplayRequest {
+            request_id: 42,
+            client_sequence: 1,
+            session_id: 7,
+            dimension: 0,
+            client_revision: 0,
+            operation: crate::network::protocol::GameplayOperation::Command {
+                command: "/help".into(),
+            },
+        };
         inbound_tx
-            .send(crate::network::server::ServerToHost::ClientBlockChange {
+            .send(crate::network::server::ServerToHost::GameplayRequest {
                 id: 7,
-                x: 3,
-                y: 80,
-                z: -4,
-                block: BlockType::Stone.to_wire(),
-                state: 0,
+                request,
             })
             .unwrap();
 
         let events = handle.drain_inbound();
         assert!(matches!(
             events.as_slice(),
-            [NetworkInbound::ClientBlockChange {
-                id: 7,
-                x: 3,
-                y: 80,
-                z: -4,
-                block,
-                state: 0,
-            }] if *block == BlockType::Stone.to_wire()
+            [NetworkInbound::GameplayRequest { id: 7, request: req }] if req.request_id == 42
         ));
     }
 

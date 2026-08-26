@@ -199,105 +199,7 @@ pub fn build_unit_quad_prototype() -> (Vec<MobPrototypeVertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-pub fn expand_mob_instances(
-    cuboid_instances: &[MobInstance],
-    quad_instances: &[MobInstance],
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-) {
-    let (cuboid_verts, _) = build_unit_cuboid_prototype();
-    let (quad_verts, _) = build_unit_quad_prototype();
 
-    for inst in cuboid_instances {
-        let start_idx = vertices.len() as u32;
-        let size = Vec3::from(inst.size);
-        let offset = Vec3::from(inst.offset);
-        let pivot = Vec3::from(inst.pivot);
-        let cos_pitch = inst.rot_pitch.cos();
-        let sin_pitch = inst.rot_pitch.sin();
-        let cos_yaw = inst.rot_yaw.cos();
-        let sin_yaw = inst.rot_yaw.sin();
-
-        for proto in &cuboid_verts {
-            let local_pos = Vec3::from(proto.position) * size + offset;
-            let v2 = Vec3::new(
-                local_pos.x,
-                local_pos.y * cos_pitch - local_pos.z * sin_pitch,
-                local_pos.y * sin_pitch + local_pos.z * cos_pitch,
-            );
-            let v3 = Vec3::new(
-                v2.x * cos_yaw + v2.z * sin_yaw,
-                v2.y,
-                -v2.x * sin_yaw + v2.z * cos_yaw,
-            );
-            let final_pos = v3 + pivot;
-
-            let col = (inst.tex_cols_packed >> (proto.face_idx * 4)) & 0xF;
-            let u = (proto.uv[0] + col as f32) * 0.0625;
-            let v = (proto.uv[1] + inst.tex_row as f32) * 0.0625;
-
-            vertices.push(Vertex {
-                position: final_pos.into(),
-                tex_coords: [u, v],
-                light_level: inst.light_level,
-                ao: 1.0,
-            });
-        }
-
-        for f in 0..6 {
-            let f_start = start_idx + (f * 4);
-            indices.push(f_start + 0);
-            indices.push(f_start + 1);
-            indices.push(f_start + 2);
-            indices.push(f_start + 0);
-            indices.push(f_start + 2);
-            indices.push(f_start + 3);
-        }
-    }
-
-    for inst in quad_instances {
-        let start_idx = vertices.len() as u32;
-        let size = Vec3::from(inst.size);
-        let offset = Vec3::from(inst.offset);
-        let pivot = Vec3::from(inst.pivot);
-        let cos_yaw = inst.rot_yaw.cos();
-        let sin_yaw = inst.rot_yaw.sin();
-
-        for proto in &quad_verts {
-            let local_pos = Vec3::from(proto.position) * size + offset;
-            let rotated = Vec3::new(
-                local_pos.x * cos_yaw + local_pos.z * sin_yaw,
-                local_pos.y,
-                -local_pos.x * sin_yaw + local_pos.z * cos_yaw,
-            );
-            let final_pos = pivot + rotated;
-
-            let col = inst.tex_cols_packed & 0xF;
-            let u = (proto.uv[0] + col as f32) * 0.0625;
-            let v = (proto.uv[1] + inst.tex_row as f32) * 0.0625;
-
-            vertices.push(Vertex {
-                position: final_pos.into(),
-                tex_coords: [u, v],
-                light_level: inst.light_level,
-                ao: 1.0,
-            });
-        }
-
-        indices.push(start_idx + 0);
-        indices.push(start_idx + 1);
-        indices.push(start_idx + 2);
-        indices.push(start_idx + 0);
-        indices.push(start_idx + 2);
-        indices.push(start_idx + 3);
-        indices.push(start_idx + 2);
-        indices.push(start_idx + 1);
-        indices.push(start_idx + 0);
-        indices.push(start_idx + 3);
-        indices.push(start_idx + 2);
-        indices.push(start_idx + 0);
-    }
-}
 
 pub fn add_cuboid(
     instances: &mut Vec<MobInstance>,
@@ -344,50 +246,6 @@ fn add_flat_sprite(
     });
 }
 
-pub fn render_mobs_legacy(
-    entity_manager: &EntityManager,
-    chunk_manager: &ChunkManager,
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    time: f32,
-) {
-    let mut cuboids = Vec::new();
-    let mut quads = Vec::new();
-    render_mobs(
-        &entity_manager.entities,
-        chunk_manager,
-        &mut cuboids,
-        &mut quads,
-        time,
-    );
-    expand_mob_instances(&cuboids, &quads, vertices, indices);
-}
-
-pub fn render_local_player_legacy(
-    position: Vec3,
-    yaw: f32,
-    pitch: f32,
-    chunk_manager: &ChunkManager,
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    time: f32,
-    velocity: Vec3,
-) {
-    let mut cuboids = Vec::new();
-    let mut quads = Vec::new();
-    render_local_player(
-        position,
-        yaw,
-        pitch,
-        chunk_manager,
-        &mut cuboids,
-        &mut quads,
-        crate::inventory::Item::Air,
-        time,
-        velocity,
-    );
-    expand_mob_instances(&cuboids, &quads, vertices, indices);
-}
 pub fn render_mobs<'a>(
     entities: impl IntoIterator<Item = &'a Entity>,
     chunk_manager: &ChunkManager,
@@ -2452,40 +2310,51 @@ mod tests {
         let mut entities = EntityManager::new();
         entities.spawn(EntityType::RemotePlayer, Vec3::new(4.0, 8.0, -2.0));
         let chunks = ChunkManager::new(1);
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let mut cuboids = Vec::new();
+        let mut quads = Vec::new();
 
-        render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 0.0);
+        render_mobs(
+            entities.entities.iter(),
+            &chunks,
+            &mut cuboids,
+            &mut quads,
+            0.0,
+        );
 
-        assert_eq!(vertices.len(), 8 * 24);
-        assert_eq!(indices.len(), 8 * 36);
-        assert!(vertices
-            .iter()
-            .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
+        assert_eq!(cuboids.len(), 8);
+        assert!(quads.is_empty());
+        assert!(cuboids.iter().all(|instance| {
+            instance.pivot.iter().all(|&p| p.is_finite())
+                && instance.size.iter().all(|&s| s.is_finite())
+                && instance.offset.iter().all(|&o| o.is_finite())
+        }));
     }
 
     #[test]
     fn local_player_renders_body_and_two_sleeve_layers() {
         let chunks = ChunkManager::new(1);
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let mut instances = Vec::new();
+        let mut quads = Vec::new();
 
-        render_local_player_legacy(
+        render_local_player(
             Vec3::new(0.0, 64.0, 0.0),
             0.0,
             0.0,
             &chunks,
-            &mut vertices,
-            &mut indices,
+            &mut instances,
+            &mut quads,
+            crate::inventory::Item::Air,
             0.0,
             Vec3::ZERO,
         );
 
-        assert_eq!(vertices.len(), 8 * 24);
-        assert_eq!(indices.len(), 8 * 36);
-        assert!(vertices
-            .iter()
-            .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
+        assert_eq!(instances.len(), 8);
+        assert!(quads.is_empty());
+        assert!(instances.iter().all(|instance| {
+            instance.pivot.iter().all(|&p| p.is_finite())
+                && instance.size.iter().all(|&s| s.is_finite())
+                && instance.offset.iter().all(|&o| o.is_finite())
+        }));
     }
 
     #[test]
@@ -2561,34 +2430,29 @@ mod tests {
     #[test]
     fn local_player_faces_camera_direction_with_shifted_yaw() {
         // Third-person caller passes model_yaw = FRAC_PI_2 - camera_yaw. The
-        // head's front face (the first four emitted vertices) must then point
-        // along the camera's horizontal forward so the camera sees the back.
+        // head's front face instance yaw must then point along the camera's
+        // horizontal forward so the camera sees the back.
         let camera_yaw = 0.3_f32;
         let model_yaw = std::f32::consts::FRAC_PI_2 - camera_yaw;
         let position = Vec3::new(10.0, 64.0, -3.0);
         let chunks = ChunkManager::new(1);
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let mut instances = Vec::new();
+        let mut quads = Vec::new();
 
-        render_local_player_legacy(
+        render_local_player(
             position,
             model_yaw,
             0.0,
             &chunks,
-            &mut vertices,
-            &mut indices,
+            &mut instances,
+            &mut quads,
+            crate::inventory::Item::Air,
             0.0,
             Vec3::ZERO,
         );
 
-        // Head front-face center relative to the head pivot at (0, 1.65, 0).
-        let front = &vertices[0..4];
-        let center = front.iter().fold(Vec3::ZERO, |acc, v| {
-            acc + Vec3::new(v.position[0], v.position[1], v.position[2])
-        }) / 4.0;
-        let pivot = position + Vec3::new(0.0, 1.65, 0.0);
-        let facing = (center - pivot).normalize_or_zero();
-
+        let head = &instances[0];
+        let facing = Vec3::new(head.rot_yaw.sin(), 0.0, head.rot_yaw.cos());
         let expected = Vec3::new(camera_yaw.cos(), 0.0, camera_yaw.sin());
         assert!(
             facing.dot(expected) > 0.99,
@@ -2603,16 +2467,23 @@ mod tests {
         entities.entities.last_mut().unwrap().dropped_item = Some(crate::inventory::Item::Seeds);
 
         let chunks = ChunkManager::new(1);
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 1.0);
+        let mut cuboids = Vec::new();
+        let mut quads = Vec::new();
+        render_mobs(
+            entities.entities.iter(),
+            &chunks,
+            &mut cuboids,
+            &mut quads,
+            1.0,
+        );
 
-        // Flat items render as one double-sided quad, not a cube.
-        assert_eq!(vertices.len(), 4);
-        assert_eq!(indices.len(), 12);
-        assert!(vertices
-            .iter()
-            .all(|vertex| vertex.position.into_iter().all(f32::is_finite)));
+        // Flat items render as one quad instance, not cuboids.
+        assert_eq!(cuboids.len(), 0);
+        assert_eq!(quads.len(), 1);
+        assert!(quads.iter().all(|instance| {
+            instance.pivot.iter().all(|&p| p.is_finite())
+                && instance.size.iter().all(|&s| s.is_finite())
+        }));
     }
 
     #[test]
@@ -2622,21 +2493,27 @@ mod tests {
         entities.entities.last_mut().unwrap().dropped_item = Some(crate::inventory::Item::Stone);
 
         let chunks = ChunkManager::new(1);
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 1.0);
+        let mut cuboids = Vec::new();
+        let mut quads = Vec::new();
+        render_mobs(
+            entities.entities.iter(),
+            &chunks,
+            &mut cuboids,
+            &mut quads,
+            1.0,
+        );
 
-        assert_eq!(vertices.len(), 24);
-        assert_eq!(indices.len(), 36);
+        assert_eq!(cuboids.len(), 1);
+        assert_eq!(quads.len(), 0);
     }
 
     #[test]
     fn passive_mob_heads_have_single_face_texture_and_body_sides() {
         let test_cases = [
-            (EntityType::Pig, 0.0, 1.0),
-            (EntityType::Cow, 2.0, 3.0),
-            (EntityType::Sheep, 3.0, 4.0),
-            (EntityType::Chicken, 7.0, 8.0),
+            (EntityType::Pig, 0u32, 1u32),
+            (EntityType::Cow, 2u32, 3u32),
+            (EntityType::Sheep, 3u32, 4u32),
+            (EntityType::Chicken, 7u32, 8u32),
         ];
 
         let chunks = ChunkManager::new(1);
@@ -2645,22 +2522,27 @@ mod tests {
             let mut entities = EntityManager::new();
             entities.spawn(mob_type, Vec3::new(0.0, 64.0, 0.0));
 
-            let mut vertices = Vec::new();
-            let mut indices = Vec::new();
-            render_mobs_legacy(&entities, &chunks, &mut vertices, &mut indices, 0.0);
+            let mut cuboids = Vec::new();
+            let mut quads = Vec::new();
+            render_mobs(
+                entities.entities.iter(),
+                &chunks,
+                &mut cuboids,
+                &mut quads,
+                0.0,
+            );
 
-            // Head is the first cuboid (24 vertices, 6 faces of 4 vertices each).
-            // Face 0 (Front face) starts at vertex index 0; vertex 0 has uv[0] = 0.0.
-            let front_col = (vertices[0].tex_coords[0] * 16.0).round();
+            // Head is the first cuboid.
+            // Face 0 (Front face) packed at bits 0..4.
+            let front_col = (cuboids[0].tex_cols_packed >> 0) & 0xF;
             assert_eq!(
                 front_col, face_col,
                 "{mob_type:?} head front face should use face_col {face_col}"
             );
 
-            // Faces 1..5 (Back, Left, Right, Top, Bottom) start at vertex indices 4, 8, 12, 16, 20.
+            // Faces 1..5 (Back, Left, Right, Top, Bottom) packed at bits (face * 4)..
             for face in 1..6 {
-                let v_idx = face * 4;
-                let col = (vertices[v_idx].tex_coords[0] * 16.0).round();
+                let col = (cuboids[0].tex_cols_packed >> (face * 4)) & 0xF;
                 assert_eq!(
                     col, body_col,
                     "{mob_type:?} head face {face} should use body_col {body_col}"
@@ -2706,13 +2588,13 @@ mod tests {
         let zombie_id = entity_manager.spawn(EntityType::Zombie, Vec3::new(0.0, 64.0, 0.0));
 
         let chunk_manager = ChunkManager::new(1);
-        let mut vertices_normal = Vec::new();
-        let mut indices_normal = Vec::new();
-        render_mobs_legacy(
-            &entity_manager,
+        let mut cuboids_normal = Vec::new();
+        let mut quads_normal = Vec::new();
+        render_mobs(
+            entity_manager.entities.iter(),
             &chunk_manager,
-            &mut vertices_normal,
-            &mut indices_normal,
+            &mut cuboids_normal,
+            &mut quads_normal,
             0.0,
         );
 
@@ -2721,24 +2603,22 @@ mod tests {
             zombie.fire_aspect_timer = 5.0;
         }
 
-        let mut vertices_burning = Vec::new();
-        let mut indices_burning = Vec::new();
-        render_mobs_legacy(
-            &entity_manager,
+        let mut cuboids_burning = Vec::new();
+        let mut quads_burning = Vec::new();
+        render_mobs(
+            entity_manager.entities.iter(),
             &chunk_manager,
-            &mut vertices_burning,
-            &mut indices_burning,
+            &mut cuboids_burning,
+            &mut quads_burning,
             0.0,
         );
 
-        // Burning entity should generate 24 extra vertices (1 extra cuboid)
-        assert_eq!(vertices_burning.len(), vertices_normal.len() + 24);
-        assert_eq!(indices_burning.len(), indices_normal.len() + 36);
+        // Burning entity should generate 1 extra cuboid (fire overlay)
+        assert_eq!(cuboids_burning.len(), cuboids_normal.len() + 1);
 
-        // Verify the extra fire vertices use row 12 (v = (uv[1] + 12) * 0.0625)
-        let last_v = vertices_burning.last().unwrap().tex_coords[1];
-        let row = (last_v * 16.0).floor();
-        assert_eq!(row, 12.0);
+        // Verify the extra fire cuboid uses row 12
+        let last_instance = cuboids_burning.last().unwrap();
+        assert_eq!(last_instance.tex_row, 12);
     }
 
     #[test]
@@ -2793,12 +2673,9 @@ mod tests {
             })
         }));
 
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        expand_mob_instances(&cuboids, &quads, &mut vertices, &mut indices);
-        let max_y = vertices
+        let max_y = cuboids
             .iter()
-            .map(|vertex| vertex.position[1])
+            .map(|inst| inst.pivot[1] + inst.offset[1] + inst.size[1])
             .fold(f32::NEG_INFINITY, f32::max);
         assert!(
             max_y > 2.8,
@@ -2812,27 +2689,27 @@ mod tests {
         entity_manager.spawn(EntityType::Creeper, Vec3::ZERO);
 
         let chunk_manager = ChunkManager::new(1);
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        render_mobs_legacy(
-            &entity_manager,
+        let mut cuboids = Vec::new();
+        let mut quads = Vec::new();
+        render_mobs(
+            entity_manager.entities.iter(),
             &chunk_manager,
-            &mut vertices,
-            &mut indices,
+            &mut cuboids,
+            &mut quads,
             0.0,
         );
 
-        // Creeper has 6 cuboids (1 head + 1 torso + 4 legs) = 144 vertices
-        assert_eq!(vertices.len(), 144);
+        // Creeper has 6 cuboids (1 head + 1 torso + 4 legs)
+        assert_eq!(cuboids.len(), 6);
 
-        // Find min and max Y across all vertices
-        let min_y = vertices
+        // Find min and max Y across all cuboids
+        let min_y = cuboids
             .iter()
-            .map(|v| v.position[1])
+            .map(|c| c.pivot[1] + c.offset[1] - c.size[1] * 0.5)
             .fold(f32::INFINITY, f32::min);
-        let max_y = vertices
+        let max_y = cuboids
             .iter()
-            .map(|v| v.position[1])
+            .map(|c| c.pivot[1] + c.offset[1] + c.size[1] * 0.5)
             .fold(f32::NEG_INFINITY, f32::max);
 
         // Legs start at Y=0.0 and head ends at Y=1.625
@@ -2848,12 +2725,12 @@ mod tests {
         );
 
         // Check vertical continuity: no gap between leg top (0.375) and torso bottom (0.375)
-        let has_y_0_375 = vertices
+        let has_y_0_375 = cuboids
             .iter()
-            .any(|v| (v.position[1] - 0.375).abs() < 1e-4);
+            .any(|c| ((c.pivot[1] + c.offset[1] + c.size[1] * 0.5) - 0.375).abs() < 1e-4);
         assert!(
             has_y_0_375,
-            "Vertices must exist at Y=0.375 connecting legs and torso"
+            "Cuboid must exist reaching Y=0.375 connecting legs and torso"
         );
     }
 }
