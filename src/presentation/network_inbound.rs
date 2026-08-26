@@ -66,23 +66,6 @@ pub(crate) enum NetworkInbound {
         id: crate::network::protocol::PlayerId,
         request: crate::network::protocol::GameplayRequest,
     },
-    ClientBlockChange {
-        id: crate::network::protocol::PlayerId,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-    },
-    ClientBlockAction {
-        id: crate::network::protocol::PlayerId,
-        action: crate::network::protocol::Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<crate::network::protocol::ItemWire>,
-    },
     BlockActionResult {
         x: i32,
         y: i32,
@@ -196,12 +179,6 @@ pub(crate) enum NetworkInbound {
     ClientRespawnRequest {
         id: crate::network::protocol::PlayerId,
     },
-    ClientSleepRequest {
-        id: crate::network::protocol::PlayerId,
-        bed_x: i32,
-        bed_y: i32,
-        bed_z: i32,
-    },
     Chat {
         sender: String,
         message: String,
@@ -209,21 +186,6 @@ pub(crate) enum NetworkInbound {
     StatusUpdate(String),
     GameplayResponse {
         response: crate::network::protocol::GameplayResponse,
-    },
-    ContainerOpenRequest {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerClickRequest {
-        id: crate::network::protocol::PlayerId,
-        dimension: u8,
-        revision: u64,
-        slot_index: u16,
-        is_left: bool,
-        dragged: Option<crate::network::protocol::ItemWire>,
     },
     ContainerClose {
         id: crate::network::protocol::PlayerId,
@@ -313,10 +275,6 @@ impl NetworkInbound {
             }
             Self::ChatFromClient { message, .. } => message.len(),
             Self::Chat { sender, message } => sender.len().saturating_add(message.len()),
-            Self::ContainerOpenRequest { .. } => 0,
-            Self::ContainerClickRequest { dragged, .. } => {
-                dragged.as_ref().map_or(0, |w| std::mem::size_of_val(w))
-            }
             Self::ContainerClose { .. } => 0,
             Self::ContainerOpenResult { slots, .. } => {
                 slots.len() * std::mem::size_of::<Option<crate::network::protocol::ItemWire>>()
@@ -589,38 +547,6 @@ impl NetworkHandle {
                         crate::network::server::ServerToHost::GameplayRequest { id, request } => {
                             NetworkInbound::GameplayRequest { id, request }
                         }
-                        crate::network::server::ServerToHost::ClientBlockChange {
-                            id,
-                            x,
-                            y,
-                            z,
-                            block,
-                            state,
-                        } => NetworkInbound::ClientBlockChange {
-                            id,
-                            x,
-                            y,
-                            z,
-                            block,
-                            state,
-                        },
-                        crate::network::server::ServerToHost::ClientBlockAction {
-                            id,
-                            action,
-                            x,
-                            y,
-                            z,
-                            block,
-                            held_item,
-                        } => NetworkInbound::ClientBlockAction {
-                            id,
-                            action,
-                            x,
-                            y,
-                            z,
-                            block,
-                            held_item,
-                        },
                         crate::network::server::ServerToHost::ChatFromClient { id, message } => {
                             NetworkInbound::ChatFromClient { id, message }
                         }
@@ -668,58 +594,6 @@ impl NetworkHandle {
                         crate::network::server::ServerToHost::ClientRespawnRequest { id } => {
                             NetworkInbound::ClientRespawnRequest { id }
                         }
-                        crate::network::server::ServerToHost::ClientSleepRequest {
-                            id,
-                            bed_x,
-                            bed_y,
-                            bed_z,
-                        } => NetworkInbound::ClientSleepRequest {
-                            id,
-                            bed_x,
-                            bed_y,
-                            bed_z,
-                        },
-                        crate::network::server::ServerToHost::ContainerOpenRequest {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        } => NetworkInbound::ContainerOpenRequest {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        },
-                        crate::network::server::ServerToHost::ContainerClickRequest {
-                            id,
-                            dimension,
-                            revision,
-                            slot_index,
-                            is_left,
-                            dragged,
-                        } => NetworkInbound::ContainerClickRequest {
-                            id,
-                            dimension,
-                            revision,
-                            slot_index,
-                            is_left,
-                            dragged,
-                        },
-                        crate::network::server::ServerToHost::ContainerClose {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        } => NetworkInbound::ContainerClose {
-                            id,
-                            dimension,
-                            x,
-                            y,
-                            z,
-                        },
                     })
                     .collect()
             }

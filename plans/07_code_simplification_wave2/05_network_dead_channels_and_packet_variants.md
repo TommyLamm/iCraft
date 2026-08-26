@@ -25,11 +25,11 @@
 
 ## 精確 acceptance
 
-- [ ] 從 `src/network/channels.rs` 的 `ServerToHost` 枚舉中刪除上述 6 個未使用的變體。
-- [ ] 從 `src/server_runtime/ingress.rs` 中刪除處理這 6 個變體的全部 `match` 分支及輔助方法。
-- [ ] 從 `src/network/protocol.rs` 的 `Packet` 枚舉中安全刪除未分配/未使用的交易與突襲變體（不影響其他 wire 變體的解析）。
-- [ ] `cargo check --all-targets` 通過。
-- [ ] 所有網路整合測試（`tests/review_hardening_network_ingress.rs`、`tests/plan30_real_transport_acceptance.rs` 等）全部通過。
+- [x] 從 `src/network/channels.rs` 的 `ServerToHost` 枚舉中刪除上述 6 個未使用的變體。
+- [x] 從 `src/server_runtime/ingress.rs` 中刪除處理這 6 個變體的全部 `match` 分支及輔助方法。
+- [x] 從 `src/network/protocol.rs` 的 `Packet` 枚舉中安全刪除未分配/未使用的交易與突襲變體（不影響其他 wire 變體的解析）。
+- [x] `cargo check --all-targets` 通過。
+- [x] 所有網路整合測試（`tests/review_hardening_network_ingress.rs`、`tests/plan30_real_transport_acceptance.rs` 等）全部通過。
 
 ## 預計檔案與測試
 
@@ -37,10 +37,14 @@
   - `src/network/channels.rs`
   - `src/server_runtime/ingress.rs`
   - `src/network/protocol.rs`
+  - `src/network/server.rs`
+  - `src/presentation/network_event.rs`
+  - `src/presentation/network_inbound.rs`
 - 驗證測試：
   - `cargo test --lib network::`
   - `cargo test --lib server_runtime::`
-  - `cargo test --test review_hardening_network_ingress -- --test-threads=1`
+  - `cargo test --test review_hardening_ingress -- --test-threads=1`
+  - `cargo test --test plan30_real_transport_acceptance -- --test-threads=1`
   - `cargo check --all-targets`
 
 ## 建議階段
@@ -55,3 +59,26 @@
 
 - 變更任何現有 `GameplayRequest` / `GameplayOperation` 的 wire 格式。
 - 修改 `Packet` 的 2 MiB 長度限制或 bincode decode 策略。
+
+## 實作與證據
+
+### 修改內容
+1. **`src/network/channels.rs`**：
+   - 從 `ServerToHost` 枚舉中刪除 6 個未使用的死變體：`ClientBlockChange`、`ClientBlockAction`、`ClientSleepRequest`、`ContainerOpenRequest`、`ContainerClickRequest`、`ContainerClose`。
+2. **`src/server_runtime/ingress.rs`**：
+   - 刪除 `handle_event` 中上述 6 個死變體的全部 `match` 分支。
+   - 刪除不再使用的輔助方法：`handle_block_change`、`legacy_request`、`send_legacy_rejection`、`session_request_id`。
+3. **`src/network/protocol.rs`**：
+   - 從 `Packet` 枚舉及其 `protocol_version()` 匹配中刪除未使用的交易與突襲變體：`OpenTradeWindow`、`ExecuteTradeRequest`、`ExecuteTradeResult`、`CloseTradeWindow`、`RaidStatusSync`。
+4. **`src/network/server.rs`**：
+   - 更新單元測試中對 `ServerToHost` 事件類型的斷言匹配。
+5. **`src/presentation/network_event.rs` & `src/presentation/network_inbound.rs`**：
+   - 清理表現層對應的死事件變體分派與轉換。
+
+### 驗證證據
+- `cargo test --lib network::` (101 passed; 0 failed)
+- `cargo test --lib server_runtime::` (26 passed; 0 failed)
+- `cargo test --test review_hardening_ingress -- --test-threads=1` (2 passed; 0 failed)
+- `cargo test --test plan30_real_transport_acceptance -- --test-threads=1` (2 passed; 0 failed)
+- `cargo check --all-targets` (通過)
+

@@ -1510,7 +1510,7 @@ mod tests {
         assert!(
             event_rx
                 .try_iter()
-                .all(|event| !matches!(event, ServerToHost::ClientBlockChange { id: event_id, .. } if event_id == id)),
+                .all(|event| !matches!(event, ServerToHost::GameplayRequest { id: event_id, .. } if event_id == id)),
             "evicted client forwarded a gameplay packet after cancellation"
         );
     }

@@ -9,10 +9,7 @@ use super::*;
 use crate::authority::DimensionTransferIntent;
 use crate::dimension::Dimension;
 use crate::game_rules::persisted_player_game_mode;
-use crate::network::protocol::{
-    wrap_legacy, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
-    GameplayResponse, LegacyGameplay, PlayerEffectWire, RejectReason,
-};
+use crate::network::protocol::{GameplayRequest, GameplayResponse};
 use crate::network::server::{HostToServer, ServerToHost};
 use crate::save::normalize_player_identity;
 use std::io;
@@ -48,14 +45,6 @@ impl ServerRuntime {
                 yaw,
                 pitch,
             } => self.handle_position(id, sequence, sender_time_millis, x, y, z, yaw, pitch),
-            ServerToHost::ClientBlockChange {
-                id,
-                x,
-                y,
-                z,
-                block,
-                state,
-            } => self.handle_block_change(id, x, y, z, block, state),
             ServerToHost::ClientAction { id, action } => {
                 self.enqueue_host(HostToServer::BroadcastPlayerAction { id, action });
                 Ok(())
@@ -121,150 +110,6 @@ impl ServerRuntime {
                 self.sync_gameplay_projection(id);
                 self.send_respawn_result(id, respawn_position, dimension);
                 self.update_interest_for(id, dimension, respawn_position);
-                Ok(())
-            }
-            ServerToHost::ClientBlockAction {
-                id,
-                action,
-                x,
-                y,
-                z,
-                block,
-                held_item,
-            } => {
-                let Some(request) = self.legacy_request(
-                    id,
-                    self.session_revision(id).unwrap_or(0),
-                    LegacyGameplay::BlockAction {
-                        action,
-                        x,
-                        y,
-                        z,
-                        block,
-                        held_item,
-                    },
-                ) else {
-                    return Ok(());
-                };
-                let response = self.handle_gameplay_request(request)?;
-                self.send_response(id, response);
-                Ok(())
-            }
-            ServerToHost::ClientSleepRequest {
-                id,
-                bed_x,
-                bed_y,
-                bed_z,
-            } => {
-                let Some(request) = self.legacy_request(
-                    id,
-                    self.session_revision(id).unwrap_or(0),
-                    LegacyGameplay::Sleep {
-                        x: bed_x,
-                        y: bed_y,
-                        z: bed_z,
-                    },
-                ) else {
-                    return Ok(());
-                };
-                let response = self.handle_gameplay_request(request)?;
-                self.send_response(id, response);
-                Ok(())
-            }
-            ServerToHost::ContainerOpenRequest {
-                id,
-                dimension,
-                x,
-                y,
-                z,
-            } => {
-                let Some(request) = self.legacy_request(
-                    id,
-                    self.session_revision(id).unwrap_or(0),
-                    LegacyGameplay::ContainerOpen { x, y, z },
-                ) else {
-                    return Ok(());
-                };
-                if request.dimension != dimension {
-                    self.send_legacy_rejection(
-                        id,
-                        request.request_id,
-                        RejectReason::InvalidDimension,
-                    );
-                } else {
-                    let response = self.handle_gameplay_request(request)?;
-                    self.send_response(id, response);
-                }
-                Ok(())
-            }
-            ServerToHost::ContainerClickRequest {
-                id,
-                dimension,
-                revision,
-                slot_index,
-                is_left,
-                dragged,
-            } => {
-                let Some((x, y, z)) = self
-                    .players
-                    .get(&id)
-                    .and_then(|session| session.interest.open_containers.iter().next())
-                    .copied()
-                else {
-                    self.send_legacy_rejection(
-                        id,
-                        self.session_request_id(id),
-                        RejectReason::InvalidState,
-                    );
-                    return Ok(());
-                };
-                let request = GameplayRequest {
-                    request_id: self.session_request_id(id),
-                    client_sequence: self
-                        .authority
-                        .session(id)
-                        .map(|session| session.last_client_sequence + 1)
-                        .unwrap_or(1),
-                    session_id: id,
-                    dimension,
-                    client_revision: revision,
-                    operation: GameplayOperation::ContainerClick {
-                        x,
-                        y,
-                        z,
-                        slot: slot_index,
-                        is_left,
-                        dragged,
-                    },
-                };
-                let response = self.handle_gameplay_request(request)?;
-                self.send_response(id, response);
-                Ok(())
-            }
-            ServerToHost::ContainerClose {
-                id,
-                dimension,
-                x,
-                y,
-                z,
-            } => {
-                let Some(request) = self.legacy_request(
-                    id,
-                    self.session_revision(id).unwrap_or(0),
-                    LegacyGameplay::ContainerClose { x, y, z },
-                ) else {
-                    return Ok(());
-                };
-                if request.dimension != dimension {
-                    self.send_legacy_rejection(
-                        id,
-                        request.request_id,
-                        RejectReason::InvalidDimension,
-                    );
-                } else {
-                    let response = self.handle_gameplay_request(request)?;
-                    self.send_response(id, response);
-                }
                 Ok(())
             }
             ServerToHost::CatchupAccepted { .. }
@@ -565,28 +410,6 @@ impl ServerRuntime {
         Ok(())
     }
 
-    pub(super) fn handle_block_change(
-        &mut self,
-        id: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        _state: u8,
-    ) -> io::Result<()> {
-        // Leftover BlockChange has no held/face. Submit BlockUse so the
-        // authority can reject Unsupported; never set_block or invent Air.
-        let Some(request) = self.legacy_request(
-            id,
-            self.session_revision(id).unwrap_or(0),
-            LegacyGameplay::BlockChange { x, y, z, block },
-        ) else {
-            return Ok(());
-        };
-        let response = self.handle_gameplay_request(request)?;
-        self.send_response(id, response);
-        Ok(())
-    }
 
     pub(super) fn handle_gameplay_request(
         &mut self,
@@ -909,51 +732,11 @@ impl ServerRuntime {
         self.observed_transport_duplicates = snapshot.duplicate_requests;
     }
 
-    pub(super) fn legacy_request(
-        &self,
-        id: u64,
-        client_revision: u64,
-        leftover: LegacyGameplay,
-    ) -> Option<GameplayRequest> {
-        let session = self.authority.session(id)?;
-        let dimension = Dimension::from_wire(session.dimension)?;
-        let mut request = wrap_legacy(id, dimension as u8, client_revision, leftover)?;
-        request.request_id = self.authority.revision_for_dimension(dimension) as u128 + 1;
-        request.client_sequence = session.last_client_sequence.saturating_add(1).max(1);
-        Some(request)
-    }
-
-    pub(super) fn send_legacy_rejection(
-        &mut self,
-        to: u64,
-        request_id: u128,
-        reason: RejectReason,
-    ) {
-        let dimension = self
-            .authority
-            .session(to)
-            .and_then(|session| Dimension::from_wire(session.dimension))
-            .unwrap_or_else(|| self.authority.active_dimension());
-        let server_sequence = self
-            .authority
-            .with_world(dimension, |world| world.revisions.allocate());
-        let response = GameplayResponse {
-            request_id,
-            server_sequence,
-            outcome: GameplayOutcome::Rejected { reason },
-        };
-        self.send_response(to, response);
-    }
-
     pub(super) fn session_revision(&self, id: u64) -> Option<u64> {
         let dimension = self
             .authority
             .session(id)
             .and_then(|session| Dimension::from_wire(session.dimension))?;
         Some(self.authority.revision_for_dimension(dimension))
-    }
-
-    pub(super) fn session_request_id(&self, id: u64) -> u128 {
-        self.session_revision(id).unwrap_or(0) as u128 + 1
     }
 }

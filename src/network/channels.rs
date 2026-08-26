@@ -72,23 +72,6 @@ pub enum ServerToHost {
         id: PlayerId,
         request: GameplayRequest,
     },
-    ClientBlockChange {
-        id: PlayerId,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-    },
-    ClientBlockAction {
-        id: PlayerId,
-        action: Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<ItemWire>,
-    },
     ChatFromClient {
         id: PlayerId,
         message: String,
@@ -117,34 +100,6 @@ pub enum ServerToHost {
     },
     ClientRespawnRequest {
         id: PlayerId,
-    },
-    ClientSleepRequest {
-        id: PlayerId,
-        bed_x: i32,
-        bed_y: i32,
-        bed_z: i32,
-    },
-    ContainerOpenRequest {
-        id: PlayerId,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerClickRequest {
-        id: PlayerId,
-        dimension: u8,
-        revision: u64,
-        slot_index: u16,
-        is_left: bool,
-        dragged: Option<ItemWire>,
-    },
-    ContainerClose {
-        id: PlayerId,
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
     },
 }
 

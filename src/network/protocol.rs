@@ -1587,43 +1587,6 @@ pub enum Packet {
         player_id: PlayerId,
         is_sleeping: bool,
     },
-    /// v19 reserved/unused. Discriminant must stay for bincode.
-    OpenTradeWindow {
-        protocol_version: u32,
-        villager_id: u64,
-        profession: u8,
-        level: u8,
-        xp: u32,
-        #[serde(deserialize_with = "deserialize_bounded_vec")]
-        offers: Vec<crate::village::trade::TradeOffer>,
-    },
-    /// v19 reserved/unused. Discriminant must stay for bincode.
-    ExecuteTradeRequest {
-        protocol_version: u32,
-        villager_id: u64,
-        offer_index: u16,
-    },
-    /// v19 reserved/unused. Discriminant must stay for bincode.
-    ExecuteTradeResult {
-        protocol_version: u32,
-        success: bool,
-        offer_index: u16,
-        new_uses: u32,
-        villager_xp: u32,
-        new_level: u8,
-    },
-    /// v19 reserved/unused. Discriminant must stay for bincode.
-    CloseTradeWindow {
-        protocol_version: u32,
-        villager_id: u64,
-    },
-    /// v19 reserved/unused. Discriminant must stay for bincode.
-    RaidStatusSync {
-        protocol_version: u32,
-        current_wave: u8,
-        max_waves: u8,
-        status: u8,
-    },
     WorldRulesSync {
         protocol_version: u32,
         rules: crate::game_rules::WorldRules,
@@ -1738,21 +1701,6 @@ impl Packet {
                 protocol_version, ..
             }
             | Packet::SleepStateSync {
-                protocol_version, ..
-            }
-            | Packet::OpenTradeWindow {
-                protocol_version, ..
-            }
-            | Packet::ExecuteTradeRequest {
-                protocol_version, ..
-            }
-            | Packet::ExecuteTradeResult {
-                protocol_version, ..
-            }
-            | Packet::CloseTradeWindow {
-                protocol_version, ..
-            }
-            | Packet::RaidStatusSync {
                 protocol_version, ..
             } => *protocol_version,
             Packet::WorldRulesSync {
