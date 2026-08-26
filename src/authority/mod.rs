@@ -112,56 +112,6 @@ pub struct DimensionTransferIntent {
     pub position: [f32; 3],
 }
 
-/// Test-only helper around `AuthorityCore`. Desktop Singleplayer/Host use
-/// `ServerRuntime` instead; this type is not a production presentation path.
-#[cfg(test)]
-pub struct AuthorityBoundary {
-    pub topology: AuthorityTopology,
-    pub core: AuthorityCore,
-    pub session_id: PlayerId,
-}
-
-#[cfg(test)]
-impl AuthorityBoundary {
-    pub fn new(
-        config: AuthorityConfig,
-        topology: AuthorityTopology,
-        session_id: PlayerId,
-        username: impl Into<String>,
-        position: [f32; 3],
-        operator: bool,
-        cheats_enabled: bool,
-    ) -> Self {
-        let mut core = AuthorityCore::new(config, topology);
-        let _ = core.register_session(SessionContract::new(
-            session_id,
-            username,
-            config.dimension as u8,
-            position,
-            operator,
-            cheats_enabled,
-        ));
-        Self {
-            topology,
-            core,
-            session_id,
-        }
-    }
-
-    pub fn set_position(&mut self, position: [f32; 3]) {
-        if let Some(session) = self.core.session_mut(self.session_id) {
-            session.position = position;
-        }
-    }
-
-    /// Wire-dimension wrapper around `AuthorityCore::set_session_dimension`.
-    pub fn set_dimension(&mut self, dimension: u8) -> bool {
-        let Some(target) = Dimension::from_wire(dimension) else {
-            return false;
-        };
-        self.core.set_session_dimension(self.session_id, target)
-    }
-}
 
 impl AuthorityCore {
     pub fn new(config: AuthorityConfig, topology: AuthorityTopology) -> Self {
@@ -492,10 +442,6 @@ impl AuthorityCore {
             responses.push((response, self.last_snapshot().clone()));
         }
         responses
-    }
-
-    pub fn world_mutations(&self) -> &[WorldMutation] {
-        &self.last_snapshot.mutations
     }
 
     /// Drain request mutations without advancing the simulation clock.
@@ -1610,96 +1556,99 @@ mod tests {
 
     #[test]
     fn dimension_transfer_updates_session_and_world_contract() {
-        let mut boundary = AuthorityBoundary::new(
+        let mut core = AuthorityCore::new(
             AuthorityConfig::default(),
             AuthorityTopology::Singleplayer,
+        );
+        let _ = core.register_session(SessionContract::new(
             7,
             "alex",
+            0,
             [8.0, 80.0, 8.0],
             true,
             true,
-        );
-        assert!(boundary.set_dimension(crate::dimension::Dimension::Nether as u8));
-        assert_eq!(boundary.core.session(7).unwrap().dimension, 1);
+        ));
+        assert!(core.set_session_dimension(7, crate::dimension::Dimension::Nether));
+        assert_eq!(core.session(7).unwrap().dimension, 1);
         assert_eq!(
-            boundary.core.active_dimension(),
+            core.active_dimension(),
             crate::dimension::Dimension::Nether
         );
-        let nether = boundary
-            .core
+        let nether = core
             .world_ref(crate::dimension::Dimension::Nether)
             .expect("nether world stays in the map");
         assert_eq!(nether.dimension, crate::dimension::Dimension::Nether);
         assert_eq!(nether.chunks.dimension, crate::dimension::Dimension::Nether);
         assert_eq!(
-            boundary.core.world_mut_active().dimension,
+            core.world_mut_active().dimension,
             crate::dimension::Dimension::Nether
         );
     }
 
     #[test]
     fn dimension_worlds_are_parked_without_chunk_aliasing() {
-        let mut boundary = AuthorityBoundary::new(
+        let mut core = AuthorityCore::new(
             AuthorityConfig::default(),
             AuthorityTopology::Singleplayer,
+        );
+        let _ = core.register_session(SessionContract::new(
             7,
             "alex",
+            0,
             [8.0, 80.0, 8.0],
             true,
             true,
-        );
+        ));
         let marker = BlockType::Glass;
-        boundary
-            .core
+        core
             .world_mut(crate::dimension::Dimension::Overworld)
             .expect("overworld world")
             .set_block(1_234, 100, -2_345, marker, 0)
             .unwrap();
         assert_eq!(
-            boundary
-                .core
+            core
                 .world_ref(crate::dimension::Dimension::Overworld)
                 .expect("overworld world")
                 .get_block(1_234, 100, -2_345),
             marker
         );
 
-        assert!(boundary.set_dimension(crate::dimension::Dimension::Nether as u8));
+        assert!(core.set_session_dimension(7, crate::dimension::Dimension::Nether));
         assert_eq!(
-            boundary.core.active_dimension(),
+            core.active_dimension(),
             crate::dimension::Dimension::Nether
         );
-        assert_ne!(boundary.core.world().get_block(1_234, 100, -2_345), marker);
-        assert!(boundary.core.world().valid_coordinate(1_234, 127, -2_345));
-        assert!(!boundary.core.world().valid_coordinate(1_234, 128, -2_345));
+        assert_ne!(core.world().get_block(1_234, 100, -2_345), marker);
+        assert!(core.world().valid_coordinate(1_234, 127, -2_345));
+        assert!(!core.world().valid_coordinate(1_234, 128, -2_345));
         assert_eq!(
-            boundary
-                .core
+            core
                 .world_ref(crate::dimension::Dimension::Overworld)
                 .expect("overworld remains in the map")
                 .get_block(1_234, 100, -2_345),
             marker
         );
-        boundary.set_position([154.25, 67.0, -293.5]);
+        if let Some(session) = core.session_mut(7) {
+            session.position = [154.25, 67.0, -293.5];
+        }
         assert_eq!(
-            boundary.core.session(7).unwrap().position,
+            core.session(7).unwrap().position,
             [154.25, 67.0, -293.5]
         );
 
-        assert!(boundary.set_dimension(crate::dimension::Dimension::Overworld as u8));
+        assert!(core.set_session_dimension(7, crate::dimension::Dimension::Overworld));
         assert_eq!(
-            boundary.core.active_dimension(),
+            core.active_dimension(),
             crate::dimension::Dimension::Overworld
         );
         assert_eq!(
-            boundary
-                .core
+            core
                 .world_ref(crate::dimension::Dimension::Overworld)
                 .expect("overworld world")
                 .get_block(1_234, 100, -2_345),
             marker
         );
-        assert_eq!(boundary.core.session(7).unwrap().dimension, 0);
+        assert_eq!(core.session(7).unwrap().dimension, 0);
     }
 
     #[test]

@@ -23,14 +23,14 @@
 
 ## 精確 acceptance
 
-- [ ] 刪除 `src/container_sessions.rs` 中的 `get_furnace_slots`、`set_furnace_slots`、`get_chest_inventory`、`set_chest_inventory`、`close_all_for_player`。
-- [ ] 刪除 `src/server_world.rs` 中的 `spawn_experience_orb`。
-- [ ] 刪除 `src/authority/contract.rs` 中的 `SessionGameplayState::add_item` 與 `AuthorityTopology::is_headless`。
-- [ ] 刪除 `src/authority/mod.rs` 中的 `AuthorityBoundary` 結構體與 `world_mutations` 方法，將調用 `AuthorityBoundary` 的 2 個單元測試改為直接構建 `AuthorityCore`。
-- [ ] 刪除 `src/server_runtime.rs` 中的 `gamemode_wire`。
-- [ ] 刪除 `src/world/block.rs` 中的舊 `Biome` 查詢表與常數（保留純 enum 定義）。
-- [ ] `cargo check --all-targets` 通過。
-- [ ] 權威與世界測試全數通過。
+- [x] 刪除 `src/container_sessions.rs` 中的 `get_furnace_slots`、`set_furnace_slots`、`get_chest_inventory`、`set_chest_inventory`、`close_all_for_player`。
+- [x] 刪除 `src/server_world.rs` 中的 `spawn_experience_orb`。
+- [x] 刪除 `src/authority/contract.rs` 中的 `SessionGameplayState::add_item` 與 `AuthorityTopology::is_headless`。
+- [x] 刪除 `src/authority/mod.rs` 中的 `AuthorityBoundary` 結構體與 `world_mutations` 方法，將調用 `AuthorityBoundary` 的 2 個單元測試改為直接構建 `AuthorityCore`。
+- [x] 刪除 `src/server_runtime.rs` 中的 `gamemode_wire`。
+- [x] 刪除 `src/world/block.rs` 中的舊 `Biome` 查詢表與常數（保留純 enum 定義）。
+- [x] `cargo check --all-targets` 通過。
+- [x] 權威與世界測試全數通過。
 
 ## 預計檔案與測試
 
@@ -57,3 +57,30 @@
 
 - 解耦 `container_sessions.rs` 與 `ServerWorld` 的架構關係（此為 Plan 10）。
 - 更改任何權威交易或掉落經驗的邏輯。
+
+## 實作與證據
+
+### 修改內容
+1. **`src/container_sessions.rs`**：
+   - 刪除 `get_furnace_slots`、`set_furnace_slots`（已由 `ServerWorld::take_furnace_output` 與 `transactions::execute_furnace_take_output` 接管）。
+   - 刪除 `get_chest_inventory`、`set_chest_inventory`（無人使用的單行轉發別名）。
+   - 刪除 `close_all_for_player`（`close_by_player` 的重複包裝）。
+2. **`src/server_world.rs`**：
+   - 刪除 `spawn_experience_orb`（經驗球生成統一走 `spawn_authority_experience`）。
+3. **`src/authority/contract.rs`**：
+   - 刪除 `AuthorityTopology::is_headless` 與 `SessionGameplayState::add_item`（全庫均使用 `add_slot`）。
+4. **`src/authority/mod.rs`**：
+   - 刪除 `AuthorityBoundary` 結構體與 `AuthorityCore::world_mutations` 方法。
+   - 重構調用 `AuthorityBoundary` 的 2 個單元測試（`dimension_transfer_updates_session_and_world_contract`、`dimension_worlds_are_parked_without_chunk_aliasing`），改為直接構建與操作 `AuthorityCore`。
+5. **`src/server_runtime.rs`**：
+   - 刪除假函式 `gamemode_wire`，呼叫處直接傳入 `0`。
+6. **`src/world/block.rs`**：
+   - 刪除舊 `Biome` 查詢表與輔助常數/函式（`ALL`、`get_biome`、`terrain_params`、`is_snowy`、`is_dry`）及其測試，保留純 `enum Biome` 定義。
+
+### 驗證證據
+- `cargo test --lib authority::` (56 passed; 0 failed)
+- `cargo test --lib server_world::` (18 passed; 0 failed)
+- `cargo test --lib container_sessions::` (9 passed; 0 failed)
+- `cargo test --test headless_server_authority` (2 passed; 0 failed)
+- `cargo check --all-targets` (通過)
+

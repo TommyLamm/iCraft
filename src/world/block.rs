@@ -1,6 +1,5 @@
 use crate::inventory::{ToolMaterial, ToolType};
 use crate::redstone::Direction;
-use noise::{NoiseFn, Perlin};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoundMaterial {
@@ -46,110 +45,6 @@ pub enum Biome {
     DeepOcean,
 }
 
-impl Biome {
-    /// All 16 reachable overworld biomes.
-    pub const ALL: [Biome; 16] = [
-        Biome::Plains,
-        Biome::Forest,
-        Biome::BirchForest,
-        Biome::Taiga,
-        Biome::SnowyPlains,
-        Biome::Desert,
-        Biome::Savanna,
-        Biome::Swamp,
-        Biome::Jungle,
-        Biome::Badlands,
-        Biome::Meadow,
-        Biome::WindsweptHills,
-        Biome::River,
-        Biome::Beach,
-        Biome::Ocean,
-        Biome::DeepOcean,
-    ];
-
-    pub fn get_biome(
-        world_x: i32,
-        world_z: i32,
-        temp_perlin: &Perlin,
-        moist_perlin: &Perlin,
-        ocean_perlin: &Perlin,
-    ) -> Self {
-        // Legacy compatibility shim: the new climate/biome selection lives in
-        // worldgen::climate. This shim reproduces a subset of the new logic
-        // so callers that only have raw Perlin fields can still resolve a
-        // biome deterministically.
-        let ocean_val = ocean_perlin.get([world_x as f64 * 0.001, world_z as f64 * 0.001]);
-        if ocean_val < -0.55 {
-            return Biome::DeepOcean;
-        }
-        if ocean_val < -0.35 {
-            return Biome::Ocean;
-        }
-
-        let temp = temp_perlin.get([world_x as f64 * 0.002, world_z as f64 * 0.002]);
-        let moist = moist_perlin.get([world_x as f64 * 0.002, world_z as f64 * 0.002]);
-
-        if temp < -0.35 {
-            if moist > -0.2 {
-                Biome::SnowyPlains
-            } else {
-                Biome::WindsweptHills
-            }
-        } else if temp < -0.2 {
-            Biome::Taiga
-        } else if temp > 0.5 && moist < -0.45 {
-            Biome::Badlands
-        } else if temp > 0.45 && moist < 0.15 {
-            Biome::Savanna
-        } else if temp > 0.4 && moist < -0.3 {
-            Biome::Desert
-        } else if temp > 0.35 && moist > 0.55 {
-            Biome::Jungle
-        } else if temp > 0.2 && moist > 0.4 {
-            Biome::Swamp
-        } else if temp > 0.1 && temp < 0.4 && moist > 0.2 {
-            Biome::BirchForest
-        } else if temp > 0.1 && moist > 0.0 {
-            Biome::Forest
-        } else {
-            Biome::Plains
-        }
-    }
-
-    pub fn terrain_params(self) -> (f64, f64) {
-        match self {
-            Biome::Plains => (70.0, 4.0),
-            Biome::Forest => (71.0, 6.0),
-            Biome::BirchForest => (71.0, 6.0),
-            Biome::Taiga => (72.0, 8.0),
-            Biome::SnowyPlains => (68.0, 3.0),
-            Biome::Desert => (70.0, 5.0),
-            Biome::Savanna => (72.0, 6.0),
-            Biome::Swamp => (66.0, 1.5),
-            Biome::Jungle => (74.0, 10.0),
-            Biome::Badlands => (78.0, 12.0),
-            Biome::Meadow => (72.0, 4.0),
-            Biome::WindsweptHills => (85.0, 22.0),
-            Biome::River => (63.0, 1.0),
-            Biome::Beach => (64.0, 1.0),
-            Biome::Ocean => (40.0, 6.0),
-            Biome::DeepOcean => (25.0, 4.0),
-        }
-    }
-
-    /// Whether precipitation in this biome falls as snow.
-    pub fn is_snowy(self) -> bool {
-        matches!(
-            self,
-            Biome::SnowyPlains | Biome::Taiga | Biome::WindsweptHills
-        )
-    }
-
-    /// Whether this biome is dry (no rain).
-    pub fn is_dry(self) -> bool {
-        matches!(self, Biome::Desert | Biome::Badlands | Biome::Savanna)
-    }
-}
 
 #[cfg(test)]
 fn place_oak_tree(
@@ -2005,6 +1900,7 @@ pub fn find_safe_spawn_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redstone::Direction;
     use glam::Vec3;
 
     #[test]
@@ -2147,17 +2043,6 @@ mod tests {
         );
         assert_eq!(BlockType::OakPlanks.preferred_tool(), ToolType::Axe);
         assert_eq!(BlockType::OakPlanks.min_harvest_material(), None);
-    }
-
-    #[test]
-    fn test_biome_distribution() {
-        let temp_perlin = Perlin::new(99999);
-        let moist_perlin = Perlin::new(88888);
-        let ocean_perlin = Perlin::new(77777);
-
-        // Verify that biomes evaluate correctly and don't panic
-        let biome_land = Biome::get_biome(1000, 1000, &temp_perlin, &moist_perlin, &ocean_perlin);
-        println!("Sample Biome at (1000, 1000): {:?}", biome_land);
     }
 
     #[test]

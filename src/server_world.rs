@@ -994,20 +994,6 @@ impl ServerWorld {
         true
     }
 
-    pub fn spawn_experience_orb(&mut self, entity_id: u64, position: [f32; 3], value: u32) -> bool {
-        if entity_id == 0 || value == 0 || self.entities.get_by_id(entity_id).is_some() {
-            return false;
-        }
-        if !self.ensure_entity(entity_id, EntityType::ExperienceOrb, position, 0.0) {
-            return false;
-        }
-        let Some(entity) = self.entities.get_by_id_mut(entity_id) else {
-            return false;
-        };
-        entity.xp_value = value;
-        true
-    }
-
     /// Apply one authoritative water-bucket edge.  The world mutation is
     /// intentionally separate from the session inventory transaction: callers
     /// validate and prepare the exact hand slot first, then publish this

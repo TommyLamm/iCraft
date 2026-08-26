@@ -26,12 +26,6 @@ pub enum AuthorityTopology {
     Dedicated,
 }
 
-impl AuthorityTopology {
-    pub const fn is_headless(self) -> bool {
-        matches!(self, Self::Dedicated)
-    }
-}
-
 /// Monotonic server revision shared by mutations and ACKs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevisionClock {
@@ -527,29 +521,6 @@ impl SessionGameplayState {
             }
         }
         true
-    }
-
-    pub fn add_item(&mut self, item: u32, count: u32) -> bool {
-        if count == 0 {
-            return true;
-        }
-        if count > u32::from(u16::MAX) {
-            return false;
-        }
-        self.add_slot(SessionInventorySlot::from_wire(
-            ItemWire {
-                item,
-                count: count as u16,
-                durability: 0,
-                enchantments: [0; 6],
-                potion: None,
-                custom_name: [0; 24],
-                can_break: 0,
-                can_place_on: 0,
-            },
-            0,
-            0,
-        ))
     }
 
     pub fn add_slot(&mut self, slot: SessionInventorySlot) -> bool {

@@ -1050,7 +1050,7 @@ impl ServerRuntime {
             runtime.network_thread = Some(NetworkServer::spawn_with_config_and_metrics(
                 bind_addr,
                 runtime.properties.seed,
-                gamemode_wire(&runtime.level),
+                0,
                 host_rx_network,
                 server_to_host,
                 network_config,
@@ -1468,11 +1468,6 @@ impl ServerRuntime {
             }
         }
     }
-}
-
-fn gamemode_wire(level: &LevelData) -> u8 {
-    let _ = level;
-    0
 }
 
 pub(super) fn default_player_data(game_mode: GameMode) -> PlayerData {
