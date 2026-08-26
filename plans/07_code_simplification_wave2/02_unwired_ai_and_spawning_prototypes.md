@@ -18,11 +18,11 @@
 
 ## 精確 acceptance
 
-- [ ] 徹底刪除整個 `src/ai/` 目錄（`brain.rs`, `goal.rs`, `navigation.rs`, `mod.rs`）。
-- [ ] 徹底刪除 `src/spawning.rs` 文件。
-- [ ] 在 `src/lib.rs` 中移除 `pub(crate) mod ai;` 與 `pub(crate) mod spawning;` 模組宣告。
-- [ ] `cargo check --all-targets` 通過。
-- [ ] 權威端生物模擬測試與整合測試不受影響。
+- [x] 徹底刪除整個 `src/ai/` 目錄（`brain.rs`, `goal.rs`, `navigation.rs`, `mod.rs`）。
+- [x] 徹底刪除 `src/spawning.rs` 文件。
+- [x] 在 `src/lib.rs` 中移除 `pub(crate) mod ai;` 與 `pub(crate) mod spawning;` 模組宣告。
+- [x] `cargo check --all-targets` 通過。
+- [x] 權威端生物模擬測試與整合測試不受影響。
 
 ## 預計檔案與測試
 
@@ -51,3 +51,16 @@
 
 - 修改 `ServerWorld::tick_entities` 中的權威生物追逐邏輯。
 - 修改 `mob::spawn_mobs` 或 `passive_mob::spawn_passive_mobs` 的生成機率與常數。
+
+## 實作與證據
+
+### 修改內容
+1. 徹底刪除 `src/ai/` 目錄（`brain.rs`, `goal.rs`, `navigation.rs`, `mod.rs`，510 行）。
+2. 徹底刪除 `src/spawning.rs`（315 行）。
+3. 從 `src/lib.rs` 移除 `pub(crate) mod ai;` 與 `pub(crate) mod spawning;` 宣告。
+
+### 驗證證據
+- `cargo test --lib entity::` (26 passed; 0 failed)
+- `cargo test --lib mob::` (5 passed; 0 failed)
+- `cargo test --lib passive_mob::` (2 passed; 0 failed)
+- `cargo check --all-targets` (通過)

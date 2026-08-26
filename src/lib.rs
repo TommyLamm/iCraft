@@ -77,8 +77,6 @@ pub mod world_tick;
 
 // Still crate-internal. Desktop-only files do not `use crate::` these.
 #[cfg(any(test, feature = "harness"))]
-pub(crate) mod ai;
-#[cfg(any(test, feature = "harness"))]
 pub(crate) mod final_acceptance;
 pub(crate) mod loot;
 #[cfg(any(test, feature = "harness"))]
@@ -86,7 +84,5 @@ pub(crate) mod microbench;
 pub(crate) mod recipes;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod sim_harness;
-#[cfg(any(test, feature = "harness"))]
-pub(crate) mod spawning;
 pub(crate) mod voxel_shape;
 pub(crate) mod worldgen;
