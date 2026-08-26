@@ -61,12 +61,12 @@
 
 | # | 單獨執行文件 | 優先級 | 預估淨減行數 | 前置依賴 | 狀態 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| 01 | [State 廢棄 GPU 管線與頂點緩衝清理](01_state_dead_gpu_pipelines_and_buffers.md) | P0 | ~-360 行 | 無 | 待執行 |
-| 02 | [刪除未接線的 AI 與生成系統原型](02_unwired_ai_and_spawning_prototypes.md) | P0 | ~-825 行 | 無 | 待執行 |
-| 03 | [刪除 mob 與 passive_mob 遺留渲染器更新循環](03_legacy_mob_update_loops.md) | P0 | ~-481 行 | 無 | 待執行 |
-| 04 | [刪除 save/legacy_queue 遺留存檔佇列](04_legacy_save_queue_cleanup.md) | P0 | ~-946 行 | 無 | 待執行 |
-| 05 | [刪除網路 dead 通道變體與未使用的 Packet 變體](05_network_dead_channels_and_packet_variants.md) | P0 | ~-375 行 | 無 | 待執行 |
-| 06 | [刪除權威、世界與會話中的死函式](06_authority_and_container_dead_methods.md) | P0 | ~-270 行 | 無 | 待執行 |
+| 01 | [State 廢棄 GPU 管線與頂點緩衝清理](01_state_dead_gpu_pipelines_and_buffers.md) | P0 | ~-360 行 | 無 | 已完成 |
+| 02 | [刪除未接線的 AI 與生成系統原型](02_unwired_ai_and_spawning_prototypes.md) | P0 | ~-825 行 | 無 | 已完成 |
+| 03 | [刪除 mob 與 passive_mob 遺留渲染器更新循環](03_legacy_mob_update_loops.md) | P0 | ~-481 行 | 無 | 已完成 |
+| 04 | [刪除 save/legacy_queue 遺留存檔佇列](04_legacy_save_queue_cleanup.md) | P0 | ~-946 行 | 無 | 已完成 |
+| 05 | [刪除網路 dead 通道變體與未使用的 Packet 變體](05_network_dead_channels_and_packet_variants.md) | P0 | ~-375 行 | 無 | 已完成 |
+| 06 | [刪除權威、世界與會話中的死函式](06_authority_and_container_dead_methods.md) | P0 | ~-270 行 | 無 | 已完成 |
 | 07 | [State 點擊與挖礦掉落去重](07_state_click_and_mining_rewards_dedup.md) | P1 | ~-250 行 | 01 | 待執行 |
 | 08 | [向量字型與選單 5x7 字型整合](08_vector_font_and_menu_font_unification.md) | P1 | ~-300 行 | 01 | 待執行 |
 | 09 | [ServerRuntime 投射與會話同步樣板提煉](09_server_runtime_projection_boilerplate.md) | P1 | ~-210 行 | 05, 06 | 待執行 |
