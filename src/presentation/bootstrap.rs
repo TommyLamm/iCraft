@@ -123,9 +123,6 @@ pub(crate) async fn create_gpu_context(
 
 pub(crate) struct LaunchWorldState {
     pub save_manager: Option<std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>>,
-    pub save_tx: Option<crate::save::SaveQueue>,
-    pub save_queue_stats: std::sync::Arc<crate::save::SaveQueueStats>,
-    pub network_snapshot_worker: Option<crate::save::NetworkSnapshotWorker>,
     pub current_dimension: crate::dimension::Dimension,
     pub mutation_revisions: crate::save::MutationRevisionIndex,
     pub player_physics: PlayerPhysics,
@@ -161,50 +158,21 @@ pub(crate) fn load_launch_world_state(
     // projections only and must not create a local save tree, chunk save
     // worker, or snapshot worker against `icraft_multiplayer_client`.
     // Embedded Singleplayer / listen-host already own the world through
-    // ServerRuntime; building a second SaveManager/SaveQueue would write
-    // mutation_revisions.bin and enqueue onto a leftover worker.
-    let (save_manager, save_tx, save_queue_stats, network_snapshot_worker) =
-        if is_client || in_process_authority {
-            (
-                None,
-                None,
-                std::sync::Arc::new(crate::save::SaveQueueStats::default()),
-                None,
-            )
-        } else {
-            #[cfg(any(test, feature = "legacy_owner"))]
-            {
-                // Leftover LegacyOwner: keep desktop SaveQueue semantics for
-                // tests/paths that still construct a presentation-owned world.
-                let save_manager = std::sync::Arc::new(std::sync::Mutex::new(
-                    crate::save::SaveManager::new(&launch.world_dir),
-                ));
-                let save_tx = crate::save::spawn_save_worker(
-                    std::sync::Arc::clone(&save_manager),
-                    crate::save::SAVE_QUEUE_CAPACITY,
-                );
-                let save_queue_stats = save_tx.stats();
-                let network_snapshot_worker = crate::save::spawn_network_snapshot_worker(
-                    std::sync::Arc::clone(&save_manager),
-                    crate::save::NETWORK_SNAPSHOT_QUEUE_CAPACITY,
-                );
-                (
-                    Some(save_manager),
-                    Some(save_tx),
-                    save_queue_stats,
-                    Some(network_snapshot_worker),
-                )
-            }
-            #[cfg(not(any(test, feature = "legacy_owner")))]
-            {
-                (
-                    None,
-                    None,
-                    std::sync::Arc::new(crate::save::SaveQueueStats::default()),
-                    None,
-                )
-            }
-        };
+    // ServerRuntime.
+    let save_manager = if is_client || in_process_authority {
+        None
+    } else {
+        #[cfg(any(test, feature = "legacy_owner"))]
+        {
+            Some(std::sync::Arc::new(std::sync::Mutex::new(
+                crate::save::SaveManager::new(&launch.world_dir),
+            )))
+        }
+        #[cfg(not(any(test, feature = "legacy_owner")))]
+        {
+            None
+        }
+    };
     let current_dimension = if is_client {
         crate::dimension::Dimension::Overworld
     } else if in_process_authority {
@@ -347,9 +315,6 @@ pub(crate) fn load_launch_world_state(
 
     LaunchWorldState {
         save_manager,
-        save_tx,
-        save_queue_stats,
-        network_snapshot_worker,
         current_dimension,
         mutation_revisions,
         player_physics,

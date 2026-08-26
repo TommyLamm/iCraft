@@ -1,6 +1,5 @@
 pub mod format;
 pub mod index;
-pub mod legacy_queue;
 pub mod player;
 pub mod region;
 
@@ -25,13 +24,6 @@ pub use index::{
     default_mutation_revision_index_capacity, DirtyChunkSet, MutationRevisionIndex,
     SaveState, MUTATION_REVISION_INDEX_CAPACITY,
 };
-pub use legacy_queue::{
-    spawn_network_snapshot_worker, spawn_save_worker, NetworkSnapshotKey,
-    NetworkSnapshotPayload, NetworkSnapshotRequest, NetworkSnapshotSubmitError,
-    NetworkSnapshotWorker, NetworkSnapshotWorkerResult, SaveCommand, SaveQueue,
-    SaveQueueStats, UncompressedChunkSnapshot, NETWORK_SNAPSHOT_QUEUE_CAPACITY,
-    SAVE_QUEUE_CAPACITY,
-};
 pub use player::normalize_player_identity;
 pub use region::{
     atomic_write, compress_bytes, decompress_bytes, decompress_bytes_limited, RegionData,
@@ -55,10 +47,6 @@ pub struct SaveManager {
     pub world_dir: PathBuf,
     region_cache: HashMap<(Dimension, i32, i32), RegionData>,
     lru_order: VecDeque<(Dimension, i32, i32)>,
-    #[cfg(test)]
-    panic_next_worker_save: bool,
-    #[cfg(test)]
-    fail_next_serialization: bool,
 }
 
 impl SaveManager {
@@ -78,21 +66,7 @@ impl SaveManager {
             world_dir,
             region_cache: HashMap::new(),
             lru_order: VecDeque::new(),
-            #[cfg(test)]
-            panic_next_worker_save: false,
-            #[cfg(test)]
-            fail_next_serialization: false,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_worker_panic_once(&mut self) {
-        self.panic_next_worker_save = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_serialization_failure_once(&mut self) {
-        self.fail_next_serialization = true;
     }
 
     fn touch_region(&mut self, key: (Dimension, i32, i32)) {
@@ -366,64 +340,6 @@ impl SaveManager {
         self.save_chunk_in(Dimension::Overworld, cx, cz, data)
     }
 
-    pub fn save_chunks_batch_in(
-        &mut self,
-        dimension: Dimension,
-        snapshots: &[UncompressedChunkSnapshot],
-    ) -> SaveResult<()> {
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_next_serialization) {
-            return Err(SaveError::Serialization(
-                "injected serialization failure".to_string(),
-            ));
-        }
-        if snapshots.is_empty() {
-            return Ok(());
-        }
-        let mut by_region: HashMap<(i32, i32), Vec<&UncompressedChunkSnapshot>> = HashMap::new();
-        for snap in snapshots {
-            let rx = snap.chunk_x.div_euclid(32);
-            let rz = snap.chunk_z.div_euclid(32);
-            by_region.entry((rx, rz)).or_default().push(snap);
-        }
-
-        for ((rx, rz), snaps) in by_region {
-            let region_file = self
-                .region_dir(dimension)
-                .join(format!("r.{}.{}.bin", rx, rz));
-            let representative = (snaps[0].chunk_x, snaps[0].chunk_z);
-            let mut region =
-                self.load_region_for_write(&region_file, representative.0, representative.1)?;
-
-            let mut serialized_chunks = Vec::with_capacity(snaps.len());
-            for snap in &snaps {
-                let lx = snap.chunk_x.rem_euclid(32) as u8;
-                let lz = snap.chunk_z.rem_euclid(32) as u8;
-                let data = snap.try_to_chunk_save_data()?;
-                let serialized_chunk = bincode::serialize(&data)
-                    .map_err(|error| SaveError::Serialization(error.to_string()))?;
-                serialized_chunks.push(((lx, lz), serialized_chunk));
-            }
-
-            for (coord, serialized_chunk) in serialized_chunks {
-                region.chunks.insert(coord, serialized_chunk);
-            }
-
-            let serialized_region = bincode::serialize(&region)
-                .map_err(|error| SaveError::Serialization(error.to_string()))?;
-
-            region::backup_region_file_if_needed(&region_file);
-            atomic_write(&region_file, &serialized_region)
-                .map_err(|error| SaveError::io("atomic region replacement", &region_file, error))?;
-            // Commit the cache only after the atomic replacement succeeds so
-            // a failed save leaves the previous snapshot available for retry.
-            self.region_cache.insert((dimension, rx, rz), region);
-            self.touch_region((dimension, rx, rz));
-            self.evict_lru_regions();
-        }
-        Ok(())
-    }
-
     pub fn save_chunk_in(
         &mut self,
         dimension: Dimension,
@@ -431,12 +347,6 @@ impl SaveManager {
         cz: i32,
         data: ChunkSaveData,
     ) -> SaveResult<()> {
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_next_serialization) {
-            return Err(SaveError::Serialization(
-                "injected serialization failure".to_string(),
-            ));
-        }
         let rx = cx.div_euclid(32);
         let rz = cz.div_euclid(32);
         let lx = cx.rem_euclid(32) as u8;

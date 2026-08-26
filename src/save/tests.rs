@@ -4,17 +4,12 @@ use crate::inventory::{CreativeDragOrigin, GameMode, Inventory, Item, ItemStack}
 use crate::world::{BlockType, Chunk};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::format::{
-    deserialize_chunk_save_data, destination_voxel_count, LegacyInventoryData, LegacyItemStackData,
-    LegacyLevelData, LegacyPlayerData, LegacyRedstoneComponentMetadata,
+    deserialize_chunk_save_data, destination_voxel_count, LegacyInventoryData,
+    LegacyLevelData, LegacyRedstoneComponentMetadata,
     LegacyU8YRedstoneComponentMetadata, PreviousInventoryData, PreviousPlayerData,
-};
-use super::legacy_queue::{
-    PendingChunkSave, SaveBatch, SaveKey, SaveQueueInner, SaveQueueState,
 };
 use super::region::{ATOMIC_WRITE_FAILPOINT, COMPRESS_FAILPOINT};
 
@@ -319,7 +314,7 @@ fn saved_chunk_restores_player_placed_blocks() {
 }
 
 #[test]
-fn automation_block_entities_roundtrip_and_snapshot_preserves_runtime_state() {
+fn automation_block_entities_roundtrip() {
     let mut chunk = Chunk::new(0, 0);
     chunk.set_block_local(2, 64, 2, BlockType::Hopper);
     let mut hopper = crate::block_entity::HopperBlockEntity::new();
@@ -442,37 +437,6 @@ fn automation_block_entities_roundtrip_and_snapshot_preserves_runtime_state() {
     assert_eq!(
         restored.get_block_entity(6, 64, 2),
         Some(&crate::block_entity::BlockEntity::Furnace(furnace.clone()))
-    );
-
-    let snapshot = UncompressedChunkSnapshot::from_chunk_with_redstone(
-        crate::dimension::Dimension::Overworld,
-        &chunk,
-        Vec::new(),
-    );
-    let snapshot_data = snapshot.try_to_chunk_save_data().unwrap();
-    let mut snapshot_restored = Chunk::new(0, 0);
-    snapshot_data
-        .restore_to_chunk(&mut snapshot_restored)
-        .unwrap();
-    assert_eq!(
-        snapshot_restored.get_block_entity(2, 64, 2),
-        Some(&crate::block_entity::BlockEntity::Hopper(hopper))
-    );
-    assert_eq!(
-        snapshot_restored.get_block_entity(3, 64, 2),
-        Some(&crate::block_entity::BlockEntity::Observer(observer))
-    );
-    assert_eq!(
-        snapshot_restored.get_block_entity(4, 64, 2),
-        Some(&crate::block_entity::BlockEntity::Dispenser(dispenser))
-    );
-    assert_eq!(
-        snapshot_restored.get_block_entity(5, 64, 2),
-        Some(&crate::block_entity::BlockEntity::Dropper(dropper))
-    );
-    assert_eq!(
-        snapshot_restored.get_block_entity(6, 64, 2),
-        Some(&crate::block_entity::BlockEntity::Furnace(furnace))
     );
 }
 
@@ -794,20 +758,6 @@ fn unique_test_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("icraft_{label}_{}_{}", std::process::id(), unique))
 }
 
-fn unstarted_save_queue(capacity: usize) -> SaveQueue {
-    SaveQueue {
-        inner: Arc::new(SaveQueueInner {
-            state: Mutex::new(SaveQueueState::default()),
-            work_available: Condvar::new(),
-            capacity_available: Condvar::new(),
-            capacity,
-            stats: Arc::new(SaveQueueStats::default()),
-            last_error: Mutex::new(None),
-            producers: AtomicU64::new(1),
-        }),
-    }
-}
-
 #[test]
 fn stale_ack_cannot_clear_a_newer_dirty_revision() {
     let tracker = DirtyChunkSet::new();
@@ -821,158 +771,6 @@ fn stale_ack_cannot_clear_a_newer_dirty_revision() {
     assert!(tracker.begin_save(2, -4, second));
     tracker.acknowledge_persisted(2, -4, second);
     assert_eq!(tracker.state(2, -4), Some(SaveState::Persisted(second)));
-}
-
-#[test]
-fn latest_revision_replaces_older_pending_snapshot() {
-    let queue = unstarted_save_queue(1);
-    let tracker = DirtyChunkSet::new();
-    let chunk = Chunk::new(1, 2);
-
-    let first = tracker.mark_dirty(1, 2);
-    assert!(tracker.begin_save(1, 2, first));
-    queue
-        .send(SaveCommand::SaveChunk {
-            snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
-                crate::dimension::Dimension::Overworld,
-                &chunk,
-                Vec::new(),
-            ),
-            revision: first,
-            tracker: tracker.clone(),
-        })
-        .unwrap();
-
-    let second = tracker.mark_dirty(1, 2);
-    assert!(tracker.begin_save(1, 2, second));
-    queue
-        .send(SaveCommand::SaveChunk {
-            snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
-                crate::dimension::Dimension::Overworld,
-                &chunk,
-                Vec::new(),
-            ),
-            revision: second,
-            tracker,
-        })
-        .unwrap();
-
-    let state = queue
-        .inner
-        .state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    assert_eq!(state.pending_chunks.len(), 1);
-    assert_eq!(
-        state.pending_chunks.values().next().unwrap().revision,
-        second
-    );
-    assert_eq!(queue.stats().depth(), 1);
-    assert_eq!(queue.stats().dropped(), 1);
-}
-
-#[test]
-fn paused_worker_sustained_latest_wins_stays_bounded_in_items_and_bytes() {
-    let queue = unstarted_save_queue(2);
-    let tracker = DirtyChunkSet::new();
-    let chunk = Chunk::new(1, 2);
-    let base = UncompressedChunkSnapshot::from_chunk_with_redstone(
-        crate::dimension::Dimension::Overworld,
-        &chunk,
-        Vec::new(),
-    );
-    let metadata = crate::redstone::RedstoneComponentMetadata {
-        local_x: 1,
-        local_y: 64,
-        local_z: 1,
-        facing: crate::redstone::SavedDirection::East,
-        repeater_delay: 2,
-        comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
-        note: 7,
-        last_powered: false,
-    };
-    let mut larger = base.clone();
-    larger.redstone_metadata = vec![metadata; 32];
-
-    const MUTATIONS: u64 = 64;
-    for _ in 1..=MUTATIONS {
-        let revision = tracker.mark_dirty(1, 2);
-        assert!(tracker.begin_save(1, 2, revision));
-        let snapshot = if revision % 2 == 0 {
-            larger.clone()
-        } else {
-            base.clone()
-        }
-        .with_mutation_revision(revision);
-        let expected_bytes = snapshot.estimated_bytes();
-
-        queue
-            .send(SaveCommand::SaveChunk {
-                snapshot,
-                revision,
-                tracker: tracker.clone(),
-            })
-            .unwrap();
-
-        let stats = queue.stats();
-        assert_eq!(stats.depth(), 1, "latest-wins must retain one queued item");
-        assert_eq!(stats.in_flight(), 0, "the worker remains paused");
-        assert_eq!(stats.in_flight_bytes(), 0);
-        assert_eq!(stats.queued_bytes(), expected_bytes);
-        assert!(stats.queued_bytes() <= larger.estimated_bytes());
-
-        let state = queue
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        assert_eq!(state.pending_chunks.len(), 1);
-        let pending = state.pending_chunks.values().next().unwrap();
-        assert_eq!(pending.revision, revision);
-        assert_eq!(pending.bytes, expected_bytes);
-    }
-
-    assert_eq!(queue.stats().dropped(), MUTATIONS - 1);
-}
-
-#[test]
-fn flush_propagates_io_failure_and_keeps_chunk_dirty_for_retry() {
-    let world_dir = unique_test_dir("save_flush_failure");
-    let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
-    fs::remove_dir_all(world_dir.join("regions")).unwrap();
-    File::create(world_dir.join("regions")).unwrap();
-
-    let queue = spawn_save_worker(Arc::clone(&manager), 2);
-    let tracker = DirtyChunkSet::new();
-    let revision = tracker.mark_dirty(0, 0);
-    assert!(tracker.begin_save(0, 0, revision));
-    let chunk = Chunk::new(0, 0);
-    queue
-        .send(SaveCommand::SaveChunk {
-            snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
-                crate::dimension::Dimension::Overworld,
-                &chunk,
-                Vec::new(),
-            ),
-            revision,
-            tracker: tracker.clone(),
-        })
-        .unwrap();
-    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-    queue.send(SaveCommand::Flush(ack_tx)).unwrap();
-
-    let result = ack_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("save worker did not ACK flush");
-    assert!(result.is_err());
-    assert_eq!(tracker.state(0, 0), Some(SaveState::Dirty(revision)));
-    assert_eq!(queue.stats().depth(), 1);
-    assert_eq!(queue.stats().in_flight(), 0);
-
-    drop(queue);
-    drop(manager);
-    fs::remove_file(world_dir.join("regions")).unwrap();
-    fs::remove_dir_all(world_dir).unwrap();
 }
 
 #[test]
@@ -1059,14 +857,10 @@ fn atomic_replace_survives_process_crash_before_and_after_replace() {
     fs::remove_dir_all(world_dir).unwrap();
 }
 
-fn same_region_snapshot(cx: i32, cz: i32, marker: BlockType) -> UncompressedChunkSnapshot {
+fn same_region_chunk_data(cx: i32, cz: i32, marker: BlockType) -> ChunkSaveData {
     let mut chunk = Chunk::new(cx, cz);
     chunk.set_block_local(0, 64, 0, marker);
-    UncompressedChunkSnapshot::from_chunk_with_redstone(
-        crate::dimension::Dimension::Overworld,
-        &chunk,
-        Vec::new(),
-    )
+    ChunkSaveData::from_chunk(&chunk).unwrap()
 }
 
 fn assert_saved_marker(manager: &mut SaveManager, cx: i32, cz: i32, marker: BlockType) {
@@ -1080,37 +874,55 @@ fn assert_saved_marker(manager: &mut SaveManager, cx: i32, cz: i32, marker: Bloc
 
 fn save_same_region_new_snapshots(world_dir: &Path) {
     let mut manager = SaveManager::new(world_dir);
-    let snapshots = [
-        same_region_snapshot(0, 0, BlockType::Obsidian),
-        same_region_snapshot(1, 0, BlockType::StoneBrick),
-    ];
     manager
-        .save_chunks_batch_in(crate::dimension::Dimension::Overworld, &snapshots)
+        .save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Obsidian),
+        )
+        .unwrap();
+    manager
+        .save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            1,
+            0,
+            same_region_chunk_data(1, 0, BlockType::StoneBrick),
+        )
         .unwrap();
 }
 
 #[test]
 fn same_region_batch_faults_replace_atomically_and_preserve_sibling_on_restart() {
     let world_dir = unique_test_dir("same_region_batch_faults");
-    let old_snapshots = [
-        same_region_snapshot(0, 0, BlockType::Brick),
-        same_region_snapshot(1, 0, BlockType::Cobblestone),
-    ];
-    let new_snapshots = [
-        same_region_snapshot(0, 0, BlockType::Obsidian),
-        same_region_snapshot(1, 0, BlockType::StoneBrick),
-    ];
-
     let mut manager = SaveManager::new(&world_dir);
     manager
-        .save_chunks_batch_in(crate::dimension::Dimension::Overworld, &old_snapshots)
+        .save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Brick),
+        )
+        .unwrap();
+    manager
+        .save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            1,
+            0,
+            same_region_chunk_data(1, 0, BlockType::Cobblestone),
+        )
         .unwrap();
     drop(manager);
 
     let mut manager = SaveManager::new(&world_dir);
     ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(1));
     assert!(matches!(
-        manager.save_chunks_batch_in(crate::dimension::Dimension::Overworld, &new_snapshots),
+        manager.save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Obsidian),
+        ),
         Err(SaveError::Io { .. })
     ));
     ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(0));
@@ -1124,7 +936,12 @@ fn same_region_batch_faults_replace_atomically_and_preserve_sibling_on_restart()
     let mut manager = SaveManager::new(&world_dir);
     ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(2));
     assert!(matches!(
-        manager.save_chunks_batch_in(crate::dimension::Dimension::Overworld, &new_snapshots),
+        manager.save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Obsidian),
+        ),
         Err(SaveError::Io { .. })
     ));
     ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(0));
@@ -1132,25 +949,29 @@ fn same_region_batch_faults_replace_atomically_and_preserve_sibling_on_restart()
 
     let mut restarted = SaveManager::new(&world_dir);
     assert_saved_marker(&mut restarted, 0, 0, BlockType::Obsidian);
-    assert_saved_marker(&mut restarted, 1, 0, BlockType::StoneBrick);
+    assert_saved_marker(&mut restarted, 1, 0, BlockType::Cobblestone);
     fs::remove_dir_all(world_dir).unwrap();
 }
 
 #[test]
 fn failed_region_write_does_not_replace_in_memory_region_cache() {
     let world_dir = unique_test_dir("region_cache_write_failure");
-    let old_snapshots = [
-        same_region_snapshot(0, 0, BlockType::Brick),
-        same_region_snapshot(1, 0, BlockType::Cobblestone),
-    ];
-    let new_snapshots = [
-        same_region_snapshot(0, 0, BlockType::Obsidian),
-        same_region_snapshot(1, 0, BlockType::StoneBrick),
-    ];
-
     let mut manager = SaveManager::new(&world_dir);
     manager
-        .save_chunks_batch_in(crate::dimension::Dimension::Overworld, &old_snapshots)
+        .save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Brick),
+        )
+        .unwrap();
+    manager
+        .save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            1,
+            0,
+            same_region_chunk_data(1, 0, BlockType::Cobblestone),
+        )
         .unwrap();
     assert_saved_marker(&mut manager, 0, 0, BlockType::Brick);
     let cached_before = manager
@@ -1162,7 +983,12 @@ fn failed_region_write_does_not_replace_in_memory_region_cache() {
 
     ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(1));
     assert!(matches!(
-        manager.save_chunks_batch_in(crate::dimension::Dimension::Overworld, &new_snapshots),
+        manager.save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Obsidian),
+        ),
         Err(SaveError::Io { .. })
     ));
     ATOMIC_WRITE_FAILPOINT.with(|failpoint| failpoint.set(0));
@@ -1185,13 +1011,22 @@ fn failed_region_write_does_not_replace_in_memory_region_cache() {
 #[test]
 fn same_region_batch_survives_process_crash_before_and_after_replace() {
     let world_dir = unique_test_dir("same_region_batch_crash");
-    let old_snapshots = [
-        same_region_snapshot(0, 0, BlockType::Brick),
-        same_region_snapshot(1, 0, BlockType::Cobblestone),
-    ];
     let mut manager = SaveManager::new(&world_dir);
     manager
-        .save_chunks_batch_in(crate::dimension::Dimension::Overworld, &old_snapshots)
+        .save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Brick),
+        )
+        .unwrap();
+    manager
+        .save_chunk_in(
+            crate::dimension::Dimension::Overworld,
+            1,
+            0,
+            same_region_chunk_data(1, 0, BlockType::Cobblestone),
+        )
         .unwrap();
     drop(manager);
 
@@ -1227,7 +1062,7 @@ fn same_region_batch_survives_process_crash_before_and_after_replace() {
 
     let mut restarted = SaveManager::new(&world_dir);
     assert_saved_marker(&mut restarted, 0, 0, BlockType::Obsidian);
-    assert_saved_marker(&mut restarted, 1, 0, BlockType::StoneBrick);
+    assert_saved_marker(&mut restarted, 1, 0, BlockType::Cobblestone);
     fs::remove_dir_all(world_dir).unwrap();
 }
 
@@ -1261,117 +1096,6 @@ fn missing_region_load_does_not_create_phantom_lru_keys() {
 }
 
 #[test]
-fn enqueue_failure_restores_in_flight_revision_to_dirty() {
-    let queue = unstarted_save_queue(1);
-    queue
-        .inner
-        .state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .closed = true;
-    let tracker = DirtyChunkSet::new();
-    let revision = tracker.mark_dirty(0, 0);
-    assert!(tracker.begin_save(0, 0, revision));
-    let chunk = Chunk::new(0, 0);
-    let error = queue
-        .send(SaveCommand::SaveChunk {
-            snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
-                crate::dimension::Dimension::Overworld,
-                &chunk,
-                Vec::new(),
-            ),
-            revision,
-            tracker: tracker.clone(),
-        })
-        .unwrap_err();
-    assert_eq!(error, SaveError::QueueClosed);
-    assert_eq!(tracker.state(0, 0), Some(SaveState::Dirty(revision)));
-}
-
-#[test]
-fn worker_panic_is_acked_as_error_and_snapshot_is_retained() {
-    let world_dir = unique_test_dir("save_worker_panic");
-    let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
-    manager
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .inject_worker_panic_once();
-    let queue = spawn_save_worker(Arc::clone(&manager), 2);
-    let tracker = DirtyChunkSet::new();
-    let revision = tracker.mark_dirty(0, 0);
-    assert!(tracker.begin_save(0, 0, revision));
-    let chunk = Chunk::new(0, 0);
-    queue
-        .send(SaveCommand::SaveChunk {
-            snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
-                crate::dimension::Dimension::Overworld,
-                &chunk,
-                Vec::new(),
-            ),
-            revision,
-            tracker: tracker.clone(),
-        })
-        .unwrap();
-    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-    queue.send(SaveCommand::Flush(ack_tx)).unwrap();
-    let error = ack_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap()
-        .unwrap_err();
-    assert!(matches!(error, SaveError::WorkerPanic(_)));
-    assert_eq!(tracker.state(0, 0), Some(SaveState::Dirty(revision)));
-    assert_eq!(queue.stats().depth(), 1);
-    drop(queue);
-    drop(manager);
-    fs::remove_dir_all(world_dir).unwrap();
-}
-
-#[test]
-fn serialization_failure_is_propagated_and_retryable() {
-    let world_dir = unique_test_dir("save_serialize_failure");
-    let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
-    manager
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .inject_serialization_failure_once();
-    let queue = spawn_save_worker(Arc::clone(&manager), 2);
-    let tracker = DirtyChunkSet::new();
-    let revision = tracker.mark_dirty(0, 0);
-    assert!(tracker.begin_save(0, 0, revision));
-    let chunk = Chunk::new(0, 0);
-    queue
-        .send(SaveCommand::SaveChunk {
-            snapshot: UncompressedChunkSnapshot::from_chunk_with_redstone(
-                crate::dimension::Dimension::Overworld,
-                &chunk,
-                Vec::new(),
-            ),
-            revision,
-            tracker: tracker.clone(),
-        })
-        .unwrap();
-    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-    queue.send(SaveCommand::Flush(ack_tx)).unwrap();
-    let error = ack_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap()
-        .unwrap_err();
-    assert!(matches!(error, SaveError::Serialization(_)));
-    assert_eq!(tracker.state(0, 0), Some(SaveState::Dirty(revision)));
-
-    let (retry_tx, retry_rx) = std::sync::mpsc::channel();
-    queue.send(SaveCommand::Flush(retry_tx)).unwrap();
-    retry_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap()
-        .unwrap();
-    assert_eq!(tracker.state(0, 0), Some(SaveState::Persisted(revision)));
-    drop(queue);
-    drop(manager);
-    fs::remove_dir_all(world_dir).unwrap();
-}
-
-#[test]
 fn salvage_copies_only_readable_chunks_without_mutating_source() {
     let world_dir = unique_test_dir("region_salvage");
     let manager = SaveManager::new(&world_dir);
@@ -1401,33 +1125,9 @@ fn salvage_copies_only_readable_chunks_without_mutating_source() {
 }
 
 #[test]
-fn mutation_index_and_unloaded_snapshot_source_survive_reload() {
-    fn wait_payload(worker: &NetworkSnapshotWorker) -> NetworkSnapshotPayload {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            if let Some(NetworkSnapshotWorkerResult::Snapshot(payload)) =
-                worker.try_iter().next()
-            {
-                return payload;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "unloaded snapshot worker timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-
+fn mutation_index_survives_reload() {
     let world_dir = unique_test_dir("network_revision_index");
-    let mut manager = SaveManager::new(&world_dir);
-    let chunk = Chunk::new(7, -4);
-    let mut saved = ChunkSaveData::from_chunk(&chunk).unwrap();
-    saved.mutation_revision = 1;
-    let expected_blocks = saved.blocks.clone();
-    manager
-        .save_chunk_in(crate::dimension::Dimension::Overworld, 7, -4, saved)
-        .unwrap();
-
+    let manager = SaveManager::new(&world_dir);
     let mut index = MutationRevisionIndex::default();
     assert_eq!(
         index
@@ -1444,51 +1144,12 @@ fn mutation_index_and_unloaded_snapshot_source_survive_reload() {
     manager.save_mutation_revision_index(&index).unwrap();
     drop(manager);
 
-    let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
-    let reloaded = manager.lock().unwrap().load_mutation_revision_index();
+    let manager = SaveManager::new(&world_dir);
+    let reloaded = manager.load_mutation_revision_index();
     assert_eq!(
         reloaded.latest(crate::dimension::Dimension::Overworld, 7, -4),
         2
     );
-    let worker = spawn_network_snapshot_worker(Arc::clone(&manager), 1);
-    let key = NetworkSnapshotKey {
-        player_id: 11,
-        dimension: crate::dimension::Dimension::Overworld,
-        cx: 7,
-        cz: -4,
-        revision: 2,
-    };
-    worker
-        .try_submit(NetworkSnapshotRequest {
-            key,
-            chunk: None,
-            allow_disk_fallback: true,
-        })
-        .unwrap();
-    let stale = wait_payload(&worker);
-    assert_eq!(stale.key, key);
-    assert!(
-        stale.result.unwrap_err().contains("waiting for 2"),
-        "persisted revision must not be mislabeled as current"
-    );
-
-    let mut current = ChunkSaveData::from_chunk(&chunk).unwrap();
-    current.mutation_revision = 2;
-    manager
-        .lock()
-        .unwrap()
-        .save_chunk_in(crate::dimension::Dimension::Overworld, 7, -4, current)
-        .unwrap();
-    worker
-        .try_submit(NetworkSnapshotRequest {
-            key,
-            chunk: None,
-            allow_disk_fallback: true,
-        })
-        .unwrap();
-    let payload = wait_payload(&worker);
-    assert_eq!(payload.key, key);
-    assert_eq!(payload.result.unwrap().0, expected_blocks);
     fs::remove_dir_all(world_dir).unwrap();
 }
 
@@ -1741,9 +1402,9 @@ fn migration_fixture_legacy_0_to_255_preserves_data_and_creates_backup() {
     let total_voxels_256 = 16 * 256 * 16;
     let mut legacy_blocks = vec![0u8; total_voxels_256];
     let mut legacy_states = vec![0u8; total_voxels_256];
-    let mut legacy_sky = vec![15u8; total_voxels_256];
-    let mut legacy_block_light = vec![0u8; total_voxels_256];
-    let mut legacy_fluid = vec![0u8; total_voxels_256];
+    let legacy_sky = vec![15u8; total_voxels_256];
+    let legacy_block_light = vec![0u8; total_voxels_256];
+    let legacy_fluid = vec![0u8; total_voxels_256];
 
     // Place custom blocks at y = 10, y = 100, y = 255
     // Index formula in legacy flat array: (x * 256 + y) * 16 + z
@@ -2138,56 +1799,6 @@ fn persist_index_is_noop_when_in_process_runtime_owns_world() {
         .unwrap();
     assert!(wrote);
     assert_ne!(fs::read(&path).unwrap(), b"runtime-owned");
-    fs::remove_dir_all(world_dir).unwrap();
-}
-
-#[test]
-fn snapshot_worker_skips_region_cache_when_disk_fallback_disabled() {
-    let world_dir = unique_test_dir("snapshot_no_disk_fallback");
-    let mut manager = SaveManager::new(&world_dir);
-    let chunk = Chunk::new(3, 4);
-    let mut saved = ChunkSaveData::from_chunk(&chunk).unwrap();
-    saved.mutation_revision = 1;
-    manager
-        .save_chunk_in(crate::dimension::Dimension::Overworld, 3, 4, saved)
-        .unwrap();
-    drop(manager);
-
-    let manager = Arc::new(Mutex::new(SaveManager::new(&world_dir)));
-    let worker = spawn_network_snapshot_worker(Arc::clone(&manager), 1);
-    let key = NetworkSnapshotKey {
-        player_id: 7,
-        dimension: crate::dimension::Dimension::Overworld,
-        cx: 3,
-        cz: 4,
-        revision: 1,
-    };
-    worker
-        .try_submit(NetworkSnapshotRequest {
-            key,
-            chunk: None,
-            allow_disk_fallback: false,
-        })
-        .unwrap();
-    let payload = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if let Some(NetworkSnapshotWorkerResult::Snapshot(payload)) =
-                worker.try_iter().next()
-            {
-                break payload;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "snapshot worker timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    };
-    assert!(
-        payload.result.unwrap_err().contains("unavailable"),
-        "presentation region cache must not back catch-up while runtime owns the world"
-    );
     fs::remove_dir_all(world_dir).unwrap();
 }
 

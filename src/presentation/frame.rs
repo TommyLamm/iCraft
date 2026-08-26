@@ -45,11 +45,11 @@ impl State {
             );
         }
 
-        self.perf_counters.save_queue_depth = self.save_queue_stats.depth();
-        self.perf_counters.save_queue_bytes = self.save_queue_stats.queued_bytes();
-        self.perf_counters.save_in_flight = self.save_queue_stats.in_flight();
-        self.perf_counters.save_in_flight_bytes = self.save_queue_stats.in_flight_bytes();
-        self.perf_counters.save_drop = self.save_queue_stats.dropped();
+        self.perf_counters.save_queue_depth = 0;
+        self.perf_counters.save_queue_bytes = 0;
+        self.perf_counters.save_in_flight = 0;
+        self.perf_counters.save_in_flight_bytes = 0;
+        self.perf_counters.save_drop = 0;
         if let Some(mgr) = self
             .save_manager
             .as_ref()
