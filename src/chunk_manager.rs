@@ -1,7 +1,9 @@
+use crate::block_entity::BlockEntity;
+use crate::inventory::{ContainerInventory, ItemStack};
 use crate::world::{
     BlockSupportStatus, BlockType, Chunk, MeshVoxel, SectionHaloSnapshot, SectionKey, CHUNK_DEPTH,
-    CHUNK_WIDTH, FLUID_FALLING_BIT, FLUID_LEVEL_MASK, FLUID_RESERVED_MASK,
-    FLUID_WATERLOGGED_BIT, SECTION_SIZE,
+    CHUNK_WIDTH, FLUID_FALLING_BIT, FLUID_LEVEL_MASK, FLUID_RESERVED_MASK, FLUID_WATERLOGGED_BIT,
+    SECTION_SIZE,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -46,12 +48,7 @@ pub fn mark_block_mesh_dependencies(dirty: &mut HashSet<(i32, i32)>, wx: i32, wz
 /// Marks the owner section and only sections that can observe a one-cell halo
 /// sample (including edges/corners). This is the exact 3-D counterpart to the
 /// legacy chunk dependency helper.
-pub fn mark_section_mesh_dependencies(
-    dirty: &mut HashSet<SectionKey>,
-    wx: i32,
-    wy: i32,
-    wz: i32,
-) {
+pub fn mark_section_mesh_dependencies(dirty: &mut HashSet<SectionKey>, wx: i32, wy: i32, wz: i32) {
     let sy = crate::world::world_y_to_section_y(wy) as i32;
     let cx = wx.div_euclid(CHUNK_WIDTH as i32);
     let cz = wz.div_euclid(CHUNK_DEPTH as i32);
@@ -347,6 +344,178 @@ impl ChunkManager {
                 }
                 self.dirty_chunks.mark_dirty(cx, cz);
             }
+        }
+    }
+
+    fn single_chest_inventory(&self, x: i32, y: i32, z: i32) -> Option<ContainerInventory> {
+        match self.get_block_entity(x, y, z)? {
+            BlockEntity::Chest(chest) => Some(chest.inventory.clone()),
+            _ => None,
+        }
+    }
+
+    fn chest_slots(&self, x: i32, y: i32, z: i32) -> Option<Vec<Option<ItemStack>>> {
+        let primary_inv = self.single_chest_inventory(x, y, z)?;
+        let state_raw = self.get_block_state(x, y, z);
+        let state = crate::world::BlockState::decode(state_raw);
+        if let Some(partner_pos) = crate::block_entity::double_chest_partner(self, (x, y, z)) {
+            if let Some(partner_inv) =
+                self.single_chest_inventory(partner_pos.0, partner_pos.1, partner_pos.2)
+            {
+                let mut combined_slots = vec![None; 54];
+                if state.chest_type == crate::world::ChestType::Left {
+                    combined_slots[..27].clone_from_slice(&primary_inv.slots);
+                    combined_slots[27..54].clone_from_slice(&partner_inv.slots);
+                } else {
+                    combined_slots[..27].clone_from_slice(&partner_inv.slots);
+                    combined_slots[27..54].clone_from_slice(&primary_inv.slots);
+                }
+                return Some(combined_slots);
+            }
+        }
+        Some(primary_inv.slots.to_vec())
+    }
+
+    fn set_single_chest_inventory(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        inventory: ContainerInventory,
+    ) -> bool {
+        let Some(entity) = self.get_block_entity(x, y, z).cloned() else {
+            return false;
+        };
+        if let BlockEntity::Chest(mut chest_be) = entity {
+            chest_be.inventory = inventory;
+            chest_be.revision = chest_be.revision.wrapping_add(1);
+            self.set_block_entity(x, y, z, Some(BlockEntity::Chest(chest_be)));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn set_chest_slots(&mut self, x: i32, y: i32, z: i32, slots: &[Option<ItemStack>]) -> bool {
+        if slots.iter().flatten().any(|stack| {
+            stack.count == 0
+                || stack.item == crate::inventory::Item::Air
+                || stack.count > stack.item.properties().max_stack
+        }) {
+            return false;
+        }
+        if slots.len() == 54 {
+            let state_raw = self.get_block_state(x, y, z);
+            let state = crate::world::BlockState::decode(state_raw);
+            if let Some(partner_pos) = crate::block_entity::double_chest_partner(self, (x, y, z)) {
+                let (primary_slice, partner_slice) =
+                    if state.chest_type == crate::world::ChestType::Left {
+                        (&slots[..27], &slots[27..54])
+                    } else {
+                        (&slots[27..54], &slots[..27])
+                    };
+                let mut p_arr = [None; 27];
+                p_arr.copy_from_slice(primary_slice);
+                let mut pt_arr = [None; 27];
+                pt_arr.copy_from_slice(partner_slice);
+                // Validate and prepare both halves before committing either
+                // one. A malformed or unloaded partner must never leave a
+                // half-updated double chest.
+                let primary = self
+                    .get_block_entity(x, y, z)
+                    .and_then(|entity| match entity {
+                        BlockEntity::Chest(chest) => Some(chest.clone()),
+                        _ => None,
+                    });
+                let partner = self
+                    .get_block_entity(partner_pos.0, partner_pos.1, partner_pos.2)
+                    .and_then(|entity| match entity {
+                        BlockEntity::Chest(chest) => Some(chest.clone()),
+                        _ => None,
+                    });
+                let (Some(mut primary), Some(mut partner)) = (primary, partner) else {
+                    return false;
+                };
+                primary.inventory = ContainerInventory { slots: p_arr };
+                primary.revision = primary.revision.wrapping_add(1);
+                partner.inventory = ContainerInventory { slots: pt_arr };
+                partner.revision = partner.revision.wrapping_add(1);
+                self.set_block_entity(x, y, z, Some(BlockEntity::Chest(primary)));
+                self.set_block_entity(
+                    partner_pos.0,
+                    partner_pos.1,
+                    partner_pos.2,
+                    Some(BlockEntity::Chest(partner)),
+                );
+                return true;
+            }
+        }
+        if slots.len() == 27 {
+            let mut arr = [None; 27];
+            arr.copy_from_slice(slots);
+            return self.set_single_chest_inventory(x, y, z, ContainerInventory { slots: arr });
+        }
+        false
+    }
+
+    pub fn container_slot_count(&self, x: i32, y: i32, z: i32) -> usize {
+        if let Some(entity) = self.get_block_entity(x, y, z) {
+            if matches!(entity, BlockEntity::Chest(_))
+                && crate::block_entity::double_chest_partner(self, (x, y, z)).is_some()
+            {
+                54
+            } else {
+                entity.slot_count()
+            }
+        } else {
+            0
+        }
+    }
+
+    /// Shared slot view used by UI and automation. Chest halves retain their
+    /// existing deterministic 27/54 ordering; all other containers expose
+    /// their native slot count and complete metadata-bearing stacks.
+    pub fn container_slots(&self, x: i32, y: i32, z: i32) -> Option<Vec<Option<ItemStack>>> {
+        let entity = self.get_block_entity(x, y, z)?;
+        if matches!(entity, BlockEntity::Chest(_)) {
+            return self.chest_slots(x, y, z);
+        }
+        Some(
+            (0..entity.slot_count())
+                .map(|slot| entity.get_stack(slot).copied())
+                .collect(),
+        )
+    }
+
+    /// Atomically commits a complete container slot vector after validating the
+    /// target entity and exact length. This prevents a malformed/stale click
+    /// from partially replacing a multi-slot inventory.
+    pub fn set_container_slots(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        slots: &[Option<ItemStack>],
+    ) -> bool {
+        if matches!(self.get_block_entity(x, y, z), Some(BlockEntity::Chest(_))) {
+            return self.set_chest_slots(x, y, z, slots);
+        }
+        let Some(mut entity) = self.get_block_entity(x, y, z).cloned() else {
+            return false;
+        };
+        if slots.len() != entity.slot_count() {
+            return false;
+        }
+        if !entity.replace_slots(slots) {
+            return false;
+        }
+        self.set_block_entity(x, y, z, Some(entity));
+        true
+    }
+
+    pub fn ensure_chest_loot_generated(&mut self, x: i32, y: i32, z: i32, world_seed: u32) {
+        if let Some(BlockEntity::Chest(chest_be)) = self.get_block_entity_mut(x, y, z) {
+            chest_be.ensure_loot_generated(world_seed, (x, y, z));
         }
     }
 
@@ -1048,5 +1217,28 @@ mod tests {
         assert_eq!(broken, vec![((15, 100, 8), BlockType::Cactus)]);
         assert!(dirty.contains(&(0, 0)));
         assert!(dirty.contains(&(1, 0)));
+    }
+
+    #[test]
+    fn container_slot_commit_rejects_invalid_stack_without_partial_write() {
+        let mut chunk_manager = ChunkManager::new(2);
+        chunk_manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        chunk_manager.set_block(0, 64, 0, crate::world::BlockType::Chest);
+        chunk_manager.set_block_entity(
+            0,
+            64,
+            0,
+            Some(BlockEntity::Chest(
+                crate::block_entity::ChestBlockEntity::new(),
+            )),
+        );
+        let original = chunk_manager.container_slots(0, 64, 0).unwrap();
+        let mut invalid = original.clone();
+        invalid[3] = Some(ItemStack::new(crate::inventory::Item::Stone, 0));
+
+        assert!(!chunk_manager.set_container_slots(0, 64, 0, &invalid));
+        assert_eq!(chunk_manager.container_slots(0, 64, 0).unwrap(), original);
     }
 }

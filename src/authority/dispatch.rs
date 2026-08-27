@@ -834,11 +834,12 @@ impl AuthorityCore {
             }
         }
 
-        let (next_slot, next_cursor) = crate::container_sessions::simulate_container_click(
+        let click_result = crate::inventory::apply_stack_click(
             slots[slot_index],
             candidate.cursor.and_then(|slot| slot.to_stack()),
             is_left,
         );
+        let (next_slot, next_cursor) = (click_result.slot, click_result.dragged);
         let extract_into_inventory = original.cursor.is_none() && claimed.is_none();
         candidate.cursor = next_cursor.as_ref().map(session_slot_from_item_stack);
         if extract_into_inventory {

@@ -15,17 +15,16 @@ use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
 #[cfg(test)]
 use crate::commands::{self, Command, TimeCommand};
-use crate::container_sessions::ContainerSessionManager;
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::{EntityManager, EntityType};
 use crate::fluid::FluidMutation;
 use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
 use crate::inventory::ItemStack;
+#[cfg(test)]
+use crate::network::protocol::ContainerAction;
 use crate::network::protocol::{
     GameplayOperation, GameplayRequest, ItemWire, PlayerId, RejectReason,
 };
-#[cfg(test)]
-use crate::network::protocol::ContainerAction;
 use crate::redstone::{RedstoneAction, RedstoneSystem};
 use crate::save::{ChunkSaveData, EntitySaveData, MutationRevisionIndex};
 use crate::world::BlockType;
@@ -255,12 +254,8 @@ impl ServerWorld {
         &self,
         position: (i32, i32, i32),
     ) -> Option<Vec<Option<ItemStack>>> {
-        ContainerSessionManager::get_container_slots(
-            &self.chunks,
-            position.0,
-            position.1,
-            position.2,
-        )
+        self.chunks
+            .container_slots(position.0, position.1, position.2)
     }
 
     pub fn commit_container_item_slots(
@@ -268,13 +263,10 @@ impl ServerWorld {
         position: (i32, i32, i32),
         slots: &[Option<ItemStack>],
     ) -> Result<WorldMutation, RejectReason> {
-        if !ContainerSessionManager::set_container_slots(
-            &mut self.chunks,
-            position.0,
-            position.1,
-            position.2,
-            slots,
-        ) {
+        if !self
+            .chunks
+            .set_container_slots(position.0, position.1, position.2, slots)
+        {
             return Err(RejectReason::InvalidState);
         }
         Ok(self.touch_revision(position.0, position.1, position.2))

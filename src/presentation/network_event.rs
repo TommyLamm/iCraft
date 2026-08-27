@@ -610,14 +610,7 @@ impl State {
                             .iter()
                             .map(|slot| slot.as_ref().and_then(|wire| wire.to_stack()))
                             .collect();
-                        committed =
-                            crate::container_sessions::ContainerSessionManager::set_container_slots(
-                                &mut self.chunk_manager,
-                                x,
-                                y,
-                                z,
-                                &stacks,
-                            );
+                        committed = self.chunk_manager.set_container_slots(x, y, z, &stacks);
                     }
                     if !committed {
                         return;
@@ -670,23 +663,10 @@ impl State {
                 if !container_revision_is_newer(current_revision, revision) {
                     return;
                 }
-                if let Some(mut slots) =
-                    crate::container_sessions::ContainerSessionManager::get_container_slots(
-                        &self.chunk_manager,
-                        x,
-                        y,
-                        z,
-                    )
-                {
+                if let Some(mut slots) = self.chunk_manager.container_slots(x, y, z) {
                     if (slot_index as usize) < slots.len() {
                         slots[slot_index as usize] = slot.and_then(|wire| wire.to_stack());
-                        if !crate::container_sessions::ContainerSessionManager::set_container_slots(
-                            &mut self.chunk_manager,
-                            x,
-                            y,
-                            z,
-                            &slots,
-                        ) {
+                        if !self.chunk_manager.set_container_slots(x, y, z, &slots) {
                             return;
                         }
                         if let Some(entity) = self.chunk_manager.get_block_entity_mut(x, y, z) {

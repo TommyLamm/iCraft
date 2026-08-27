@@ -13,7 +13,6 @@ use icraft::authority::contract::{
 use icraft::authority::{AuthorityConfig, AuthorityCore};
 use icraft::block_entity::{BlockEntity, ChestBlockEntity};
 use icraft::brewing::{PotionData, PotionKind};
-use icraft::container_sessions::ContainerSessionManager;
 use icraft::dimension::Dimension;
 use icraft::enchantment::Enchantment;
 use icraft::inventory::{Item, ItemStack};
@@ -87,9 +86,12 @@ fn seed_chest(core: &mut AuthorityCore, slots: &[(usize, ItemStack)]) {
     for (index, stack) in slots {
         chest.set_stack(*index, Some(*stack));
     }
-    core.world_mut_active()
-        .chunks
-        .set_block_entity(CHEST.0, CHEST.1, CHEST.2, Some(BlockEntity::Chest(chest)));
+    core.world_mut_active().chunks.set_block_entity(
+        CHEST.0,
+        CHEST.1,
+        CHEST.2,
+        Some(BlockEntity::Chest(chest)),
+    );
 }
 
 fn open_chest(core: &mut AuthorityCore, request_id: u128, sequence: u64) {
@@ -214,8 +216,10 @@ fn conserved_totals(
             add_stack(&mut totals, stack);
         }
     }
-    if let Some(slots) =
-        ContainerSessionManager::get_container_slots(&core.world().chunks, CHEST.0, CHEST.1, CHEST.2)
+    if let Some(slots) = core
+        .world()
+        .chunks
+        .container_slots(CHEST.0, CHEST.1, CHEST.2)
     {
         for slot in slots.into_iter().flatten() {
             add_stack(&mut totals, slot);
@@ -225,7 +229,9 @@ fn conserved_totals(
 }
 
 fn chest_slot(core: &AuthorityCore, index: u16) -> Option<ItemStack> {
-    ContainerSessionManager::get_container_slots(&core.world().chunks, CHEST.0, CHEST.1, CHEST.2)
+    core.world()
+        .chunks
+        .container_slots(CHEST.0, CHEST.1, CHEST.2)
         .and_then(|slots| slots.get(usize::from(index)).copied().flatten())
 }
 

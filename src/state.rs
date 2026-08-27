@@ -11606,13 +11606,7 @@ impl State {
                     out_y0 + slot_h,
                 ));
             } else {
-                let container_slots =
-                    crate::container_sessions::ContainerSessionManager::get_slot_count(
-                        &self.chunk_manager,
-                        pos.0,
-                        pos.1,
-                        pos.2,
-                    );
+                let container_slots = self.chunk_manager.container_slot_count(pos.0, pos.1, pos.2);
                 let container_rows = container_slots.saturating_add(8) / 9;
                 let x_start = -0.40;
                 let y_start = -0.70 - (container_rows as f32) * (slot_h + gap) - gap;
@@ -11745,13 +11739,9 @@ impl State {
             SlotType::AnvilRight => self.anvil.right,
             SlotType::AnvilOutput => self.anvil.output,
             SlotType::ContainerSlot(i) => self.container_target.and_then(|pos| {
-                crate::container_sessions::ContainerSessionManager::get_container_slots(
-                    &self.chunk_manager,
-                    pos.0,
-                    pos.1,
-                    pos.2,
-                )
-                .and_then(|slots| slots.get(i).copied().flatten())
+                self.chunk_manager
+                    .container_slots(pos.0, pos.1, pos.2)
+                    .and_then(|slots| slots.get(i).copied().flatten())
             }),
         }
     }
@@ -11786,13 +11776,7 @@ impl State {
             SlotType::AnvilOutput => {}
             SlotType::ContainerSlot(i) => {
                 if let Some(pos) = self.container_target {
-                    if let Some(mut slots) =
-                        crate::container_sessions::ContainerSessionManager::get_container_slots(
-                            &self.chunk_manager,
-                            pos.0,
-                            pos.1,
-                            pos.2,
-                        )
+                    if let Some(mut slots) = self.chunk_manager.container_slots(pos.0, pos.1, pos.2)
                     {
                         if i < slots.len() {
                             let access = self
@@ -11805,16 +11789,16 @@ impl State {
                                     .map_or(true, |item| access.can_insert(i, item, None))
                             }) {
                                 slots[i] = stack;
-                                if crate::container_sessions::ContainerSessionManager::set_container_slots(
-                                    &mut self.chunk_manager,
-                                    pos.0,
-                                    pos.1,
-                                    pos.2,
-                                    &slots,
-                                ) {
+                                if self
+                                    .chunk_manager
+                                    .set_container_slots(pos.0, pos.1, pos.2, &slots)
+                                {
                                     self.redstone
                                         .mark_container_changed(&self.chunk_manager, pos);
-                                    let entity = self.chunk_manager.get_block_entity(pos.0, pos.1, pos.2).cloned();
+                                    let entity = self
+                                        .chunk_manager
+                                        .get_block_entity(pos.0, pos.1, pos.2)
+                                        .cloned();
                                     self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, entity);
                                 }
                             }
@@ -12738,12 +12722,7 @@ impl State {
             return;
         }
         self.container_target = Some(pos);
-        let slot_count = crate::container_sessions::ContainerSessionManager::get_slot_count(
-            &self.chunk_manager,
-            pos.0,
-            pos.1,
-            pos.2,
-        );
+        let slot_count = self.chunk_manager.container_slot_count(pos.0, pos.1, pos.2);
         self.container_is_double = slot_count > 27;
         self.set_local_chest_open_state(pos, true);
         self.open_inventory();
