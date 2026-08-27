@@ -55,7 +55,6 @@ pub mod boss;
 pub mod chunk_render;
 pub mod chunk_schedule;
 pub mod commands;
-pub mod crafting;
 pub mod culling;
 pub mod fluid;
 pub mod gpu_frame_resources;
@@ -81,7 +80,7 @@ pub(crate) mod final_acceptance;
 pub(crate) mod loot;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod microbench;
-pub(crate) mod recipes;
+pub mod recipes;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod sim_harness;
 pub(crate) mod voxel_shape;

@@ -16,7 +16,7 @@ use crate::authority::interest::{
 };
 use crate::authority::{AuthorityConfig, AuthorityCore};
 use crate::dimension::Dimension;
-use crate::game_rules::{ServerDifficulty, WorldRules};
+use crate::game_rules::{Difficulty, WorldRules};
 use crate::inventory::{GameMode, Inventory};
 use crate::network::protocol::{
     ContainerAction, EntityStateWire, GameplayOperation, GameplayOutcome, GameplayRequest,
@@ -498,8 +498,8 @@ impl Default for ServerProperties {
 }
 
 impl ServerProperties {
-    pub fn difficulty_kind(&self) -> Result<ServerDifficulty, ServerConfigError> {
-        ServerDifficulty::parse(&self.difficulty).ok_or_else(|| {
+    pub fn difficulty_kind(&self) -> Result<Difficulty, ServerConfigError> {
+        Difficulty::parse_strict(&self.difficulty).ok_or_else(|| {
             invalid(
                 "difficulty",
                 &self.difficulty,

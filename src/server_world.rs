@@ -18,7 +18,7 @@ use crate::commands::{self, Command, TimeCommand};
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
 use crate::entity::{EntityManager, EntityType};
 use crate::fluid::FluidMutation;
-use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
+use crate::game_rules::{Difficulty, WorldRules, WorldType};
 use crate::inventory::ItemStack;
 #[cfg(test)]
 use crate::network::protocol::ContainerAction;
@@ -47,13 +47,13 @@ pub struct ServerWorld {
     /// outside `WorldRules` so adding this policy does not invalidate the
     /// existing binary level-save layout; `server.properties` is its durable
     /// source of truth.
-    pub difficulty: ServerDifficulty,
+    pub difficulty: Difficulty,
     pub time: u64,
     pub revisions: RevisionClock,
     pub chunks: ChunkManager,
     pub entities: EntityManager,
     pub redstone: RedstoneSystem,
-    pub recipe_manager: crate::crafting::RecipeManager,
+    pub recipe_manager: crate::recipes::RecipeManager,
     pub container_viewers: BTreeMap<(i32, i32, i32), BTreeSet<PlayerId>>,
     /// Authoritative lifecycle intents emitted when a block-backed container
     /// is invalidated.  RuntimePresentation consumes these after the fixed
@@ -97,7 +97,7 @@ impl ServerWorld {
             generate_structures,
             rules,
             render_distance,
-            ServerDifficulty::default(),
+            Difficulty::default(),
         )
     }
 
@@ -108,7 +108,7 @@ impl ServerWorld {
         generate_structures: bool,
         rules: WorldRules,
         render_distance: i32,
-        difficulty: ServerDifficulty,
+        difficulty: Difficulty,
     ) -> Self {
         let mut world = Self {
             seed,
@@ -126,7 +126,7 @@ impl ServerWorld {
             // mistaken for the authenticated player with the same raw id.
             entities: EntityManager::new_with_id_base(1u64 << 32),
             redstone: RedstoneSystem::new(),
-            recipe_manager: crate::crafting::RecipeManager::new(),
+            recipe_manager: crate::recipes::RecipeManager::new(),
             container_viewers: BTreeMap::new(),
             pending_container_closures: Vec::new(),
             pending_mutations: Vec::new(),
@@ -145,7 +145,7 @@ impl ServerWorld {
     /// `do_mob_spawning` gamerule; the latter never freezes already-loaded
     /// hostiles.
     pub const fn allows_hostile_spawning(&self) -> bool {
-        self.rules.do_mob_spawning && !matches!(self.difficulty, ServerDifficulty::Peaceful)
+        self.rules.do_mob_spawning && !matches!(self.difficulty, Difficulty::Peaceful)
     }
 
     pub fn ensure_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
@@ -1965,7 +1965,7 @@ impl ServerWorld {
         // already-loaded hostile entities are removed at the next fixed tick.
         // `do_mob_spawning=false` deliberately does not take this path, so it
         // cannot freeze an existing hostile entity's AI.
-        if matches!(self.difficulty, ServerDifficulty::Peaceful) {
+        if matches!(self.difficulty, Difficulty::Peaceful) {
             let before = self.entities.entities.len();
             self.entities
                 .entities
@@ -2007,7 +2007,7 @@ impl ServerWorld {
             entity.invulnerable_time = (entity.invulnerable_time - FIXED_DT).max(0.0);
             entity.fire_aspect_timer = (entity.fire_aspect_timer - FIXED_DT).max(0.0);
             if entity.entity_type.is_hostile()
-                && !matches!(self.difficulty, ServerDifficulty::Peaceful)
+                && !matches!(self.difficulty, Difficulty::Peaceful)
             {
                 if let Some((_, target)) =
                     player_positions.iter().min_by(|(_, left), (_, right)| {
@@ -2893,7 +2893,7 @@ mod tests {
             false,
             rules,
             2,
-            ServerDifficulty::Peaceful,
+            Difficulty::Peaceful,
         );
         assert!(!peaceful.allows_hostile_spawning());
         assert!(peaceful.rules.pvp);
@@ -2912,7 +2912,7 @@ mod tests {
             false,
             easy_rules,
             2,
-            ServerDifficulty::Easy,
+            Difficulty::Easy,
         );
         assert!(!easy.allows_hostile_spawning());
         let easy_id = easy
@@ -2932,7 +2932,7 @@ mod tests {
             false,
             WorldRules::default(),
             2,
-            ServerDifficulty::Normal,
+            Difficulty::Normal,
         );
         let normal_id = normal
             .entities
@@ -2946,7 +2946,7 @@ mod tests {
             false,
             WorldRules::default(),
             2,
-            ServerDifficulty::Hard,
+            Difficulty::Hard,
         );
         let hard_id = hard
             .entities

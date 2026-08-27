@@ -505,11 +505,7 @@ impl SimpleLootRng {
     }
 
     fn next_u32(&mut self) -> u32 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (self.state >> 32) as u32
+        crate::world_tick::next_splitmix64(&mut self.state) as u32
     }
 }
 

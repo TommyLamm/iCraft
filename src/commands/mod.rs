@@ -143,13 +143,7 @@ fn parse_mode(token: &str, pos: usize) -> Result<GameMode, CommandError> {
 }
 
 fn parse_difficulty(token: &str, pos: usize) -> Result<Difficulty, CommandError> {
-    match token.to_ascii_lowercase().as_str() {
-        "peaceful" | "0" => Ok(Difficulty::Peaceful),
-        "easy" | "1" => Ok(Difficulty::Easy),
-        "normal" | "2" => Ok(Difficulty::Normal),
-        "hard" | "3" => Ok(Difficulty::Hard),
-        _ => Err(CommandError::new(pos, "unknown difficulty")),
-    }
+    Difficulty::parse_strict(token).ok_or_else(|| CommandError::new(pos, "unknown difficulty"))
 }
 
 fn parse_coordinate(token: &str, pos: usize) -> Result<i32, CommandError> {

@@ -87,18 +87,6 @@ pub fn block_shape(block: BlockType, state_raw: u8, pos: (i32, i32, i32)) -> Vox
     crate::voxel_shape::block_collision_shape(block, state_raw, pos, None)
 }
 
-/// Backward-compatible wrapper that returns the first AABB of a block shape.
-pub fn block_aabb(block: BlockType, state_raw: u8, pos: (i32, i32, i32)) -> AABB {
-    let shape = block_shape(block, state_raw, pos);
-    if shape.count > 0 {
-        shape.boxes[0]
-    } else {
-        AABB {
-            min: Vec3::ZERO,
-            max: Vec3::ZERO,
-        }
-    }
-}
 
 pub fn block_placement_decision(
     block: BlockType,
@@ -418,66 +406,14 @@ impl PlayerPhysics {
         if self.no_clip {
             return;
         }
-        let player_aabb = self.get_aabb();
-        let height = chunk_manager.dimension.height();
-
-        // 檢測玩家周圍可能相交的方塊
-        let min_x = player_aabb.min.x.floor() as i32;
-        let max_x = player_aabb.max.x.floor() as i32;
-        let min_y =
-            (player_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
-        let max_y =
-            (player_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
-        let min_z = player_aabb.min.z.floor() as i32;
-        let max_z = player_aabb.max.z.floor() as i32;
-
-        for x in min_x..=max_x {
-            for y in min_y..=max_y {
-                for z in min_z..=max_z {
-                    let block = chunk_manager.get_block(x, y, z);
-                    if block.properties().is_solid {
-                        let state = chunk_manager.get_block_state(x, y, z);
-                        let shape = crate::voxel_shape::block_collision_shape(
-                            block,
-                            state,
-                            (x, y, z),
-                            Some(chunk_manager),
-                        );
-
-                        for block_aabb in shape.iter() {
-                            if self.get_aabb().intersects(block_aabb) {
-                                if axis == 0 {
-                                    // X 軸
-                                    if self.velocity.x > 0.0 {
-                                        self.position.x = block_aabb.min.x - self.size.x * 0.5;
-                                    } else {
-                                        self.position.x = block_aabb.max.x + self.size.x * 0.5;
-                                    }
-                                    self.velocity.x = 0.0;
-                                } else if axis == 2 {
-                                    // Z 軸
-                                    if self.velocity.z > 0.0 {
-                                        self.position.z = block_aabb.min.z - self.size.z * 0.5;
-                                    } else {
-                                        self.position.z = block_aabb.max.z + self.size.z * 0.5;
-                                    }
-                                    self.velocity.z = 0.0;
-                                } else if axis == 1 {
-                                    // Y 軸
-                                    if self.velocity.y > 0.0 {
-                                        self.position.y = block_aabb.min.y - self.size.y;
-                                    } else {
-                                        self.position.y = block_aabb.max.y;
-                                        self.on_ground = true;
-                                    }
-                                    self.velocity.y = 0.0;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        resolve_axis_box_collision(
+            &mut self.position,
+            &mut self.velocity,
+            self.size,
+            &mut self.on_ground,
+            chunk_manager,
+            axis,
+        );
     }
 
     pub fn is_block_below(&self, chunk_manager: &ChunkManager) -> bool {
@@ -515,6 +451,84 @@ impl PlayerPhysics {
             }
         }
         false
+    }
+}
+
+/// Resolves axis-aligned bounding box collisions against the world for an entity or player box.
+pub fn resolve_axis_box_collision(
+    position: &mut Vec3,
+    velocity: &mut Vec3,
+    size: Vec3,
+    on_ground: &mut bool,
+    chunk_manager: &ChunkManager,
+    axis: usize,
+) {
+    let body_aabb = AABB::new(
+        *position + Vec3::new(0.0, size.y * 0.5, 0.0),
+        size,
+    );
+    let height = chunk_manager.dimension.height();
+
+    // 檢測周圍可能相交的方塊
+    let min_x = body_aabb.min.x.floor() as i32;
+    let max_x = body_aabb.max.x.floor() as i32;
+    let min_y =
+        (body_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
+    let max_y =
+        (body_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
+    let min_z = body_aabb.min.z.floor() as i32;
+    let max_z = body_aabb.max.z.floor() as i32;
+
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                let block = chunk_manager.get_block(x, y, z);
+                if block.properties().is_solid {
+                    let state = chunk_manager.get_block_state(x, y, z);
+                    let shape = crate::voxel_shape::block_collision_shape(
+                        block,
+                        state,
+                        (x, y, z),
+                        Some(chunk_manager),
+                    );
+
+                    for block_aabb in shape.iter() {
+                        let current_aabb = AABB::new(
+                            *position + Vec3::new(0.0, size.y * 0.5, 0.0),
+                            size,
+                        );
+                        if current_aabb.intersects(block_aabb) {
+                            if axis == 0 {
+                                // X 軸
+                                if velocity.x > 0.0 {
+                                    position.x = block_aabb.min.x - size.x * 0.5;
+                                } else {
+                                    position.x = block_aabb.max.x + size.x * 0.5;
+                                }
+                                velocity.x = 0.0;
+                            } else if axis == 2 {
+                                // Z 軸
+                                if velocity.z > 0.0 {
+                                    position.z = block_aabb.min.z - size.z * 0.5;
+                                } else {
+                                    position.z = block_aabb.max.z + size.z * 0.5;
+                                }
+                                velocity.z = 0.0;
+                            } else if axis == 1 {
+                                // Y 軸
+                                if velocity.y > 0.0 {
+                                    position.y = block_aabb.min.y - size.y;
+                                } else {
+                                    position.y = block_aabb.max.y;
+                                    *on_ground = true;
+                                }
+                                velocity.y = 0.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -621,7 +635,7 @@ mod tests {
             is_open: false,
             chest_type: ChestType::Single,
         };
-        let aabb = block_aabb(BlockType::OakDoor, closed_door_state.encode(), (2, 10, 2));
+        let aabb = block_shape(BlockType::OakDoor, closed_door_state.encode(), (2, 10, 2)).boxes[0];
         assert_eq!(aabb.min, Vec3::new(2.0, 10.0, 2.0));
         assert_eq!(aabb.max, Vec3::new(3.0, 11.0, 2.1875));
 
@@ -632,7 +646,7 @@ mod tests {
             is_open: true,
             chest_type: ChestType::Single,
         };
-        let open_aabb = block_aabb(BlockType::OakDoor, open_door_state.encode(), (2, 10, 2));
+        let open_aabb = block_shape(BlockType::OakDoor, open_door_state.encode(), (2, 10, 2)).boxes[0];
         assert_eq!(open_aabb.min, Vec3::new(2.0, 10.0, 2.0));
         assert_eq!(open_aabb.max, Vec3::new(2.1875, 11.0, 3.0));
 
@@ -643,7 +657,7 @@ mod tests {
             is_open: false,
             chest_type: ChestType::Single,
         };
-        let trap_aabb = block_aabb(BlockType::OakTrapdoor, closed_trapdoor.encode(), (0, 64, 0));
+        let trap_aabb = block_shape(BlockType::OakTrapdoor, closed_trapdoor.encode(), (0, 64, 0)).boxes[0];
         assert_eq!(trap_aabb.min, Vec3::new(0.0, 64.0, 0.0));
         assert_eq!(trap_aabb.max, Vec3::new(1.0, 64.1875, 1.0));
     }

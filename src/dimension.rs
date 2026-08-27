@@ -301,18 +301,6 @@ fn empty_light() -> Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> {
         .expect("chunk light dimensions are fixed")
 }
 
-fn hash3(seed: u32, x: i32, y: i32, z: i32) -> u32 {
-    let mut value = seed
-        ^ (x as u32).wrapping_mul(0x9E37_79B9)
-        ^ (y as u32).wrapping_mul(0x85EB_CA6B)
-        ^ (z as u32).wrapping_mul(0xC2B2_AE35);
-    value ^= value >> 16;
-    value = value.wrapping_mul(0x7FEB_352D);
-    value ^= value >> 15;
-    value = value.wrapping_mul(0x846C_A68B);
-    value ^ (value >> 16)
-}
-
 fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     let mut blocks = empty_blocks();
     let caves = Perlin::new(seed ^ 0x4E45_5448);
@@ -331,9 +319,17 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             for y in 0..NETHER_HEIGHT {
                 let block = if y == 0 || y == NETHER_HEIGHT - 1 {
                     BlockType::Bedrock
-                } else if y <= 4 && hash3(seed, world_x, y as i32, world_z) % 5 < (5 - y) as u32
+                } else if y <= 4
+                    && crate::worldgen::hash_coord(seed, world_x, y as i32, world_z, 0) % 5
+                        < (5 - y) as u32
                     || y >= NETHER_HEIGHT - 5
-                        && hash3(seed ^ 0xBED0_CAFE, world_x, y as i32, world_z) % 5
+                        && crate::worldgen::hash_coord(
+                            seed ^ 0xBED0_CAFE,
+                            world_x,
+                            y as i32,
+                            world_z,
+                            0,
+                        ) % 5
                             < (y - (NETHER_HEIGHT - 5) + 1) as u32
                 {
                     BlockType::Bedrock
@@ -385,10 +381,10 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             for y in 35..(NETHER_HEIGHT - 6) {
                 if blocks[x][y][z] == BlockType::Air
                     && blocks[x][y + 1][z] == BlockType::Netherrack
-                    && hash3(seed ^ 0x6105_700E, world_x, y as i32, world_z) % 149 == 0
+                    && crate::worldgen::hash_coord(seed ^ 0x6105_700E, world_x, y as i32, world_z, 0) % 149 == 0
                 {
                     blocks[x][y][z] = BlockType::Glowstone;
-                    if y > 35 && hash3(seed, world_x, y as i32, world_z) & 1 == 0 {
+                    if y > 35 && crate::worldgen::hash_coord(seed, world_x, y as i32, world_z, 0) & 1 == 0 {
                         blocks[x][y - 1][z] = BlockType::Glowstone;
                     }
                     glowstone_count += 1;
@@ -397,8 +393,8 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
         }
     }
     if glowstone_count == 0 {
-        let x = (hash3(seed, chunk_x, 17, chunk_z) as usize) % CHUNK_WIDTH;
-        let z = (hash3(seed, chunk_x, 29, chunk_z) as usize) % CHUNK_DEPTH;
+        let x = (crate::worldgen::hash_coord(seed, chunk_x, 17, chunk_z, 0) as usize) % CHUNK_WIDTH;
+        let z = (crate::worldgen::hash_coord(seed, chunk_x, 29, chunk_z, 0) as usize) % CHUNK_DEPTH;
         blocks[x][112][z] = BlockType::Glowstone;
         if blocks[x][111][z] == BlockType::Netherrack {
             blocks[x][111][z] = BlockType::Air;
@@ -424,8 +420,8 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             }
         }
         if !contains_block(&blocks, BlockType::SoulSand) {
-            let x = (hash3(seed ^ 0x5015_A4D0, chunk_x, 32, chunk_z) as usize) % CHUNK_WIDTH;
-            let z = (hash3(seed ^ 0x5015_A4D0, chunk_z, 32, chunk_x) as usize) % CHUNK_DEPTH;
+            let x = (crate::worldgen::hash_coord(seed ^ 0x5015_A4D0, chunk_x, 32, chunk_z, 0) as usize) % CHUNK_WIDTH;
+            let z = (crate::worldgen::hash_coord(seed ^ 0x5015_A4D0, chunk_z, 32, chunk_x, 0) as usize) % CHUNK_DEPTH;
             blocks[x][32][z] = BlockType::SoulSand;
             blocks[x][33][z] = BlockType::Air;
         }
@@ -466,7 +462,7 @@ fn end_surface_at(world_x: i32, world_z: i32, seed: u32) -> Option<i32> {
     let mut best = None;
     for gx in (cell_x - 1)..=(cell_x + 1) {
         for gz in (cell_z - 1)..=(cell_z + 1) {
-            let h = hash3(seed ^ 0xE0D1_51A0, gx, 0, gz);
+            let h = crate::worldgen::hash_coord(seed ^ 0xE0D1_51A0, gx, 0, gz, 0);
             if h % 100 >= 38 {
                 continue;
             }
@@ -500,7 +496,7 @@ fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             let thickness = if distance_from_origin <= 112.0 {
                 10 + ((1.0 - distance_from_origin / 112.0).max(0.0) * 18.0) as i32
             } else {
-                9 + (hash3(seed, world_x, 0, world_z) % 7) as i32
+                9 + (crate::worldgen::hash_coord(seed, world_x, 0, world_z, 0) % 7) as i32
             };
             for y in (top - thickness).max(1)..=top {
                 blocks[x][y as usize][z] = BlockType::EndStone;

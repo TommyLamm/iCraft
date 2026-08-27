@@ -614,58 +614,14 @@ impl Entity {
     }
 
     fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
-        let entity_aabb = self.get_aabb();
-        let height = chunk_manager.dimension.height();
-        let min_x = entity_aabb.min.x.floor() as i32;
-        let max_x = entity_aabb.max.x.floor() as i32;
-        let min_y =
-            (entity_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
-        let max_y =
-            (entity_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
-        let min_z = entity_aabb.min.z.floor() as i32;
-        let max_z = entity_aabb.max.z.floor() as i32;
-
-        for x in min_x..=max_x {
-            for y in min_y..=max_y {
-                for z in min_z..=max_z {
-                    let Some(block) = chunk_manager.get_loaded_block(x, y, z) else {
-                        continue;
-                    };
-                    if block.properties().is_solid {
-                        let block_aabb = AABB::new(
-                            Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                            Vec3::ONE,
-                        );
-
-                        if self.get_aabb().intersects(&block_aabb) {
-                            if axis == 0 {
-                                if self.velocity.x > 0.0 {
-                                    self.position.x = block_aabb.min.x - self.size.x * 0.5;
-                                } else {
-                                    self.position.x = block_aabb.max.x + self.size.x * 0.5;
-                                }
-                                self.velocity.x = 0.0;
-                            } else if axis == 2 {
-                                if self.velocity.z > 0.0 {
-                                    self.position.z = block_aabb.min.z - self.size.z * 0.5;
-                                } else {
-                                    self.position.z = block_aabb.max.z + self.size.z * 0.5;
-                                }
-                                self.velocity.z = 0.0;
-                            } else if axis == 1 {
-                                if self.velocity.y > 0.0 {
-                                    self.position.y = block_aabb.min.y - self.size.y;
-                                } else {
-                                    self.position.y = block_aabb.max.y;
-                                    self.on_ground = true;
-                                }
-                                self.velocity.y = 0.0;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        crate::physics::resolve_axis_box_collision(
+            &mut self.position,
+            &mut self.velocity,
+            self.size,
+            &mut self.on_ground,
+            chunk_manager,
+            axis,
+        );
     }
 }
 

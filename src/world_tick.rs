@@ -25,6 +25,12 @@ pub fn deterministic_rng(seed: u64, salt: u64) -> u64 {
     x
 }
 
+/// Advance a SplitMix64 state and return the next pseudo-random `u64`.
+pub fn next_splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    deterministic_rng(*state, 0)
+}
+
 /// Checks if a water block is within 4 blocks horizontally (x, z offset <= 4)
 /// and within -1..=1 vertically of the farmland block.
 pub fn is_water_nearby<F>(pos: (i32, i32, i32), height: WorldHeight, mut get_block: F) -> bool

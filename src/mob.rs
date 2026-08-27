@@ -123,6 +123,21 @@ fn get_highest_solid_y(chunk_manager: &ChunkManager, x: i32, z: i32) -> Option<i
     None
 }
 
+/// Deterministic time-and-position-varying PRNG helper for ambient mob spawning.
+pub fn ambient_spawn_rng(player_pos: Vec3, entity_count: usize, time: f32) -> impl FnMut() -> u32 {
+    let time_bits = (time * 1000.0) as u32;
+    let mut rng_seed = (player_pos.x.to_bits())
+        .wrapping_mul(31)
+        .wrapping_add(player_pos.z.to_bits())
+        .wrapping_add(entity_count as u32)
+        .wrapping_add(time_bits.wrapping_mul(2654435761));
+
+    move || {
+        rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
+        (rng_seed / 65536) % 32768
+    }
+}
+
 pub fn spawn_mobs(
     entity_manager: &mut EntityManager,
     chunk_manager: &ChunkManager,
@@ -135,18 +150,7 @@ pub fn spawn_mobs(
         return;
     }
 
-    // Use time-varying seed so RNG produces different results each frame
-    let time_bits = (time * 1000.0) as u32;
-    let mut rng_seed = (player_pos.x.to_bits())
-        .wrapping_mul(31)
-        .wrapping_add(player_pos.z.to_bits())
-        .wrapping_add(entity_manager.entities.len() as u32)
-        .wrapping_add(time_bits.wrapping_mul(2654435761));
-
-    let mut next_rand = || {
-        rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-        (rng_seed / 65536) % 32768
-    };
+    let mut next_rand = ambient_spawn_rng(player_pos, entity_manager.entities.len(), time);
 
     // ~1% chance per frame to attempt a spawn
     if next_rand() % 100 != 0 {

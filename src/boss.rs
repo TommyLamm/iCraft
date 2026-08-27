@@ -992,17 +992,12 @@ fn periodic_work_due(timer: f32, dt: f32, interval: f32) -> bool {
     timer <= f32::EPSILON || (timer / interval).floor() != ((timer + dt) / interval).floor()
 }
 
-fn mix64(mut value: u64) -> u64 {
-    value ^= value >> 30;
-    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value ^= value >> 27;
-    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
+fn mix64(value: u64) -> u64 {
+    crate::world_tick::deterministic_rng(value, 0)
 }
 
 fn next_u64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    mix64(*state)
+    crate::world_tick::next_splitmix64(state)
 }
 
 #[cfg(test)]

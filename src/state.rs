@@ -9,13 +9,13 @@ use crate::chunk_render::{
     TerrainVertex,
 }; // LodLevel / MeshBounds used by #[cfg(test)] helpers and frame.rs via super
 use crate::chunk_schedule::DependencyReason;
-use crate::crafting::RecipeManager;
 use crate::game_rules::Difficulty;
 use crate::interaction::{raycast, RaycastTargetPolicy};
 use crate::inventory::{
     CreativeTab, GameMode, Inventory, Item, ItemStack, ToolType, CREATIVE_COLUMNS, CREATIVE_ROWS,
     CREATIVE_VISIBLE_SLOTS,
 };
+use crate::recipes::RecipeManager;
 use crate::menu::{GameSettings, WorldLaunch};
 use crate::physics::{
     block_placement_decision, player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB,

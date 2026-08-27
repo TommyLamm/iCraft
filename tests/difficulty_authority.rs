@@ -1,7 +1,7 @@
 use glam::Vec3;
 use icraft::authority::contract::AuthorityTopology;
 use icraft::entity::EntityType;
-use icraft::game_rules::{ServerDifficulty, WorldRules, WorldType};
+use icraft::game_rules::{Difficulty, WorldRules, WorldType};
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, ServerProperties, ServerRuntime, TransportMode,
 };
@@ -70,7 +70,7 @@ fn server_difficulty_is_strict_and_pvp_remains_independent() {
     .expect("peaceful config should construct");
     assert_eq!(
         runtime.authority.world_mut_active().difficulty,
-        ServerDifficulty::Peaceful
+        Difficulty::Peaceful
     );
     assert!(runtime.authority.world_mut_active().rules.pvp);
     runtime.shutdown().expect("shutdown should persist cleanly");
@@ -83,9 +83,9 @@ fn difficulty_policy_is_observable_and_existing_hostiles_are_not_frozen_by_gamer
     rules.do_mob_spawning = false;
     let mut speeds = Vec::new();
     for difficulty in [
-        ServerDifficulty::Easy,
-        ServerDifficulty::Normal,
-        ServerDifficulty::Hard,
+        Difficulty::Easy,
+        Difficulty::Normal,
+        Difficulty::Hard,
     ] {
         let mut world = ServerWorld::new_with_difficulty(
             7,
@@ -116,7 +116,7 @@ fn difficulty_policy_is_observable_and_existing_hostiles_are_not_frozen_by_gamer
         false,
         WorldRules::default(),
         2,
-        ServerDifficulty::Peaceful,
+        Difficulty::Peaceful,
     );
     peaceful
         .entities
@@ -142,13 +142,13 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
         },
     )
     .expect("embedded listen topology should construct");
-    assert_eq!(embedded.authority.world_mut_active().difficulty, ServerDifficulty::Hard);
+    assert_eq!(embedded.authority.world_mut_active().difficulty, Difficulty::Hard);
     embedded
         .save_all()
         .expect("save should persist difficulty policy");
     let properties_path = world_dir.join("server.properties");
     let loaded = ServerProperties::load(&properties_path).expect("reload server.properties");
-    assert_eq!(loaded.difficulty_kind().unwrap(), ServerDifficulty::Hard);
+    assert_eq!(loaded.difficulty_kind().unwrap(), Difficulty::Hard);
     embedded.shutdown().expect("embedded shutdown");
 
     let (mut reloaded, _) = ServerRuntime::new_embedded(
@@ -156,14 +156,14 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
         EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(4, "reloaded")),
     )
     .expect("reloaded embedded runtime");
-    assert_eq!(reloaded.authority.world_mut_active().difficulty, ServerDifficulty::Hard);
+    assert_eq!(reloaded.authority.world_mut_active().difficulty, Difficulty::Hard);
     reloaded.shutdown().expect("reloaded shutdown");
 
     let dedicated_props = properties("dedicated", "hard");
     let dedicated_dir = dedicated_props.world_dir.clone();
     let mut dedicated = ServerRuntime::new(dedicated_props).expect("dedicated runtime");
     assert_eq!(dedicated.authority.topology, AuthorityTopology::Dedicated);
-    assert_eq!(dedicated.authority.world_mut_active().difficulty, ServerDifficulty::Hard);
+    assert_eq!(dedicated.authority.world_mut_active().difficulty, Difficulty::Hard);
     dedicated.shutdown().expect("dedicated shutdown");
 
     let _ = fs::remove_dir_all(world_dir);

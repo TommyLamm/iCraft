@@ -11,7 +11,7 @@ pub(crate) mod tick;
 pub mod transactions;
 
 use crate::dimension::Dimension;
-use crate::game_rules::{ServerDifficulty, WorldRules, WorldType};
+use crate::game_rules::{Difficulty, WorldRules, WorldType};
 use crate::network::protocol::{GameplayRequest, GameplayResponse, PlayerId, RejectReason};
 use crate::server_world::ServerWorld;
 use contract::{
@@ -52,7 +52,7 @@ pub struct AuthorityConfig {
     pub world_type: WorldType,
     pub generate_structures: bool,
     pub rules: WorldRules,
-    pub difficulty: ServerDifficulty,
+    pub difficulty: Difficulty,
     pub render_distance: i32,
 }
 
@@ -67,7 +67,7 @@ impl Default for AuthorityConfig {
             // malformed legacy structure seed cannot abort authority startup.
             generate_structures: false,
             rules: WorldRules::default(),
-            difficulty: ServerDifficulty::default(),
+            difficulty: Difficulty::default(),
             render_distance: 8,
         }
     }

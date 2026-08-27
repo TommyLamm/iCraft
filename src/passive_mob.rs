@@ -17,17 +17,8 @@ pub fn spawn_passive_mobs(
         return;
     }
 
-    let time_bits = (time * 1000.0) as u32;
-    let mut rng_seed = (player_pos.x.to_bits())
-        .wrapping_mul(31)
-        .wrapping_add(player_pos.z.to_bits())
-        .wrapping_add(entity_manager.entities.len() as u32)
-        .wrapping_add(time_bits.wrapping_mul(2654435761));
-
-    let mut next_rand = || {
-        rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-        (rng_seed / 65536) % 32768
-    };
+    let mut next_rand =
+        crate::mob::ambient_spawn_rng(player_pos, entity_manager.entities.len(), time);
 
     // Establish the first visible population promptly, then fall back to the
     // lower ambient spawn rate.

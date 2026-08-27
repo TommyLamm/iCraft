@@ -7,10 +7,10 @@
 
 pub use icraft::{
     accessibility, advancements, authority, block_entity, block_model, boss, brewing,
-    chunk_manager, chunk_render, chunk_schedule, commands, container_sessions, crafting, culling,
-    dimension, enchantment, entity, fishing, fluid, game_rules, gpu_frame_resources, interaction,
-    inventory, lighting, localization, mob, navigation, network, passive_mob, perf, physics,
-    player, presentation_click, presentation_inventory_policy, rail, redstone, resources, save,
+    chunk_manager, chunk_render, chunk_schedule, commands, container_sessions, culling, dimension,
+    enchantment, entity, fishing, fluid, game_rules, gpu_frame_resources, interaction, inventory,
+    lighting, localization, mob, navigation, network, passive_mob, perf, physics, player,
+    presentation_click, presentation_inventory_policy, rail, recipes, redstone, resources, save,
     server_runtime, server_world, structure, vehicle, village, weather, world, world_mutation,
     world_tick,
 };

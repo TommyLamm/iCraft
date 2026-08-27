@@ -40,19 +40,18 @@ impl WorldType {
     }
 }
 
-/// Desktop / world-meta difficulty. Dedicated `server.properties` still uses
-/// [`ServerDifficulty`]; the two stay separate so a renderer setting cannot
-/// silently become server policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// World difficulty policy for menus, world-meta, dedicated server, and authoritative simulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Difficulty {
     Peaceful,
     Easy,
+    #[default]
     Normal,
     Hard,
 }
 
 impl Difficulty {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Peaceful => "PEACEFUL",
             Self::Easy => "EASY",
@@ -62,11 +61,16 @@ impl Difficulty {
     }
 
     pub fn parse(value: &str) -> Self {
+        Self::parse_strict(value).unwrap_or(Self::Normal)
+    }
+
+    pub fn parse_strict(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "peaceful" => Self::Peaceful,
-            "easy" => Self::Easy,
-            "hard" => Self::Hard,
-            _ => Self::Normal,
+            "peaceful" | "0" => Some(Self::Peaceful),
+            "easy" | "1" => Some(Self::Easy),
+            "normal" | "2" => Some(Self::Normal),
+            "hard" | "3" => Some(Self::Hard),
+            _ => None,
         }
     }
 
@@ -74,44 +78,6 @@ impl Difficulty {
         let values = [Self::Peaceful, Self::Easy, Self::Normal, Self::Hard];
         let index = values.iter().position(|value| *value == self).unwrap_or(2) as i32;
         values[(index + delta).rem_euclid(values.len() as i32) as usize]
-    }
-}
-
-/// Server-owned difficulty policy.  This is deliberately separate from the
-/// renderer/menu [`Difficulty`] enum: dedicated and embedded runtimes consume
-/// the same value parsed from `server.properties`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServerDifficulty {
-    Peaceful,
-    Easy,
-    Normal,
-    Hard,
-}
-
-impl Default for ServerDifficulty {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
-impl ServerDifficulty {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "peaceful" => Some(Self::Peaceful),
-            "easy" => Some(Self::Easy),
-            "normal" => Some(Self::Normal),
-            "hard" => Some(Self::Hard),
-            _ => None,
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Peaceful => "peaceful",
-            Self::Easy => "easy",
-            Self::Normal => "normal",
-            Self::Hard => "hard",
-        }
     }
 
     /// Stable value used by the headless checksum.  This is not a wire
@@ -446,27 +412,27 @@ mod tests {
     }
 
     #[test]
-    fn server_difficulty_parse_and_chase_policy_are_canonical() {
+    fn difficulty_parse_and_chase_policy_are_canonical() {
         assert_eq!(
-            ServerDifficulty::parse("PEACEFUL"),
-            Some(ServerDifficulty::Peaceful)
+            Difficulty::parse_strict("PEACEFUL"),
+            Some(Difficulty::Peaceful)
         );
         assert_eq!(
-            ServerDifficulty::parse("easy"),
-            Some(ServerDifficulty::Easy)
+            Difficulty::parse_strict("easy"),
+            Some(Difficulty::Easy)
         );
         assert_eq!(
-            ServerDifficulty::parse("normal"),
-            Some(ServerDifficulty::Normal)
+            Difficulty::parse_strict("normal"),
+            Some(Difficulty::Normal)
         );
         assert_eq!(
-            ServerDifficulty::parse("hard"),
-            Some(ServerDifficulty::Hard)
+            Difficulty::parse_strict("hard"),
+            Some(Difficulty::Hard)
         );
-        assert_eq!(ServerDifficulty::parse("unknown"), None);
-        assert_eq!(ServerDifficulty::Easy.hostile_chase_speed_milli(), 900);
-        assert_eq!(ServerDifficulty::Normal.hostile_chase_speed_milli(), 1_000);
-        assert_eq!(ServerDifficulty::Hard.hostile_chase_speed_milli(), 1_100);
-        assert_eq!(ServerDifficulty::Peaceful.hostile_chase_speed_milli(), 0);
+        assert_eq!(Difficulty::parse_strict("unknown"), None);
+        assert_eq!(Difficulty::Easy.hostile_chase_speed_milli(), 900);
+        assert_eq!(Difficulty::Normal.hostile_chase_speed_milli(), 1_000);
+        assert_eq!(Difficulty::Hard.hostile_chase_speed_milli(), 1_100);
+        assert_eq!(Difficulty::Peaceful.hostile_chase_speed_milli(), 0);
     }
 }
