@@ -2001,9 +2001,10 @@ impl Menu {
                 rects
             }
             MenuScreen::CreateWorld => CREATE_WORLD_RECTS.iter().map(|r| r.as_array()).collect(),
-            MenuScreen::ConfirmDelete => {
-                CONFIRM_DELETE_BUTTON_RECTS.iter().map(|r| r.as_array()).collect()
-            }
+            MenuScreen::ConfirmDelete => CONFIRM_DELETE_BUTTON_RECTS
+                .iter()
+                .map(|r| r.as_array())
+                .collect(),
         };
         rects
             .get(self.focus_index.min(rects.len().saturating_sub(1)))
@@ -2488,11 +2489,9 @@ impl Menu {
             self.settings.master_volume =
                 (self.settings.master_volume + delta * 0.1).clamp(0.0, 1.0);
         } else if rects[7].contains(x, y) {
-            self.settings.music_volume =
-                (self.settings.music_volume + delta * 0.1).clamp(0.0, 1.0);
+            self.settings.music_volume = (self.settings.music_volume + delta * 0.1).clamp(0.0, 1.0);
         } else if rects[8].contains(x, y) {
-            self.settings.sound_volume =
-                (self.settings.sound_volume + delta * 0.1).clamp(0.0, 1.0);
+            self.settings.sound_volume = (self.settings.sound_volume + delta * 0.1).clamp(0.0, 1.0);
         } else if rects[9].contains(x, y) {
             self.settings.weather_volume =
                 (self.settings.weather_volume + delta * 0.1).clamp(0.0, 1.0);
@@ -2737,7 +2736,9 @@ impl Menu {
             ),
         ] {
             let hover = rect.contains(x, y);
-            draw_button_state(vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover, selected);
+            draw_button_state(
+                vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover, selected,
+            );
             draw_centered_text_in(
                 vertices,
                 &label,
@@ -2868,10 +2869,10 @@ impl Menu {
             MultiplayerMode::Host => self.tr("menu.select_world"),
             MultiplayerMode::Join => self.tr("menu.connect"),
         };
-        for (rect, label) in MULTIPLAYER_BOTTOM_RECTS.iter().zip([
-            confirm_label,
-            self.tr("menu.back"),
-        ]) {
+        for (rect, label) in MULTIPLAYER_BOTTOM_RECTS
+            .iter()
+            .zip([confirm_label, self.tr("menu.back")])
+        {
             let hover = rect.contains(x, y);
             draw_button(vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover);
             draw_centered_text_in(
@@ -2921,7 +2922,9 @@ impl Menu {
             let rect = world_item_rect(visible_index as isize);
             let selected = self.selected_world.as_deref() == Some(world.directory.as_path());
             let hover = rect.contains(x, y);
-            draw_button_state(vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover, selected);
+            draw_button_state(
+                vertices, rect.x0, rect.x1, rect.y0, rect.y1, hover, selected,
+            );
             draw_text(
                 vertices,
                 &world.metadata.name,
@@ -3427,7 +3430,9 @@ impl Menu {
                 let index = self.resource_pack_scroll + row;
                 if let Some(summary) = available.get(index) {
                     let mut selected = self.resource_packs.enabled_order().to_vec();
-                    if let Some(position) = selected.iter().position(|id| id == &summary.manifest.id) {
+                    if let Some(position) =
+                        selected.iter().position(|id| id == &summary.manifest.id)
+                    {
                         selected.remove(position);
                     } else {
                         selected.push(summary.manifest.id.clone());
@@ -4134,8 +4139,8 @@ fn draw_text_with_font(
     }
 }
 
-fn glyph(ch: char) -> [u8; 7] {
-    match ch {
+pub(crate) fn glyph(ch: char) -> [u8; 7] {
+    match ch.to_ascii_uppercase() {
         'A' => [14, 17, 17, 31, 17, 17, 17],
         'B' => [30, 17, 17, 30, 17, 17, 30],
         'C' => [14, 17, 16, 16, 16, 17, 14],
@@ -4174,13 +4179,21 @@ fn glyph(ch: char) -> [u8; 7] {
         '9' => [14, 17, 17, 15, 1, 1, 14],
         ':' => [0, 4, 4, 0, 4, 4, 0],
         '.' => [0, 0, 0, 0, 0, 4, 4],
+        ',' => [0, 0, 0, 0, 0, 4, 8],
+        '!' => [4, 4, 4, 4, 4, 0, 4],
+        '?' => [14, 17, 1, 2, 4, 0, 4],
         '-' => [0, 0, 0, 31, 0, 0, 0],
+        '+' => [0, 4, 4, 31, 4, 4, 0],
+        '=' => [0, 31, 0, 31, 0, 0, 0],
         '_' => [0, 0, 0, 0, 0, 0, 31],
         '<' => [2, 4, 8, 16, 8, 4, 2],
         '>' => [8, 4, 2, 1, 2, 4, 8],
         '/' => [1, 2, 2, 4, 8, 8, 16],
         '%' => [17, 2, 4, 8, 17, 0, 0],
-        '?' => [14, 17, 1, 2, 4, 0, 4],
+        '(' => [2, 4, 8, 8, 8, 4, 2],
+        ')' => [8, 4, 2, 2, 2, 4, 8],
+        '[' => [14, 8, 8, 8, 8, 8, 14],
+        ']' => [14, 2, 2, 2, 2, 2, 14],
         _ => [0; 7],
     }
 }
@@ -4841,8 +4854,18 @@ key_pause = ESC
         }
 
         for rect in all_rects {
-            assert!(rect.x0 < rect.x1, "x0 ({}) must be < x1 ({})", rect.x0, rect.x1);
-            assert!(rect.y0 < rect.y1, "y0 ({}) must be < y1 ({})", rect.y0, rect.y1);
+            assert!(
+                rect.x0 < rect.x1,
+                "x0 ({}) must be < x1 ({})",
+                rect.x0,
+                rect.x1
+            );
+            assert!(
+                rect.y0 < rect.y1,
+                "y0 ({}) must be < y1 ({})",
+                rect.y0,
+                rect.y1
+            );
             assert!((-1.0..=1.0).contains(&rect.x0));
             assert!((-1.0..=1.0).contains(&rect.x1));
             assert!((-1.0..=1.0).contains(&rect.y0));

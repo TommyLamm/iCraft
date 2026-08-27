@@ -22,11 +22,6 @@ use crate::physics::{
     PLAYER_STANDING_HEIGHT,
 };
 use crate::player::{DamageSource, PlayerState};
-use crate::presentation_click::{
-    collect_inventory_ui_hits, resolve_world_click, InventoryHit, InventoryHitProbe, WorldClickHit,
-    WorldClickIntent,
-};
-use crate::presentation_inventory_policy::MultiplayerRole;
 use crate::presentation::gpu_terrain::{
     chunk_mesh_is_registered_with_region, empty_region_rebuild_worthwhile,
     region_allocation_handle_is_live, should_decrement_region_active_chunks, UploadMetrics,
@@ -37,9 +32,12 @@ use crate::presentation::interpolation::{
     SnapshotPushResult, ENTITY_INTERPOLATION_DELAY, PLAYER_CORRECTION_SNAP_DISTANCE,
     REMOTE_INTERPOLATION_DELAY,
 };
-use crate::presentation::network_inbound::{
-    NetworkInbound, NetworkStaging, TrackedNetworkSender,
+use crate::presentation::network_inbound::{NetworkInbound, NetworkStaging, TrackedNetworkSender};
+use crate::presentation_click::{
+    collect_inventory_ui_hits, resolve_world_click, InventoryHit, InventoryHitProbe, WorldClickHit,
+    WorldClickIntent,
 };
+use crate::presentation_inventory_policy::MultiplayerRole;
 use crate::presentation_inventory_policy::{
     PresentationInventoryAction, PresentationInventoryTarget, PresentationTopology,
 };
@@ -58,19 +56,19 @@ pub use crate::presentation::gpu_terrain::{
 };
 pub use crate::presentation::network_inbound::NetworkHandle;
 
+#[path = "presentation/embedded_runtime.rs"]
+mod embedded_runtime;
+#[path = "presentation/frame.rs"]
+mod frame;
+#[cfg(any(test, feature = "legacy_owner"))]
+#[path = "presentation/legacy_interaction.rs"]
+mod legacy_interaction;
 #[cfg(any(test, feature = "legacy_owner"))]
 #[path = "presentation/legacy_sim.rs"]
 mod legacy_sim;
 #[cfg(any(test, feature = "legacy_owner"))]
 #[path = "presentation/legacy_systems.rs"]
 mod legacy_systems;
-#[cfg(any(test, feature = "legacy_owner"))]
-#[path = "presentation/legacy_interaction.rs"]
-mod legacy_interaction;
-#[path = "presentation/frame.rs"]
-mod frame;
-#[path = "presentation/embedded_runtime.rs"]
-mod embedded_runtime;
 #[path = "presentation/network_event.rs"]
 mod network_event;
 
@@ -103,8 +101,6 @@ const PAUSE_QUIT_BOUNDS: [f32; 4] = [-0.3, 0.3, -0.60, -0.50];
 pub const SIM_TICK_TIME: f32 = 0.05;
 pub const MAX_CATCHUP_TICKS: usize = 4;
 
-
-
 fn should_advance_simulation(
     role: &MultiplayerRole,
     network_ready: bool,
@@ -119,8 +115,6 @@ fn should_advance_simulation(
             }
         }
 }
-
-
 
 fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
     x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
@@ -1259,8 +1253,6 @@ mod remote_sync_tests {
 const MAX_CHUNK_LOAD_JOBS: usize = 2;
 const MAX_CHUNK_MESH_JOBS: usize = 4;
 
-
-
 #[derive(Clone, Copy)]
 struct MeshVoxel {
     block: BlockType,
@@ -1791,12 +1783,10 @@ impl State {
                         let redstone_metadata =
                             self.redstone
                                 .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                        if let Ok(data) =
-                            crate::save::ChunkSaveData::from_chunk_with_redstone(
-                                chunk,
-                                &redstone_metadata,
-                            )
-                        {
+                        if let Ok(data) = crate::save::ChunkSaveData::from_chunk_with_redstone(
+                            chunk,
+                            &redstone_metadata,
+                        ) {
                             let _ = manager.save_chunk_in(source, cx, cz, data);
                         }
                     }
@@ -2579,8 +2569,6 @@ pub enum StationKind {
     Merchant,
 }
 
-
-
 /// Explicit lifecycle for asynchronous GPU timestamp readback.  Mapping is
 /// only entered after a submission and a device poll; the range is read only
 /// in Mapped and is consumed exactly once.
@@ -2745,8 +2733,6 @@ mod gpu_timestamp_state_tests {
     }
 }
 
-
-
 fn entity_animation_state(entity: &crate::entity::Entity) -> u8 {
     u8::from(entity.on_ground)
         | (u8::from(entity.target_player) << 1)
@@ -2883,8 +2869,6 @@ fn effect_from_wire(
     }
 }
 
-
-
 fn normalized_chat_message(input: &str) -> Option<String> {
     let message: String = input
         .trim()
@@ -2962,8 +2946,6 @@ struct PlayerCatchupEntry {
     status: CatchupStatus,
     retries: u8,
 }
-
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CameraPerspective {
@@ -6157,7 +6139,6 @@ impl State {
         self.entity_manager.sync_entity_positions(&moved_ids);
     }
 
-
     fn update_network_position(&mut self, dt: f32) {
         if !self.network_ready || matches!(&self.network, NetworkHandle::None) {
             return;
@@ -6856,7 +6837,9 @@ impl State {
         let Some(save_manager) = self.save_manager.as_ref() else {
             return Ok(());
         };
-        let mut manager = save_manager.lock().unwrap_or_else(|error| error.into_inner());
+        let mut manager = save_manager
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let world_dir = manager.world_dir.clone();
         crate::menu::update_world_metadata(
             &world_dir,
@@ -6904,9 +6887,9 @@ impl State {
             })?;
 
         for (&(cx, cz), chunk) in &self.chunk_manager.chunks {
-            let redstone_metadata = self
-                .redstone
-                .collect_chunk_metadata(&self.chunk_manager, cx, cz);
+            let redstone_metadata =
+                self.redstone
+                    .collect_chunk_metadata(&self.chunk_manager, cx, cz);
             if let Ok(data) =
                 crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata)
             {
@@ -8395,8 +8378,6 @@ impl State {
         );
     }
 
-
-
     pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
         if !self.presentation_topology().is_legacy_owner() {
             let response = self.submit_local_authority_operation(
@@ -8557,8 +8538,6 @@ impl State {
             }
         }
     }
-
-
 
     pub fn update_frame(&mut self, dt: f32) {
         let target = self.network_time - REMOTE_INTERPOLATION_DELAY;
@@ -9310,7 +9289,6 @@ impl State {
         ))
     }
 
-
     fn damage_selected_tool(&mut self, salt: u32) {
         if self.game_mode == GameMode::Creative {
             return;
@@ -10004,7 +9982,6 @@ impl State {
         );
     }
 
-
     pub fn handle_client_block_action(
         &mut self,
         requester_id: crate::network::protocol::PlayerId,
@@ -10635,7 +10612,9 @@ impl State {
             );
             return;
         }
-        if !self.presentation_topology().is_legacy_owner() || !self.game_mode_policy().can_take_damage {
+        if !self.presentation_topology().is_legacy_owner()
+            || !self.game_mode_policy().can_take_damage
+        {
             return;
         }
 
@@ -12280,11 +12259,7 @@ impl State {
                             .map(crate::network::protocol::ItemWire::from_stack);
                         let revision = self
                             .chunk_manager
-                            .get_block_entity(
-                                container_pos.0,
-                                container_pos.1,
-                                container_pos.2,
-                            )
+                            .get_block_entity(container_pos.0, container_pos.1, container_pos.2)
                             .map(crate::block_entity::BlockEntity::revision)
                             .unwrap_or(0);
                         if let Some(request) = crate::network::protocol::wrap_legacy(
@@ -12845,7 +12820,6 @@ impl State {
             }
         }
     }
-
 
     pub fn open_merchant_trade_window(&mut self, villager_id: u64) {
         if !self.game_mode_policy().can_use_containers {
@@ -13963,271 +13937,27 @@ fn add_char_lines_with_source(
     vertices: &mut Vec<UiVertex>,
 ) {
     let character = c.to_ascii_uppercase();
-    let x0 = x;
-    let x1 = x + w;
-    let xm = x + w * 0.5;
-    let y0 = y;
-    let y1 = y + h;
-    let ym = y + h * 0.5;
+    let rows = font_source
+        .glyph_override(character)
+        .unwrap_or_else(|| crate::menu::glyph(character));
 
-    let mut add_line = |x_start: f32, y_start: f32, x_end: f32, y_end: f32| {
-        vertices.push(UiVertex {
-            position: [x_start, y_start, 0.0],
-            color,
-        });
-        vertices.push(UiVertex {
-            position: [x_end, y_end, 0.0],
-            color,
-        });
-    };
-
-    if let Some(rows) = font_source.glyph_override(character) {
-        let cell_w = w / 5.0;
-        let cell_h = h / 7.0;
-        for (row, mask) in rows.into_iter().enumerate() {
-            let center_y = y + h - (row as f32 + 0.5) * cell_h;
-            for column in 0..5 {
-                if mask & (1 << (4 - column)) != 0 {
-                    let cell_x = x + column as f32 * cell_w;
-                    add_line(cell_x, center_y, cell_x + cell_w, center_y);
-                }
+    let cell_w = w / 5.0;
+    let cell_h = h / 7.0;
+    for (row, mask) in rows.into_iter().enumerate() {
+        let center_y = y + h - (row as f32 + 0.5) * cell_h;
+        for column in 0..5 {
+            if mask & (1 << (4 - column)) != 0 {
+                let cell_x = x + column as f32 * cell_w;
+                vertices.push(UiVertex {
+                    position: [cell_x, center_y, 0.0],
+                    color,
+                });
+                vertices.push(UiVertex {
+                    position: [cell_x + cell_w, center_y, 0.0],
+                    color,
+                });
             }
         }
-        return;
-    }
-
-    match character {
-        'R' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, ym);
-            add_line(x1, ym, x0, ym);
-            add_line(x0, ym, x1, y0);
-        }
-        'E' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x0, ym, x1, ym);
-            add_line(x0, y0, x1, y0);
-        }
-        'S' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, ym);
-            add_line(x0, ym, x1, ym);
-            add_line(x1, ym, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        'U' => {
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-            add_line(x1, y0, x1, y1);
-        }
-        'M' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, xm, ym);
-            add_line(xm, ym, x1, y1);
-            add_line(x1, y1, x1, y0);
-        }
-        'G' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-            add_line(x1, y0, x1, ym);
-            add_line(x1, ym, xm, ym);
-        }
-        'A' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x0, ym, x1, ym);
-        }
-        'Q' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-            add_line(xm, ym, x1 + w * 0.2, y0 - h * 0.2);
-        }
-        'I' => {
-            add_line(xm, y0, xm, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x0, y0, x1, y0);
-        }
-        'T' => {
-            add_line(x0, y1, x1, y1);
-            add_line(xm, y1, xm, y0);
-        }
-        'P' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, ym);
-            add_line(x1, ym, x0, ym);
-        }
-        'O' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        'D' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, xm, y1);
-            add_line(xm, y1, x1, ym);
-            add_line(x1, ym, xm, y0);
-            add_line(xm, y0, x0, y0);
-        }
-        'F' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x0, ym, x1, ym);
-        }
-        'V' => {
-            add_line(x0, y1, xm, y0);
-            add_line(xm, y0, x1, y1);
-        }
-        'N' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y0);
-            add_line(x1, y0, x1, y1);
-        }
-        'Y' => {
-            add_line(x0, y1, xm, ym);
-            add_line(x1, y1, xm, ym);
-            add_line(xm, ym, xm, y0);
-        }
-        'C' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-        }
-        'H' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x1, y0, x1, y1);
-            add_line(x0, ym, x1, ym);
-        }
-        'L' => {
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-        }
-        'B' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, ym);
-            add_line(x1, ym, x0, ym);
-            add_line(x1, ym, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        'K' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, ym, x1, y1);
-            add_line(x0, ym, x1, y0);
-        }
-        'W' => {
-            add_line(x0, y1, x0 + w * 0.2, y0);
-            add_line(x0 + w * 0.2, y0, xm, ym);
-            add_line(xm, ym, x0 + w * 0.8, y0);
-            add_line(x0 + w * 0.8, y0, x1, y1);
-        }
-        'X' => {
-            add_line(x0, y0, x1, y1);
-            add_line(x0, y1, x1, y0);
-        }
-        'Z' => {
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-        }
-        '<' => {
-            add_line(x1, y1, x0, ym);
-            add_line(x0, ym, x1, y0);
-        }
-        '>' => {
-            add_line(x0, y1, x1, ym);
-            add_line(x1, ym, x0, y0);
-        }
-        '-' => {
-            add_line(x0, ym, x1, ym);
-        }
-        '_' => {
-            add_line(x0, y0, x1, y0);
-        }
-        '+' => {
-            add_line(x0, ym, x1, ym);
-            add_line(xm, y0, xm, y1);
-        }
-        '/' => {
-            add_line(x0, y0, x1, y1);
-        }
-        ':' => {
-            add_line(xm - w * 0.05, y0 + h * 0.7, xm + w * 0.05, y0 + h * 0.7);
-            add_line(xm - w * 0.05, y0 + h * 0.3, xm + w * 0.05, y0 + h * 0.3);
-        }
-        '0' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        '1' => {
-            add_line(xm, y0, xm, y1);
-            add_line(x0, y0, x1, y0);
-            add_line(xm - w * 0.2, y1 - h * 0.2, xm, y1);
-        }
-        '2' => {
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, ym);
-            add_line(x1, ym, x0, ym);
-            add_line(x0, ym, x0, y0);
-            add_line(x0, y0, x1, y0);
-        }
-        '3' => {
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-            add_line(x0, ym, x1, ym);
-        }
-        '4' => {
-            add_line(x0, y1, x0, ym);
-            add_line(x0, ym, x1, ym);
-            add_line(x1, y1, x1, y0);
-        }
-        '5' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, ym);
-            add_line(x0, ym, x1, ym);
-            add_line(x1, ym, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        '6' => {
-            add_line(x1, y1, x0, y1);
-            add_line(x0, y1, x0, y0);
-            add_line(x0, y0, x1, y0);
-            add_line(x1, y0, x1, ym);
-            add_line(x1, ym, x0, ym);
-        }
-        '7' => {
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-        }
-        '8' => {
-            add_line(x0, y0, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-            add_line(x0, ym, x1, ym);
-        }
-        '9' => {
-            add_line(x0, ym, x1, ym);
-            add_line(x0, ym, x0, y1);
-            add_line(x0, y1, x1, y1);
-            add_line(x1, y1, x1, y0);
-            add_line(x1, y0, x0, y0);
-        }
-        '.' => {
-            add_line(xm - w * 0.05, y0, xm + w * 0.05, y0);
-        }
-        ' ' => {}
-        _ => {}
     }
 }
 
@@ -15025,8 +14755,8 @@ mod debug_tests {
 
         let mut fallback = Vec::new();
         add_string_lines("A", 0.0, 0.0, 0.1, 0.2, 0.0, [1.0; 4], &mut fallback);
-        // Built-in A remains the existing four-segment glyph.
-        assert_eq!(fallback.len(), 8);
+        // Built-in A uses the shared 5x7 glyph table (18 lit cells -> 36 vertices).
+        assert_eq!(fallback.len(), 36);
     }
 
     #[test]
@@ -15124,10 +14854,7 @@ mod debug_tests {
             },
         };
         inbound_tx
-            .send(crate::network::server::ServerToHost::GameplayRequest {
-                id: 7,
-                request,
-            })
+            .send(crate::network::server::ServerToHost::GameplayRequest { id: 7, request })
             .unwrap();
 
         let events = handle.drain_inbound();
