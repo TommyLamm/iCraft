@@ -370,24 +370,14 @@ impl TranslationCatalog {
     }
 
     pub fn format(&mut self, key: &str, arguments: &[(&str, &str)]) -> String {
-        let mut value = self.translate(key);
-        for (name, replacement) in arguments {
-            let token = format!("{{{name}}}");
-            value = value.replace(&token, replacement);
-        }
-        value
+        replace_tokens(self.translate(key), arguments)
     }
 
     /// Format a visible UI string without mutating the missing-key diagnostic
     /// set. Render paths are called every frame, so they use this immutable
     /// helper while command/test paths may continue to use `format`.
     pub fn format_lookup(&self, key: &str, arguments: &[(&str, &str)]) -> String {
-        let mut value = self.lookup(key);
-        for (name, replacement) in arguments {
-            let token = format!("{{{name}}}");
-            value = value.replace(&token, replacement);
-        }
-        value
+        replace_tokens(self.lookup(key), arguments)
     }
 
     pub fn plural(&mut self, key: &str, count: u64) -> String {
@@ -466,24 +456,16 @@ fn merge_locale_layers(layers: Vec<Vec<u8>>) -> HashMap<String, String> {
 
 fn key_component(value: &str) -> String {
     let mut key = String::with_capacity(value.len());
-    let mut previous_separator = false;
     for ch in value.chars() {
         if ch.is_ascii_alphanumeric() {
             if ch.is_ascii_uppercase()
-                && !key.is_empty()
-                && !previous_separator
-                && key
-                    .as_bytes()
-                    .last()
-                    .is_some_and(|byte| byte.is_ascii_lowercase())
+                && key.chars().last().is_some_and(|c| c.is_ascii_lowercase())
             {
                 key.push('_');
             }
             key.push(ch.to_ascii_lowercase());
-            previous_separator = false;
-        } else if !previous_separator {
+        } else if !key.is_empty() && !key.ends_with('_') {
             key.push('_');
-            previous_separator = true;
         }
     }
     while key.ends_with('_') {
@@ -496,31 +478,28 @@ fn entity_debug_name(entity: EntityType) -> String {
     format!("{entity:?}")
 }
 
+fn replace_tokens(mut template: String, arguments: &[(&str, &str)]) -> String {
+    for (name, replacement) in arguments {
+        template = template.replace(&format!("{{{name}}}"), replacement);
+    }
+    template
+}
+
+fn builtin_catalog(language: Language) -> &'static TranslationCatalog {
+    static ENGLISH: OnceLock<TranslationCatalog> = OnceLock::new();
+    static GERMAN: OnceLock<TranslationCatalog> = OnceLock::new();
+    match language {
+        Language::English => ENGLISH.get_or_init(|| TranslationCatalog::builtin(Language::English)),
+        Language::German => GERMAN.get_or_init(|| TranslationCatalog::builtin(Language::German)),
+    }
+}
+
 pub fn translate(language: Language, key: &str) -> String {
-    static ENGLISH: OnceLock<HashMap<String, String>> = OnceLock::new();
-    static GERMAN: OnceLock<HashMap<String, String>> = OnceLock::new();
-    let english = ENGLISH
-        .get_or_init(|| parse_map(include_str!("../assets/lang/en_us.json")).unwrap_or_default());
-    let active = match language {
-        Language::English => english,
-        Language::German => GERMAN.get_or_init(|| {
-            parse_map(include_str!("../assets/lang/de_de.json")).unwrap_or_default()
-        }),
-    };
-    active
-        .get(key)
-        .or_else(|| english.get(key))
-        .cloned()
-        .unwrap_or_else(|| key.to_string())
+    builtin_catalog(language).lookup(key)
 }
 
 pub fn format(language: Language, key: &str, arguments: &[(&str, &str)]) -> String {
-    let mut value = translate(language, key);
-    for (name, replacement) in arguments {
-        let token = format!("{{{name}}}");
-        value = value.replace(&token, replacement);
-    }
-    value
+    builtin_catalog(language).format_lookup(key, arguments)
 }
 
 #[cfg(test)]
@@ -786,5 +765,23 @@ mod tests {
         assert_eq!(catalog.item_name(Item::Diamond), "Diamond");
         assert_eq!(catalog.block_name(BlockType::Stone), "Stone");
         assert_eq!(catalog.entity_name(EntityType::Zombie), "Zombie");
+    }
+
+    #[test]
+    fn top_level_translate_and_format_and_key_component() {
+        assert_eq!(translate(Language::English, "menu.singleplayer"), "SINGLEPLAYER");
+        assert_eq!(translate(Language::German, "menu.singleplayer"), "EINZELSPIELER");
+        assert_eq!(
+            format(Language::English, "hud.fov", &[("value", "90")]),
+            "FOV < 90 >"
+        );
+        assert_eq!(
+            format(Language::German, "hud.fov", &[("value", "90")]),
+            "SICHTFELD < 90 >"
+        );
+        assert_eq!(key_component("Diamond"), "diamond");
+        assert_eq!(key_component("Oak Planks"), "oak_planks");
+        assert_eq!(key_component("EnderDragon"), "ender_dragon");
+        assert_eq!(key_component("  Multiple   Spaces  "), "multiple_spaces");
     }
 }

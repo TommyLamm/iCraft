@@ -286,23 +286,10 @@ impl ResourcePackManager {
             }
         }
 
-        // A malformed or cyclic *unselected* pack must not hide every other
-        // pack.  Keep it in `available()` for the UI, diagnose it, and build
-        // the enabled order from the acyclic subset only.  Explicit selection
-        // still uses the strict dependency checks in `apply_enabled_order`.
-        let (order, rejected) = self.best_effort_dependency_order();
-        for (id, reason) in rejected {
-            let source = self
-                .packs
-                .iter()
-                .find(|pack| pack.manifest.id == id)
-                .map(|pack| pack.source.clone());
-            if let Some(source) = source {
-                self.record_diagnostic(Path::new(&source), &reason);
-            }
-        }
-        self.enabled_order = order
-            .into_iter()
+        self.enabled_order = self
+            .packs
+            .iter()
+            .map(|pack| pack.manifest.id.clone())
             .filter(|id| id != BUILTIN_PACK_ID)
             .collect();
         Ok(())
@@ -333,30 +320,7 @@ impl ResourcePackManager {
                 ));
             }
         }
-        for id in &requested {
-            let pack = self
-                .packs
-                .iter()
-                .find(|pack| pack.manifest.id == *id)
-                .expect("available pack checked above");
-            for dependency in &pack.manifest.dependencies {
-                if dependency != BUILTIN_PACK_ID && !seen.contains(dependency) {
-                    return Err(PackError::MissingDependency {
-                        pack: id.clone(),
-                        dependency: dependency.clone(),
-                    });
-                }
-            }
-        }
-        let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
-        // Only selected packs participate in strict validation.  An
-        // unselected broken/cyclic pack remains visible in the UI but cannot
-        // prevent users from disabling it and applying the rest.
-        let topological = self.dependency_order_for_ids(&requested_set)?;
-        self.enabled_order = topological
-            .into_iter()
-            .filter(|id| id != BUILTIN_PACK_ID && requested_set.contains(id.as_str()))
-            .collect();
+        self.enabled_order = requested;
         Ok(())
     }
 
@@ -406,10 +370,6 @@ impl ResourcePackManager {
         })
     }
 
-    pub fn texture_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
-        self.resolve_texture(relative)
-    }
-
     /// Resolve a JSON item/block model descriptor.  The small client model
     /// format intentionally accepts any JSON object; malformed JSON and
     /// scalar/array descriptors fall back to the built-in/procedural model.
@@ -421,18 +381,10 @@ impl ResourcePackManager {
         })
     }
 
-    pub fn model_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
-        self.resolve_model(relative)
-    }
-
     /// Resolve a TrueType/OpenType/WebFont payload.  Font parsing is kept
     /// dependency-free and bounded by checking the format's mandatory magic.
     pub fn resolve_font(&mut self, relative: &str) -> Option<Vec<u8>> {
         self.resolve_validated_asset(relative, "font", font_bytes_are_decodable)
-    }
-
-    pub fn font_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
-        self.resolve_font(relative)
     }
 
     /// Resolve the parsed UI font registry.  A missing `relative` path is
@@ -463,10 +415,6 @@ impl ResourcePackManager {
     /// consumer.  Rodio performs the actual bounded decoder validation.
     pub fn resolve_sound(&mut self, relative: &str) -> Option<Vec<u8>> {
         self.resolve_validated_asset(relative, "sound", sound_bytes_are_decodable)
-    }
-
-    pub fn sound_bytes(&mut self, relative: &str) -> Option<Vec<u8>> {
-        self.resolve_sound(relative)
     }
 
     pub fn read_asset(&self, relative: &str) -> Option<Vec<u8>> {
@@ -647,74 +595,6 @@ impl ResourcePackManager {
         None
     }
 
-    fn dependency_order_for_ids(&self, ids: &HashSet<&str>) -> Result<Vec<String>, PackError> {
-        let by_id: HashMap<_, _> = self
-            .packs
-            .iter()
-            .map(|pack| (pack.manifest.id.as_str(), pack))
-            .collect();
-        let mut state = HashMap::<&str, u8>::new();
-        let mut output = Vec::new();
-        let mut sorted: Vec<&str> = ids.iter().copied().collect();
-        sorted.sort_unstable();
-        for id in sorted {
-            visit_dependency(id, &by_id, &mut state, &mut output)?;
-        }
-        Ok(output)
-    }
-
-    fn best_effort_dependency_order(&self) -> (Vec<String>, Vec<(String, String)>) {
-        let by_id: HashMap<&str, &LoadedPack> = self
-            .packs
-            .iter()
-            .map(|pack| (pack.manifest.id.as_str(), pack))
-            .collect();
-        let mut pending: HashSet<&str> = by_id.keys().copied().collect();
-        let mut order = Vec::with_capacity(by_id.len());
-        loop {
-            let mut progress = false;
-            let mut ids: Vec<&str> = pending.iter().copied().collect();
-            ids.sort_unstable();
-            for id in ids {
-                let Some(pack) = by_id.get(id) else { continue };
-                let dependencies_ready = pack.manifest.dependencies.iter().all(|dependency| {
-                    dependency == BUILTIN_PACK_ID || order.iter().any(|ready| ready == dependency)
-                });
-                if dependencies_ready {
-                    pending.remove(id);
-                    order.push(id.to_string());
-                    progress = true;
-                }
-            }
-            if !progress {
-                break;
-            }
-        }
-        let mut rejected = Vec::new();
-        let mut ids: Vec<&str> = pending.into_iter().collect();
-        ids.sort_unstable();
-        for id in ids {
-            let Some(pack) = by_id.get(id) else { continue };
-            if let Some(dependency) = pack
-                .manifest
-                .dependencies
-                .iter()
-                .find(|dependency| !by_id.contains_key(dependency.as_str()))
-            {
-                rejected.push((
-                    id.to_string(),
-                    format!("missing dependency {dependency}; pack disabled"),
-                ));
-            } else {
-                rejected.push((
-                    id.to_string(),
-                    "dependency cycle; pack disabled until selection is repaired".into(),
-                ));
-            }
-        }
-        (order, rejected)
-    }
-
     fn record_diagnostic(&mut self, source: &Path, message: &str) {
         let key = format!("{}::{message}", source.display());
         if self.diagnostic_keys.insert(key) {
@@ -724,36 +604,6 @@ impl ResourcePackManager {
             });
         }
     }
-}
-
-fn visit_dependency<'a>(
-    id: &'a str,
-    by_id: &HashMap<&'a str, &'a LoadedPack>,
-    state: &mut HashMap<&'a str, u8>,
-    output: &mut Vec<String>,
-) -> Result<(), PackError> {
-    match state.get(id).copied().unwrap_or(0) {
-        1 => return Err(PackError::DependencyCycle(id.into())),
-        2 => return Ok(()),
-        _ => {}
-    }
-    state.insert(id, 1);
-    let pack = by_id.get(id).ok_or_else(|| PackError::MissingDependency {
-        pack: id.into(),
-        dependency: "unknown".into(),
-    })?;
-    for dependency in &pack.manifest.dependencies {
-        if !by_id.contains_key(dependency.as_str()) {
-            return Err(PackError::MissingDependency {
-                pack: id.into(),
-                dependency: dependency.clone(),
-            });
-        }
-        visit_dependency(dependency, by_id, state, output)?;
-    }
-    state.insert(id, 2);
-    output.push(id.into());
-    Ok(())
 }
 
 fn load_pack_path(path: &Path) -> Result<LoadedPack, PackError> {
@@ -1389,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_and_dependency_order_are_deterministic() {
+    fn manifest_and_enabled_order_are_deterministic() {
         let root = temp_dir("packs");
         fs::write(root.join("pack.json"), manifest(BUILTIN_PACK_ID, &[])).unwrap();
         fs::write(root.join("stone.txt"), b"builtin").unwrap();
@@ -1399,7 +1249,7 @@ mod tests {
         fs::create_dir_all(user.join("theme")).unwrap();
         fs::write(
             user.join("theme/pack.json"),
-            manifest("test.theme", &["test.base"]),
+            manifest("test.theme", &[]),
         )
         .unwrap();
         fs::create_dir_all(user.join("theme/lang")).unwrap();
@@ -1418,7 +1268,7 @@ mod tests {
         manager
             .apply_enabled_order(["test.theme", "test.base"])
             .unwrap();
-        assert_eq!(manager.enabled_order(), ["test.base", "test.theme"]);
+        assert_eq!(manager.enabled_order(), ["test.theme", "test.base"]);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1857,10 +1707,10 @@ mod tests {
         ));
 
         let user = root.join("resourcepacks");
-        fs::create_dir_all(user.join("missing-dep")).unwrap();
+        fs::create_dir_all(user.join("bad-json")).unwrap();
         fs::write(
-            user.join("missing-dep/pack.json"),
-            manifest("missing.dep", &["not.present"]),
+            user.join("bad-json/pack.json"),
+            b"invalid json",
         )
         .unwrap();
         fs::write(root.join("pack.json"), manifest(BUILTIN_PACK_ID, &[])).unwrap();
@@ -1869,7 +1719,7 @@ mod tests {
         assert!(manager
             .diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("missing dependency")));
+            .any(|diagnostic| diagnostic.source.contains("bad-json")));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1910,28 +1760,29 @@ mod tests {
     }
 
     #[test]
-    fn dependency_cycles_are_rejected() {
-        let root = temp_dir("cycle");
+    fn linear_overlay_and_selection_validation() {
+        let root = temp_dir("linear");
         fs::write(root.join("pack.json"), manifest(BUILTIN_PACK_ID, &[])).unwrap();
         let user = root.join("resourcepacks");
         fs::create_dir_all(user.join("one")).unwrap();
-        fs::write(user.join("one/pack.json"), manifest("one", &["two"])).unwrap();
+        fs::write(user.join("one/pack.json"), manifest("one", &[])).unwrap();
         fs::create_dir_all(user.join("two")).unwrap();
-        fs::write(user.join("two/pack.json"), manifest("two", &["one"])).unwrap();
-        let manager = ResourcePackManager::discover(&root, &user);
-        assert!(manager.enabled_order().is_empty());
-        assert!(manager
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("dependency cycle")));
-        let mut manager = manager;
+        fs::write(user.join("two/pack.json"), manifest("two", &[])).unwrap();
+        let mut manager = ResourcePackManager::discover(&root, &user);
+        assert_eq!(manager.enabled_order(), ["one", "two"]);
         manager
             .apply_enabled_order(std::iter::empty::<&str>())
             .unwrap();
         assert!(manager.enabled_order().is_empty());
+        manager.apply_enabled_order(["two", "one"]).unwrap();
+        assert_eq!(manager.enabled_order(), ["two", "one"]);
         assert!(matches!(
-            manager.apply_enabled_order(["one", "two"]),
-            Err(PackError::DependencyCycle(_))
+            manager.apply_enabled_order(["one", "one"]),
+            Err(PackError::InvalidManifest(_))
+        ));
+        assert!(matches!(
+            manager.apply_enabled_order(["missing"]),
+            Err(PackError::MissingDependency { .. })
         ));
         let _ = fs::remove_dir_all(root);
     }
