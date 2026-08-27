@@ -1513,16 +1513,6 @@ fn session_slot_from_stack(
     ))
 }
 
-fn stack_from_session_slot(
-    slot: Option<SessionInventorySlot>,
-) -> Option<crate::inventory::ItemStack> {
-    let slot = slot?;
-    let mut stack = slot.item.to_stack()?;
-    stack.can_break = slot.can_break;
-    stack.can_place_on = slot.can_place_on;
-    Some(stack)
-}
-
 /// Convert the persisted player payload into the compact authority gameplay
 /// contract.  The 41 slots retain ItemWire metadata and Adventure masks; the
 /// real dragged cursor is restored so container-click conservation survives
@@ -1567,16 +1557,16 @@ pub(super) fn apply_gameplay_to_player_data(data: &mut PlayerData, gameplay: Ses
 
     let mut inventory = data.inventory.to_inventory();
     for (index, slot) in gameplay.inventory[..9].iter().copied().enumerate() {
-        inventory.hotbar[index] = stack_from_session_slot(slot);
+        inventory.hotbar[index] = slot.and_then(|s| s.to_stack());
     }
     for (index, slot) in gameplay.inventory[9..36].iter().copied().enumerate() {
-        inventory.main[index] = stack_from_session_slot(slot);
+        inventory.main[index] = slot.and_then(|s| s.to_stack());
     }
     for (index, slot) in gameplay.inventory[36..40].iter().copied().enumerate() {
-        inventory.armor[index] = stack_from_session_slot(slot);
+        inventory.armor[index] = slot.and_then(|s| s.to_stack());
     }
-    inventory.offhand = stack_from_session_slot(gameplay.inventory[40]);
-    inventory.dragged = stack_from_session_slot(gameplay.cursor);
+    inventory.offhand = gameplay.inventory[40].and_then(|s| s.to_stack());
+    inventory.dragged = gameplay.cursor.and_then(|s| s.to_stack());
     inventory.selected = usize::from(gameplay.selected_hotbar_slot.min(8));
     data.inventory = crate::save::InventoryData::from(&inventory);
 }

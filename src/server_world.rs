@@ -653,11 +653,9 @@ impl ServerWorld {
         if entity_id == 0 || self.entities.get_by_id(entity_id).is_some() {
             return false;
         }
-        let Some(mut stack) = slot.item.to_stack() else {
+        let Some(stack) = slot.to_stack() else {
             return false;
         };
-        stack.can_break = slot.can_break;
-        stack.can_place_on = slot.can_place_on;
         let mut entity = crate::entity::Entity::new(
             entity_id,
             EntityType::DroppedItem,

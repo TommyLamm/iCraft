@@ -61,23 +61,10 @@ impl AuthorityCore {
             );
         }
         if session.game_mode == crate::inventory::GameMode::Spectator
-            && matches!(
+            && !matches!(
                 &request.operation,
-                crate::network::protocol::GameplayOperation::BlockAction { .. }
-                    | crate::network::protocol::GameplayOperation::Container { .. }
-                    | crate::network::protocol::GameplayOperation::ContainerClick { .. }
-                    | crate::network::protocol::GameplayOperation::ItemUse { .. }
-                    | crate::network::protocol::GameplayOperation::Combat { .. }
-                    | crate::network::protocol::GameplayOperation::Trade { .. }
-                    | crate::network::protocol::GameplayOperation::Mount { .. }
-                    | crate::network::protocol::GameplayOperation::Fishing { .. }
-                    | crate::network::protocol::GameplayOperation::FurnaceTakeOutput { .. }
-                    | crate::network::protocol::GameplayOperation::Craft { .. }
-                    | crate::network::protocol::GameplayOperation::Enchant { .. }
-                    | crate::network::protocol::GameplayOperation::Brew { .. }
-                    | crate::network::protocol::GameplayOperation::Anvil { .. }
-                    | crate::network::protocol::GameplayOperation::UseState { .. }
-                    | crate::network::protocol::GameplayOperation::FluidUse { .. }
+                crate::network::protocol::GameplayOperation::Command { .. }
+                    | crate::network::protocol::GameplayOperation::Sleep { .. }
             )
         {
             return self.reject_for_session(id, request_id, RejectReason::PermissionDenied, None);
@@ -849,7 +836,7 @@ impl AuthorityCore {
 
         let (next_slot, next_cursor) = crate::container_sessions::simulate_container_click(
             slots[slot_index],
-            candidate.cursor.and_then(stack_from_session_inventory),
+            candidate.cursor.and_then(|slot| slot.to_stack()),
             is_left,
         );
         let extract_into_inventory = original.cursor.is_none() && claimed.is_none();
@@ -1369,18 +1356,7 @@ impl AuthorityCore {
 pub(crate) fn stack_from_slot(
     slot: Option<SessionSlotWire>,
 ) -> Option<crate::inventory::ItemStack> {
-    let slot = slot?;
-    let mut stack = slot.item.to_stack()?;
-    stack.can_break = slot.can_break;
-    stack.can_place_on = slot.can_place_on;
-    Some(stack)
-}
-
-fn stack_from_session_inventory(slot: SessionInventorySlot) -> Option<crate::inventory::ItemStack> {
-    let mut stack = slot.item.to_stack()?;
-    stack.can_break = slot.can_break;
-    stack.can_place_on = slot.can_place_on;
-    Some(stack)
+    slot.and_then(|slot| SessionInventorySlot::from(slot).to_stack())
 }
 
 fn session_slot_from_item_stack(stack: &crate::inventory::ItemStack) -> SessionInventorySlot {

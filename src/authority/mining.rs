@@ -85,28 +85,14 @@ pub fn calculate_block_break_rewards(
                 }
             }
             BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop => {
-                let age = old_state & 0b111;
-                if age == 7 {
-                    let item = match old_block {
-                        BlockType::WheatCrop => Item::Wheat,
-                        BlockType::CarrotCrop => Item::Carrot,
-                        BlockType::PotatoCrop => Item::Potato,
-                        _ => Item::Air,
-                    };
-                    if item != Item::Air {
-                        drops.push(ItemStack::new(item, 1));
-                    }
-                } else {
-                    let item = match old_block {
-                        BlockType::WheatCrop => Item::Seeds,
-                        BlockType::CarrotCrop => Item::Carrot,
-                        BlockType::PotatoCrop => Item::Potato,
-                        _ => Item::Air,
-                    };
-                    if item != Item::Air {
-                        drops.push(ItemStack::new(item, 1));
-                    }
-                }
+                let item = match (old_block, old_state & 0b111) {
+                    (BlockType::WheatCrop, 7) => Item::Wheat,
+                    (BlockType::WheatCrop, _) => Item::Seeds,
+                    (BlockType::CarrotCrop, _) => Item::Carrot,
+                    (BlockType::PotatoCrop, _) => Item::Potato,
+                    _ => Item::Air,
+                };
+                drops.push(ItemStack::new(item, 1));
             }
             _ => {}
         }

@@ -4,7 +4,7 @@
 //! single-player in-process runtime, a listen server and the dedicated binary
 //! all use these same revision/session rules and request vectors.
 
-use crate::inventory::GameMode;
+use crate::inventory::{GameMode, ItemStack};
 use crate::network::protocol::{
     GameplayOperation, GameplayRequest, GameplayResponse, ItemWire, MiningProgressWire, PlayerId,
     RejectReason, SessionBrewWire, SessionFishingHookWire, SessionGameplayWire, SessionSlotWire,
@@ -82,6 +82,13 @@ impl SessionInventorySlot {
             can_break,
             can_place_on,
         }
+    }
+
+    pub fn to_stack(&self) -> Option<ItemStack> {
+        let mut stack = self.item.to_stack()?;
+        stack.can_break = self.can_break;
+        stack.can_place_on = self.can_place_on;
+        Some(stack)
     }
 
     pub fn same_identity(self, other: Self) -> bool {

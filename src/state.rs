@@ -5166,10 +5166,7 @@ impl State {
     fn stack_from_session_slot(
         slot: crate::authority::contract::SessionInventorySlot,
     ) -> Option<crate::inventory::ItemStack> {
-        let mut stack = slot.item.to_stack()?;
-        stack.can_break = slot.can_break;
-        stack.can_place_on = slot.can_place_on;
-        Some(stack)
+        slot.to_stack()
     }
 
     fn local_inventory_writeback(

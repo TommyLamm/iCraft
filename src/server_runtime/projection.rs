@@ -72,17 +72,18 @@ impl ServerRuntime {
                     .world_mut(dimension)
                     .and_then(|world| world.container_slots_wire(position))
                     .unwrap_or_default();
-                if self.local_session_id == Some(id) {
-                    self.push_presentation_event(RuntimePresentationEvent::ContainerOpenResult {
+                self.send_targeted(
+                    id,
+                    slots,
+                    |slots| RuntimePresentationEvent::ContainerOpenResult {
                         target: id,
                         dimension: dimension as u8,
                         success: true,
                         position,
                         slots,
                         revision,
-                    });
-                } else {
-                    self.enqueue_host(HostToServer::SendContainerOpenResult {
+                    },
+                    |slots| HostToServer::SendContainerOpenResult {
                         to: id,
                         dimension: dimension as u8,
                         success: true,
@@ -91,8 +92,8 @@ impl ServerRuntime {
                         z,
                         slots,
                         revision,
-                    });
-                }
+                    },
+                );
             }
             ContainerAction::Click => {
                 let slot_value = self
@@ -110,25 +111,26 @@ impl ServerRuntime {
                     }
                     self.send_session_update(id, revision, dimension, state);
                 }
-                if self.local_session_id == Some(id) {
-                    self.push_presentation_event(RuntimePresentationEvent::ContainerClickResult {
+                self.send_targeted(
+                    id,
+                    (),
+                    |_| RuntimePresentationEvent::ContainerClickResult {
                         target: id,
                         dimension: dimension as u8,
                         success: true,
                         slot_index: slot,
                         slot: slot_value,
                         dragged,
-                    });
-                } else {
-                    self.enqueue_host(HostToServer::SendContainerClickResult {
+                    },
+                    |_| HostToServer::SendContainerClickResult {
                         to: id,
                         dimension: dimension as u8,
                         success: true,
                         slot_index: slot,
                         slot: slot_value,
                         dragged,
-                    });
-                }
+                    },
+                );
                 for target in container_targets {
                     if target != id {
                         self.send_container_slot_update(
@@ -141,15 +143,30 @@ impl ServerRuntime {
         }
     }
 
-    pub(super) fn send_response(&mut self, to: u64, response: GameplayResponse) {
+    fn send_targeted<T>(
+        &mut self,
+        to: u64,
+        payload: T,
+        local: impl FnOnce(T) -> RuntimePresentationEvent,
+        remote: impl FnOnce(T) -> HostToServer,
+    ) {
         if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::GameplayResponse {
+            self.push_presentation_event(local(payload));
+        } else {
+            self.enqueue_host(remote(payload));
+        }
+    }
+
+    pub(super) fn send_response(&mut self, to: u64, response: GameplayResponse) {
+        self.send_targeted(
+            to,
+            response,
+            |response| RuntimePresentationEvent::GameplayResponse {
                 target: to,
                 response,
-            });
-            return;
-        }
-        self.enqueue_host(HostToServer::SendGameplayResponse { to, response });
+            },
+            |response| HostToServer::SendGameplayResponse { to, response },
+        );
     }
 
     pub(super) fn send_respawn_result(
@@ -158,19 +175,20 @@ impl ServerRuntime {
         position: [f32; 3],
         dimension: Dimension,
     ) {
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::PlayerRespawnResult {
+        self.send_targeted(
+            to,
+            (),
+            |_| RuntimePresentationEvent::PlayerRespawnResult {
                 target: to,
                 position,
                 dimension: dimension as u8,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendPlayerRespawnResult {
+            },
+            |_| HostToServer::SendPlayerRespawnResult {
                 to,
                 position,
                 dimension: dimension as u8,
-            });
-        }
+            },
+        );
     }
 
     pub(super) fn send_block_entity_delta(
@@ -182,8 +200,10 @@ impl ServerRuntime {
         entity: Option<crate::block_entity::BlockEntity>,
     ) {
         let (x, y, z) = position;
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::BlockEntityDelta {
+        self.send_targeted(
+            to,
+            entity,
+            |entity| RuntimePresentationEvent::BlockEntityDelta {
                 target: to,
                 dimension: dimension as u8,
                 revision,
@@ -191,9 +211,8 @@ impl ServerRuntime {
                 y,
                 z,
                 entity,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendBlockEntityDelta {
+            },
+            |entity| HostToServer::SendBlockEntityDelta {
                 to,
                 dimension: dimension as u8,
                 revision,
@@ -201,8 +220,8 @@ impl ServerRuntime {
                 y,
                 z,
                 entity,
-            });
-        }
+            },
+        );
     }
 
     pub(super) fn send_entity_spawn(
@@ -212,21 +231,22 @@ impl ServerRuntime {
         sequence: u64,
         state: EntityStateWire,
     ) {
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::EntitySpawn {
+        self.send_targeted(
+            to,
+            state,
+            |state| RuntimePresentationEvent::EntitySpawn {
                 target: to,
                 dimension: dimension as u8,
                 sequence,
                 state,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendEntitySpawn {
+            },
+            |state| HostToServer::SendEntitySpawn {
                 to,
                 dimension: dimension as u8,
                 sequence,
                 state,
-            });
-        }
+            },
+        );
     }
 
     pub(super) fn send_entity_state(
@@ -236,21 +256,22 @@ impl ServerRuntime {
         sequence: u64,
         state: EntityStateWire,
     ) {
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::EntityState {
+        self.send_targeted(
+            to,
+            state,
+            |state| RuntimePresentationEvent::EntityState {
                 target: to,
                 dimension: dimension as u8,
                 sequence,
                 state,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendEntityState {
+            },
+            |state| HostToServer::SendEntityState {
                 to,
                 dimension: dimension as u8,
                 sequence,
                 state,
-            });
-        }
+            },
+        );
     }
 
     pub(super) fn send_entity_despawn(
@@ -260,21 +281,22 @@ impl ServerRuntime {
         sequence: u64,
         entity_id: u64,
     ) {
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::EntityDespawn {
+        self.send_targeted(
+            to,
+            (),
+            |_| RuntimePresentationEvent::EntityDespawn {
                 target: to,
                 dimension: dimension as u8,
                 sequence,
                 entity_id,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendEntityDespawn {
+            },
+            |_| HostToServer::SendEntityDespawn {
                 to,
                 dimension: dimension as u8,
                 sequence,
                 entity_id,
-            });
-        }
+            },
+        );
     }
 
     pub(super) fn send_session_update(
@@ -285,23 +307,24 @@ impl ServerRuntime {
         state: SessionGameplayState,
     ) {
         let state = SessionGameplayWire::from(state);
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::PlayerSessionUpdate {
+        self.send_targeted(
+            to,
+            state,
+            |state| RuntimePresentationEvent::PlayerSessionUpdate {
                 target: to,
                 sequence,
                 player_id: to,
                 dimension: dimension as u8,
                 state,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendPlayerSessionUpdate {
+            },
+            |state| HostToServer::SendPlayerSessionUpdate {
                 to,
                 sequence,
                 player_id: to,
                 dimension: dimension as u8,
                 state,
-            });
-        }
+            },
+        );
     }
 
     pub(super) fn send_player_effects(
@@ -310,21 +333,22 @@ impl ServerRuntime {
         sequence: u64,
         effects: Vec<PlayerEffectWire>,
     ) {
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::PlayerEffect {
+        self.send_targeted(
+            to,
+            effects,
+            |effects| RuntimePresentationEvent::PlayerEffect {
                 target: to,
                 sequence,
                 player_id: to,
                 effects,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendPlayerEffect {
+            },
+            |effects| HostToServer::SendPlayerEffect {
                 to,
                 sequence,
                 player_id: to,
                 effects,
-            });
-        }
+            },
+        );
     }
 
     pub(super) fn send_container_slot_update(
@@ -337,17 +361,18 @@ impl ServerRuntime {
         slot: Option<ItemWire>,
     ) {
         let (x, y, z) = position;
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::ContainerSlotUpdate {
+        self.send_targeted(
+            to,
+            (),
+            |_| RuntimePresentationEvent::ContainerSlotUpdate {
                 target: to,
                 dimension: dimension as u8,
                 revision,
                 position,
                 slot_index,
                 slot,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendContainerSlotUpdate {
+            },
+            |_| HostToServer::SendContainerSlotUpdate {
                 to,
                 dimension: dimension as u8,
                 revision,
@@ -356,8 +381,8 @@ impl ServerRuntime {
                 z,
                 slot_index,
                 slot,
-            });
-        }
+            },
+        );
     }
 
     pub(super) fn send_container_close(
@@ -367,21 +392,22 @@ impl ServerRuntime {
         position: (i32, i32, i32),
     ) {
         let (x, y, z) = position;
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::ContainerClose {
+        self.send_targeted(
+            to,
+            (),
+            |_| RuntimePresentationEvent::ContainerClose {
                 target: to,
                 dimension: dimension as u8,
                 position,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendContainerClose {
+            },
+            |_| HostToServer::SendContainerClose {
                 to,
                 dimension: dimension as u8,
                 x,
                 y,
                 z,
-            });
-        }
+            },
+        );
     }
 
     /// Remove one exact lifecycle registration and emit at most one close for
@@ -440,35 +466,40 @@ impl ServerRuntime {
         fluid_levels: Vec<u8>,
         block_entities: Vec<u8>,
     ) {
-        if self.local_session_id == Some(to) {
-            self.push_presentation_event(RuntimePresentationEvent::ChunkData {
-                target: to,
-                dimension: dimension as u8,
-                cx,
-                cz,
-                revision,
-                min_section_y,
-                section_count,
-                blocks,
-                block_states,
-                fluid_levels,
-                block_entities,
-            });
-        } else {
-            self.enqueue_host(HostToServer::SendChunk {
-                dimension: dimension as u8,
-                cx,
-                cz,
-                revision,
-                min_section_y,
-                section_count,
-                blocks,
-                block_states,
-                fluid_levels,
-                block_entities,
-                to,
-            });
-        }
+        self.send_targeted(
+            to,
+            (blocks, block_states, fluid_levels, block_entities),
+            |(blocks, block_states, fluid_levels, block_entities)| {
+                RuntimePresentationEvent::ChunkData {
+                    target: to,
+                    dimension: dimension as u8,
+                    cx,
+                    cz,
+                    revision,
+                    min_section_y,
+                    section_count,
+                    blocks,
+                    block_states,
+                    fluid_levels,
+                    block_entities,
+                }
+            },
+            |(blocks, block_states, fluid_levels, block_entities)| {
+                HostToServer::SendChunk {
+                    dimension: dimension as u8,
+                    cx,
+                    cz,
+                    revision,
+                    min_section_y,
+                    section_count,
+                    blocks,
+                    block_states,
+                    fluid_levels,
+                    block_entities,
+                    to,
+                }
+            },
+        );
     }
 
     /// Queue an embedded-client projection without allowing replaceable state
@@ -569,8 +600,10 @@ impl ServerRuntime {
         let targets =
             self.queue_interest_update(dimension, revision, InterestKind::Block((x, y, z)));
         for target in targets {
-            if self.local_session_id == Some(target) {
-                self.push_presentation_event(RuntimePresentationEvent::BlockChange {
+            self.send_targeted(
+                target,
+                (),
+                |_| RuntimePresentationEvent::BlockChange {
                     target,
                     dimension: dimension as u8,
                     revision,
@@ -580,9 +613,8 @@ impl ServerRuntime {
                     block,
                     state,
                     raw_fluid,
-                });
-            } else {
-                self.enqueue_host(HostToServer::SendBlockChange {
+                },
+                |_| HostToServer::SendBlockChange {
                     to: target,
                     dimension: dimension as u8,
                     revision,
@@ -592,8 +624,8 @@ impl ServerRuntime {
                     block,
                     state,
                     raw_fluid,
-                });
-            }
+                },
+            );
         }
     }
 
