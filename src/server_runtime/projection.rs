@@ -212,8 +212,8 @@ impl ServerRuntime {
                 z,
                 entity,
             },
-            |entity| HostToServer::SendBlockEntityDelta {
-                to,
+            |entity| HostToServer::BlockEntityDelta {
+                to: Some(to),
                 dimension: dimension as u8,
                 revision,
                 x,
@@ -240,8 +240,8 @@ impl ServerRuntime {
                 sequence,
                 state,
             },
-            |state| HostToServer::SendEntitySpawn {
-                to,
+            |state| HostToServer::EntitySpawn {
+                to: Some(to),
                 dimension: dimension as u8,
                 sequence,
                 state,
@@ -265,8 +265,8 @@ impl ServerRuntime {
                 sequence,
                 state,
             },
-            |state| HostToServer::SendEntityState {
-                to,
+            |state| HostToServer::EntityState {
+                to: Some(to),
                 dimension: dimension as u8,
                 sequence,
                 state,
@@ -290,8 +290,8 @@ impl ServerRuntime {
                 sequence,
                 entity_id,
             },
-            |_| HostToServer::SendEntityDespawn {
-                to,
+            |_| HostToServer::EntityDespawn {
+                to: Some(to),
                 dimension: dimension as u8,
                 sequence,
                 entity_id,
@@ -342,8 +342,8 @@ impl ServerRuntime {
                 player_id: to,
                 effects,
             },
-            |effects| HostToServer::SendPlayerEffect {
-                to,
+            |effects| HostToServer::PlayerEffect {
+                to: Some(to),
                 sequence,
                 player_id: to,
                 effects,
@@ -372,8 +372,8 @@ impl ServerRuntime {
                 slot_index,
                 slot,
             },
-            |_| HostToServer::SendContainerSlotUpdate {
-                to,
+            |_| HostToServer::ContainerSlotUpdate {
+                to: Some(to),
                 dimension: dimension as u8,
                 revision,
                 x,
@@ -614,8 +614,8 @@ impl ServerRuntime {
                     state,
                     raw_fluid,
                 },
-                |_| HostToServer::SendBlockChange {
-                    to: target,
+                |_| HostToServer::BlockChange {
+                    to: Some(target),
                     dimension: dimension as u8,
                     revision,
                     x,

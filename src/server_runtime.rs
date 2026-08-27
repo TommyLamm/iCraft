@@ -899,7 +899,7 @@ pub struct ServerRuntime {
     pub(super) world_dir: PathBuf,
     pub(super) save_manager: SaveManager,
     pub(super) default_game_mode: GameMode,
-    pub(super) host_tx: Option<SyncSender<HostToServer>>,
+    pub(super) host_tx: Option<tokio::sync::mpsc::Sender<HostToServer>>,
     pub(super) host_rx: Receiver<ServerToHost>,
     pub(super) network_thread: Option<JoinHandle<()>>,
     pub(super) network_metrics: NetworkMetrics,
@@ -994,7 +994,7 @@ impl ServerRuntime {
         let (host_tx, host_rx_network) = match options.transport {
             TransportMode::Disabled => (None, None),
             TransportMode::Listen => {
-                let (sender, receiver) = mpsc::sync_channel(HOST_COMMAND_QUEUE_CAPACITY);
+                let (sender, receiver) = tokio::sync::mpsc::channel(HOST_COMMAND_QUEUE_CAPACITY);
                 (Some(sender), Some(receiver))
             }
         };

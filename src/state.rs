@@ -14813,7 +14813,7 @@ mod debug_tests {
     #[test]
     fn host_inbound_gameplay_request_preserves_authenticated_player_id() {
         let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
-        let (outbound_tx, _outbound_rx) = std::sync::mpsc::channel();
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(16);
         let handle = NetworkHandle::Host {
             server_to_host: inbound_rx,
             host_to_server: outbound_tx,

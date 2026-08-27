@@ -15,7 +15,7 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct RawServer {
     addr: String,
-    host_tx: mpsc::Sender<HostToServer>,
+    host_tx: tokio::sync::mpsc::Sender<HostToServer>,
     event_rx: Receiver<ServerToHost>,
     handle: Option<JoinHandle<()>>,
 }
@@ -29,7 +29,7 @@ impl RawServer {
             .to_string();
         drop(reserved);
 
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(16);
         let (event_tx, event_rx) = mpsc::channel();
         let handle = NetworkServer::spawn(addr.clone(), 0xCAFE_BABE, 1, host_rx, event_tx);
         Self {
@@ -107,7 +107,7 @@ impl RawServer {
     }
 
     fn stop(mut self) {
-        let _ = self.host_tx.send(HostToServer::Stop);
+        let _ = self.host_tx.try_send(HostToServer::Stop);
         if let Some(handle) = self.handle.take() {
             handle.join().expect("network server thread panicked");
         }
@@ -116,7 +116,7 @@ impl RawServer {
 
 impl Drop for RawServer {
     fn drop(&mut self) {
-        let _ = self.host_tx.send(HostToServer::Stop);
+        let _ = self.host_tx.try_send(HostToServer::Stop);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }

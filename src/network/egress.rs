@@ -123,36 +123,7 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
         return;
     }
 
-    if let HostToServer::BroadcastPlayerPosition {
-        id,
-        sequence,
-        sender_time_millis,
-        x,
-        y,
-        z,
-        yaw,
-        pitch,
-    } = &command
-    {
-        broadcast_pose_inner(
-            sessions,
-            Packet::PlayerPosition {
-                protocol_version: PROTOCOL_VERSION,
-                id: *id,
-                sequence: *sequence,
-                sender_time_millis: *sender_time_millis,
-                x: *x,
-                y: *y,
-                z: *z,
-                yaw: *yaw,
-                pitch: *pitch,
-            },
-        )
-        .await;
-        return;
-    }
-
-    if let HostToServer::SendPlayerPosition {
+    if let HostToServer::PlayerPosition {
         to,
         id,
         sequence,
@@ -164,34 +135,34 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
         pitch,
     } = &command
     {
-        let mailbox = sessions
-            .lock()
-            .await
-            .get(to)
-            .map(|session| Arc::clone(&session.pose_mailbox));
-        if let Some(mailbox) = mailbox {
-            mailbox
-                .replace(
-                    *id,
-                    Packet::PlayerPosition {
-                        protocol_version: PROTOCOL_VERSION,
-                        id: *id,
-                        sequence: *sequence,
-                        sender_time_millis: *sender_time_millis,
-                        x: *x,
-                        y: *y,
-                        z: *z,
-                        yaw: *yaw,
-                        pitch: *pitch,
-                    },
-                )
-                .await;
+        let packet = Packet::PlayerPosition {
+            protocol_version: PROTOCOL_VERSION,
+            id: *id,
+            sequence: *sequence,
+            sender_time_millis: *sender_time_millis,
+            x: *x,
+            y: *y,
+            z: *z,
+            yaw: *yaw,
+            pitch: *pitch,
+        };
+        if let Some(to) = to {
+            let mailbox = sessions
+                .lock()
+                .await
+                .get(to)
+                .map(|session| Arc::clone(&session.pose_mailbox));
+            if let Some(mailbox) = mailbox {
+                mailbox.replace(*id, packet).await;
+            }
+        } else {
+            broadcast_pose_inner(sessions, packet).await;
         }
         return;
     }
 
-    let targeted_state = match &command {
-        HostToServer::SendEntityState {
+    let state_entry = match &command {
+        HostToServer::EntityState {
             to,
             dimension,
             sequence,
@@ -205,7 +176,7 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 state: *state,
             },
         )),
-        HostToServer::SendPlayerEffect {
+        HostToServer::PlayerEffect {
             to,
             sequence,
             player_id,
@@ -226,7 +197,7 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             dimension,
             state,
         } => Some((
-            *to,
+            Some(*to),
             Packet::PlayerSessionUpdate {
                 protocol_version: PROTOCOL_VERSION,
                 sequence: *sequence,
@@ -235,31 +206,6 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 state: *state,
             },
         )),
-        _ => None,
-    };
-    if let Some((to, packet)) = targeted_state {
-        let mailbox = sessions
-            .lock()
-            .await
-            .get(&to)
-            .map(|session| Arc::clone(&session.state_mailbox));
-        if let Some(mailbox) = mailbox {
-            mailbox.replace(packet).await;
-        }
-        return;
-    }
-
-    let state_packet = match &command {
-        HostToServer::BroadcastEntityState {
-            dimension,
-            sequence,
-            state,
-        } => Some(Packet::EntityState {
-            protocol_version: PROTOCOL_VERSION,
-            dimension: *dimension,
-            sequence: *sequence,
-            state: *state,
-        }),
         HostToServer::BroadcastPlayerHealth {
             sequence,
             player_id,
@@ -270,74 +216,41 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             oxygen,
             is_dead,
             death_reason,
-        } => Some(Packet::PlayerHealth {
-            protocol_version: PROTOCOL_VERSION,
-            sequence: *sequence,
-            player_id: *player_id,
-            health: *health,
-            max_health: *max_health,
-            hunger: *hunger,
-            saturation: *saturation,
-            oxygen: *oxygen,
-            is_dead: *is_dead,
-            death_reason: *death_reason,
-        }),
-        HostToServer::BroadcastPlayerEffect {
-            sequence,
-            player_id,
-            effects,
-        } => Some(Packet::PlayerEffect {
-            protocol_version: PROTOCOL_VERSION,
-            sequence: *sequence,
-            player_id: *player_id,
-            effects: effects.clone(),
-        }),
+        } => Some((
+            None,
+            Packet::PlayerHealth {
+                protocol_version: PROTOCOL_VERSION,
+                sequence: *sequence,
+                player_id: *player_id,
+                health: *health,
+                max_health: *max_health,
+                hunger: *hunger,
+                saturation: *saturation,
+                oxygen: *oxygen,
+                is_dead: *is_dead,
+                death_reason: *death_reason,
+            },
+        )),
         _ => None,
     };
-    if let Some(packet) = state_packet {
-        broadcast_state(sessions, packet).await;
+    if let Some((to, packet)) = state_entry {
+        if let Some(to) = to {
+            let mailbox = sessions
+                .lock()
+                .await
+                .get(&to)
+                .map(|session| Arc::clone(&session.state_mailbox));
+            if let Some(mailbox) = mailbox {
+                mailbox.replace(packet).await;
+            }
+        } else {
+            broadcast_state(sessions, packet).await;
+        }
         return;
     }
 
-    let reliable_broadcast = matches!(
-        &command,
-        HostToServer::BroadcastBlockChange { .. }
-            | HostToServer::BroadcastBlockEntityDelta { .. }
-            | HostToServer::BroadcastEntitySpawn { .. }
-            | HostToServer::BroadcastEntityDespawn { .. }
-            | HostToServer::BroadcastChat { .. }
-            | HostToServer::NotifyPlayerJoin { .. }
-            | HostToServer::BroadcastTimeSync { .. }
-            | HostToServer::BroadcastWorldRules { .. }
-            | HostToServer::BroadcastLightningStrike { .. }
-            | HostToServer::BroadcastSleepStateSync { .. }
-            | HostToServer::BroadcastContainerSlotUpdate { .. }
-    );
-    let (packet, recipient) = match command {
-        HostToServer::BroadcastBlockChange {
-            dimension,
-            revision,
-            x,
-            y,
-            z,
-            block,
-            state,
-            raw_fluid,
-        } => (
-            Packet::BlockChange {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                block,
-                state,
-                raw_fluid,
-            },
-            None,
-        ),
-        HostToServer::SendBlockChange {
+    let (packet, recipient, reliable_broadcast) = match command {
+        HostToServer::BlockChange {
             to,
             dimension,
             revision,
@@ -359,9 +272,11 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 state,
                 raw_fluid,
             },
-            Some(to),
+            to,
+            true,
         ),
-        HostToServer::BroadcastBlockEntityDelta {
+        HostToServer::BlockEntityDelta {
+            to,
             dimension,
             revision,
             x,
@@ -378,61 +293,8 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 z,
                 entity,
             },
-            None,
-        ),
-        HostToServer::BroadcastEntitySpawn {
-            dimension,
-            sequence,
-            state,
-        } => (
-            Packet::EntitySpawn {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                sequence,
-                state,
-            },
-            None,
-        ),
-        HostToServer::SendEntitySpawn {
             to,
-            dimension,
-            sequence,
-            state,
-        } => (
-            Packet::EntitySpawn {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                sequence,
-                state,
-            },
-            Some(to),
-        ),
-        HostToServer::BroadcastEntityDespawn {
-            dimension,
-            sequence,
-            entity_id,
-        } => (
-            Packet::EntityDespawn {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                sequence,
-                entity_id,
-            },
-            None,
-        ),
-        HostToServer::SendEntityDespawn {
-            to,
-            dimension,
-            sequence,
-            entity_id,
-        } => (
-            Packet::EntityDespawn {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                sequence,
-                entity_id,
-            },
-            Some(to),
+            true,
         ),
         HostToServer::SendBlockActionResult {
             to,
@@ -453,59 +315,43 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 drops,
             },
             Some(to),
+            true,
         ),
-        HostToServer::BroadcastTimeSync {
-            ticks,
-            weather,
-            weather_remaining_ticks,
-        } => (
-            Packet::TimeSync {
-                protocol_version: PROTOCOL_VERSION,
-                ticks,
-                weather,
-                weather_remaining_ticks,
-            },
-            None,
-        ),
-        HostToServer::BroadcastWorldRules { rules } => (
-            Packet::WorldRulesSync {
-                protocol_version: PROTOCOL_VERSION,
-                rules,
-            },
-            None,
-        ),
-        HostToServer::SendBlockEntityDelta {
+        HostToServer::EntitySpawn {
             to,
             dimension,
-            revision,
-            x,
-            y,
-            z,
-            entity,
+            sequence,
+            state,
         } => (
-            Packet::BlockEntityDelta {
+            Packet::EntitySpawn {
                 protocol_version: PROTOCOL_VERSION,
                 dimension,
-                revision,
-                x,
-                y,
-                z,
-                entity,
+                sequence,
+                state,
             },
-            Some(to),
+            to,
+            true,
         ),
-        HostToServer::SendWorldRules { rules, to } => (
-            Packet::WorldRulesSync {
+        HostToServer::EntityDespawn {
+            to,
+            dimension,
+            sequence,
+            entity_id,
+        } => (
+            Packet::EntityDespawn {
                 protocol_version: PROTOCOL_VERSION,
-                rules,
+                dimension,
+                sequence,
+                entity_id,
             },
-            Some(to),
+            to,
+            true,
         ),
-        HostToServer::SendTimeSync {
+        HostToServer::TimeSync {
+            to,
             ticks,
             weather,
             weather_remaining_ticks,
-            to,
         } => (
             Packet::TimeSync {
                 protocol_version: PROTOCOL_VERSION,
@@ -513,7 +359,16 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 weather,
                 weather_remaining_ticks,
             },
-            Some(to),
+            to,
+            true,
+        ),
+        HostToServer::WorldRules { to, rules } => (
+            Packet::WorldRulesSync {
+                protocol_version: PROTOCOL_VERSION,
+                rules,
+            },
+            to,
+            true,
         ),
         HostToServer::BroadcastLightningStrike { strike } => (
             Packet::LightningStrike {
@@ -521,29 +376,8 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 strike,
             },
             None,
+            true,
         ),
-        HostToServer::BroadcastPlayerPosition { .. } => {
-            unreachable!("player positions use the latest-wins pose channel")
-        }
-        HostToServer::SendPlayerPosition { .. } => {
-            unreachable!("targeted player positions use the latest-wins pose channel")
-        }
-        HostToServer::SendGameplayResponse { to, response } => {
-            let response = normalize_host_response(sessions, to, response).await;
-            let packet = Packet::GameplayResponse {
-                protocol_version: PROTOCOL_VERSION,
-                response,
-            };
-            (packet, Some(to))
-        }
-        HostToServer::BroadcastEntityState { .. }
-        | HostToServer::SendEntityState { .. }
-        | HostToServer::BroadcastPlayerHealth { .. }
-        | HostToServer::BroadcastPlayerEffect { .. }
-        | HostToServer::SendPlayerEffect { .. }
-        | HostToServer::SendPlayerSessionUpdate { .. } => {
-            unreachable!("state packets use the latest-wins state channel")
-        }
         HostToServer::BroadcastPlayerAction { id, action } => (
             Packet::PlayerAction {
                 protocol_version: PROTOCOL_VERSION,
@@ -551,6 +385,7 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 action,
             },
             None,
+            false,
         ),
         HostToServer::BroadcastChat { sender, message } => (
             Packet::ChatMessage {
@@ -559,6 +394,7 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 message,
             },
             None,
+            true,
         ),
         HostToServer::NotifyPlayerJoin { id, username } => (
             Packet::PlayerJoin {
@@ -567,17 +403,8 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 username,
             },
             None,
+            true,
         ),
-        HostToServer::SendChunk { .. } => {
-            unreachable!("chunk data payloads use catchup_mailbox")
-        }
-        HostToServer::DisconnectCatchupClient { .. } => {
-            unreachable!("catch-up disconnects are handled before packet mapping")
-        }
-        HostToServer::DisconnectClient { .. } => {
-            unreachable!("targeted disconnects are handled before packet mapping")
-        }
-        HostToServer::Stop => return,
         HostToServer::SendContainerOpenResult {
             to,
             dimension,
@@ -587,8 +414,8 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             z,
             slots,
             revision,
-        } => {
-            let packet = Packet::ContainerOpenResult {
+        } => (
+            Packet::ContainerOpenResult {
                 protocol_version: PROTOCOL_VERSION,
                 dimension,
                 success,
@@ -597,25 +424,27 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 z,
                 slots,
                 revision,
-            };
-            (packet, Some(to))
-        }
+            },
+            Some(to),
+            true,
+        ),
         HostToServer::SendContainerClose {
             to,
             dimension,
             x,
             y,
             z,
-        } => {
-            let packet = Packet::ContainerClose {
+        } => (
+            Packet::ContainerClose {
                 protocol_version: PROTOCOL_VERSION,
                 dimension,
                 x,
                 y,
                 z,
-            };
-            (packet, Some(to))
-        }
+            },
+            Some(to),
+            true,
+        ),
         HostToServer::SendContainerClickResult {
             to,
             dimension,
@@ -623,39 +452,19 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             slot_index,
             slot,
             dragged,
-        } => {
-            let packet = Packet::ContainerClickResult {
+        } => (
+            Packet::ContainerClickResult {
                 protocol_version: PROTOCOL_VERSION,
                 dimension,
                 success,
                 slot_index,
                 slot,
                 dragged,
-            };
-            (packet, Some(to))
-        }
-        HostToServer::BroadcastContainerSlotUpdate {
-            dimension,
-            revision,
-            x,
-            y,
-            z,
-            slot_index,
-            slot,
-        } => {
-            let packet = Packet::ContainerSlotUpdate {
-                protocol_version: PROTOCOL_VERSION,
-                dimension,
-                revision,
-                x,
-                y,
-                z,
-                slot_index,
-                slot,
-            };
-            (packet, None)
-        }
-        HostToServer::SendContainerSlotUpdate {
+            },
+            Some(to),
+            true,
+        ),
+        HostToServer::ContainerSlotUpdate {
             to,
             dimension,
             revision,
@@ -664,8 +473,8 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             z,
             slot_index,
             slot,
-        } => {
-            let packet = Packet::ContainerSlotUpdate {
+        } => (
+            Packet::ContainerSlotUpdate {
                 protocol_version: PROTOCOL_VERSION,
                 dimension,
                 revision,
@@ -674,31 +483,42 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 z,
                 slot_index,
                 slot,
-            };
-            (packet, Some(to))
-        }
+            },
+            to,
+            true,
+        ),
         HostToServer::SendPlayerRespawnResult {
             to,
             position,
             dimension,
-        } => {
-            let packet = Packet::PlayerRespawnResult {
+        } => (
+            Packet::PlayerRespawnResult {
                 protocol_version: PROTOCOL_VERSION,
                 position,
                 dimension,
-            };
-            (packet, Some(to))
-        }
+            },
+            Some(to),
+            true,
+        ),
         HostToServer::BroadcastSleepStateSync {
             player_id,
             is_sleeping,
-        } => {
-            let packet = Packet::SleepStateSync {
+        } => (
+            Packet::SleepStateSync {
                 protocol_version: PROTOCOL_VERSION,
                 player_id,
                 is_sleeping,
+            },
+            None,
+            true,
+        ),
+        HostToServer::SendGameplayResponse { to, response } => {
+            let response = normalize_host_response(sessions, to, response).await;
+            let packet = Packet::GameplayResponse {
+                protocol_version: PROTOCOL_VERSION,
+                response,
             };
-            (packet, None)
+            (packet, Some(to), true)
         }
         HostToServer::SendDimensionTransfer {
             to,
@@ -706,10 +526,6 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             position,
         } => {
             if let Some(session) = sessions.lock().await.get_mut(&to) {
-                // Gameplay revisions are dimension-scoped. Crossing a
-                // portal starts the target world's lane; retaining the
-                // source revision would reject every lower target-world
-                // revision before it could reach the authority.
                 session.gameplay.current_dimension = dimension;
                 session.gameplay.last_client_revision = 0;
                 session.gameplay.active_container = None;
@@ -720,8 +536,19 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
                 dimension,
                 position,
             };
-            (packet, Some(to))
+            (packet, Some(to), true)
         }
+        HostToServer::PlayerPosition { .. }
+        | HostToServer::EntityState { .. }
+        | HostToServer::PlayerEffect { .. }
+        | HostToServer::SendPlayerSessionUpdate { .. }
+        | HostToServer::BroadcastPlayerHealth { .. }
+        | HostToServer::SendChunk { .. }
+        | HostToServer::DisconnectCatchupClient { .. }
+        | HostToServer::DisconnectClient { .. } => {
+            unreachable!("handled before general packet mapping")
+        }
+        HostToServer::Stop => return,
     };
 
     let failed = if let Some(id) = recipient {

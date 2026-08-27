@@ -33,7 +33,7 @@ pub(crate) use super::session::{
     reliable_send_and_wait, send_connection_packet, send_with_outbound_metrics, send_writer_packet,
     CatchupMailbox, ClientSession, GameplaySessionState, PoseMailbox, PreAuthSlot, QueuedPacket,
     RequestRateLimiter, Sessions, StateMailbox, StateMailboxKey, TrackedPacket,
-    CLIENT_QUEUE_CAPACITY, CLIENT_TIMEOUT, HOST_COMMAND_POLL_INTERVAL, KEEPALIVE_INTERVAL,
+    CLIENT_QUEUE_CAPACITY, CLIENT_TIMEOUT, KEEPALIVE_INTERVAL,
     MAX_CHAT_CHARS, PRE_AUTH_CONNECTION_MULTIPLIER, RELIABLE_ENQUEUE_TIMEOUT,
 };
 use super::protocol::PlayerId;
@@ -57,7 +57,7 @@ impl<S: HostEventSender> NetworkServer<S> {
         bind_addr: String,
         seed: u64,
         gamemode: u8,
-        host_to_server: std_mpsc::Receiver<HostToServer>,
+        host_to_server: tokio::sync::mpsc::Receiver<HostToServer>,
         server_to_host: S,
     ) -> JoinHandle<()> {
         Self::spawn_with_config(
@@ -75,7 +75,7 @@ impl<S: HostEventSender> NetworkServer<S> {
         bind_addr: String,
         seed: u64,
         gamemode: u8,
-        host_to_server: std_mpsc::Receiver<HostToServer>,
+        host_to_server: tokio::sync::mpsc::Receiver<HostToServer>,
         server_to_host: S,
         catchup_queue_capacity: usize,
         catchup_drain_delay: Duration,
@@ -101,7 +101,7 @@ impl<S: HostEventSender> NetworkServer<S> {
         bind_addr: String,
         seed: u64,
         gamemode: u8,
-        host_to_server: std_mpsc::Receiver<HostToServer>,
+        host_to_server: tokio::sync::mpsc::Receiver<HostToServer>,
         server_to_host: S,
         config: ServerConfig,
     ) -> JoinHandle<()> {
@@ -120,7 +120,7 @@ impl<S: HostEventSender> NetworkServer<S> {
         bind_addr: String,
         seed: u64,
         gamemode: u8,
-        host_to_server: std_mpsc::Receiver<HostToServer>,
+        host_to_server: tokio::sync::mpsc::Receiver<HostToServer>,
         server_to_host: S,
         config: ServerConfig,
         metrics: NetworkMetrics,
@@ -165,11 +165,7 @@ impl<S: HostEventSender> NetworkServer<S> {
         })
     }
 
-    async fn run(self, listener: TcpListener, host_to_server: std_mpsc::Receiver<HostToServer>) {
-        // Polling try_recv keeps the blocking std receiver off Tokio's workers and,
-        // unlike spawn_blocking(recv), lets runtime shutdown finish immediately.
-        let mut command_tick = time::interval(HOST_COMMAND_POLL_INTERVAL);
-
+    async fn run(self, listener: TcpListener, mut host_to_server: tokio::sync::mpsc::Receiver<HostToServer>) {
         loop {
             tokio::select! {
                 accepted = listener.accept() => {
@@ -216,33 +212,19 @@ impl<S: HostEventSender> NetworkServer<S> {
                         }
                     }
                 }
-                _ = command_tick.tick() => {
-                    let mut latest_positions = HashMap::new();
-                    loop {
-                        match host_to_server.try_recv() {
-                            Ok(HostToServer::Stop) => {
-                                queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
-                                self.metrics.dequeue();
-                                return;
-                            }
-                            Ok(command @ HostToServer::BroadcastPlayerPosition { id, .. }) => {
-                                queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
-                                self.metrics.dequeue();
-                                latest_positions.insert(id, command);
-                            }
-                            Ok(command) => {
-                                queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
-                                self.metrics.dequeue();
-                                handle_host_command(&self.sessions, &self.server_to_host, &self.metrics, command).await;
-                            }
-                            Err(std_mpsc::TryRecvError::Empty) => break,
-                            Err(std_mpsc::TryRecvError::Disconnected) => return,
+                cmd = host_to_server.recv() => {
+                    match cmd {
+                        Some(HostToServer::Stop) => {
+                            queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
+                            self.metrics.dequeue();
+                            return;
                         }
-                    }
-                    let mut latest_positions: Vec<_> = latest_positions.into_iter().collect();
-                    latest_positions.sort_by_key(|(id, _)| *id);
-                    for (_, command) in latest_positions {
-                        handle_host_command(&self.sessions, &self.server_to_host, &self.metrics, command).await;
+                        Some(command) => {
+                            queue_stats().dequeue(std::mem::size_of::<HostToServer>() as u64);
+                            self.metrics.dequeue();
+                            handle_host_command(&self.sessions, &self.server_to_host, &self.metrics, command).await;
+                        }
+                        None => return,
                     }
                 }
             }
@@ -316,7 +298,7 @@ mod tests {
 
     struct TestServer {
         addr: String,
-        host_tx: std_mpsc::Sender<HostToServer>,
+        host_tx: tokio::sync::mpsc::Sender<HostToServer>,
         event_rx: std_mpsc::Receiver<ServerToHost>,
         handle: JoinHandle<()>,
         metrics: NetworkMetrics,
@@ -343,7 +325,7 @@ mod tests {
             let addr = reserved.local_addr().unwrap().to_string();
             drop(reserved);
 
-            let (host_tx, host_rx) = std_mpsc::channel();
+            let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
             let (event_tx, event_rx) = std_mpsc::channel();
             let metrics = NetworkMetrics::default();
             let handle = NetworkServer::spawn_with_config_and_metrics(
@@ -438,7 +420,7 @@ mod tests {
 
         async fn stop(self) -> NetworkMetricsSnapshot {
             let metrics = self.metrics.clone();
-            let _ = self.host_tx.send(HostToServer::Stop);
+            let _ = self.host_tx.send(HostToServer::Stop).await;
             time::timeout(
                 Duration::from_secs(2),
                 tokio::task::spawn_blocking(move || {
@@ -472,14 +454,14 @@ mod tests {
     fn bind_failure_notifies_host_and_thread_exits() {
         let occupied = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = occupied.local_addr().unwrap().to_string();
-        let (host_tx, host_rx) = std_mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(16);
         let (event_tx, event_rx) = std_mpsc::channel();
         let handle = NetworkServer::spawn(addr.clone(), 1, 0, host_rx, event_tx);
 
         let event = match event_rx.recv_timeout(Duration::from_secs(3)) {
             Ok(event) => event,
             Err(error) => {
-                let _ = host_tx.send(HostToServer::Stop);
+                let _ = host_tx.try_send(HostToServer::Stop);
                 handle.join().unwrap();
                 panic!("server did not report bind failure for {addr}: {error}");
             }
@@ -602,6 +584,7 @@ mod tests {
                 to: id,
                 response: accepted.clone(),
             })
+            .await
             .unwrap();
         let first = recv_matching(&mut client, |packet| {
             matches!(packet, Packet::GameplayResponse { .. })
@@ -1158,7 +1141,8 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::BroadcastPlayerPosition {
+            .send(HostToServer::PlayerPosition {
+                to: None,
                 id: id_a,
                 sequence: 12,
                 sender_time_millis: 600,
@@ -1168,6 +1152,7 @@ mod tests {
                 yaw: 1.5,
                 pitch: -0.25,
             })
+            .await
             .unwrap();
         let packet = recv_matching(&mut client_b, |packet| {
             matches!(packet, Packet::PlayerPosition { .. })
@@ -1554,12 +1539,13 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::SendTimeSync {
+            .send(HostToServer::TimeSync {
                 ticks: 21_000,
                 weather: 2,
                 weather_remaining_ticks: 3_500.25,
-                to: joining_id,
+                to: Some(joining_id),
             })
+            .await
             .unwrap();
 
         let packet = recv_matching(&mut joining, |packet| {
@@ -1605,15 +1591,18 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::BroadcastTimeSync {
+            .send(HostToServer::TimeSync {
+                to: None,
                 ticks: 22_000,
                 weather: 2,
                 weather_remaining_ticks: 4_500.0,
             })
+            .await
             .unwrap();
         server
             .host_tx
             .send(HostToServer::BroadcastLightningStrike { strike })
+            .await
             .unwrap();
 
         let weather_packets = time::timeout(Duration::from_secs(2), async {
@@ -1701,6 +1690,7 @@ mod tests {
                 id: id_a,
                 action: Action::Break,
             })
+            .await
             .unwrap();
         let packet =
             recv_matching(&mut client_b, |p| matches!(p, Packet::PlayerAction { .. })).await;
@@ -1740,6 +1730,7 @@ mod tests {
                 sender: "steve".into(),
                 message: "hello".into(),
             })
+            .await
             .unwrap();
 
         for client in [&mut client_a, &mut client_b] {
@@ -1855,6 +1846,7 @@ mod tests {
                 consumed_item: false,
                 drops: vec![drop],
             })
+            .await
             .unwrap();
 
         // client_a receives result
@@ -1908,6 +1900,7 @@ mod tests {
                 dimension: 0,
                 state,
             })
+            .await
             .unwrap();
 
         let received = recv_matching(&mut client_a, |packet| {
@@ -1944,6 +1937,7 @@ mod tests {
                     ..state
                 },
             })
+            .await
             .unwrap();
         assert!(tokio::time::timeout(
             Duration::from_millis(100),
@@ -2100,6 +2094,7 @@ mod tests {
                     outcome: crate::network::protocol::GameplayOutcome::Accepted { revision: 1 },
                 },
             })
+            .await
             .unwrap();
         let response = recv_matching(&mut peer, |packet| {
             matches!(packet, Packet::GameplayResponse { .. })
@@ -2166,7 +2161,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = std_mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(16);
         let (event_tx, event_rx) = std_mpsc::sync_channel(4);
         let metrics = NetworkMetrics::default();
         let handle = NetworkServer::spawn_with_config_and_metrics(
@@ -2281,7 +2276,7 @@ mod tests {
                 "peer GameplayRequest must complete after pose flood backpressure"
             );
         }
-        let _ = host_tx.send(HostToServer::Stop);
+        let _ = host_tx.try_send(HostToServer::Stop);
         handle.join().unwrap();
     }
 
@@ -2298,6 +2293,7 @@ mod tests {
                     sender: "pad".into(),
                     message: format!("pad-{index}"),
                 })
+                .await
                 .unwrap();
             let _ = time::timeout(
                 Duration::from_millis(80),
@@ -2310,7 +2306,8 @@ mod tests {
 
         server
             .host_tx
-            .send(HostToServer::BroadcastContainerSlotUpdate {
+            .send(HostToServer::ContainerSlotUpdate {
+                to: None,
                 dimension: 0,
                 revision: 11,
                 x: 8,
@@ -2319,6 +2316,7 @@ mod tests {
                 slot_index: 3,
                 slot: None,
             })
+            .await
             .unwrap();
 
         let fast_slot = recv_matching(&mut fast, |packet| {

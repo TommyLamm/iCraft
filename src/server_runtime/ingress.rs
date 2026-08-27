@@ -13,7 +13,6 @@ use crate::network::protocol::{GameplayRequest, GameplayResponse};
 use crate::network::server::{HostToServer, ServerToHost};
 use crate::save::normalize_player_identity;
 use std::io;
-use std::sync::mpsc::TrySendError;
 use std::time::Instant;
 
 impl ServerRuntime {
@@ -275,12 +274,12 @@ impl ServerRuntime {
                 weather_remaining_ticks: 0.0,
             });
         } else {
-            self.enqueue_host(HostToServer::SendWorldRules { rules, to: id });
-            self.enqueue_host(HostToServer::SendTimeSync {
+            self.enqueue_host(HostToServer::WorldRules { rules, to: Some(id) });
+            self.enqueue_host(HostToServer::TimeSync {
                 ticks: self.level.time,
                 weather: 0,
                 weather_remaining_ticks: 0.0,
-                to: id,
+                to: Some(id),
             });
         }
         if let Some((state, effects)) = self
@@ -394,8 +393,8 @@ impl ServerRuntime {
                     pitch,
                 });
             } else {
-                self.enqueue_host(HostToServer::SendPlayerPosition {
-                    to: target,
+                self.enqueue_host(HostToServer::PlayerPosition {
+                    to: Some(target),
                     id,
                     sequence,
                     sender_time_millis,
@@ -671,12 +670,12 @@ impl ServerRuntime {
         self.network_metrics.enqueue();
         match host_tx.try_send(event) {
             Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.network_metrics.dequeue();
                 self.network_metrics.record_queue_full();
                 false
             }
-            Err(TrySendError::Disconnected(_)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 self.network_metrics.dequeue();
                 false
             }
@@ -690,17 +689,17 @@ impl ServerRuntime {
         self.network_metrics.enqueue();
         match host_tx.try_send(HostToServer::Stop) {
             Ok(()) => {}
-            Err(TrySendError::Full(stop)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(stop)) => {
                 self.network_metrics.record_queue_full();
                 // A full command queue must not turn shutdown into a detached
-                // network thread. `send` unblocks as soon as the live server
+                // network thread. `blocking_send` unblocks as soon as the live server
                 // consumes one command; the pre-counted Stop remains part of
                 // the aggregate backlog while the producer is waiting.
-                if host_tx.send(stop).is_err() {
+                if host_tx.blocking_send(stop).is_err() {
                     self.network_metrics.dequeue();
                 }
             }
-            Err(TrySendError::Disconnected(_)) => self.network_metrics.dequeue(),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => self.network_metrics.dequeue(),
         }
     }
 

@@ -11,7 +11,7 @@ pub enum NetworkHandle {
     None,
     Host {
         server_to_host: std::sync::mpsc::Receiver<crate::network::server::ServerToHost>,
-        host_to_server: std::sync::mpsc::Sender<crate::network::server::HostToServer>,
+        host_to_server: tokio::sync::mpsc::Sender<crate::network::server::HostToServer>,
         thread: Option<std::thread::JoinHandle<()>>,
     },
     Client {
@@ -21,13 +21,26 @@ pub enum NetworkHandle {
     },
 }
 
-pub(crate) trait TrackedNetworkSender<T> {
-    fn tracked_send(&self, value: T) -> Result<(), std::sync::mpsc::SendError<T>>;
+pub(crate) trait TrackedNetworkSender<T, E> {
+    fn tracked_send(&self, value: T) -> Result<(), E>;
 }
 
-impl<T> TrackedNetworkSender<T> for std::sync::mpsc::Sender<T> {
+impl<T> TrackedNetworkSender<T, std::sync::mpsc::SendError<T>> for std::sync::mpsc::Sender<T> {
     fn tracked_send(&self, value: T) -> Result<(), std::sync::mpsc::SendError<T>> {
         crate::perf::tracked_send(
+            self,
+            value,
+            std::mem::size_of::<T>() as u64,
+            &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
+        )
+    }
+}
+
+impl<T> TrackedNetworkSender<T, tokio::sync::mpsc::error::TrySendError<T>>
+    for tokio::sync::mpsc::Sender<T>
+{
+    fn tracked_send(&self, value: T) -> Result<(), tokio::sync::mpsc::error::TrySendError<T>> {
+        crate::perf::tracked_try_send_tokio(
             self,
             value,
             std::mem::size_of::<T>() as u64,
@@ -924,9 +937,9 @@ impl NetworkHandle {
     ) {
         match self {
             NetworkHandle::Host { host_to_server, .. } => {
-                let _ = crate::perf::tracked_send(
-                    host_to_server,
-                    crate::network::server::HostToServer::BroadcastPlayerPosition {
+                let _ = host_to_server.tracked_send(
+                    crate::network::server::HostToServer::PlayerPosition {
+                        to: None,
                         id: 0,
                         sequence,
                         sender_time_millis,
@@ -936,8 +949,6 @@ impl NetworkHandle {
                         yaw,
                         pitch,
                     },
-                    std::mem::size_of::<crate::network::server::HostToServer>() as u64,
-                    &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
                 );
             }
             NetworkHandle::Client { game_to_client, .. } => {
@@ -970,9 +981,9 @@ impl NetworkHandle {
         pitch: f32,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = crate::perf::tracked_send(
-                host_to_server,
-                crate::network::server::HostToServer::BroadcastPlayerPosition {
+            let _ = host_to_server.tracked_send(
+                crate::network::server::HostToServer::PlayerPosition {
+                    to: None,
                     id,
                     sequence,
                     sender_time_millis,
@@ -982,8 +993,6 @@ impl NetworkHandle {
                     yaw,
                     pitch,
                 },
-                std::mem::size_of::<crate::network::server::HostToServer>() as u64,
-                &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
             );
         }
     }
@@ -1071,7 +1080,8 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastBlockChange {
+                crate::network::server::HostToServer::BlockChange {
+                    to: None,
                     dimension: dimension as u8,
                     revision,
                     x,
@@ -1096,7 +1106,8 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastBlockEntityDelta {
+                crate::network::server::HostToServer::BlockEntityDelta {
+                    to: None,
                     dimension: dimension as u8,
                     revision,
                     x,
@@ -1116,7 +1127,8 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastEntitySpawn {
+                crate::network::server::HostToServer::EntitySpawn {
+                    to: None,
                     dimension: dimension as u8,
                     sequence,
                     state,
@@ -1133,7 +1145,8 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastEntityState {
+                crate::network::server::HostToServer::EntityState {
+                    to: None,
                     dimension: dimension as u8,
                     sequence,
                     state,
@@ -1150,7 +1163,8 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastEntityDespawn {
+                crate::network::server::HostToServer::EntityDespawn {
+                    to: None,
                     dimension: dimension as u8,
                     sequence,
                     entity_id,
@@ -1171,7 +1185,8 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastContainerSlotUpdate {
+                crate::network::server::HostToServer::ContainerSlotUpdate {
+                    to: None,
                     dimension,
                     revision,
                     x,
@@ -1215,7 +1230,8 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastPlayerEffect {
+                crate::network::server::HostToServer::PlayerEffect {
+                    to: None,
                     sequence,
                     player_id,
                     effects,
@@ -1263,14 +1279,15 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server
-                .send(crate::network::server::HostToServer::DisconnectCatchupClient { to, reason });
+                .try_send(crate::network::server::HostToServer::DisconnectCatchupClient { to, reason });
         }
     }
 
     pub(crate) fn broadcast_time_sync(&self, ticks: u64, weather: u8, weather_remaining_ticks: f32) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BroadcastTimeSync {
+                crate::network::server::HostToServer::TimeSync {
+                    to: None,
                     ticks,
                     weather,
                     weather_remaining_ticks,
@@ -1288,11 +1305,11 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ =
-                host_to_server.tracked_send(crate::network::server::HostToServer::SendTimeSync {
+                host_to_server.tracked_send(crate::network::server::HostToServer::TimeSync {
+                    to: Some(to),
                     ticks,
                     weather,
                     weather_remaining_ticks,
-                    to,
                 });
         }
     }
@@ -1300,7 +1317,7 @@ impl NetworkHandle {
     pub(crate) fn broadcast_world_rules(&self, rules: crate::game_rules::WorldRules) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server
-                .tracked_send(crate::network::server::HostToServer::BroadcastWorldRules { rules });
+                .tracked_send(crate::network::server::HostToServer::WorldRules { to: None, rules });
         }
     }
 
@@ -1311,14 +1328,14 @@ impl NetworkHandle {
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server
-                .tracked_send(crate::network::server::HostToServer::SendWorldRules { rules, to });
+                .tracked_send(crate::network::server::HostToServer::WorldRules { to: Some(to), rules });
         }
     }
 
     pub(crate) fn broadcast_lightning_strike(&self, strike: crate::network::protocol::LightningStrike) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server
-                .send(crate::network::server::HostToServer::BroadcastLightningStrike { strike });
+                .try_send(crate::network::server::HostToServer::BroadcastLightningStrike { strike });
         }
     }
 

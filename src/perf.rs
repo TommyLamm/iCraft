@@ -689,6 +689,24 @@ pub fn tracked_send<T>(
     }
 }
 
+/// Account a tokio producer using try_send.
+pub fn tracked_try_send_tokio<T>(
+    tx: &tokio::sync::mpsc::Sender<T>,
+    value: T,
+    bytes: u64,
+    stats: &SharedQueueStats,
+) -> Result<(), tokio::sync::mpsc::error::TrySendError<T>> {
+    stats.enqueue(bytes, monotonic_millis());
+    match tx.try_send(value) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            stats.dequeue(bytes);
+            stats.drop_item();
+            Err(error)
+        }
+    }
+}
+
 /// Account a synchronous consumer after removing an item from the channel.
 pub fn tracked_try_recv<T>(
     rx: &std::sync::mpsc::Receiver<T>,

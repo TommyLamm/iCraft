@@ -105,7 +105,8 @@ pub enum ServerToHost {
 
 #[derive(Debug)]
 pub enum HostToServer {
-    BroadcastBlockChange {
+    BlockChange {
+        to: Option<PlayerId>,
         dimension: u8,
         revision: u64,
         x: i32,
@@ -115,27 +116,8 @@ pub enum HostToServer {
         state: u8,
         raw_fluid: u8,
     },
-    SendBlockChange {
-        to: PlayerId,
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        state: u8,
-        raw_fluid: u8,
-    },
-    BroadcastBlockEntityDelta {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    },
-    SendBlockEntityDelta {
-        to: PlayerId,
+    BlockEntityDelta {
+        to: Option<PlayerId>,
         dimension: u8,
         revision: u64,
         x: i32,
@@ -173,35 +155,20 @@ pub enum HostToServer {
         to: PlayerId,
         reason: String,
     },
-    BroadcastEntitySpawn {
+    EntitySpawn {
+        to: Option<PlayerId>,
         dimension: u8,
         sequence: u64,
         state: EntityStateWire,
     },
-    SendEntitySpawn {
-        to: PlayerId,
+    EntityState {
+        to: Option<PlayerId>,
         dimension: u8,
         sequence: u64,
         state: EntityStateWire,
     },
-    BroadcastEntityState {
-        dimension: u8,
-        sequence: u64,
-        state: EntityStateWire,
-    },
-    SendEntityState {
-        to: PlayerId,
-        dimension: u8,
-        sequence: u64,
-        state: EntityStateWire,
-    },
-    BroadcastEntityDespawn {
-        dimension: u8,
-        sequence: u64,
-        entity_id: u64,
-    },
-    SendEntityDespawn {
-        to: PlayerId,
+    EntityDespawn {
+        to: Option<PlayerId>,
         dimension: u8,
         sequence: u64,
         entity_id: u64,
@@ -217,13 +184,8 @@ pub enum HostToServer {
         is_dead: bool,
         death_reason: u8,
     },
-    BroadcastPlayerEffect {
-        sequence: u64,
-        player_id: PlayerId,
-        effects: Vec<PlayerEffectWire>,
-    },
-    SendPlayerEffect {
-        to: PlayerId,
+    PlayerEffect {
+        to: Option<PlayerId>,
         sequence: u64,
         player_id: PlayerId,
         effects: Vec<PlayerEffectWire>,
@@ -235,39 +197,21 @@ pub enum HostToServer {
         dimension: u8,
         state: SessionGameplayWire,
     },
-    BroadcastTimeSync {
+    WorldRules {
+        to: Option<PlayerId>,
+        rules: crate::game_rules::WorldRules,
+    },
+    TimeSync {
+        to: Option<PlayerId>,
         ticks: u64,
         weather: u8,
         weather_remaining_ticks: f32,
-    },
-    BroadcastWorldRules {
-        rules: crate::game_rules::WorldRules,
-    },
-    SendWorldRules {
-        rules: crate::game_rules::WorldRules,
-        to: PlayerId,
-    },
-    SendTimeSync {
-        ticks: u64,
-        weather: u8,
-        weather_remaining_ticks: f32,
-        to: PlayerId,
     },
     BroadcastLightningStrike {
         strike: LightningStrike,
     },
-    BroadcastPlayerPosition {
-        id: PlayerId,
-        sequence: u32,
-        sender_time_millis: u64,
-        x: f32,
-        y: f32,
-        z: f32,
-        yaw: f32,
-        pitch: f32,
-    },
-    SendPlayerPosition {
-        to: PlayerId,
+    PlayerPosition {
+        to: Option<PlayerId>,
         id: PlayerId,
         sequence: u32,
         sender_time_millis: u64,
@@ -317,17 +261,8 @@ pub enum HostToServer {
         slot: Option<ItemWire>,
         dragged: Option<ItemWire>,
     },
-    BroadcastContainerSlotUpdate {
-        dimension: u8,
-        revision: u64,
-        x: i32,
-        y: i32,
-        z: i32,
-        slot_index: u16,
-        slot: Option<ItemWire>,
-    },
-    SendContainerSlotUpdate {
-        to: PlayerId,
+    ContainerSlotUpdate {
+        to: Option<PlayerId>,
         dimension: u8,
         revision: u64,
         x: i32,

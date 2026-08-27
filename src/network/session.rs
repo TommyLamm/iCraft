@@ -14,7 +14,6 @@ use super::protocol::{
 use super::transport::Connection;
 
 pub(crate) const CLIENT_QUEUE_CAPACITY: usize = 64;
-pub(crate) const HOST_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Handshake is shorter than the post-auth idle timeout so unauthenticated

@@ -1529,7 +1529,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 0xCAFE_BABE, 1, host_rx, server_tx);
 
@@ -1571,7 +1571,7 @@ mod tests {
             other => panic!("expected ClientJoined, got {other:?}"),
         };
         host_tx
-            .send(HostToServer::NotifyPlayerJoin {
+            .try_send(HostToServer::NotifyPlayerJoin {
                 id: second_id,
                 username,
             })
@@ -1585,7 +1585,7 @@ mod tests {
         game_tx_b.send(GameToClient::Disconnect).unwrap();
         let _ = client_a.join();
         let _ = client_b.join();
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         let _ = server.join();
         assert_ne!(first_id, second_id);
     }
@@ -1596,7 +1596,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
 
@@ -1613,7 +1613,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         host_tx
-            .send(HostToServer::BroadcastBlockChange {
+            .try_send(HostToServer::BlockChange {
+                to: None,
                 dimension: 0,
                 revision: 100,
                 x: 7,
@@ -1625,7 +1626,7 @@ mod tests {
             })
             .unwrap();
         host_tx
-            .send(HostToServer::SendChunk {
+            .try_send(HostToServer::SendChunk {
                 dimension: 0,
                 cx: 0,
                 cz: -1,
@@ -1640,7 +1641,8 @@ mod tests {
             })
             .unwrap();
         host_tx
-            .send(HostToServer::BroadcastTimeSync {
+            .try_send(HostToServer::TimeSync {
+                to: None,
                 ticks: 19_000,
                 weather: 2,
                 weather_remaining_ticks: 8_000.5,
@@ -1653,7 +1655,7 @@ mod tests {
             visual_seed: 77,
         };
         host_tx
-            .send(HostToServer::BroadcastLightningStrike { strike })
+            .try_send(HostToServer::BroadcastLightningStrike { strike })
             .unwrap();
 
         let mut events = Vec::new();
@@ -1704,7 +1706,7 @@ mod tests {
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         server.join().unwrap();
     }
 
@@ -1807,7 +1809,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn_for_test(
             addr.clone(),
@@ -1844,7 +1846,8 @@ mod tests {
         ));
 
         host_tx
-            .send(HostToServer::BroadcastBlockChange {
+            .try_send(HostToServer::BlockChange {
+                to: None,
                 dimension: 0,
                 revision: 2,
                 x: 2,
@@ -1872,16 +1875,16 @@ mod tests {
         // transport must preserve it while reporting, rather than dropping,
         // the farther chunk when this client's capacity-one mailbox is full.
         host_tx
-            .send(snapshot(
+            .try_send(snapshot(
                 id_a,
                 0,
                 persisted.blocks.clone(),
                 persisted.block_states.clone(),
             ))
             .unwrap();
-        host_tx.send(snapshot(id_a, 8, vec![8], vec![0])).unwrap();
+        host_tx.try_send(snapshot(id_a, 8, vec![8], vec![0])).unwrap();
         host_tx
-            .send(snapshot(
+            .try_send(snapshot(
                 id_b,
                 0,
                 persisted.blocks.clone(),
@@ -1947,7 +1950,7 @@ mod tests {
             "both TCP clients must ACK accepted snapshots"
         );
 
-        host_tx.send(snapshot(id_a, 8, vec![8], vec![0])).unwrap();
+        host_tx.try_send(snapshot(id_a, 8, vec![8], vec![0])).unwrap();
         assert!(matches!(
             wait_for_event(&event_rx_a),
             ClientToGame::ChunkData {
@@ -1976,7 +1979,7 @@ mod tests {
         game_tx_b.send(GameToClient::Disconnect).unwrap();
         client_a.join().unwrap();
         client_b.join().unwrap();
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         server.join().unwrap();
         std::fs::remove_dir_all(world_dir).unwrap();
     }
@@ -1987,7 +1990,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
         let (game_tx, game_rx) = mpsc::channel();
@@ -2003,7 +2006,8 @@ mod tests {
         ));
 
         host_tx
-            .send(HostToServer::BroadcastBlockChange {
+            .try_send(HostToServer::BlockChange {
+                to: None,
                 dimension: 0,
                 revision: 2,
                 x: 1,
@@ -2015,26 +2019,27 @@ mod tests {
             })
             .unwrap();
         host_tx
-            .send(HostToServer::BroadcastChat {
+            .try_send(HostToServer::BroadcastChat {
                 sender: "host".into(),
                 message: "first".into(),
             })
             .unwrap();
         host_tx
-            .send(HostToServer::BroadcastTimeSync {
+            .try_send(HostToServer::TimeSync {
+                to: None,
                 ticks: 42,
                 weather: 1,
                 weather_remaining_ticks: 99.0,
             })
             .unwrap();
         host_tx
-            .send(HostToServer::BroadcastChat {
+            .try_send(HostToServer::BroadcastChat {
                 sender: "host".into(),
                 message: "second".into(),
             })
             .unwrap();
         host_tx
-            .send(HostToServer::SendChunk {
+            .try_send(HostToServer::SendChunk {
                 dimension: 0,
                 cx: 0,
                 cz: 0,
@@ -2087,7 +2092,7 @@ mod tests {
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         server.join().unwrap();
     }
 
@@ -2129,7 +2134,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 0xCAFE_BABE, 1, host_rx, server_tx);
 
@@ -2158,7 +2163,7 @@ mod tests {
         ));
 
         host_tx
-            .send(HostToServer::BroadcastChat {
+            .try_send(HostToServer::BroadcastChat {
                 sender: "steve".into(),
                 message: "hello".into(),
             })
@@ -2171,7 +2176,7 @@ mod tests {
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         server.join().unwrap();
     }
 
@@ -2181,7 +2186,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
         let (game_tx, game_rx) = mpsc::channel();
@@ -2330,7 +2335,7 @@ mod tests {
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         server.join().unwrap();
     }
 
@@ -2345,7 +2350,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 0xDEAD_BEEF, 0, host_rx, server_tx);
 
@@ -2365,7 +2370,7 @@ mod tests {
             .expect("join event missing");
 
         // Host quits: stop the server. The client must be notified and exit.
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         match event_rx.recv_timeout(Duration::from_secs(3)) {
             Ok(ClientToGame::Disconnected { .. }) => {}
             Ok(other) => panic!("expected Disconnected, got {other:?}"),
@@ -2373,10 +2378,10 @@ mod tests {
         }
         client
             .join()
-            .expect("client thread panicked during host-stop shutdown");
+            .expect("client thread did not exit after host shutdown");
         server
             .join()
-            .expect("server thread panicked during shutdown");
+            .expect("server thread did not exit after host shutdown");
     }
 
     #[test]
@@ -2622,7 +2627,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
 
@@ -2637,7 +2642,7 @@ mod tests {
 
         let position = (4, 64, 4);
         host_tx
-            .send(HostToServer::SendContainerOpenResult {
+            .try_send(HostToServer::SendContainerOpenResult {
                 to: player_id,
                 dimension: 0,
                 success: true,
@@ -2662,8 +2667,8 @@ mod tests {
         // Advance the slot revision so a close with no revision field proves
         // it is not accidentally sent through the container delta gate.
         host_tx
-            .send(HostToServer::SendContainerSlotUpdate {
-                to: player_id,
+            .try_send(HostToServer::ContainerSlotUpdate {
+                to: Some(player_id),
                 dimension: 0,
                 revision: 100,
                 x: position.0,
@@ -2679,7 +2684,7 @@ mod tests {
         ));
 
         host_tx
-            .send(HostToServer::SendContainerClose {
+            .try_send(HostToServer::SendContainerClose {
                 to: player_id,
                 dimension: 0,
                 x: position.0 + 1,
@@ -2693,7 +2698,7 @@ mod tests {
         ));
 
         host_tx
-            .send(HostToServer::SendContainerClose {
+            .try_send(HostToServer::SendContainerClose {
                 to: player_id,
                 dimension: 0,
                 x: position.0,
@@ -2709,7 +2714,7 @@ mod tests {
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         server.join().unwrap();
     }
 
@@ -2719,7 +2724,7 @@ mod tests {
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
         drop(reserved);
-        let (host_tx, host_rx) = mpsc::channel();
+        let (host_tx, host_rx) = tokio::sync::mpsc::channel(128);
         let (server_tx, server_rx) = mpsc::channel();
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
 
@@ -2747,28 +2752,31 @@ mod tests {
             item: None,
         };
         host_tx
-            .send(HostToServer::BroadcastEntitySpawn {
+            .try_send(HostToServer::EntitySpawn {
+                to: None,
                 dimension: 0,
                 sequence: 1,
                 state: state(0.0),
             })
             .unwrap();
         host_tx
-            .send(HostToServer::BroadcastEntityState {
+            .try_send(HostToServer::EntityState {
+                to: None,
                 dimension: 0,
                 sequence: 2,
                 state: state(2.0),
             })
             .unwrap();
         host_tx
-            .send(HostToServer::BroadcastEntityState {
+            .try_send(HostToServer::EntityState {
+                to: None,
                 dimension: 0,
                 sequence: 3,
                 state: state(3.0),
             })
             .unwrap();
         host_tx
-            .send(HostToServer::BroadcastPlayerHealth {
+            .try_send(HostToServer::BroadcastPlayerHealth {
                 sequence: 3,
                 player_id,
                 health: 14.0,
@@ -2781,7 +2789,8 @@ mod tests {
             })
             .unwrap();
         host_tx
-            .send(HostToServer::BroadcastPlayerEffect {
+            .try_send(HostToServer::PlayerEffect {
+                to: None,
                 sequence: 3,
                 player_id,
                 effects: vec![PlayerEffectWire {
@@ -2829,7 +2838,8 @@ mod tests {
         assert_eq!(effects.unwrap()[0].level, 2);
 
         host_tx
-            .send(HostToServer::BroadcastEntityDespawn {
+            .try_send(HostToServer::EntityDespawn {
+                to: None,
                 dimension: 0,
                 sequence: 4,
                 entity_id: 77,
@@ -2846,7 +2856,7 @@ mod tests {
 
         game_tx.send(GameToClient::Disconnect).unwrap();
         client.join().unwrap();
-        host_tx.send(HostToServer::Stop).unwrap();
+        host_tx.try_send(HostToServer::Stop).unwrap();
         server.join().unwrap();
     }
 
