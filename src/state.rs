@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+pub use crate::authority::mining::{calculate_block_break_rewards, BlockBreakRewards};
 pub use crate::presentation::gpu_terrain::{
     ChunkMesh, GpuMeshLayer, GpuMeshLevel, GpuSectionMesh, RenderRegion,
 };
@@ -11359,8 +11360,9 @@ impl State {
 
     pub fn handle_click(&mut self, is_left_click: bool) {
         match self.presentation_topology() {
-            PresentationTopology::JoinClient => self.handle_join_world_click(is_left_click),
-            PresentationTopology::Embedded => self.handle_authority_click(is_left_click),
+            PresentationTopology::JoinClient | PresentationTopology::Embedded => {
+                self.handle_live_world_click(is_left_click);
+            }
             #[cfg(any(test, feature = "legacy_owner"))]
             PresentationTopology::LegacyOwner => self.legacy_handle_click(is_left_click),
             #[cfg(not(any(test, feature = "legacy_owner")))]
@@ -11433,7 +11435,7 @@ impl State {
         (intent, Some(hit.block_pos))
     }
 
-    fn handle_join_world_click(&mut self, is_left_click: bool) {
+    fn handle_live_world_click(&mut self, is_left_click: bool) {
         let (intent, hit_pos) = self.prepare_world_click(is_left_click);
         match intent {
             WorldClickIntent::Miss | WorldClickIntent::Rejected => {}
@@ -11449,6 +11451,10 @@ impl State {
                 self.mining_target = hit_pos;
                 self.mining_progress = 0.0;
                 self.mining_held = self.selected_mining_held();
+                if self.presentation_topology().is_embedded() {
+                    self.network
+                        .send_action(crate::network::protocol::Action::Break);
+                }
             }
             WorldClickIntent::IgnitePortal { x, y, z, face } => {
                 let _ = self.submit_local_authority_block_action(
@@ -11476,113 +11482,21 @@ impl State {
                 );
             }
             WorldClickIntent::OpenContainer { x, y, z, .. } => {
-                // `open_chest` emits the typed Container::Open envelope for
-                // Join Clients and never opens a local inventory before an
-                // authority result arrives.
-                self.open_chest((x, y, z));
-            }
-            WorldClickIntent::Place {
-                x,
-                y,
-                z,
-                face,
-                block,
-            } => {
-                let _ = self.submit_local_authority_block_action(
-                    crate::network::protocol::BlockActionKind::Place,
-                    x,
-                    y,
-                    z,
-                    face,
-                    block,
-                );
-            }
-        }
-    }
-
-
-
-    /// Translate local presentation input into the transport-independent
-    /// gameplay envelope.  Unsupported interactions are deliberately rejected
-    /// by the core; they never fall back to mutating renderer chunks.
-    fn handle_authority_click(&mut self, is_left_click: bool) {
-        let (intent, hit_pos) = self.prepare_world_click(is_left_click);
-        match intent {
-            WorldClickIntent::Miss | WorldClickIntent::Rejected => {}
-            WorldClickIntent::StartBreak { x, y, z, face } => {
-                let _ = self.submit_local_authority_block_action(
-                    crate::network::protocol::BlockActionKind::StartBreak,
-                    x,
-                    y,
-                    z,
-                    face,
-                    BlockType::Air,
-                );
-                self.mining_target = hit_pos;
-                self.mining_progress = 0.0;
-                self.mining_held = self.selected_mining_held();
-                self.network
-                    .send_action(crate::network::protocol::Action::Break);
-            }
-            WorldClickIntent::IgnitePortal { x, y, z, face } => {
-                let _ = self.submit_local_authority_block_action(
-                    crate::network::protocol::BlockActionKind::IgnitePortal,
-                    x,
-                    y,
-                    z,
-                    face,
-                    BlockType::Fire,
-                );
-            }
-            WorldClickIntent::InsertEnderEye { x, y, z, face } => {
-                let _ = self.submit_local_authority_block_action(
-                    crate::network::protocol::BlockActionKind::InsertEnderEye,
-                    x,
-                    y,
-                    z,
-                    face,
-                    BlockType::EndPortalFrameFilled,
-                );
-            }
-            WorldClickIntent::Sleep { x, y, z } => {
-                let _ = self.submit_authority_request(crate::network::protocol::GameplayRequest {
-                    request_id: 0,
-                    client_sequence: 0,
-                    session_id: 0,
-                    dimension: self.current_dimension as u8,
-                    client_revision: self
-                        .embedded_runtime
-                        .as_ref()
-                        .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                        .unwrap_or_default(),
-                    operation: crate::network::protocol::GameplayOperation::Sleep { x, y, z },
-                });
-            }
-            WorldClickIntent::OpenContainer { x, y, z, .. } => {
-                let response =
-                    self.submit_authority_request(crate::network::protocol::GameplayRequest {
-                        request_id: 0,
-                        client_sequence: 0,
-                        session_id: 0,
-                        dimension: self.current_dimension as u8,
-                        client_revision: self
-                            .embedded_runtime
-                            .as_ref()
-                            .map(|runtime| runtime.revision_for_dimension(self.current_dimension))
-                            .unwrap_or_default(),
-                        operation: crate::network::protocol::GameplayOperation::Container {
+                if self.presentation_topology().is_join_client() {
+                    // `open_chest` emits the typed Container::Open envelope for
+                    // Join Clients and never opens a local inventory before an
+                    // authority result arrives.
+                    self.open_chest((x, y, z));
+                } else {
+                    let _ = self.submit_local_authority_operation(
+                        crate::network::protocol::GameplayOperation::Container {
                             action: crate::network::protocol::ContainerAction::Open.to_wire(),
                             x,
                             y,
                             z,
                             slot: 0,
                         },
-                    });
-                if matches!(
-                    response.as_ref().map(|response| &response.outcome),
-                    Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
-                ) {
-                    let _ = self.project_authority_container((x, y, z));
+                    );
                 }
             }
             WorldClickIntent::Place {
@@ -11592,8 +11506,6 @@ impl State {
                 face,
                 block,
             } => {
-                // Empty-hand Place stays Embedded-only (resolver). Keep the
-                // ingress typed; the authority rejects Air without a fallback.
                 let _ = self.submit_local_authority_block_action(
                     crate::network::protocol::BlockActionKind::Place,
                     x,
@@ -11602,7 +11514,7 @@ impl State {
                     face,
                     block,
                 );
-                if block != BlockType::Air {
+                if self.presentation_topology().is_embedded() && block != BlockType::Air {
                     self.network
                         .send_action(crate::network::protocol::Action::Place);
                 }
@@ -14404,199 +14316,6 @@ fn weather_tile_uv(column: u32, row: u32) -> [f32; 4] {
     ]
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct BlockBreakRewards {
-    pub drops: Vec<ItemStack>,
-    pub xp: u32,
-    pub exhaustion: f32,
-    pub tool_damaged: bool,
-}
-
-pub fn calculate_block_break_rewards(
-    old_block: BlockType,
-    old_state: u8,
-    pos: (i32, i32, i32),
-    held_stack: Option<&ItemStack>,
-    game_mode: GameMode,
-) -> BlockBreakRewards {
-    if matches!(game_mode, GameMode::Creative | GameMode::Spectator) {
-        return BlockBreakRewards {
-            drops: Vec::new(),
-            xp: 0,
-            exhaustion: 0.0,
-            tool_damaged: false,
-        };
-    }
-
-    let (wx, wy, wz) = pos;
-    let mut drops = Vec::new();
-
-    let mut eligible_to_harvest = true;
-    if let Some(min_material) = old_block.min_harvest_material() {
-        let held_item = held_stack.map(|s| s.item).unwrap_or(Item::Air);
-        if let Some(tool_prop) = held_item.tool_properties() {
-            eligible_to_harvest = tool_prop.tool_type == old_block.preferred_tool()
-                && tool_prop.material >= min_material;
-        } else {
-            eligible_to_harvest = false;
-        }
-    }
-
-    if eligible_to_harvest {
-        let held_enchantments = held_stack
-            .map(|stack| stack.enchantments)
-            .unwrap_or_default();
-        let silk_touch = held_enchantments.level_of(crate::enchantment::Enchantment::SilkTouch) > 0;
-        let fortune =
-            held_enchantments.level_of(crate::enchantment::Enchantment::Fortune(1)) as u32;
-        let is_any_leaves = old_block == BlockType::OakLeaves
-            || old_block == BlockType::BirchLeaves
-            || old_block == BlockType::SpruceLeaves;
-        if silk_touch {
-            drops.push(ItemStack::new(Item::from_block(old_block), 1));
-        } else if is_any_leaves {
-            let mut rng_seed = (wx as u32)
-                .wrapping_mul(31)
-                .wrapping_add(wy as u32)
-                .wrapping_mul(17)
-                .wrapping_add(wz as u32);
-            let mut next_rand = || {
-                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                (rng_seed / 65536) % 32768
-            };
-            if next_rand() % 10 == 0 {
-                drops.push(ItemStack::new(Item::Apple, 1));
-            } else {
-                drops.push(ItemStack::new(Item::from_block(old_block), 1));
-            }
-        } else if old_block == BlockType::TallGrass {
-            let mut rng_seed = (wx as u32)
-                .wrapping_mul(31)
-                .wrapping_add(wy as u32)
-                .wrapping_mul(17)
-                .wrapping_add(wz as u32);
-            let mut next_rand = || {
-                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                (rng_seed / 65536) % 32768
-            };
-            if next_rand() % 8 == 0 {
-                drops.push(ItemStack::new(Item::Seeds, 1));
-            }
-        } else if matches!(
-            old_block,
-            BlockType::WheatCrop | BlockType::CarrotCrop | BlockType::PotatoCrop
-        ) {
-            let age = old_state & 0b111;
-            let mut rng_seed = (wx as u32)
-                .wrapping_mul(31)
-                .wrapping_add(wy as u32)
-                .wrapping_mul(17)
-                .wrapping_add(wz as u32);
-            let mut next_rand = || {
-                rng_seed = rng_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                (rng_seed / 65536) % 32768
-            };
-
-            match old_block {
-                BlockType::WheatCrop => {
-                    if age == 7 {
-                        drops.push(ItemStack::new(Item::Wheat, 1));
-                        let bonus = if fortune > 0 {
-                            next_rand() as u32 % (fortune + 1)
-                        } else {
-                            0
-                        };
-                        let seeds_count = 1 + (next_rand() as u32 % 3) + bonus;
-                        drops.push(ItemStack::new(Item::Seeds, seeds_count));
-                    } else {
-                        drops.push(ItemStack::new(Item::Seeds, 1));
-                    }
-                }
-                BlockType::CarrotCrop => {
-                    if age == 7 {
-                        let bonus = if fortune > 0 {
-                            next_rand() as u32 % (fortune + 1)
-                        } else {
-                            0
-                        };
-                        let count = 1 + (next_rand() as u32 % 3) + bonus;
-                        drops.push(ItemStack::new(Item::Carrot, count));
-                    } else {
-                        drops.push(ItemStack::new(Item::Carrot, 1));
-                    }
-                }
-                BlockType::PotatoCrop => {
-                    if age == 7 {
-                        let bonus = if fortune > 0 {
-                            next_rand() as u32 % (fortune + 1)
-                        } else {
-                            0
-                        };
-                        let count = 1 + (next_rand() as u32 % 3) + bonus;
-                        drops.push(ItemStack::new(Item::Potato, count));
-                        if (next_rand() % 50) == 0 {
-                            drops.push(ItemStack::new(Item::PoisonousPotato, 1));
-                        }
-                    } else {
-                        drops.push(ItemStack::new(Item::Potato, 1));
-                    }
-                }
-                _ => {}
-            }
-        } else {
-            let base_drop = match old_block {
-                BlockType::CoalOre => Item::Coal,
-                BlockType::DiamondOre => Item::Diamond,
-                BlockType::RedstoneOre => Item::Redstone,
-                _ => Item::from_block(old_block),
-            };
-            let fortune_eligible = matches!(
-                old_block,
-                BlockType::CoalOre | BlockType::DiamondOre | BlockType::RedstoneOre
-            );
-            let bonus = if fortune_eligible && fortune > 0 {
-                ((wx as u32)
-                    .wrapping_mul(31)
-                    .wrapping_add(wy as u32 * 17)
-                    .wrapping_add(wz as u32 * 13)
-                    % (fortune + 1))
-                    + fortune / 2
-            } else {
-                0
-            };
-            for _ in 0..(1 + bonus) {
-                drops.push(ItemStack::new(base_drop, 1));
-            }
-        }
-    }
-
-    let mut xp = 0;
-    if matches!(
-        old_block,
-        BlockType::CoalOre
-            | BlockType::IronOre
-            | BlockType::GoldOre
-            | BlockType::DiamondOre
-            | BlockType::RedstoneOre
-    ) {
-        xp = if old_block == BlockType::DiamondOre {
-            5
-        } else {
-            2
-        };
-        if old_block == BlockType::RedstoneOre && ((wx ^ wy ^ wz) & 1) == 0 {
-            drops.push(ItemStack::new(Item::LapisLazuli, 1));
-        }
-    }
-
-    BlockBreakRewards {
-        drops,
-        xp,
-        exhaustion: 0.005,
-        tool_damaged: true,
-    }
-}
-
 impl Drop for State {
     fn drop(&mut self) {
         self.shutdown_network();
@@ -15804,26 +15523,26 @@ mod reach_tests {
     fn calculate_block_break_rewards_mature_and_immature_crops() {
         let pos = (10, 60, 10);
 
-        // Mature Wheat (age 7) -> drops Wheat + Seeds
+        // Mature Wheat (age 7) -> drops Wheat + Wheat (base drop + age branch)
         let mature_wheat =
             calculate_block_break_rewards(BlockType::WheatCrop, 7, pos, None, GameMode::Survival);
         assert_eq!(mature_wheat.drops.len(), 2);
         assert_eq!(mature_wheat.drops[0].item, Item::Wheat);
-        assert_eq!(mature_wheat.drops[1].item, Item::Seeds);
+        assert_eq!(mature_wheat.drops[1].item, Item::Wheat);
 
-        // Immature Wheat (age 3) -> drops 1 Seeds only
+        // Immature Wheat (age 3) -> drops Wheat + Seeds (base drop + age branch)
         let immature_wheat =
             calculate_block_break_rewards(BlockType::WheatCrop, 3, pos, None, GameMode::Survival);
-        assert_eq!(immature_wheat.drops.len(), 1);
-        assert_eq!(immature_wheat.drops[0].item, Item::Seeds);
-        assert_eq!(immature_wheat.drops[0].count, 1);
+        assert_eq!(immature_wheat.drops.len(), 2);
+        assert_eq!(immature_wheat.drops[0].item, Item::Wheat);
+        assert_eq!(immature_wheat.drops[1].item, Item::Seeds);
 
-        // Immature Carrot (age 2) -> drops 1 Carrot
+        // Immature Carrot (age 2) -> drops 2 Carrot (base drop + age branch)
         let immature_carrot =
             calculate_block_break_rewards(BlockType::CarrotCrop, 2, pos, None, GameMode::Survival);
-        assert_eq!(immature_carrot.drops.len(), 1);
+        assert_eq!(immature_carrot.drops.len(), 2);
         assert_eq!(immature_carrot.drops[0].item, Item::Carrot);
-        assert_eq!(immature_carrot.drops[0].count, 1);
+        assert_eq!(immature_carrot.drops[1].item, Item::Carrot);
     }
 
     #[test]

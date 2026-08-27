@@ -153,3 +153,106 @@ pub fn mining_time_seconds(block: BlockType, held_stack: Option<&ItemStack>) -> 
         .unwrap_or(1.0);
     base / (speed * enchantment_multiplier).max(f32::EPSILON)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calculate_block_break_rewards_harvest_and_drops() {
+        let pos = (10, 60, 10);
+
+        // Stone with bare hand in Survival -> not eligible to harvest (no drops)
+        let rewards =
+            calculate_block_break_rewards(BlockType::Stone, 0, pos, None, GameMode::Survival);
+        assert!(rewards.drops.is_empty());
+        assert_eq!(rewards.xp, 0);
+
+        // Stone with Pickaxe -> eligible, drops Stone
+        let pick = ItemStack::new(Item::StonePickaxe, 1);
+        let rewards = calculate_block_break_rewards(
+            BlockType::Stone,
+            0,
+            pos,
+            Some(&pick),
+            GameMode::Survival,
+        );
+        assert_eq!(rewards.drops.len(), 1);
+        assert_eq!(rewards.drops[0].item, Item::Stone);
+
+        // DiamondOre with IronPickaxe -> drops Diamond + 5 XP
+        let iron_pick = ItemStack::new(Item::IronPickaxe, 1);
+        let rewards = calculate_block_break_rewards(
+            BlockType::DiamondOre,
+            0,
+            pos,
+            Some(&iron_pick),
+            GameMode::Survival,
+        );
+        assert_eq!(rewards.drops[0].item, Item::Diamond);
+        assert_eq!(rewards.xp, 5);
+
+        // DiamondOre with SilkTouch -> drops DiamondOre block
+        let mut silk_pick = ItemStack::new(Item::IronPickaxe, 1);
+        silk_pick
+            .enchantments
+            .add_or_upgrade(crate::enchantment::Enchantment::SilkTouch);
+        let rewards = calculate_block_break_rewards(
+            BlockType::DiamondOre,
+            0,
+            pos,
+            Some(&silk_pick),
+            GameMode::Survival,
+        );
+        assert_eq!(rewards.drops[0].item, Item::DiamondOre);
+
+        // Creative mode -> zero drops
+        let rewards = calculate_block_break_rewards(
+            BlockType::Stone,
+            0,
+            pos,
+            Some(&pick),
+            GameMode::Creative,
+        );
+        assert!(rewards.drops.is_empty());
+    }
+
+    #[test]
+    fn calculate_block_break_rewards_mature_and_immature_crops() {
+        let pos = (10, 60, 10);
+
+        // Mature Wheat (age 7) -> drops Wheat + Wheat (base drop + age branch)
+        let mature_wheat =
+            calculate_block_break_rewards(BlockType::WheatCrop, 7, pos, None, GameMode::Survival);
+        assert_eq!(mature_wheat.drops.len(), 2);
+        assert_eq!(mature_wheat.drops[0].item, Item::Wheat);
+        assert_eq!(mature_wheat.drops[1].item, Item::Wheat);
+
+        // Immature Wheat (age 3) -> drops Wheat + Seeds (base drop + age branch)
+        let immature_wheat =
+            calculate_block_break_rewards(BlockType::WheatCrop, 3, pos, None, GameMode::Survival);
+        assert_eq!(immature_wheat.drops.len(), 2);
+        assert_eq!(immature_wheat.drops[0].item, Item::Wheat);
+        assert_eq!(immature_wheat.drops[1].item, Item::Seeds);
+
+        // Immature Carrot (age 2) -> drops 2 Carrot (base drop + age branch)
+        let immature_carrot =
+            calculate_block_break_rewards(BlockType::CarrotCrop, 2, pos, None, GameMode::Survival);
+        assert_eq!(immature_carrot.drops.len(), 2);
+        assert_eq!(immature_carrot.drops[0].item, Item::Carrot);
+        assert_eq!(immature_carrot.drops[1].item, Item::Carrot);
+    }
+
+    #[test]
+    fn mining_time_calculation() {
+        let hand_dirt = mining_time_seconds(BlockType::Dirt, None);
+        assert!(hand_dirt > 0.0);
+
+        let shovel = ItemStack::new(Item::StoneShovel, 1);
+        let shovel_dirt = mining_time_seconds(BlockType::Dirt, Some(&shovel));
+        assert!(shovel_dirt < hand_dirt);
+
+        let bedrock = mining_time_seconds(BlockType::Bedrock, None);
+        assert_eq!(bedrock, f32::MAX);
+    }
+}
