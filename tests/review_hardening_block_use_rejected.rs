@@ -1,8 +1,8 @@
 mod common;
 
 use common::tcp_harness::{
-    drive_until, gameplay_request as request, loopback_properties, session_slot as slot,
-    temp_world, wait_for_response, HeldLoopback, TcpClient,
+    drive_until, gameplay_request as request, seeded_properties, session_slot as slot,
+    wait_for_response, HeldLoopback, TcpClient,
 };
 use icraft::authority::contract::{
     AuthorityTopology, SessionGameplayState, SessionInventorySlot, SESSION_INVENTORY_SLOTS,
@@ -22,12 +22,7 @@ const TARGET: (i32, i32, i32) = (8, 80, 8);
 const OWNER_POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 
 fn properties(label: &str) -> ServerProperties {
-    let mut properties = loopback_properties(
-        temp_world(&format!("plan01-block-use-{label}")),
-        "127.0.0.1",
-    );
-    properties.seed = 0x01_01_01_01;
-    properties
+    seeded_properties(&format!("plan01-block-use-{label}"), 0x01_01_01_01)
 }
 
 fn seed_chest_and_inventory(runtime: &mut ServerRuntime, player_id: u64) {

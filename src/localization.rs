@@ -458,8 +458,7 @@ fn key_component(value: &str) -> String {
     let mut key = String::with_capacity(value.len());
     for ch in value.chars() {
         if ch.is_ascii_alphanumeric() {
-            if ch.is_ascii_uppercase()
-                && key.chars().last().is_some_and(|c| c.is_ascii_lowercase())
+            if ch.is_ascii_uppercase() && key.chars().last().is_some_and(|c| c.is_ascii_lowercase())
             {
                 key.push('_');
             }
@@ -769,8 +768,14 @@ mod tests {
 
     #[test]
     fn top_level_translate_and_format_and_key_component() {
-        assert_eq!(translate(Language::English, "menu.singleplayer"), "SINGLEPLAYER");
-        assert_eq!(translate(Language::German, "menu.singleplayer"), "EINZELSPIELER");
+        assert_eq!(
+            translate(Language::English, "menu.singleplayer"),
+            "SINGLEPLAYER"
+        );
+        assert_eq!(
+            translate(Language::German, "menu.singleplayer"),
+            "EINZELSPIELER"
+        );
         assert_eq!(
             format(Language::English, "hud.fov", &[("value", "90")]),
             "FOV < 90 >"

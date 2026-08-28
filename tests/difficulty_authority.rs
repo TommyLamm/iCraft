@@ -82,11 +82,7 @@ fn difficulty_policy_is_observable_and_existing_hostiles_are_not_frozen_by_gamer
     let mut rules = WorldRules::default();
     rules.do_mob_spawning = false;
     let mut speeds = Vec::new();
-    for difficulty in [
-        Difficulty::Easy,
-        Difficulty::Normal,
-        Difficulty::Hard,
-    ] {
+    for difficulty in [Difficulty::Easy, Difficulty::Normal, Difficulty::Hard] {
         let mut world = ServerWorld::new_with_difficulty(
             7,
             icraft::dimension::Dimension::Overworld,
@@ -142,7 +138,10 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
         },
     )
     .expect("embedded listen topology should construct");
-    assert_eq!(embedded.authority.world_mut_active().difficulty, Difficulty::Hard);
+    assert_eq!(
+        embedded.authority.world_mut_active().difficulty,
+        Difficulty::Hard
+    );
     embedded
         .save_all()
         .expect("save should persist difficulty policy");
@@ -156,14 +155,20 @@ fn difficulty_persists_through_server_properties_and_embedded_dedicated_parity()
         EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(4, "reloaded")),
     )
     .expect("reloaded embedded runtime");
-    assert_eq!(reloaded.authority.world_mut_active().difficulty, Difficulty::Hard);
+    assert_eq!(
+        reloaded.authority.world_mut_active().difficulty,
+        Difficulty::Hard
+    );
     reloaded.shutdown().expect("reloaded shutdown");
 
     let dedicated_props = properties("dedicated", "hard");
     let dedicated_dir = dedicated_props.world_dir.clone();
     let mut dedicated = ServerRuntime::new(dedicated_props).expect("dedicated runtime");
     assert_eq!(dedicated.authority.topology, AuthorityTopology::Dedicated);
-    assert_eq!(dedicated.authority.world_mut_active().difficulty, Difficulty::Hard);
+    assert_eq!(
+        dedicated.authority.world_mut_active().difficulty,
+        Difficulty::Hard
+    );
     dedicated.shutdown().expect("dedicated shutdown");
 
     let _ = fs::remove_dir_all(world_dir);

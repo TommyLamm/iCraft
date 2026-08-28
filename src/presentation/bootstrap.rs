@@ -225,7 +225,8 @@ pub(crate) fn load_launch_world_state(
     let mut camera_pitch = f32::to_radians(-20.0);
     let mut world_time = WorldTime::new();
     let mut world_seed = launch.seed;
-    let mut world_spawn = if creation_options.world_type == crate::game_rules::WorldType::Superflat {
+    let mut world_spawn = if creation_options.world_type == crate::game_rules::WorldType::Superflat
+    {
         (8, 65, 8)
     } else {
         (8, 80, 8)

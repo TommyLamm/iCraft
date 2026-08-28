@@ -417,18 +417,9 @@ mod tests {
             Difficulty::parse_strict("PEACEFUL"),
             Some(Difficulty::Peaceful)
         );
-        assert_eq!(
-            Difficulty::parse_strict("easy"),
-            Some(Difficulty::Easy)
-        );
-        assert_eq!(
-            Difficulty::parse_strict("normal"),
-            Some(Difficulty::Normal)
-        );
-        assert_eq!(
-            Difficulty::parse_strict("hard"),
-            Some(Difficulty::Hard)
-        );
+        assert_eq!(Difficulty::parse_strict("easy"), Some(Difficulty::Easy));
+        assert_eq!(Difficulty::parse_strict("normal"), Some(Difficulty::Normal));
+        assert_eq!(Difficulty::parse_strict("hard"), Some(Difficulty::Hard));
         assert_eq!(Difficulty::parse_strict("unknown"), None);
         assert_eq!(Difficulty::Easy.hostile_chase_speed_milli(), 900);
         assert_eq!(Difficulty::Normal.hostile_chase_speed_milli(), 1_000);

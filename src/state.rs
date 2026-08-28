@@ -15,7 +15,6 @@ use crate::inventory::{
     CreativeTab, GameMode, Inventory, Item, ItemStack, ToolType, CREATIVE_COLUMNS, CREATIVE_ROWS,
     CREATIVE_VISIBLE_SLOTS,
 };
-use crate::recipes::RecipeManager;
 use crate::menu::{GameSettings, WorldLaunch};
 use crate::physics::{
     player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB, PLAYER_STANDING_HEIGHT,
@@ -40,6 +39,7 @@ use crate::presentation_inventory_policy::MultiplayerRole;
 use crate::presentation_inventory_policy::{
     PresentationInventoryAction, PresentationInventoryTarget, PresentationTopology,
 };
+use crate::recipes::RecipeManager;
 use crate::world::{
     Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
 };
@@ -1054,7 +1054,7 @@ mod remote_sync_tests {
 
 const MAX_CHUNK_LOAD_JOBS: usize = 2;
 const MAX_CHUNK_MESH_JOBS: usize = 4;
- 
+
 #[cfg(test)]
 #[derive(Clone, Copy)]
 struct MeshVoxel {
@@ -2408,8 +2408,12 @@ enum CatchupStatus {
     #[allow(dead_code)]
     WorkerInFlight,
     #[allow(dead_code)]
-    ServerSubmission { since: Instant },
-    AwaitingAck { since: Instant },
+    ServerSubmission {
+        since: Instant,
+    },
+    AwaitingAck {
+        since: Instant,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

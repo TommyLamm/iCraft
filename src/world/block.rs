@@ -45,7 +45,6 @@ pub enum Biome {
     DeepOcean,
 }
 
-
 #[cfg(test)]
 fn place_oak_tree(
     blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
@@ -707,9 +706,7 @@ impl BlockType {
             | BlockType::BrewingStand
             | BlockType::Pumpkin
             | BlockType::Melon => Some(SoundMaterial::Wood),
-            BlockType::Sand | BlockType::Clay | BlockType::SoulSand => {
-                Some(SoundMaterial::Sand)
-            }
+            BlockType::Sand | BlockType::Clay | BlockType::SoulSand => Some(SoundMaterial::Sand),
             BlockType::Gravel | BlockType::Cactus => Some(SoundMaterial::Gravel),
             BlockType::Snow | BlockType::SnowLayer => Some(SoundMaterial::Snow),
             BlockType::Ice => Some(SoundMaterial::Ice),
@@ -2064,7 +2061,8 @@ mod tests {
     #[test]
     fn test_find_safe_spawn_position_fallback() {
         let mut cm = crate::chunk_manager::ChunkManager::new(8);
-        cm.chunks.insert((0, 0), crate::world::chunk::Chunk::new(0, 0));
+        cm.chunks
+            .insert((0, 0), crate::world::chunk::Chunk::new(0, 0));
         // Create ground block at (0, 63, 0) with Air above
         cm.set_block(0, 63, 0, BlockType::Cobblestone);
         cm.set_block(0, 64, 0, BlockType::Air);

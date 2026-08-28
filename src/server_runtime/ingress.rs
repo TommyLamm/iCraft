@@ -274,7 +274,10 @@ impl ServerRuntime {
                 weather_remaining_ticks: 0.0,
             });
         } else {
-            self.enqueue_host(HostToServer::WorldRules { rules, to: Some(id) });
+            self.enqueue_host(HostToServer::WorldRules {
+                rules,
+                to: Some(id),
+            });
             self.enqueue_host(HostToServer::TimeSync {
                 ticks: self.level.time,
                 weather: 0,
@@ -408,7 +411,6 @@ impl ServerRuntime {
         }
         Ok(())
     }
-
 
     pub(super) fn handle_gameplay_request(
         &mut self,
@@ -699,7 +701,9 @@ impl ServerRuntime {
                     self.network_metrics.dequeue();
                 }
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => self.network_metrics.dequeue(),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                self.network_metrics.dequeue()
+            }
         }
     }
 

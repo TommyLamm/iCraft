@@ -29,24 +29,6 @@ impl AcceptanceScenario {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AcceptanceTopology {
     Singleplayer,
-    ListenServer,
-    DedicatedTwoClients,
-}
-
-impl AcceptanceTopology {
-    pub const ALL: [Self; 3] = [
-        Self::Singleplayer,
-        Self::ListenServer,
-        Self::DedicatedTwoClients,
-    ];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Singleplayer => "singleplayer",
-            Self::ListenServer => "listen-server",
-            Self::DedicatedTwoClients => "dedicated+2-clients",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,12 +42,11 @@ pub struct AcceptanceReport {
     pub scenario: AcceptanceScenario,
     pub topology: AcceptanceTopology,
     pub assertions: Vec<AcceptanceAssertion>,
-    pub blocked_reason: Option<&'static str>,
 }
 
 impl AcceptanceReport {
     pub fn passed(&self) -> bool {
-        self.blocked_reason.is_none() && self.assertions.iter().all(|assertion| assertion.passed)
+        self.assertions.iter().all(|assertion| assertion.passed)
     }
 }
 
@@ -73,15 +54,6 @@ pub fn run_headless(
     scenario: AcceptanceScenario,
     topology: AcceptanceTopology,
 ) -> AcceptanceReport {
-    if topology != AcceptanceTopology::Singleplayer {
-        return AcceptanceReport {
-            scenario,
-            topology,
-            assertions: Vec::new(),
-            blocked_reason: Some(network_block_reason(scenario)),
-        };
-    }
-
     let assertions = match scenario {
         AcceptanceScenario::Foundation => run_foundation(),
         AcceptanceScenario::Progression => run_progression(),
@@ -91,12 +63,7 @@ pub fn run_headless(
         scenario,
         topology,
         assertions,
-        blocked_reason: None,
     }
-}
-
-const fn network_block_reason(_scenario: AcceptanceScenario) -> &'static str {
-    "Listen/Dedicated recipe rows are not this CPU physics smoke. Real TCP coverage lives in Plan30-34 (plan30_real_transport_acceptance, plan31_authoritative_block_actions, plan32_progression_travel, plan33_tcp_fishing_lifecycle, plan34_container_break_inventory_conservation) and review-hardening 01/02 (review_hardening_block_use_rejected, review_hardening_container_click)."
 }
 
 fn assertion(name: &'static str, passed: bool) -> AcceptanceAssertion {
@@ -822,39 +789,6 @@ mod tests {
                 scenario.name(),
                 report.assertions
             );
-        }
-    }
-
-    #[test]
-    fn network_recipe_rows_point_at_plan30_34_tcp_vectors() {
-        for scenario in AcceptanceScenario::ALL {
-            for topology in [
-                AcceptanceTopology::ListenServer,
-                AcceptanceTopology::DedicatedTwoClients,
-            ] {
-                let report = run_headless(scenario, topology);
-                assert!(
-                    !report.passed(),
-                    "this harness is recipe/physics smoke, not Listen/Dedicated authority"
-                );
-                let reason = report
-                    .blocked_reason
-                    .expect("network row is not this smoke harness");
-                assert!(
-                    reason.contains("Plan30-34")
-                        && reason.contains("plan31_authoritative_block_actions")
-                        && reason.contains("plan34_container_break_inventory_conservation"),
-                    "network rows must point at Plan30-34 TCP vectors: {reason}"
-                );
-                assert!(
-                    reason.contains("review_hardening"),
-                    "network rows must point at review-hardening 01/02 TCP vectors: {reason}"
-                );
-                assert!(
-                    !reason.contains("missing"),
-                    "must not lock Plan31/32 as unfinished: {reason}"
-                );
-            }
         }
     }
 }

@@ -2,8 +2,6 @@ use crate::chunk_manager::ChunkManager;
 use crate::entity::{EntityManager, EntityType};
 use glam::Vec3;
 
-
-
 pub fn spawn_passive_mobs(
     entity_manager: &mut EntityManager,
     chunk_manager: &ChunkManager,

@@ -1,8 +1,8 @@
 mod common;
 
 use common::tcp_harness::{
-    drive_until, gameplay_request as request, loopback_properties, session_slot as slot,
-    temp_world, wait_for_response, HeldLoopback, TcpClient,
+    drive_until, gameplay_request as request, held, seeded_properties, session_slot as slot,
+    wait_for_response, HeldLoopback, TcpClient,
 };
 use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::inventory::{Item, ItemStack};
@@ -33,17 +33,7 @@ const RECONNECT_LOOK: [i16; 3] = [946, -76, 315];
 const PLACE_LOOK: [i16; 3] = [480, -359, 800];
 
 fn properties(label: &str) -> ServerProperties {
-    let mut properties = loopback_properties(temp_world(&format!("plan31-{label}")), "127.0.0.1");
-    properties.seed = 0x31_31_31_31;
-    properties
-}
-
-fn held(stack: &ItemStack) -> SessionSlotWire {
-    SessionSlotWire::new(
-        icraft::network::protocol::ItemWire::from_stack(stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+    seeded_properties(&format!("plan31-{label}"), 0x31_31_31_31)
 }
 
 fn start_request_at(

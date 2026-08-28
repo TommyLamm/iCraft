@@ -2006,9 +2006,7 @@ impl ServerWorld {
             entity.action_cooldown = (entity.action_cooldown - FIXED_DT).max(0.0);
             entity.invulnerable_time = (entity.invulnerable_time - FIXED_DT).max(0.0);
             entity.fire_aspect_timer = (entity.fire_aspect_timer - FIXED_DT).max(0.0);
-            if entity.entity_type.is_hostile()
-                && !matches!(self.difficulty, Difficulty::Peaceful)
-            {
+            if entity.entity_type.is_hostile() && !matches!(self.difficulty, Difficulty::Peaceful) {
                 if let Some((_, target)) =
                     player_positions.iter().min_by(|(_, left), (_, right)| {
                         entity

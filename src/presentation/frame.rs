@@ -148,7 +148,6 @@ impl State {
             crate::perf::ScopeId::RenderPrepareTerrain,
             terrain_prepare_started.elapsed(),
         );
-
     }
 
     pub(super) fn prepare_entities(&mut self, _gpu_upload_elapsed: &mut Duration) {
@@ -480,14 +479,7 @@ impl State {
         ui_line_vertices.clear();
         if self.is_saving || self.save_error.is_some() {
             let bg_color = [0.1, 0.1, 0.1, 0.75];
-            add_ui_quad(
-                &mut ui_vertices,
-                -1.0,
-                1.0,
-                -1.0,
-                1.0,
-                bg_color,
-            );
+            add_ui_quad(&mut ui_vertices, -1.0, 1.0, -1.0, 1.0, bg_color);
 
             if self.save_error.is_some() {
                 let [mouse_x, mouse_y] = self.mouse_ndc;
@@ -732,14 +724,7 @@ impl State {
 
             // Reddish overlay
             let bg_color = [0.4, 0.0, 0.0, 0.6];
-            add_ui_quad(
-                &mut ui_vertices,
-                -1.0,
-                1.0,
-                -1.0,
-                1.0,
-                bg_color,
-            );
+            add_ui_quad(&mut ui_vertices, -1.0, 1.0, -1.0, 1.0, bg_color);
 
             // Button background
             let btn_bg = if respawn_hover {
@@ -755,14 +740,7 @@ impl State {
             let btn_y_min = -0.10;
             let btn_y_max = 0.00;
 
-            add_ui_quad(
-                &mut ui_vertices,
-                -0.3,
-                0.3,
-                btn_y_min,
-                btn_y_max,
-                btn_bg,
-            );
+            add_ui_quad(&mut ui_vertices, -0.3, 0.3, btn_y_min, btn_y_max, btn_bg);
 
             // Button border
             ui_line_vertices.push(UiVertex {
@@ -901,14 +879,7 @@ impl State {
 
             // 1. Dark overlay (screen covers from -1.0 to 1.0)
             let bg_color = [0.1, 0.1, 0.1, 0.7];
-            add_ui_quad(
-                &mut ui_vertices,
-                -1.0,
-                1.0,
-                -1.0,
-                1.0,
-                bg_color,
-            );
+            add_ui_quad(&mut ui_vertices, -1.0, 1.0, -1.0, 1.0, bg_color);
 
             // Button drawing helper
             let draw_button = |hover: bool,
@@ -1240,14 +1211,7 @@ impl State {
 
                             // 1. Black background bar
                             let bg_color = [0.0, 0.0, 0.0, 1.0];
-                            add_ui_quad(
-                                ui_vertices,
-                                bar_x0,
-                                bar_x1,
-                                bar_y0,
-                                bar_y1,
-                                bg_color,
-                            );
+                            add_ui_quad(ui_vertices, bar_x0, bar_x1, bar_y0, bar_y1, bg_color);
 
                             // 2. Colored foreground bar
                             let fg_x1 = bar_x0 + (bar_x1 - bar_x0) * ratio;
@@ -1258,14 +1222,7 @@ impl State {
                             };
                             let fg_color = [r, g, 0.0, 1.0];
 
-                            add_ui_quad(
-                                ui_vertices,
-                                bar_x0,
-                                fg_x1,
-                                bar_y0,
-                                bar_y1,
-                                fg_color,
-                            );
+                            add_ui_quad(ui_vertices, bar_x0, fg_x1, bar_y0, bar_y1, fg_color);
                         }
                     }
                 };
@@ -1274,14 +1231,7 @@ impl State {
                 let creative_catalog = self.is_creative_catalog_open();
                 // 1. Dark overlay (screen covers from -1.0 to 1.0)
                 let bg_color = [0.08, 0.08, 0.08, 0.6];
-                add_ui_quad(
-                    &mut ui_vertices,
-                    -1.0,
-                    1.0,
-                    -1.0,
-                    1.0,
-                    bg_color,
-                );
+                add_ui_quad(&mut ui_vertices, -1.0, 1.0, -1.0, 1.0, bg_color);
 
                 if creative_catalog {
                     add_ui_quad(
@@ -1407,14 +1357,7 @@ impl State {
                     } else {
                         [0.15, 0.15, 0.15, 0.8]
                     };
-                    add_ui_quad(
-                        &mut ui_vertices,
-                        x0,
-                        x1,
-                        y0,
-                        y1,
-                        slot_bg_color,
-                    );
+                    add_ui_quad(&mut ui_vertices, x0, x1, y0, y1, slot_bg_color);
 
                     // Borders
                     let border_color = match slot_type {
@@ -2256,14 +2199,7 @@ impl State {
                 let bg_x1 = 0.415;
                 let bg_y0 = -0.96;
                 let bg_y1 = -0.94 + slot_h;
-                add_ui_quad(
-                    &mut ui_vertices,
-                    bg_x0,
-                    bg_x1,
-                    bg_y0,
-                    bg_y1,
-                    bg_color,
-                );
+                add_ui_quad(&mut ui_vertices, bg_x0, bg_x1, bg_y0, bg_y1, bg_color);
 
                 // Slots
                 for i in 0..9 {
@@ -3503,7 +3439,6 @@ impl State {
             total_draw_calls += u64::from(self.num_ui_line_vertices > 0);
         }
         self.perf_counters.draw_calls = total_draw_calls;
-
     }
 
     pub(super) fn encode_frame(
@@ -3961,6 +3896,5 @@ impl State {
         self.perf_counters.frame_allocations = allocs_after.saturating_sub(allocs_before);
         self.record_frame_perf_sample();
         Ok(())
-
     }
 }

@@ -3,13 +3,13 @@
 
 mod common;
 
-use common::tcp_harness::{gameplay_request, loopback_properties, session_slot as slot};
+use common::tcp_harness::{gameplay_request, held, loopback_properties, session_slot as slot};
 use icraft::authority::contract::{SessionBrewState, SessionGameplayState};
 use icraft::dimension::Dimension;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::protocol::{
-    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, ItemWire, RejectReason,
-    SessionSlotWire, SlotRefWire,
+    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, RejectReason,
+    SlotRefWire,
 };
 use icraft::network::server::ServerToHost;
 use icraft::server_runtime::{
@@ -43,14 +43,6 @@ fn properties(label: &str) -> ServerProperties {
     properties.simulation_distance = 4;
     properties.max_players = 20;
     properties
-}
-
-fn held(stack: &ItemStack) -> SessionSlotWire {
-    SessionSlotWire::new(
-        ItemWire::from_stack(stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
 }
 
 fn request(

@@ -1882,7 +1882,9 @@ mod tests {
                 persisted.block_states.clone(),
             ))
             .unwrap();
-        host_tx.try_send(snapshot(id_a, 8, vec![8], vec![0])).unwrap();
+        host_tx
+            .try_send(snapshot(id_a, 8, vec![8], vec![0]))
+            .unwrap();
         host_tx
             .try_send(snapshot(
                 id_b,
@@ -1950,7 +1952,9 @@ mod tests {
             "both TCP clients must ACK accepted snapshots"
         );
 
-        host_tx.try_send(snapshot(id_a, 8, vec![8], vec![0])).unwrap();
+        host_tx
+            .try_send(snapshot(id_a, 8, vec![8], vec![0]))
+            .unwrap();
         assert!(matches!(
             wait_for_event(&event_rx_a),
             ClientToGame::ChunkData {

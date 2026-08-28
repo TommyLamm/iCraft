@@ -112,7 +112,6 @@ pub fn explode(
         .collect()
 }
 
-
 fn get_highest_solid_y(chunk_manager: &ChunkManager, x: i32, z: i32) -> Option<i32> {
     let height = chunk_manager.dimension.height();
     for y in (height.min_y..height.max_y_exclusive()).rev() {

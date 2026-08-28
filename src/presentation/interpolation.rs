@@ -125,7 +125,10 @@ impl ReplicatedEntityState {
         should_snap
     }
 
-    pub(crate) fn sample(&self, target_time: f64) -> Option<crate::network::protocol::EntityStateWire> {
+    pub(crate) fn sample(
+        &self,
+        target_time: f64,
+    ) -> Option<crate::network::protocol::EntityStateWire> {
         let first = self.snapshots.front().copied()?;
         if self.snapshots.len() == 1 || target_time <= first.time {
             return Some(first.state);
@@ -357,4 +360,3 @@ pub(crate) fn sample_snapshot_buffer(
         ..latest
     })
 }
-

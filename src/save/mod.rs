@@ -21,8 +21,8 @@ pub use format::{
     PLAYER_IDENTITY_MAX_LEN, PLAYER_SAVE_MAGIC, PLAYER_SAVE_VERSION, WORLD_META_FILE,
 };
 pub use index::{
-    default_mutation_revision_index_capacity, DirtyChunkSet, MutationRevisionIndex,
-    SaveState, MUTATION_REVISION_INDEX_CAPACITY,
+    default_mutation_revision_index_capacity, DirtyChunkSet, MutationRevisionIndex, SaveState,
+    MUTATION_REVISION_INDEX_CAPACITY,
 };
 pub use player::normalize_player_identity;
 pub use region::{
@@ -188,13 +188,7 @@ impl SaveManager {
         data: &PlayerData,
         effects: &[PlayerEffectWire],
     ) -> io::Result<()> {
-        player::save_dedicated_player(
-            &self.world_dir,
-            username,
-            current_dimension,
-            data,
-            effects,
-        )
+        player::save_dedicated_player(&self.world_dir, username, current_dimension, data, effects)
     }
 
     /// Load a dedicated player payload, migrating the version-1 runtime file
@@ -207,10 +201,7 @@ impl SaveManager {
     /// Enumerate all readable chunk payloads for a dimension. Region files are
     /// scanned in a deterministic order and bounded to avoid turning a
     /// malformed save directory into an unbounded allocation.
-    pub fn load_saved_chunks_in(
-        &self,
-        dimension: Dimension,
-    ) -> io::Result<Vec<ChunkSaveData>> {
+    pub fn load_saved_chunks_in(&self, dimension: Dimension) -> io::Result<Vec<ChunkSaveData>> {
         const MAX_REGION_FILES: usize = 65_536;
         const MAX_CHUNKS: usize = 1_000_000;
         let directory = self.region_dir(dimension);
@@ -264,12 +255,13 @@ impl SaveManager {
                         "too many saved chunks in authoritative world",
                     ));
                 }
-                let mut data = format::deserialize_chunk_save_data(&chunk_bytes).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("chunk decode failed in {}", path.display()),
-                    )
-                })?;
+                let mut data =
+                    format::deserialize_chunk_save_data(&chunk_bytes).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("chunk decode failed in {}", path.display()),
+                        )
+                    })?;
                 data.chunk_x = rx.saturating_mul(32).saturating_add(i32::from(lx));
                 data.chunk_z = rz.saturating_mul(32).saturating_add(i32::from(lz));
                 chunks.push(data);

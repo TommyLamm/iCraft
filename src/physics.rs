@@ -87,7 +87,6 @@ pub fn block_shape(block: BlockType, state_raw: u8, pos: (i32, i32, i32)) -> Vox
     crate::voxel_shape::block_collision_shape(block, state_raw, pos, None)
 }
 
-
 pub fn block_placement_decision(
     block: BlockType,
     block_state: u8,
@@ -463,19 +462,14 @@ pub fn resolve_axis_box_collision(
     chunk_manager: &ChunkManager,
     axis: usize,
 ) {
-    let body_aabb = AABB::new(
-        *position + Vec3::new(0.0, size.y * 0.5, 0.0),
-        size,
-    );
+    let body_aabb = AABB::new(*position + Vec3::new(0.0, size.y * 0.5, 0.0), size);
     let height = chunk_manager.dimension.height();
 
     // 檢測周圍可能相交的方塊
     let min_x = body_aabb.min.x.floor() as i32;
     let max_x = body_aabb.max.x.floor() as i32;
-    let min_y =
-        (body_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
-    let max_y =
-        (body_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
+    let min_y = (body_aabb.min.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
+    let max_y = (body_aabb.max.y.floor() as i32).clamp(height.min_y, height.max_y_exclusive() - 1);
     let min_z = body_aabb.min.z.floor() as i32;
     let max_z = body_aabb.max.z.floor() as i32;
 
@@ -493,10 +487,8 @@ pub fn resolve_axis_box_collision(
                     );
 
                     for block_aabb in shape.iter() {
-                        let current_aabb = AABB::new(
-                            *position + Vec3::new(0.0, size.y * 0.5, 0.0),
-                            size,
-                        );
+                        let current_aabb =
+                            AABB::new(*position + Vec3::new(0.0, size.y * 0.5, 0.0), size);
                         if current_aabb.intersects(block_aabb) {
                             if axis == 0 {
                                 // X 軸
@@ -646,7 +638,8 @@ mod tests {
             is_open: true,
             chest_type: ChestType::Single,
         };
-        let open_aabb = block_shape(BlockType::OakDoor, open_door_state.encode(), (2, 10, 2)).boxes[0];
+        let open_aabb =
+            block_shape(BlockType::OakDoor, open_door_state.encode(), (2, 10, 2)).boxes[0];
         assert_eq!(open_aabb.min, Vec3::new(2.0, 10.0, 2.0));
         assert_eq!(open_aabb.max, Vec3::new(2.1875, 11.0, 3.0));
 
@@ -657,7 +650,8 @@ mod tests {
             is_open: false,
             chest_type: ChestType::Single,
         };
-        let trap_aabb = block_shape(BlockType::OakTrapdoor, closed_trapdoor.encode(), (0, 64, 0)).boxes[0];
+        let trap_aabb =
+            block_shape(BlockType::OakTrapdoor, closed_trapdoor.encode(), (0, 64, 0)).boxes[0];
         assert_eq!(trap_aabb.min, Vec3::new(0.0, 64.0, 0.0));
         assert_eq!(trap_aabb.max, Vec3::new(1.0, 64.1875, 1.0));
     }

@@ -1,8 +1,10 @@
-use icraft::authority::contract::SessionInventorySlot;
+use icraft::authority::contract::{SessionGameplayState, SessionInventorySlot};
 use icraft::dimension::Dimension;
 use icraft::inventory::ItemStack;
 use icraft::network::client::{ClientToGame, GameToClient, NetworkClient};
-use icraft::network::protocol::{GameplayOperation, GameplayRequest, GameplayResponse};
+use icraft::network::protocol::{
+    GameplayOperation, GameplayRequest, GameplayResponse, ItemWire, SessionSlotWire, SlotRefWire,
+};
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpListener};
@@ -289,8 +291,42 @@ pub fn gameplay_request(
 
 pub fn session_slot(stack: ItemStack) -> SessionInventorySlot {
     SessionInventorySlot::from_wire(
-        icraft::network::protocol::ItemWire::from_stack(&stack),
+        ItemWire::from_stack(&stack),
         stack.can_break,
         stack.can_place_on,
     )
 }
+
+pub fn held(stack: &ItemStack) -> SessionSlotWire {
+    SessionSlotWire::new(
+        ItemWire::from_stack(stack),
+        stack.can_break,
+        stack.can_place_on,
+    )
+}
+
+pub fn source(state: &SessionGameplayState, index: u8, count: u16) -> SlotRefWire {
+    SlotRefWire {
+        index,
+        count,
+        expected: state.inventory[usize::from(index)]
+            .expect("fixture source slot")
+            .into(),
+    }
+}
+
+pub fn current_revision(runtime: &ServerRuntime, id: u64) -> u64 {
+    let dimension = runtime
+        .authority
+        .session(id)
+        .and_then(|session| Dimension::from_wire(session.dimension))
+        .expect("fixture session dimension");
+    runtime.authority.revision_for_dimension(dimension)
+}
+
+pub fn seeded_properties(prefix: &str, seed: u64) -> ServerProperties {
+    let mut properties = loopback_properties(temp_world(prefix), "127.0.0.1");
+    properties.seed = seed;
+    properties
+}
+

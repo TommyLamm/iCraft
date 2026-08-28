@@ -1468,9 +1468,15 @@ impl State {
         if let Some(stack) = held {
             base_damage +=
                 crate::enchantment::attack_damage_bonus(&stack.enchantments) * cooldown_factor;
-            knockback +=
-                stack.enchantments.level_of(crate::enchantment::Enchantment::Knockback(1)) as f32 * 0.5 * cooldown_factor;
-            fire_aspect_level = stack.enchantments.level_of(crate::enchantment::Enchantment::FireAspect(1));
+            knockback += stack
+                .enchantments
+                .level_of(crate::enchantment::Enchantment::Knockback(1))
+                as f32
+                * 0.5
+                * cooldown_factor;
+            fire_aspect_level = stack
+                .enchantments
+                .level_of(crate::enchantment::Enchantment::FireAspect(1));
         }
 
         let damage = (base_damage * cooldown_factor).max(1.0);
@@ -1506,7 +1512,10 @@ impl State {
             // Mob drops
             if let Some(kill) = claim_standard_player_kill(entity) {
                 let looting = held
-                    .map(|s| s.enchantments.level_of(crate::enchantment::Enchantment::Looting(1)))
+                    .map(|s| {
+                        s.enchantments
+                            .level_of(crate::enchantment::Enchantment::Looting(1))
+                    })
                     .unwrap_or(0);
                 self.settle_standard_player_kill(kill, looting);
             }
@@ -1531,7 +1540,8 @@ impl State {
                         .map(|stack| {
                             stack
                                 .enchantments
-                                .level_of(crate::enchantment::Enchantment::Infinity) > 0
+                                .level_of(crate::enchantment::Enchantment::Infinity)
+                                > 0
                         })
                         .unwrap_or(false);
 
@@ -1586,7 +1596,9 @@ impl State {
                             .play_sound(crate::audio::SoundId::ArrowShoot);
 
                         if self.game_mode != GameMode::Creative {
-                            if let Some(ref mut stack) = self.inventory.hotbar[self.inventory.selected] {
+                            if let Some(ref mut stack) =
+                                self.inventory.hotbar[self.inventory.selected]
+                            {
                                 if stack.durability > 0 {
                                     stack.durability = stack.durability.saturating_sub(1);
                                     if stack.durability == 0 {
@@ -1615,8 +1627,11 @@ impl State {
                 crate::world::BlockType::Chest | crate::world::BlockType::EndCityChest
             );
             if is_chest {
-                let partner = self.double_chest_partner((x, y, z), crate::world::ChestType::Left)
-                    .or_else(|| self.double_chest_partner((x, y, z), crate::world::ChestType::Right));
+                let partner = self
+                    .double_chest_partner((x, y, z), crate::world::ChestType::Left)
+                    .or_else(|| {
+                        self.double_chest_partner((x, y, z), crate::world::ChestType::Right)
+                    });
                 self.drop_chest_inventory((x, y, z));
                 self.close_legacy_container_sessions_at((x, y, z));
                 if let Some(partner) = partner {
@@ -1725,10 +1740,15 @@ impl State {
         dirty_chunks: &mut std::collections::HashSet<(i32, i32)>,
     ) {
         let mut broken = Vec::new();
-        self.chunk_manager
-            .check_and_break_unsupported_above(wx, wy, wz, dirty_chunks, |position, block| {
+        self.chunk_manager.check_and_break_unsupported_above(
+            wx,
+            wy,
+            wz,
+            dirty_chunks,
+            |position, block| {
                 broken.push((position, block));
-            });
+            },
+        );
         for &(position, _block) in &broken {
             self.broadcast_block_change(position.0, position.1, position.2, BlockType::Air);
         }
@@ -1749,14 +1769,15 @@ impl State {
             return;
         }
         let mut broken = Vec::new();
-        self.chunk_manager.check_and_break_unsupported_for_loaded_chunk(
-            cx,
-            cz,
-            dirty_chunks,
-            |position, block| {
-                broken.push((position, block));
-            },
-        );
+        self.chunk_manager
+            .check_and_break_unsupported_for_loaded_chunk(
+                cx,
+                cz,
+                dirty_chunks,
+                |position, block| {
+                    broken.push((position, block));
+                },
+            );
         for &(position, _block) in &broken {
             self.broadcast_block_change(position.0, position.1, position.2, BlockType::Air);
         }
@@ -1775,13 +1796,8 @@ impl State {
             return;
         }
         for ((wx, wy, wz), block) in broken_blocks {
-            let rewards = calculate_block_break_rewards(
-                block,
-                0,
-                (wx, wy, wz),
-                None,
-                self.game_mode,
-            );
+            let rewards =
+                calculate_block_break_rewards(block, 0, (wx, wy, wz), None, self.game_mode);
             let sound_pos = glam::Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
             for drop in &rewards.drops {
                 self.spawn_dropped_item(drop.item, sound_pos);
@@ -2359,11 +2375,14 @@ impl State {
                                 self.anvil.output = None;
                                 self.anvil.rename.clear();
                                 self.anvil.refresh();
-                                self.audio_manager.play_sound(crate::audio::SoundId::UiClick);
+                                self.audio_manager
+                                    .play_sound(crate::audio::SoundId::UiClick);
                             }
                         }
                     }
-                    SlotType::ContainerSlot(slot) if !self.presentation_topology().is_legacy_owner() => {
+                    SlotType::ContainerSlot(slot)
+                        if !self.presentation_topology().is_legacy_owner() =>
+                    {
                         self.submit_local_authority_container_action(
                             self.container_target.unwrap_or((0, 0, 0)),
                             crate::network::protocol::ContainerAction::Click,
@@ -2535,7 +2554,11 @@ impl State {
         self.open_inventory();
     }
 
-    pub(super) fn legacy_chest_viewer_count(&self, dimension: u8, position: (i32, i32, i32)) -> usize {
+    pub(super) fn legacy_chest_viewer_count(
+        &self,
+        dimension: u8,
+        position: (i32, i32, i32),
+    ) -> usize {
         let mut count = self
             .container_sessions
             .viewer_count(dimension, position.0, position.1, position.2);
@@ -2597,7 +2620,11 @@ impl State {
         }
     }
 
-    pub(super) fn legacy_execute_active_merchant_trade(&mut self, villager_id: u64, offer_index: usize) -> bool {
+    pub(super) fn legacy_execute_active_merchant_trade(
+        &mut self,
+        villager_id: u64,
+        offer_index: usize,
+    ) -> bool {
         let discount = if self.player_state.hero_of_the_village_timer > 0.0 {
             0.3
         } else {

@@ -308,10 +308,13 @@ impl NetworkInbound {
 #[derive(Default)]
 pub(crate) struct NetworkStaging {
     pub(crate) reliable: std::collections::VecDeque<NetworkInbound>,
-    pub(crate) latest_positions: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    pub(crate) latest_positions:
+        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
     pub(crate) latest_entities: std::collections::HashMap<(u8, u64), NetworkInbound>,
-    pub(crate) latest_health: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
-    pub(crate) latest_effects: std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    pub(crate) latest_health:
+        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
+    pub(crate) latest_effects:
+        std::collections::HashMap<crate::network::protocol::PlayerId, NetworkInbound>,
     pub(crate) latest_time_sync: Option<NetworkInbound>,
 }
 
@@ -440,7 +443,10 @@ impl NetworkStaging {
 
     /// Remove one event only when its full estimated footprint fits. Reliable
     /// events are considered first and never skipped, preserving strict FIFO.
-    pub(crate) fn pop_next_if_fits(&mut self, remaining_bytes: usize) -> Option<(NetworkInbound, usize)> {
+    pub(crate) fn pop_next_if_fits(
+        &mut self,
+        remaining_bytes: usize,
+    ) -> Option<(NetworkInbound, usize)> {
         if let Some(event) = self.reliable.front() {
             let event_bytes = event.estimated_bytes();
             if event_bytes > remaining_bytes {
@@ -981,8 +987,8 @@ impl NetworkHandle {
         pitch: f32,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::PlayerPosition {
+            let _ =
+                host_to_server.tracked_send(crate::network::server::HostToServer::PlayerPosition {
                     to: None,
                     id,
                     sequence,
@@ -992,8 +998,7 @@ impl NetworkHandle {
                     z: position.z,
                     yaw,
                     pitch,
-                },
-            );
+                });
         }
     }
 
@@ -1079,8 +1084,8 @@ impl NetworkHandle {
         raw_fluid: u8,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::BlockChange {
+            let _ =
+                host_to_server.tracked_send(crate::network::server::HostToServer::BlockChange {
                     to: None,
                     dimension: dimension as u8,
                     revision,
@@ -1090,8 +1095,7 @@ impl NetworkHandle {
                     block,
                     state,
                     raw_fluid,
-                },
-            );
+                });
         }
     }
 
@@ -1126,14 +1130,13 @@ impl NetworkHandle {
         state: crate::network::protocol::EntityStateWire,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::EntitySpawn {
+            let _ =
+                host_to_server.tracked_send(crate::network::server::HostToServer::EntitySpawn {
                     to: None,
                     dimension: dimension as u8,
                     sequence,
                     state,
-                },
-            );
+                });
         }
     }
 
@@ -1144,14 +1147,13 @@ impl NetworkHandle {
         state: crate::network::protocol::EntityStateWire,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::EntityState {
+            let _ =
+                host_to_server.tracked_send(crate::network::server::HostToServer::EntityState {
                     to: None,
                     dimension: dimension as u8,
                     sequence,
                     state,
-                },
-            );
+                });
         }
     }
 
@@ -1162,14 +1164,13 @@ impl NetworkHandle {
         entity_id: u64,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::EntityDespawn {
+            let _ =
+                host_to_server.tracked_send(crate::network::server::HostToServer::EntityDespawn {
                     to: None,
                     dimension: dimension as u8,
                     sequence,
                     entity_id,
-                },
-            );
+                });
         }
     }
 
@@ -1229,14 +1230,13 @@ impl NetworkHandle {
         effects: Vec<crate::network::protocol::PlayerEffectWire>,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::PlayerEffect {
+            let _ =
+                host_to_server.tracked_send(crate::network::server::HostToServer::PlayerEffect {
                     to: None,
                     sequence,
                     player_id,
                     effects,
-                },
-            );
+                });
         }
     }
 
@@ -1278,21 +1278,25 @@ impl NetworkHandle {
         reason: String,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server
-                .try_send(crate::network::server::HostToServer::DisconnectCatchupClient { to, reason });
+            let _ = host_to_server.try_send(
+                crate::network::server::HostToServer::DisconnectCatchupClient { to, reason },
+            );
         }
     }
 
-    pub(crate) fn broadcast_time_sync(&self, ticks: u64, weather: u8, weather_remaining_ticks: f32) {
+    pub(crate) fn broadcast_time_sync(
+        &self,
+        ticks: u64,
+        weather: u8,
+        weather_remaining_ticks: f32,
+    ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::TimeSync {
-                    to: None,
-                    ticks,
-                    weather,
-                    weather_remaining_ticks,
-                },
-            );
+            let _ = host_to_server.tracked_send(crate::network::server::HostToServer::TimeSync {
+                to: None,
+                ticks,
+                weather,
+                weather_remaining_ticks,
+            });
         }
     }
 
@@ -1304,13 +1308,12 @@ impl NetworkHandle {
         to: crate::network::protocol::PlayerId,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ =
-                host_to_server.tracked_send(crate::network::server::HostToServer::TimeSync {
-                    to: Some(to),
-                    ticks,
-                    weather,
-                    weather_remaining_ticks,
-                });
+            let _ = host_to_server.tracked_send(crate::network::server::HostToServer::TimeSync {
+                to: Some(to),
+                ticks,
+                weather,
+                weather_remaining_ticks,
+            });
         }
     }
 
@@ -1327,15 +1330,21 @@ impl NetworkHandle {
         to: crate::network::protocol::PlayerId,
     ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server
-                .tracked_send(crate::network::server::HostToServer::WorldRules { to: Some(to), rules });
+            let _ = host_to_server.tracked_send(crate::network::server::HostToServer::WorldRules {
+                to: Some(to),
+                rules,
+            });
         }
     }
 
-    pub(crate) fn broadcast_lightning_strike(&self, strike: crate::network::protocol::LightningStrike) {
+    pub(crate) fn broadcast_lightning_strike(
+        &self,
+        strike: crate::network::protocol::LightningStrike,
+    ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
-            let _ = host_to_server
-                .try_send(crate::network::server::HostToServer::BroadcastLightningStrike { strike });
+            let _ = host_to_server.try_send(
+                crate::network::server::HostToServer::BroadcastLightningStrike { strike },
+            );
         }
     }
 
@@ -1399,7 +1408,11 @@ impl NetworkHandle {
         }
     }
 
-    pub(crate) fn notify_player_join(&self, id: crate::network::protocol::PlayerId, username: String) {
+    pub(crate) fn notify_player_join(
+        &self,
+        id: crate::network::protocol::PlayerId,
+        username: String,
+    ) {
         if let NetworkHandle::Host { host_to_server, .. } = self {
             let _ = host_to_server.tracked_send(
                 crate::network::server::HostToServer::NotifyPlayerJoin { id, username },
@@ -1434,4 +1447,3 @@ impl NetworkHandle {
         crate::perf::reset_network_queue_stats();
     }
 }
-

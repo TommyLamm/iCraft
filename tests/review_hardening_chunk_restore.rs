@@ -109,7 +109,12 @@ fn save_all_does_not_replace_empty_inner_zlib_with_generated_terrain() {
 
     let mut runtime = dedicated_runtime(world_dir.clone());
     assert!(
-        !runtime.authority.world_mut_active().chunks.chunks.contains_key(&(0, 0)),
+        !runtime
+            .authority
+            .world_mut_active()
+            .chunks
+            .chunks
+            .contains_key(&(0, 0)),
         "failed restore must not insert the column"
     );
     assert!(runtime
@@ -143,7 +148,12 @@ fn player_modified_chunk_with_corrupt_inner_zlib_is_not_rewritten_as_generated()
 
     let mut runtime = dedicated_runtime(world_dir.clone());
     runtime.authority.world_mut_active().ensure_chunk(0, 0);
-    assert!(!runtime.authority.world_mut_active().chunks.chunks.contains_key(&(0, 0)));
+    assert!(!runtime
+        .authority
+        .world_mut_active()
+        .chunks
+        .chunks
+        .contains_key(&(0, 0)));
     runtime.save_all().unwrap();
     drop(runtime);
 

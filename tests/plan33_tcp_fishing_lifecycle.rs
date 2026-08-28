@@ -1,8 +1,8 @@
 mod common;
 
 use common::tcp_harness::{
-    drive_until, gameplay_request as request, loopback_properties, session_slot, temp_world,
-    wait_for_response, HeldLoopback, TcpClient,
+    drive_until, gameplay_request as request, seeded_properties, session_slot, wait_for_response,
+    HeldLoopback, TcpClient,
 };
 use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::authority::fishing::water_probe_position;
@@ -26,9 +26,7 @@ const OBSERVER_POSITION: [f32; 3] = [10.0, 80.0, 8.0];
 const LOOK: [i16; 3] = [0, 0, 1_000];
 
 fn properties(label: &str) -> ServerProperties {
-    let mut properties = loopback_properties(temp_world(&format!("plan33-{label}")), "127.0.0.1");
-    properties.seed = 0x33_33_33_33;
-    properties
+    seeded_properties(&format!("plan33-{label}"), 0x33_33_33_33)
 }
 
 fn fishing(action: u8) -> GameplayOperation {

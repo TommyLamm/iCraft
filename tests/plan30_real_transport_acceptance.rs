@@ -1,18 +1,16 @@
 mod common;
 
 use common::tcp_harness::{
-    drive_until, gameplay_request as request, loopback_properties, session_slot, temp_world,
-    wait_for_response, HeldLoopback, TcpClient,
+    current_revision, drive_until, gameplay_request as request, seeded_properties, session_slot,
+    source, wait_for_response, HeldLoopback, TcpClient,
 };
-use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
+use icraft::authority::contract::AuthorityTopology;
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::block_entity::{BlockEntity, FurnaceBlockEntity};
-use icraft::dimension::Dimension;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient};
 use icraft::network::protocol::{
     GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
-    SlotRefWire,
 };
 use icraft::network::server::ServerToHost;
 use icraft::server_runtime::{
@@ -28,28 +26,7 @@ const POSITION: [f32; 3] = [8.0, 80.0, 8.0];
 const VICTIM_POSITION: [f32; 3] = [8.0, 80.0, 9.0];
 
 fn properties(label: &str) -> ServerProperties {
-    let mut properties = loopback_properties(temp_world(&format!("plan30-{label}")), "127.0.0.1");
-    properties.seed = 0x30_30_30_30;
-    properties
-}
-
-fn source(state: SessionGameplayState, index: u8, count: u16) -> SlotRefWire {
-    SlotRefWire {
-        index,
-        count,
-        expected: state.inventory[usize::from(index)]
-            .expect("fixture source slot")
-            .into(),
-    }
-}
-
-fn current_revision(runtime: &ServerRuntime, id: u64) -> u64 {
-    let dimension = runtime
-        .authority
-        .session(id)
-        .and_then(|session| Dimension::from_wire(session.dimension))
-        .expect("fixture session dimension");
-    runtime.authority.revision_for_dimension(dimension)
+    seeded_properties(&format!("plan30-{label}"), 0x30_30_30_30)
 }
 
 /// Reset long-lived domain reservations between independent wire lanes.  This
@@ -64,7 +41,10 @@ fn reset_persistent_domains(runtime: &mut ServerRuntime, id: u64) {
         .and_then(|session| session.gameplay.fishing_hook)
         .map(|hook| hook.entity_id);
     if let Some(hook) = hook {
-        runtime.authority.world_mut_active().remove_authority_entity(hook);
+        runtime
+            .authority
+            .world_mut_active()
+            .remove_authority_entity(hook);
     }
     let revision = current_revision(runtime, id);
     if let Some(session) = runtime.authority.session_mut(id) {
@@ -115,12 +95,16 @@ fn prepare_fixture(runtime: &mut ServerRuntime, owner: u64, victim: u64) {
     let mut furnace = FurnaceBlockEntity::new();
     furnace.slots[2] = Some(ItemStack::new(Item::IronIngot, 2));
     furnace.accumulated_xp = 4.0;
-    runtime.authority.world_mut_active().chunks.set_block_entity(
-        furnace_position.0,
-        furnace_position.1,
-        furnace_position.2,
-        Some(BlockEntity::Furnace(furnace)),
-    );
+    runtime
+        .authority
+        .world_mut_active()
+        .chunks
+        .set_block_entity(
+            furnace_position.0,
+            furnace_position.1,
+            furnace_position.2,
+            Some(BlockEntity::Furnace(furnace)),
+        );
 
     for id in [owner, victim] {
         let player = runtime
@@ -319,7 +303,7 @@ fn run_singleplayer_embedded_contract() {
         .session(HOST_SESSION_ID)
         .expect("embedded owner state")
         .gameplay;
-    let plank = source(state, 1, 1);
+    let plank = source(&state, 1, 1);
     let mut sources = [None; 9];
     sources[0] = Some(plank);
     sources[2] = Some(plank);
@@ -356,7 +340,7 @@ fn run_singleplayer_embedded_contract() {
             x: 8,
             y: 80,
             z: 11,
-            source: source(state, 3, 1),
+            source: source(&state, 3, 1),
             option: 2,
         },
     );
@@ -380,7 +364,7 @@ fn run_singleplayer_embedded_contract() {
             x: 8,
             y: 80,
             z: 12,
-            left: source(state, 3, 1),
+            left: source(&state, 3, 1),
             right: None,
             rename: "Plan30 Pick".into(),
         },
@@ -406,8 +390,8 @@ fn run_singleplayer_embedded_contract() {
             x: 8,
             y: 80,
             z: 10,
-            ingredient: Some(source(owner_state, 5, 1)),
-            bottles: [Some(source(owner_state, 2, 1)), None, None],
+            ingredient: Some(source(&owner_state, 5, 1)),
+            bottles: [Some(source(&owner_state, 2, 1)), None, None],
         },
     );
     assert!(matches!(
@@ -692,7 +676,7 @@ fn run_topology(label: &str, listen: bool) {
         .session(owner_id)
         .expect("owner state after furnace")
         .gameplay;
-    let plank = source(owner_state, 1, 1);
+    let plank = source(&owner_state, 1, 1);
     let mut craft_sources = [None; 9];
     craft_sources[0] = Some(plank);
     craft_sources[2] = Some(plank);
@@ -730,7 +714,7 @@ fn run_topology(label: &str, listen: bool) {
             x: 8,
             y: 80,
             z: 11,
-            source: source(owner_state, 3, 1),
+            source: source(&owner_state, 3, 1),
             option: 2,
         },
     );
@@ -756,7 +740,7 @@ fn run_topology(label: &str, listen: bool) {
             x: 8,
             y: 80,
             z: 12,
-            left: source(owner_state, 3, 1),
+            left: source(&owner_state, 3, 1),
             right: None,
             rename: "Plan30 Pick".into(),
         },
@@ -784,8 +768,8 @@ fn run_topology(label: &str, listen: bool) {
             x: 8,
             y: 80,
             z: 10,
-            ingredient: Some(source(owner_state, 5, 1)),
-            bottles: [Some(source(owner_state, 2, 1)), None, None],
+            ingredient: Some(source(&owner_state, 5, 1)),
+            bottles: [Some(source(&owner_state, 2, 1)), None, None],
         },
     );
     clients[0].send_request(brew);

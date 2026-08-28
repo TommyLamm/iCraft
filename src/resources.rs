@@ -1247,11 +1247,7 @@ mod tests {
         fs::create_dir_all(user.join("base")).unwrap();
         fs::write(user.join("base/pack.json"), manifest("test.base", &[])).unwrap();
         fs::create_dir_all(user.join("theme")).unwrap();
-        fs::write(
-            user.join("theme/pack.json"),
-            manifest("test.theme", &[]),
-        )
-        .unwrap();
+        fs::write(user.join("theme/pack.json"), manifest("test.theme", &[])).unwrap();
         fs::create_dir_all(user.join("theme/lang")).unwrap();
         fs::write(user.join("theme/lang/de_de.json"), b"{}").unwrap();
         let manager = ResourcePackManager::discover(&root, &user);
@@ -1708,11 +1704,7 @@ mod tests {
 
         let user = root.join("resourcepacks");
         fs::create_dir_all(user.join("bad-json")).unwrap();
-        fs::write(
-            user.join("bad-json/pack.json"),
-            b"invalid json",
-        )
-        .unwrap();
+        fs::write(user.join("bad-json/pack.json"), b"invalid json").unwrap();
         fs::write(root.join("pack.json"), manifest(BUILTIN_PACK_ID, &[])).unwrap();
         let manager = ResourcePackManager::discover(&root, &user);
         assert!(manager.enabled_order().is_empty());

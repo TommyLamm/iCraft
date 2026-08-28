@@ -150,7 +150,6 @@ pub fn presentation_chunk_load_policy(role: &MultiplayerRole) -> PresentationChu
     }
 }
 
-
 /// Testable load-schedule gate. `generate` is invoked only when the role is
 /// allowed to materialize a local column.
 pub fn schedule_presentation_chunk_load<T>(

@@ -431,75 +431,74 @@ impl State {
     /// before pickup, matching the pre-split `tick_simulation` order.
     pub(super) fn legacy_tick_night_skip(&mut self) {
         let mut total_overworld_players = 0;
-            let mut sleeping_overworld_players = 0;
+        let mut sleeping_overworld_players = 0;
 
-            if self.current_dimension == crate::dimension::Dimension::Overworld
-                && !self.player_state.is_dead
-            {
+        if self.current_dimension == crate::dimension::Dimension::Overworld
+            && !self.player_state.is_dead
+        {
+            total_overworld_players += 1;
+            if self.player_state.is_sleeping {
+                sleeping_overworld_players += 1;
+            }
+        }
+
+        for (_id, remote) in &self.remote_players {
+            if remote.dimension == crate::dimension::Dimension::Overworld && !remote.is_dead {
                 total_overworld_players += 1;
-                if self.player_state.is_sleeping {
+                if remote.is_sleeping {
                     sleeping_overworld_players += 1;
                 }
             }
+        }
 
-            for (_id, remote) in &self.remote_players {
-                if remote.dimension == crate::dimension::Dimension::Overworld && !remote.is_dead {
-                    total_overworld_players += 1;
-                    if remote.is_sleeping {
-                        sleeping_overworld_players += 1;
-                    }
+        let required_sleepers =
+            ((total_overworld_players * self.world_rules.sleeping_percentage as usize + 99) / 100)
+                .max(1);
+        if self.world_rules.do_daylight_cycle
+            && total_overworld_players > 0
+            && sleeping_overworld_players >= required_sleepers
+        {
+            let ready_to_skip = if self.player_state.is_sleeping {
+                self.player_state.sleep_timer >= 5.0
+            } else {
+                true
+            };
+            if ready_to_skip {
+                let current_day = self.world_time.ticks / 24000;
+                self.world_time.ticks = (current_day + 1) * 24000 + 1000;
+                self.weather.clear_weather();
+
+                if self.player_state.is_sleeping {
+                    let bed_pos = self.player_state.bed_pos.unwrap_or([
+                        self.player_physics.position.x as i32,
+                        self.player_physics.position.y as i32,
+                        self.player_physics.position.z as i32,
+                    ]);
+                    let (safe_p, _) = crate::world::find_safe_spawn_position(
+                        &self.chunk_manager,
+                        (bed_pos[0], bed_pos[1], bed_pos[2]),
+                    );
+                    self.player_physics.position = safe_p;
+                    self.player_state.is_sleeping = false;
+                    self.player_state.sleep_timer = 0.0;
+                    self.player_state.bed_pos = None;
                 }
-            }
 
-            let required_sleepers =
-                ((total_overworld_players * self.world_rules.sleeping_percentage as usize + 99)
-                    / 100)
-                    .max(1);
-            if self.world_rules.do_daylight_cycle
-                && total_overworld_players > 0
-                && sleeping_overworld_players >= required_sleepers
-            {
-                let ready_to_skip = if self.player_state.is_sleeping {
-                    self.player_state.sleep_timer >= 5.0
-                } else {
-                    true
-                };
-                if ready_to_skip {
-                    let current_day = self.world_time.ticks / 24000;
-                    self.world_time.ticks = (current_day + 1) * 24000 + 1000;
-                    self.weather.clear_weather();
-
-                    if self.player_state.is_sleeping {
-                        let bed_pos = self.player_state.bed_pos.unwrap_or([
-                            self.player_physics.position.x as i32,
-                            self.player_physics.position.y as i32,
-                            self.player_physics.position.z as i32,
-                        ]);
-                        let (safe_p, _) = crate::world::find_safe_spawn_position(
-                            &self.chunk_manager,
-                            (bed_pos[0], bed_pos[1], bed_pos[2]),
-                        );
-                        self.player_physics.position = safe_p;
-                        self.player_state.is_sleeping = false;
-                        self.player_state.sleep_timer = 0.0;
-                        self.player_state.bed_pos = None;
-                    }
-
-                    let remote_ids: Vec<u64> = self.remote_players.keys().copied().collect();
-                    for id in remote_ids {
-                        if let Some(remote) = self.remote_players.get_mut(&id) {
-                            if remote.is_sleeping {
-                                remote.is_sleeping = false;
-                                remote.bed_pos = None;
-                                self.network.broadcast_sleep_state_sync(id, false);
-                            }
+                let remote_ids: Vec<u64> = self.remote_players.keys().copied().collect();
+                for id in remote_ids {
+                    if let Some(remote) = self.remote_players.get_mut(&id) {
+                        if remote.is_sleeping {
+                            remote.is_sleeping = false;
+                            remote.bed_pos = None;
+                            self.network.broadcast_sleep_state_sync(id, false);
                         }
                     }
-
-                    self.broadcast_time_sync();
-                    println!("[Game] Night skipped! Woke up. Good morning!");
                 }
+
+                self.broadcast_time_sync();
+                println!("[Game] Night skipped! Woke up. Good morning!");
             }
+        }
     }
 
     /// Leaf decay random ticks. Called after lava damage and before cactus,
@@ -739,7 +738,6 @@ impl State {
                 }
             }
         }
-
     }
 
     pub(super) fn store_or_drop_generated_item(&mut self, item: Item, position: Vec3) {
@@ -991,7 +989,12 @@ impl State {
         64.0
     }
 
-    pub(super) fn build_linked_nether_portal(&mut self, chunk_x: i32, chunk_z: i32, spawn_y: i32) -> Vec3 {
+    pub(super) fn build_linked_nether_portal(
+        &mut self,
+        chunk_x: i32,
+        chunk_z: i32,
+        spawn_y: i32,
+    ) -> Vec3 {
         let base_x = chunk_x * CHUNK_WIDTH as i32 + 6;
         let base_z = chunk_z * CHUNK_DEPTH as i32 + 8;
         let height = self.chunk_manager.dimension.height();
@@ -1017,7 +1020,13 @@ impl State {
         )
     }
 
-    pub(super) fn apply_weather_block_change(&mut self, wx: i32, wy: i32, wz: i32, block: BlockType) {
+    pub(super) fn apply_weather_block_change(
+        &mut self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        block: BlockType,
+    ) {
         if !self.presentation_topology().is_legacy_owner() {
             return;
         }
@@ -1860,7 +1869,10 @@ impl State {
         println!("[Debug] Player respawned at spawn point");
     }
 
-    pub(super) fn legacy_execute_command(&mut self, command: crate::commands::Command) -> Option<String> {
+    pub(super) fn legacy_execute_command(
+        &mut self,
+        command: crate::commands::Command,
+    ) -> Option<String> {
         use crate::commands::{Command, CommandTarget, TimeCommand, WeatherCommand};
 
         let target_is_local = |target: Option<&CommandTarget>| {
@@ -1878,9 +1890,7 @@ impl State {
         };
 
         match command {
-            Command::Help(command) => {
-                Some(crate::commands::help_text(command.as_deref()).into())
-            }
+            Command::Help(command) => Some(crate::commands::help_text(command.as_deref()).into()),
             Command::GameMode { mode, target } => {
                 if !target_is_local(target.as_ref()) {
                     Some(self.translate("command.only_local_player"))
@@ -2000,10 +2010,12 @@ impl State {
                     let x = position[0].to_string();
                     let y = position[1].to_string();
                     let z = position[2].to_string();
-                    Some(self.translation_catalog.format_lookup(
-                        "command.teleported",
-                        &[("x", &x), ("y", &y), ("z", &z)],
-                    ))
+                    Some(
+                        self.translation_catalog.format_lookup(
+                            "command.teleported",
+                            &[("x", &x), ("y", &y), ("z", &z)],
+                        ),
+                    )
                 } else {
                     Some(self.translate("command.teleport_outside"))
                 }
@@ -2022,10 +2034,12 @@ impl State {
                         .map_or(count, |remaining| count - remaining.count);
                     let received = received.to_string();
                     let item = self.localized_item_name(item);
-                    Some(self.translation_catalog.format_lookup(
-                        "command.gave",
-                        &[("count", &received), ("item", &item)],
-                    ))
+                    Some(
+                        self.translation_catalog.format_lookup(
+                            "command.gave",
+                            &[("count", &received), ("item", &item)],
+                        ),
+                    )
                 }
             }
             Command::Kill(target) => {

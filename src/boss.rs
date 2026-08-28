@@ -8,9 +8,9 @@ use crate::chunk_manager::ChunkManager;
 use crate::dimension::Dimension;
 use crate::entity::{EntityIterationKind, EntityManager, EntityType};
 use crate::inventory::{GameMode, Item};
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH, SECTION_SIZE};
 #[cfg(test)]
 use crate::world::CHUNK_HEIGHT;
+use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH, SECTION_SIZE};
 use glam::Vec3;
 
 pub type BlockPos = (i32, i32, i32);

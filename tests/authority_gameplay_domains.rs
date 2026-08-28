@@ -7,9 +7,9 @@
 
 mod common;
 
-use common::tcp_harness::session_slot;
+use common::tcp_harness::{session_slot, source};
 use glam::Vec3;
-use icraft::authority::contract::{AuthorityTopology, SessionContract, SessionGameplayState};
+use icraft::authority::contract::{AuthorityTopology, SessionContract};
 use icraft::authority::fishing::water_probe_position;
 use icraft::authority::transactions::BREW_TICKS;
 use icraft::authority::{AuthorityConfig, AuthorityCore};
@@ -19,7 +19,6 @@ use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::protocol::{
     GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, RejectReason,
-    SlotRefWire,
 };
 use icraft::world::BlockType;
 
@@ -37,16 +36,6 @@ fn new_core() -> AuthorityCore {
     ))
     .unwrap();
     core
-}
-
-fn source(state: &SessionGameplayState, index: u8, count: u16) -> SlotRefWire {
-    SlotRefWire {
-        index,
-        count,
-        expected: state.inventory[usize::from(index)]
-            .expect("source slot is present")
-            .into(),
-    }
 }
 
 fn request(
@@ -206,7 +195,11 @@ fn fishing_fixed_tick_reel_is_atomic_and_idempotent() {
     assert!(after_reel.fishing_hook.is_none());
     assert!(after_reel.inventory[0].unwrap().item.durability < before_rod);
     assert!(after_reel.experience > before_experience);
-    assert!(core.world_mut_active().entities.get_by_id(hook_id).is_none());
+    assert!(core
+        .world_mut_active()
+        .entities
+        .get_by_id(hook_id)
+        .is_none());
 
     // Duplicate reel cannot grant a second catch, and stale revisions are
     // rejected before the domain seam is entered.
@@ -518,7 +511,12 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         .world_mut_active()
         .entities
         .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 9.0));
-    let before = core.world_mut_active().entities.get_by_id(target).unwrap().health;
+    let before = core
+        .world_mut_active()
+        .entities
+        .get_by_id(target)
+        .unwrap()
+        .health;
     let hit = submit(
         &mut core,
         30,
@@ -564,7 +562,11 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         },
     );
     accepted(&lethal);
-    assert!(core.world_mut_active().entities.get_by_id(lethal_target).is_none());
+    assert!(core
+        .world_mut_active()
+        .entities
+        .get_by_id(lethal_target)
+        .is_none());
     let drops_after_lethal = core
         .world()
         .entities
@@ -687,7 +689,12 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
         .unwrap()
         .gameplay
         .attack_cooldown_ticks = 5;
-    let far_before = core.world_mut_active().entities.get_by_id(far_target).unwrap().health;
+    let far_before = core
+        .world_mut_active()
+        .entities
+        .get_by_id(far_target)
+        .unwrap()
+        .health;
     let far_response = submit(
         &mut core,
         35,
@@ -699,7 +706,11 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     );
     rejected(&far_response, RejectReason::TooFar);
     assert_eq!(
-        core.world_mut_active().entities.get_by_id(far_target).unwrap().health,
+        core.world_mut_active()
+            .entities
+            .get_by_id(far_target)
+            .unwrap()
+            .health,
         far_before
     );
 
@@ -788,12 +799,17 @@ fn combat_death_respawn_and_entity_loot_are_authoritative() {
     let kept_dead = keep_core.session(target_id).unwrap().gameplay;
     assert!(kept_dead.is_dead);
     assert_eq!(kept_dead.count_item(Item::Diamond.to_u32()), 1);
-    assert!(keep_core.world_mut_active().entities.entities.iter().all(|entity| {
-        !matches!(
-            entity.entity_type,
-            EntityType::DroppedItem | EntityType::ExperienceOrb
-        )
-    }));
+    assert!(keep_core
+        .world_mut_active()
+        .entities
+        .entities
+        .iter()
+        .all(|entity| {
+            !matches!(
+                entity.entity_type,
+                EntityType::DroppedItem | EntityType::ExperienceOrb
+            )
+        }));
 
     // A stale revision cannot replay combat after the authoritative death and
     // respawn transition.

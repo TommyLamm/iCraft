@@ -643,12 +643,16 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     let dirt = ItemStack::new(Item::Dirt, 1);
     let mut chest = ChestBlockEntity::new();
     chest.set_stack(0, Some(dirt));
-    runtime.authority.world_mut_active().chunks.set_block_entity(
-        CHEST_POSITION.0,
-        CHEST_POSITION.1,
-        CHEST_POSITION.2,
-        Some(BlockEntity::Chest(chest)),
-    );
+    runtime
+        .authority
+        .world_mut_active()
+        .chunks
+        .set_block_entity(
+            CHEST_POSITION.0,
+            CHEST_POSITION.1,
+            CHEST_POSITION.2,
+            Some(BlockEntity::Chest(chest)),
+        );
     let stone_stack = ItemStack::new(Item::Stone, 2);
     let stone = ItemWire::from_stack(&stone_stack);
     let mut alice_gameplay = runtime
@@ -902,22 +906,20 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     } else {
         panic!("dispenser block entity fixture is missing");
     }
-    { let world = runtime.authority.world_mut_active();
+    {
+        let world = runtime.authority.world_mut_active();
 
-    world.redstone.on_block_changed(
+        world
+            .redstone
+            .on_block_changed(&world.chunks, lever, Direction::East);
+    }
+    {
+        let world = runtime.authority.world_mut_active();
 
-        &world.chunks,
-        lever,
-        Direction::East,
-    ); }
-    { let world = runtime.authority.world_mut_active();
-
-    world.redstone.on_block_changed(
-
-        &world.chunks,
-        source,
-        Direction::East,
-    ); }
+        world
+            .redstone
+            .on_block_changed(&world.chunks, source, Direction::East);
+    }
 
     drive_pair_until(
         &mut runtime,
@@ -995,14 +997,13 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
         .world_mut_active()
         .set_block(lever.0, lever.1, lever.2, BlockType::Lever, 0)
         .expect("turn dispenser fixture off");
-    { let world = runtime.authority.world_mut_active();
+    {
+        let world = runtime.authority.world_mut_active();
 
-    world.redstone.on_block_changed(
-
-        &world.chunks,
-        lever,
-        Direction::East,
-    ); }
+        world
+            .redstone
+            .on_block_changed(&world.chunks, lever, Direction::East);
+    }
     drive_pair_for(
         &mut runtime,
         &mut alice,
@@ -1054,27 +1055,25 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     } else {
         panic!("dropper target chest fixture is missing");
     }
-    { let world = runtime.authority.world_mut_active();
+    {
+        let world = runtime.authority.world_mut_active();
 
-    world.redstone.on_block_changed(
-
-        &world.chunks,
-        source,
-        Direction::East,
-    ); }
+        world
+            .redstone
+            .on_block_changed(&world.chunks, source, Direction::East);
+    }
     runtime
         .authority
         .world_mut_active()
         .set_block(lever.0, lever.1, lever.2, BlockType::LeverOn, 0)
         .expect("raise dropper fixture edge");
-    { let world = runtime.authority.world_mut_active();
+    {
+        let world = runtime.authority.world_mut_active();
 
-    world.redstone.on_block_changed(
-
-        &world.chunks,
-        lever,
-        Direction::East,
-    ); }
+        world
+            .redstone
+            .on_block_changed(&world.chunks, lever, Direction::East);
+    }
 
     drive_pair_until(
         &mut runtime,

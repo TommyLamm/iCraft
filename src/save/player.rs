@@ -74,14 +74,18 @@ pub(crate) fn is_windows_reserved_stem(name: &str) -> bool {
 /// Handshake, whitelist, operators, and this file all use the same
 /// normalized key; mutating names such as `foo.bar` are rejected instead
 /// of being rewritten onto `foo_bar.dat`.
-pub fn dedicated_player_file_path(world_dir: &Path, username: &str) -> Result<PathBuf, IdentityError> {
+pub fn dedicated_player_file_path(
+    world_dir: &Path,
+    username: &str,
+) -> Result<PathBuf, IdentityError> {
     let identity = normalize_player_identity(username)?;
-    Ok(world_dir
-        .join("players")
-        .join(format!("{identity}.dat")))
+    Ok(world_dir.join("players").join(format!("{identity}.dat")))
 }
 
-pub(crate) fn dedicated_player_file_path_io(world_dir: &Path, username: &str) -> io::Result<PathBuf> {
+pub(crate) fn dedicated_player_file_path_io(
+    world_dir: &Path,
+    username: &str,
+) -> io::Result<PathBuf> {
     dedicated_player_file_path(world_dir, username)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
@@ -114,7 +118,10 @@ pub fn save_dedicated_player(
 /// Load a dedicated player payload, migrating the version-1 runtime file
 /// (which did not store current dimension) to the explicit Overworld or
 /// saved spawn dimension default.
-pub fn load_dedicated_player(world_dir: &Path, username: &str) -> io::Result<Option<DedicatedPlayerFile>> {
+pub fn load_dedicated_player(
+    world_dir: &Path,
+    username: &str,
+) -> io::Result<Option<DedicatedPlayerFile>> {
     let path = dedicated_player_file_path_io(world_dir, username)?;
     if !path.exists() {
         return Ok(None);

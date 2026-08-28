@@ -44,9 +44,9 @@ pub(crate) async fn queue_initial_roster(
             Err(_) => return Err(()),
         };
         queue_stats().enqueue(bytes, queue_now_ms());
-        permit.send(QueuedPacket::Outbound(
-            super::session::TrackedPacket::new(packet, metrics),
-        ));
+        permit.send(QueuedPacket::Outbound(super::session::TrackedPacket::new(
+            packet, metrics,
+        )));
     }
     Ok(())
 }
@@ -248,7 +248,9 @@ pub(crate) async fn run_client<S: HostEventSender>(
             return;
         }
         Ok(Ok(packet)) => {
-            eprintln!("[NetworkServer] Handshake rejected: expected Packet::Handshake, got {packet:?}");
+            eprintln!(
+                "[NetworkServer] Handshake rejected: expected Packet::Handshake, got {packet:?}"
+            );
             let _ = send_connection_packet(
                 &mut connection,
                 Packet::Disconnect {

@@ -202,12 +202,17 @@ fn prepare_topology_fixture(harness: &mut TopologyHarness) {
         2,
     ));
     furnace.accumulated_xp = 4.0;
-    harness.runtime.authority.world_mut_active().chunks.set_block_entity(
-        furnace_position[0],
-        furnace_position[1],
-        furnace_position[2],
-        Some(BlockEntity::Furnace(furnace)),
-    );
+    harness
+        .runtime
+        .authority
+        .world_mut_active()
+        .chunks
+        .set_block_entity(
+            furnace_position[0],
+            furnace_position[1],
+            furnace_position[2],
+            Some(BlockEntity::Furnace(furnace)),
+        );
 
     let mut gameplay = harness.session_state();
     gameplay.inventory[0] = Some(session_slot(icraft::inventory::ItemStack::new(

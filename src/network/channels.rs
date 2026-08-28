@@ -3,8 +3,8 @@ use std::sync::{mpsc as std_mpsc, Arc};
 use std::time::Duration;
 
 use super::protocol::{
-    Action, EntityStateWire, GameplayRequest, ItemWire, LightningStrike, PlayerEffectWire, PlayerId,
-    SessionGameplayWire,
+    Action, EntityStateWire, GameplayRequest, ItemWire, LightningStrike, PlayerEffectWire,
+    PlayerId, SessionGameplayWire,
 };
 use super::session::NetworkMetrics;
 

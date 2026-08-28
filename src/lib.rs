@@ -15,8 +15,8 @@
 //!
 //! Additional modules are `pub` so the desktop binary crate can re-export
 //! them. They are not a dedicated-server or integration-test API.
-//! `sim_harness`, `final_acceptance`, and `microbench` compile only under
-//! `cfg(test)` or feature `harness`.
+//! `sim_harness` and `final_acceptance` compile only under `cfg(test)` or
+//! feature `harness`.
 //!
 //! `src/presentation/` is the Plan 10 desktop fence and **must not** be
 //! added to this library. GPU menu, terrain arenas, and frame encode stay
@@ -61,6 +61,7 @@ pub mod gpu_frame_resources;
 pub mod interaction;
 pub mod lighting;
 pub mod localization;
+pub mod microbench;
 pub mod mob;
 pub mod navigation;
 pub mod perf;
@@ -78,8 +79,6 @@ pub mod world_tick;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod final_acceptance;
 pub(crate) mod loot;
-#[cfg(any(test, feature = "harness"))]
-pub(crate) mod microbench;
 pub mod recipes;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod sim_harness;

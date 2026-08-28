@@ -1,7 +1,5 @@
+use crate::world::block::{BlockType, RenderType, CHUNK_HEIGHT};
 use std::mem::{size_of, size_of_val};
-use crate::world::block::{
-    BlockType, RenderType, CHUNK_HEIGHT,
-};
 
 pub const SECTION_SIZE: usize = 16;
 pub const SECTION_COUNT: usize = CHUNK_HEIGHT / SECTION_SIZE;
@@ -896,7 +894,6 @@ impl ChunkSection {
                 .map_or(0, |v| size_of_val(v.as_ref()))
     }
 }
-
 
 #[cfg(test)]
 mod tests {

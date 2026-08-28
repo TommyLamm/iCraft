@@ -60,7 +60,6 @@ pub struct TradeResult {
 /// through methods below so recipe/physics smoke can describe real user actions.
 pub struct SimHarness {
     pub chunks: ChunkManager,
-    pub lighting_dirty: std::collections::HashSet<(i32, i32)>,
     pub redstone: RedstoneSystem,
     pub entities: EntityManager,
     pub player: PlayerPhysics,
@@ -79,7 +78,6 @@ pub struct SimHarness {
     pub trade_cooldowns: HashMap<u64, u32>,
     pub mount_manager: MountManager,
     pub minecart_states: HashMap<u64, crate::rail::MinecartState>,
-    pub minecart_cargo: HashMap<u64, ItemStack>,
     recipes: RecipeManager,
     dimensions: HashMap<Dimension, DimensionState>,
     next_trade_session: u64,
@@ -90,7 +88,6 @@ impl SimHarness {
         let dimension = Dimension::Overworld;
         let mut h = Self {
             chunks: Self::new_chunks(dimension),
-            lighting_dirty: std::collections::HashSet::new(),
             redstone: RedstoneSystem::new(),
             entities: EntityManager::new(),
             player: PlayerPhysics::new(Vec3::new(8.5, 72.0, 8.5)),
@@ -109,7 +106,6 @@ impl SimHarness {
             trade_cooldowns: HashMap::new(),
             mount_manager: MountManager::new(),
             minecart_states: HashMap::new(),
-            minecart_cargo: HashMap::new(),
             recipes: RecipeManager::new(),
             dimensions: HashMap::new(),
             next_trade_session: 1,
@@ -1098,11 +1094,10 @@ impl SimHarness {
         result
     }
 
-    pub fn place_minecart(&mut self, pos: Vec3, cargo: ItemStack) -> u64 {
+    pub fn place_minecart(&mut self, pos: Vec3, _cargo: ItemStack) -> u64 {
         let id = self.entities.spawn(EntityType::Minecart, pos);
         self.minecart_states
             .insert(id, crate::rail::MinecartState::new(pos));
-        self.minecart_cargo.insert(id, cargo);
         id
     }
 

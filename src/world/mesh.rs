@@ -2036,9 +2036,8 @@ mod tests {
         chunk.set_block_local(9, 64, 8, BlockType::Dirt);
         let key = SectionKey::new(0, 4, 0);
 
-        let bundle_default = chunk.generate_section_mesh_bundle(key, 1, 1, |x, y, z| {
-            test_chunk_lookup(&chunk, x, y, z)
-        });
+        let bundle_default = chunk
+            .generate_section_mesh_bundle(key, 1, 1, |x, y, z| test_chunk_lookup(&chunk, x, y, z));
         let default_stone_tile = BlockType::Stone.get_face_tex_index(0);
         let default_dirt_tile = BlockType::Dirt.get_face_tex_index(0);
         let default_vertices = &bundle_default.levels[0].opaque.vertices;
@@ -2124,9 +2123,8 @@ mod tests {
         }
 
         let key = SectionKey::new(0, 4, 0);
-        let bundle = chunk.generate_section_mesh_bundle(key, 42, 7, |x, y, z| {
-            test_chunk_lookup(&chunk, x, y, z)
-        });
+        let bundle = chunk
+            .generate_section_mesh_bundle(key, 42, 7, |x, y, z| test_chunk_lookup(&chunk, x, y, z));
 
         assert_eq!(bundle.identity.key, key);
         assert_eq!(bundle.identity.revision, 42);
@@ -2158,7 +2156,8 @@ mod tests {
     fn section_halo_occludes_boundary_neighbor() {
         let key = SectionKey::new(0, 0, 0);
         let snapshot = SectionHaloSnapshot::from_chunk(key, |wx, wy, wz| {
-            let in_section = (0..16).contains(&wx) && (0..16).contains(&wy) && (0..16).contains(&wz);
+            let in_section =
+                (0..16).contains(&wx) && (0..16).contains(&wy) && (0..16).contains(&wz);
             let neighbor_block = (wx, wy, wz) == (16, 0, 0);
             MeshVoxel {
                 block: if in_section || neighbor_block {
@@ -2296,7 +2295,7 @@ mod tests {
         assert_eq!(
             samples,
             [
-                [9, 21, 30], // side U: -X
+                [9, 21, 30],  // side U: -X
                 [10, 21, 29], // side V: -Z
                 [9, 21, 29]   // corner: -X -Z
             ]
@@ -2378,8 +2377,7 @@ mod tests {
         chunk.set_block_local(8, 1, 8, BlockType::Stone);
         chunk.heightmap[8][8] = 1;
 
-        let (vertices, _, _, _) =
-            chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+        let (vertices, _, _, _) = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
         assert!(
             vertices.iter().all(|vertex| vertex.ao() == 1.0),
             "an isolated stone cube in empty air must have full 1.0 AO across all vertices"
@@ -2391,8 +2389,7 @@ mod tests {
         chunk.heightmap[7][8] = 2;
         chunk.heightmap[8][7] = 2;
 
-        let (vertices, _, _, _) =
-            chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
+        let (vertices, _, _, _) = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
         let top_face_ao_values: Vec<f32> = vertices
             .iter()
             .filter(|vertex| {

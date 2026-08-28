@@ -77,10 +77,7 @@ impl MutationRevisionIndex {
             .unwrap_or(0)
     }
 
-    pub fn entries_in(
-        &self,
-        dimension: Dimension,
-    ) -> impl Iterator<Item = ((i32, i32), u64)> + '_ {
+    pub fn entries_in(&self, dimension: Dimension) -> impl Iterator<Item = ((i32, i32), u64)> + '_ {
         self.revisions
             .iter()
             .filter(move |((entry_dimension, _, _), _)| *entry_dimension == dimension)
@@ -99,12 +96,7 @@ impl MutationRevisionIndex {
         self.capacity.max(self.revisions.len())
     }
 
-    pub fn remove(
-        &mut self,
-        dimension: Dimension,
-        cx: i32,
-        cz: i32,
-    ) -> Option<u64> {
+    pub fn remove(&mut self, dimension: Dimension, cx: i32, cz: i32) -> Option<u64> {
         self.revisions.remove(&(dimension, cx, cz))
     }
 

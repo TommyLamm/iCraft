@@ -484,20 +484,18 @@ impl ServerRuntime {
                     block_entities,
                 }
             },
-            |(blocks, block_states, fluid_levels, block_entities)| {
-                HostToServer::SendChunk {
-                    dimension: dimension as u8,
-                    cx,
-                    cz,
-                    revision,
-                    min_section_y,
-                    section_count,
-                    blocks,
-                    block_states,
-                    fluid_levels,
-                    block_entities,
-                    to,
-                }
+            |(blocks, block_states, fluid_levels, block_entities)| HostToServer::SendChunk {
+                dimension: dimension as u8,
+                cx,
+                cz,
+                revision,
+                min_section_y,
+                section_count,
+                blocks,
+                block_states,
+                fluid_levels,
+                block_entities,
+                to,
             },
         );
     }

@@ -149,7 +149,10 @@ impl RenderRegion {
         Ok(())
     }
 
-    pub(crate) fn handle_is_live(&self, handle: &crate::chunk_render::RegionAllocationHandle) -> bool {
+    pub(crate) fn handle_is_live(
+        &self,
+        handle: &crate::chunk_render::RegionAllocationHandle,
+    ) -> bool {
         region_allocation_handle_is_live(
             self.region_instance_id,
             &self.vertex_freelist,
@@ -374,7 +377,10 @@ pub(crate) fn should_decrement_region_active_chunks(
     mesh_has_resident_section && (!mesh_has_allocation_handles || mesh_has_matching_region_handle)
 }
 
-pub(crate) fn chunk_mesh_is_registered_with_region(mesh: &ChunkMesh, region: Option<&RenderRegion>) -> bool {
+pub(crate) fn chunk_mesh_is_registered_with_region(
+    mesh: &ChunkMesh,
+    region: Option<&RenderRegion>,
+) -> bool {
     if !mesh.has_resident_section() {
         return false;
     }
@@ -533,7 +539,10 @@ impl ChunkMesh {
         self.sections.iter().any(|section| section.levels.is_some())
     }
 
-    pub(crate) fn allocation_handle_region_membership(&self, region_instance_id: u64) -> (bool, bool) {
+    pub(crate) fn allocation_handle_region_membership(
+        &self,
+        region_instance_id: u64,
+    ) -> (bool, bool) {
         let mut has_handles = false;
         let mut has_matching_handle = false;
         for section in &self.sections {
@@ -553,4 +562,3 @@ impl ChunkMesh {
         (has_handles, has_matching_handle)
     }
 }
-

@@ -199,8 +199,6 @@ pub fn build_unit_quad_prototype() -> (Vec<MobPrototypeVertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-
-
 pub fn add_cuboid(
     instances: &mut Vec<MobInstance>,
     size: Vec3,

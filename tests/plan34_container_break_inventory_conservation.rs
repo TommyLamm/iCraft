@@ -1,5 +1,5 @@
 use common::tcp_harness::{
-    drive_until, loopback_properties, session_slot as tcp_slot, temp_world, wait_for_response,
+    drive_until, held as tcp_held, seeded_properties, session_slot as tcp_slot, wait_for_response,
     HeldLoopback, TcpClient,
 };
 use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
@@ -221,17 +221,7 @@ fn dropped_total_count(stacks: &[ItemStack]) -> u32 {
 }
 
 fn tcp_properties(label: &str) -> ServerProperties {
-    let mut properties = loopback_properties(temp_world(&format!("plan34-{label}")), "127.0.0.1");
-    properties.seed = 0x34_34_34_34;
-    properties
-}
-
-fn tcp_held(stack: &ItemStack) -> SessionSlotWire {
-    SessionSlotWire::new(
-        ItemWire::from_stack(stack),
-        stack.can_break,
-        stack.can_place_on,
-    )
+    seeded_properties(&format!("plan34-{label}"), 0x34_34_34_34)
 }
 
 fn tcp_start_request(
@@ -336,12 +326,16 @@ fn run_tcp_container_vector(label: &str, listen: bool) {
         .world_mut_active()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed TCP chest block");
-    runtime.authority.world_mut_active().chunks.set_block_entity(
-        TARGET.0,
-        TARGET.1,
-        TARGET.2,
-        Some(ContainerKind::Chest.entity(expected_stacks)),
-    );
+    runtime
+        .authority
+        .world_mut_active()
+        .chunks
+        .set_block_entity(
+            TARGET.0,
+            TARGET.1,
+            TARGET.2,
+            Some(ContainerKind::Chest.entity(expected_stacks)),
+        );
     let mut owner_gameplay = SessionGameplayState::default();
     owner_gameplay.inventory[0] = Some(tcp_slot(axe));
     assert!(runtime
@@ -583,9 +577,12 @@ fn stale_state_failure_preserves_container_and_session_resources() {
     core.world_mut_active()
         .set_block(TARGET.0, TARGET.1, TARGET.2, BlockType::Chest, 0)
         .expect("seed atomicity chest");
-    core.world_mut_active()
-        .chunks
-        .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(source_entity.clone()));
+    core.world_mut_active().chunks.set_block_entity(
+        TARGET.0,
+        TARGET.1,
+        TARGET.2,
+        Some(source_entity.clone()),
+    );
     let axe = ItemStack::new(Item::StoneAxe, 1);
     let mut gameplay = core.session(SESSION_ID).unwrap().gameplay;
     gameplay.inventory[0] = Some(tcp_slot(axe));
@@ -660,9 +657,12 @@ fn double_chest_break_only_drops_target_half() {
             right_state,
         )
         .expect("seed double chest partner");
-    core.world_mut_active()
-        .chunks
-        .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(target_entity.clone()));
+    core.world_mut_active().chunks.set_block_entity(
+        TARGET.0,
+        TARGET.1,
+        TARGET.2,
+        Some(target_entity.clone()),
+    );
     core.world_mut_active().chunks.set_block_entity(
         partner.0,
         partner.1,
@@ -697,7 +697,8 @@ fn double_chest_break_only_drops_target_half() {
         .get_block_entity(TARGET.0, TARGET.1, TARGET.2)
         .is_none());
     assert_eq!(
-        core.world().get_block_entity(partner.0, partner.1, partner.2),
+        core.world()
+            .get_block_entity(partner.0, partner.1, partner.2),
         Some(&partner_entity)
     );
     let actual = dropped_entities(&core);
@@ -740,9 +741,12 @@ fn authority_matrix_conserves_two_noncontiguous_metadata_stacks_and_retries() {
         core.world_mut_active()
             .set_block(TARGET.0, TARGET.1, TARGET.2, kind.block(), 0)
             .expect("seed container block");
-        core.world_mut_active()
-            .chunks
-            .set_block_entity(TARGET.0, TARGET.1, TARGET.2, Some(kind.entity(stacks)));
+        core.world_mut_active().chunks.set_block_entity(
+            TARGET.0,
+            TARGET.1,
+            TARGET.2,
+            Some(kind.entity(stacks)),
+        );
         let request = break_request(&core, next_request_id, next_sequence, tool);
         let accepted = core.submit_request(request.clone());
         assert!(

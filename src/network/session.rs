@@ -655,7 +655,11 @@ impl GameplaySessionState {
             .cloned()
     }
 
-    pub(crate) fn rejection(&mut self, request_id: RequestId, reason: RejectReason) -> GameplayResponse {
+    pub(crate) fn rejection(
+        &mut self,
+        request_id: RequestId,
+        reason: RejectReason,
+    ) -> GameplayResponse {
         let response = GameplayResponse {
             request_id,
             server_sequence: self.allocate_server_sequence(),

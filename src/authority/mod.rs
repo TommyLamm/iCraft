@@ -112,7 +112,6 @@ pub struct DimensionTransferIntent {
     pub position: [f32; 3],
 }
 
-
 impl AuthorityCore {
     pub fn new(config: AuthorityConfig, topology: AuthorityTopology) -> Self {
         let mut worlds = BTreeMap::new();
@@ -1556,10 +1555,8 @@ mod tests {
 
     #[test]
     fn dimension_transfer_updates_session_and_world_contract() {
-        let mut core = AuthorityCore::new(
-            AuthorityConfig::default(),
-            AuthorityTopology::Singleplayer,
-        );
+        let mut core =
+            AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Singleplayer);
         let _ = core.register_session(SessionContract::new(
             7,
             "alex",
@@ -1570,10 +1567,7 @@ mod tests {
         ));
         assert!(core.set_session_dimension(7, crate::dimension::Dimension::Nether));
         assert_eq!(core.session(7).unwrap().dimension, 1);
-        assert_eq!(
-            core.active_dimension(),
-            crate::dimension::Dimension::Nether
-        );
+        assert_eq!(core.active_dimension(), crate::dimension::Dimension::Nether);
         let nether = core
             .world_ref(crate::dimension::Dimension::Nether)
             .expect("nether world stays in the map");
@@ -1587,10 +1581,8 @@ mod tests {
 
     #[test]
     fn dimension_worlds_are_parked_without_chunk_aliasing() {
-        let mut core = AuthorityCore::new(
-            AuthorityConfig::default(),
-            AuthorityTopology::Singleplayer,
-        );
+        let mut core =
+            AuthorityCore::new(AuthorityConfig::default(), AuthorityTopology::Singleplayer);
         let _ = core.register_session(SessionContract::new(
             7,
             "alex",
@@ -1600,30 +1592,24 @@ mod tests {
             true,
         ));
         let marker = BlockType::Glass;
-        core
-            .world_mut(crate::dimension::Dimension::Overworld)
+        core.world_mut(crate::dimension::Dimension::Overworld)
             .expect("overworld world")
             .set_block(1_234, 100, -2_345, marker, 0)
             .unwrap();
         assert_eq!(
-            core
-                .world_ref(crate::dimension::Dimension::Overworld)
+            core.world_ref(crate::dimension::Dimension::Overworld)
                 .expect("overworld world")
                 .get_block(1_234, 100, -2_345),
             marker
         );
 
         assert!(core.set_session_dimension(7, crate::dimension::Dimension::Nether));
-        assert_eq!(
-            core.active_dimension(),
-            crate::dimension::Dimension::Nether
-        );
+        assert_eq!(core.active_dimension(), crate::dimension::Dimension::Nether);
         assert_ne!(core.world().get_block(1_234, 100, -2_345), marker);
         assert!(core.world().valid_coordinate(1_234, 127, -2_345));
         assert!(!core.world().valid_coordinate(1_234, 128, -2_345));
         assert_eq!(
-            core
-                .world_ref(crate::dimension::Dimension::Overworld)
+            core.world_ref(crate::dimension::Dimension::Overworld)
                 .expect("overworld remains in the map")
                 .get_block(1_234, 100, -2_345),
             marker
@@ -1631,10 +1617,7 @@ mod tests {
         if let Some(session) = core.session_mut(7) {
             session.position = [154.25, 67.0, -293.5];
         }
-        assert_eq!(
-            core.session(7).unwrap().position,
-            [154.25, 67.0, -293.5]
-        );
+        assert_eq!(core.session(7).unwrap().position, [154.25, 67.0, -293.5]);
 
         assert!(core.set_session_dimension(7, crate::dimension::Dimension::Overworld));
         assert_eq!(
@@ -1642,8 +1625,7 @@ mod tests {
             crate::dimension::Dimension::Overworld
         );
         assert_eq!(
-            core
-                .world_ref(crate::dimension::Dimension::Overworld)
+            core.world_ref(crate::dimension::Dimension::Overworld)
                 .expect("overworld world")
                 .get_block(1_234, 100, -2_345),
             marker

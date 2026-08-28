@@ -654,18 +654,8 @@ fn try_container_transfer(
     else {
         return false;
     };
-    chunk_manager.set_block_entity(
-        source_pos.0,
-        source_pos.1,
-        source_pos.2,
-        Some(source_after),
-    );
-    chunk_manager.set_block_entity(
-        target_pos.0,
-        target_pos.1,
-        target_pos.2,
-        Some(target_after),
-    );
+    chunk_manager.set_block_entity(source_pos.0, source_pos.1, source_pos.2, Some(source_after));
+    chunk_manager.set_block_entity(target_pos.0, target_pos.1, target_pos.2, Some(target_after));
     result.changed_positions.push(source_pos);
     result.changed_positions.push(target_pos);
     true
@@ -1029,7 +1019,10 @@ mod tests {
         manager.set_block_entity(15, 64, 0, Some(BlockEntity::Hopper(hopper)));
 
         // x=16 belongs to an unloaded chunk.  The source remains untouched.
-        assert_eq!(tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
+        assert_eq!(
+            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            0
+        );
         assert_eq!(
             manager
                 .get_block_entity(15, 64, 0)
@@ -1042,7 +1035,10 @@ mod tests {
             .insert((1, 0), crate::world::Chunk::new(1, 0));
         manager.set_block(16, 64, 0, BlockType::Chest);
         manager.set_block_entity(16, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
-        assert_eq!(tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 1);
+        assert_eq!(
+            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            1
+        );
         assert_eq!(
             manager
                 .get_block_entity(16, 64, 0)
@@ -1106,7 +1102,10 @@ mod tests {
         manager.set_block(1, 64, 0, BlockType::Chest);
         manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
 
-        assert_eq!(tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK), 0);
+        assert_eq!(
+            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            0
+        );
         assert_eq!(
             manager.get_block_entity(0, 64, 0).unwrap().get_stack(0),
             Some(&ItemStack::new(Item::Stone, 1))

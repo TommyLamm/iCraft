@@ -28,17 +28,17 @@ pub(crate) use super::ingress::{
     prepare_gameplay_request, queue_initial_roster, remove_client, route_gameplay_request,
     run_client,
 };
+#[cfg(test)]
+use super::protocol::Packet;
+use super::protocol::PlayerId;
 pub(crate) use super::session::{
     best_effort_send, packet_bytes, queue_now_ms, queue_stats, reliable_send,
     reliable_send_and_wait, send_connection_packet, send_with_outbound_metrics, send_writer_packet,
     CatchupMailbox, ClientSession, GameplaySessionState, PoseMailbox, PreAuthSlot, QueuedPacket,
     RequestRateLimiter, Sessions, StateMailbox, StateMailboxKey, TrackedPacket,
-    CLIENT_QUEUE_CAPACITY, CLIENT_TIMEOUT, KEEPALIVE_INTERVAL,
-    MAX_CHAT_CHARS, PRE_AUTH_CONNECTION_MULTIPLIER, RELIABLE_ENQUEUE_TIMEOUT,
+    CLIENT_QUEUE_CAPACITY, CLIENT_TIMEOUT, KEEPALIVE_INTERVAL, MAX_CHAT_CHARS,
+    PRE_AUTH_CONNECTION_MULTIPLIER, RELIABLE_ENQUEUE_TIMEOUT,
 };
-use super::protocol::PlayerId;
-#[cfg(test)]
-use super::protocol::Packet;
 use super::transport::Connection;
 
 pub struct NetworkServer<S: HostEventSender = std_mpsc::Sender<ServerToHost>> {
@@ -165,7 +165,11 @@ impl<S: HostEventSender> NetworkServer<S> {
         })
     }
 
-    async fn run(self, listener: TcpListener, mut host_to_server: tokio::sync::mpsc::Receiver<HostToServer>) {
+    async fn run(
+        self,
+        listener: TcpListener,
+        mut host_to_server: tokio::sync::mpsc::Receiver<HostToServer>,
+    ) {
         loop {
             tokio::select! {
                 accepted = listener.accept() => {

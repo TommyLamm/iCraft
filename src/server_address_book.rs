@@ -362,9 +362,9 @@ fn valid_result(result: &ServerPingResult) -> bool {
 }
 
 fn ping_once(address: &str, timeout: Duration) -> ServerPingResult {
+    use crate::network::protocol::{Packet, MAX_PACKET_SIZE, PROTOCOL_VERSION};
     use std::io::{Read, Write};
     use std::net::{TcpStream, ToSocketAddrs};
-    use crate::network::protocol::{Packet, MAX_PACKET_SIZE, PROTOCOL_VERSION};
 
     let timeout = timeout.clamp(Duration::from_millis(1), Duration::from_secs(5));
     let mut result = ServerPingResult {
@@ -410,8 +410,12 @@ fn ping_once(address: &str, timeout: Duration) -> ServerPingResult {
             protocol_version: PROTOCOL_VERSION,
         };
         let payload = req_packet.encode();
-        let len = u32::try_from(payload.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "packet payload exceeds u32 length"))?;
+        let len = u32::try_from(payload.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "packet payload exceeds u32 length",
+            )
+        })?;
         let mut frame = Vec::with_capacity(4 + payload.len());
         frame.extend_from_slice(&len.to_be_bytes());
         frame.extend_from_slice(&payload);
@@ -430,8 +434,8 @@ fn ping_once(address: &str, timeout: Duration) -> ServerPingResult {
         let mut body = vec![0u8; frame_len];
         stream.read_exact(&mut body)?;
 
-        let packet = Packet::decode(&body)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let packet =
+            Packet::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         match packet {
             Packet::ServerListPingResponse {
