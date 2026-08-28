@@ -139,7 +139,7 @@ impl Direction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComparatorMode {
     Compare,
     Subtract,
@@ -195,70 +195,6 @@ impl ComponentState {
     }
 }
 
-/// Direction encoding used by the redstone metadata sidecar. Independent of
-/// the runtime `Direction` enum so the on-disk format stays stable even if the
-/// enum is reordered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SavedDirection {
-    North,
-    South,
-    West,
-    East,
-    Up,
-    Down,
-}
-
-impl From<Direction> for SavedDirection {
-    fn from(direction: Direction) -> Self {
-        match direction {
-            Direction::North => SavedDirection::North,
-            Direction::South => SavedDirection::South,
-            Direction::West => SavedDirection::West,
-            Direction::East => SavedDirection::East,
-            Direction::Up => SavedDirection::Up,
-            Direction::Down => SavedDirection::Down,
-        }
-    }
-}
-
-impl SavedDirection {
-    pub fn into_direction(self) -> Direction {
-        match self {
-            SavedDirection::North => Direction::North,
-            SavedDirection::South => Direction::South,
-            SavedDirection::West => Direction::West,
-            SavedDirection::East => Direction::East,
-            SavedDirection::Up => Direction::Up,
-            SavedDirection::Down => Direction::Down,
-        }
-    }
-}
-
-/// Comparator-mode encoding used by the redstone metadata sidecar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SavedComparatorMode {
-    Compare,
-    Subtract,
-}
-
-impl From<ComparatorMode> for SavedComparatorMode {
-    fn from(mode: ComparatorMode) -> Self {
-        match mode {
-            ComparatorMode::Compare => SavedComparatorMode::Compare,
-            ComparatorMode::Subtract => SavedComparatorMode::Subtract,
-        }
-    }
-}
-
-impl SavedComparatorMode {
-    fn into_comparator_mode(self) -> ComparatorMode {
-        match self {
-            SavedComparatorMode::Compare => ComparatorMode::Compare,
-            SavedComparatorMode::Subtract => ComparatorMode::Subtract,
-        }
-    }
-}
-
 /// Persistent redstone component metadata for a single block inside a chunk.
 ///
 /// `local_x`/`local_z` are chunk-local (0..16). `local_y` is signed world Y
@@ -270,9 +206,9 @@ pub struct RedstoneComponentMetadata {
     pub local_x: u8,
     pub local_y: i16,
     pub local_z: u8,
-    pub facing: SavedDirection,
+    pub facing: Direction,
     pub repeater_delay: u8,
-    pub comparator_mode: SavedComparatorMode,
+    pub comparator_mode: ComparatorMode,
     pub note: u8,
     /// Persisted rising-edge latch. `serde(default)` covers self-describing
     /// formats; `ChunkSaveData::redstone_metadata` also has an explicit
@@ -288,6 +224,20 @@ enum ScheduledKind {
     Explode,
     ObserverPulseOn,
     ObserverPulseOff,
+}
+
+impl ScheduledKind {
+    fn encode(self, bytes: &mut Vec<u8>) {
+        let (kind, payload) = match self {
+            Self::ReleaseButton => (0, 0),
+            Self::Repeater(powered) => (1, powered as u8),
+            Self::Explode => (2, 0),
+            Self::ObserverPulseOn => (3, 0),
+            Self::ObserverPulseOff => (4, 0),
+        };
+        bytes.push(kind);
+        bytes.push(payload);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,28 +366,7 @@ impl RedstoneSystem {
         for scheduled in &self.scheduled {
             bytes.extend_from_slice(&scheduled.due.to_le_bytes());
             append_pos(&mut bytes, scheduled.pos);
-            match scheduled.kind {
-                ScheduledKind::ReleaseButton => {
-                    bytes.push(0);
-                    bytes.push(0);
-                }
-                ScheduledKind::Repeater(powered) => {
-                    bytes.push(1);
-                    bytes.push(powered as u8);
-                }
-                ScheduledKind::Explode => {
-                    bytes.push(2);
-                    bytes.push(0);
-                }
-                ScheduledKind::ObserverPulseOn => {
-                    bytes.push(3);
-                    bytes.push(0);
-                }
-                ScheduledKind::ObserverPulseOff => {
-                    bytes.push(4);
-                    bytes.push(0);
-                }
-            }
+            scheduled.kind.encode(&mut bytes);
         }
 
         let mut dirty: Vec<_> = self.dirty.iter().copied().collect();
@@ -570,9 +499,9 @@ impl RedstoneSystem {
                 local_x: local_x as u8,
                 local_y: pos.1 as i16,
                 local_z: local_z as u8,
-                facing: state.facing.into(),
+                facing: state.facing,
                 repeater_delay: state.repeater_delay,
-                comparator_mode: state.comparator_mode.into(),
+                comparator_mode: state.comparator_mode,
                 note: state.note,
                 last_powered: state.last_powered,
             });
@@ -609,9 +538,9 @@ impl RedstoneSystem {
                 .components
                 .entry(pos)
                 .or_insert_with(|| ComponentState::new(block, Direction::North));
-            state.facing = entry.facing.into_direction();
+            state.facing = entry.facing;
             state.repeater_delay = entry.repeater_delay.clamp(1, 4);
-            state.comparator_mode = entry.comparator_mode.into_comparator_mode();
+            state.comparator_mode = entry.comparator_mode;
             state.note = entry.note.min(24);
             state.last_powered = entry.last_powered;
             self.mark_dirty(pos);

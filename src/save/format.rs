@@ -877,9 +877,9 @@ pub(crate) struct LegacyRedstoneComponentMetadata {
     pub local_x: u8,
     pub local_y: u8,
     pub local_z: u8,
-    pub facing: crate::redstone::SavedDirection,
+    pub facing: crate::redstone::Direction,
     pub repeater_delay: u8,
-    pub comparator_mode: crate::redstone::SavedComparatorMode,
+    pub comparator_mode: crate::redstone::ComparatorMode,
     pub note: u8,
 }
 
@@ -890,9 +890,9 @@ pub(crate) struct LegacyU8YRedstoneComponentMetadata {
     pub local_x: u8,
     pub local_y: u8,
     pub local_z: u8,
-    pub facing: crate::redstone::SavedDirection,
+    pub facing: crate::redstone::Direction,
     pub repeater_delay: u8,
-    pub comparator_mode: crate::redstone::SavedComparatorMode,
+    pub comparator_mode: crate::redstone::ComparatorMode,
     pub note: u8,
     pub last_powered: bool,
 }

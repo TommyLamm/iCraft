@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::format::{
-    deserialize_chunk_save_data, destination_voxel_count, LegacyInventoryData,
-    LegacyLevelData, LegacyRedstoneComponentMetadata,
-    LegacyU8YRedstoneComponentMetadata, PreviousInventoryData, PreviousPlayerData,
+    deserialize_chunk_save_data, destination_voxel_count, LegacyInventoryData, LegacyLevelData,
+    LegacyRedstoneComponentMetadata, LegacyU8YRedstoneComponentMetadata, PreviousInventoryData,
+    PreviousPlayerData,
 };
 use super::region::{ATOMIC_WRITE_FAILPOINT, COMPRESS_FAILPOINT};
 
@@ -528,9 +528,9 @@ fn redstone_metadata_sidecar_roundtrips_through_save_and_load() {
         local_x: 3,
         local_y: 100,
         local_z: 7,
-        facing: crate::redstone::SavedDirection::East,
+        facing: crate::redstone::Direction::East,
         repeater_delay: 4,
-        comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
+        comparator_mode: crate::redstone::ComparatorMode::Subtract,
         note: 12,
         last_powered: true,
     }];
@@ -558,9 +558,9 @@ fn legacy_redstone_sidecar_preserves_fields_and_defaults_latch() {
         local_x: 6,
         local_y: 91,
         local_z: 4,
-        facing: crate::redstone::SavedDirection::South,
+        facing: crate::redstone::Direction::South,
         repeater_delay: 3,
-        comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
+        comparator_mode: crate::redstone::ComparatorMode::Subtract,
         note: 9,
     }];
     let mut saved = ChunkSaveData::from_chunk(&Chunk::new(0, 0)).unwrap();
@@ -572,9 +572,9 @@ fn legacy_redstone_sidecar_preserves_fields_and_defaults_latch() {
             local_x: 6,
             local_y: 91,
             local_z: 4,
-            facing: crate::redstone::SavedDirection::South,
+            facing: crate::redstone::Direction::South,
             repeater_delay: 3,
-            comparator_mode: crate::redstone::SavedComparatorMode::Subtract,
+            comparator_mode: crate::redstone::ComparatorMode::Subtract,
             note: 9,
             last_powered: false,
         }]
@@ -587,9 +587,9 @@ fn legacy_u8_redstone_y_236_stays_236_not_negative_twenty() {
         local_x: 2,
         local_y: 236,
         local_z: 3,
-        facing: crate::redstone::SavedDirection::North,
+        facing: crate::redstone::Direction::North,
         repeater_delay: 1,
-        comparator_mode: crate::redstone::SavedComparatorMode::Compare,
+        comparator_mode: crate::redstone::ComparatorMode::Compare,
         note: 0,
         last_powered: true,
     }];
@@ -611,14 +611,13 @@ fn signed_redstone_y_roundtrips_negative_world_y() {
         local_x: 4,
         local_y: -20,
         local_z: 5,
-        facing: crate::redstone::SavedDirection::East,
+        facing: crate::redstone::Direction::East,
         repeater_delay: 2,
-        comparator_mode: crate::redstone::SavedComparatorMode::Compare,
+        comparator_mode: crate::redstone::ComparatorMode::Compare,
         note: 0,
         last_powered: false,
     }];
-    let saved =
-        ChunkSaveData::from_chunk_with_redstone(&Chunk::empty(0, 0), &metadata).unwrap();
+    let saved = ChunkSaveData::from_chunk_with_redstone(&Chunk::empty(0, 0), &metadata).unwrap();
     assert_eq!(saved.redstone_metadata(), metadata);
 }
 
@@ -1101,8 +1100,7 @@ fn salvage_copies_only_readable_chunks_without_mutating_source() {
     let manager = SaveManager::new(&world_dir);
     let source = world_dir.join("corrupt-region.bin");
     let destination = world_dir.join("salvaged-region.bin");
-    let valid =
-        bincode::serialize(&ChunkSaveData::from_chunk(&Chunk::new(0, 0)).unwrap()).unwrap();
+    let valid = bincode::serialize(&ChunkSaveData::from_chunk(&Chunk::new(0, 0)).unwrap()).unwrap();
     let region = RegionData {
         chunks: [((0, 0), valid), ((1, 0), b"broken chunk".to_vec())]
             .into_iter()
@@ -1650,10 +1648,7 @@ fn overwrite_region_chunk_payload(path: &Path, lx: u8, lz: u8, payload: Vec<u8>)
     fs::write(path, bincode::serialize(&region).unwrap()).unwrap();
 }
 
-fn with_corrupt_inner_blocks(
-    payload: &[u8],
-    mutate: impl FnOnce(&mut ChunkSaveData),
-) -> Vec<u8> {
+fn with_corrupt_inner_blocks(payload: &[u8], mutate: impl FnOnce(&mut ChunkSaveData)) -> Vec<u8> {
     let mut data = deserialize_chunk_save_data(payload).unwrap();
     mutate(&mut data);
     bincode::serialize(&data).unwrap()

@@ -1,4 +1,6 @@
-use crate::world::{BlockType, Chunk, RenderType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH};
+use crate::world::{
+    BlockType, Chunk, ChunkSection, RenderType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
+};
 use glam::Vec3;
 use noise::{NoiseFn, Perlin};
 use std::collections::VecDeque;
@@ -289,20 +291,19 @@ fn generate_overworld_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     chunk
 }
 
-fn empty_blocks() -> Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> {
-    vec![[[BlockType::Air; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
-        .try_into()
-        .expect("chunk block dimensions are fixed")
-}
-
-fn empty_light() -> Box<[[[u8; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]> {
-    vec![[[0; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]
-        .try_into()
-        .expect("chunk light dimensions are fixed")
+fn contains_block(
+    blocks: &[[[BlockType; CHUNK_DEPTH]; NETHER_HEIGHT]; CHUNK_WIDTH],
+    target: BlockType,
+) -> bool {
+    blocks
+        .iter()
+        .flat_map(|column| column.iter())
+        .flat_map(|row| row.iter())
+        .any(|block| *block == target)
 }
 
 fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
-    let mut blocks = empty_blocks();
+    let mut blocks = [[[BlockType::Air; CHUNK_DEPTH]; NETHER_HEIGHT]; CHUNK_WIDTH];
     let caves = Perlin::new(seed ^ 0x4E45_5448);
     let caverns = Perlin::new(seed ^ 0xC0A7_3E55);
     let valleys = Perlin::new(seed ^ 0x5015_A4D0);
@@ -381,10 +382,19 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             for y in 35..(NETHER_HEIGHT - 6) {
                 if blocks[x][y][z] == BlockType::Air
                     && blocks[x][y + 1][z] == BlockType::Netherrack
-                    && crate::worldgen::hash_coord(seed ^ 0x6105_700E, world_x, y as i32, world_z, 0) % 149 == 0
+                    && crate::worldgen::hash_coord(
+                        seed ^ 0x6105_700E,
+                        world_x,
+                        y as i32,
+                        world_z,
+                        0,
+                    ) % 149
+                        == 0
                 {
                     blocks[x][y][z] = BlockType::Glowstone;
-                    if y > 35 && crate::worldgen::hash_coord(seed, world_x, y as i32, world_z, 0) & 1 == 0 {
+                    if y > 35
+                        && crate::worldgen::hash_coord(seed, world_x, y as i32, world_z, 0) & 1 == 0
+                    {
                         blocks[x][y - 1][z] = BlockType::Glowstone;
                     }
                     glowstone_count += 1;
@@ -420,25 +430,127 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             }
         }
         if !contains_block(&blocks, BlockType::SoulSand) {
-            let x = (crate::worldgen::hash_coord(seed ^ 0x5015_A4D0, chunk_x, 32, chunk_z, 0) as usize) % CHUNK_WIDTH;
-            let z = (crate::worldgen::hash_coord(seed ^ 0x5015_A4D0, chunk_z, 32, chunk_x, 0) as usize) % CHUNK_DEPTH;
+            let x = (crate::worldgen::hash_coord(seed ^ 0x5015_A4D0, chunk_x, 32, chunk_z, 0)
+                as usize)
+                % CHUNK_WIDTH;
+            let z = (crate::worldgen::hash_coord(seed ^ 0x5015_A4D0, chunk_z, 32, chunk_x, 0)
+                as usize)
+                % CHUNK_DEPTH;
             blocks[x][32][z] = BlockType::SoulSand;
             blocks[x][33][z] = BlockType::Air;
         }
     }
 
-    finish_chunk(chunk_x, chunk_z, blocks, false)
-}
+    let mut block_light = [[[0u8; CHUNK_DEPTH]; NETHER_HEIGHT]; CHUNK_WIDTH];
+    let mut heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
+        vec![[crate::world::NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
+            .try_into()
+            .expect("chunk heightmap dimensions are fixed");
+    let mut light_queue = VecDeque::new();
 
-fn contains_block(
-    blocks: &[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH],
-    target: BlockType,
-) -> bool {
-    blocks
-        .iter()
-        .flat_map(|column| column.iter())
-        .flat_map(|row| row.iter())
-        .any(|block| *block == target)
+    for x in 0..CHUNK_WIDTH {
+        for z in 0..CHUNK_DEPTH {
+            for y in (0..NETHER_HEIGHT).rev() {
+                let block = blocks[x][y][z];
+                if heightmap[x][z] == crate::world::NO_HEIGHT && block != BlockType::Air {
+                    heightmap[x][z] = y as i16;
+                }
+                let emission = block.properties().light_emission;
+                if emission > 0 {
+                    block_light[x][y][z] = emission;
+                    light_queue.push_back((x, y, z));
+                }
+            }
+        }
+    }
+
+    const NEIGHBORS: [(isize, isize, isize); 6] = [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ];
+    while let Some((x, y, z)) = light_queue.pop_front() {
+        let current_light = block_light[x][y][z];
+        if current_light <= 1 {
+            continue;
+        }
+        let next_light = current_light - 1;
+        for (dx, dy, dz) in NEIGHBORS {
+            let nx = x as isize + dx;
+            let ny = y as isize + dy;
+            let nz = z as isize + dz;
+            if nx < 0
+                || nx >= CHUNK_WIDTH as isize
+                || ny < 0
+                || ny >= NETHER_HEIGHT as isize
+                || nz < 0
+                || nz >= CHUNK_DEPTH as isize
+            {
+                continue;
+            }
+            let (nx, ny, nz) = (nx as usize, ny as usize, nz as usize);
+            if blocks[nx][ny][nz].properties().render_type != RenderType::Opaque
+                && block_light[nx][ny][nz] < next_light
+            {
+                block_light[nx][ny][nz] = next_light;
+                light_queue.push_back((nx, ny, nz));
+            }
+        }
+    }
+
+    let nether_sections = NETHER_HEIGHT / crate::world::SECTION_SIZE;
+    let mut sections = Vec::with_capacity(crate::world::SECTION_COUNT);
+    for sec_y in 0..nether_sections {
+        let mut sec_b = [BlockType::Air; 4096];
+        let mut sec_bl = [0u8; 4096];
+        let mut sec_fl = [0u8; 4096];
+        for ly in 0..crate::world::SECTION_SIZE {
+            let y = sec_y * crate::world::SECTION_SIZE + ly;
+            for z in 0..CHUNK_DEPTH {
+                for x in 0..CHUNK_WIDTH {
+                    let idx = (ly << 8) | (z << 4) | x;
+                    let b = blocks[x][y][z];
+                    sec_b[idx] = b;
+                    sec_bl[idx] = block_light[x][y][z];
+                    if matches!(b, BlockType::Water | BlockType::Lava) {
+                        sec_fl[idx] = 0;
+                    }
+                }
+            }
+        }
+        let sec = crate::world::ChunkSection::from_dense(
+            &sec_b,
+            &[0u8; 4096],
+            &sec_bl,
+            None,
+            Some(&sec_fl),
+        );
+        if sec.is_empty() {
+            sections.push(None);
+        } else {
+            sections.push(Some(sec));
+        }
+    }
+    while sections.len() < crate::world::SECTION_COUNT {
+        sections.push(None);
+    }
+
+    let mut chunk = Chunk {
+        chunk_x,
+        chunk_z,
+        min_section_y: 0,
+        sections,
+        heightmap,
+        torch_positions: Vec::new(),
+        redstone_positions: Vec::new(),
+        block_entities: std::collections::HashMap::new(),
+    };
+    chunk.rebuild_torch_index();
+    chunk.rebuild_redstone_index();
+    chunk
 }
 
 fn end_surface_at(world_x: i32, world_z: i32, seed: u32) -> Option<i32> {
@@ -482,35 +594,32 @@ fn end_surface_at(world_x: i32, world_z: i32, seed: u32) -> Option<i32> {
     best
 }
 
-fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
-    let mut blocks = empty_blocks();
-
-    for x in 0..CHUNK_WIDTH {
-        for z in 0..CHUNK_DEPTH {
-            let world_x = chunk_x * CHUNK_WIDTH as i32 + x as i32;
-            let world_z = chunk_z * CHUNK_DEPTH as i32 + z as i32;
-            let Some(top) = end_surface_at(world_x, world_z, seed) else {
-                continue;
-            };
-            let distance_from_origin = (world_x as f64).hypot(world_z as f64);
-            let thickness = if distance_from_origin <= 112.0 {
-                10 + ((1.0 - distance_from_origin / 112.0).max(0.0) * 18.0) as i32
-            } else {
-                9 + (crate::worldgen::hash_coord(seed, world_x, 0, world_z, 0) % 7) as i32
-            };
-            for y in (top - thickness).max(1)..=top {
-                blocks[x][y as usize][z] = BlockType::EndStone;
-            }
-        }
+fn set_section_block(
+    sec_b: &mut [BlockType; 4096],
+    sec_base_y: i32,
+    chunk_x: i32,
+    chunk_z: i32,
+    world_x: i32,
+    y: i32,
+    world_z: i32,
+    block: BlockType,
+) {
+    let local_x = world_x - chunk_x * CHUNK_WIDTH as i32;
+    let local_z = world_z - chunk_z * CHUNK_DEPTH as i32;
+    if (0..CHUNK_WIDTH as i32).contains(&local_x)
+        && (0..CHUNK_DEPTH as i32).contains(&local_z)
+        && y >= sec_base_y
+        && y < sec_base_y + 16
+    {
+        let ly = (y - sec_base_y) as usize;
+        let idx = (ly << 8) | ((local_z as usize) << 4) | (local_x as usize);
+        sec_b[idx] = block;
     }
-
-    place_end_crystal_towers(&mut blocks, chunk_x, chunk_z, seed);
-    place_end_exit(&mut blocks, chunk_x, chunk_z);
-    finish_chunk(chunk_x, chunk_z, blocks, false)
 }
 
-fn place_end_crystal_towers(
-    blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
+fn place_end_crystal_towers_in_section(
+    sec_b: &mut [BlockType; 4096],
+    sec_base_y: i32,
     chunk_x: i32,
     chunk_z: i32,
     seed: u32,
@@ -528,8 +637,9 @@ fn place_end_crystal_towers(
                     continue;
                 };
                 for y in (surface_y + 1)..=top_y {
-                    set_world_block(
-                        blocks,
+                    set_section_block(
+                        sec_b,
+                        sec_base_y,
                         chunk_x,
                         chunk_z,
                         world_x,
@@ -543,37 +653,17 @@ fn place_end_crystal_towers(
     }
 }
 
-fn set_world_block(
-    blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    chunk_x: i32,
-    chunk_z: i32,
-    world_x: i32,
-    y: i32,
-    world_z: i32,
-    block: BlockType,
-) {
-    let local_x = world_x - chunk_x * CHUNK_WIDTH as i32;
-    let local_z = world_z - chunk_z * CHUNK_DEPTH as i32;
-    if (0..CHUNK_WIDTH as i32).contains(&local_x)
-        && (0..CHUNK_DEPTH as i32).contains(&local_z)
-        && (0..CHUNK_HEIGHT as i32).contains(&y)
-    {
-        blocks[local_x as usize][y as usize][local_z as usize] = block;
-    }
-}
-
-fn place_end_exit(
-    blocks: &mut Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
+fn place_end_exit_in_section(
+    sec_b: &mut [BlockType; 4096],
+    sec_base_y: i32,
     chunk_x: i32,
     chunk_z: i32,
 ) {
     const EXIT_Y: i32 = 73;
-    // Generate only the dormant bedrock fountain. The portal blocks and egg
-    // are materialized by the dragon-death event, so a fresh End always starts
-    // with a live boss encounter.
     for offset in -2..=2 {
-        set_world_block(
-            blocks,
+        set_section_block(
+            sec_b,
+            sec_base_y,
             chunk_x,
             chunk_z,
             offset,
@@ -581,8 +671,9 @@ fn place_end_exit(
             -2,
             BlockType::Bedrock,
         );
-        set_world_block(
-            blocks,
+        set_section_block(
+            sec_b,
+            sec_base_y,
             chunk_x,
             chunk_z,
             offset,
@@ -590,8 +681,9 @@ fn place_end_exit(
             2,
             BlockType::Bedrock,
         );
-        set_world_block(
-            blocks,
+        set_section_block(
+            sec_b,
+            sec_base_y,
             chunk_x,
             chunk_z,
             -2,
@@ -599,8 +691,9 @@ fn place_end_exit(
             offset,
             BlockType::Bedrock,
         );
-        set_world_block(
-            blocks,
+        set_section_block(
+            sec_b,
+            sec_base_y,
             chunk_x,
             chunk_z,
             2,
@@ -610,110 +703,70 @@ fn place_end_exit(
         );
     }
     for y in EXIT_Y..=(EXIT_Y + 4) {
-        set_world_block(blocks, chunk_x, chunk_z, 0, y, 0, BlockType::Bedrock);
+        set_section_block(
+            sec_b,
+            sec_base_y,
+            chunk_x,
+            chunk_z,
+            0,
+            y,
+            0,
+            BlockType::Bedrock,
+        );
     }
 }
 
-fn finish_chunk(
-    chunk_x: i32,
-    chunk_z: i32,
-    blocks: Box<[[[BlockType; CHUNK_DEPTH]; CHUNK_HEIGHT]; CHUNK_WIDTH]>,
-    has_sky_light: bool,
-) -> Chunk {
-    let mut sky_light = empty_light();
-    let mut block_light = empty_light();
-    let mut fluid_levels = empty_light();
+fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
+    let mut sections = Vec::with_capacity(crate::world::SECTION_COUNT);
     let mut heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
         vec![[crate::world::NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
             .try_into()
             .expect("chunk heightmap dimensions are fixed");
-    let mut light_queue = VecDeque::new();
 
-    for x in 0..CHUNK_WIDTH {
-        for z in 0..CHUNK_DEPTH {
-            let mut direct_sky = if has_sky_light { 15 } else { 0 };
-            let mut found_height = false;
-            for y in (0..CHUNK_HEIGHT).rev() {
-                let block = blocks[x][y][z];
-                if !found_height && block != BlockType::Air {
-                    heightmap[x][z] = y as i16;
-                    found_height = true;
-                }
-                if block.properties().render_type == RenderType::Opaque {
-                    direct_sky = 0;
-                }
-                sky_light[x][y][z] = direct_sky;
-                let emission = block.properties().light_emission;
-                if emission > 0 {
-                    block_light[x][y][z] = emission;
-                    light_queue.push_back((x, y, z));
-                }
-                if matches!(block, BlockType::Water | BlockType::Lava) {
-                    // Level zero represents a full source block in the fluid
-                    // system; the remaining bits are reserved for falling flow.
-                    fluid_levels[x][y][z] = 0;
-                }
-            }
-        }
-    }
-
-    const NEIGHBORS: [(isize, isize, isize); 6] = [
-        (1, 0, 0),
-        (-1, 0, 0),
-        (0, 1, 0),
-        (0, -1, 0),
-        (0, 0, 1),
-        (0, 0, -1),
-    ];
-    while let Some((x, y, z)) = light_queue.pop_front() {
-        let current_light = block_light[x][y][z];
-        if current_light <= 1 {
-            continue;
-        }
-        let next_light = current_light - 1;
-        for (dx, dy, dz) in NEIGHBORS {
-            let nx = x as isize + dx;
-            let ny = y as isize + dy;
-            let nz = z as isize + dz;
-            if nx < 0
-                || nx >= CHUNK_WIDTH as isize
-                || ny < 0
-                || ny >= CHUNK_HEIGHT as isize
-                || nz < 0
-                || nz >= CHUNK_DEPTH as isize
-            {
-                continue;
-            }
-            let (nx, ny, nz) = (nx as usize, ny as usize, nz as usize);
-            if blocks[nx][ny][nz].properties().render_type != RenderType::Opaque
-                && block_light[nx][ny][nz] < next_light
-            {
-                block_light[nx][ny][nz] = next_light;
-                light_queue.push_back((nx, ny, nz));
-            }
-        }
-    }
-
-    let mut sections = Vec::with_capacity(crate::world::SECTION_COUNT);
     for sec_y in 0..crate::world::SECTION_COUNT {
         let mut sec_b = [BlockType::Air; 4096];
-        let mut sec_sk = [0u8; 4096];
-        let mut sec_bl = [0u8; 4096];
-        let mut sec_fl = [0u8; 4096];
-        for ly in 0..crate::world::SECTION_SIZE {
-            let y = sec_y * crate::world::SECTION_SIZE + ly;
+        let sec_base_y = sec_y as i32 * 16;
+        for ly in 0..16 {
+            let y = sec_base_y + ly;
             for z in 0..CHUNK_DEPTH {
                 for x in 0..CHUNK_WIDTH {
-                    let idx = (ly << 8) | (z << 4) | x;
-                    sec_b[idx] = blocks[x][y][z];
-                    sec_sk[idx] = sky_light[x][y][z];
-                    sec_bl[idx] = block_light[x][y][z];
-                    sec_fl[idx] = fluid_levels[x][y][z];
+                    let world_x = chunk_x * CHUNK_WIDTH as i32 + x as i32;
+                    let world_z = chunk_z * CHUNK_DEPTH as i32 + z as i32;
+                    if let Some(top) = end_surface_at(world_x, world_z, seed) {
+                        let distance_from_origin = (world_x as f64).hypot(world_z as f64);
+                        let thickness = if distance_from_origin <= 112.0 {
+                            10 + ((1.0 - distance_from_origin / 112.0).max(0.0) * 18.0) as i32
+                        } else {
+                            9 + (crate::worldgen::hash_coord(seed, world_x, 0, world_z, 0) % 7)
+                                as i32
+                        };
+                        if y >= (top - thickness).max(1) && y <= top {
+                            let idx = (ly as usize) << 8 | (z << 4) | x;
+                            sec_b[idx] = BlockType::EndStone;
+                        }
+                    }
                 }
             }
         }
-        let sec =
-            crate::world::ChunkSection::from_dense(&sec_b, &sec_sk, &sec_bl, None, Some(&sec_fl));
+
+        place_end_crystal_towers_in_section(&mut sec_b, sec_base_y, chunk_x, chunk_z, seed);
+        place_end_exit_in_section(&mut sec_b, sec_base_y, chunk_x, chunk_z);
+
+        for z in 0..CHUNK_DEPTH {
+            for x in 0..CHUNK_WIDTH {
+                for ly in (0..16).rev() {
+                    let idx = (ly << 8) | (z << 4) | x;
+                    if sec_b[idx] != BlockType::Air {
+                        let y = (sec_base_y + ly as i32) as i16;
+                        if y > heightmap[x][z] {
+                            heightmap[x][z] = y;
+                        }
+                    }
+                }
+            }
+        }
+
+        let sec = ChunkSection::from_dense(&sec_b, &[0u8; 4096], &[0u8; 4096], None, None);
         if sec.is_empty() {
             sections.push(None);
         } else {
