@@ -67,16 +67,16 @@
 | 04 | [刪除 save/legacy_queue 遺留存檔佇列](04_legacy_save_queue_cleanup.md) | P0 | ~-946 行 | 無 | 已完成 |
 | 05 | [刪除網路 dead 通道變體與未使用的 Packet 變體](05_network_dead_channels_and_packet_variants.md) | P0 | ~-375 行 | 無 | 已完成 |
 | 06 | [刪除權威、世界與會話中的死函式](06_authority_and_container_dead_methods.md) | P0 | ~-270 行 | 無 | 已完成 |
-| 07 | [State 點擊與挖礦掉落去重](07_state_click_and_mining_rewards_dedup.md) | P1 | ~-250 行 | 01 | 待執行 |
-| 08 | [向量字型與選單 5x7 字型整合](08_vector_font_and_menu_font_unification.md) | P1 | ~-300 行 | 01 | 待執行 |
-| 09 | [ServerRuntime 投射與會話同步樣板提煉](09_server_runtime_projection_boilerplate.md) | P1 | ~-210 行 | 05, 06 | 待執行 |
-| 10 | [container_sessions 與 ServerWorld 職責解耦](10_container_sessions_decoupling.md) | P1 | ~-160 行 | 06 | 待執行 |
-| 11 | [物理與實體軸向碰撞去重及 PRNG 整合](11_physics_collision_dedup_and_math_helpers.md) | P1 | ~-180 行 | 無 | 待執行 |
-| 12 | [資源包解析與本地化邏輯精簡](12_resource_pack_and_localization_slimming.md) | P1 | ~-500 行 | 無 | 待執行 |
-| 13 | [網路伺服器非同步原生化與通道目標整合](13_network_server_async_and_target_channel.md) | P1 | ~-240 行 | 05 | 待執行 |
-| 14 | [State 殘留權威模擬與指令處理收斂至 Legacy 模組](14_state_legacy_authority_quarantine.md) | P2 | ~-1,650 行 | 01, 07, 08 | 待執行 |
-| 15 | [紅石排程與維度堆配置優化](15_redstone_and_dimension_alloc_slimming.md) | P2 | ~-150 行 | 無 | 待執行 |
-| 16 | [測試腳手架與驗收測試收斂](16_test_harness_and_acceptance_slimming.md) | P2 | ~-950 行 | 02, 04 | 待執行 |
+| 07 | [State 點擊與挖礦掉落去重](07_state_click_and_mining_rewards_dedup.md) | P1 | ~-250 行 | 01 | 已完成 |
+| 08 | [向量字型與選單 5x7 字型整合](08_vector_font_and_menu_font_unification.md) | P1 | ~-300 行 | 01 | 已完成 |
+| 09 | [ServerRuntime 投射與會話同步樣板提煉](09_server_runtime_projection_boilerplate.md) | P1 | ~-210 行 | 05, 06 | 已完成 |
+| 10 | [container_sessions 與 ServerWorld 職責解耦](10_container_sessions_decoupling.md) | P1 | ~-160 行 | 06 | 已完成 |
+| 11 | [物理與實體軸向碰撞去重及 PRNG 整合](11_physics_collision_dedup_and_math_helpers.md) | P1 | ~-180 行 | 無 | 已完成 |
+| 12 | [資源包解析與本地化邏輯精簡](12_resource_pack_and_localization_slimming.md) | P1 | ~-500 行 | 無 | 已完成 |
+| 13 | [網路伺服器非同步原生化與通道目標整合](13_network_server_async_and_target_channel.md) | P1 | ~-240 行 | 05 | 已完成 |
+| 14 | [State 殘留權威模擬與指令處理收斂至 Legacy 模組](14_state_legacy_authority_quarantine.md) | P2 | ~-1,650 行 | 01, 07, 08 | 已完成 |
+| 15 | [紅石排程與維度堆配置優化](15_redstone_and_dimension_alloc_slimming.md) | P2 | ~-150 行 | 無 | 已完成 |
+| 16 | [測試腳手架與驗收測試收斂](16_test_harness_and_acceptance_slimming.md) | P2 | ~-950 行 | 02, 04 | 已完成 |
 
 **全路線預期削減成果**：`net: -7,857 ~ -8,500 lines possible.`
 
