@@ -313,7 +313,7 @@ impl State {
                     (limit * std::mem::size_of::<crate::mob_renderer::MobInstance>()) as u64,
                 );
         }
-        let mut entity_prepare_elapsed = entity_prepare_started.elapsed();
+        let entity_prepare_elapsed = entity_prepare_started.elapsed();
 
         // Compile particle instance data
         let particle_prepare_started = Instant::now();

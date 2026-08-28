@@ -149,6 +149,7 @@ pub(crate) struct LaunchWorldState {
 /// Embedded presentations start empty and wait for runtime projections.
 /// Reading player.dat / materializing the spawn halo here races
 /// `ServerRuntime::new_embedded` on the same `world_dir`.
+#[allow(unused_mut)]
 pub(crate) fn load_launch_world_state(
     launch: &WorldLaunch,
     is_client: bool,

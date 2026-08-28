@@ -550,6 +550,7 @@ impl State {
                 y,
                 z,
             } => {
+                #[cfg(any(test, feature = "legacy_owner"))]
                 if matches!(self.role, MultiplayerRole::Host { .. }) {
                     let closed = self.container_sessions.close_exact(id, dimension, x, y, z);
                     if let Some(session) = closed {
