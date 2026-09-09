@@ -15,7 +15,7 @@ use crate::inventory::{
     CreativeTab, GameMode, Inventory, Item, ItemStack, ToolType, CREATIVE_COLUMNS, CREATIVE_ROWS,
     CREATIVE_VISIBLE_SLOTS,
 };
-use crate::menu::{GameSettings, WorldLaunch};
+use crate::menu::{GameSettings, MenuRect, WorldLaunch};
 use crate::physics::{player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB};
 use crate::player::{DamageSource, PlayerState};
 use crate::presentation::gpu_terrain::{
@@ -2718,17 +2718,29 @@ enum InventoryLayoutKind {
     Standard,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct InventoryUiRect {
-    x0: f32,
-    x1: f32,
-    y0: f32,
-    y1: f32,
+type InventoryUiRect = MenuRect;
+
+fn presentation_target_for_slot(slot: SlotType) -> PresentationInventoryTarget {
+    match slot {
+        SlotType::ContainerSlot(_) => PresentationInventoryTarget::ContainerSlot,
+        SlotType::AnvilOutput | SlotType::EnchantInput | SlotType::EnchantLapis => {
+            PresentationInventoryTarget::Workstation
+        }
+        _ => PresentationInventoryTarget::PlayerInventory,
+    }
 }
 
-impl InventoryUiRect {
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+fn presentation_target_for_authority_hit(
+    hit: InventoryHit<SlotType>,
+) -> Option<PresentationInventoryTarget> {
+    match hit {
+        InventoryHit::Slot(slot) => Some(presentation_target_for_slot(slot)),
+        InventoryHit::Enchant { .. }
+        | InventoryHit::RecipeBook
+        | InventoryHit::RecipeBookToggle => Some(PresentationInventoryTarget::Workstation),
+        InventoryHit::Merchant { .. } | InventoryHit::CreativeTab { .. } | InventoryHit::Empty => {
+            None
+        }
     }
 }
 
@@ -8781,54 +8793,26 @@ impl State {
     fn presentation_inventory_click_target(&self) -> Option<PresentationInventoryTarget> {
         let mouse_x = self.mouse_ndc[0];
         let mouse_y = self.mouse_ndc[1];
-        if self.active_station == Some(StationKind::Merchant) {
-            let mut offer_y = 0.28;
-            for _ in 0..self.active_merchant_offers.len() {
-                if mouse_x >= -0.35
-                    && mouse_x <= 0.35
-                    && mouse_y >= offer_y - 0.04
-                    && mouse_y <= offer_y + 0.03
-                {
-                    return Some(PresentationInventoryTarget::Workstation);
-                }
-                offer_y -= 0.09;
-                if offer_y < -0.30 {
-                    break;
-                }
-            }
-        }
-        if self.active_station == Some(StationKind::Enchanting) {
-            for index in 0..3 {
-                let y1 = 0.28 - index as f32 * 0.12;
-                let y0 = y1 - 0.09;
-                if mouse_x >= 0.02 && mouse_x <= 0.62 && mouse_y >= y0 && mouse_y <= y1 {
-                    return Some(PresentationInventoryTarget::Workstation);
-                }
-            }
-        }
-        if self.recipe_book_open
-            && mouse_x >= -0.85
-            && mouse_x <= -0.48
-            && mouse_y >= -0.45
-            && mouse_y <= 0.45
-        {
+        // Writeback has no mouse-button; overlay geometry matches the historical
+        // always-on hit test (`collect_inventory_ui_hits` with `is_left = true`).
+        let ui = collect_inventory_ui_hits(
+            mouse_x,
+            mouse_y,
+            true,
+            self.active_station == Some(StationKind::Merchant),
+            self.active_merchant_offers.len(),
+            self.recipe_book_open,
+            self.active_station == Some(StationKind::Enchanting),
+        );
+        if ui.merchant.is_some() || ui.enchant.is_some() || ui.recipe_book {
             return Some(PresentationInventoryTarget::Workstation);
         }
-        let clicked_slot = self
-            .get_inventory_slots()
+        self.get_inventory_slots()
             .into_iter()
             .find(|&(_, x0, x1, y0, y1)| {
                 mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
             })
-            .map(|(slot, _, _, _, _)| slot);
-        match clicked_slot {
-            Some(SlotType::ContainerSlot(_)) => Some(PresentationInventoryTarget::ContainerSlot),
-            Some(SlotType::AnvilOutput | SlotType::EnchantInput | SlotType::EnchantLapis) => {
-                Some(PresentationInventoryTarget::Workstation)
-            }
-            Some(_) => Some(PresentationInventoryTarget::PlayerInventory),
-            None => None,
-        }
+            .map(|(slot, _, _, _, _)| presentation_target_for_slot(slot))
     }
 
     pub(crate) fn should_writeback_after_inventory_click(&self) -> bool {
@@ -8884,39 +8868,30 @@ impl State {
 
     pub fn handle_inventory_click(&mut self, is_left: bool) {
         let probe = self.probe_inventory_click(is_left);
-        match (self.presentation_topology(), probe.authority_hit()) {
-            (
-                PresentationTopology::JoinClient | PresentationTopology::Embedded,
-                InventoryHit::Merchant { offer_index },
-            ) => {
-                let _ = self.execute_active_merchant_trade(offer_index);
+        let hit = probe.authority_hit();
+        if let InventoryHit::Merchant { offer_index } = hit {
+            // Merchant is not a `PresentationInventoryTarget`. Mapping it to
+            // Workstation would `inventory_decision` → Reject, but the live
+            // path submits `GameplayOperation::Trade` on both topologies.
+            let _ = self.execute_active_merchant_trade(offer_index);
+            return;
+        }
+        let Some(target) = presentation_target_for_authority_hit(hit) else {
+            return;
+        };
+        match self.presentation_topology().inventory_decision(target) {
+            PresentationInventoryAction::SendAuthorityOp => {
+                if let InventoryHit::Slot(SlotType::ContainerSlot(slot)) = hit {
+                    self.submit_inventory_container_click(slot, is_left);
+                }
             }
-            (
-                PresentationTopology::JoinClient | PresentationTopology::Embedded,
-                InventoryHit::Slot(SlotType::ContainerSlot(slot)),
-            ) => {
-                self.submit_inventory_container_click(slot, is_left);
-            }
-            (
-                PresentationTopology::Embedded,
-                InventoryHit::Slot(
-                    SlotType::AnvilOutput | SlotType::EnchantInput | SlotType::EnchantLapis,
-                ),
-            ) => {
-                // Workstation: reject. Must not consume items or spawn drops.
-            }
-            (PresentationTopology::Embedded, InventoryHit::Slot(_)) => {
+            PresentationInventoryAction::LocalMutate => {
                 // Embedded player-inventory writeback exception is applied
                 // by `app` after this click via `sync_authority_gameplay_from_local`.
                 // Local slot mutation lives in presentation inventory policy, not leftover sim.
                 let _ = (probe, is_left);
             }
-            (PresentationTopology::JoinClient, _) => {
-                // Join must not consume or drop.
-            }
-            (PresentationTopology::Embedded, _) => {
-                // Embedded workstation / empty-space throws must not consume.
-            }
+            PresentationInventoryAction::Reject => {}
         }
     }
 
@@ -10847,6 +10822,73 @@ mod reach_tests {
         // add_stack with full inventory returns remainder
         let remainder = inv.add_stack(ItemStack::new(Item::Dirt, 64));
         assert_eq!(remainder, Some(ItemStack::new(Item::Dirt, 64)));
+    }
+
+    #[test]
+    fn inventory_slot_hits_map_to_inventory_decision_targets() {
+        assert_eq!(
+            presentation_target_for_slot(SlotType::ContainerSlot(3)),
+            PresentationInventoryTarget::ContainerSlot
+        );
+        assert_eq!(
+            presentation_target_for_slot(SlotType::Hotbar(0)),
+            PresentationInventoryTarget::PlayerInventory
+        );
+        assert_eq!(
+            presentation_target_for_slot(SlotType::Backpack(4)),
+            PresentationInventoryTarget::PlayerInventory
+        );
+        assert_eq!(
+            presentation_target_for_slot(SlotType::AnvilOutput),
+            PresentationInventoryTarget::Workstation
+        );
+        assert_eq!(
+            presentation_target_for_slot(SlotType::EnchantInput),
+            PresentationInventoryTarget::Workstation
+        );
+        assert_eq!(
+            presentation_target_for_slot(SlotType::EnchantLapis),
+            PresentationInventoryTarget::Workstation
+        );
+        assert_eq!(
+            presentation_target_for_authority_hit(InventoryHit::Merchant { offer_index: 0 }),
+            None
+        );
+        assert_eq!(
+            presentation_target_for_authority_hit(InventoryHit::RecipeBook),
+            Some(PresentationInventoryTarget::Workstation)
+        );
+        assert_eq!(
+            presentation_target_for_authority_hit(InventoryHit::Empty),
+            None
+        );
+
+        let embedded = PresentationTopology::Embedded;
+        let join = PresentationTopology::JoinClient;
+        assert_eq!(
+            embedded.inventory_decision(PresentationInventoryTarget::ContainerSlot),
+            PresentationInventoryAction::SendAuthorityOp
+        );
+        assert_eq!(
+            join.inventory_decision(PresentationInventoryTarget::ContainerSlot),
+            PresentationInventoryAction::SendAuthorityOp
+        );
+        assert_eq!(
+            embedded.inventory_decision(PresentationInventoryTarget::PlayerInventory),
+            PresentationInventoryAction::LocalMutate
+        );
+        assert_eq!(
+            join.inventory_decision(PresentationInventoryTarget::PlayerInventory),
+            PresentationInventoryAction::Reject
+        );
+        assert_eq!(
+            embedded.inventory_decision(PresentationInventoryTarget::Workstation),
+            PresentationInventoryAction::Reject
+        );
+        assert_eq!(
+            join.inventory_decision(PresentationInventoryTarget::Workstation),
+            PresentationInventoryAction::Reject
+        );
     }
 }
 

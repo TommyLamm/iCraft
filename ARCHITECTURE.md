@@ -129,6 +129,10 @@ input
 - `EmbeddedRuntimeBridge::sync_local_inventory` may write back only
   inventory, cursor, and selected hotbar. Health, hunger, XP, mining, and
   mounts stay server-owned. Join clients never use this path.
+- Inventory UI topology is `PresentationTopology::inventory_decision`.
+  Container slots send `ContainerClick`. Merchant offers submit `Trade` on
+  both topologies (they are not `Workstation`, which would Reject). A UI
+  hit is never itself an authoritative commit.
 
 Leftover renderer-owned world simulation is gone. World mutation belongs in
 `AuthorityCore` / `ServerWorld`. Presentation `SaveManager` and

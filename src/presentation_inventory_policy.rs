@@ -285,4 +285,23 @@ mod tests {
         )));
         assert!(!topology.should_writeback_after_inventory_click(None));
     }
+
+    #[test]
+    fn container_click_sends_authority_workstation_rejects_on_both_topologies() {
+        for topology in [
+            PresentationTopology::Embedded,
+            PresentationTopology::JoinClient,
+        ] {
+            assert_eq!(
+                topology.inventory_decision(PresentationInventoryTarget::ContainerSlot),
+                PresentationInventoryAction::SendAuthorityOp,
+                "{topology:?} container"
+            );
+            assert_eq!(
+                topology.inventory_decision(PresentationInventoryTarget::Workstation),
+                PresentationInventoryAction::Reject,
+                "{topology:?} workstation"
+            );
+        }
+    }
 }
