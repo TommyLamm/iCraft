@@ -532,29 +532,6 @@ pub fn tick_hoppers_in_columns(
             continue;
         }
         if result.transfers >= budget {
-            // #region agent log
-            {
-                use std::io::Write;
-                static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("debug-879839.log")
-                        .and_then(|mut f| {
-                            writeln!(
-                                f,
-                                "{{\"sessionId\":\"879839\",\"hypothesisId\":\"I\",\"location\":\"world_tick.rs:tick_hoppers\",\"message\":\"budget skip after cooldown handled\",\"data\":{{\"pos\":[{},{},{}],\"cooldown\":{},\"transfers\":{},\"budget\":{}}},\"timestamp\":{}}}",
-                                x, y, z, cooldown, result.transfers, budget, ts
-                            )
-                        });
-                }
-            }
-            // #endregion
             continue;
         }
 
@@ -1214,26 +1191,6 @@ mod tests {
             Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
             _ => 255,
         };
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"I\",\"location\":\"world_tick.rs:debug_hopper_budget_skips_cooldown\",\"message\":\"cooldown after budget tick\",\"data\":{{\"remaining\":{}}},\"timestamp\":{}}}",
-                        remaining, ts
-                    )
-                });
-        }
-        // #endregion
         assert_eq!(remaining, 3);
     }
 }

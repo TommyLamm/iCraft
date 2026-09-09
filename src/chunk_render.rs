@@ -45,32 +45,6 @@ impl TerrainVertex {
         let py = (rel_y * 32.0).round() as u16;
         let pz = (rel_z * 32.0).round() as u16;
 
-        // #region agent log
-        if position[1] < 0.0 {
-            use std::io::Write;
-            static NEG_Y_LOGS: std::sync::atomic::AtomicU32 =
-                std::sync::atomic::AtomicU32::new(0);
-            if NEG_Y_LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let decoded = py as f32 / 32.0 + REGION_ORIGIN_Y;
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("debug-879839.log")
-                    .and_then(|mut f| {
-                        writeln!(
-                            f,
-                            "{{\"sessionId\":\"879839\",\"hypothesisId\":\"A\",\"location\":\"chunk_render.rs:TerrainVertex::new\",\"message\":\"negative world Y encoded\",\"data\":{{\"input_y\":{},\"clamped_rel_y\":{},\"encoded_py\":{},\"decoded_y\":{}}},\"timestamp\":{}}}",
-                            position[1], rel_y, py, decoded, ts
-                        )
-                    });
-            }
-        }
-        // #endregion
-
         let light_u32 = light_level as u32;
         let sky_light = (light_u32 & 0x0F) as u16;
         let block_light = ((light_u32 >> 4) & 0x0F) as u16;
@@ -1631,27 +1605,6 @@ mod tests {
             (0, 0),
         );
         let decoded = vertex.world_position((0, 0));
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"A\",\"location\":\"chunk_render.rs:debug_negative_world_y_encoding\",\"message\":\"roundtrip\",\"data\":{{\"input_y\":-32.0,\"decoded_y\":{},\"encoded_py\":{}}},\"timestamp\":{}}}",
-                        decoded.y, vertex.pos[1], ts
-                    )
-                });
-        }
-        // #endregion
-        let _ = decoded;
         assert!((decoded.y + 32.0).abs() < 0.05, "negative world Y must round-trip, got {}", decoded.y);
     }
 }

@@ -185,31 +185,6 @@ pub fn apply_batch(
                 );
             }
         }
-        // #region agent log
-        {
-            use crate::world::RenderType;
-            let old_opaque = old_props.render_type == RenderType::Opaque;
-            let new_opaque = new_props.render_type == RenderType::Opaque;
-            if old_props.is_solid == new_props.is_solid && old_opaque != new_opaque {
-                use std::io::Write;
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("debug-879839.log")
-                    .and_then(|mut f| {
-                        writeln!(
-                            f,
-                            "{{\"sessionId\":\"879839\",\"hypothesisId\":\"B\",\"location\":\"world_mutation.rs:apply_batch\",\"message\":\"opacity changed with same is_solid\",\"data\":{{\"pos\":[{},{},{}],\"old_solid\":{},\"new_solid\":{},\"old_opaque\":{},\"new_opaque\":{}}},\"timestamp\":{}}}",
-                            x, y, z, old_props.is_solid, new_props.is_solid, old_opaque, new_opaque, ts
-                        )
-                    });
-            }
-        }
-        // #endregion
 
         if old_props.light_emission != new_props.light_emission {
             crate::lighting::update_block_light_after_removed(
@@ -387,29 +362,8 @@ mod tests {
             new_entity: None,
             cause: MutationCause::System,
         };
-        let outcome = apply_batch(&mut manager, vec![req]).unwrap();
+        apply_batch(&mut manager, vec![req]).unwrap();
         let after = manager.get_sky_light(8, 79, 8);
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"B\",\"location\":\"world_mutation.rs:debug_stone_to_glass\",\"message\":\"sky below glass after swap\",\"data\":{{\"before\":{},\"after\":{},\"dirty\":{}}},\"timestamp\":{}}}",
-                        before, after, outcome.dirty_chunks.len(), ts
-                    )
-                });
-        }
-        // #endregion
-        let _ = (before, after, outcome);
         assert_eq!(before, 0);
         assert_eq!(after, 15);
     }

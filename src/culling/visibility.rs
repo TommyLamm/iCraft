@@ -362,30 +362,6 @@ impl EntityLosManager {
         );
         let height = manager.dimension.height();
         if min.1 < height.min_y() || max.1 >= height.max_y_exclusive() {
-            // #region agent log
-            {
-                use std::io::Write;
-                static Y_LOGS: std::sync::atomic::AtomicU32 =
-                    std::sync::atomic::AtomicU32::new(0);
-                if Y_LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("debug-879839.log")
-                        .and_then(|mut f| {
-                            writeln!(
-                                f,
-                                "{{\"sessionId\":\"879839\",\"hypothesisId\":\"E\",\"location\":\"culling/visibility.rs:make_snapshot\",\"message\":\"LOS snapshot rejected Y range\",\"data\":{{\"min_y\":{},\"max_y\":{},\"chunk_height\":{}}},\"timestamp\":{}}}",
-                                min.1, max.1, crate::world::CHUNK_HEIGHT, ts
-                            )
-                        });
-                }
-            }
-            // #endregion
             self.counters.fail_open = self.counters.fail_open.saturating_add(1);
             return None;
         }
@@ -1006,29 +982,8 @@ mod entity_los_tests {
         let cam_cell = (0, 1, 0);
         let mob = Entity::new(21, EntityType::Zombie, Vec3::new(20.8, -20.2, 0.2));
         let (mut los, request_rx, _result_tx) = harness(4);
-        let visible = los.is_entity_visible(&mob, cam, cam_cell, &chunks);
+        let _ = los.is_entity_visible(&mob, cam, cam_cell, &chunks);
         let queued = request_rx.try_recv().is_ok();
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"E\",\"location\":\"culling/visibility.rs:debug_los_snapshot_rejects_negative_y\",\"message\":\"below-zero LOS\",\"data\":{{\"visible\":{},\"queued\":{},\"fail_open\":{}}},\"timestamp\":{}}}",
-                        visible, queued, los.counters.fail_open, ts
-                    )
-                });
-        }
-        // #endregion
-        let _ = (visible, queued);
         assert!(queued, "below-zero LOS must queue a terrain snapshot");
     }
 }

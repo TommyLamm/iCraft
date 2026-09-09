@@ -2159,7 +2159,7 @@ mod tests {
         let key = SectionKey::new(0, -2, 0);
         let bundle = chunk
             .generate_section_mesh_bundle(key, 1, 1, |x, y, z| test_chunk_lookup(&chunk, x, y, z));
-        let (min_y, max_y, vertex_count) = match bundle.bounds {
+        let (min_y, _max_y, vertex_count) = match bundle.bounds {
             Some(bounds) => (
                 bounds.min.y,
                 bounds.max.y,
@@ -2167,27 +2167,6 @@ mod tests {
             ),
             None => (f32::NAN, f32::NAN, 0),
         };
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"A\",\"location\":\"world/mesh.rs:debug_negative_section_mesh_bounds\",\"message\":\"section y=-2 mesh bounds\",\"data\":{{\"expected_min_y\":-32.0,\"min_y\":{},\"max_y\":{},\"vertices\":{}}},\"timestamp\":{}}}",
-                        min_y, max_y, vertex_count, ts
-                    )
-                });
-        }
-        // #endregion
-        let _ = (min_y, max_y, vertex_count);
         assert!((min_y + 32.0).abs() < 0.05, "section y=-2 mesh min Y must stay at -32, got {min_y}");
         assert!(vertex_count > 0);
     }
