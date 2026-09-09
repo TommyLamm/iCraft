@@ -191,35 +191,6 @@ fn desired_flow(
     {
         return Some((0, true));
     }
-    // #region agent log
-    if chunk_manager.dimension.height().contains_y(wy + 1)
-        && chunk_manager.get_block(wx, wy + 1, wz) == target_type
-        && !is_water_source_at(chunk_manager, (wx, wy + 1, wz), target_type, is_lava)
-    {
-        use std::io::Write;
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"F\",\"location\":\"fluid.rs:desired_flow\",\"message\":\"above fluid rejected as non-source\",\"data\":{{\"pos\":[{},{},{}],\"above_level\":{},\"above_falling\":{}}},\"timestamp\":{}}}",
-                        wx, wy, wz,
-                        chunk_manager.get_fluid_level(wx, wy + 1, wz),
-                        chunk_manager.get_fluid_falling(wx, wy + 1, wz),
-                        ts
-                    )
-                });
-        }
-    }
-    // #endregion
 
     // Two adjacent source blocks above a supporting block create an infinite
     // water source. Lava intentionally does not use this rule.
@@ -514,27 +485,6 @@ mod tests {
         let y118 = manager.get_block(8, 118, 8);
         let y118_falling = manager.get_fluid_falling(8, 118, 8);
         let side = manager.get_block(9, 101, 8);
-        let side_level = manager.get_fluid_level(9, 101, 8);
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"F\",\"location\":\"fluid.rs:debug_waterfall_and_horizontal_spread\",\"message\":\"flow after ticks\",\"data\":{{\"y118_water\":{},\"y118_falling\":{},\"side_water\":{},\"side_level\":{}}},\"timestamp\":{}}}",
-                        y118 == BlockType::Water, y118_falling, side == BlockType::Water, side_level, ts
-                    )
-                });
-        }
-        // #endregion
         assert_eq!(y118, BlockType::Water);
         assert!(y118_falling);
         assert_eq!(side, BlockType::Water);

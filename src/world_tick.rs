@@ -3,7 +3,7 @@ use crate::chunk_manager::ChunkManager;
 use crate::dimension::WorldHeight;
 use crate::entity::EntityType;
 use crate::inventory::ItemStack;
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
+use crate::world::{section_and_local_y_to_world_y, BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
 use glam::Vec3;
 use std::collections::BTreeSet;
 
@@ -437,7 +437,7 @@ pub fn sample_random_ticks_in_columns(
             let lz = ((rng_val >> 8) & 0xF) as i32;
 
             let world_x = cx * (CHUNK_WIDTH as i32) + lx;
-            let world_y = (sec_y as i32) * 16 + ly;
+            let world_y = section_and_local_y_to_world_y(sec_y, ly as u8);
             let world_z = cz * (CHUNK_DEPTH as i32) + lz;
 
             let block = chunk_manager.get_block(world_x, world_y, world_z);
@@ -551,36 +551,15 @@ pub fn tick_hoppers_in_columns(
             continue;
         }
         if cooldown > 0 {
+            // Countdown is memory-only so idle hoppers do not keep the column
+            // dirty. Reload restores the last persisted cooldown (armed 8
+            // after a transfer), so a hopper may wait up to 8 extra ticks.
             if let Some(BlockEntity::Hopper(h)) = chunk_manager.get_block_entity_mut(x, y, z) {
                 h.transfer_cooldown = h.transfer_cooldown.saturating_sub(1);
-                chunk_manager.mark_block_entity_dirty(x, z);
             }
             continue;
         }
         if result.transfers >= budget {
-            // #region agent log
-            {
-                use std::io::Write;
-                static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("debug-879839.log")
-                        .and_then(|mut f| {
-                            writeln!(
-                                f,
-                                "{{\"sessionId\":\"879839\",\"hypothesisId\":\"I\",\"location\":\"world_tick.rs:tick_hoppers\",\"message\":\"budget skip after cooldown handled\",\"data\":{{\"pos\":[{},{},{}],\"cooldown\":{},\"transfers\":{},\"budget\":{}}},\"timestamp\":{}}}",
-                                x, y, z, cooldown, result.transfers, budget, ts
-                            )
-                        });
-                }
-            }
-            // #endregion
             continue;
         }
 
@@ -1229,7 +1208,9 @@ mod tests {
             1,
             64,
             0,
-            Some(BlockEntity::Chest(crate::block_entity::ChestBlockEntity::new())),
+            Some(BlockEntity::Chest(
+                crate::block_entity::ChestBlockEntity::new(),
+            )),
         );
         let mut right = HopperBlockEntity::with_facing(Direction::West);
         right.transfer_cooldown = 4;
@@ -1240,26 +1221,73 @@ mod tests {
             Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
             _ => 255,
         };
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"I\",\"location\":\"world_tick.rs:debug_hopper_budget_skips_cooldown\",\"message\":\"cooldown after budget tick\",\"data\":{{\"remaining\":{}}},\"timestamp\":{}}}",
-                        remaining, ts
-                    )
-                });
-        }
-        // #endregion
         assert_eq!(remaining, 3);
+    }
+
+    #[test]
+    fn hopper_cooldown_countdown_does_not_mark_chunk_dirty() {
+        use crate::block_entity::{BlockEntity, ChestBlockEntity, HopperBlockEntity};
+        use crate::inventory::{Item, ItemStack};
+        use crate::redstone::Direction;
+
+        let mut manager = ChunkManager::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(0, 64, 0, BlockType::Hopper);
+        let mut hopper = HopperBlockEntity::with_facing(Direction::East);
+        hopper.slots[0] = Some(ItemStack::new(Item::Stone, 1));
+        hopper.transfer_cooldown = 4;
+        manager.set_block_entity(0, 64, 0, Some(BlockEntity::Hopper(hopper)));
+        manager.set_block(1, 64, 0, BlockType::Chest);
+        manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
+        manager.dirty_chunks.clear();
+
+        assert_eq!(
+            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            0
+        );
+        let remaining = match manager.get_block_entity(0, 64, 0) {
+            Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
+            _ => panic!("hopper"),
+        };
+        assert_eq!(remaining, 3);
+        assert!(
+            !manager.dirty_chunks.is_dirty(0, 0),
+            "cooldown countdown must not mark the column dirty"
+        );
+    }
+
+    #[test]
+    fn hopper_transfer_marks_chunk_dirty_and_arms_cooldown() {
+        use crate::block_entity::{BlockEntity, ChestBlockEntity, HopperBlockEntity};
+        use crate::inventory::{Item, ItemStack};
+        use crate::redstone::Direction;
+
+        let mut manager = ChunkManager::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(0, 64, 0, BlockType::Hopper);
+        let mut hopper = HopperBlockEntity::with_facing(Direction::East);
+        hopper.slots[0] = Some(ItemStack::new(Item::Stone, 1));
+        manager.set_block_entity(0, 64, 0, Some(BlockEntity::Hopper(hopper)));
+        manager.set_block(1, 64, 0, BlockType::Chest);
+        manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
+        manager.dirty_chunks.clear();
+
+        assert_eq!(
+            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            1
+        );
+        let remaining = match manager.get_block_entity(0, 64, 0) {
+            Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
+            _ => panic!("hopper"),
+        };
+        assert_eq!(remaining, 8);
+        assert!(
+            manager.dirty_chunks.is_dirty(0, 0),
+            "slot change and cooldown 0→8 after a transfer must dirty the column"
+        );
     }
 }

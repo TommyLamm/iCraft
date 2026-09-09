@@ -1,4 +1,4 @@
-use crate::chunk_render::{ChunkLodMeshData, ChunkMeshBundle, TerrainVertex};
+use crate::chunk_render::{ChunkLodMeshData, ChunkMeshBundle, LodLevel, TerrainVertex};
 use crate::redstone::Direction;
 use crate::world::block::{
     BlockState, BlockType, RenderType, CHUNK_DEPTH, CHUNK_WIDTH, FLUID_WATERLOGGED_BIT,
@@ -735,10 +735,31 @@ impl Chunk {
                 v.raw_fluid & 8 != 0,
             )
         };
-        let mut opaque_vertices = Vec::new();
-        let mut opaque_indices = Vec::new();
-        let mut trans_vertices = Vec::new();
-        let mut trans_indices = Vec::new();
+        let mut non_air = 0usize;
+        for x in 0..extent[0] {
+            for z in 0..extent[2] {
+                for y in 0..extent[1] {
+                    if get_voxel(
+                        origin[0] + x as i32,
+                        origin[1] + y as i32,
+                        origin[2] + z as i32,
+                    )
+                    .block
+                        != BlockType::Air
+                    {
+                        non_air += 1;
+                    }
+                }
+            }
+        }
+        // Six cube faces × 4 verts / 6 indices is a hard upper bound for greedy
+        // cubes; custom models may grow past it and Vec will reallocate.
+        let vert_cap = non_air.saturating_mul(24);
+        let idx_cap = non_air.saturating_mul(36);
+        let mut opaque_vertices = Vec::with_capacity(vert_cap);
+        let mut opaque_indices = Vec::with_capacity(idx_cap);
+        let mut trans_vertices = Vec::with_capacity(vert_cap / 4);
+        let mut trans_indices = Vec::with_capacity(idx_cap / 4);
 
         let region_coord = crate::chunk_render::chunk_to_region_coord(
             origin[0] / CHUNK_WIDTH as i32,
@@ -1300,8 +1321,8 @@ impl Chunk {
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
     {
-        let min_y = self.min_section_y as i32 * 16;
-        let total_height = self.sections.len() * 16;
+        let min_y = self.min_world_y();
+        let total_height = (self.max_world_y_exclusive() - min_y) as usize;
         let origin = [
             self.chunk_x * CHUNK_WIDTH as i32,
             min_y,
@@ -1473,6 +1494,7 @@ impl Chunk {
             SectionIdentity::new(key, revision, lifetime),
             &halo,
             registry,
+            LodLevel::MASK_ALL,
         )
     }
 
@@ -1483,7 +1505,16 @@ impl Chunk {
         identity: SectionIdentity,
         halo: &SectionHaloSnapshot,
     ) -> crate::chunk_render::SectionMeshBundle {
-        Self::generate_section_mesh_bundle_from_halo_inner(identity, halo, None)
+        Self::generate_section_mesh_bundle_from_halo_inner(identity, halo, None, LodLevel::MASK_ALL)
+    }
+
+    /// Same worker entry, but only generates the requested LOD bits.
+    pub fn generate_section_mesh_bundle_from_halo_for_lods(
+        identity: SectionIdentity,
+        halo: &SectionHaloSnapshot,
+        lod_mask: u8,
+    ) -> crate::chunk_render::SectionMeshBundle {
+        Self::generate_section_mesh_bundle_from_halo_inner(identity, halo, None, lod_mask)
     }
 
     /// Worker-safe section mesh entry point with an immutable model registry.
@@ -1492,46 +1523,76 @@ impl Chunk {
         halo: &SectionHaloSnapshot,
         registry: &crate::block_model::ModelRegistry,
     ) -> crate::chunk_render::SectionMeshBundle {
-        Self::generate_section_mesh_bundle_from_halo_inner(identity, halo, Some(registry))
+        Self::generate_section_mesh_bundle_from_halo_inner(
+            identity,
+            halo,
+            Some(registry),
+            LodLevel::MASK_ALL,
+        )
+    }
+
+    /// Same as the registry worker entry, but only generates the requested LOD bits.
+    pub fn generate_section_mesh_bundle_from_halo_with_registry_for_lods(
+        identity: SectionIdentity,
+        halo: &SectionHaloSnapshot,
+        registry: &crate::block_model::ModelRegistry,
+        lod_mask: u8,
+    ) -> crate::chunk_render::SectionMeshBundle {
+        Self::generate_section_mesh_bundle_from_halo_inner(identity, halo, Some(registry), lod_mask)
     }
 
     fn generate_section_mesh_bundle_from_halo_inner(
         identity: SectionIdentity,
         halo: &SectionHaloSnapshot,
         registry: Option<&crate::block_model::ModelRegistry>,
+        lod_mask: u8,
     ) -> crate::chunk_render::SectionMeshBundle {
         let key = identity.key;
         debug_assert_eq!(halo.key, key);
-        let section_voxel = |wx: i32, wy: i32, wz: i32| {
-            let hx = wx - key.cx * CHUNK_WIDTH as i32 + 1;
-            let hy = wy - key.min_world_y() + 1;
-            let hz = wz - key.cz * CHUNK_DEPTH as i32 + 1;
-            if (0..SectionHaloSnapshot::SIDE as i32).contains(&hx)
-                && (0..SectionHaloSnapshot::SIDE as i32).contains(&hy)
-                && (0..SectionHaloSnapshot::SIDE as i32).contains(&hz)
-            {
-                let voxel = halo.get(hx as usize, hy as usize, hz as usize);
-                return voxel;
-            }
-            // Coordinates outside the captured halo are never queried by the
-            // section worker. Keep a deterministic sentinel for defensive use.
-            MeshVoxel::default()
+        let lod_mask = if lod_mask == 0 {
+            LodLevel::MASK_L0
+        } else {
+            lod_mask & LodLevel::MASK_ALL
         };
-        let origin = [
-            key.cx * CHUNK_WIDTH as i32,
-            key.min_world_y(),
-            key.cz * CHUNK_DEPTH as i32,
-        ];
-        let (o, oi, t, ti) = Self::mesh_l0_volume_with_registry(
-            origin,
-            [CHUNK_WIDTH, SECTION_SIZE, CHUNK_DEPTH],
-            section_voxel,
-            registry,
-        );
-        let region_coord = crate::chunk_render::chunk_to_region_coord(key.cx, key.cz);
-        let l0 = ChunkLodMeshData::from_parts(o, oi, t, ti, region_coord);
-        let l1 = Self::mesh_section_lod_from_halo_with_registry(key, halo, 2, registry);
-        let l2 = Self::mesh_section_lod_from_halo_with_registry(key, halo, 4, registry);
+        let l0 = if LodLevel::L0.is_in(lod_mask) {
+            let section_voxel = |wx: i32, wy: i32, wz: i32| {
+                let hx = wx - key.cx * CHUNK_WIDTH as i32 + 1;
+                let hy = wy - key.min_world_y() + 1;
+                let hz = wz - key.cz * CHUNK_DEPTH as i32 + 1;
+                if (0..SectionHaloSnapshot::SIDE as i32).contains(&hx)
+                    && (0..SectionHaloSnapshot::SIDE as i32).contains(&hy)
+                    && (0..SectionHaloSnapshot::SIDE as i32).contains(&hz)
+                {
+                    return halo.get(hx as usize, hy as usize, hz as usize);
+                }
+                MeshVoxel::default()
+            };
+            let origin = [
+                key.cx * CHUNK_WIDTH as i32,
+                key.min_world_y(),
+                key.cz * CHUNK_DEPTH as i32,
+            ];
+            let (o, oi, t, ti) = Self::mesh_l0_volume_with_registry(
+                origin,
+                [CHUNK_WIDTH, SECTION_SIZE, CHUNK_DEPTH],
+                section_voxel,
+                registry,
+            );
+            let region_coord = crate::chunk_render::chunk_to_region_coord(key.cx, key.cz);
+            ChunkLodMeshData::from_parts(o, oi, t, ti, region_coord)
+        } else {
+            ChunkLodMeshData::default()
+        };
+        let l1 = if LodLevel::L1.is_in(lod_mask) {
+            Self::mesh_section_lod_from_halo_with_registry(key, halo, 2, registry)
+        } else {
+            ChunkLodMeshData::default()
+        };
+        let l2 = if LodLevel::L2.is_in(lod_mask) {
+            Self::mesh_section_lod_from_halo_with_registry(key, halo, 4, registry)
+        } else {
+            ChunkLodMeshData::default()
+        };
         let levels = [l0, l1, l2];
         let bounds = levels
             .iter()
@@ -1542,6 +1603,7 @@ impl Chunk {
             levels,
             bounds,
             connectivity: crate::culling::compute_section_connectivity_snapshot(halo),
+            built_lods: lod_mask,
         }
     }
 
@@ -1672,7 +1734,7 @@ impl Chunk {
                             continue;
                         }
                         let mut y = h as i32;
-                        let min_y = self.min_section_y as i32 * 16;
+                        let min_y = self.min_world_y();
                         loop {
                             let block = self.get_block_local(x, y, z);
                             if is_lod_surface(block) {
@@ -1921,6 +1983,7 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk_render::LodLevel;
     use std::collections::HashSet;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1992,10 +2055,8 @@ mod tests {
 
     fn empty_test_chunk() -> Chunk {
         let mut chunk = Chunk::new(0, 0);
-        let min_y = chunk.min_section_y as i32 * 16;
-        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
-            for y in min_y..max_y {
+            for y in chunk.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                     chunk.set_sky_light(x, y, z, 15);
@@ -2103,11 +2164,9 @@ mod tests {
     #[test]
     fn section_bundle_builds_distinct_bounded_lods_and_preserves_identity() {
         let mut chunk = empty_test_chunk();
-        let min_y = chunk.min_section_y as i32 * 16;
-        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in min_y..max_y {
+                for y in chunk.world_y_range() {
                     let block = if y < 64 {
                         BlockType::Stone
                     } else if y == 64 {
@@ -2150,6 +2209,33 @@ mod tests {
         let l1_quads = bundle.levels[1].opaque.indices.len() / 6;
         let l2_quads = bundle.levels[2].opaque.indices.len() / 6;
         assert!(l0_quads > 0 && l1_quads > 0 && l2_quads > 0);
+        assert_eq!(bundle.built_lods, LodLevel::MASK_ALL);
+    }
+
+    #[test]
+    fn halo_bundle_can_defer_coarse_lods() {
+        let mut chunk = empty_test_chunk();
+        chunk.set_block_local(8, 64, 8, BlockType::Stone);
+        let key = SectionKey::new(0, 4, 0);
+        let halo = SectionHaloSnapshot::from_chunk(key, |wx, wy, wz| {
+            let (block, sky, block_light, level, falling) = test_chunk_lookup(&chunk, wx, wy, wz);
+            MeshVoxel {
+                block,
+                state: 0,
+                sky,
+                block_light,
+                raw_fluid: level | if falling { 8 } else { 0 },
+            }
+        });
+        let bundle = Chunk::generate_section_mesh_bundle_from_halo_for_lods(
+            SectionIdentity::new(key, 1, 1),
+            &halo,
+            LodLevel::MASK_L0,
+        );
+        assert!(!bundle.levels[0].opaque.indices.is_empty());
+        assert!(bundle.levels[1].opaque.indices.is_empty());
+        assert!(bundle.levels[2].opaque.indices.is_empty());
+        assert_eq!(bundle.built_lods, LodLevel::MASK_L0);
     }
 
     #[test]
@@ -2159,7 +2245,7 @@ mod tests {
         let key = SectionKey::new(0, -2, 0);
         let bundle = chunk
             .generate_section_mesh_bundle(key, 1, 1, |x, y, z| test_chunk_lookup(&chunk, x, y, z));
-        let (min_y, max_y, vertex_count) = match bundle.bounds {
+        let (min_y, _max_y, vertex_count) = match bundle.bounds {
             Some(bounds) => (
                 bounds.min.y,
                 bounds.max.y,
@@ -2167,28 +2253,10 @@ mod tests {
             ),
             None => (f32::NAN, f32::NAN, 0),
         };
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"A\",\"location\":\"world/mesh.rs:debug_negative_section_mesh_bounds\",\"message\":\"section y=-2 mesh bounds\",\"data\":{{\"expected_min_y\":-32.0,\"min_y\":{},\"max_y\":{},\"vertices\":{}}},\"timestamp\":{}}}",
-                        min_y, max_y, vertex_count, ts
-                    )
-                });
-        }
-        // #endregion
-        let _ = (min_y, max_y, vertex_count);
-        assert!((min_y + 32.0).abs() < 0.05, "section y=-2 mesh min Y must stay at -32, got {min_y}");
+        assert!(
+            (min_y + 32.0).abs() < 0.05,
+            "section y=-2 mesh min Y must stay at -32, got {min_y}"
+        );
         assert!(vertex_count > 0);
     }
 
@@ -2240,8 +2308,8 @@ mod tests {
         chunk.set_block_local(3, 64, 2, BlockType::Glass);
 
         let legacy = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
-        let min_y = chunk.min_section_y as i32 * 16;
-        let total_height = chunk.sections.len() * 16;
+        let min_y = chunk.min_world_y();
+        let total_height = (chunk.max_world_y_exclusive() - min_y) as usize;
         let core = Chunk::mesh_l0_volume(
             [0, min_y, 0],
             [CHUNK_WIDTH, total_height, CHUNK_DEPTH],
@@ -2549,10 +2617,8 @@ mod tests {
     #[test]
     fn snow_layer_mesh_is_one_eighth_of_a_block_high() {
         let mut chunk = Chunk::new(0, 0);
-        let min_y = chunk.min_section_y as i32 * 16;
-        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
-            for y in min_y..max_y {
+            for y in chunk.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                 }
@@ -2681,11 +2747,11 @@ mod tests {
         let (opaque_v, _, _, _) = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
         let min_y = opaque_v
             .iter()
-            .map(|v| v.pos[1] as f32 / 32.0)
+            .map(|v| v.local_position()[1])
             .fold(f32::INFINITY, f32::min);
         let max_y = opaque_v
             .iter()
-            .map(|v| v.pos[1] as f32 / 32.0)
+            .map(|v| v.local_position()[1])
             .fold(f32::NEG_INFINITY, f32::max);
 
         assert!((min_y - 1.0).abs() < 1e-4);
@@ -2916,7 +2982,7 @@ mod tests {
             assert_eq!(opaque_i.len(), 36);
             let max_y = opaque_v
                 .iter()
-                .map(|vertex| vertex.pos[1] as f32 / 32.0)
+                .map(|vertex| vertex.local_position()[1])
                 .fold(f32::NEG_INFINITY, f32::max);
             assert!((max_y - (1.0 + END_PORTAL_FRAME_HEIGHT)).abs() < 1e-4);
         }
@@ -2927,7 +2993,7 @@ mod tests {
         assert_eq!(trans_v.len(), 8);
         assert_eq!(trans_i.len(), 12);
         assert!(trans_v.iter().all(|vertex| {
-            (vertex.pos[1] as f32 / 32.0 - (1.0 + END_PORTAL_SURFACE_HEIGHT)).abs() < 1e-4
+            (vertex.local_position()[1] - (1.0 + END_PORTAL_SURFACE_HEIGHT)).abs() < 1e-4
         }));
         assert!(END_PORTAL_SURFACE_HEIGHT < END_PORTAL_FRAME_HEIGHT);
     }

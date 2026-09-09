@@ -142,6 +142,15 @@ input
   simulation-distance and is sent only when pose, health, or animation
   changed, or when the entity newly entered that session's simulation set.
   Stationary entities are not re-encoded every tick.
+- Hopper `transfer_cooldown` countdown is memory-only. A column is marked dirty
+  only when hopper slots change or cooldown is armed `0→N` after a transfer.
+  Reload restores the last persisted cooldown (typically 8 after a transfer),
+  so a hopper may wait up to 8 extra ticks. Furnaces are ticked from a compact
+  per-chunk index with the same encoding as torches. Sleeping redstone skips
+  comparator/observer refresh until a container mutation, plate occupancy
+  change, scheduled/dirty work, or loaded-chunk set change wakes it. Grounded
+  dropped items with near-zero velocity skip XYZ physics until the support
+  block changes or an external push applies velocity.
 - `EmbeddedRuntimeBridge::sync_local_inventory` may write back only
   inventory, cursor, and selected hotbar. Health, hunger, XP, mining, and
   mounts stay server-owned. Join clients never use this path.
@@ -166,6 +175,9 @@ which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 3. Apply dimension transfers, route snapshots by interest, evict uninteresting
    columns, close invalid containers, update metrics, autosave every 6,000
    ticks (log errors; shutdown still `save_all`).
+   `ServerWorld::checksum` mixes a running XOR of block-revision fingerprints
+   (updated on mutation/evict) plus one sorted entity pass. Idle ticks do not
+   scan `block_revisions`.
 
 Desktop: `App -> State::update(dt) -> State::render()`. Drain events, run
 capped 20 Hz catch-up (listen-host keeps ticking in pause/death UI;
@@ -175,7 +187,8 @@ pass.
 Terrain is derived only:
 
 ```text
-ChunkManager -> section halo snapshot -> Rayon mesh -> identity check
+ChunkManager -> 9-column halo snapshot -> Rayon mesh (the currently
+  selected LOD; L1/L2 wait until first selected) -> identity check
   -> GPU region upload -> visibility + LOD -> wgpu
 ```
 
@@ -191,8 +204,10 @@ least 1×1.
 
 A chunk is a 16×16 column of sparse 16-high paletted `ChunkSection`s. Block
 entities live in the owning chunk. Use signed-Y helpers in `src/world/`
-(`world_y_to_section_y`, `Dimension::height()`), not `CHUNK_HEIGHT` (256,
-legacy dense constant) and not hard-coded `0..256`.
+(`world_y_to_section_y`, `section_and_local_y_to_world_y`,
+`Chunk::world_y_range()`, `Dimension::height()`), not `CHUNK_HEIGHT` (256,
+legacy dense constant) and not hard-coded `0..256`. Nether and End generation
+allocate `height().section_count()` sections.
 
 | Dimension | `WorldHeight` |
 | --- | --- |
@@ -202,6 +217,12 @@ legacy dense constant) and not hard-coded `0..256`.
 
 Unloaded columns are not air: entity physics freezes for a tick if the
 current or predicted AABB touches missing terrain.
+
+Load lighting (`propagate_chunk_lighting`) seeds from the locked column and
+up to eight neighbors (faces, emitters, and local darker neighbors) instead of
+a per-voxel HashMap lookup. Section mesh halos copy from those same column
+refs. Runtime meshing generates only the currently selected LOD; coarser
+LODs are filled the first time the camera selects them.
 
 - `dimension.rs` picks generation per dimension.
 - `worldgen/` owns climate, density, surfaces, caves, ores, features.
@@ -265,8 +286,18 @@ Writes are atomic. Chunk restore is fail-closed: corrupt/empty/oversized/
 dimension-inconsistent streams error; the column is never generated or
 saved over (`ServerWorld::failed_restore_chunks`). `ServerRuntime` is the
 sole `SaveManager` owner and the sole writer of `mutation_revisions.bin`.
-Desktop `State` does not keep a second mutation index. Desktop world paths
-go through `validated_world_path` (no symlink escape from `saves/`).
+Desktop `State` does not keep a second mutation index. Autosave and shutdown
+flush only `dirty_chunks` (plus eviction of unkept dirty columns), batched
+per region file so one region is rewritten once. `SaveManager` reuses
+`region_cache` on write when the on-disk length still matches the last
+observed snapshot; a truncated or corrupt region still fail-closes and
+leaves `.bin.bak` semantics unchanged. Disk chunk streams use zlib level 1
+(`Compression::fast`); the wrapper is unchanged so older level-6 payloads
+still inflate. Historical save payloads still treat Y as `0..256` world Y
+and must not be reinterpreted as signed-Y. Live `ChunkData` projection
+sends uncompressed terrain streams instead of the disk `ChunkSaveData`
+envelope. Desktop world paths go through `validated_world_path` (no
+symlink escape from `saves/`).
 
 ## Code map
 

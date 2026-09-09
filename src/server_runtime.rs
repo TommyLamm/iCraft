@@ -26,8 +26,8 @@ use crate::network::server::{
     HostToServer, MeteredHostEventSender, NetworkMetrics, NetworkServer, ServerConfig, ServerToHost,
 };
 use crate::save::{
-    normalize_player_identity, ChunkSaveData, EntitySaveData, LevelData, MutationRevisionIndex,
-    PlayerData, SaveManager,
+    normalize_player_identity, EntitySaveData, LevelData, MutationRevisionIndex, PlayerData,
+    SaveManager,
 };
 use glam::Vec3;
 #[cfg(test)]
@@ -1232,38 +1232,46 @@ impl ServerRuntime {
         let active_dimension = self.authority.active_dimension();
         let mut merged_revisions = MutationRevisionIndex::default();
         for dimension in self.authority.dimensions() {
-            let (chunks, entities, revisions) = self.authority.with_world(dimension, |world| {
-                let mut coordinates: Vec<_> = world.chunks.chunks.keys().copied().collect();
-                coordinates.sort_unstable();
-                let chunks = coordinates
-                    .into_iter()
-                    .filter_map(|(cx, cz)| {
-                        if world.failed_restore_chunks().contains(&(cx, cz)) {
-                            return None;
+            let (chunks, dirty_revs, entities, revisions) =
+                self.authority.with_world(dimension, |world| {
+                    let mut dirty = world.chunks.dirty_chunks.dirty_revisions();
+                    dirty.sort_unstable_by_key(|(coord, _)| *coord);
+                    let mut payloads = Vec::new();
+                    let mut revs = Vec::new();
+                    for ((cx, cz), revision) in dirty {
+                        let Some(data) = world.chunk_save_payload(cx, cz) else {
+                            continue;
+                        };
+                        if world.chunks.dirty_chunks.begin_save(cx, cz, revision) {
+                            payloads.push((cx, cz, data));
+                            revs.push((cx, cz, revision));
                         }
-                        world.chunks.chunks.get(&(cx, cz)).and_then(|chunk| {
-                            let metadata =
-                                world.redstone.collect_chunk_metadata(&world.chunks, cx, cz);
-                            let mut data =
-                                ChunkSaveData::from_chunk_with_redstone(chunk, &metadata).ok()?;
-                            data.mutation_revision = world.chunk_revision(cx, cz);
-                            Some((cx, cz, data))
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let entities = world
-                    .entities
-                    .entities
-                    .iter()
-                    .map(EntitySaveData::from)
-                    .collect::<Vec<_>>();
-                (chunks, entities, world.mutation_revision_index())
+                    }
+                    let entities = world
+                        .entities
+                        .entities
+                        .iter()
+                        .map(EntitySaveData::from)
+                        .collect::<Vec<_>>();
+                    (payloads, revs, entities, world.mutation_revision_index())
+                });
+            let save_result = self.save_manager.save_chunks_in(dimension, chunks);
+            self.authority.with_world(dimension, |world| {
+                for (cx, cz, revision) in &dirty_revs {
+                    if save_result.is_ok() {
+                        world
+                            .chunks
+                            .dirty_chunks
+                            .acknowledge_persisted(*cx, *cz, *revision);
+                    } else {
+                        world
+                            .chunks
+                            .dirty_chunks
+                            .acknowledge_failed(*cx, *cz, *revision);
+                    }
+                }
             });
-            for (cx, cz, data) in chunks {
-                self.save_manager
-                    .save_chunk_in(dimension, cx, cz, data)
-                    .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
-            }
+            save_result.map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
             self.save_manager.save_entities_in(dimension, &entities)?;
             for ((cx, cz), revision) in revisions.entries_in(dimension) {
                 merged_revisions
@@ -1427,7 +1435,41 @@ impl ServerRuntime {
         let dimensions = self.authority.dimensions();
         for dimension in dimensions {
             let keep = self.residency_keep_set(dimension);
+            let mut pending = Vec::new();
+            self.authority.with_world(dimension, |world| {
+                let mut unkept_dirty: Vec<_> = world
+                    .chunks
+                    .chunks
+                    .keys()
+                    .copied()
+                    .filter(|key| {
+                        !keep.contains(key)
+                            && !world.failed_restore_chunks().contains(key)
+                            && world.chunks.dirty_chunks.is_dirty(key.0, key.1)
+                    })
+                    .collect();
+                unkept_dirty.sort_unstable();
+                pending = unkept_dirty
+                    .into_iter()
+                    .filter_map(|(cx, cz)| {
+                        world.chunk_save_payload(cx, cz).map(|data| (cx, cz, data))
+                    })
+                    .collect();
+            });
             let mut flush_error = None;
+            if !pending.is_empty() {
+                let flushed: Vec<(i32, i32)> =
+                    pending.iter().map(|(cx, cz, _)| (*cx, *cz)).collect();
+                if let Err(error) = self.save_manager.save_chunks_in(dimension, pending) {
+                    flush_error = Some(error.to_string());
+                } else {
+                    self.authority.with_world(dimension, |world| {
+                        for (cx, cz) in flushed {
+                            world.chunks.dirty_chunks.remove(cx, cz);
+                        }
+                    });
+                }
+            }
             let save_manager = &mut self.save_manager;
             self.authority.with_world(dimension, |world| {
                 world.evict_unkept_chunks(&keep, |cx, cz, data| {
@@ -3025,5 +3067,40 @@ mod tests {
         }
         let _ = runtime.shutdown();
         let _ = fs::remove_dir_all(&runtime.world_dir);
+    }
+
+    #[test]
+    fn save_all_persists_only_dirty_resident_columns() {
+        let mut properties = ServerProperties::default();
+        properties.bind = "127.0.0.1".into();
+        properties.port = 25584;
+        properties.world_dir = temp_dir("dirty_only_autosave");
+        let mut runtime = ServerRuntime::new(properties).unwrap();
+        runtime.authority.with_world(Dimension::Overworld, |world| {
+            world.ensure_chunk(0, 0);
+            world.ensure_chunk(1, 0);
+            world
+                .set_block(8, 80, 8, crate::world::BlockType::DiamondOre, 0)
+                .unwrap();
+        });
+        runtime.save_all().unwrap();
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+
+        let mut manager = SaveManager::new(&world_dir);
+        let saved = manager
+            .load_chunk(0, 0)
+            .expect("dirty mutated column must persist");
+        let mut restored = crate::world::Chunk::empty_in_dimension(Dimension::Overworld, 0, 0);
+        saved.restore_to_chunk(&mut restored).unwrap();
+        assert_eq!(
+            restored.get_block_local(8, 80, 8),
+            crate::world::BlockType::DiamondOre
+        );
+        assert!(
+            manager.load_chunk(1, 0).is_none(),
+            "unmodified generated columns must not be rewritten on autosave"
+        );
+        let _ = fs::remove_dir_all(world_dir);
     }
 }

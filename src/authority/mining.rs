@@ -117,26 +117,6 @@ pub fn calculate_block_break_rewards(
     } else {
         0
     };
-    // #region agent log
-    if xp > 0 {
-        use std::io::Write;
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("debug-879839.log")
-            .and_then(|mut f| {
-                writeln!(
-                    f,
-                    "{{\"sessionId\":\"879839\",\"hypothesisId\":\"G\",\"location\":\"authority/mining.rs:calculate_block_break_rewards\",\"message\":\"xp vs eligibility\",\"data\":{{\"eligible\":{},\"xp\":{},\"drop_count\":{}}},\"timestamp\":{}}}",
-                    eligible, xp, drops.len(), ts
-                )
-            });
-    }
-    // #endregion
     BlockBreakRewards {
         drops,
         xp,
@@ -283,30 +263,6 @@ mod tests {
             calculate_block_break_rewards(BlockType::WheatCrop, 3, pos, None, GameMode::Survival);
         let tall =
             calculate_block_break_rewards(BlockType::TallGrass, 0, pos, None, GameMode::Survival);
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"G\",\"location\":\"authority/mining.rs:debug_ore_xp_and_crop_drops\",\"message\":\"rewards\",\"data\":{{\"iron_xp\":{},\"iron_drops\":{},\"wheat_drops\":{},\"first_wheat\":{:?},\"grass_drops\":{},\"first_grass\":{:?}}},\"timestamp\":{}}}",
-                        bare_iron.xp, bare_iron.drops.len(), immature.drops.len(),
-                        immature.drops.first().map(|d| format!("{:?}", d.item)).unwrap_or_default(),
-                        tall.drops.len(),
-                        tall.drops.first().map(|d| format!("{:?}", d.item)).unwrap_or_default(),
-                        ts
-                    )
-                });
-        }
-        // #endregion
         assert_eq!(bare_iron.xp, 0);
         assert!(bare_iron.drops.is_empty());
         assert_eq!(immature.drops.len(), 1);

@@ -301,6 +301,10 @@ pub struct RedstoneSystem {
     pressure_plate_scans: u64,
     #[cfg(test)]
     component_sync_scans: u64,
+    #[cfg(test)]
+    container_revision_scans: u64,
+    #[cfg(test)]
+    observer_scans: u64,
 }
 
 #[allow(dead_code)]
@@ -675,9 +679,7 @@ impl RedstoneSystem {
     pub fn tick(&mut self, manager: &mut ChunkManager, occupants: &[BlockPos]) -> RedstoneUpdate {
         self.tick = self.tick.wrapping_add(1);
         self.sync_loaded_chunks(manager);
-        self.refresh_container_revisions(manager);
         let mut update = RedstoneUpdate::default();
-        self.update_observers(manager, &mut update.block_entity_changes);
         let normalized_occupants = normalize_plate_occupants(self, manager, occupants);
 
         if self.sleeping
@@ -687,6 +689,9 @@ impl RedstoneSystem {
         {
             return update;
         }
+
+        self.refresh_container_revisions(manager);
+        self.update_observers(manager, &mut update.block_entity_changes);
 
         self.process_scheduled(manager, &mut update);
         self.update_pressure_plates(manager, occupants, &mut update.mutations);
@@ -705,6 +710,10 @@ impl RedstoneSystem {
     }
 
     fn refresh_container_revisions(&mut self, manager: &ChunkManager) {
+        #[cfg(test)]
+        {
+            self.container_revision_scans += 1;
+        }
         let mut comparators: Vec<BlockPos> = self
             .components
             .iter()
@@ -749,6 +758,10 @@ impl RedstoneSystem {
             .filter_map(|(&pos, _)| (get_block(manager, pos) == BlockType::Observer).then_some(pos))
             .collect();
         observers.sort_unstable();
+        #[cfg(test)]
+        {
+            self.observer_scans += 1;
+        }
         if observers.is_empty() {
             return;
         }
@@ -843,6 +856,7 @@ impl RedstoneSystem {
         if loaded_chunks_unchanged {
             return;
         }
+        self.sleeping = false;
 
         #[cfg(test)]
         {
@@ -2127,6 +2141,47 @@ mod tests {
     }
 
     #[test]
+    fn sleeping_skips_comparator_and_observer_refresh() {
+        let mut manager = manager();
+        let mut system = RedstoneSystem::new();
+        manager.set_block(0, Y, 0, BlockType::Chest);
+        manager.set_block_entity(
+            0,
+            Y,
+            0,
+            Some(crate::block_entity::BlockEntity::Chest(
+                crate::block_entity::ChestBlockEntity::new(),
+            )),
+        );
+        place(
+            &mut system,
+            &mut manager,
+            1,
+            BlockType::Comparator,
+            Direction::East,
+        );
+        place(
+            &mut system,
+            &mut manager,
+            2,
+            BlockType::Observer,
+            Direction::East,
+        );
+
+        system.tick(&mut manager, &[]);
+        system.tick(&mut manager, &[]);
+        assert!(system.is_sleeping());
+        let container_scans = system.container_revision_scans;
+        let observer_scans = system.observer_scans;
+
+        let update = system.tick(&mut manager, &[]);
+        assert!(update.mutations.is_empty());
+        assert!(system.is_sleeping());
+        assert_eq!(system.container_revision_scans, container_scans);
+        assert_eq!(system.observer_scans, observer_scans);
+    }
+
+    #[test]
     fn pressure_plate_output_matches_independent_occupancy_oracle() {
         let mut manager = manager();
         let mut system = RedstoneSystem::new();
@@ -2314,6 +2369,7 @@ mod tests {
         assert_eq!(system.power_at((0, Y, 0)), 0);
 
         manager.set_block(1, Y, 0, BlockType::Stone);
+        system.on_block_changed(&manager, (1, Y, 0), Direction::East);
         system.tick(&mut manager, &[]);
         // The edge is delayed by one redstone tick and is therefore not
         // observable until the following tick.

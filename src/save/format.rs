@@ -793,8 +793,255 @@ pub(crate) fn voxel_inflate_limit(data_version: u32, chunk: &Chunk) -> usize {
 pub(crate) fn voxel_count_matches_save(len: usize, _data_version: u32, chunk: &Chunk) -> bool {
     let dest = destination_voxel_count(chunk);
     // Destination dimension height, or the documented 256-high column used by
-    // pre-signed-Y saves and `UncompressedChunkSnapshot` flattening.
+    // pre-signed-Y saves and uncompressed network terrain flattening.
     len == dest || len == LEGACY_VOXEL_COUNT
+}
+
+/// Uncompressed terrain streams for `ChunkData` projection. This is not the
+/// disk `ChunkSaveData` envelope: no sky/block light, no redstone sidecar,
+/// and no zlib. Join restore accepts these lengths as raw voxels.
+#[derive(Debug, Clone)]
+pub struct NetworkTerrainPayload {
+    pub min_section_y: i8,
+    pub section_count: u16,
+    pub blocks: Vec<u8>,
+    pub block_states: Vec<u8>,
+    pub fluid_levels: Vec<u8>,
+    pub block_entities: Vec<u8>,
+}
+
+struct FlattenedVoxels {
+    blocks: Vec<u8>,
+    block_states: Vec<u8>,
+    sky_light: Vec<u8>,
+    block_light: Vec<u8>,
+    fluid_levels: Vec<u8>,
+}
+
+fn flatten_column_voxels(chunk: &Chunk, include_light: bool) -> FlattenedVoxels {
+    let section_count = chunk.sections.len();
+    let total_height = section_count * 16;
+    let min_y = chunk.min_section_y as i32 * 16;
+    let voxels = 16 * total_height * 16;
+
+    let mut blocks = Vec::with_capacity(voxels);
+    let mut block_states = Vec::with_capacity(voxels);
+    let mut sky_light = if include_light {
+        Vec::with_capacity(voxels)
+    } else {
+        Vec::new()
+    };
+    let mut block_light = if include_light {
+        Vec::with_capacity(voxels)
+    } else {
+        Vec::new()
+    };
+    let mut fluid_levels = Vec::with_capacity(voxels);
+
+    for x in 0..16 {
+        for h in 0..total_height {
+            let wy = min_y + h as i32;
+            for z in 0..16 {
+                blocks.push(chunk.get_block_local(x, wy, z) as u8);
+                block_states.push(chunk.get_block_state(x as i32, wy, z as i32));
+                if include_light {
+                    sky_light.push(chunk.get_sky_light(x, wy, z));
+                    block_light.push(chunk.get_block_light(x, wy, z));
+                }
+                fluid_levels.push(chunk.get_fluid_level(x, wy, z));
+            }
+        }
+    }
+
+    FlattenedVoxels {
+        blocks,
+        block_states,
+        sky_light,
+        block_light,
+        fluid_levels,
+    }
+}
+
+fn encode_block_entities(chunk: &Chunk) -> io::Result<Vec<u8>> {
+    let block_entities_list: Vec<((u8, i16, u8), crate::block_entity::BlockEntity)> = chunk
+        .iter_block_entities()
+        .map(|(pos, entity)| (pos, entity.clone()))
+        .collect();
+    if block_entities_list.is_empty() {
+        return Ok(Vec::new());
+    }
+    bincode::serialize(&block_entities_list)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+}
+
+fn decode_network_required_voxels(
+    data: &[u8],
+    name: &'static str,
+    chunk: &Chunk,
+) -> io::Result<Vec<u8>> {
+    if voxel_count_matches_save(data.len(), CHUNK_SAVE_DATA_VERSION, chunk) {
+        if data.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{name} stream is empty"),
+            ));
+        }
+        return Ok(data.to_vec());
+    }
+    decode_required_voxel_stream(data, name, CHUNK_SAVE_DATA_VERSION, chunk)
+}
+
+fn decode_network_optional_voxels(
+    data: &[u8],
+    name: &'static str,
+    expected_len: usize,
+) -> io::Result<Vec<u8>> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    if data.len() == expected_len {
+        return Ok(data.to_vec());
+    }
+    decode_optional_voxel_stream(data, name, expected_len)
+}
+
+fn decode_network_block_entities(
+    data: &[u8],
+) -> Vec<((u8, i16, u8), crate::block_entity::BlockEntity)> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(list) =
+        bincode::deserialize::<Vec<((u8, i16, u8), crate::block_entity::BlockEntity)>>(data)
+    {
+        return list;
+    }
+    if let Ok(legacy) =
+        bincode::deserialize::<Vec<((u8, i16, u8), crate::block_entity::LegacyBlockEntity)>>(data)
+    {
+        return legacy
+            .into_iter()
+            .map(|(pos, entity)| (pos, entity.into()))
+            .collect();
+    }
+    ChunkSaveData {
+        chunk_x: 0,
+        chunk_z: 0,
+        blocks: Vec::new(),
+        sky_light: Vec::new(),
+        block_light: Vec::new(),
+        fluid_levels: Vec::new(),
+        redstone_metadata: Vec::new(),
+        block_states: Vec::new(),
+        mutation_revision: 0,
+        block_entities: data.to_vec(),
+        data_version: CHUNK_SAVE_DATA_VERSION,
+    }
+    .block_entities()
+}
+
+fn apply_decoded_column(
+    chunk: &mut Chunk,
+    blocks: &[u8],
+    block_states: &[u8],
+    sky_light: &[u8],
+    block_light: &[u8],
+    fluid_levels: &[u8],
+) {
+    let total_voxels = blocks.len();
+    let is_legacy_256 = total_voxels == LEGACY_VOXEL_COUNT;
+    let total_height = if is_legacy_256 {
+        256
+    } else {
+        total_voxels / (16 * 16)
+    };
+    let source_sec_count = total_height / 16;
+
+    for sec_i in 0..source_sec_count {
+        let target_sec_y = if is_legacy_256 {
+            sec_i as i8
+        } else {
+            chunk.min_section_y + sec_i as i8
+        };
+        let Some(target_sec_idx) = chunk.section_index(target_sec_y) else {
+            continue;
+        };
+
+        let mut sec_b = [BlockType::Air; 4096];
+        let mut sec_st = [0u8; 4096];
+        let mut sec_sk = [0u8; 4096];
+        let mut sec_bl = [0u8; 4096];
+        let mut sec_fl = [0u8; 4096];
+
+        for ly in 0..16 {
+            let h = sec_i * 16 + ly;
+            for z in 0..16 {
+                for x in 0..16 {
+                    let flat_idx = (x * total_height + h) * 16 + z;
+                    let sec_idx = (ly << 8) | (z << 4) | x;
+
+                    if flat_idx < blocks.len() {
+                        sec_b[sec_idx] = BlockType::from_u8(blocks[flat_idx]);
+                    }
+                    if flat_idx < block_states.len() {
+                        sec_st[sec_idx] = block_states[flat_idx];
+                    }
+                    if flat_idx < sky_light.len() {
+                        sec_sk[sec_idx] = sky_light[flat_idx];
+                    }
+                    if flat_idx < block_light.len() {
+                        sec_bl[sec_idx] = block_light[flat_idx];
+                    }
+                    if flat_idx < fluid_levels.len() {
+                        sec_fl[sec_idx] = fluid_levels[flat_idx];
+                    }
+                }
+            }
+        }
+
+        let sec = crate::world::ChunkSection::from_dense(
+            &sec_b,
+            &sec_sk,
+            &sec_bl,
+            if block_states.is_empty() {
+                None
+            } else {
+                Some(&sec_st)
+            },
+            if fluid_levels.is_empty() {
+                None
+            } else {
+                Some(&sec_fl)
+            },
+        );
+        if sec.is_empty() && sec_sk.iter().all(|&l| l == 0) && sec_bl.iter().all(|&l| l == 0) {
+            chunk.sections[target_sec_idx] = None;
+        } else {
+            chunk.sections[target_sec_idx] = Some(sec);
+        }
+    }
+
+    chunk.rebuild_torch_index();
+    chunk.rebuild_redstone_index();
+    chunk.rebuild_furnace_index();
+
+    for x in 0..16 {
+        for z in 0..16 {
+            chunk.update_heightmap(x, z);
+        }
+    }
+}
+
+fn apply_block_entities(
+    chunk: &mut Chunk,
+    entities: Vec<((u8, i16, u8), crate::block_entity::BlockEntity)>,
+) {
+    chunk.block_entities.clear();
+    if entities.len() <= 4096 {
+        for ((x, y, z), entity) in entities {
+            let _ = chunk.insert_block_entity(x, y, z, entity);
+        }
+    }
 }
 
 pub(crate) fn decode_required_voxel_stream(
@@ -915,28 +1162,7 @@ impl ChunkSaveData {
         chunk: &Chunk,
         redstone_metadata: &[crate::redstone::RedstoneComponentMetadata],
     ) -> io::Result<Self> {
-        let section_count = chunk.sections.len();
-        let total_height = section_count * 16;
-        let min_y = chunk.min_section_y as i32 * 16;
-
-        let mut blocks = Vec::with_capacity(16 * total_height * 16);
-        let mut block_states_raw = Vec::with_capacity(16 * total_height * 16);
-        let mut sky_light = Vec::with_capacity(16 * total_height * 16);
-        let mut block_light = Vec::with_capacity(16 * total_height * 16);
-        let mut fluid_levels = Vec::with_capacity(16 * total_height * 16);
-
-        for x in 0..16 {
-            for h in 0..total_height {
-                let wy = min_y + h as i32;
-                for z in 0..16 {
-                    blocks.push(chunk.get_block_local(x, wy, z) as u8);
-                    block_states_raw.push(chunk.get_block_state(x as i32, wy, z as i32));
-                    sky_light.push(chunk.get_sky_light(x, wy, z));
-                    block_light.push(chunk.get_block_light(x, wy, z));
-                    fluid_levels.push(chunk.get_fluid_level(x, wy, z));
-                }
-            }
-        }
+        let flattened = flatten_column_voxels(chunk, true);
 
         let redstone_metadata = if redstone_metadata.is_empty() {
             Vec::new()
@@ -946,19 +1172,14 @@ impl ChunkSaveData {
             compress_bytes(&bytes)?
         };
 
-        let block_entities_list: Vec<((u8, i16, u8), crate::block_entity::BlockEntity)> = chunk
-            .iter_block_entities()
-            .map(|(pos, e)| (pos, e.clone()))
-            .collect();
-        let block_entities = if block_entities_list.is_empty() {
+        let block_entities = encode_block_entities(chunk)?;
+        let block_entities = if block_entities.is_empty() {
             Vec::new()
         } else {
-            let bytes = bincode::serialize(&block_entities_list)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-            compress_bytes(&bytes)?
+            compress_bytes(&block_entities)?
         };
 
-        let blocks = compress_bytes(&blocks)?;
+        let blocks = compress_bytes(&flattened.blocks)?;
         if blocks.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -970,14 +1191,33 @@ impl ChunkSaveData {
             chunk_x: chunk.chunk_x,
             chunk_z: chunk.chunk_z,
             blocks,
-            sky_light: compress_bytes(&sky_light)?,
-            block_light: compress_bytes(&block_light)?,
-            fluid_levels: compress_bytes(&fluid_levels)?,
+            sky_light: compress_bytes(&flattened.sky_light)?,
+            block_light: compress_bytes(&flattened.block_light)?,
+            fluid_levels: compress_bytes(&flattened.fluid_levels)?,
             redstone_metadata,
-            block_states: compress_bytes(&block_states_raw)?,
+            block_states: compress_bytes(&flattened.block_states)?,
             mutation_revision: 0,
             block_entities,
             data_version: CHUNK_SAVE_DATA_VERSION,
+        })
+    }
+
+    /// Flatten terrain for projection without the disk save envelope or zlib.
+    pub fn network_terrain_payload(chunk: &Chunk) -> io::Result<NetworkTerrainPayload> {
+        let flattened = flatten_column_voxels(chunk, false);
+        if flattened.blocks.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "network blocks payload is empty",
+            ));
+        }
+        Ok(NetworkTerrainPayload {
+            min_section_y: chunk.min_section_y,
+            section_count: chunk.sections.len().min(u16::MAX as usize) as u16,
+            blocks: flattened.blocks,
+            block_states: flattened.block_states,
+            fluid_levels: flattened.fluid_levels,
+            block_entities: encode_block_entities(chunk)?,
         })
     }
 
@@ -1081,8 +1321,9 @@ impl ChunkSaveData {
         decompress_bytes_limited(&self.block_states, SAVE_SIDECAR_INFLATE_MAX).unwrap_or_default()
     }
 
-    /// Decode a `ChunkSaveData`-style compressed network/save payload into
-    /// `chunk`. Shared by disk restore and join-client `ChunkData` insert.
+    /// Decode a network terrain payload into `chunk`. Accepts the uncompressed
+    /// projection streams and the historical zlib `ChunkSaveData` layout so
+    /// join clients stay fail-closed for both encodings.
     pub fn restore_network_payload(
         chunk: &mut Chunk,
         blocks: &[u8],
@@ -1090,40 +1331,13 @@ impl ChunkSaveData {
         fluid_levels: &[u8],
         block_entities: &[u8],
     ) -> io::Result<()> {
-        // #region agent log
-        {
-            use std::io::Write;
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug-879839.log")
-                .and_then(|mut f| {
-                    writeln!(
-                        f,
-                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"C\",\"location\":\"save/format.rs:restore_network_payload\",\"message\":\"network restore zeros light\",\"data\":{{\"chunk\":[{},{}],\"block_bytes\":{},\"forced_sky_len\":0,\"forced_block_len\":0}},\"timestamp\":{}}}",
-                        chunk.chunk_x, chunk.chunk_z, blocks.len(), ts
-                    )
-                });
-        }
-        // #endregion
-        let save_data = ChunkSaveData {
-            chunk_x: chunk.chunk_x,
-            chunk_z: chunk.chunk_z,
-            blocks: blocks.to_vec(),
-            sky_light: Vec::new(),
-            block_light: Vec::new(),
-            fluid_levels: fluid_levels.to_vec(),
-            redstone_metadata: Vec::new(),
-            block_states: block_states.to_vec(),
-            mutation_revision: 0,
-            block_entities: block_entities.to_vec(),
-            data_version: CHUNK_SAVE_DATA_VERSION,
-        };
-        save_data.restore_to_chunk(chunk)?;
+        let blocks = decode_network_required_voxels(blocks, "blocks", chunk)?;
+        let block_states =
+            decode_network_optional_voxels(block_states, "block_states", blocks.len())?;
+        let fluid_levels =
+            decode_network_optional_voxels(fluid_levels, "fluid_levels", blocks.len())?;
+        apply_decoded_column(chunk, &blocks, &block_states, &[], &[], &fluid_levels);
+        apply_block_entities(chunk, decode_network_block_entities(block_entities));
         chunk.recompute_direct_column_lighting();
         Ok(())
     }
@@ -1139,96 +1353,15 @@ impl ChunkSaveData {
         let fluid_levels =
             decode_optional_voxel_stream(&self.fluid_levels, "fluid_levels", blocks.len())?;
 
-        let total_voxels = blocks.len();
-        let is_legacy_256 = total_voxels == LEGACY_VOXEL_COUNT;
-        let total_height = if is_legacy_256 {
-            256
-        } else {
-            total_voxels / (16 * 16)
-        };
-        let source_sec_count = total_height / 16;
-
-        for sec_i in 0..source_sec_count {
-            let target_sec_y = if is_legacy_256 {
-                sec_i as i8
-            } else {
-                chunk.min_section_y + sec_i as i8
-            };
-            let Some(target_sec_idx) = chunk.section_index(target_sec_y) else {
-                continue;
-            };
-
-            let mut sec_b = [BlockType::Air; 4096];
-            let mut sec_st = [0u8; 4096];
-            let mut sec_sk = [0u8; 4096];
-            let mut sec_bl = [0u8; 4096];
-            let mut sec_fl = [0u8; 4096];
-
-            for ly in 0..16 {
-                let h = sec_i * 16 + ly;
-                for z in 0..16 {
-                    for x in 0..16 {
-                        let flat_idx = (x * total_height + h) * 16 + z;
-                        let sec_idx = (ly << 8) | (z << 4) | x;
-
-                        if flat_idx < blocks.len() {
-                            sec_b[sec_idx] = BlockType::from_u8(blocks[flat_idx]);
-                        }
-                        if flat_idx < block_states.len() {
-                            sec_st[sec_idx] = block_states[flat_idx];
-                        }
-                        if flat_idx < sky_light.len() {
-                            sec_sk[sec_idx] = sky_light[flat_idx];
-                        }
-                        if flat_idx < block_light.len() {
-                            sec_bl[sec_idx] = block_light[flat_idx];
-                        }
-                        if flat_idx < fluid_levels.len() {
-                            sec_fl[sec_idx] = fluid_levels[flat_idx];
-                        }
-                    }
-                }
-            }
-
-            let sec = crate::world::ChunkSection::from_dense(
-                &sec_b,
-                &sec_sk,
-                &sec_bl,
-                if block_states.is_empty() {
-                    None
-                } else {
-                    Some(&sec_st)
-                },
-                if fluid_levels.is_empty() {
-                    None
-                } else {
-                    Some(&sec_fl)
-                },
-            );
-            if sec.is_empty() && sec_sk.iter().all(|&l| l == 0) && sec_bl.iter().all(|&l| l == 0) {
-                chunk.sections[target_sec_idx] = None;
-            } else {
-                chunk.sections[target_sec_idx] = Some(sec);
-            }
-        }
-
-        chunk.rebuild_torch_index();
-        chunk.rebuild_redstone_index();
-
-        for x in 0..16 {
-            for z in 0..16 {
-                chunk.update_heightmap(x, z);
-            }
-        }
-
-        // Restore block entities with validation: limit check, bounds check, type matching check
-        chunk.block_entities.clear();
-        let entities = self.block_entities();
-        if entities.len() <= 4096 {
-            for ((x, y, z), entity) in entities {
-                let _ = chunk.insert_block_entity(x, y, z, entity);
-            }
-        }
+        apply_decoded_column(
+            chunk,
+            &blocks,
+            &block_states,
+            &sky_light,
+            &block_light,
+            &fluid_levels,
+        );
+        apply_block_entities(chunk, self.block_entities());
         Ok(())
     }
 }

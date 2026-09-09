@@ -39,7 +39,7 @@ use crate::presentation_inventory_policy::{
 };
 use crate::recipes::RecipeManager;
 use crate::world::{
-    Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
+    Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_WIDTH,
 };
 use glam::{Mat4, Vec2, Vec3};
 use std::sync::Arc;
@@ -1015,7 +1015,9 @@ struct MeshVoxel {
 #[cfg(test)]
 struct MeshSnapshot {
     min_world_x: i32,
+    min_world_y: i32,
     min_world_z: i32,
+    y_count: usize,
     voxels: Vec<MeshVoxel>,
     default_sky_light: u8,
 }
@@ -1030,17 +1032,18 @@ impl MeshSnapshot {
         chunks: &std::collections::HashMap<(i32, i32), Chunk>,
         default_sky_light: u8,
     ) -> Option<Self> {
-        if !chunks.contains_key(&coord) {
-            return None;
-        }
+        let center = chunks.get(&coord)?;
         let min_world_x = coord.0 * CHUNK_WIDTH as i32 - 1;
+        let min_world_y = center.min_world_y();
         let min_world_z = coord.1 * CHUNK_DEPTH as i32 - 1;
-        let mut voxels = Vec::with_capacity(Self::WIDTH * CHUNK_HEIGHT * Self::DEPTH);
+        let y_count = (center.max_world_y_exclusive() - min_world_y) as usize;
+        let mut voxels = Vec::with_capacity(Self::WIDTH * y_count * Self::DEPTH);
         for x in 0..Self::WIDTH {
             let world_x = min_world_x + x as i32;
             let chunk_x = world_x.div_euclid(CHUNK_WIDTH as i32);
             let local_x = world_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
-            for y in 0..CHUNK_HEIGHT {
+            for y in 0..y_count {
+                let world_y = min_world_y + y as i32;
                 for z in 0..Self::DEPTH {
                     let world_z = min_world_z + z as i32;
                     let chunk_z = world_z.div_euclid(CHUNK_DEPTH as i32);
@@ -1048,10 +1051,10 @@ impl MeshSnapshot {
                     let voxel = chunks
                         .get(&(chunk_x, chunk_z))
                         .map(|neighbor| MeshVoxel {
-                            block: neighbor.get_block_local(local_x, y as i32, local_z),
-                            sky_light: neighbor.get_sky_light(local_x, y as i32, local_z),
-                            block_light: neighbor.get_block_light(local_x, y as i32, local_z),
-                            fluid: neighbor.get_fluid_level(local_x, y as i32, local_z),
+                            block: neighbor.get_block_local(local_x, world_y, local_z),
+                            sky_light: neighbor.get_sky_light(local_x, world_y, local_z),
+                            block_light: neighbor.get_block_light(local_x, world_y, local_z),
+                            fluid: neighbor.get_fluid_level(local_x, world_y, local_z),
                         })
                         .unwrap_or(MeshVoxel {
                             block: BlockType::Air,
@@ -1065,17 +1068,19 @@ impl MeshSnapshot {
         }
         Some(Self {
             min_world_x,
+            min_world_y,
             min_world_z,
+            y_count,
             voxels,
             default_sky_light,
         })
     }
 
     fn get(&self, world_x: i32, world_y: i32, world_z: i32) -> (BlockType, u8, u8, u8, bool) {
-        if world_y < 0 {
+        if world_y < self.min_world_y {
             return (BlockType::Air, 0, 0, 0, false);
         }
-        if world_y >= CHUNK_HEIGHT as i32 {
+        if world_y >= self.min_world_y + self.y_count as i32 {
             return (BlockType::Air, self.default_sky_light, 0, 0, false);
         }
         let x = world_x - self.min_world_x;
@@ -1083,7 +1088,8 @@ impl MeshSnapshot {
         if x < 0 || x >= Self::WIDTH as i32 || z < 0 || z >= Self::DEPTH as i32 {
             return (BlockType::Air, self.default_sky_light, 0, 0, false);
         }
-        let index = (x as usize * CHUNK_HEIGHT + world_y as usize) * Self::DEPTH + z as usize;
+        let local_y = (world_y - self.min_world_y) as usize;
+        let index = (x as usize * self.y_count + local_y) * Self::DEPTH + z as usize;
         let voxel = self.voxels[index];
         (
             voxel.block,
@@ -5510,23 +5516,31 @@ impl State {
             region.active_chunks += 1;
         }
 
-        if let Some(levels) = &existing_section.levels {
-            for level in levels {
-                if let Some(h) = &level.opaque.handle {
-                    if let Err(error) = region.deallocate_handle(h) {
-                        eprintln!("[RenderRegion] deallocate failed: {error:?}");
-                    }
-                }
-                if let Some(h) = &level.transparent.handle {
-                    if let Err(error) = region.deallocate_handle(h) {
-                        eprintln!("[RenderRegion] deallocate failed: {error:?}");
-                    }
+        let full_rebuild = existing_section.needs_rebuild();
+        let mask = bundle.built_lods;
+
+        let mut levels = if full_rebuild {
+            if let Some(old) = existing_section.levels.take() {
+                for level in &old {
+                    Self::deallocate_gpu_mesh_level(region, level);
                 }
             }
-        }
+            std::array::from_fn(|_| GpuMeshLevel::empty())
+        } else {
+            existing_section
+                .levels
+                .take()
+                .unwrap_or_else(|| std::array::from_fn(|_| GpuMeshLevel::empty()))
+        };
 
         let mut metrics = UploadMetrics::default();
-        let levels = std::array::from_fn(|index| {
+        for index in 0..3 {
+            if mask & (1 << index) == 0 {
+                continue;
+            }
+            if !full_rebuild {
+                Self::deallocate_gpu_mesh_level(region, &levels[index]);
+            }
             let data = &bundle.levels[index];
             let owner_opaque = crate::chunk_render::allocation_owner(
                 terrain_generation,
@@ -5547,13 +5561,31 @@ impl State {
             let (transparent, transparent_metrics) =
                 region.upload_mesh_layer(device, queue, &data.transparent, owner_transparent);
             metrics = metrics.add(opaque_metrics).add(transparent_metrics);
-            GpuMeshLevel {
+            levels[index] = GpuMeshLevel {
                 opaque,
                 transparent,
                 bounds: data.bounds(),
-            }
-        });
+            };
+        }
+        existing_section.built_lods = if full_rebuild {
+            mask
+        } else {
+            existing_section.built_lods | mask
+        };
         (levels, metrics)
+    }
+
+    fn deallocate_gpu_mesh_level(region: &mut RenderRegion, level: &GpuMeshLevel) {
+        if let Some(h) = &level.opaque.handle {
+            if let Err(error) = region.deallocate_handle(h) {
+                eprintln!("[RenderRegion] deallocate failed: {error:?}");
+            }
+        }
+        if let Some(h) = &level.transparent.handle {
+            if let Err(error) = region.deallocate_handle(h) {
+                eprintln!("[RenderRegion] deallocate failed: {error:?}");
+            }
+        }
     }
 
     fn next_chunk_lifetime(&mut self) -> u64 {
@@ -5913,28 +5945,34 @@ impl State {
             return false;
         }
         if !self.chunk_manager.chunks.contains_key(&(key.cx, key.cz)) {
-            return false;
+            return true;
         }
         let Some(section) = self
             .chunk_meshes
             .get(&(key.cx, key.cz))
             .and_then(|mesh| mesh.section(key.section_y))
         else {
-            return false;
+            return true;
         };
-        if !section.needs_rebuild() || self.current_section_identity(key) != Some(work.identity) {
-            return false;
+        if self.current_section_identity(key) != Some(work.identity) {
+            return true;
         }
+        let selected = self.section_selected_lod(key);
+        if !section.needs_rebuild() && section.lod_is_built(selected) {
+            return true;
+        }
+        let lod_mask = selected.mask();
         let snapshot = self.chunk_manager.capture_section_halo(key);
         self.section_scheduler.mark_in_flight(work);
         let sender = self.terrain_worker_tx.clone();
         let generation = self.terrain_generation;
         let model_registry = Arc::clone(&self.model_registry);
         rayon::spawn(move || {
-            let bundle = Chunk::generate_section_mesh_bundle_from_halo_with_registry(
+            let bundle = Chunk::generate_section_mesh_bundle_from_halo_with_registry_for_lods(
                 work.identity,
                 &snapshot,
                 &model_registry,
+                lod_mask,
             );
             let _ = sender.send(TerrainWorkerResult::SectionMeshed(SectionMeshResult {
                 generation,
@@ -5942,6 +5980,26 @@ impl State {
             }));
         });
         true
+    }
+
+    fn section_selected_lod(&self, key: SectionKey) -> LodLevel {
+        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
+        let thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
+        let min = Vec3::new(
+            (key.cx * CHUNK_WIDTH as i32) as f32,
+            key.min_world_y() as f32,
+            (key.cz * CHUNK_DEPTH as i32) as f32,
+        );
+        let max = Vec3::new(
+            (key.cx * CHUNK_WIDTH as i32 + CHUNK_WIDTH as i32) as f32,
+            key.max_world_y() as f32,
+            (key.cz * CHUNK_DEPTH as i32 + CHUNK_DEPTH as i32) as f32,
+        );
+        select_lod_for_bounds(
+            self.player_physics.position,
+            MeshBounds::new(min, max),
+            thresholds,
+        )
     }
 
     pub fn update_chunks(&mut self) {
@@ -6055,24 +6113,15 @@ impl State {
                     break;
                 };
                 let key = work.identity.key;
-                let Some(section) = self
-                    .chunk_meshes
-                    .get(&(key.cx, key.cz))
-                    .and_then(|mesh| mesh.section(key.section_y))
-                else {
-                    continue;
-                };
-                if !section.needs_rebuild()
-                    || self.current_section_identity(key) != Some(work.identity)
-                {
-                    continue;
-                }
                 if self.section_scheduler.is_in_flight(key) {
                     deferred.push(work);
                     continue;
                 }
+                let in_flight_before = self.section_scheduler.in_flight.len();
                 if self.schedule_section_mesh(work) {
-                    dispatched += 1;
+                    if self.section_scheduler.in_flight.len() > in_flight_before {
+                        dispatched += 1;
+                    }
                 } else {
                     deferred.push(work);
                 }
@@ -7278,9 +7327,10 @@ impl State {
     }
 
     /// Client-side application of a full chunk payload sent by the host during
-    /// mid-game join catch-up. The payload uses the same Zlib-compressed layout
-    /// as `save.rs::ChunkSaveData`. Missing columns are inserted from the
-    /// payload only — join clients never generate a stand-in.
+    /// mid-game join catch-up. Live projection sends uncompressed terrain
+    /// streams; restore also accepts the historical zlib `ChunkSaveData` layout.
+    /// Missing columns are inserted from the payload only — join clients never
+    /// generate a stand-in.
     fn apply_remote_chunk_data(
         &mut self,
         dimension_wire: u8,

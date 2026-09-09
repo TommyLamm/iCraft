@@ -1502,7 +1502,7 @@ mod tests {
         fn checksum(chunk: &crate::world::Chunk) -> u64 {
             let mut hash = 0xcbf2_9ce4_8422_2325u64;
             for x in 0..16 {
-                for y in 0..256 {
+                for y in chunk.world_y_range() {
                     for z in 0..16 {
                         hash ^= chunk.get_block_local(x, y, z) as u8 as u64;
                         hash = hash.wrapping_mul(0x100_0000_01b3);
@@ -2199,7 +2199,7 @@ mod tests {
         fn checksum(chunk: &crate::world::Chunk) -> u64 {
             let mut hash = 0xcbf2_9ce4_8422_2325u64;
             for x in 0..16 {
-                for y in 0..256 {
+                for y in chunk.world_y_range() {
                     for z in 0..16 {
                         hash ^= chunk.get_block_local(x, y, z) as u8 as u64;
                         hash = hash.wrapping_mul(0x100_0000_01b3);

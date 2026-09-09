@@ -1235,16 +1235,16 @@ impl SimHarness {
         coords.sort_unstable();
         for (cx, cz) in coords {
             let chunk = &self.chunks.chunks[&(cx, cz)];
-            for y in 0..crate::world::CHUNK_HEIGHT {
+            for y in chunk.world_y_range() {
                 for z in 0..16 {
                     for x in 0..16 {
-                        let p = (cx * 16 + x as i32, y as i32, cz * 16 + z as i32);
+                        let p = (cx * 16 + x as i32, y, cz * 16 + z as i32);
                         bytes.extend_from_slice(&p.0.to_le_bytes());
                         bytes.extend_from_slice(&p.1.to_le_bytes());
                         bytes.extend_from_slice(&p.2.to_le_bytes());
                         bytes.extend_from_slice(
                             &chunk
-                                .get_block_local(x, y as i32, z)
+                                .get_block_local(x, y, z)
                                 .to_wire()
                                 .to_le_bytes(),
                         );
