@@ -30,11 +30,9 @@ fn properties(label: &str, port: u16) -> ServerProperties {
 }
 
 fn write_packet(stream: &mut TcpStream, packet: &Packet) {
-    let payload = packet.encode();
     stream
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .expect("write packet length");
-    stream.write_all(&payload).expect("write packet payload");
+        .write_all(&packet.encode_frame().expect("legal packet frame"))
+        .expect("write packet frame");
 }
 
 fn read_packet(stream: &mut TcpStream) -> Packet {

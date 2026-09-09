@@ -62,7 +62,7 @@
 | 10 | [漏斗 cooldown dirty、熔爐索引、紅石 sleep](10_hopper_furnace_redstone_tick.md) | P1 | 安靜世界的 tick 接近「沒事」 | 無 | 待執行 |
 | 11 | [載入光照邊界入隊與 mesh halo／LOD](11_lighting_and_mesh_hotpath.md) | P1 | 走路 hitch 與進圈 CPU | 無 | 待執行 |
 | 12 | [剩餘 `CHUNK_HEIGHT`／`0..256` 改 signed-Y](12_signed_y_and_height_helpers.md) | P2 | 高度政策單一來源 | 無 | 待執行 |
-| 13 | [測試 `TcpClient`／`temp_world` 合併](13_test_harness_reuse.md) | P2 | 少約 150 行等待複本 | 無 | 待執行 |
+| 13 | [測試 `TcpClient`／`temp_world` 合併](13_test_harness_reuse.md) | P2 | 少約 150 行等待複本 | 無 | 已完成 |
 | 14 | [inventory click 走既有政策](14_inventory_click_policy_reuse.md) | P2 | 政策只活在 policy 模組 | 06 | 待執行 |
 | 15 | [session 鏡像欄位與 Container 雙信封](15_session_mirror_and_container_envelopes.md) | P2 | 少 dual-write 與兩種 click wire | 02 | 已完成 |
 | 16 | [縮小 `lib.rs` 桌面契約與死 helper](16_lib_surface_and_dead_helpers.md) | P2 | server 少編永不呼叫的桌面 API | 04 | 待執行 |

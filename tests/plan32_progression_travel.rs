@@ -2,7 +2,7 @@ mod common;
 
 use common::tcp_harness::{
     drive_until, gameplay_request as request, held, loopback_properties, session_slot as slot,
-    wait_for_response, HeldLoopback, TcpClient,
+    temp_world, wait_for_response, HeldLoopback, TcpClient,
 };
 use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::block_entity::BlockEntity;
@@ -20,7 +20,7 @@ use icraft::server_runtime::{
 use icraft::structure::StructureId;
 use icraft::world::BlockType;
 use std::fs;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const LOCAL_ID: u64 = 0x32_0000;
 const FRAME_BASE: (i32, i32, i32) = (10, 65, 10);
@@ -28,18 +28,7 @@ const PORTAL_CELL: (i32, i32, i32) = (11, 66, 10);
 const PORTAL_LOOK: [i16; 3] = [0, -500, 866];
 
 fn properties(label: &str) -> ServerProperties {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut properties = loopback_properties(
-        std::env::temp_dir().join(format!(
-            "icraft_plan32_{label}_{}_{}",
-            std::process::id(),
-            nonce
-        )),
-        "127.0.0.1",
-    );
+    let mut properties = loopback_properties(temp_world(&format!("plan32-{label}")), "127.0.0.1");
     properties.seed = 12_345;
     properties.view_distance = 4;
     properties.simulation_distance = 4;

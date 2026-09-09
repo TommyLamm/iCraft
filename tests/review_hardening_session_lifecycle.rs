@@ -3,7 +3,9 @@
 
 mod common;
 
-use common::tcp_harness::{gameplay_request, held, loopback_properties, session_slot as slot};
+use common::tcp_harness::{
+    gameplay_request, held, loopback_properties, session_slot as slot, temp_world,
+};
 use icraft::authority::contract::{SessionBrewState, SessionGameplayState};
 use icraft::dimension::Dimension;
 use icraft::inventory::{Item, ItemStack};
@@ -17,7 +19,6 @@ use icraft::server_runtime::{
 };
 use icraft::world::BlockType;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOCAL_ID: u64 = 0x08_0001;
 const GATEWAY: (i32, i32, i32) = (8, 65, 8);
@@ -26,18 +27,7 @@ const OUTER_ISLAND: [f32; 3] = [1035.5, 89.0, 11.5];
 const PORTAL_LOOK: [i16; 3] = [0, -500, 866];
 
 fn properties(label: &str) -> ServerProperties {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut properties = loopback_properties(
-        std::env::temp_dir().join(format!(
-            "icraft_plan08_{label}_{}_{}",
-            std::process::id(),
-            nonce
-        )),
-        "127.0.0.1",
-    );
+    let mut properties = loopback_properties(temp_world(&format!("plan08-{label}")), "127.0.0.1");
     properties.seed = 8_008;
     properties.view_distance = 4;
     properties.simulation_distance = 4;

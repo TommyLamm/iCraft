@@ -1,6 +1,9 @@
 //! Plan 11: interest is the chunk materialization gate; out-of-view columns
 //! are not ensured, tick walks the simulation set, and eviction is bounded.
 
+mod common;
+
+use common::tcp_harness::{temp_world, HeldLoopback};
 use icraft::authority::contract::AuthorityTopology;
 use icraft::dimension::Dimension;
 use icraft::network::protocol::{
@@ -12,34 +15,21 @@ use icraft::server_runtime::{
 };
 use icraft::world::BlockType;
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOCAL_ID: u64 = 11;
 const FAR_CHUNK: (i32, i32) = (8, 0);
 const FAR_BLOCK: (i32, i32, i32) = (128, 80, 8);
 const WALK_CHUNKS: i32 = 32;
 
-fn temp_world(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "icraft_plan11_{label}_{}_{}",
-        std::process::id(),
-        nonce
-    ))
-}
-
 fn properties(label: &str) -> ServerProperties {
+    let reserved = HeldLoopback::bind();
     ServerProperties {
         bind: "127.0.0.1".into(),
-        port: 25582,
+        port: reserved.port(),
         view_distance: 2,
         simulation_distance: 2,
         seed: 11_011,
-        world_dir: temp_world(label),
+        world_dir: temp_world(&format!("plan11-{label}")),
         ..ServerProperties::default()
     }
 }
