@@ -62,6 +62,7 @@ impl State {
         let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
         self.terrain_candidates_scratch.clear();
         let mut occluded_sections = 0u64;
+        let mut lod_fills = Vec::new();
 
         for (&coord, mesh) in &self.chunk_meshes {
             for (sec_idx, section) in mesh.sections.iter().enumerate() {
@@ -85,7 +86,10 @@ impl State {
                 }
 
                 let lod = select_lod_for_bounds(cam_pos, bounds, lod_thresholds);
-                let Some(level) = section.level(lod) else {
+                if !section.lod_is_built(lod) {
+                    lod_fills.push(SectionKey::new(coord.0, section_y, coord.1));
+                }
+                let Some((draw_lod, level)) = section.level_for_draw(lod) else {
                     continue;
                 };
                 let key = SectionKey::new(coord.0, section_y, coord.1);
@@ -97,7 +101,7 @@ impl State {
                             bounds,
                             level.opaque.num_indices(),
                             DrawLayer::Opaque,
-                            lod,
+                            draw_lod,
                             distance_sq,
                         ));
                 }
@@ -108,10 +112,24 @@ impl State {
                             bounds,
                             level.transparent.num_indices(),
                             DrawLayer::Transparent,
-                            lod,
+                            draw_lod,
                             distance_sq,
                         ));
                 }
+            }
+        }
+
+        let player_chunk = (
+            (cam_pos.x / CHUNK_WIDTH as f32).floor() as i32,
+            (cam_pos.z / CHUNK_DEPTH as f32).floor() as i32,
+        );
+        for key in lod_fills {
+            if self.section_scheduler.is_in_flight(key) {
+                continue;
+            }
+            if let Some(identity) = self.current_section_identity(key) {
+                self.section_scheduler
+                    .enqueue(identity, DependencyReason::ChunkLoad, player_chunk);
             }
         }
 

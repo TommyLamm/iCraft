@@ -6266,23 +6266,31 @@ impl State {
             region.active_chunks += 1;
         }
 
-        if let Some(levels) = &existing_section.levels {
-            for level in levels {
-                if let Some(h) = &level.opaque.handle {
-                    if let Err(error) = region.deallocate_handle(h) {
-                        eprintln!("[RenderRegion] deallocate failed: {error:?}");
-                    }
-                }
-                if let Some(h) = &level.transparent.handle {
-                    if let Err(error) = region.deallocate_handle(h) {
-                        eprintln!("[RenderRegion] deallocate failed: {error:?}");
-                    }
+        let full_rebuild = existing_section.needs_rebuild();
+        let mask = bundle.built_lods;
+
+        let mut levels = if full_rebuild {
+            if let Some(old) = existing_section.levels.take() {
+                for level in &old {
+                    Self::deallocate_gpu_mesh_level(region, level);
                 }
             }
-        }
+            std::array::from_fn(|_| GpuMeshLevel::empty())
+        } else {
+            existing_section
+                .levels
+                .take()
+                .unwrap_or_else(|| std::array::from_fn(|_| GpuMeshLevel::empty()))
+        };
 
         let mut metrics = UploadMetrics::default();
-        let levels = std::array::from_fn(|index| {
+        for index in 0..3 {
+            if mask & (1 << index) == 0 {
+                continue;
+            }
+            if !full_rebuild {
+                Self::deallocate_gpu_mesh_level(region, &levels[index]);
+            }
             let data = &bundle.levels[index];
             let owner_opaque = crate::chunk_render::allocation_owner(
                 terrain_generation,
@@ -6303,13 +6311,31 @@ impl State {
             let (transparent, transparent_metrics) =
                 region.upload_mesh_layer(device, queue, &data.transparent, owner_transparent);
             metrics = metrics.add(opaque_metrics).add(transparent_metrics);
-            GpuMeshLevel {
+            levels[index] = GpuMeshLevel {
                 opaque,
                 transparent,
                 bounds: data.bounds(),
-            }
-        });
+            };
+        }
+        existing_section.built_lods = if full_rebuild {
+            mask
+        } else {
+            existing_section.built_lods | mask
+        };
         (levels, metrics)
+    }
+
+    fn deallocate_gpu_mesh_level(region: &mut RenderRegion, level: &GpuMeshLevel) {
+        if let Some(h) = &level.opaque.handle {
+            if let Err(error) = region.deallocate_handle(h) {
+                eprintln!("[RenderRegion] deallocate failed: {error:?}");
+            }
+        }
+        if let Some(h) = &level.transparent.handle {
+            if let Err(error) = region.deallocate_handle(h) {
+                eprintln!("[RenderRegion] deallocate failed: {error:?}");
+            }
+        }
     }
 
     fn next_chunk_lifetime(&mut self) -> u64 {
@@ -6741,28 +6767,34 @@ impl State {
             return false;
         }
         if !self.chunk_manager.chunks.contains_key(&(key.cx, key.cz)) {
-            return false;
+            return true;
         }
         let Some(section) = self
             .chunk_meshes
             .get(&(key.cx, key.cz))
             .and_then(|mesh| mesh.section(key.section_y))
         else {
-            return false;
+            return true;
         };
-        if !section.needs_rebuild() || self.current_section_identity(key) != Some(work.identity) {
-            return false;
+        if self.current_section_identity(key) != Some(work.identity) {
+            return true;
         }
+        let selected = self.section_selected_lod(key);
+        if !section.needs_rebuild() && section.lod_is_built(selected) {
+            return true;
+        }
+        let lod_mask = selected.mask();
         let snapshot = self.chunk_manager.capture_section_halo(key);
         self.section_scheduler.mark_in_flight(work);
         let sender = self.terrain_worker_tx.clone();
         let generation = self.terrain_generation;
         let model_registry = Arc::clone(&self.model_registry);
         rayon::spawn(move || {
-            let bundle = Chunk::generate_section_mesh_bundle_from_halo_with_registry(
+            let bundle = Chunk::generate_section_mesh_bundle_from_halo_with_registry_for_lods(
                 work.identity,
                 &snapshot,
                 &model_registry,
+                lod_mask,
             );
             let _ = sender.send(TerrainWorkerResult::SectionMeshed(SectionMeshResult {
                 generation,
@@ -6770,6 +6802,26 @@ impl State {
             }));
         });
         true
+    }
+
+    fn section_selected_lod(&self, key: SectionKey) -> LodLevel {
+        let render_blocks = self.chunk_manager.render_distance as f32 * CHUNK_WIDTH as f32;
+        let thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
+        let min = Vec3::new(
+            (key.cx * CHUNK_WIDTH as i32) as f32,
+            key.min_world_y() as f32,
+            (key.cz * CHUNK_DEPTH as i32) as f32,
+        );
+        let max = Vec3::new(
+            (key.cx * CHUNK_WIDTH as i32 + CHUNK_WIDTH as i32) as f32,
+            key.max_world_y() as f32,
+            (key.cz * CHUNK_DEPTH as i32 + CHUNK_DEPTH as i32) as f32,
+        );
+        select_lod_for_bounds(
+            self.player_physics.position,
+            MeshBounds::new(min, max),
+            thresholds,
+        )
     }
 
     pub fn update_chunks(&mut self) {
@@ -6909,24 +6961,15 @@ impl State {
                     break;
                 };
                 let key = work.identity.key;
-                let Some(section) = self
-                    .chunk_meshes
-                    .get(&(key.cx, key.cz))
-                    .and_then(|mesh| mesh.section(key.section_y))
-                else {
-                    continue;
-                };
-                if !section.needs_rebuild()
-                    || self.current_section_identity(key) != Some(work.identity)
-                {
-                    continue;
-                }
                 if self.section_scheduler.is_in_flight(key) {
                     deferred.push(work);
                     continue;
                 }
+                let in_flight_before = self.section_scheduler.in_flight.len();
                 if self.schedule_section_mesh(work) {
-                    dispatched += 1;
+                    if self.section_scheduler.in_flight.len() > in_flight_before {
+                        dispatched += 1;
+                    }
                 } else {
                     deferred.push(work);
                 }
