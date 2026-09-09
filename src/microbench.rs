@@ -230,7 +230,7 @@ fn bench_network() -> u64 {
     let start = Instant::now();
     let mut checksum = 0u64;
     for _ in 0..ITERS {
-        let flattened = ChunkSaveData::from_chunk(&chunk).expect("compress chunk");
+        let payload = ChunkSaveData::network_terrain_payload(&chunk).expect("flatten chunk");
         let packet = Packet::ChunkData {
             protocol_version: crate::network::protocol::PROTOCOL_VERSION,
             dimension: 0,
@@ -239,10 +239,10 @@ fn bench_network() -> u64 {
             revision: 1,
             min_section_y: chunk.min_section_y,
             section_count: chunk.sections.len() as u16,
-            blocks: flattened.blocks,
-            block_states: flattened.block_states,
-            fluid_levels: flattened.fluid_levels,
-            block_entities: flattened.block_entities,
+            blocks: payload.blocks,
+            block_states: payload.block_states,
+            fluid_levels: payload.fluid_levels,
+            block_entities: payload.block_entities,
         };
         let bytes = packet.encode();
         let decoded = Packet::decode(&bytes).unwrap();

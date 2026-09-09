@@ -976,13 +976,12 @@ impl ServerRuntime {
                         return None;
                     }
                     world.chunks.chunks.get(&(cx, cz)).and_then(|chunk| {
-                        let mut data = ChunkSaveData::from_chunk(chunk).ok()?;
+                        let data = ChunkSaveData::network_terrain_payload(chunk).ok()?;
                         let revision = world.chunk_revision(cx, cz);
-                        data.mutation_revision = revision;
                         Some((
                             revision,
-                            chunk.min_section_y,
-                            chunk.sections.len().min(u16::MAX as usize) as u16,
+                            data.min_section_y,
+                            data.section_count,
                             data.blocks,
                             data.block_states,
                             data.fluid_levels,

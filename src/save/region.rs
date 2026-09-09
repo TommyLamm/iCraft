@@ -148,7 +148,9 @@ pub fn compress_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
             "injected compress failure",
         ));
     }
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    // Level 1 (fast): same zlib wrapper as default/best, so existing disk
+    // payloads still inflate. Tick-path save/projection no longer pays level 6.
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
     encoder.write_all(data)?;
     encoder.finish()
 }

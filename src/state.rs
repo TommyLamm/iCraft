@@ -8512,9 +8512,10 @@ impl State {
     }
 
     /// Client-side application of a full chunk payload sent by the host during
-    /// mid-game join catch-up. The payload uses the same Zlib-compressed layout
-    /// as `save.rs::ChunkSaveData`. Missing columns are inserted from the
-    /// payload only — join clients never generate a stand-in.
+    /// mid-game join catch-up. Live projection sends uncompressed terrain
+    /// streams; restore also accepts the historical zlib `ChunkSaveData` layout.
+    /// Missing columns are inserted from the payload only — join clients never
+    /// generate a stand-in.
     fn apply_remote_chunk_data(
         &mut self,
         dimension_wire: u8,

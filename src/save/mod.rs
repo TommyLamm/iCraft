@@ -8,7 +8,7 @@ mod tests;
 
 use crate::dimension::Dimension;
 use crate::network::protocol::PlayerEffectWire;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 pub use crate::inventory::{CreativeDragOrigin, GameMode};
 pub use format::{
     load_world_creation_options, ChunkSaveData, DedicatedPlayerFile, EntitySaveData, IdentityError,
-    InventoryData, ItemStackData, LevelData, MutationRevisionIndexCapacityError, PlayerData,
-    SaveError, SaveResult, CHUNK_SAVE_DATA_VERSION, DEDICATED_PLAYER_SAVE_VERSION,
-    PLAYER_IDENTITY_MAX_LEN, PLAYER_SAVE_MAGIC, PLAYER_SAVE_VERSION, WORLD_META_FILE,
+    InventoryData, ItemStackData, LevelData, MutationRevisionIndexCapacityError,
+    NetworkTerrainPayload, PlayerData, SaveError, SaveResult, CHUNK_SAVE_DATA_VERSION,
+    DEDICATED_PLAYER_SAVE_VERSION, PLAYER_IDENTITY_MAX_LEN, PLAYER_SAVE_MAGIC, PLAYER_SAVE_VERSION,
+    WORLD_META_FILE,
 };
 pub use index::{
     default_mutation_revision_index_capacity, DirtyChunkSet, MutationRevisionIndex, SaveState,
@@ -46,6 +47,10 @@ pub fn peek_current_dimension(world_dir: &Path) -> Dimension {
 pub struct SaveManager {
     pub world_dir: PathBuf,
     region_cache: HashMap<(Dimension, i32, i32), RegionData>,
+    /// Serialized on-disk length last observed for a cached region. Write
+    /// hits the cache when this still matches `metadata.len()`, so an
+    /// externally truncated/corrupt file still fail-closes.
+    region_disk_len: HashMap<(Dimension, i32, i32), u64>,
     lru_order: VecDeque<(Dimension, i32, i32)>,
 }
 
@@ -65,6 +70,7 @@ impl SaveManager {
         Self {
             world_dir,
             region_cache: HashMap::new(),
+            region_disk_len: HashMap::new(),
             lru_order: VecDeque::new(),
         }
     }
@@ -93,6 +99,7 @@ impl SaveManager {
         while self.region_cache.len() > MAX_ENTRIES || self.region_cache_bytes() > MAX_BYTES {
             if let Some(lru_key) = self.lru_order.pop_front() {
                 self.region_cache.remove(&lru_key);
+                self.region_disk_len.remove(&lru_key);
             } else {
                 break;
             }
@@ -308,6 +315,8 @@ impl SaveManager {
                     if file.read_to_end(&mut bytes).is_ok() {
                         if let Ok(region_data) = bincode::deserialize::<RegionData>(&bytes) {
                             self.region_cache.insert((dimension, rx, rz), region_data);
+                            self.region_disk_len
+                                .insert((dimension, rx, rz), bytes.len() as u64);
                         }
                     }
                 }
@@ -339,20 +348,50 @@ impl SaveManager {
         cz: i32,
         data: ChunkSaveData,
     ) -> SaveResult<()> {
-        let rx = cx.div_euclid(32);
-        let rz = cz.div_euclid(32);
-        let lx = cx.rem_euclid(32) as u8;
-        let lz = cz.rem_euclid(32) as u8;
+        self.save_chunks_in(dimension, std::iter::once((cx, cz, data)))
+    }
+
+    /// Insert many columns, writing each region file at most once.
+    pub fn save_chunks_in(
+        &mut self,
+        dimension: Dimension,
+        chunks: impl IntoIterator<Item = (i32, i32, ChunkSaveData)>,
+    ) -> SaveResult<()> {
+        let mut by_region: BTreeMap<(i32, i32), Vec<(i32, i32, ChunkSaveData)>> = BTreeMap::new();
+        for (cx, cz, data) in chunks {
+            let rx = cx.div_euclid(32);
+            let rz = cz.div_euclid(32);
+            by_region.entry((rx, rz)).or_default().push((cx, cz, data));
+        }
+        for ((rx, rz), entries) in by_region {
+            self.save_region_chunks(dimension, rx, rz, entries)?;
+        }
+        Ok(())
+    }
+
+    fn save_region_chunks(
+        &mut self,
+        dimension: Dimension,
+        rx: i32,
+        rz: i32,
+        entries: Vec<(i32, i32, ChunkSaveData)>,
+    ) -> SaveResult<()> {
+        let Some((error_cx, error_cz, _)) = entries.first() else {
+            return Ok(());
+        };
         let region_file = self
             .region_dir(dimension)
             .join(format!("r.{}.{}.bin", rx, rz));
+        let mut region =
+            self.load_region_for_write(dimension, rx, rz, &region_file, *error_cx, *error_cz)?;
 
-        let mut region = self.load_region_for_write(&region_file, cx, cz)?;
-
-        let serialized_chunk = bincode::serialize(&data)
-            .map_err(|error| SaveError::Serialization(error.to_string()))?;
-
-        region.chunks.insert((lx, lz), serialized_chunk);
+        for (cx, cz, data) in entries {
+            let lx = cx.rem_euclid(32) as u8;
+            let lz = cz.rem_euclid(32) as u8;
+            let serialized_chunk = bincode::serialize(&data)
+                .map_err(|error| SaveError::Serialization(error.to_string()))?;
+            region.chunks.insert((lx, lz), serialized_chunk);
+        }
 
         let serialized_region = bincode::serialize(&region)
             .map_err(|error| SaveError::Serialization(error.to_string()))?;
@@ -363,12 +402,37 @@ impl SaveManager {
         // Do not poison the in-memory cache if replacement fails; callers can
         // retry the same revision without losing the old on-disk snapshot.
         self.region_cache.insert((dimension, rx, rz), region);
+        self.region_disk_len
+            .insert((dimension, rx, rz), serialized_region.len() as u64);
         self.touch_region((dimension, rx, rz));
         self.evict_lru_regions();
         Ok(())
     }
 
     fn load_region_for_write(
+        &self,
+        dimension: Dimension,
+        rx: i32,
+        rz: i32,
+        region_file: &Path,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> SaveResult<RegionData> {
+        let key = (dimension, rx, rz);
+        if let Some(cached) = self.region_cache.get(&key) {
+            if !region_file.exists() {
+                return Ok(cached.clone());
+            }
+            if let Ok(meta) = fs::metadata(region_file) {
+                if self.region_disk_len.get(&key).copied() == Some(meta.len()) {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+        self.load_region_from_disk(region_file, chunk_x, chunk_z)
+    }
+
+    fn load_region_from_disk(
         &self,
         region_file: &Path,
         chunk_x: i32,
