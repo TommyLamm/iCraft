@@ -1,6 +1,6 @@
 mod common;
 
-use common::tcp_harness::session_slot;
+use common::tcp_harness::{session_slot, temp_world, HeldLoopback};
 use glam::Vec3;
 use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::authority::transactions::BREW_TICKS;
@@ -20,30 +20,19 @@ use icraft::{
     player::PlayerState, save::LevelData, save::PlayerData, save::SaveManager, world::BlockType,
 };
 use std::fs;
-use std::net::TcpListener;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn temp_world(label: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft_runtime_topology_{label}_{unique}"))
-}
-
-fn available_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve an ephemeral test port");
-    listener.local_addr().unwrap().port()
-}
 
 fn properties(label: &str) -> ServerProperties {
     ServerProperties {
         bind: "127.0.0.1".into(),
-        port: available_port(),
-        world_dir: temp_world(label),
+        world_dir: temp_world(&format!("runtime-topology-{label}")),
         ..ServerProperties::default()
     }
+}
+
+fn listen_properties(label: &str) -> ServerProperties {
+    let mut properties = properties(label);
+    properties.port = HeldLoopback::bind().release();
+    properties
 }
 
 fn leftover_block_use(session_id: u64, client_revision: u64, request_id: u128) -> GameplayRequest {
@@ -100,7 +89,7 @@ impl TopologyHarness {
         // vector drives the local session through the same bounded runtime
         // input FIFO.  A reserved ephemeral port keeps parallel runs isolated.
         if transport == TransportMode::Listen {
-            properties.port = available_port();
+            properties.port = HeldLoopback::bind().release();
         }
         let (mut runtime, input) = ServerRuntime::new_embedded(
             properties,
@@ -876,7 +865,7 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
 
 #[test]
 fn listen_runtime_routes_local_response_to_tick_output() {
-    let properties = properties("listen");
+    let properties = listen_properties("listen");
     let world_dir = properties.world_dir.clone();
     let local_id = u64::MAX - 2;
     let (mut runtime, input) = ServerRuntime::new_embedded(
@@ -919,7 +908,7 @@ fn listen_runtime_routes_local_response_to_tick_output() {
 
 #[test]
 fn legacy_constructor_remains_dedicated_listen_runtime() {
-    let properties = properties("dedicated");
+    let properties = listen_properties("dedicated");
     let world_dir = properties.world_dir.clone();
     let mut runtime = ServerRuntime::new(properties).unwrap();
     assert_eq!(runtime.authority.topology, AuthorityTopology::Dedicated);

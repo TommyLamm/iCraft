@@ -135,8 +135,70 @@ impl TcpClient {
         self.connected.map(|connected| connected.0)
     }
 
+    pub fn connected(&self) -> Option<(u64, u64, u8)> {
+        self.connected
+    }
+
     pub fn events(&self) -> &VecDeque<ClientToGame> {
         &self.events
+    }
+
+    pub fn take_open_result(
+        &mut self,
+        position: (i32, i32, i32),
+    ) -> Option<(Vec<Option<ItemWire>>, u64)> {
+        let index = self.events.iter().position(|event| {
+            matches!(
+                event,
+                ClientToGame::ContainerOpenResult { x, y, z, .. }
+                    if (*x, *y, *z) == position
+            )
+        })?;
+        match self.events.remove(index)? {
+            ClientToGame::ContainerOpenResult {
+                success,
+                slots,
+                revision,
+                ..
+            } => {
+                assert!(success, "authority reported a failed container open");
+                Some((slots, revision))
+            }
+            _ => unreachable!("event index was selected as a container-open result"),
+        }
+    }
+
+    pub fn take_click_result(&mut self, slot: u16) -> Option<(Option<ItemWire>, Option<ItemWire>)> {
+        let index = self.events.iter().position(|event| {
+            matches!(
+                event,
+                ClientToGame::ContainerClickResult { slot_index, .. }
+                    if *slot_index == slot
+            )
+        })?;
+        match self.events.remove(index)? {
+            ClientToGame::ContainerClickResult {
+                success,
+                slot,
+                dragged,
+                ..
+            } => {
+                assert!(success, "authority reported a failed container click");
+                Some((slot, dragged))
+            }
+            _ => unreachable!("event index was selected as a container-click result"),
+        }
+    }
+
+    pub fn has_private_container_event(&self) -> bool {
+        self.events.iter().any(|event| {
+            matches!(
+                event,
+                ClientToGame::ContainerOpenResult { .. }
+                    | ClientToGame::ContainerClickResult { .. }
+                    | ClientToGame::ContainerSlotUpdate { .. }
+            )
+        })
     }
 
     pub fn take_response(&mut self, request_id: u128) -> Option<GameplayResponse> {
