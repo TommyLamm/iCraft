@@ -797,18 +797,6 @@ impl NetworkHandle {
         }
     }
 
-    pub(crate) fn request_block_change(&self, x: i32, y: i32, z: i32, block: u32) {
-        let Some(request) = crate::network::protocol::wrap_legacy(
-            0,
-            0,
-            0,
-            crate::network::protocol::LegacyGameplay::BlockChange { x, y, z, block },
-        ) else {
-            return;
-        };
-        self.request_gameplay(request);
-    }
-
     /// Publish one already-typed gameplay operation to a joining client.
     /// Embedded hosts use `State::submit_authority_request` so their local
     /// producer shares the runtime FIFO; this method is deliberately a
@@ -822,33 +810,6 @@ impl NetworkHandle {
                 &crate::perf::queue_stats(crate::perf::QueueCategory::Outbound),
             );
         }
-    }
-
-    pub(crate) fn request_block_action(
-        &self,
-        action: crate::network::protocol::Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<crate::network::protocol::ItemWire>,
-    ) {
-        let Some(request) = crate::network::protocol::wrap_legacy(
-            0,
-            0,
-            0,
-            crate::network::protocol::LegacyGameplay::BlockAction {
-                action,
-                x,
-                y,
-                z,
-                block,
-                held_item,
-            },
-        ) else {
-            return;
-        };
-        self.request_gameplay(request);
     }
 
     pub(crate) fn send_respawn_request(&self) {

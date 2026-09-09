@@ -8,8 +8,8 @@ use tokio::net::TcpStream;
 use tokio::time::{self, Instant};
 
 use super::protocol::{
-    wrap_legacy, Action, EntityStateWire, GameplayRequest, GameplayResponse, LegacyGameplay,
-    LightningStrike, Packet, PlayerEffectWire, PlayerId, SessionGameplayWire, PROTOCOL_VERSION,
+    Action, EntityStateWire, GameplayRequest, GameplayResponse, LightningStrike, Packet,
+    PlayerEffectWire, PlayerId, SessionGameplayWire, PROTOCOL_VERSION,
 };
 use super::transport::{Connection, ConnectionWriter};
 
@@ -299,49 +299,11 @@ pub enum GameToClient {
     SendAction {
         action: Action,
     },
-    RequestBlockChange {
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-    },
-    RequestBlockAction {
-        action: Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<crate::network::protocol::ItemWire>,
-    },
     SendChat {
         message: String,
     },
     Disconnect,
-    ContainerOpenRequest {
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerClickRequest {
-        dimension: u8,
-        revision: u64,
-        slot_index: u16,
-        is_left: bool,
-        dragged: Option<crate::network::protocol::ItemWire>,
-    },
-    ContainerClose {
-        dimension: u8,
-        x: i32,
-        y: i32,
-        z: i32,
-    },
     PlayerRespawnRequest,
-    SleepRequest {
-        x: i32,
-        y: i32,
-        z: i32,
-    },
     GameplayRequest {
         request: GameplayRequest,
     },
@@ -642,24 +604,6 @@ fn prepare_gameplay_request(
     }
     request.session_id = player_id;
     request
-}
-
-fn legacy_gameplay_request(
-    leftover: LegacyGameplay,
-    dimension: u8,
-    client_revision: u64,
-    player_id: PlayerId,
-    next_request_id: &mut crate::network::protocol::RequestId,
-    last_client_sequence: &mut u64,
-    last_client_revision: &mut u64,
-) -> Option<GameplayRequest> {
-    Some(prepare_gameplay_request(
-        wrap_legacy(player_id, dimension, client_revision, leftover)?,
-        player_id,
-        next_request_id,
-        last_client_sequence,
-        last_client_revision,
-    ))
 }
 
 async fn send_or_die(
@@ -1175,61 +1119,6 @@ async fn run_client(
                                 return;
                             }
                         }
-                        Ok(GameToClient::RequestBlockChange { x, y, z, block }) => {
-                            let Some(request) = legacy_gameplay_request(
-                                LegacyGameplay::BlockChange { x, y, z, block },
-                                current_dimension,
-                                last_client_revision,
-                                player_id,
-                                &mut next_request_id,
-                                &mut last_client_sequence,
-                                &mut last_client_revision,
-                            ) else {
-                                continue;
-                            };
-                            if send_or_die(
-                                &mut writer,
-                                &Packet::GameplayRequest {
-                                    protocol_version: PROTOCOL_VERSION,
-                                    request,
-                                },
-                                &client_to_game,
-                                "legacy BlockChange envelope",
-                            ).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ok(GameToClient::RequestBlockAction { action, x, y, z, block, held_item }) => {
-                            let Some(request) = legacy_gameplay_request(
-                                LegacyGameplay::BlockAction {
-                                    action,
-                                    x,
-                                    y,
-                                    z,
-                                    block,
-                                    held_item,
-                                },
-                                current_dimension,
-                                last_client_revision,
-                                player_id,
-                                &mut next_request_id,
-                                &mut last_client_sequence,
-                                &mut last_client_revision,
-                            ) else {
-                                continue;
-                            };
-                            if send_or_die(
-                                &mut writer,
-                                &Packet::GameplayRequest {
-                                    protocol_version: PROTOCOL_VERSION,
-                                    request,
-                                },
-                                &client_to_game,
-                                "leftover BlockAction envelope",
-                            ).await.is_err() {
-                                return;
-                            }
-                        }
                         Ok(GameToClient::SendChat { message }) => {
                             if send_or_die(
                                 &mut writer,
@@ -1240,115 +1129,12 @@ async fn run_client(
                                 return;
                             }
                         }
-                        Ok(GameToClient::ContainerOpenRequest { dimension, x, y, z }) => {
-                            current_dimension = dimension;
-                            active_container = Some((dimension, x, y, z));
-                            let Some(request) = legacy_gameplay_request(
-                                LegacyGameplay::ContainerOpen { x, y, z },
-                                dimension,
-                                last_client_revision,
-                                player_id,
-                                &mut next_request_id,
-                                &mut last_client_sequence,
-                                &mut last_client_revision,
-                            ) else {
-                                continue;
-                            };
-                            if send_or_die(
-                                &mut writer,
-                                &Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request },
-                                &client_to_game,
-                                "legacy ContainerOpen envelope",
-                            ).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ok(GameToClient::ContainerClickRequest { dimension, revision, slot_index, is_left, dragged }) => {
-                            let Some((active_dimension, x, y, z)) = active_container else {
-                                // Never fabricate a zero-coordinate click: a
-                                // client may only mutate the container it
-                                // explicitly opened.
-                                continue;
-                            };
-                            if active_dimension != dimension {
-                                continue;
-                            }
-                            let Some(request) = legacy_gameplay_request(
-                                LegacyGameplay::ContainerClick {
-                                    x,
-                                    y,
-                                    z,
-                                    slot: slot_index,
-                                    is_left,
-                                    dragged,
-                                },
-                                dimension,
-                                revision,
-                                player_id,
-                                &mut next_request_id,
-                                &mut last_client_sequence,
-                                &mut last_client_revision,
-                            ) else {
-                                continue;
-                            };
-                            if send_or_die(
-                                &mut writer,
-                                &Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request },
-                                &client_to_game,
-                                "legacy ContainerClick envelope",
-                            ).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ok(GameToClient::ContainerClose { dimension, x, y, z }) => {
-                            let Some(request) = legacy_gameplay_request(
-                                LegacyGameplay::ContainerClose { x, y, z },
-                                dimension,
-                                last_client_revision,
-                                player_id,
-                                &mut next_request_id,
-                                &mut last_client_sequence,
-                                &mut last_client_revision,
-                            ) else {
-                                continue;
-                            };
-                            active_container = None;
-                            if send_or_die(
-                                &mut writer,
-                                &Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request },
-                                &client_to_game,
-                                "legacy ContainerClose envelope",
-                            ).await.is_err() {
-                                return;
-                            }
-                        }
                         Ok(GameToClient::PlayerRespawnRequest) => {
                             if send_or_die(
                                 &mut writer,
                                 &Packet::PlayerRespawnRequest { protocol_version: PROTOCOL_VERSION },
                                 &client_to_game,
                                 "PlayerRespawnRequest",
-                            ).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ok(GameToClient::SleepRequest { x, y, z }) => {
-                            let Some(request) = legacy_gameplay_request(
-                                LegacyGameplay::Sleep { x, y, z },
-                                current_dimension,
-                                last_client_revision,
-                                player_id,
-                                &mut next_request_id,
-                                &mut last_client_sequence,
-                                &mut last_client_revision,
-                            ) else {
-                                continue;
-                            };
-                            if send_or_die(
-                                &mut writer,
-                                &Packet::GameplayRequest { protocol_version: PROTOCOL_VERSION, request },
-                                &client_to_game,
-                                "legacy Sleep envelope",
                             ).await.is_err() {
                                 return;
                             }
@@ -2185,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_client_inputs_are_single_gameplay_envelopes() {
+    fn live_client_inputs_are_typed_gameplay_requests() {
         let _guard = network_test_guard();
         let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
@@ -2195,7 +1981,7 @@ mod tests {
         let server = NetworkServer::spawn(addr.clone(), 1234, 1, host_rx, server_tx);
         let (game_tx, game_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::sync_channel(CLIENT_TO_GAME_QUEUE_CAPACITY);
-        let client = NetworkClient::spawn(addr, "legacy-client".into(), game_rx, event_tx);
+        let client = NetworkClient::spawn(addr, "live-client".into(), game_rx, event_tx);
         let player_id = match wait_for_event(&event_rx) {
             ClientToGame::Connected { player_id, .. } => player_id,
             other => panic!("expected Connected, got {other:?}"),
@@ -2213,38 +1999,30 @@ mod tests {
         };
 
         game_tx
-            .send(GameToClient::RequestBlockChange {
-                x: 3,
-                y: 80,
-                z: -4,
-                block: 7,
-            })
-            .unwrap();
-        let block = next_request(&server_rx);
-        assert!(matches!(
-            block.operation,
-            crate::network::protocol::GameplayOperation::BlockUse {
-                x: 3,
-                y: 80,
-                z: -4,
-                block: 7,
-            }
-        ));
-        assert_eq!(block.session_id, player_id);
-        assert_eq!(block.client_sequence, 1);
-
-        game_tx
-            .send(GameToClient::RequestBlockAction {
-                action: Action::Break,
-                x: 10,
-                y: 64,
-                z: 20,
-                block: 0,
-                held_item: None,
+            .send(GameToClient::GameplayRequest {
+                request: GameplayRequest {
+                    request_id: 0,
+                    client_sequence: 0,
+                    session_id: 0,
+                    dimension: 0,
+                    client_revision: 0,
+                    operation: crate::network::protocol::GameplayOperation::BlockAction {
+                        action: crate::network::protocol::BlockActionKind::StartBreak,
+                        x: 10,
+                        y: 64,
+                        z: 20,
+                        face: [0, 0, 0],
+                        hand: 0,
+                        held: None,
+                        block: 0,
+                        look_milli: [0, 0, 1000],
+                    },
+                },
             })
             .unwrap();
         let action = next_request(&server_rx);
-        assert_eq!(action.client_sequence, 2);
+        assert_eq!(action.session_id, player_id);
+        assert_eq!(action.client_sequence, 1);
         assert!(matches!(
             action.operation,
             crate::network::protocol::GameplayOperation::BlockAction {
@@ -2254,61 +2032,6 @@ mod tests {
                 z: 20,
                 block: 0,
                 ..
-            }
-        ));
-
-        game_tx
-            .send(GameToClient::SleepRequest { x: 2, y: 70, z: 5 })
-            .unwrap();
-        let sleep = next_request(&server_rx);
-        assert_eq!(sleep.client_sequence, 3);
-        assert!(matches!(
-            sleep.operation,
-            crate::network::protocol::GameplayOperation::Sleep { x: 2, y: 70, z: 5 }
-        ));
-
-        game_tx
-            .send(GameToClient::ContainerOpenRequest {
-                dimension: 1,
-                x: 12,
-                y: 65,
-                z: -8,
-            })
-            .unwrap();
-        let open = next_request(&server_rx);
-        assert_eq!(open.client_sequence, 4);
-        assert_eq!(open.dimension, 1);
-        assert!(matches!(
-            open.operation,
-            crate::network::protocol::GameplayOperation::Container {
-                action: 0,
-                x: 12,
-                y: 65,
-                z: -8,
-                slot: 0,
-            }
-        ));
-
-        game_tx
-            .send(GameToClient::ContainerClickRequest {
-                dimension: 1,
-                revision: 17,
-                slot_index: 4,
-                is_left: true,
-                dragged: None,
-            })
-            .unwrap();
-        let click = next_request(&server_rx);
-        assert_eq!(click.client_sequence, 5);
-        assert_eq!(click.client_revision, 17);
-        assert!(matches!(
-            click.operation,
-            crate::network::protocol::GameplayOperation::Container {
-                action: 1,
-                x: 12,
-                y: 65,
-                z: -8,
-                slot: 4,
             }
         ));
 
@@ -2329,7 +2052,7 @@ mod tests {
             .unwrap();
         let typed = next_request(&server_rx);
         assert_eq!(typed.session_id, player_id);
-        assert_eq!(typed.client_sequence, 6);
+        assert_eq!(typed.client_sequence, 2);
         assert_eq!(typed.client_revision, 17);
         assert!(matches!(
             typed.operation,

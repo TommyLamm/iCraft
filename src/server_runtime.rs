@@ -754,18 +754,22 @@ pub struct ServerMetrics {
     pub last_save_latency_ms: u64,
 }
 
+/// Runtime session record kept separate from authority `SessionContract`.
+/// Interest, the save codec, pose clocks, and teleport allowance live here.
+/// Authoritative pose / dimension / accepted sequence live on the contract.
 #[derive(Debug, Clone)]
 pub struct PlayerSessionState {
     pub id: u64,
     pub username: String,
     pub storage: LocalSessionStorage,
     pub data: PlayerData,
-    pub dimension: Dimension,
-    pub last_client_sequence: u64,
     pub interest: InterestSet,
     pub effects: Vec<PlayerEffectWire>,
     pub(super) pending_initial_chunks: VecDeque<(Dimension, i32, i32)>,
     pub(super) last_projected_session_revision: Option<(Dimension, u64)>,
+    /// Last pose/health/anim fingerprint sent as `EntityState` to this session.
+    /// Cleared when an entity leaves the simulation set so re-entry is full.
+    pub(super) last_projected_entity_states: HashMap<u64, projection::EntityBroadcastFingerprint>,
     pub(super) last_pose_sequence: u32,
     pub(super) last_pose_sender_time_millis: u64,
     pub(super) last_pose_received_at: Option<Instant>,
@@ -787,12 +791,11 @@ impl PlayerSessionState {
             username,
             storage,
             data,
-            dimension,
-            last_client_sequence: 0,
             interest: InterestSet::new(dimension, view_distance, simulation_distance),
             effects: Vec::new(),
             pending_initial_chunks: VecDeque::new(),
             last_projected_session_revision: None,
+            last_projected_entity_states: HashMap::new(),
             last_pose_sequence: 0,
             last_pose_sender_time_millis: 0,
             last_pose_received_at: None,
@@ -813,6 +816,18 @@ impl PlayerSessionState {
             if !self.pending_initial_chunks.contains(&item) {
                 self.pending_initial_chunks.push_back(item);
             }
+        }
+    }
+
+    pub(super) fn prune_projected_entity_states(&mut self) {
+        let stale: Vec<u64> = self
+            .last_projected_entity_states
+            .keys()
+            .copied()
+            .filter(|id| !self.interest.simulation_entities.contains(id))
+            .collect();
+        for id in stale {
+            self.last_projected_entity_states.remove(&id);
         }
     }
 
@@ -1388,7 +1403,7 @@ impl ServerRuntime {
         let mut keep = BTreeSet::new();
         let mut any_session = false;
         for session in self.players.values() {
-            if session.dimension != dimension {
+            if session.interest.dimension != dimension {
                 continue;
             }
             any_session = true;
@@ -1450,7 +1465,7 @@ impl ServerRuntime {
                     dimension
                 })
             })
-            .unwrap_or(session.dimension);
+            .unwrap_or(session.interest.dimension);
         match session.storage {
             LocalSessionStorage::Named => self.save_manager.save_dedicated_player(
                 &session.username,
@@ -1607,7 +1622,7 @@ impl Drop for ServerRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::protocol::RejectReason;
+    use crate::network::protocol::{BlockActionKind, RejectReason};
     use crate::world::BlockType;
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -1919,11 +1934,16 @@ mod tests {
                     session_id: 2,
                     dimension: Dimension::Overworld as u8,
                     client_revision: revision,
-                    operation: GameplayOperation::BlockUse {
+                    operation: GameplayOperation::BlockAction {
+                        action: BlockActionKind::Place,
                         x: 8,
                         y: 80,
                         z: 8,
+                        face: [0, 1, 0],
+                        hand: 0,
+                        held: None,
                         block: crate::world::BlockType::DiamondOre.to_wire(),
+                        look_milli: [0, 0, 1000],
                     },
                 },
             )
@@ -1931,7 +1951,7 @@ mod tests {
         assert!(matches!(
             response.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         let output = runtime.tick_with_output().unwrap();
@@ -1951,7 +1971,7 @@ mod tests {
                 ))
                 .count(),
             0,
-            "rejected leftover BlockUse must not project a BlockChange"
+            "rejected BlockAction must not project a BlockChange"
         );
         assert_eq!(
             runtime
@@ -1978,11 +1998,16 @@ mod tests {
                     session_id: 99,
                     dimension: Dimension::Overworld as u8,
                     client_revision: revision,
-                    operation: GameplayOperation::BlockUse {
+                    operation: GameplayOperation::BlockAction {
+                        action: BlockActionKind::Place,
                         x: 9,
                         y: 80,
                         z: 8,
+                        face: [0, 1, 0],
+                        hand: 0,
+                        held: None,
                         block: crate::world::BlockType::DiamondOre.to_wire(),
+                        look_milli: [0, 0, 1000],
                     },
                 },
             )
@@ -1990,7 +2015,7 @@ mod tests {
         assert!(matches!(
             response.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         assert!(!runtime
@@ -2399,11 +2424,16 @@ mod tests {
                     session_id: 1,
                     dimension: 0,
                     client_revision: 0,
-                    operation: GameplayOperation::BlockUse {
+                    operation: GameplayOperation::BlockAction {
+                        action: BlockActionKind::Place,
                         x: 8,
                         y: 80,
                         z: 8,
+                        face: [0, 1, 0],
+                        hand: 0,
+                        held: None,
                         block: 1,
+                        look_milli: [0, 0, 1000],
                     },
                 },
             )
@@ -2417,11 +2447,16 @@ mod tests {
                     session_id: 2,
                     dimension: 0,
                     client_revision: 0,
-                    operation: GameplayOperation::BlockUse {
+                    operation: GameplayOperation::BlockAction {
+                        action: BlockActionKind::Place,
                         x: 8,
                         y: 80,
                         z: 8,
+                        face: [0, 1, 0],
+                        hand: 0,
+                        held: None,
                         block: 2,
+                        look_milli: [0, 0, 1000],
                     },
                 },
             )
@@ -2429,13 +2464,13 @@ mod tests {
         assert!(matches!(
             first.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         assert!(matches!(
             second.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         assert!(second.server_sequence > first.server_sequence);
@@ -2482,6 +2517,123 @@ mod tests {
         let _ = fs::remove_dir_all(&runtime.world_dir);
     }
 
+    fn entity_lifecycle_counts(
+        events: &[RuntimePresentationEvent],
+        entity_id: u64,
+    ) -> (usize, usize, usize) {
+        let mut spawns = 0;
+        let mut states = 0;
+        let mut despawns = 0;
+        for event in events {
+            match event {
+                RuntimePresentationEvent::EntitySpawn { state, .. }
+                    if state.entity_id == entity_id =>
+                {
+                    spawns += 1;
+                }
+                RuntimePresentationEvent::EntityState { state, .. }
+                    if state.entity_id == entity_id =>
+                {
+                    states += 1;
+                }
+                RuntimePresentationEvent::EntityDespawn {
+                    entity_id: id, ..
+                } if *id == entity_id => {
+                    despawns += 1;
+                }
+                _ => {}
+            }
+        }
+        (spawns, states, despawns)
+    }
+
+    #[test]
+    fn entity_state_broadcasts_dirty_or_entered_only() {
+        let (mut runtime, _input) = embedded_runtime("entity_dirty");
+        let _ = runtime.tick_with_output().unwrap();
+        let player_pos = runtime.players[&99].data.position;
+        const ENTITY_ID: u64 = 101;
+        runtime.authority.with_world(Dimension::Overworld, |world| {
+            assert!(world.ensure_entity(
+                ENTITY_ID,
+                crate::entity::EntityType::EndCrystal,
+                player_pos,
+                5.0,
+            ));
+        });
+
+        let entered = runtime.tick_with_output().unwrap();
+        let (spawns, states, despawns) =
+            entity_lifecycle_counts(&entered.presentation_events, ENTITY_ID);
+        assert!(
+            spawns + states >= 1,
+            "entering the interest set must project a full entity payload"
+        );
+        assert_eq!(despawns, 0);
+        assert!(runtime.players[&99]
+            .interest
+            .simulation_entities
+            .contains(&ENTITY_ID));
+
+        let quiet = runtime.tick_with_output().unwrap();
+        let (spawns, states, _) = entity_lifecycle_counts(&quiet.presentation_events, ENTITY_ID);
+        assert_eq!(spawns, 0);
+        assert_eq!(
+            states, 0,
+            "stationary pose/health/anim must not re-encode every tick"
+        );
+
+        runtime.authority.with_world(Dimension::Overworld, |world| {
+            let entity = world.entities.get_by_id_mut(ENTITY_ID).unwrap();
+            entity.health = 4.0;
+        });
+        let dirty = runtime.tick_with_output().unwrap();
+        let (_, states, _) = entity_lifecycle_counts(&dirty.presentation_events, ENTITY_ID);
+        assert_eq!(states, 1);
+        let quiet_after_dirty = runtime.tick_with_output().unwrap();
+        let (_, states, _) =
+            entity_lifecycle_counts(&quiet_after_dirty.presentation_events, ENTITY_ID);
+        assert_eq!(states, 0);
+
+        let far = [player_pos[0] + 10_000.0, player_pos[1], player_pos[2]];
+        assert!(runtime.teleport_session(99, far));
+        let left: Vec<_> = runtime.presentation_events.drain(..).collect();
+        let (_, _, despawns) = entity_lifecycle_counts(&left, ENTITY_ID);
+        assert!(despawns >= 1);
+        assert!(!runtime.players[&99]
+            .interest
+            .simulation_entities
+            .contains(&ENTITY_ID));
+
+        assert!(runtime.teleport_session(99, player_pos));
+        let reentered: Vec<_> = runtime.presentation_events.drain(..).collect();
+        let (spawns, _, _) = entity_lifecycle_counts(&reentered, ENTITY_ID);
+        assert!(
+            spawns >= 1,
+            "re-entering view distance must send a full EntitySpawn"
+        );
+        assert!(runtime.players[&99]
+            .last_projected_entity_states
+            .get(&ENTITY_ID)
+            .is_none());
+        let reentered_tick = runtime.tick_with_output().unwrap();
+        let (spawns, states, _) =
+            entity_lifecycle_counts(&reentered_tick.presentation_events, ENTITY_ID);
+        assert_eq!(spawns, 0);
+        assert_eq!(
+            states, 1,
+            "re-entering the simulation set must send a full EntityState once"
+        );
+        let quiet_reentered = runtime.tick_with_output().unwrap();
+        let (_, states, _) =
+            entity_lifecycle_counts(&quiet_reentered.presentation_events, ENTITY_ID);
+        assert_eq!(states, 0);
+
+        let world_dir = runtime.world_dir.clone();
+        runtime.shutdown().unwrap();
+        let _ = fs::remove_dir_all(world_dir);
+    }
+
     #[test]
     fn respawn_updates_authority_dimension_and_position() {
         let mut properties = ServerProperties::default();
@@ -2503,9 +2655,12 @@ mod tests {
             .handle_event(ServerToHost::ClientRespawnRequest { id: 1 })
             .unwrap();
         let player = runtime.players.get(&1).unwrap();
-        assert_eq!(player.dimension, runtime.level.spawn_dimension);
+        assert_eq!(player.interest.dimension, runtime.level.spawn_dimension);
         let authority_session = runtime.authority.session(1).unwrap();
-        assert_eq!(authority_session.dimension, player.dimension as u8);
+        assert_eq!(
+            authority_session.dimension,
+            player.interest.dimension as u8
+        );
         assert_eq!(authority_session.position, player.data.position);
         assert!(!authority_session.gameplay.is_dead);
         assert_eq!(

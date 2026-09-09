@@ -91,13 +91,18 @@ compatibility key, not a moved slot.
 Two session records stay separate because interest and the save codec cannot
 enter the deterministic core:
 
-- `SessionContract` in `AuthorityCore`
-- `PlayerSessionState` in `ServerRuntime`
+- `SessionContract` in `AuthorityCore` owns pose, dimension, and the accepted
+  client sequence.
+- `PlayerSessionState` in `ServerRuntime` owns interest, the save codec,
+  `Instant` pose clocks, and teleport allowance.
 
 Pose / dimension / gameplay overlays go only through
 `write_pose`, `sync_pose_from_authority`, `sync_dimension`, and
 `sync_gameplay_projection` in `src/server_runtime/session_sync.rs`.
 `teleport_session` grants `teleport_allowance` before `write_pose`.
+TCP ingress still rejects out-of-order sequences before they cross the host
+channel (the network thread has no `AuthorityCore`); that watermark is not a
+second accepted-sequence source.
 
 ## Mutation path
 
@@ -114,9 +119,10 @@ input
 
 - Reject before mutating. A rejection must not consume inventory, spawn
   drops, or partially write the world.
-- Place/break is `GameplayOperation::BlockAction`. `BlockUse` is a leftover
-  envelope and is always `Unsupported`.
-- Container clicks are conserving session transactions: clone player +
+- Place/break is `GameplayOperation::BlockAction`.
+- Container open/close is `GameplayOperation::Container`. Clicks are
+  `ContainerClick` only; leftover `Container { action: 1 }` is rejected.
+  Clicks are conserving session transactions: clone player +
   container, verify the claimed cursor, apply brew/viewer locks, commit both
   sides or roll back. Client-supplied item data is never echoed as truth.
 - Revisions are `(dimension, revision)`. The aggregate snapshot revision is
@@ -132,6 +138,10 @@ input
   simulation union, not the unbounded residency map. Columns that leave every
   session's view/simulation sets (plus `interest::RESIDENCY_HYSTERESIS`, same
   Chebyshev ring as client unload) are flushed if dirty and evicted.
+- Entity spawn/despawn follows view-distance interest. `EntityState` follows
+  simulation-distance and is sent only when pose, health, or animation
+  changed, or when the entity newly entered that session's simulation set.
+  Stationary entities are not re-encoded every tick.
 - `EmbeddedRuntimeBridge::sync_local_inventory` may write back only
   inventory, cursor, and selected hotbar. Health, hunger, XP, mining, and
   mounts stay server-owned. Join clients never use this path.
@@ -219,8 +229,14 @@ operator.
 `GameplayRequest` carries request id, client sequence, session, dimension,
 revision, and a typed operation. The bounded response cache makes retries
 idempotent. Live egress for sleep / container click / close is a
-`GameplayRequest`. Leftover `Packet` / `GameToClient` variants exist for
-inbound compatibility and tests.
+`GameplayRequest`. `Container` wire values are Open=`0` and Close=`2`;
+leftover Click=`1` fails bounds validation. Leftover inbound request packets (`BlockChange` as a
+client request, `BlockActionRequest`, `SleepRequest`,
+`ContainerOpenRequest`, `ContainerClickRequest`, inbound `ContainerClose`)
+are decoded then dropped. Live desktop send uses pose / chat / disconnect /
+`GameplayRequest` / respawn. Server→client `BlockChange` projection is
+unchanged. Deleting `GameplayOperation::BlockUse` shifts later
+`GameplayOperation` bincode discriminants; handshake stays protocol v19.
 
 `NetworkServer` / `NetworkClient` run Tokio on a background thread with
 bounded/metered channels. Reliable gameplay/lifecycle output is never

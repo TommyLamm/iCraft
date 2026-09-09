@@ -1,3 +1,6 @@
+mod common;
+
+use common::tcp_harness::temp_world;
 use glam::Vec3;
 use icraft::authority::interest::{InterestKind, InterestSet};
 use icraft::dimension::Dimension;
@@ -5,21 +8,12 @@ use icraft::entity::EntityManager;
 use icraft::inventory::{GameMode, Inventory};
 use icraft::network::protocol::{
     GameplayOperation, GameplayOutcome, GameplayRequest, PlayerEffectWire,
+    BlockActionKind,
 };
 use icraft::save::{ChunkSaveData, EntitySaveData, PlayerData, SaveManager};
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use icraft::world::{BlockType, Chunk};
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn temp_dir(label: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("icraft_authority_c_{label}_{unique}"))
-}
 
 fn player_data() -> PlayerData {
     let state = icraft::player::PlayerState::new();
@@ -37,7 +31,7 @@ fn player_data() -> PlayerData {
 
 #[test]
 fn dedicated_player_file_roundtrips_current_dimension_and_effects() {
-    let world_dir = temp_dir("player");
+    let world_dir = temp_world("player");
     let manager = SaveManager::new(&world_dir);
     let mut data = player_data();
     data.health = 7.5;
@@ -76,7 +70,7 @@ fn dedicated_player_file_roundtrips_current_dimension_and_effects() {
 
 #[test]
 fn authoritative_chunks_and_entities_roundtrip_with_revisions() {
-    let world_dir = temp_dir("world");
+    let world_dir = temp_world("world");
     let mut manager = SaveManager::new(&world_dir);
     let mut chunk = Chunk::new(2, -1);
     chunk.set_block_local(1, 70, 1, BlockType::Brick);
@@ -108,7 +102,7 @@ fn authoritative_chunks_and_entities_roundtrip_with_revisions() {
 
 #[test]
 fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
-    let world_dir = temp_dir("runtime");
+    let world_dir = temp_world("runtime");
     let mut properties = ServerProperties::default();
     properties.bind = "127.0.0.1".into();
     properties.port = 26000 + (std::process::id() as u16 % 500);
@@ -138,7 +132,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     let mut restarted = ServerRuntime::new(properties).unwrap();
     restarted.login_session(9, "ALICE").unwrap();
     let session = restarted.players.get(&9).unwrap();
-    assert_eq!(session.dimension, Dimension::Nether);
+    assert_eq!(session.interest.dimension, Dimension::Nether);
     assert_eq!(session.data.health, 6.0);
     assert_eq!(session.effects.len(), 1);
 
@@ -158,11 +152,16 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
                 session_id: 9,
                 dimension: Dimension::Overworld as u8,
                 client_revision: restarted.authority.current_revision(),
-                operation: GameplayOperation::BlockUse {
+                operation: GameplayOperation::BlockAction {
+                    action: BlockActionKind::Place,
                     x: 8,
                     y: 80,
                     z: 8,
+                    face: [0, 1, 0],
+                    hand: 0,
+                    held: None,
                     block: BlockType::DiamondOre.to_wire(),
+                    look_milli: [0, 0, 1000],
                 },
             },
         )
@@ -170,7 +169,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     assert!(matches!(
         response.outcome,
         GameplayOutcome::Rejected {
-            reason: icraft::network::protocol::RejectReason::Unsupported
+            reason: icraft::network::protocol::RejectReason::InvalidState
         }
     ));
     assert_eq!(restarted.authority.world().get_block(8, 80, 8), old);
@@ -188,7 +187,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
 
 #[test]
 fn mutating_identities_cannot_join_or_share_player_files() {
-    let world_dir = temp_dir("identity");
+    let world_dir = temp_world("identity");
     let mut properties = ServerProperties::default();
     properties.bind = "127.0.0.1".into();
     properties.port = 26000 + (std::process::id() as u16 % 500);

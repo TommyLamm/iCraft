@@ -531,12 +531,7 @@ mod tests {
             session_id: 7,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::BlockUse {
-                x: 8,
-                y: 80,
-                z: 8,
-                block: 3,
-            },
+            operation: GameplayOperation::ItemUse { item: 1, count: 1 },
         };
         let first = core.submit_request(request.clone());
         let duplicate = core.submit_request(request.clone());
@@ -573,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn leftover_block_use_is_unsupported_and_does_not_drain_a_mutation() {
+    fn rejected_block_action_does_not_drain_a_mutation() {
         let mut core = core(AuthorityTopology::Singleplayer);
         let before = core.world().get_block(8, 80, 8);
         let request = GameplayRequest {
@@ -582,18 +577,23 @@ mod tests {
             session_id: 7,
             dimension: 0,
             client_revision: 0,
-            operation: GameplayOperation::BlockUse {
+            operation: GameplayOperation::BlockAction {
+                action: BlockActionKind::Place,
                 x: 8,
                 y: 80,
                 z: 8,
+                face: [0, 1, 0],
+                hand: 0,
+                held: None,
                 block: 3,
+                look_milli: [0, 0, 1000],
             },
         };
         let response = core.submit_request(request);
         assert!(matches!(
             response.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         assert!(core.take_pending_mutations().is_empty());
@@ -1694,41 +1694,51 @@ mod tests {
             session_id: 7,
             dimension: Dimension::Overworld as u8,
             client_revision: overworld_revision,
-            operation: GameplayOperation::BlockUse {
+            operation: GameplayOperation::BlockAction {
+                action: BlockActionKind::Place,
                 x: 8,
                 y: 80,
                 z: 8,
+                face: [0, 1, 0],
+                hand: 0,
+                held: None,
                 block: BlockType::DiamondOre.to_wire(),
+                look_milli: [0, 0, 1000],
             },
         });
         assert!(matches!(
             leftover.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         core.activate_dimension(Dimension::Overworld);
         assert_eq!(core.world().get_block(8, 80, 8), BlockType::Glass);
 
-        // An active Nether compatibility view must not make a leftover
-        // Overworld BlockUse mutate; routing still selects the session world.
+        // An active Nether compatibility view must not make a rejected
+        // Overworld BlockAction mutate; routing still selects the session world.
         let routed_again = core.submit_request(GameplayRequest {
             request_id: 103,
             client_sequence: 2,
             session_id: 7,
             dimension: Dimension::Overworld as u8,
             client_revision: overworld_revision,
-            operation: GameplayOperation::BlockUse {
+            operation: GameplayOperation::BlockAction {
+                action: BlockActionKind::Place,
                 x: 9,
                 y: 80,
                 z: 8,
+                face: [0, 1, 0],
+                hand: 0,
+                held: None,
                 block: BlockType::Glass.to_wire(),
+                look_milli: [0, 0, 1000],
             },
         });
         assert!(matches!(
             routed_again.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         core.activate_dimension(Dimension::Overworld);

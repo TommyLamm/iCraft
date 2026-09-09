@@ -16,6 +16,31 @@ use crate::network::protocol::{
 use crate::network::server::HostToServer;
 use crate::save::ChunkSaveData;
 use glam::Vec3;
+use std::collections::HashMap;
+
+/// Pose / health / anim signature used to skip unchanged entity state fanout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EntityBroadcastFingerprint {
+    position: [f32; 3],
+    velocity: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    health: f32,
+    animation_state: u8,
+}
+
+impl EntityBroadcastFingerprint {
+    fn from_entity(entity: &crate::entity::Entity) -> Self {
+        Self {
+            position: entity.position.to_array(),
+            velocity: entity.velocity.to_array(),
+            yaw: entity.yaw,
+            pitch: entity.pitch,
+            health: entity.health,
+            animation_state: entity_animation_state(entity),
+        }
+    }
+}
 
 impl ServerRuntime {
     pub(super) fn route_container_result(
@@ -25,7 +50,6 @@ impl ServerRuntime {
         x: i32,
         y: i32,
         z: i32,
-        slot: u16,
         action: ContainerAction,
     ) {
         let position = (x, y, z);
@@ -57,89 +81,106 @@ impl ServerRuntime {
                 ContainerAction::Close => {
                     session.interest.open_containers.remove(&position);
                 }
-                ContainerAction::Open | ContainerAction::Click => {
+                ContainerAction::Open => {
                     session.interest.open_containers.insert(position);
                 }
             }
         }
         self.queue_interest_update(dimension, revision, InterestKind::BlockEntity(position));
+        self.queue_interest_update(dimension, revision, InterestKind::Container(position));
+        if let ContainerAction::Open = action {
+            let slots = self
+                .authority
+                .world_mut(dimension)
+                .and_then(|world| world.container_slots_wire(position))
+                .unwrap_or_default();
+            self.send_targeted(
+                id,
+                slots,
+                |slots| RuntimePresentationEvent::ContainerOpenResult {
+                    target: id,
+                    dimension: dimension as u8,
+                    success: true,
+                    position,
+                    slots,
+                    revision,
+                },
+                |slots| HostToServer::SendContainerOpenResult {
+                    to: id,
+                    dimension: dimension as u8,
+                    success: true,
+                    x,
+                    y,
+                    z,
+                    slots,
+                    revision,
+                },
+            );
+        }
+    }
+
+    pub(super) fn route_container_click_result(
+        &mut self,
+        id: u64,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot: u16,
+    ) {
+        let position = (x, y, z);
+        let dimension = self
+            .authority
+            .session(id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+            .unwrap_or_else(|| self.authority.active_dimension());
+        if let Some(session) = self.players.get_mut(&id) {
+            session.interest.open_containers.insert(position);
+        }
+        self.queue_interest_update(dimension, revision, InterestKind::BlockEntity(position));
         let container_targets =
             self.queue_interest_update(dimension, revision, InterestKind::Container(position));
-        match action {
-            ContainerAction::Open => {
-                let slots = self
-                    .authority
-                    .world_mut(dimension)
-                    .and_then(|world| world.container_slots_wire(position))
-                    .unwrap_or_default();
-                self.send_targeted(
-                    id,
-                    slots,
-                    |slots| RuntimePresentationEvent::ContainerOpenResult {
-                        target: id,
-                        dimension: dimension as u8,
-                        success: true,
-                        position,
-                        slots,
-                        revision,
-                    },
-                    |slots| HostToServer::SendContainerOpenResult {
-                        to: id,
-                        dimension: dimension as u8,
-                        success: true,
-                        x,
-                        y,
-                        z,
-                        slots,
-                        revision,
-                    },
+        let slot_value = self
+            .authority
+            .world_mut(dimension)
+            .and_then(|world| world.container_slot_wire(position, slot))
+            .flatten();
+        let session_state = self.authority.session(id).map(|session| session.gameplay);
+        let dragged = session_state
+            .and_then(|state| state.cursor)
+            .map(|slot| slot.item);
+        if let Some(state) = session_state {
+            if let Some(session) = self.players.get_mut(&id) {
+                session.last_projected_session_revision = Some((dimension, state.revision));
+            }
+            self.send_session_update(id, revision, dimension, state);
+        }
+        self.send_targeted(
+            id,
+            (),
+            |_| RuntimePresentationEvent::ContainerClickResult {
+                target: id,
+                dimension: dimension as u8,
+                success: true,
+                slot_index: slot,
+                slot: slot_value,
+                dragged,
+            },
+            |_| HostToServer::SendContainerClickResult {
+                to: id,
+                dimension: dimension as u8,
+                success: true,
+                slot_index: slot,
+                slot: slot_value,
+                dragged,
+            },
+        );
+        for target in container_targets {
+            if target != id {
+                self.send_container_slot_update(
+                    target, dimension, revision, position, slot, slot_value,
                 );
             }
-            ContainerAction::Click => {
-                let slot_value = self
-                    .authority
-                    .world_mut(dimension)
-                    .and_then(|world| world.container_slot_wire(position, slot))
-                    .flatten();
-                let session_state = self.authority.session(id).map(|session| session.gameplay);
-                let dragged = session_state
-                    .and_then(|state| state.cursor)
-                    .map(|slot| slot.item);
-                if let Some(state) = session_state {
-                    if let Some(session) = self.players.get_mut(&id) {
-                        session.last_projected_session_revision = Some((dimension, state.revision));
-                    }
-                    self.send_session_update(id, revision, dimension, state);
-                }
-                self.send_targeted(
-                    id,
-                    (),
-                    |_| RuntimePresentationEvent::ContainerClickResult {
-                        target: id,
-                        dimension: dimension as u8,
-                        success: true,
-                        slot_index: slot,
-                        slot: slot_value,
-                        dragged,
-                    },
-                    |_| HostToServer::SendContainerClickResult {
-                        to: id,
-                        dimension: dimension as u8,
-                        success: true,
-                        slot_index: slot,
-                        slot: slot_value,
-                        dragged,
-                    },
-                );
-                for target in container_targets {
-                    if target != id {
-                        self.send_container_slot_update(
-                            target, dimension, revision, position, slot, slot_value,
-                        );
-                    }
-                }
-            }
-            ContainerAction::Close => {}
         }
     }
 
@@ -435,7 +476,7 @@ impl ServerRuntime {
     pub(super) fn force_close_player_containers(&mut self, id: u64) {
         let Some((dimension, positions)) = self.players.get(&id).map(|session| {
             (
-                session.dimension,
+                session.interest.dimension,
                 session
                     .interest
                     .open_containers
@@ -638,7 +679,7 @@ impl ServerRuntime {
             if let Some((dimension, position)) = self
                 .players
                 .get(&id)
-                .map(|session| (session.dimension, session.data.position))
+                .map(|session| (session.interest.dimension, session.data.position))
             {
                 self.update_interest_for_at(id, dimension, position, snapshot.tick);
             }
@@ -721,32 +762,73 @@ impl ServerRuntime {
             self.routed_mutations.remove(&oldest);
         }
 
-        // Entity AI runs inside AuthorityCore::tick.  Emit state only to
-        // sessions whose simulation-distance set contains that entity.
+        // Entity AI runs inside AuthorityCore::tick. Emit pose/health/anim
+        // only when it changed, or when the entity newly entered a session's
+        // simulation set. Stationary entities are not re-encoded.
         for dimension in self.authority.dimensions() {
-            let mut entities: Vec<_> = self
-                .authority
-                .world_ref(dimension)
-                .map(|world| {
-                    world
-                        .entities
-                        .entities
-                        .iter()
-                        .map(|entity| (entity.id, entity_state_wire(entity)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            entities.sort_by_key(|(id, _)| *id);
-            for (entity_id, state) in entities {
-                let targets = self.queue_interest_update(
-                    dimension,
-                    // Snapshot revision is an aggregate max across worlds and
-                    // cannot be used as a client gate for this dimension.
-                    self.authority.revision_for_dimension(dimension),
-                    InterestKind::EntityState(entity_id),
-                );
-                for target in targets {
-                    self.send_entity_state(target, dimension, snapshot.tick, state);
+            let revision = self.authority.revision_for_dimension(dimension);
+            let mut session_ids: Vec<_> = self.players.keys().copied().collect();
+            session_ids.sort_unstable();
+            let mut encoded: HashMap<u64, EntityStateWire> = HashMap::new();
+            for session_id in session_ids {
+                let entity_ids = {
+                    let Some(session) = self.players.get_mut(&session_id) else {
+                        continue;
+                    };
+                    if session.interest.dimension != dimension {
+                        continue;
+                    }
+                    session.prune_projected_entity_states();
+                    let mut entity_ids: Vec<_> =
+                        session.interest.simulation_entities.iter().copied().collect();
+                    entity_ids.sort_unstable();
+                    entity_ids
+                };
+                for entity_id in entity_ids {
+                    let fingerprint = {
+                        let Some(entity) = self
+                            .authority
+                            .world_ref(dimension)
+                            .and_then(|world| world.entities.get_by_id(entity_id))
+                        else {
+                            continue;
+                        };
+                        EntityBroadcastFingerprint::from_entity(entity)
+                    };
+                    let Some(dirty) = self.players.get(&session_id).map(|session| {
+                        session.last_projected_entity_states.get(&entity_id) != Some(&fingerprint)
+                    }) else {
+                        continue;
+                    };
+                    if !dirty {
+                        continue;
+                    }
+                    let state = if let Some(&state) = encoded.get(&entity_id) {
+                        state
+                    } else {
+                        let Some(state) = self
+                            .authority
+                            .world_ref(dimension)
+                            .and_then(|world| world.entities.get_by_id(entity_id))
+                            .map(entity_state_wire)
+                        else {
+                            continue;
+                        };
+                        encoded.insert(entity_id, state);
+                        state
+                    };
+                    self.record_interest_update(
+                        session_id,
+                        dimension,
+                        revision,
+                        InterestKind::EntityState(entity_id),
+                    );
+                    self.send_entity_state(session_id, dimension, snapshot.tick, state);
+                    if let Some(session) = self.players.get_mut(&session_id) {
+                        session
+                            .last_projected_entity_states
+                            .insert(entity_id, fingerprint);
+                    }
                 }
             }
         }
@@ -755,7 +837,7 @@ impl ServerRuntime {
                 continue;
             };
             let should_send = self.players.get(&update.player_id).is_some_and(|session| {
-                session.dimension == dimension
+                session.interest.dimension == dimension
                     && session.last_projected_session_revision.map_or(
                         true,
                         |(projected_dimension, revision)| {
@@ -777,12 +859,12 @@ impl ServerRuntime {
     pub(super) fn update_interest(&mut self, session: &mut PlayerSessionState) {
         let _ = session
             .interest
-            .update_position(session.dimension, session.data.position);
+            .update_position(session.interest.dimension, session.data.position);
         let center = Vec3::from_array(session.data.position);
         let radius = f32::from(session.interest.view_distance) * 16.0;
         let (entities, simulation_entities) = self
             .authority
-            .world_ref(session.dimension)
+            .world_ref(session.interest.dimension)
             .map(|world| {
                 let entities = world
                     .entities
@@ -804,6 +886,7 @@ impl ServerRuntime {
         session
             .interest
             .update_simulation_entities(simulation_entities);
+        session.prune_projected_entity_states();
     }
 
     pub(super) fn update_interest_for(
@@ -823,7 +906,7 @@ impl ServerRuntime {
         position: [f32; 3],
         sequence: u64,
     ) {
-        let (entity_states, simulation_entities) = self
+        let (entities, simulation_entities) = self
             .authority
             .world_ref(dimension)
             .map(|world| {
@@ -833,7 +916,7 @@ impl ServerRuntime {
                         Vec3::from_array(position),
                         f32::from(self.properties.view_distance) * 16.0,
                     )
-                    .map(|entity| (entity.id, entity_state_wire(entity)))
+                    .map(|entity| entity.id)
                     .collect::<Vec<_>>();
                 let simulation_entities = world
                     .entities
@@ -846,10 +929,6 @@ impl ServerRuntime {
                 (entities, simulation_entities)
             })
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
-        let entities: Vec<_> = entity_states
-            .iter()
-            .map(|(entity_id, _)| *entity_id)
-            .collect();
         let (entity_delta, old_dimension, departed_containers) = {
             let Some(session) = self.players.get_mut(&id) else {
                 return;
@@ -857,7 +936,6 @@ impl ServerRuntime {
             let old_dimension = session.interest.dimension;
             let old_entities = session.interest.entities.clone();
             let old_open_containers = session.interest.open_containers.clone();
-            session.dimension = dimension;
             let mut chunk_delta = session.interest.update_position(dimension, position);
             let center_chunk = (
                 (position[0] / 16.0).floor() as i32,
@@ -879,10 +957,12 @@ impl ServerRuntime {
                 entity_delta.entered = session.interest.entities.iter().copied().collect();
                 entity_delta.entered.sort_unstable();
                 session.pending_initial_chunks.clear();
+                session.last_projected_entity_states.clear();
             }
             session
                 .interest
                 .update_simulation_entities(simulation_entities);
+            session.prune_projected_entity_states();
             session
                 .pending_initial_chunks
                 .retain(|(queued_dimension, cx, cz)| {
@@ -913,9 +993,11 @@ impl ServerRuntime {
                 self.authority.revision_for_dimension(dimension),
                 InterestKind::Entity(entity_id),
             );
-            if let Some(state) = entity_states
-                .iter()
-                .find_map(|(id, state)| (*id == entity_id).then_some(*state))
+            if let Some(state) = self
+                .authority
+                .world_ref(dimension)
+                .and_then(|world| world.entities.get_by_id(entity_id))
+                .map(entity_state_wire)
             {
                 self.send_entity_spawn(id, dimension, sequence, state);
             }
@@ -1041,11 +1123,15 @@ impl ServerRuntime {
     }
 }
 
-pub(super) fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
-    let animation_state = u8::from(entity.on_ground)
+fn entity_animation_state(entity: &crate::entity::Entity) -> u8 {
+    u8::from(entity.on_ground)
         | (u8::from(entity.target_player) << 1)
         | (u8::from(entity.is_ignited) << 2)
-        | (u8::from(entity.fire_aspect_timer > 0.0) << 3);
+        | (u8::from(entity.fire_aspect_timer > 0.0) << 3)
+}
+
+pub(super) fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
+    let animation_state = entity_animation_state(entity);
     let item = entity
         .dropped_stack
         .as_ref()

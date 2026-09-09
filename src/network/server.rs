@@ -24,9 +24,8 @@ pub(crate) use super::egress::{
     normalize_host_response, send_to,
 };
 pub(crate) use super::ingress::{
-    authenticate_handshake_username, chat_exceeds_display_cap, legacy_gameplay_request,
-    prepare_gameplay_request, queue_initial_roster, remove_client, route_gameplay_request,
-    run_client,
+    authenticate_handshake_username, chat_exceeds_display_cap, prepare_gameplay_request,
+    queue_initial_roster, remove_client, route_gameplay_request, run_client,
 };
 #[cfg(test)]
 use super::protocol::Packet;
@@ -876,7 +875,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_sleep_and_container_fields_are_preserved_in_envelopes() {
+    async fn leftover_inbound_packets_are_dropped_not_wrapped() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let (mut client, id) = server.connect("legacy-adapter").await;
 
@@ -889,20 +888,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let sleep = server
-            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
-            .await;
-        assert!(matches!(
-            sleep,
-            ServerToHost::GameplayRequest { id: event_id, request }
-                if event_id == id
-                    && request.client_sequence == 1
-                    && matches!(
-                        request.operation,
-                        GameplayOperation::Sleep { x: -3, y: 70, z: 11 }
-                    )
-        ));
-
         client
             .send(&Packet::ContainerOpenRequest {
                 protocol_version: PROTOCOL_VERSION,
@@ -913,27 +898,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let open = server
-            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
-            .await;
-        assert!(matches!(
-            open,
-            ServerToHost::GameplayRequest { id: event_id, request }
-                if event_id == id
-                    && request.dimension == 1
-                    && request.client_sequence == 2
-                    && matches!(
-                        request.operation,
-                        GameplayOperation::Container {
-                            action: 0,
-                            x: 12,
-                            y: 65,
-                            z: -8,
-                            slot: 0,
-                        }
-                    )
-        ));
-
         client
             .send(&Packet::ContainerClickRequest {
                 protocol_version: PROTOCOL_VERSION,
@@ -945,28 +909,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let click = server
-            .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
-            .await;
-        assert!(matches!(
-            click,
-            ServerToHost::GameplayRequest { id: event_id, request }
-                if event_id == id
-                    && request.dimension == 1
-                    && request.client_revision == 17
-                    && request.client_sequence == 3
-                    && matches!(
-                        request.operation,
-                        GameplayOperation::Container {
-                            action: 1,
-                            x: 12,
-                            y: 65,
-                            z: -8,
-                            slot: 4,
-                        }
-                    )
-        ));
-
         client
             .send(&Packet::ContainerClose {
                 protocol_version: PROTOCOL_VERSION,
@@ -977,23 +919,31 @@ mod tests {
             })
             .await
             .unwrap();
-        let close = server
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: GameplayRequest {
+                    request_id: 9,
+                    client_sequence: 1,
+                    session_id: 0,
+                    dimension: 0,
+                    client_revision: 0,
+                    operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+                },
+            })
+            .await
+            .unwrap();
+        let forwarded = server
             .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
             .await;
         assert!(matches!(
-            close,
+            forwarded,
             ServerToHost::GameplayRequest { id: event_id, request }
                 if event_id == id
-                    && request.client_sequence == 4
+                    && request.request_id == 9
                     && matches!(
                         request.operation,
-                        GameplayOperation::Container {
-                            action: 2,
-                            x: 12,
-                            y: 65,
-                            z: -8,
-                            slot: 0,
-                        }
+                        GameplayOperation::ItemUse { item: 1, count: 1 }
                     )
         ));
         server.stop().await;
@@ -1026,7 +976,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_change_reports_authenticated_session_id_to_host() {
+    async fn inbound_block_change_is_not_wrapped_as_a_request() {
         let server = TestServer::start(0xCAFE_BABE, 1);
         let (mut client, id) = server.connect("steve").await;
 
@@ -1044,6 +994,20 @@ mod tests {
             })
             .await
             .unwrap();
+        client
+            .send(&Packet::GameplayRequest {
+                protocol_version: PROTOCOL_VERSION,
+                request: GameplayRequest {
+                    request_id: 4,
+                    client_sequence: 1,
+                    session_id: 0,
+                    dimension: 0,
+                    client_revision: 0,
+                    operation: GameplayOperation::ItemUse { item: 1, count: 1 },
+                },
+            })
+            .await
+            .unwrap();
 
         let event = server
             .next_event_matching(|event| matches!(event, ServerToHost::GameplayRequest { .. }))
@@ -1053,17 +1017,10 @@ mod tests {
             ServerToHost::GameplayRequest { id: event_id, request }
                 if event_id == id
                     && request.session_id == id
-                    && request.request_id != 0
-                    && request.client_sequence == 1
-                    && request.client_revision == 0
+                    && request.request_id == 4
                     && matches!(
                         request.operation,
-                        crate::network::protocol::GameplayOperation::BlockUse {
-                            x: 3,
-                            y: 80,
-                            z: -4,
-                            block: 3,
-                        }
+                        GameplayOperation::ItemUse { item: 1, count: 1 }
                     )
         ));
 
@@ -1802,14 +1759,26 @@ mod tests {
             &crate::inventory::ItemStack::new(crate::inventory::Item::StonePickaxe, 1),
         );
         client_a
-            .send(&Packet::BlockActionRequest {
+            .send(&Packet::GameplayRequest {
                 protocol_version: PROTOCOL_VERSION,
-                action: Action::Break,
-                x: 10,
-                y: 64,
-                z: 20,
-                block: crate::inventory::Item::Air as u32,
-                held_item: Some(held),
+                request: GameplayRequest {
+                    request_id: 0,
+                    client_sequence: 0,
+                    session_id: 0,
+                    dimension: 0,
+                    client_revision: 0,
+                    operation: crate::network::protocol::GameplayOperation::BlockAction {
+                        action: crate::network::protocol::BlockActionKind::StartBreak,
+                        x: 10,
+                        y: 64,
+                        z: 20,
+                        face: [0, 0, 0],
+                        hand: 0,
+                        held: Some(crate::network::protocol::SessionSlotWire::new(held, 0, 0)),
+                        block: crate::inventory::Item::Air as u32,
+                        look_milli: [0, 0, 1000],
+                    },
+                },
             })
             .await
             .unwrap();

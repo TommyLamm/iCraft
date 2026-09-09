@@ -16,12 +16,12 @@
 
 ## 精確 acceptance
 
-- [ ] `PlayerSessionState` 去掉與權威重複的 pose／dimension／`last_client_sequence`；只留 interest、存檔、`Instant` 時鐘、teleport allowance。
-- [ ] 生產路徑維度／pose 只經 `write_pose` / `sync_pose_from_authority` / `sync_dimension` / `sync_gameplay_projection`。`projection.rs` 旁路賦值刪除。
-- [ ] 傳輸層只分配序號；權威是唯一「已接受序號」來源（或證據說明為何 ingress 閘必須留下）。
-- [ ] `Container` 只留 Open／Close；Click 只走 `ContainerClick`。刪 `ContainerAction::Click` 與 leftover `action: 1` 適配。
-- [ ] 不碰 world 的 session 突變改 `transact`；跨 world+session 的容器交易維持 clone 兩邊再 commit。
-- [ ] 會話／容器測試通過。
+- [x] `PlayerSessionState` 去掉與權威重複的 pose／dimension／`last_client_sequence`；只留 interest、存檔、`Instant` 時鐘、teleport allowance。
+- [x] 生產路徑維度／pose 只經 `write_pose` / `sync_pose_from_authority` / `sync_dimension` / `sync_gameplay_projection`。`projection.rs` 旁路賦值刪除。
+- [x] 傳輸層只分配序號；權威是唯一「已接受序號」來源（或證據說明為何 ingress 閘必須留下）。
+- [x] `Container` 只留 Open／Close；Click 只走 `ContainerClick`。刪 `ContainerAction::Click` 與 leftover `action: 1` 適配。
+- [x] 不碰 world 的 session 突變改 `transact`；跨 world+session 的容器交易維持 clone 兩邊再 commit。
+- [x] 會話／容器測試通過。
 
 ## 預計檔案與測試
 
@@ -39,3 +39,33 @@
 
 - 合併 `SessionContract` 與 `PlayerSessionState`。
 - `activate_dimension` 改成第二條 tick 路徑。
+
+## 實作與證據
+
+- `PlayerSessionState` 不再鏡像 `dimension`／`last_client_sequence`。存檔 pose 留在 `PlayerData`；runtime 維度只活在 `InterestSet`。生產寫入只經 `session_sync`：`write_pose`、`sync_pose_from_authority`、`sync_dimension`、`sync_gameplay_projection`。`projection.rs` 的 `session.dimension = dimension` 旁路已刪；pose 路徑不再 `sync_dimension`。
+- `SessionContract` 與 `PlayerSessionState` 仍是兩個型別。`activate_dimension` 未改成第二條 tick 路徑。
+- TCP `GameplaySessionState.last_client_sequence` **必須留下 ingress 閘**：`NetworkServer` 單元測試沒有 `AuthorityCore`，live TCP thread 也不能在跨 host channel 之前問權威。傳輸層在 `client_sequence == 0` 時分配；權威 `SessionContract.last_client_sequence` 才是已接受序號。Runtime 不再複製第三份。
+- `ContainerAction` 只剩 Open=`0`／Close=`2`。`from_wire(1)` 為 leftover Click，bounds 拒絕。Click 只走 `GameplayOperation::ContainerClick`。`dispatch.rs` 不再把 `action: 1` 當 click。
+- 純 session `apply_item_use` 改 `SessionGameplayState::transact`。容器 click 仍 clone player + container 再 commit／rollback。
+
+### 測試
+
+```
+cargo test --test review_hardening_session_lifecycle --test review_hardening_container_click -- --test-threads=1
+  3 + 9 passed（含 leftover_container_click_envelope_is_rejected）
+
+cargo test --lib leftover_container -- --test-threads=1
+  leftover_container_click_wire_is_rejected passed
+
+cargo test --lib respawn_updates_authority -- --test-threads=1
+  respawn_updates_authority_dimension_and_position passed
+
+cargo test --lib opening_new_container -- --test-threads=1
+  opening_new_container_replaces_old_session_and_preserves_other_viewers passed
+
+cargo test --test authority_persistence --test plan34_container_break_inventory_conservation -- --test-threads=1
+  4 + 4 passed
+
+cargo test --tests --no-run
+  all integration tests compile
+```

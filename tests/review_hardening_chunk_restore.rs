@@ -1,5 +1,8 @@
 //! Plan 05: inner-zlib restore must fail closed and never generate-over-save.
 
+mod common;
+
+use common::tcp_harness::{temp_world, HeldLoopback};
 use icraft::authority::contract::AuthorityTopology;
 use icraft::dimension::Dimension;
 use icraft::save::{
@@ -11,19 +14,6 @@ use icraft::server_runtime::{
 use icraft::world::{BlockType, Chunk};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn temp_dir(label: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "icraft_plan05_{label}_{}_{}",
-        std::process::id(),
-        unique
-    ))
-}
 
 fn region_path(world_dir: &Path) -> PathBuf {
     world_dir.join("regions").join("r.0.0.bin")
@@ -45,9 +35,10 @@ fn decode_chunk_save(bytes: &[u8]) -> ChunkSaveData {
 }
 
 fn dedicated_runtime(world_dir: PathBuf) -> ServerRuntime {
+    let reserved = HeldLoopback::bind();
     let mut properties = ServerProperties::default();
     properties.bind = "127.0.0.1".into();
-    properties.port = 25580;
+    properties.port = reserved.port();
     properties.view_distance = 2;
     properties.simulation_distance = 2;
     properties.world_dir = world_dir;
@@ -76,7 +67,7 @@ fn save_player_modified_spawn(world_dir: &Path) -> ChunkSaveData {
 
 #[test]
 fn legal_region_envelope_with_empty_or_truncated_zlib_is_restore_error() {
-    let world_dir = temp_dir("empty_zlib");
+    let world_dir = temp_world("empty_zlib");
     save_player_modified_spawn(&world_dir);
     let path = region_path(&world_dir);
     let original = region_chunk_payload(&path, 0, 0);
@@ -99,7 +90,7 @@ fn legal_region_envelope_with_empty_or_truncated_zlib_is_restore_error() {
 
 #[test]
 fn save_all_does_not_replace_empty_inner_zlib_with_generated_terrain() {
-    let world_dir = temp_dir("save_all_empty");
+    let world_dir = temp_world("save_all_empty");
     save_player_modified_spawn(&world_dir);
     let path = region_path(&world_dir);
     let mut corrupt = decode_chunk_save(&region_chunk_payload(&path, 0, 0));
@@ -136,7 +127,7 @@ fn save_all_does_not_replace_empty_inner_zlib_with_generated_terrain() {
 
 #[test]
 fn player_modified_chunk_with_corrupt_inner_zlib_is_not_rewritten_as_generated() {
-    let world_dir = temp_dir("player_corrupt");
+    let world_dir = temp_world("player_corrupt");
     let saved = save_player_modified_spawn(&world_dir);
     assert_ne!(saved.blocks, compress_bytes(&[]).unwrap());
 
@@ -165,7 +156,7 @@ fn player_modified_chunk_with_corrupt_inner_zlib_is_not_rewritten_as_generated()
 
 #[test]
 fn corrupt_region_container_is_still_not_overwritten() {
-    let world_dir = temp_dir("region_container");
+    let world_dir = temp_world("region_container");
     let mut manager = SaveManager::new(&world_dir);
     let path = region_path(&world_dir);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

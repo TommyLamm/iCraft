@@ -2,7 +2,7 @@ mod common;
 
 use common::tcp_harness::{
     drive_until, gameplay_request as request, held, loopback_properties, session_slot as slot,
-    wait_for_response, HeldLoopback, TcpClient,
+    temp_world, wait_for_response, HeldLoopback, TcpClient,
 };
 use icraft::authority::contract::{AuthorityTopology, SessionGameplayState};
 use icraft::block_entity::BlockEntity;
@@ -20,7 +20,7 @@ use icraft::server_runtime::{
 use icraft::structure::StructureId;
 use icraft::world::BlockType;
 use std::fs;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const LOCAL_ID: u64 = 0x32_0000;
 const FRAME_BASE: (i32, i32, i32) = (10, 65, 10);
@@ -28,18 +28,7 @@ const PORTAL_CELL: (i32, i32, i32) = (11, 66, 10);
 const PORTAL_LOOK: [i16; 3] = [0, -500, 866];
 
 fn properties(label: &str) -> ServerProperties {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut properties = loopback_properties(
-        std::env::temp_dir().join(format!(
-            "icraft_plan32_{label}_{}_{}",
-            std::process::id(),
-            nonce
-        )),
-        "127.0.0.1",
-    );
+    let mut properties = loopback_properties(temp_world(&format!("plan32-{label}")), "127.0.0.1");
     properties.seed = 12_345;
     properties.view_distance = 4;
     properties.simulation_distance = 4;
@@ -198,7 +187,10 @@ fn singleplayer_typed_nether_activation_and_transfer() {
         ));
     }
     assert!(transferred);
-    assert_eq!(runtime.players[&LOCAL_ID].dimension, Dimension::Nether);
+    assert_eq!(
+        runtime.players[&LOCAL_ID].interest.dimension,
+        Dimension::Nether
+    );
     assert_eq!(
         runtime.authority.session(LOCAL_ID).unwrap().dimension,
         Dimension::Nether as u8
@@ -296,7 +288,7 @@ fn run_tcp_travel(label: &str, listen: bool) {
             "Plan32 cached portal duplicate and TCP transfer",
             |runtime, views| {
                 runtime.metrics.duplicate_requests > duplicate_before
-                    && runtime.players[&owner].dimension == Dimension::Nether
+                    && runtime.players[&owner].interest.dimension == Dimension::Nether
                     && views[0].events().iter().any(|event| {
                         matches!(
                             event,
@@ -371,7 +363,7 @@ fn run_tcp_travel(label: &str, listen: bool) {
                     runtime
                         .players
                         .get(&id)
-                        .is_some_and(|session| session.dimension == Dimension::Nether)
+                        .is_some_and(|session| session.interest.dimension == Dimension::Nether)
                 })
             },
         );
@@ -461,7 +453,7 @@ fn dedicated_tcp_combat_completes_generated_dragon_lifecycle() {
             &mut runtime,
             &mut refs,
             "Plan32 generated End dragon",
-            |runtime, _| runtime.players[&owner].dimension == Dimension::End,
+            |runtime, _| runtime.players[&owner].interest.dimension == Dimension::End,
         );
     }
     runtime.tick().unwrap();

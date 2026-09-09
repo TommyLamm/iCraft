@@ -9,7 +9,9 @@ use icraft::authority::contract::{
 };
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
-use icraft::network::protocol::{GameplayOperation, GameplayOutcome, RejectReason};
+use icraft::network::protocol::{
+    BlockActionKind, GameplayOperation, GameplayOutcome, ItemWire, RejectReason, SessionSlotWire,
+};
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, RuntimePresentationEvent, ServerProperties,
     ServerRuntime, TransportMode,
@@ -55,6 +57,25 @@ fn inventory_wire(
         .inventory
 }
 
+fn rejected_place(block: BlockType) -> GameplayOperation {
+    let held = SessionSlotWire::new(
+        ItemWire::from_stack(&ItemStack::new(Item::Stone, 1)),
+        0,
+        0,
+    );
+    GameplayOperation::BlockAction {
+        action: BlockActionKind::Place,
+        x: TARGET.0,
+        y: TARGET.1,
+        z: TARGET.2,
+        face: [0, 1, 0],
+        hand: 0,
+        held: Some(held),
+        block: block.to_wire(),
+        look_milli: [0, 0, 1000],
+    }
+}
+
 fn dropped_item_count(runtime: &ServerRuntime) -> usize {
     runtime
         .authority
@@ -66,7 +87,7 @@ fn dropped_item_count(runtime: &ServerRuntime) -> usize {
         .count()
 }
 
-fn assert_block_use_rejected(
+fn assert_block_action_rejected(
     runtime: &ServerRuntime,
     response: &icraft::network::protocol::GameplayResponse,
     player_id: u64,
@@ -78,10 +99,10 @@ fn assert_block_use_rejected(
         matches!(
             response.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ),
-        "BlockUse must be Unsupported, got {:?}",
+        "rejected BlockAction must be InvalidState, got {:?}",
         response.outcome
     );
     assert_eq!(
@@ -90,17 +111,17 @@ fn assert_block_use_rejected(
             .world()
             .get_block(TARGET.0, TARGET.1, TARGET.2),
         expected_block,
-        "BlockUse must not mutate the target cell"
+        "rejected BlockAction must not mutate the target cell"
     );
     assert_eq!(
         &inventory_wire(runtime, player_id),
         before_inventory,
-        "BlockUse must not consume inventory"
+        "rejected BlockAction must not consume inventory"
     );
     assert_eq!(
         dropped_item_count(runtime),
         before_drops,
-        "BlockUse must not spawn DroppedItem"
+        "rejected BlockAction must not spawn DroppedItem"
     );
 }
 
@@ -138,16 +159,13 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
                 OWNER_ID,
                 1,
                 1,
-                GameplayOperation::BlockUse {
-                    x: TARGET.0,
-                    y: TARGET.1,
-                    z: TARGET.2,
-                    block: BlockType::DiamondOre.to_wire(),
-                },
+                rejected_place(BlockType::DiamondOre),
             ),
         )
-        .expect("queue leftover BlockUse");
-    let output = runtime.tick_with_output().expect("tick leftover BlockUse");
+        .expect("queue rejected BlockAction");
+    let output = runtime
+        .tick_with_output()
+        .expect("tick rejected BlockAction");
     let response = output
         .presentation_events
         .iter()
@@ -159,8 +177,8 @@ fn embedded_block_use_diamond_ore_is_unsupported_and_preserves_world() {
             }
             _ => None,
         })
-        .expect("embedded BlockUse response");
-    assert_block_use_rejected(
+        .expect("embedded BlockAction response");
+    assert_block_action_rejected(
         &runtime,
         response,
         OWNER_ID,
@@ -201,16 +219,11 @@ fn embedded_block_use_air_cannot_clear_chest() {
                 OWNER_ID,
                 2,
                 1,
-                GameplayOperation::BlockUse {
-                    x: TARGET.0,
-                    y: TARGET.1,
-                    z: TARGET.2,
-                    block: BlockType::Air.to_wire(),
-                },
+                rejected_place(BlockType::Air),
             ),
         )
-        .expect("direct leftover BlockUse");
-    assert_block_use_rejected(
+        .expect("direct rejected BlockAction");
+    assert_block_action_rejected(
         &runtime,
         &response,
         OWNER_ID,
@@ -224,7 +237,7 @@ fn embedded_block_use_air_cannot_clear_chest() {
             .world()
             .get_block_entity(TARGET.0, TARGET.1, TARGET.2)
             .is_some(),
-        "rejected Air BlockUse must not delete the chest block entity"
+        "rejected Air BlockAction must not delete the chest block entity"
     );
 
     runtime
@@ -262,19 +275,14 @@ fn tcp_block_use_is_rejected_without_world_or_inventory_mutation() {
         player_id,
         11,
         1,
-        GameplayOperation::BlockUse {
-            x: TARGET.0,
-            y: TARGET.1,
-            z: TARGET.2,
-            block: BlockType::DiamondOre.to_wire(),
-        },
+        rejected_place(BlockType::DiamondOre),
     );
     client.send_request(block_use);
     let response = {
         let mut refs = [&mut client];
         wait_for_response(&mut runtime, &mut refs, 0, 11)
     };
-    assert_block_use_rejected(
+    assert_block_action_rejected(
         &runtime,
         &response,
         player_id,

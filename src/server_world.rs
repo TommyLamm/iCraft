@@ -1462,10 +1462,6 @@ impl ServerWorld {
                 match action {
                     ContainerAction::Open => self.open_container(*x, *y, *z, *slot, player_id),
                     ContainerAction::Close => self.close_container(*x, *y, *z, *slot, player_id),
-                    ContainerAction::Click => {
-                        self.ensure_container_slot(*x, *y, *z, *slot)?;
-                        Err(RejectReason::Unsupported)
-                    }
                 }
             }
             GameplayOperation::ContainerClick { x, y, z, slot, .. } => {
@@ -2174,7 +2170,6 @@ impl ServerWorld {
 fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> {
     match operation {
         GameplayOperation::BlockAction { x, y, z, .. }
-        | GameplayOperation::BlockUse { x, y, z, .. }
         | GameplayOperation::Sleep { x, y, z }
         | GameplayOperation::Container { x, y, z, .. }
         | GameplayOperation::ContainerClick { x, y, z, .. }

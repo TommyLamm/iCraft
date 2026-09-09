@@ -1,7 +1,8 @@
 mod common;
 
 use common::tcp_harness::{
-    loopback_properties, session_slot, HeldLoopback, EVENT_TIMEOUT, STEP_SLEEP,
+    drive_until, loopback_properties, session_slot, temp_world, wait_for_response, HeldLoopback,
+    TcpClient, STEP_SLEEP,
 };
 use icraft::authority::contract::SessionGameplayState;
 use icraft::authority::interest::InterestKind;
@@ -9,25 +10,21 @@ use icraft::block_entity::{BlockEntity, ChestBlockEntity, DispenserBlockEntity};
 use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
-use icraft::network::client::{ClientToGame, GameToClient, NetworkClient};
+use icraft::network::client::{ClientToGame, GameToClient};
 use icraft::network::protocol::{
-    ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
-    ItemWire, RejectReason,
+    BlockActionKind, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
+    GameplayResponse, ItemWire, RejectReason, SessionSlotWire,
 };
 use icraft::redstone::Direction;
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
 use icraft::world::BlockType;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const CHEST_POSITION: (i32, i32, i32) = (8, 80, 8);
-
-static NEXT_WORLD: AtomicU64 = AtomicU64::new(0);
 
 struct TempWorld {
     path: PathBuf,
@@ -35,15 +32,7 @@ struct TempWorld {
 
 impl TempWorld {
     fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is before Unix epoch")
-            .as_nanos();
-        let suffix = NEXT_WORLD.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "icraft-headless-authority-{}-{nonce}-{suffix}",
-            std::process::id()
-        ));
+        let path = temp_world("headless-authority");
         fs::create_dir_all(&path).expect("create isolated headless test world");
         Self { path }
     }
@@ -59,151 +48,6 @@ impl Drop for TempWorld {
     }
 }
 
-struct HeadlessClient {
-    commands: Sender<GameToClient>,
-    inbound: Receiver<ClientToGame>,
-    events: VecDeque<ClientToGame>,
-    connected: Option<(u64, u64, u8)>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl HeadlessClient {
-    fn connect(address: &str, username: &str) -> Self {
-        let (commands, command_rx) = mpsc::channel();
-        let (event_tx, inbound) =
-            mpsc::sync_channel(icraft::network::client::CLIENT_TO_GAME_QUEUE_CAPACITY);
-        let client_thread = NetworkClient::spawn(
-            address.to_string(),
-            username.to_string(),
-            command_rx,
-            event_tx,
-        );
-        Self {
-            commands,
-            inbound,
-            events: VecDeque::new(),
-            connected: None,
-            thread: Some(client_thread),
-        }
-    }
-
-    fn send(&self, command: GameToClient) {
-        self.commands
-            .send(command)
-            .expect("headless network client command queue is open");
-    }
-
-    fn drain(&mut self) {
-        while let Ok(event) = self.inbound.try_recv() {
-            if let ClientToGame::Connected {
-                player_id,
-                seed,
-                gamemode,
-            } = &event
-            {
-                self.connected = Some((*player_id, *seed, *gamemode));
-            }
-            self.events.push_back(event);
-        }
-    }
-
-    fn clear_events(&mut self) {
-        self.drain();
-        self.events.clear();
-    }
-
-    fn player_id(&self) -> Option<u64> {
-        self.connected.map(|connected| connected.0)
-    }
-
-    fn take_response(&mut self, request_id: u128) -> Option<GameplayResponse> {
-        let index = self.events.iter().position(|event| {
-            matches!(
-                event,
-                ClientToGame::GameplayResponse { response }
-                    if response.request_id == request_id
-            )
-        })?;
-        match self.events.remove(index)? {
-            ClientToGame::GameplayResponse { response } => Some(response),
-            _ => unreachable!("event index was selected as a gameplay response"),
-        }
-    }
-
-    fn take_open_result(
-        &mut self,
-        position: (i32, i32, i32),
-    ) -> Option<(Vec<Option<ItemWire>>, u64)> {
-        let index = self.events.iter().position(|event| {
-            matches!(
-                event,
-                ClientToGame::ContainerOpenResult { x, y, z, .. }
-                    if (*x, *y, *z) == position
-            )
-        })?;
-        match self.events.remove(index)? {
-            ClientToGame::ContainerOpenResult {
-                success,
-                slots,
-                revision,
-                ..
-            } => {
-                assert!(success, "authority reported a failed container open");
-                Some((slots, revision))
-            }
-            _ => unreachable!("event index was selected as a container-open result"),
-        }
-    }
-
-    fn take_click_result(&mut self, slot: u16) -> Option<(Option<ItemWire>, Option<ItemWire>)> {
-        let index = self.events.iter().position(|event| {
-            matches!(
-                event,
-                ClientToGame::ContainerClickResult { slot_index, .. }
-                    if *slot_index == slot
-            )
-        })?;
-        match self.events.remove(index)? {
-            ClientToGame::ContainerClickResult {
-                success,
-                slot,
-                dragged,
-                ..
-            } => {
-                assert!(success, "authority reported a failed container click");
-                Some((slot, dragged))
-            }
-            _ => unreachable!("event index was selected as a container-click result"),
-        }
-    }
-
-    fn has_private_container_event(&self) -> bool {
-        self.events.iter().any(|event| {
-            matches!(
-                event,
-                ClientToGame::ContainerOpenResult { .. }
-                    | ClientToGame::ContainerClickResult { .. }
-                    | ClientToGame::ContainerSlotUpdate { .. }
-            )
-        })
-    }
-
-    fn disconnect_and_join(&mut self) {
-        if let Some(handle) = self.thread.take() {
-            let _ = self.commands.send(GameToClient::Disconnect);
-            handle
-                .join()
-                .expect("headless network client thread panicked");
-        }
-    }
-}
-
-impl Drop for HeadlessClient {
-    fn drop(&mut self) {
-        self.disconnect_and_join();
-    }
-}
-
 fn properties(world_dir: &Path, port: u16) -> ServerProperties {
     let mut properties = loopback_properties(world_dir, "127.0.0.1");
     properties.port = port;
@@ -214,61 +58,41 @@ fn properties(world_dir: &Path, port: u16) -> ServerProperties {
 
 fn drive_pair_until(
     runtime: &mut ServerRuntime,
-    first: &mut HeadlessClient,
-    second: &mut HeadlessClient,
+    first: &mut TcpClient,
+    second: &mut TcpClient,
     description: &str,
-    mut ready: impl FnMut(&ServerRuntime, &HeadlessClient, &HeadlessClient) -> bool,
+    mut ready: impl FnMut(&ServerRuntime, &TcpClient, &TcpClient) -> bool,
 ) {
-    let deadline = Instant::now() + EVENT_TIMEOUT;
-    loop {
-        runtime.tick().expect("headless authority tick succeeds");
-        first.drain();
-        second.drain();
-        if ready(runtime, first, second) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {description}; first={:?}, second={:?}, players={}",
-            first.connected,
-            second.connected,
-            runtime.players.len()
-        );
-        thread::sleep(STEP_SLEEP);
-    }
+    drive_until(
+        runtime,
+        &mut [first, second],
+        description,
+        |runtime, views| ready(runtime, views[0], views[1]),
+    );
 }
 
 fn drive_one_until(
     runtime: &mut ServerRuntime,
-    client: &mut HeadlessClient,
+    client: &mut TcpClient,
     description: &str,
-    mut ready: impl FnMut(&ServerRuntime, &HeadlessClient) -> bool,
+    mut ready: impl FnMut(&ServerRuntime, &TcpClient) -> bool,
 ) {
-    let deadline = Instant::now() + EVENT_TIMEOUT;
-    loop {
-        runtime.tick().expect("headless authority tick succeeds");
-        client.drain();
-        if ready(runtime, client) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {description}; connected={:?}, players={}",
-            client.connected,
-            runtime.players.len()
-        );
-        thread::sleep(STEP_SLEEP);
-    }
+    drive_until(
+        runtime,
+        &mut [client],
+        description,
+        |runtime, views| ready(runtime, views[0]),
+    );
 }
 
 fn drive_pair_for(
     runtime: &mut ServerRuntime,
-    first: &mut HeadlessClient,
-    second: &mut HeadlessClient,
+    first: &mut TcpClient,
+    second: &mut TcpClient,
     duration: Duration,
 ) {
-    let deadline = Instant::now() + duration;
-    while Instant::now() < deadline {
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
         runtime.tick().expect("headless authority tick succeeds");
         first.drain();
         second.drain();
@@ -276,26 +100,13 @@ fn drive_pair_for(
     }
 }
 
-fn wait_for_response(
+fn wait_for_pair_response(
     runtime: &mut ServerRuntime,
-    client: &mut HeadlessClient,
-    observer: &mut HeadlessClient,
+    client: &mut TcpClient,
+    observer: &mut TcpClient,
     request_id: u128,
 ) -> GameplayResponse {
-    let deadline = Instant::now() + EVENT_TIMEOUT;
-    loop {
-        runtime.tick().expect("headless authority tick succeeds");
-        client.drain();
-        observer.drain();
-        if let Some(response) = client.take_response(request_id) {
-            return response;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for gameplay response {request_id}"
-        );
-        thread::sleep(STEP_SLEEP);
-    }
+    wait_for_response(runtime, &mut [client, observer], 0, request_id)
 }
 
 fn request(
@@ -332,8 +143,8 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     let _port = reserved.release();
     let mut runtime =
         ServerRuntime::new(server_properties.clone()).expect("start headless authority runtime");
-    let mut alice = HeadlessClient::connect(&address, "alice");
-    let mut bob = HeadlessClient::connect(&address, "bob");
+    let mut alice = TcpClient::connect(&address, "alice");
+    let mut bob = TcpClient::connect(&address, "bob");
 
     drive_pair_until(
         &mut runtime,
@@ -350,8 +161,8 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     let alice_id = alice.player_id().expect("alice authenticated");
     let bob_id = bob.player_id().expect("bob authenticated");
     assert_ne!(alice_id, bob_id);
-    assert_eq!(alice.connected.map(|value| value.1), Some(0xC0FF_EE11));
-    assert_eq!(bob.connected.map(|value| value.1), Some(0xC0FF_EE11));
+    assert_eq!(alice.connected().map(|value| value.1), Some(0xC0FF_EE11));
+    assert_eq!(bob.connected().map(|value| value.1), Some(0xC0FF_EE11));
     assert!(runtime.metrics.ticks > 0);
     assert!(runtime.metrics.last_tick_time_us > 0);
     assert!(runtime.metrics.max_tick_time_us >= runtime.metrics.last_tick_time_us);
@@ -373,13 +184,13 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     // SessionGameplayUpdate is a private projection lane: the owner receives
     // its rich gameplay snapshot during login while the other authenticated
     // client never sees Alice's session payload.
-    assert!(alice.events.iter().any(|event| {
+    assert!(alice.events().iter().any(|event| {
         matches!(
             event,
             ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == alice_id
         )
     }));
-    assert!(!bob.events.iter().any(|event| {
+    assert!(!bob.events().iter().any(|event| {
         matches!(
             event,
             ClientToGame::PlayerSessionUpdate { player_id, .. } if *player_id == alice_id
@@ -452,21 +263,30 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         BLOCK_REQUEST,
         1,
         block_revision,
-        GameplayOperation::BlockUse {
+        GameplayOperation::BlockAction {
+            action: BlockActionKind::Place,
             x: CHEST_POSITION.0,
             y: CHEST_POSITION.1,
             z: CHEST_POSITION.2,
+            face: [0, 1, 0],
+            hand: 0,
+            held: Some(SessionSlotWire::new(
+                ItemWire::from_stack(&ItemStack::new(Item::Stone, 1)),
+                0,
+                0,
+            )),
             block: BlockType::DiamondOre.to_wire(),
+            look_milli: [0, 0, 1000],
         },
     );
     alice.send(GameToClient::GameplayRequest {
         request: leftover_block_use.clone(),
     });
-    let block_response = wait_for_response(&mut runtime, &mut alice, &mut bob, BLOCK_REQUEST);
+    let block_response = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, BLOCK_REQUEST);
     assert_eq!(
         block_response.outcome,
         GameplayOutcome::Rejected {
-            reason: RejectReason::Unsupported
+            reason: RejectReason::InvalidState
         }
     );
     assert_eq!(
@@ -475,7 +295,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             .world()
             .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
         BlockType::Chest,
-        "leftover BlockUse must not overwrite the seeded chest"
+        "rejected BlockAction must not overwrite the seeded chest"
     );
 
     let accepted_before_replay = runtime.metrics.requests_accepted;
@@ -519,7 +339,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             GameplayOperation::ItemUse { item: 1, count: 1 },
         ),
     });
-    let out_of_order = wait_for_response(&mut runtime, &mut alice, &mut bob, OUT_OF_ORDER_REQUEST);
+    let out_of_order = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, OUT_OF_ORDER_REQUEST);
     assert_eq!(
         out_of_order.outcome,
         GameplayOutcome::Rejected {
@@ -536,7 +356,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             GameplayOperation::ItemUse { item: 1, count: 1 },
         ),
     });
-    let stale = wait_for_response(&mut runtime, &mut alice, &mut bob, STALE_REQUEST);
+    let stale = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, STALE_REQUEST);
     assert_eq!(
         stale.outcome,
         GameplayOutcome::Rejected {
@@ -585,7 +405,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             },
         ),
     });
-    let open_response = wait_for_response(&mut runtime, &mut alice, &mut bob, OPEN_REQUEST);
+    let open_response = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, OPEN_REQUEST);
     let open_revision = accepted_revision(&open_response);
     drive_pair_until(
         &mut runtime,
@@ -593,7 +413,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         &mut bob,
         "container-open projection",
         |_, alice, _| {
-            alice.events.iter().any(|event| {
+            alice.events().iter().any(|event| {
                 matches!(
                     event,
                     ClientToGame::ContainerOpenResult { x, y, z, .. }
@@ -680,7 +500,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             },
         ),
     });
-    let click_response = wait_for_response(&mut runtime, &mut alice, &mut bob, CLICK_REQUEST);
+    let click_response = wait_for_pair_response(&mut runtime, &mut alice, &mut bob, CLICK_REQUEST);
     let click_revision = accepted_revision(&click_response);
     drive_pair_until(
         &mut runtime,
@@ -688,7 +508,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         &mut bob,
         "container-click projection",
         |_, alice, _| {
-            alice.events.iter().any(|event| {
+            alice.events().iter().any(|event| {
                 matches!(
                     event,
                     ClientToGame::ContainerClickResult { slot_index: 0, .. }
@@ -765,7 +585,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     );
     assert!(restarted.authority.current_revision() >= click_revision);
 
-    let mut reconnected = HeadlessClient::connect(&address, "alice");
+    let mut reconnected = TcpClient::connect(&address, "alice");
     drive_one_until(
         &mut restarted,
         &mut reconnected,
@@ -780,7 +600,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     );
     let reconnected_id = reconnected.player_id().expect("alice reconnected");
     assert_eq!(
-        restarted.players[&reconnected_id].dimension,
+        restarted.players[&reconnected_id].interest.dimension,
         Dimension::Overworld
     );
     reconnected.disconnect_and_join();
@@ -793,8 +613,8 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     restarted.shutdown().expect("stop restarted runtime");
 }
 
-fn projected_dropped_item(client: &HeadlessClient) -> Option<(u64, ItemWire)> {
-    client.events.iter().find_map(|event| {
+fn projected_dropped_item(client: &TcpClient) -> Option<(u64, ItemWire)> {
+    client.events().iter().find_map(|event| {
         let state = match event {
             ClientToGame::EntitySpawn { state, .. } | ClientToGame::EntityState { state, .. }
                 if state.entity_type == EntityType::DroppedItem.to_wire() =>
@@ -808,10 +628,10 @@ fn projected_dropped_item(client: &HeadlessClient) -> Option<(u64, ItemWire)> {
 }
 
 fn projected_block_entity(
-    client: &HeadlessClient,
+    client: &TcpClient,
     position: (i32, i32, i32),
 ) -> Option<(u64, BlockEntity)> {
-    client.events.iter().find_map(|event| match event {
+    client.events().iter().find_map(|event| match event {
         ClientToGame::BlockEntityDelta {
             x,
             y,
@@ -833,8 +653,8 @@ fn tcp_dispenser_drop_projection_converges_complete_item_metadata() {
     let _port = reserved.release();
     let mut runtime =
         ServerRuntime::new(server_properties).expect("start headless dispenser runtime");
-    let mut alice = HeadlessClient::connect(&address, "alice");
-    let mut bob = HeadlessClient::connect(&address, "bob");
+    let mut alice = TcpClient::connect(&address, "alice");
+    let mut bob = TcpClient::connect(&address, "bob");
 
     drive_pair_until(
         &mut runtime,
