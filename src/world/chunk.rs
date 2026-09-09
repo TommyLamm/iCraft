@@ -183,7 +183,7 @@ impl Chunk {
             let mut sec_sk = [0u8; 4096];
             let mut sec_bl = [0u8; 4096];
             for ly in 0..SECTION_SIZE {
-                let wy = (sec_y as i32 * 16) + ly as i32;
+                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
                 if height.contains_y(wy) {
                     let arr_ly = (wy - min_y) as usize;
                     for z in 0..CHUNK_DEPTH {
@@ -378,6 +378,21 @@ impl Chunk {
 
     pub fn section_y_at_index(&self, index: usize) -> i8 {
         self.min_section_y + index as i8
+    }
+
+    /// Lowest world Y covered by this column's first section.
+    pub fn min_world_y(&self) -> i32 {
+        section_and_local_y_to_world_y(self.min_section_y, 0)
+    }
+
+    /// Exclusive upper world Y of this column's last section.
+    pub fn max_world_y_exclusive(&self) -> i32 {
+        self.min_world_y() + (self.sections.len() as i32) * SECTION_SIZE as i32
+    }
+
+    /// World-Y span of stored sections (`min_section_y` + `sections.len()`).
+    pub fn world_y_range(&self) -> std::ops::Range<i32> {
+        self.min_world_y()..self.max_world_y_exclusive()
     }
 
     pub fn get_block_entity(
@@ -670,9 +685,9 @@ impl Chunk {
     /// Rebuild column sky/block light from the current blocks. Used when a
     /// network payload omits light streams so join clients are not left dark.
     pub fn recompute_direct_column_lighting(&mut self) {
-        let min_y = self.min_section_y as i32 * 16;
-        let max_y = min_y + (self.sections.len() as i32) * 16;
-        let enable_sky = self.min_section_y < 0 || self.sections.len() * 16 > 128;
+        let min_y = self.min_world_y();
+        let max_y = self.max_world_y_exclusive();
+        let enable_sky = self.min_section_y < 0 || (max_y - min_y) > 128;
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
                 let mut direct_sky = if enable_sky { 15u8 } else { 0u8 };
@@ -736,11 +751,9 @@ mod tests {
         let chunk = Chunk::new(0, 0);
         let mut clustered = false;
         let mut coal_count = 0;
-        let min_y = chunk.min_section_y as i32 * 16;
-        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in min_y..max_y {
+                for y in chunk.world_y_range() {
                     if chunk.get_block_local(x, y, z) == BlockType::CoalOre {
                         coal_count += 1;
                         let neighbors = [
@@ -756,8 +769,8 @@ mod tests {
                                 && nx < CHUNK_WIDTH as i32
                                 && nz >= 0
                                 && nz < CHUNK_DEPTH as i32
-                                && ny >= min_y
-                                && ny < max_y
+                                && ny >= chunk.min_world_y()
+                                && ny < chunk.max_world_y_exclusive()
                             {
                                 if chunk.get_block_local(nx as usize, ny, nz as usize)
                                     == BlockType::CoalOre

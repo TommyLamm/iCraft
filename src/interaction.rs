@@ -419,9 +419,9 @@ mod tests {
         let mut chunk_manager = ChunkManager::new(8);
         let mut chunk = Chunk::new(-1, 0);
         for x in 0..crate::world::CHUNK_WIDTH {
-            for y in 0..crate::world::CHUNK_HEIGHT {
+            for y in chunk.world_y_range() {
                 for z in 0..crate::world::CHUNK_DEPTH {
-                    chunk.set_block_local(x, y as i32, z, BlockType::Air);
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
             }
         }

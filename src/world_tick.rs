@@ -2,7 +2,7 @@ use crate::chunk_manager::ChunkManager;
 use crate::dimension::WorldHeight;
 use crate::entity::EntityType;
 use crate::inventory::ItemStack;
-use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
+use crate::world::{section_and_local_y_to_world_y, BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
 use crate::world_mutation::{BlockMutationRequest, MutationCause};
 use glam::Vec3;
 use std::collections::BTreeSet;
@@ -411,7 +411,7 @@ pub fn sample_random_ticks_in_columns(
             let lz = ((rng_val >> 8) & 0xF) as i32;
 
             let world_x = cx * (CHUNK_WIDTH as i32) + lx;
-            let world_y = (sec_y as i32) * 16 + ly;
+            let world_y = section_and_local_y_to_world_y(sec_y, ly as u8);
             let world_z = cz * (CHUNK_DEPTH as i32) + lz;
 
             let block = chunk_manager.get_block(world_x, world_y, world_z);

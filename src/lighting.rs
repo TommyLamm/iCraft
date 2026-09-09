@@ -651,7 +651,7 @@ pub fn propagate_chunk_lighting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{BlockType, Chunk, CHUNK_HEIGHT};
+    use crate::world::{BlockType, Chunk};
 
     #[test]
     fn initial_lighting_reaches_horizontal_cave_entrance() {
@@ -662,15 +662,15 @@ mod tests {
         // cave that is not reached by the vertical initialization pass.
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in 0..CHUNK_HEIGHT {
+                for y in chunk.world_y_range() {
                     if y >= 64 {
-                        chunk.set_block_local(x, y as i32, z, BlockType::Air);
-                        chunk.set_sky_light(x, y as i32, z, 15);
+                        chunk.set_block_local(x, y, z, BlockType::Air);
+                        chunk.set_sky_light(x, y, z, 15);
                     } else {
-                        chunk.set_block_local(x, y as i32, z, BlockType::Stone);
-                        chunk.set_sky_light(x, y as i32, z, 0);
+                        chunk.set_block_local(x, y, z, BlockType::Stone);
+                        chunk.set_sky_light(x, y, z, 0);
                     }
-                    chunk.set_block_light(x, y as i32, z, 0);
+                    chunk.set_block_light(x, y, z, 0);
                 }
             }
         }
@@ -717,10 +717,10 @@ mod tests {
 
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in 0..CHUNK_HEIGHT {
-                    chunk.set_block_local(x, y as i32, z, BlockType::Stone);
-                    chunk.set_sky_light(x, y as i32, z, 0);
-                    chunk.set_block_light(x, y as i32, z, 0);
+                for y in chunk.world_y_range() {
+                    chunk.set_block_local(x, y, z, BlockType::Stone);
+                    chunk.set_sky_light(x, y, z, 0);
+                    chunk.set_block_light(x, y, z, 0);
                 }
             }
         }

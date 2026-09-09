@@ -1119,7 +1119,7 @@ impl State {
         let fire_y = strike.y;
         let support_y = fire_y - 1;
         let support = self.chunk_manager.get_block(strike.x, support_y, strike.z);
-        if fire_y < CHUNK_HEIGHT as i32
+        if self.chunk_manager.dimension.height().contains_y(fire_y)
             && support.properties().is_solid
             && !matches!(
                 support,
