@@ -525,9 +525,11 @@ pub fn tick_hoppers_in_columns(
             continue;
         }
         if cooldown > 0 {
+            // Countdown is memory-only so idle hoppers do not keep the column
+            // dirty. Reload restores the last persisted cooldown (armed 8
+            // after a transfer), so a hopper may wait up to 8 extra ticks.
             if let Some(BlockEntity::Hopper(h)) = chunk_manager.get_block_entity_mut(x, y, z) {
                 h.transfer_cooldown = h.transfer_cooldown.saturating_sub(1);
-                chunk_manager.mark_block_entity_dirty(x, z);
             }
             continue;
         }
@@ -1180,7 +1182,9 @@ mod tests {
             1,
             64,
             0,
-            Some(BlockEntity::Chest(crate::block_entity::ChestBlockEntity::new())),
+            Some(BlockEntity::Chest(
+                crate::block_entity::ChestBlockEntity::new(),
+            )),
         );
         let mut right = HopperBlockEntity::with_facing(Direction::West);
         right.transfer_cooldown = 4;
@@ -1192,5 +1196,72 @@ mod tests {
             _ => 255,
         };
         assert_eq!(remaining, 3);
+    }
+
+    #[test]
+    fn hopper_cooldown_countdown_does_not_mark_chunk_dirty() {
+        use crate::block_entity::{BlockEntity, ChestBlockEntity, HopperBlockEntity};
+        use crate::inventory::{Item, ItemStack};
+        use crate::redstone::Direction;
+
+        let mut manager = ChunkManager::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(0, 64, 0, BlockType::Hopper);
+        let mut hopper = HopperBlockEntity::with_facing(Direction::East);
+        hopper.slots[0] = Some(ItemStack::new(Item::Stone, 1));
+        hopper.transfer_cooldown = 4;
+        manager.set_block_entity(0, 64, 0, Some(BlockEntity::Hopper(hopper)));
+        manager.set_block(1, 64, 0, BlockType::Chest);
+        manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
+        manager.dirty_chunks.clear();
+
+        assert_eq!(
+            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            0
+        );
+        let remaining = match manager.get_block_entity(0, 64, 0) {
+            Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
+            _ => panic!("hopper"),
+        };
+        assert_eq!(remaining, 3);
+        assert!(
+            !manager.dirty_chunks.is_dirty(0, 0),
+            "cooldown countdown must not mark the column dirty"
+        );
+    }
+
+    #[test]
+    fn hopper_transfer_marks_chunk_dirty_and_arms_cooldown() {
+        use crate::block_entity::{BlockEntity, ChestBlockEntity, HopperBlockEntity};
+        use crate::inventory::{Item, ItemStack};
+        use crate::redstone::Direction;
+
+        let mut manager = ChunkManager::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(0, 64, 0, BlockType::Hopper);
+        let mut hopper = HopperBlockEntity::with_facing(Direction::East);
+        hopper.slots[0] = Some(ItemStack::new(Item::Stone, 1));
+        manager.set_block_entity(0, 64, 0, Some(BlockEntity::Hopper(hopper)));
+        manager.set_block(1, 64, 0, BlockType::Chest);
+        manager.set_block_entity(1, 64, 0, Some(BlockEntity::Chest(ChestBlockEntity::new())));
+        manager.dirty_chunks.clear();
+
+        assert_eq!(
+            tick_all_loaded_hoppers(&mut manager, MAX_HOPPER_TRANSFERS_PER_TICK),
+            1
+        );
+        let remaining = match manager.get_block_entity(0, 64, 0) {
+            Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
+            _ => panic!("hopper"),
+        };
+        assert_eq!(remaining, 8);
+        assert!(
+            manager.dirty_chunks.is_dirty(0, 0),
+            "slot change and cooldown 0→8 after a transfer must dirty the column"
+        );
     }
 }

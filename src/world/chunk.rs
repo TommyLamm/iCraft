@@ -26,6 +26,10 @@ impl std::fmt::Display for BlockEntityError {
 
 impl std::error::Error for BlockEntityError {}
 
+fn is_furnace_block(block: BlockType) -> bool {
+    matches!(block, BlockType::Furnace | BlockType::FurnaceLit)
+}
+
 #[derive(Clone)]
 pub struct Chunk {
     pub chunk_x: i32,
@@ -38,6 +42,8 @@ pub struct Chunk {
     pub(crate) torch_positions: Vec<u32>,
     /// Compact local coordinates of redstone component blocks.
     pub(crate) redstone_positions: Vec<u32>,
+    /// Compact local coordinates of furnace / lit-furnace blocks.
+    pub(crate) furnace_positions: Vec<u32>,
     /// Block entities keyed by Chunk-local coordinates (x: u8, y: i16, z: u8).
     pub(crate) block_entities:
         std::collections::HashMap<(u8, i16, u8), crate::block_entity::BlockEntity>,
@@ -65,6 +71,7 @@ impl Chunk {
                 .unwrap(),
             torch_positions: Vec::new(),
             redstone_positions: Vec::new(),
+            furnace_positions: Vec::new(),
             block_entities: std::collections::HashMap::new(),
         }
     }
@@ -204,6 +211,8 @@ impl Chunk {
             Self::build_torch_index_from_sections(height.min_section_y(), &sections);
         let redstone_positions =
             Self::build_redstone_index_from_sections(height.min_section_y(), &sections);
+        let furnace_positions =
+            Self::build_furnace_index_from_sections(height.min_section_y(), &sections);
 
         Self {
             chunk_x,
@@ -213,6 +222,7 @@ impl Chunk {
             heightmap,
             torch_positions,
             redstone_positions,
+            furnace_positions,
             block_entities: std::collections::HashMap::new(),
         }
     }
@@ -286,6 +296,34 @@ impl Chunk {
         positions
     }
 
+    fn build_furnace_index_from_sections(
+        min_sec_y: i8,
+        sections: &[Option<ChunkSection>],
+    ) -> Vec<u32> {
+        let mut positions = Vec::new();
+        for (sec_idx, sec_opt) in sections.iter().enumerate() {
+            let Some(sec) = sec_opt else {
+                continue;
+            };
+            if sec.non_air_count() == 0 {
+                continue;
+            }
+            let sec_y = min_sec_y + sec_idx as i8;
+            for ly in 0..SECTION_SIZE {
+                let wy = section_and_local_y_to_world_y(sec_y, ly as u8);
+                for z in 0..CHUNK_DEPTH {
+                    for x in 0..CHUNK_WIDTH {
+                        let idx = (ly << 8) | (z << 4) | x;
+                        if is_furnace_block(sec.get_block(idx)) {
+                            positions.push(Self::encode_torch_position(x, wy, z));
+                        }
+                    }
+                }
+            }
+        }
+        positions
+    }
+
     /// Returns the indexed local positions of ordinary torches.
     pub fn torch_positions(&self) -> &[u32] {
         &self.torch_positions
@@ -294,6 +332,11 @@ impl Chunk {
     /// Returns the indexed local positions of redstone components.
     pub fn redstone_positions(&self) -> &[u32] {
         &self.redstone_positions
+    }
+
+    /// Returns the indexed local positions of furnace blocks.
+    pub fn furnace_positions(&self) -> &[u32] {
+        &self.furnace_positions
     }
 
     /// Bytes owned by this chunk, including representation-specific section
@@ -314,6 +357,7 @@ impl Chunk {
             + size_of_val(self.heightmap.as_ref())
             + self.torch_positions.capacity() * size_of::<u32>()
             + self.redstone_positions.capacity() * size_of::<u32>()
+            + self.furnace_positions.capacity() * size_of::<u32>()
             + self.block_entities.capacity()
                 * (size_of::<(u8, i16, u8)>() + size_of::<crate::block_entity::BlockEntity>())
             + self
@@ -413,6 +457,12 @@ impl Chunk {
             Self::build_redstone_index_from_sections(self.min_section_y, &self.sections);
     }
 
+    /// Rebuilds the furnace index after bulk block mutations (generation/load).
+    pub fn rebuild_furnace_index(&mut self) {
+        self.furnace_positions =
+            Self::build_furnace_index_from_sections(self.min_section_y, &self.sections);
+    }
+
     /// Sets a local block and keeps the torch and redstone indices synchronized.
     pub fn set_block_local(&mut self, x: usize, wy: i32, z: usize, block: BlockType) {
         let sec_y = world_y_to_section_y(wy);
@@ -454,6 +504,17 @@ impl Chunk {
         }
         if new_is_redstone && !old_is_redstone {
             self.redstone_positions.push(encoded);
+        }
+
+        let old_is_furnace = is_furnace_block(old);
+        let new_is_furnace = is_furnace_block(block);
+        if old_is_furnace && !new_is_furnace {
+            if let Some(index) = self.furnace_positions.iter().position(|&p| p == encoded) {
+                self.furnace_positions.swap_remove(index);
+            }
+        }
+        if new_is_furnace && !old_is_furnace {
+            self.furnace_positions.push(encoded);
         }
     }
 
@@ -803,6 +864,22 @@ mod tests {
     }
 
     #[test]
+    fn furnace_index_tracks_local_mutations_without_duplicates() {
+        let mut chunk = Chunk::new(0, 0);
+        assert!(chunk.furnace_positions().is_empty());
+        chunk.set_block_local(3, 40, 5, BlockType::Furnace);
+        assert_eq!(chunk.furnace_positions().len(), 1);
+        let encoded = chunk.furnace_positions()[0];
+        assert_eq!(Chunk::decode_torch_position(encoded), (3, 40, 5));
+        chunk.set_block_local(3, 40, 5, BlockType::Furnace);
+        assert_eq!(chunk.furnace_positions().len(), 1);
+        chunk.set_block_local(3, 40, 5, BlockType::FurnaceLit);
+        assert_eq!(chunk.furnace_positions().len(), 1);
+        chunk.set_block_local(3, 40, 5, BlockType::Stone);
+        assert!(chunk.furnace_positions().is_empty());
+    }
+
+    #[test]
     fn chunk_memory_usage_tracks_section_promotion_and_demotion() {
         let mut chunk = Chunk {
             chunk_x: 0,
@@ -812,6 +889,7 @@ mod tests {
             heightmap: Box::new([[NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]),
             torch_positions: Vec::new(),
             redstone_positions: Vec::new(),
+            furnace_positions: Vec::new(),
             block_entities: std::collections::HashMap::new(),
         };
         let empty_bytes = chunk.memory_usage();

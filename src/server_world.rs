@@ -275,6 +275,7 @@ impl ServerWorld {
         {
             return Err(RejectReason::InvalidState);
         }
+        self.redstone.mark_container_changed(&self.chunks, position);
         Ok(self.touch_revision(position.0, position.1, position.2))
     }
 
@@ -633,6 +634,8 @@ impl ServerWorld {
             position[2],
             Some(BlockEntity::Furnace(next_furnace)),
         );
+        self.redstone
+            .mark_container_changed(&self.chunks, (position[0], position[1], position[2]));
         Ok(self.touch_revision(position[0], position[1], position[2]))
     }
 
@@ -839,6 +842,9 @@ impl ServerWorld {
         } else if self.chunks.get_block_entity(x, y, z).is_some() {
             self.chunks.set_block_entity(x, y, z, None);
         }
+        let facing = crate::world::BlockState::decode(state).facing;
+        self.redstone
+            .on_block_changed(&self.chunks, (x, y, z), facing);
         if let Some(partner) = chest_partner_to_close {
             if matches!(
                 self.get_block(partner.0, partner.1, partner.2),
@@ -1613,12 +1619,15 @@ impl ServerWorld {
 
         // These systems mutate actual block entities/chunks, not a shadow map.
         // Simulation-union only — do not call tick_all_loaded_*.
-        let _ = crate::world_tick::tick_hoppers_in_columns(
+        let hopper = crate::world_tick::tick_hoppers_in_columns(
             &mut self.chunks,
             Some(&mut self.entities),
             MAX_AUTOMATION_TRANSFERS,
             Some(&simulation_chunks),
         );
+        for pos in hopper.changed_positions {
+            self.redstone.mark_container_changed(&self.chunks, pos);
+        }
         for is_lava in [false, true] {
             let (_, fluid_mutations) = crate::fluid::tick_fluids_in_columns(
                 &mut self.chunks,
@@ -1948,14 +1957,9 @@ impl ServerWorld {
             let Some(chunk) = self.chunks.chunks.get(&(cx, cz)) else {
                 continue;
             };
-            for (local, entity) in chunk.iter_block_entities() {
-                if matches!(entity, BlockEntity::Furnace(_)) {
-                    positions.push((
-                        cx * 16 + local.0 as i32,
-                        local.1 as i32,
-                        cz * 16 + local.2 as i32,
-                    ));
-                }
+            for &encoded in chunk.furnace_positions() {
+                let (lx, y, lz) = crate::world::Chunk::decode_torch_position(encoded);
+                positions.push((cx * 16 + lx as i32, y, cz * 16 + lz as i32));
             }
         }
         positions.sort_unstable();
@@ -1973,6 +1977,8 @@ impl ServerWorld {
             furnace.revision = furnace.revision.wrapping_add(1);
             let is_lit = furnace.is_lit;
             let _ = furnace;
+            self.redstone
+                .mark_container_changed(&self.chunks, (x, y, z));
             if was_lit != is_lit {
                 let block = if is_lit {
                     BlockType::FurnaceLit
@@ -2964,7 +2970,10 @@ mod tests {
         first.set_block_revision((8, 80, 8), 9);
         second.set_block_revision((8, 80, 8), 9);
         second.set_block_revision((1, 80, 1), 3);
-        assert_eq!(first.block_revision_checksum, second.block_revision_checksum);
+        assert_eq!(
+            first.block_revision_checksum,
+            second.block_revision_checksum
+        );
         assert_eq!(first.checksum(&[]), second.checksum(&[]));
     }
 

@@ -2,6 +2,8 @@ use crate::chunk_manager::ChunkManager;
 use crate::physics::AABB;
 use glam::Vec3;
 
+const DROPPED_ITEM_REST_VELOCITY_EPS: f32 = 1e-4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EntityType {
     Zombie,
@@ -558,6 +560,20 @@ impl Entity {
             return;
         }
 
+        // Settled ground items skip XYZ integration until a supporting block
+        // disappears, a solid occupies their cell, or an external push
+        // applies velocity.
+        if self.entity_type == EntityType::DroppedItem
+            && self.on_ground
+            && self.velocity.length_squared() <= DROPPED_ITEM_REST_VELOCITY_EPS
+        {
+            if self.dropped_item_support_holds(chunk_manager) {
+                self.velocity = Vec3::ZERO;
+                return;
+            }
+            self.on_ground = false;
+        }
+
         // Apply gravity
         let gravity = if self.entity_type == EntityType::Chicken && self.velocity.y < 0.0 {
             8.0 // slow glide
@@ -611,6 +627,19 @@ impl Entity {
         predicted.min += vel * dt;
         predicted.max += vel * dt;
         aabb_touches_unloaded_column(chunk_manager, &predicted)
+    }
+
+    fn dropped_item_support_holds(&self, chunk_manager: &ChunkManager) -> bool {
+        let x = self.position.x.floor() as i32;
+        let z = self.position.z.floor() as i32;
+        let below_y = (self.position.y - 0.001).floor() as i32;
+        let occupy_y = self.position.y.floor() as i32;
+        let below = chunk_manager.get_block(x, below_y, z);
+        if !below.properties().is_solid {
+            return false;
+        }
+        let occupying = chunk_manager.get_block(x, occupy_y, z);
+        occupying.properties().is_passable || !occupying.properties().is_solid
     }
 
     fn resolve_collisions(&mut self, chunk_manager: &ChunkManager, axis: usize) {
@@ -1189,6 +1218,60 @@ mod tests {
             item.position.y >= -9.1 && item.position.y <= -8.9,
             "dropped item should rest on top of y=-10 (got y={})",
             item.position.y
+        );
+    }
+
+    #[test]
+    fn settled_dropped_item_skips_physics_until_support_changes_or_pushed() {
+        let mut chunk_manager = loaded_air_column();
+        let _ = chunk_manager.chunks.insert((0, 0), {
+            let mut c = crate::world::Chunk::empty(0, 0);
+            for fx in 0..2 {
+                for fz in 0..2 {
+                    c.set_block_local(fx, 10, fz, crate::world::BlockType::Stone);
+                }
+            }
+            c
+        });
+        let mut item = Entity::new(7, EntityType::DroppedItem, Vec3::new(0.5, 12.0, 0.5));
+        item.dropped_item = Some(crate::inventory::Item::Stone);
+        item.pickup_cooldown = 0.4;
+        for _ in 0..400 {
+            item.update_physics(0.05, &chunk_manager);
+        }
+        assert!(item.on_ground);
+        item.velocity = Vec3::ZERO;
+        let rest = item.position;
+        item.pickup_cooldown = 0.4;
+        for _ in 0..8 {
+            item.update_physics(0.05, &chunk_manager);
+        }
+        assert_eq!(item.position, rest);
+        assert!(item.on_ground);
+        assert!((item.pickup_cooldown - 0.0).abs() < 1e-4);
+
+        item.velocity = Vec3::new(4.0, 0.0, 0.0);
+        item.update_physics(0.05, &chunk_manager);
+        assert!(
+            item.position.x > rest.x,
+            "an external push must resume dropped-item physics"
+        );
+
+        let mut falling = Entity::new(8, EntityType::DroppedItem, rest);
+        falling.dropped_item = Some(crate::inventory::Item::Stone);
+        falling.on_ground = true;
+        falling.velocity = Vec3::ZERO;
+        if let Some(chunk) = chunk_manager.chunks.get_mut(&(0, 0)) {
+            for fx in 0..2 {
+                for fz in 0..2 {
+                    chunk.set_block_local(fx, 10, fz, crate::world::BlockType::Air);
+                }
+            }
+        }
+        falling.update_physics(0.05, &chunk_manager);
+        assert!(
+            falling.position.y < rest.y,
+            "removing the support block must resume falling"
         );
     }
 

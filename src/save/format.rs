@@ -1194,6 +1194,7 @@ impl ChunkSaveData {
 
         chunk.rebuild_torch_index();
         chunk.rebuild_redstone_index();
+        chunk.rebuild_furnace_index();
 
         for x in 0..16 {
             for z in 0..16 {

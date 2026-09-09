@@ -126,6 +126,15 @@ input
   simulation union, not the unbounded residency map. Columns that leave every
   session's view/simulation sets (plus `interest::RESIDENCY_HYSTERESIS`, same
   Chebyshev ring as client unload) are flushed if dirty and evicted.
+- Hopper `transfer_cooldown` countdown is memory-only. A column is marked dirty
+  only when hopper slots change or cooldown is armed `0→N` after a transfer.
+  Reload restores the last persisted cooldown (typically 8 after a transfer),
+  so a hopper may wait up to 8 extra ticks. Furnaces are ticked from a compact
+  per-chunk index with the same encoding as torches. Sleeping redstone skips
+  comparator/observer refresh until a container mutation, plate occupancy
+  change, scheduled/dirty work, or loaded-chunk set change wakes it. Grounded
+  dropped items with near-zero velocity skip XYZ physics until the support
+  block changes or an external push applies velocity.
 - `EmbeddedRuntimeBridge::sync_local_inventory` may write back only
   inventory, cursor, and selected hotbar. Health, hunger, XP, mining, and
   mounts stay server-owned. Join clients never use this path.
