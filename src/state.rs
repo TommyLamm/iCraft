@@ -7871,17 +7871,7 @@ impl State {
     }
 
     pub fn handle_click(&mut self, is_left_click: bool) {
-        match self.presentation_topology() {
-            PresentationTopology::JoinClient | PresentationTopology::Embedded => {
-                self.handle_live_world_click(is_left_click);
-            }
-            PresentationTopology::LegacyOwner => {
-                debug_assert!(
-                    false,
-                    "LegacyOwner topology is unreachable after leftover simulation was removed"
-                );
-            }
-        }
+        self.handle_live_world_click(is_left_click);
     }
 
     fn look_direction(&self) -> Vec3 {
@@ -8467,12 +8457,6 @@ impl State {
             }
             (PresentationTopology::Embedded, _) => {
                 // Embedded workstation / empty-space throws must not consume.
-            }
-            (PresentationTopology::LegacyOwner, _) => {
-                debug_assert!(
-                    false,
-                    "LegacyOwner topology is unreachable after leftover simulation was removed"
-                );
             }
         }
     }

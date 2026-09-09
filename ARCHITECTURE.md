@@ -71,10 +71,9 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
 - `State::tick_authority_boundary` is the embedded 20 Hz tick. There is no
   separate `AuthorityBoundary` type.
 
-`PresentationTopology` (`Embedded` / `JoinClient` / `LegacyOwner`) is derived
-from role + in-process runtime. Live click and tick match Embedded / Join
-only. `LegacyOwner` remains as an unreachable derived variant; menu launches
-never reach it. There is no `is_authoritative()`.
+`PresentationTopology` is `Embedded` or `JoinClient`, derived from role
+(Join wins) plus in-process runtime. Non-join launches are Embedded.
+There is no `LegacyOwner` and no `is_authoritative()`.
 
 ## Ownership
 
