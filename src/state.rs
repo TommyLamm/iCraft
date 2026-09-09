@@ -41,7 +41,7 @@ use crate::presentation_inventory_policy::{
 };
 use crate::recipes::RecipeManager;
 use crate::world::{
-    Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
+    Biome, BlockType, Chunk, SectionIdentity, SectionKey, CHUNK_DEPTH, CHUNK_WIDTH,
 };
 use glam::{Mat4, Vec2, Vec3};
 use std::sync::Arc;
@@ -1067,7 +1067,9 @@ struct MeshVoxel {
 #[cfg(test)]
 struct MeshSnapshot {
     min_world_x: i32,
+    min_world_y: i32,
     min_world_z: i32,
+    y_count: usize,
     voxels: Vec<MeshVoxel>,
     default_sky_light: u8,
 }
@@ -1082,17 +1084,18 @@ impl MeshSnapshot {
         chunks: &std::collections::HashMap<(i32, i32), Chunk>,
         default_sky_light: u8,
     ) -> Option<Self> {
-        if !chunks.contains_key(&coord) {
-            return None;
-        }
+        let center = chunks.get(&coord)?;
         let min_world_x = coord.0 * CHUNK_WIDTH as i32 - 1;
+        let min_world_y = center.min_world_y();
         let min_world_z = coord.1 * CHUNK_DEPTH as i32 - 1;
-        let mut voxels = Vec::with_capacity(Self::WIDTH * CHUNK_HEIGHT * Self::DEPTH);
+        let y_count = (center.max_world_y_exclusive() - min_world_y) as usize;
+        let mut voxels = Vec::with_capacity(Self::WIDTH * y_count * Self::DEPTH);
         for x in 0..Self::WIDTH {
             let world_x = min_world_x + x as i32;
             let chunk_x = world_x.div_euclid(CHUNK_WIDTH as i32);
             let local_x = world_x.rem_euclid(CHUNK_WIDTH as i32) as usize;
-            for y in 0..CHUNK_HEIGHT {
+            for y in 0..y_count {
+                let world_y = min_world_y + y as i32;
                 for z in 0..Self::DEPTH {
                     let world_z = min_world_z + z as i32;
                     let chunk_z = world_z.div_euclid(CHUNK_DEPTH as i32);
@@ -1100,10 +1103,10 @@ impl MeshSnapshot {
                     let voxel = chunks
                         .get(&(chunk_x, chunk_z))
                         .map(|neighbor| MeshVoxel {
-                            block: neighbor.get_block_local(local_x, y as i32, local_z),
-                            sky_light: neighbor.get_sky_light(local_x, y as i32, local_z),
-                            block_light: neighbor.get_block_light(local_x, y as i32, local_z),
-                            fluid: neighbor.get_fluid_level(local_x, y as i32, local_z),
+                            block: neighbor.get_block_local(local_x, world_y, local_z),
+                            sky_light: neighbor.get_sky_light(local_x, world_y, local_z),
+                            block_light: neighbor.get_block_light(local_x, world_y, local_z),
+                            fluid: neighbor.get_fluid_level(local_x, world_y, local_z),
                         })
                         .unwrap_or(MeshVoxel {
                             block: BlockType::Air,
@@ -1117,17 +1120,19 @@ impl MeshSnapshot {
         }
         Some(Self {
             min_world_x,
+            min_world_y,
             min_world_z,
+            y_count,
             voxels,
             default_sky_light,
         })
     }
 
     fn get(&self, world_x: i32, world_y: i32, world_z: i32) -> (BlockType, u8, u8, u8, bool) {
-        if world_y < 0 {
+        if world_y < self.min_world_y {
             return (BlockType::Air, 0, 0, 0, false);
         }
-        if world_y >= CHUNK_HEIGHT as i32 {
+        if world_y >= self.min_world_y + self.y_count as i32 {
             return (BlockType::Air, self.default_sky_light, 0, 0, false);
         }
         let x = world_x - self.min_world_x;
@@ -1135,7 +1140,8 @@ impl MeshSnapshot {
         if x < 0 || x >= Self::WIDTH as i32 || z < 0 || z >= Self::DEPTH as i32 {
             return (BlockType::Air, self.default_sky_light, 0, 0, false);
         }
-        let index = (x as usize * CHUNK_HEIGHT + world_y as usize) * Self::DEPTH + z as usize;
+        let local_y = (world_y - self.min_world_y) as usize;
+        let index = (x as usize * self.y_count + local_y) * Self::DEPTH + z as usize;
         let voxel = self.voxels[index];
         (
             voxel.block,

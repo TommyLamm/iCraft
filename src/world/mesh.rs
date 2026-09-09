@@ -1300,8 +1300,8 @@ impl Chunk {
     where
         F: Fn(i32, i32, i32) -> (BlockType, u8, u8, u8, bool),
     {
-        let min_y = self.min_section_y as i32 * 16;
-        let total_height = self.sections.len() * 16;
+        let min_y = self.min_world_y();
+        let total_height = (self.max_world_y_exclusive() - min_y) as usize;
         let origin = [
             self.chunk_x * CHUNK_WIDTH as i32,
             min_y,
@@ -1672,7 +1672,7 @@ impl Chunk {
                             continue;
                         }
                         let mut y = h as i32;
-                        let min_y = self.min_section_y as i32 * 16;
+                        let min_y = self.min_world_y();
                         loop {
                             let block = self.get_block_local(x, y, z);
                             if is_lod_surface(block) {
@@ -1992,10 +1992,8 @@ mod tests {
 
     fn empty_test_chunk() -> Chunk {
         let mut chunk = Chunk::new(0, 0);
-        let min_y = chunk.min_section_y as i32 * 16;
-        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
-            for y in min_y..max_y {
+            for y in chunk.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                     chunk.set_sky_light(x, y, z, 15);
@@ -2103,11 +2101,9 @@ mod tests {
     #[test]
     fn section_bundle_builds_distinct_bounded_lods_and_preserves_identity() {
         let mut chunk = empty_test_chunk();
-        let min_y = chunk.min_section_y as i32 * 16;
-        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in min_y..max_y {
+                for y in chunk.world_y_range() {
                     let block = if y < 64 {
                         BlockType::Stone
                     } else if y == 64 {
@@ -2219,8 +2215,8 @@ mod tests {
         chunk.set_block_local(3, 64, 2, BlockType::Glass);
 
         let legacy = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
-        let min_y = chunk.min_section_y as i32 * 16;
-        let total_height = chunk.sections.len() * 16;
+        let min_y = chunk.min_world_y();
+        let total_height = (chunk.max_world_y_exclusive() - min_y) as usize;
         let core = Chunk::mesh_l0_volume(
             [0, min_y, 0],
             [CHUNK_WIDTH, total_height, CHUNK_DEPTH],
@@ -2528,10 +2524,8 @@ mod tests {
     #[test]
     fn snow_layer_mesh_is_one_eighth_of_a_block_high() {
         let mut chunk = Chunk::new(0, 0);
-        let min_y = chunk.min_section_y as i32 * 16;
-        let max_y = min_y + (chunk.sections.len() as i32) * 16;
         for x in 0..CHUNK_WIDTH {
-            for y in min_y..max_y {
+            for y in chunk.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     chunk.set_block_local(x, y, z, BlockType::Air);
                 }
@@ -2660,11 +2654,11 @@ mod tests {
         let (opaque_v, _, _, _) = chunk.generate_mesh(|x, y, z| test_chunk_lookup(&chunk, x, y, z));
         let min_y = opaque_v
             .iter()
-            .map(|v| v.pos[1] as f32 / 32.0)
+            .map(|v| v.local_position()[1])
             .fold(f32::INFINITY, f32::min);
         let max_y = opaque_v
             .iter()
-            .map(|v| v.pos[1] as f32 / 32.0)
+            .map(|v| v.local_position()[1])
             .fold(f32::NEG_INFINITY, f32::max);
 
         assert!((min_y - 1.0).abs() < 1e-4);
@@ -2895,7 +2889,7 @@ mod tests {
             assert_eq!(opaque_i.len(), 36);
             let max_y = opaque_v
                 .iter()
-                .map(|vertex| vertex.pos[1] as f32 / 32.0)
+                .map(|vertex| vertex.local_position()[1])
                 .fold(f32::NEG_INFINITY, f32::max);
             assert!((max_y - (1.0 + END_PORTAL_FRAME_HEIGHT)).abs() < 1e-4);
         }
@@ -2906,7 +2900,7 @@ mod tests {
         assert_eq!(trans_v.len(), 8);
         assert_eq!(trans_i.len(), 12);
         assert!(trans_v.iter().all(|vertex| {
-            (vertex.pos[1] as f32 / 32.0 - (1.0 + END_PORTAL_SURFACE_HEIGHT)).abs() < 1e-4
+            (vertex.local_position()[1] - (1.0 + END_PORTAL_SURFACE_HEIGHT)).abs() < 1e-4
         }));
         assert!(END_PORTAL_SURFACE_HEIGHT < END_PORTAL_FRAME_HEIGHT);
     }

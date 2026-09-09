@@ -2,6 +2,8 @@ use crate::world::block::{BlockType, RenderType, CHUNK_HEIGHT};
 use std::mem::{size_of, size_of_val};
 
 pub const SECTION_SIZE: usize = 16;
+/// Number of 16-high sections in a legacy 256-tall dense column.
+/// Live dimensions use `WorldHeight::section_count()`.
 pub const SECTION_COUNT: usize = CHUNK_HEIGHT / SECTION_SIZE;
 pub const SECTION_VOLUME: usize = SECTION_SIZE * SECTION_SIZE * SECTION_SIZE;
 
@@ -34,7 +36,7 @@ impl SectionKey {
         Self { cx, section_y, cz }
     }
     pub const fn min_world_y(self) -> i32 {
-        self.section_y as i32 * SECTION_SIZE as i32
+        section_and_local_y_to_world_y(self.section_y, 0)
     }
     pub const fn max_world_y(self) -> i32 {
         self.min_world_y() + SECTION_SIZE as i32

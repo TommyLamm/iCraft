@@ -14,6 +14,8 @@ pub enum SoundMaterial {
 }
 
 pub const CHUNK_WIDTH: usize = 16;
+/// Legacy dense-column height (256). Live bounds are `Dimension::height()`,
+/// not this constant.
 pub const CHUNK_HEIGHT: usize = 256;
 pub const CHUNK_DEPTH: usize = 16;
 

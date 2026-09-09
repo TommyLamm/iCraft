@@ -170,8 +170,10 @@ least 1×1.
 
 A chunk is a 16×16 column of sparse 16-high paletted `ChunkSection`s. Block
 entities live in the owning chunk. Use signed-Y helpers in `src/world/`
-(`world_y_to_section_y`, `Dimension::height()`), not `CHUNK_HEIGHT` (256,
-legacy dense constant) and not hard-coded `0..256`.
+(`world_y_to_section_y`, `section_and_local_y_to_world_y`,
+`Chunk::world_y_range()`, `Dimension::height()`), not `CHUNK_HEIGHT` (256,
+legacy dense constant) and not hard-coded `0..256`. Nether and End generation
+allocate `height().section_count()` sections.
 
 | Dimension | `WorldHeight` |
 | --- | --- |

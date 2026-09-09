@@ -180,7 +180,9 @@ fn bench_mesh() -> u64 {
     let mut checksum = 0u64;
     for _ in 0..ITERS {
         let mesh = chunk.generate_section_mesh_bundle(key, 1, 1, |x, y, z| {
-            let inside = (0..16).contains(&x) && (0..256).contains(&y) && (0..16).contains(&z);
+            let inside = (0..16).contains(&x)
+                && chunk.world_y_range().contains(&y)
+                && (0..16).contains(&z);
             if inside {
                 (
                     chunk.get_block(x, y, z),

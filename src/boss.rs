@@ -8,8 +8,6 @@ use crate::chunk_manager::ChunkManager;
 use crate::dimension::Dimension;
 use crate::entity::{EntityIterationKind, EntityManager, EntityType};
 use crate::inventory::{GameMode, Item};
-#[cfg(test)]
-use crate::world::CHUNK_HEIGHT;
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH, SECTION_SIZE};
 use glam::Vec3;
 
@@ -1158,8 +1156,8 @@ mod tests {
         let mut chunk = Chunk::new(0, 0);
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in 1..CHUNK_HEIGHT {
-                    chunk.set_block_local(x, y as i32, z, BlockType::Air);
+                for y in chunk.world_y_range() {
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
                 chunk.set_block_local(x, 64, z, BlockType::EndStone);
             }
@@ -1466,8 +1464,8 @@ mod tests {
         let mut chunk = Chunk::new(0, 0);
         for x in 0..CHUNK_WIDTH {
             for z in 0..CHUNK_DEPTH {
-                for y in 1..CHUNK_HEIGHT {
-                    chunk.set_block_local(x, y as i32, z, BlockType::Air);
+                for y in chunk.world_y_range() {
+                    chunk.set_block_local(x, y, z, BlockType::Air);
                 }
                 chunk.set_block_local(x, 40, z, BlockType::Netherrack);
             }

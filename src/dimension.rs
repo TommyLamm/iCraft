@@ -1,5 +1,6 @@
 use crate::world::{
-    BlockType, Chunk, ChunkSection, RenderType, CHUNK_DEPTH, CHUNK_HEIGHT, CHUNK_WIDTH,
+    section_and_local_y_to_world_y, BlockType, Chunk, ChunkSection, RenderType, CHUNK_DEPTH,
+    CHUNK_WIDTH, SECTION_SIZE,
 };
 use glam::Vec3;
 use noise::{NoiseFn, Perlin};
@@ -501,14 +502,16 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
         }
     }
 
-    let nether_sections = NETHER_HEIGHT / crate::world::SECTION_SIZE;
-    let mut sections = Vec::with_capacity(crate::world::SECTION_COUNT);
-    for sec_y in 0..nether_sections {
+    let height = Dimension::Nether.height();
+    let nether_sections = height.section_count();
+    let mut sections = Vec::with_capacity(nether_sections);
+    for sec_idx in 0..nether_sections {
+        let sec_y = height.section_y_at_index(sec_idx);
         let mut sec_b = [BlockType::Air; 4096];
         let mut sec_bl = [0u8; 4096];
         let mut sec_fl = [0u8; 4096];
-        for ly in 0..crate::world::SECTION_SIZE {
-            let y = sec_y * crate::world::SECTION_SIZE + ly;
+        for ly in 0..SECTION_SIZE {
+            let y = section_and_local_y_to_world_y(sec_y, ly as u8) as usize;
             for z in 0..CHUNK_DEPTH {
                 for x in 0..CHUNK_WIDTH {
                     let idx = (ly << 8) | (z << 4) | x;
@@ -534,14 +537,11 @@ fn generate_nether_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
             sections.push(Some(sec));
         }
     }
-    while sections.len() < crate::world::SECTION_COUNT {
-        sections.push(None);
-    }
 
     let mut chunk = Chunk {
         chunk_x,
         chunk_z,
-        min_section_y: 0,
+        min_section_y: height.min_section_y(),
         sections,
         heightmap,
         torch_positions: Vec::new(),
@@ -717,17 +717,19 @@ fn place_end_exit_in_section(
 }
 
 fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
-    let mut sections = Vec::with_capacity(crate::world::SECTION_COUNT);
+    let height = Dimension::End.height();
+    let mut sections = Vec::with_capacity(height.section_count());
     let mut heightmap: Box<[[i16; CHUNK_DEPTH]; CHUNK_WIDTH]> =
         vec![[crate::world::NO_HEIGHT; CHUNK_DEPTH]; CHUNK_WIDTH]
             .try_into()
             .expect("chunk heightmap dimensions are fixed");
 
-    for sec_y in 0..crate::world::SECTION_COUNT {
+    for sec_idx in 0..height.section_count() {
         let mut sec_b = [BlockType::Air; 4096];
-        let sec_base_y = sec_y as i32 * 16;
-        for ly in 0..16 {
-            let y = sec_base_y + ly;
+        let sec_y = height.section_y_at_index(sec_idx);
+        let sec_base_y = section_and_local_y_to_world_y(sec_y, 0);
+        for ly in 0..SECTION_SIZE {
+            let y = section_and_local_y_to_world_y(sec_y, ly as u8);
             for z in 0..CHUNK_DEPTH {
                 for x in 0..CHUNK_WIDTH {
                     let world_x = chunk_x * CHUNK_WIDTH as i32 + x as i32;
@@ -741,7 +743,7 @@ fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
                                 as i32
                         };
                         if y >= (top - thickness).max(1) && y <= top {
-                            let idx = (ly as usize) << 8 | (z << 4) | x;
+                            let idx = (ly << 8) | (z << 4) | x;
                             sec_b[idx] = BlockType::EndStone;
                         }
                     }
@@ -754,10 +756,10 @@ fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
 
         for z in 0..CHUNK_DEPTH {
             for x in 0..CHUNK_WIDTH {
-                for ly in (0..16).rev() {
+                for ly in (0..SECTION_SIZE).rev() {
                     let idx = (ly << 8) | (z << 4) | x;
                     if sec_b[idx] != BlockType::Air {
-                        let y = (sec_base_y + ly as i32) as i16;
+                        let y = section_and_local_y_to_world_y(sec_y, ly as u8) as i16;
                         if y > heightmap[x][z] {
                             heightmap[x][z] = y;
                         }
@@ -777,7 +779,7 @@ fn generate_end_chunk(chunk_x: i32, chunk_z: i32, seed: u32) -> Chunk {
     let mut chunk = Chunk {
         chunk_x,
         chunk_z,
-        min_section_y: 0,
+        min_section_y: height.min_section_y(),
         sections,
         heightmap,
         torch_positions: Vec::new(),
@@ -1032,8 +1034,7 @@ mod tests {
 
     fn chunk_contains_block(chunk: &Chunk, target: BlockType) -> bool {
         for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
-                let wy = y as i32 + (chunk.min_section_y as i32 * 16);
+            for wy in chunk.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     if chunk.get_block_local(x, wy, z) == target {
                         return true;
@@ -1062,8 +1063,7 @@ mod tests {
         // Verify no sky light anywhere in the nether chunk
         let mut all_sky_zero = true;
         'outer_sky: for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
-                let wy = y as i32 + (chunk.min_section_y as i32 * 16);
+            for wy in chunk.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     if chunk.get_sky_light(x, wy, z) != 0 {
                         all_sky_zero = false;
@@ -1076,8 +1076,7 @@ mod tests {
         // Verify some block light == 15 exists (from lava/glowstone)
         let mut has_max_block_light = false;
         'outer_bl: for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
-                let wy = y as i32 + (chunk.min_section_y as i32 * 16);
+            for wy in chunk.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     if chunk.get_block_light(x, wy, z) == 15 {
                         has_max_block_light = true;
@@ -1135,8 +1134,7 @@ mod tests {
             for cz in (chunk_z - 1)..=(chunk_z + 1) {
                 let chunk = generate_chunk(Dimension::Overworld, cx, cz, seed);
                 for x in 0..CHUNK_WIDTH {
-                    for y in 0..CHUNK_HEIGHT {
-                        let wy = y as i32 + (chunk.min_section_y as i32 * 16);
+                    for wy in chunk.world_y_range() {
                         for z in 0..CHUNK_DEPTH {
                             let block = chunk.get_block_local(x, wy, z);
                             if block == BlockType::EndPortalFrame
@@ -1180,9 +1178,9 @@ mod tests {
         let a = generate_chunk(Dimension::Nether, -3, 5, 99);
         let b = generate_chunk(Dimension::Nether, -3, 5, 99);
         assert_eq!(a.sections.len(), b.sections.len());
+        assert_eq!(a.sections.len(), Dimension::Nether.height().section_count());
         for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
-                let wy = y as i32 + (a.min_section_y as i32 * 16);
+            for wy in a.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     assert_eq!(a.get_block_local(x, wy, z), b.get_block_local(x, wy, z));
                     assert_eq!(a.get_sky_light(x, wy, z), b.get_sky_light(x, wy, z));
@@ -1194,9 +1192,12 @@ mod tests {
 
         let end_a = generate_chunk(Dimension::End, 15, -8, 123);
         let end_b = generate_chunk(Dimension::End, 15, -8, 123);
+        assert_eq!(
+            end_a.sections.len(),
+            Dimension::End.height().section_count()
+        );
         for x in 0..CHUNK_WIDTH {
-            for y in 0..CHUNK_HEIGHT {
-                let wy = y as i32 + (end_a.min_section_y as i32 * 16);
+            for wy in end_a.world_y_range() {
                 for z in 0..CHUNK_DEPTH {
                     assert_eq!(
                         end_a.get_block_local(x, wy, z),
