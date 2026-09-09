@@ -397,9 +397,7 @@ impl State {
                 dimension,
                 state,
             } => {
-                if self.local_player_id != Some(player_id)
-                    || (self.presentation_topology().is_legacy_owner())
-                {
+                if self.local_player_id != Some(player_id) {
                     return;
                 }
                 if self.accept_session_projection(dimension, sequence, state.revision) {
@@ -550,28 +548,6 @@ impl State {
                 y,
                 z,
             } => {
-                #[cfg(any(test, feature = "legacy_owner"))]
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    let closed = self.container_sessions.close_exact(id, dimension, x, y, z);
-                    if let Some(session) = closed {
-                        let block = self
-                            .chunk_manager
-                            .get_block(session.x, session.y, session.z);
-                        if session.dimension == self.current_dimension as u8
-                            && matches!(block, BlockType::Chest | BlockType::EndCityChest)
-                            && self.legacy_chest_viewer_count(
-                                session.dimension,
-                                (session.x, session.y, session.z),
-                            ) == 0
-                            && self.container_target != Some((session.x, session.y, session.z))
-                        {
-                            self.set_local_chest_open_state(
-                                (session.x, session.y, session.z),
-                                false,
-                            );
-                        }
-                    }
-                }
                 if self.local_player_id == Some(id)
                     && dimension == self.current_dimension as u8
                     && self.container_target == Some((x, y, z))

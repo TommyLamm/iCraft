@@ -144,12 +144,11 @@ pub(crate) struct LaunchWorldState {
     pub has_save: bool,
 }
 
-/// Load leftover presentation world state for `State::new`.
+/// Load presentation launch defaults for `State::new`.
 ///
 /// Embedded presentations start empty and wait for runtime projections.
 /// Reading player.dat / materializing the spawn halo here races
 /// `ServerRuntime::new_embedded` on the same `world_dir`.
-#[allow(unused_mut)]
 pub(crate) fn load_launch_world_state(
     launch: &WorldLaunch,
     is_client: bool,
@@ -159,21 +158,8 @@ pub(crate) fn load_launch_world_state(
     // projections only and must not create a local save tree, chunk save
     // worker, or snapshot worker against `icraft_multiplayer_client`.
     // Embedded Singleplayer / listen-host already own the world through
-    // ServerRuntime.
-    let save_manager = if is_client || in_process_authority {
-        None
-    } else {
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            Some(std::sync::Arc::new(std::sync::Mutex::new(
-                crate::save::SaveManager::new(&launch.world_dir),
-            )))
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            None
-        }
-    };
+    // ServerRuntime. Presentation SaveManager is leftover and stays None.
+    let save_manager = None;
     let current_dimension = if is_client {
         crate::dimension::Dimension::Overworld
     } else if in_process_authority {
@@ -181,139 +167,37 @@ pub(crate) fn load_launch_world_state(
         // just to learn which dimension the runtime will project first.
         crate::save::peek_current_dimension(&launch.world_dir)
     } else {
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            save_manager
-                .as_ref()
-                .expect("legacy owner owns SaveManager")
-                .lock()
-                .unwrap()
-                .load_current_dimension()
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            crate::dimension::Dimension::Overworld
-        }
+        crate::dimension::Dimension::Overworld
     };
-    let mutation_revisions = if is_client || in_process_authority {
-        crate::save::MutationRevisionIndex::default()
-    } else {
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            save_manager
-                .as_ref()
-                .expect("legacy owner owns SaveManager")
-                .lock()
-                .unwrap()
-                .load_mutation_revision_index()
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            crate::save::MutationRevisionIndex::default()
-        }
-    };
+    let mutation_revisions = crate::save::MutationRevisionIndex::default();
 
-    let mut player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
+    let player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
     let creation_options = crate::save::load_world_creation_options(&launch.world_dir);
-    let mut game_mode = launch.game_mode;
-    let mut inventory = match launch.game_mode {
+    let game_mode = launch.game_mode;
+    let inventory = match launch.game_mode {
         GameMode::Creative => Inventory::new_creative(),
         GameMode::Survival | GameMode::Adventure | GameMode::Spectator => Inventory::new(),
     };
-    let mut player_state = PlayerState::new();
-    let mut camera_yaw = f32::to_radians(90.0);
-    let mut camera_pitch = f32::to_radians(-20.0);
-    let mut world_time = WorldTime::new();
-    let mut world_seed = launch.seed;
-    let mut world_spawn = if creation_options.world_type == crate::game_rules::WorldType::Superflat
-    {
+    let player_state = PlayerState::new();
+    let camera_yaw = f32::to_radians(90.0);
+    let camera_pitch = f32::to_radians(-20.0);
+    let world_time = WorldTime::new();
+    let world_seed = launch.seed;
+    let world_spawn = if creation_options.world_type == crate::game_rules::WorldType::Superflat {
         (8, 65, 8)
     } else {
         (8, 80, 8)
     };
-    let mut world_rules = WorldRules {
+    let world_rules = WorldRules {
         hardcore: creation_options.hardcore,
         ..Default::default()
     };
-    let mut world_type = creation_options.world_type;
-    let mut generate_structures = creation_options.generate_structures;
-    let mut bonus_chest = creation_options.bonus_chest;
-    let mut cheats_enabled = creation_options.cheats_enabled || is_client;
-    let mut advancement_progress = crate::advancements::AdvancementProgressData::default();
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    let has_save = !is_client && !in_process_authority && {
-        let mgr = save_manager
-            .as_ref()
-            .expect("authoritative world owns SaveManager")
-            .lock()
-            .unwrap();
-        mgr.load_player_and_level().is_ok()
-    };
-    #[cfg(not(any(test, feature = "legacy_owner")))]
+    let world_type = creation_options.world_type;
+    let generate_structures = creation_options.generate_structures;
+    let bonus_chest = creation_options.bonus_chest;
+    let cheats_enabled = creation_options.cheats_enabled || is_client;
+    let advancement_progress = crate::advancements::AdvancementProgressData::default();
     let has_save = false;
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    if has_save {
-        let (level, player) = {
-            let mgr = save_manager
-                .as_ref()
-                .expect("authoritative world owns SaveManager")
-                .lock()
-                .unwrap();
-            mgr.load_player_and_level().unwrap()
-        };
-        world_seed = level.seed;
-        world_time.ticks = level.time;
-        world_spawn = (level.spawn_x, level.spawn_y, level.spawn_z);
-        world_rules = level.rules.normalized();
-        world_rules.hardcore = level.hardcore || world_rules.hardcore;
-        world_type = level.world_type;
-        generate_structures = level.generate_structures;
-        bonus_chest = level.bonus_chest;
-        cheats_enabled = level.cheats_enabled || creation_options.cheats_enabled;
-        player_physics.position = Vec3::from_slice(&player.position);
-        player_physics.velocity = Vec3::from_slice(&player.velocity);
-        camera_yaw = player.yaw;
-        camera_pitch = player.pitch;
-        player_state.health = player.health;
-        player_state.hunger = player.hunger;
-        player_state.saturation = player.saturation;
-        player_state.exhaustion = player.exhaustion;
-        player_state.oxygen = player.oxygen;
-        player_state.experience = player.experience;
-        player_state.experience_level = player.experience_level;
-        player_state.spawn_point = player.spawn_point;
-        player_state.spawn_dimension = player.spawn_dimension;
-        player_state.bad_omen_level = player.bad_omen_level;
-        player_state.hero_of_the_village_timer = player.hero_of_the_village_timer;
-        player_state.is_dead = player.is_dead;
-        game_mode = crate::game_rules::persisted_player_game_mode(
-            player.game_mode,
-            launch.game_mode,
-            cheats_enabled,
-        );
-        inventory = player.inventory.to_inventory();
-        advancement_progress = player.advancements;
-    } else if !is_client && !in_process_authority {
-        if let Ok(Some(level)) = save_manager
-            .as_ref()
-            .expect("authoritative world owns SaveManager")
-            .lock()
-            .unwrap()
-            .load_level()
-        {
-            world_seed = level.seed;
-            world_time.ticks = level.time;
-            world_spawn = (level.spawn_x, level.spawn_y, level.spawn_z);
-            world_rules = level.rules.normalized();
-            world_rules.hardcore = level.hardcore || world_rules.hardcore;
-            world_type = level.world_type;
-            generate_structures = level.generate_structures;
-            bonus_chest = level.bonus_chest;
-            cheats_enabled = level.cheats_enabled || creation_options.cheats_enabled;
-        }
-    }
 
     LaunchWorldState {
         save_manager,

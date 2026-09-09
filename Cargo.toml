@@ -8,7 +8,6 @@ default-run = "icraft"
 # Recipe/physics smoke and desktop microbench modules. Not a default library
 # surface; `cargo test --lib` still compiles them via `cfg(test)`.
 harness = []
-legacy_owner = []
 
 [dependencies]
 winit = "0.30"

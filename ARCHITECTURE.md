@@ -24,8 +24,9 @@ server and tests.
 network, save, `presentation_inventory_policy`, …) and extra `pub` modules so
 the desktop crate can re-export them. `loot`, `voxel_shape`, and `worldgen`
 are `pub(crate)`. `sim_harness` / `final_acceptance` compile only under
-`cfg(test)` or feature `harness`. `legacy_owner` is not default; leftover
-presentation simulation compiles only under that feature or `cfg(test)`.
+`cfg(test)` or feature `harness`. Leftover renderer-owned world simulation
+(`legacy_sim` / `legacy_interaction` / `legacy_systems`) and feature
+`legacy_owner` are gone.
 
 New gameplay belongs in `AuthorityCore` / `ServerWorld`. Start in the narrow
 domain module, then check projection, save, and protocol. Do not add
@@ -65,9 +66,9 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
   separate `AuthorityBoundary` type.
 
 `PresentationTopology` (`Embedded` / `JoinClient` / `LegacyOwner`) is derived
-from role + in-process runtime. Branch on `is_join_client()` or
-`is_legacy_owner()`; there is no `is_authoritative()`. Menu launches never
-reach `LegacyOwner`.
+from role + in-process runtime. Live click and tick match Embedded / Join
+only. `LegacyOwner` remains as an unreachable derived variant; menu launches
+never reach it. There is no `is_authoritative()`.
 
 ## Ownership
 
@@ -130,9 +131,10 @@ input
   inventory, cursor, and selected hotbar. Health, hunger, XP, mining, and
   mounts stay server-owned. Join clients never use this path.
 
-Leftover presentation mutation (`legacy_sim` / `legacy_systems` /
-`legacy_interaction`, `world_mutation::apply_batch`) compiles only under
-`cfg(test)` or feature `legacy_owner`. Do not extend it.
+Leftover renderer-owned world simulation is gone. World mutation belongs in
+`AuthorityCore` / `ServerWorld`. Presentation `SaveManager` and
+`world_mutation::apply_batch` are leftover persistence helpers, not the
+authority mutation root.
 
 ## Tick vs frame
 
@@ -246,7 +248,7 @@ world paths go through `validated_world_path` (no symlink escape from
 | Area | Files |
 | --- | --- |
 | Desktop loop | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/audio.rs` |
-| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `legacy_*` is test/`legacy_owner` only. |
+| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. |
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
 | Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |
 | World | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |

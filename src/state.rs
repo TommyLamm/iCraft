@@ -16,9 +16,7 @@ use crate::inventory::{
     CREATIVE_VISIBLE_SLOTS,
 };
 use crate::menu::{GameSettings, WorldLaunch};
-use crate::physics::{
-    player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB, PLAYER_STANDING_HEIGHT,
-};
+use crate::physics::{player_aabb_at, BlockPlacementDecision, PlayerPhysics, AABB};
 use crate::player::{DamageSource, PlayerState};
 use crate::presentation::gpu_terrain::{
     chunk_mesh_is_registered_with_region, empty_region_rebuild_worthwhile,
@@ -59,20 +57,8 @@ pub use crate::presentation::network_inbound::NetworkHandle;
 mod embedded_runtime;
 #[path = "presentation/frame.rs"]
 mod frame;
-#[cfg(any(test, feature = "legacy_owner"))]
-#[path = "presentation/legacy_interaction.rs"]
-mod legacy_interaction;
-#[cfg(any(test, feature = "legacy_owner"))]
-#[path = "presentation/legacy_sim.rs"]
-mod legacy_sim;
-#[cfg(any(test, feature = "legacy_owner"))]
-#[path = "presentation/legacy_systems.rs"]
-mod legacy_systems;
 #[path = "presentation/network_event.rs"]
 mod network_event;
-
-#[cfg(any(test, feature = "legacy_owner"))]
-use legacy_sim::*;
 
 use embedded_runtime::EmbeddedRuntimeBridge;
 
@@ -86,10 +72,6 @@ const CHAT_INPUT_CAPACITY: usize = 256;
 
 const CREATIVE_FLIGHT_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 const MELEE_REACH: f32 = 4.0;
-#[cfg(any(test, feature = "legacy_owner"))]
-const BLOCK_REACH: f32 = 5.0;
-#[cfg(any(test, feature = "legacy_owner"))]
-const BLOCK_REACH_TOLERANCE: f32 = 1.5;
 #[allow(dead_code)]
 const MAX_CATCHUP_SUBMITS_PER_FRAME: usize = 2;
 #[allow(dead_code)]
@@ -125,36 +107,6 @@ fn should_advance_simulation(
 
 fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
     x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
-}
-
-#[cfg(any(test, feature = "legacy_owner"))]
-fn block_within_reach(player_pos: Vec3, block_pos: (i32, i32, i32)) -> bool {
-    let block_center = Vec3::new(
-        block_pos.0 as f32 + 0.5,
-        block_pos.1 as f32 + 0.5,
-        block_pos.2 as f32 + 0.5,
-    );
-    let limit = BLOCK_REACH + BLOCK_REACH_TOLERANCE;
-    (player_pos - block_center).length() <= limit
-}
-
-#[cfg(any(test, feature = "legacy_owner"))]
-fn validate_remote_block_request(
-    remote_players: &std::collections::HashMap<
-        crate::network::protocol::PlayerId,
-        RemotePlayerState,
-    >,
-    requester: crate::network::protocol::PlayerId,
-    block_pos: (i32, i32, i32),
-) -> bool {
-    let Some(remote) = remote_players.get(&requester) else {
-        return false;
-    };
-    let Some(snapshot) = remote.snapshots.back() else {
-        return false;
-    };
-    let player_center = snapshot.position + Vec3::new(0.0, PLAYER_STANDING_HEIGHT * 0.5, 0.0);
-    block_within_reach(player_center, block_pos)
 }
 
 fn terrain_translucent_cull_mode() -> Option<wgpu::Face> {
@@ -1449,25 +1401,7 @@ impl State {
             crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
         }
 
-        let wx = destination.x.floor() as i32;
-        let wz = destination.z.floor() as i32;
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            destination.y = self.safe_dimension_spawn_y(wx, wz);
-            if matches!(
-                target,
-                crate::dimension::Dimension::Overworld | crate::dimension::Dimension::Nether
-            ) && matches!(
-                source,
-                crate::dimension::Dimension::Overworld | crate::dimension::Dimension::Nether
-            ) {
-                destination = self.build_linked_nether_portal(cx, cz, destination.y as i32);
-            }
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            let _ = (wx, wz, cx, cz);
-        }
+        let _ = (cx, cz);
         self.player_physics.position = destination;
         self.prev_player_position = destination;
         self.player_physics.velocity = Vec3::ZERO;
@@ -1558,55 +1492,17 @@ impl State {
         } else {
             None
         };
-        if !self.presentation_topology().is_legacy_owner() {
-            if let Some(((portal_x, portal_y, portal_z), portal_block)) = portal {
-                if self.portal_contact_time == 0.0 {
-                    let _ = self.submit_local_authority_block_action(
-                        crate::network::protocol::BlockActionKind::EnterPortal,
-                        portal_x,
-                        portal_y,
-                        portal_z,
-                        [0, 0, 0],
-                        portal_block,
-                    );
-                    self.portal_contact_time = dt.max(f32::EPSILON);
-                }
-            } else {
-                self.portal_contact_time = 0.0;
-            }
-            return;
-        }
-        if feet == BlockType::EndGateway || body == BlockType::EndGateway {
-            if self.current_dimension == crate::dimension::Dimension::End {
-                let dist = pos.length();
-                let target_pos = if dist < 300.0 {
-                    glam::Vec3::new(1000.0, 65.0, 0.0)
-                } else {
-                    glam::Vec3::new(0.0, 65.0, 0.0)
-                };
-                self.player_physics.position = target_pos;
-                self.portal_cooldown = 2.0;
-                return;
-            }
-        }
-        if feet == BlockType::EndPortal || body == BlockType::EndPortal {
-            let target = if self.current_dimension == crate::dimension::Dimension::End {
-                crate::dimension::Dimension::Overworld
-            } else {
-                crate::dimension::Dimension::End
-            };
-            self.switch_dimension(target);
-            return;
-        }
-        if feet == BlockType::NetherPortal || body == BlockType::NetherPortal {
-            self.portal_contact_time += dt;
-            if self.portal_contact_time >= 1.0 {
-                let target = if self.current_dimension == crate::dimension::Dimension::Nether {
-                    crate::dimension::Dimension::Overworld
-                } else {
-                    crate::dimension::Dimension::Nether
-                };
-                self.switch_dimension(target);
+        if let Some(((portal_x, portal_y, portal_z), portal_block)) = portal {
+            if self.portal_contact_time == 0.0 {
+                let _ = self.submit_local_authority_block_action(
+                    crate::network::protocol::BlockActionKind::EnterPortal,
+                    portal_x,
+                    portal_y,
+                    portal_z,
+                    [0, 0, 0],
+                    portal_block,
+                );
+                self.portal_contact_time = dt.max(f32::EPSILON);
             }
         } else {
             self.portal_contact_time = 0.0;
@@ -5062,17 +4958,15 @@ impl State {
     /// lives in `submit_local_authority_block_action` so duplicate CancelBreak
     /// packets are suppressed.
     fn cancel_authority_break(&mut self) {
-        if !self.presentation_topology().is_legacy_owner() {
-            if let Some(previous) = self.mining_target {
-                let _ = self.submit_local_authority_block_action(
-                    crate::network::protocol::BlockActionKind::CancelBreak,
-                    previous.x as i32,
-                    previous.y as i32,
-                    previous.z as i32,
-                    [0, 0, 0],
-                    BlockType::Air,
-                );
-            }
+        if let Some(previous) = self.mining_target {
+            let _ = self.submit_local_authority_block_action(
+                crate::network::protocol::BlockActionKind::CancelBreak,
+                previous.x as i32,
+                previous.y as i32,
+                previous.z as i32,
+                [0, 0, 0],
+                BlockType::Air,
+            );
         }
         self.mining_target = None;
         self.mining_held = None;
@@ -5178,32 +5072,6 @@ impl State {
         })
     }
 
-    #[cfg(any(test, feature = "legacy_owner"))]
-    fn send_block_action_result(
-        &self,
-        to: crate::network::protocol::PlayerId,
-        x: i32,
-        y: i32,
-        z: i32,
-        success: bool,
-        consumed_item: bool,
-        drops: Vec<crate::network::protocol::ItemWire>,
-    ) {
-        if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-            let _ = host_to_server.tracked_send(
-                crate::network::server::HostToServer::SendBlockActionResult {
-                    to,
-                    x,
-                    y,
-                    z,
-                    success,
-                    consumed_item,
-                    drops,
-                },
-            );
-        }
-    }
-
     /// Route the command domains already understood by `ServerWorld` through
     /// the in-process authority. Unsupported legacy command domains continue
     /// through the existing presentation adapter until the remaining Phase A
@@ -5255,111 +5123,6 @@ impl State {
                 self.inventory.hotbar[self.inventory.selected].as_ref(),
                 block,
             )
-    }
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    fn broadcast_block_change(&mut self, x: i32, y: i32, z: i32, block: BlockType) {
-        self.broadcast_block_change_with_raw(x, y, z, block, 0);
-    }
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    fn broadcast_block_change_with_raw(
-        &mut self,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: BlockType,
-        raw_fluid: u8,
-    ) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) {
-            return;
-        }
-        let cx = x.div_euclid(CHUNK_WIDTH as i32);
-        let cz = z.div_euclid(CHUNK_DEPTH as i32);
-        let revision = match self.mutation_revisions.bump(self.current_dimension, cx, cz) {
-            Ok(revision) => revision,
-            Err(error) => {
-                self.report_mutation_revision_error(error, "broadcasting a block mutation");
-                return;
-            }
-        };
-        self.mutation_revision_generation = self.mutation_revision_generation.saturating_add(1);
-        self.mutation_index_dirty = true;
-        let state = self.chunk_manager.get_block_state(x, y, z);
-        self.network.broadcast_block_change_with_raw(
-            self.current_dimension,
-            revision,
-            x,
-            y,
-            z,
-            block.to_wire(),
-            state,
-            raw_fluid,
-        );
-    }
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    fn broadcast_block_entity_delta(
-        &mut self,
-        x: i32,
-        y: i32,
-        z: i32,
-        entity: Option<crate::block_entity::BlockEntity>,
-    ) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) {
-            return;
-        }
-        let cx = x.div_euclid(CHUNK_WIDTH as i32);
-        let cz = z.div_euclid(CHUNK_DEPTH as i32);
-        let revision = match self.mutation_revisions.bump(self.current_dimension, cx, cz) {
-            Ok(revision) => revision,
-            Err(error) => {
-                self.report_mutation_revision_error(error, "broadcasting a block entity delta");
-                return;
-            }
-        };
-        self.mutation_revision_generation = self.mutation_revision_generation.saturating_add(1);
-        self.mutation_index_dirty = true;
-        self.network.broadcast_block_entity_delta(
-            self.current_dimension,
-            revision,
-            x,
-            y,
-            z,
-            entity,
-        );
-    }
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    pub fn apply_mutation_batch(
-        &mut self,
-        requests: Vec<crate::world_mutation::BlockMutationRequest>,
-    ) -> Result<crate::world_mutation::BlockMutationOutcome, crate::world_mutation::MutationError>
-    {
-        let outcome = crate::world_mutation::apply_batch(&mut self.chunk_manager, requests)?;
-
-        for m in &outcome.mutations {
-            self.redstone.on_block_changed(
-                &self.chunk_manager,
-                m.pos,
-                crate::redstone::Direction::North,
-            );
-            if matches!(self.role, MultiplayerRole::Host { .. }) {
-                self.broadcast_block_change(m.pos.0, m.pos.1, m.pos.2, m.new_block);
-                if m.old_entity != m.new_entity {
-                    self.broadcast_block_entity_delta(
-                        m.pos.0,
-                        m.pos.1,
-                        m.pos.2,
-                        m.new_entity.clone(),
-                    );
-                }
-            }
-        }
-
-        self.invalidate_chunk_meshes(outcome.dirty_chunks.clone(), DependencyReason::BreakPlace);
-
-        Ok(outcome)
     }
 
     fn report_mutation_revision_error(
@@ -5919,9 +5682,6 @@ impl State {
 
         let feedback = match command {
             Command::Help(command) => Some(crate::commands::help_text(command.as_deref()).into()),
-            #[cfg(any(test, feature = "legacy_owner"))]
-            cmd => self.legacy_execute_command(cmd),
-            #[cfg(not(any(test, feature = "legacy_owner")))]
             _ => None,
         };
 
@@ -5987,89 +5747,10 @@ impl State {
     }
 
     pub fn trigger_background_save(&self) -> crate::save::SaveResult<()> {
-        if !self.presentation_topology().is_legacy_owner() {
-            // ServerRuntime owns authoritative chunk/entity/player persistence
-            // and performs bounded autosaves from its fixed tick. State's
-            // renderer cache must never be serialized as a second authority.
-            return Ok(());
-        }
-        let Some(save_manager) = self.save_manager.as_ref() else {
-            return Ok(());
-        };
-        let mut manager = save_manager
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let world_dir = manager.world_dir.clone();
-        crate::menu::update_world_metadata(
-            &world_dir,
-            self.world_seed,
-            self.game_mode,
-            self.difficulty,
-        )
-        .map_err(|error| crate::save::SaveError::Io {
-            operation: "update world metadata",
-            path: world_dir.join("world.meta"),
-            message: error.to_string(),
-        })?;
-        let level = crate::save::LevelData {
-            seed: self.world_seed,
-            time: self.world_time.ticks,
-            spawn_x: self.world_spawn.0,
-            spawn_y: self.world_spawn.1,
-            spawn_z: self.world_spawn.2,
-            spawn_dimension: crate::dimension::Dimension::Overworld,
-            spawn_yaw: 0.0,
-            version: 3,
-            rules: self.world_rules,
-            world_type: self.world_type,
-            generate_structures: self.generate_structures,
-            bonus_chest: self.bonus_chest,
-            cheats_enabled: self.cheats_enabled,
-            hardcore: self.world_rules.hardcore,
-        };
-        let player = crate::save::PlayerData::from_state(
-            self.player_physics.position,
-            self.player_physics.persistent_velocity(),
-            self.camera.yaw,
-            self.camera.pitch,
-            &self.player_state,
-            self.game_mode,
-            &self.inventory,
-            self.advancement_manager.progress.clone(),
-        );
-        manager
-            .save_player_and_level(&level, &player)
-            .map_err(|error| crate::save::SaveError::Io {
-                operation: "save player and level",
-                path: world_dir.join("player.dat"),
-                message: error.to_string(),
-            })?;
-
-        for (&(cx, cz), chunk) in &self.chunk_manager.chunks {
-            let redstone_metadata =
-                self.redstone
-                    .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-            if let Ok(data) =
-                crate::save::ChunkSaveData::from_chunk_with_redstone(chunk, &redstone_metadata)
-            {
-                let _ = manager.save_chunk_in(self.current_dimension, cx, cz, data);
-            }
-        }
-        manager
-            .save_current_dimension(self.current_dimension)
-            .map_err(|error| crate::save::SaveError::Io {
-                operation: "save current dimension",
-                path: world_dir.join("dimension.dat"),
-                message: error.to_string(),
-            })?;
-        manager
-            .save_mutation_revision_index(&self.mutation_revisions)
-            .map_err(|error| crate::save::SaveError::Io {
-                operation: "save mutation revision index",
-                path: world_dir.join("mutation_revisions.bin"),
-                message: error.to_string(),
-            })?;
-        self.save_current_dimension_entities()?;
+        // ServerRuntime owns authoritative chunk/entity/player persistence
+        // and performs bounded autosaves from its fixed tick. State's
+        // renderer cache must never be serialized as a second authority.
+        let _ = self;
         Ok(())
     }
 
@@ -6379,31 +6060,6 @@ impl State {
 
     /// Applies the same one-voxel halo dependency used by `MeshSnapshot`.
     /// Cardinal and diagonal dependents are tagged as derived AO work.
-    #[cfg(any(test, feature = "legacy_owner"))]
-    fn invalidate_block_mesh_dependencies(
-        &mut self,
-        wx: i32,
-        wy: i32,
-        wz: i32,
-        reason: DependencyReason,
-    ) {
-        let owner = SectionKey::new(
-            wx.div_euclid(CHUNK_WIDTH as i32),
-            crate::world::world_y_to_section_y(wy),
-            wz.div_euclid(CHUNK_DEPTH as i32),
-        );
-        let mut dependencies = std::collections::HashSet::new();
-        mark_section_mesh_dependencies(&mut dependencies, wx, wy, wz);
-        for key in dependencies {
-            let dependency_reason = if key == owner {
-                reason
-            } else {
-                DependencyReason::Ao
-            };
-            self.invalidate_section_mesh(key, dependency_reason);
-        }
-    }
-
     fn process_terrain_worker_results(&mut self, player_chunk: (i32, i32)) {
         let integrate_started = Instant::now();
         let mut lighting_elapsed = Duration::ZERO;
@@ -6557,10 +6213,6 @@ impl State {
                     }
 
                     let mut dirty = std::collections::HashSet::new();
-                    #[cfg(any(test, feature = "legacy_owner"))]
-                    if self.presentation_topology().is_legacy_owner() {
-                        self.check_and_break_unsupported_for_loaded_chunk(cx, cz, &mut dirty);
-                    }
                     let lighting_started = Instant::now();
                     for (lighting_cx, lighting_cz) in [
                         (cx, cz),
@@ -6686,10 +6338,8 @@ impl State {
         let world_seed = self.world_seed;
         let world_type = self.world_type;
         let generate_structures = self.generate_structures;
-        let is_legacy_owner = self.presentation_topology().is_legacy_owner();
-        let save_manager = self.save_manager.clone();
         rayon::spawn(move || {
-            let mut chunk = crate::dimension::generate_chunk_with_options(
+            let chunk = crate::dimension::generate_chunk_with_options(
                 dimension,
                 coord.0,
                 coord.1,
@@ -6699,36 +6349,15 @@ impl State {
                     generate_structures,
                 },
             );
-            let mut mutated = false;
-            let mut restore_failed = false;
-            let mut redstone_metadata = Vec::new();
-            if is_legacy_owner {
-                if let Some(saved) = save_manager.as_ref().and_then(|manager| {
-                    manager
-                        .lock()
-                        .unwrap()
-                        .load_chunk_in(dimension, coord.0, coord.1)
-                }) {
-                    let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk)
-                        .ok()
-                        .map(|generated| generated.blocks);
-                    mutated = generated_blocks.as_ref() != Some(&saved.blocks);
-                    redstone_metadata = saved.redstone_metadata();
-                    if saved.restore_to_chunk(&mut chunk).is_err() {
-                        restore_failed = true;
-                        mutated = false;
-                    }
-                }
-            }
             let _ = sender.send(TerrainWorkerResult::Loaded(ChunkLoadResult {
                 coord,
                 dimension,
                 generation,
                 lifetime,
                 chunk,
-                mutated,
-                restore_failed,
-                redstone_metadata,
+                mutated: false,
+                restore_failed: false,
+                redstone_metadata: Vec::new(),
             }));
         });
     }
@@ -6810,33 +6439,7 @@ impl State {
                 }
             }
             for &(cx, cz) in &to_unload {
-                let tracker = self.chunk_manager.dirty_chunks.clone();
-                let revision = tracker.dirty_revision(cx, cz);
-                let redstone_metadata = revision.map(|_| {
-                    self.redstone
-                        .collect_chunk_metadata(&self.chunk_manager, cx, cz)
-                });
-                if let Some(chunk) = self.chunk_manager.chunks.remove(&(cx, cz)) {
-                    if self.presentation_topology().is_legacy_owner() {
-                        if let (Some(_revision), Some(redstone_metadata)) =
-                            (revision, redstone_metadata)
-                        {
-                            if let Some(save_manager) = self.save_manager.as_ref() {
-                                if let Ok(data) =
-                                    crate::save::ChunkSaveData::from_chunk_with_redstone(
-                                        &chunk,
-                                        &redstone_metadata,
-                                    )
-                                {
-                                    let _ = save_manager
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .save_chunk_in(self.current_dimension, cx, cz, data);
-                                }
-                            }
-                        }
-                    }
-                }
+                let _ = self.chunk_manager.chunks.remove(&(cx, cz));
             }
             for &(cx, cz) in &to_unload {
                 for neighbor in surrounding_chunk_coords(cx, cz) {
@@ -7066,13 +6669,11 @@ impl State {
         self.prev_player_position = self.player_physics.position;
         let world_tick_started = Instant::now();
         // Singleplayer and listen-host worlds advance exclusively in the
-        // headless AuthorityCore.  The renderer-side simulation remains only
-        // as a compatibility path for legacy worlds without a boundary.
+        // headless AuthorityCore.
         let has_in_process_runtime = self.has_in_process_runtime();
         if has_in_process_runtime {
             let _ = self.tick_authority_boundary();
         }
-        let is_legacy_owner = self.presentation_topology().is_legacy_owner();
 
         // Tick attack cooldown & shield disable ticks
         if self.player_state.attack_cooldown_ticks < self.player_state.attack_cooldown_max_ticks {
@@ -7082,54 +6683,15 @@ impl State {
             self.player_state.shield_disable_ticks -= 1;
         }
 
-        // Tick item usage state machine
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if is_legacy_owner {
-            self.legacy_tick_item_use();
-        } else {
-            self.player_state.using_item = None;
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            self.player_state.using_item = None;
-        }
-
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if is_legacy_owner {
-            self.legacy_tick_world_systems(dt);
-        }
+        self.player_state.using_item = None;
 
         self.update_portal_travel(dt);
 
         if !has_in_process_runtime {
             self.brewing.update(dt);
+            let _ = self.potion_effects.update(dt);
         }
-        #[cfg(any(test, feature = "legacy_owner"))]
-        self.update_furnaces(dt);
-        let effect_health = if has_in_process_runtime {
-            0.0
-        } else {
-            self.potion_effects.update(dt)
-        };
-        if is_legacy_owner && effect_health > 0.0 {
-            self.player_state.health =
-                (self.player_state.health + effect_health).min(self.player_state.max_health);
-        } else if is_legacy_owner && effect_health < 0.0 && self.player_state.health > 1.0 {
-            self.take_damage(
-                (-effect_health).min(self.player_state.health - 1.0),
-                DamageSource::Mob,
-            );
-        }
-        if is_legacy_owner && self.wither_effect_timer > 0.0 {
-            self.wither_effect_timer = (self.wither_effect_timer - dt).max(0.0);
-            self.wither_damage_timer += dt;
-            if self.wither_damage_timer >= 1.0 {
-                self.wither_damage_timer -= 1.0;
-                self.take_damage(1.0, DamageSource::Mob);
-            }
-        } else {
-            self.wither_damage_timer = 0.0;
-        }
+        self.wither_damage_timer = 0.0;
 
         let can_sprint = sprint_allowed(self.game_mode, self.player_state.hunger);
 
@@ -7190,17 +6752,6 @@ impl State {
             self.is_sprinting = false;
         }
 
-        // Consume more hunger when sprinting
-        let sprint_exhaustion = sprint_exhaustion_amount(
-            self.game_mode,
-            self.is_sprinting,
-            self.keys.w || self.keys.a || self.keys.s || self.keys.d,
-            dt,
-        );
-        if is_legacy_owner && sprint_exhaustion > 0.0 {
-            self.player_state.add_exhaustion(sprint_exhaustion);
-        }
-
         // Update game time
         let speed_multiplier = if self.keys.f { 60.0 } else { 1.0 };
         let elapsed_world_ticks = if self.world_rules.do_daylight_cycle {
@@ -7217,8 +6768,6 @@ impl State {
         if self.current_dimension == crate::dimension::Dimension::Overworld {
             let weather_update = if !self.world_rules.do_weather_cycle {
                 crate::weather::WeatherUpdate::default()
-            } else if is_legacy_owner {
-                self.weather.update_authoritative(elapsed_world_ticks, dt)
             } else {
                 self.weather.update_client(elapsed_world_ticks, dt);
                 crate::weather::WeatherUpdate::default()
@@ -7262,9 +6811,6 @@ impl State {
 
         // Jump exhaustion check
         let jumped = !was_flying && self.keys.space && self.player_physics.on_ground;
-        if is_legacy_owner && jumped && self.game_mode_policy().hunger_enabled {
-            self.player_state.add_exhaustion(0.05);
-        }
         if jumped {
             self.audio_manager.play_sound(crate::audio::SoundId::Jump);
         }
@@ -7301,16 +6847,6 @@ impl State {
         let under_block = self.chunk_manager.get_block(px, py, pz);
 
         if self.player_physics.on_ground && !self.was_on_ground {
-            if under_block == BlockType::Farmland
-                && (self.is_sprinting || old_pos.y - self.player_physics.position.y > 0.5)
-                && self
-                    .presentation_topology()
-                    .inventory_decision(PresentationInventoryTarget::FarmlandTrample)
-                    == PresentationInventoryAction::LocalMutate
-            {
-                #[cfg(any(test, feature = "legacy_owner"))]
-                self.apply_block_changes(&[((px, py, pz), BlockType::Dirt)]);
-            }
             if let Some(mat) = under_block.sound_material() {
                 self.audio_manager
                     .play_sound(crate::audio::SoundId::Land(mat));
@@ -7328,10 +6864,6 @@ impl State {
             self.player_physics.position.z - old_pos.z,
         )
         .length();
-        if is_legacy_owner && self.game_mode_policy().hunger_enabled {
-            self.player_state.add_exhaustion(0.02 * horizontal_dist);
-        }
-
         // Footstep sound update
         if self.player_physics.on_ground {
             if horizontal_dist > 0.0001 {
@@ -7372,18 +6904,8 @@ impl State {
             self.footstep_accumulator = 0.0;
         }
 
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if is_legacy_owner {
-            self.update_dropped_items_and_orbs(dt);
-        }
-
         if self.player_state.is_sleeping {
             self.player_state.sleep_timer += dt;
-        }
-
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if is_legacy_owner {
-            self.legacy_tick_night_skip();
         }
 
         // Dropped item & XP collection. Embedded / join-client presentations
@@ -7472,11 +6994,6 @@ impl State {
             self.lava_damage_timer = 0.0;
         }
 
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if is_legacy_owner {
-            self.legacy_tick_leaf_decay();
-        }
-
         // Cactus damage check
         let player_aabb = self.player_physics.get_aabb();
         let height = self.chunk_manager.dimension.height();
@@ -7516,23 +7033,8 @@ impl State {
             self.cactus_damage_timer = 0.0;
         }
 
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if is_legacy_owner {
-            self.legacy_tick_oxygen(dt);
-        }
-
         self.total_time += dt;
         self.end_flash_time = (self.end_flash_time - dt.max(0.0)).max(0.0);
-
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if is_legacy_owner {
-            self.legacy_tick_owned_world(dt);
-        }
-
-        #[cfg(any(test, feature = "legacy_owner"))]
-        self.update_village_and_raid_systems(dt);
-        #[cfg(any(test, feature = "legacy_owner"))]
-        self.update_vehicles_and_fishing(dt);
 
         self.broadcast_authoritative_replication(dt);
 
@@ -7542,168 +7044,31 @@ impl State {
         );
     }
 
-    #[cfg(any(test, feature = "legacy_owner"))]
-    pub fn mount_vehicle_request(&mut self, passenger_id: u64, vehicle_id: u64) -> bool {
-        if !self.presentation_topology().is_legacy_owner() {
-            let response = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Mount {
-                    entity_id: vehicle_id,
-                },
-            );
-            return matches!(
-                response.map(|response| response.outcome),
-                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
-            );
-        }
-        let capacity = if let Some(idx) = self.entity_manager.id_to_index.get(&vehicle_id).copied()
-        {
-            match self.entity_manager.entities[idx].entity_type {
-                crate::entity::EntityType::Boat => 2,
-                _ => 1,
-            }
-        } else {
-            1
-        };
-        self.mount_manager
-            .mount(vehicle_id, passenger_id, capacity)
-            .is_ok()
-    }
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    pub fn dismount_vehicle_request(&mut self, passenger_id: u64) {
-        if !self.presentation_topology().is_legacy_owner() {
-            let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Mount { entity_id: 0 },
-            );
-            return;
-        }
-        let vehicle_pos = if let Some(vid) = self.mount_manager.get_vehicle(passenger_id) {
-            self.entity_manager.get_by_id(vid).map(|e| e.position)
-        } else {
-            None
-        };
-        self.mount_manager.dismount(passenger_id);
-        if let Some(v_pos) = vehicle_pos {
-            let cm = &self.chunk_manager;
-            let safe_pos =
-                crate::vehicle::MountManager::find_dismount_position(v_pos, |x, y, z| {
-                    cm.get_block(x, y, z).properties().is_solid
-                });
-            if passenger_id == 0 {
-                self.player_physics.position = safe_pos;
-            }
-        }
-    }
-
     pub fn use_fishing_rod(&mut self) {
-        if !self.presentation_topology().is_legacy_owner() {
-            let action = if self.fishing_manager.get_hook(0).is_some() {
-                1
-            } else {
-                0
-            };
-            let look = self.camera.forward();
-            let look_milli = [
-                (look.x * 1000.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-                (look.y * 1000.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-                (look.z * 1000.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-            ];
-            let _ = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Fishing {
-                    action,
-                    hand: 0,
-                    look_milli,
-                },
-            );
-            return;
-        }
-        let p_id = 0u64; // local player
-        if self.fishing_manager.get_hook(p_id).is_some() {
-            let mut rng_val = (self.total_time * 1000.0) as u32;
-            let result = self.fishing_manager.reel_in(p_id, || {
-                rng_val = rng_val.wrapping_mul(1103515245).wrapping_add(12345);
-                rng_val
-            });
-            if let Some(crate::fishing::FishingResult::Caught(stack)) = result {
-                self.inventory.add_stack(stack);
-                self.trigger_advancement(crate::advancements::AdvancementTrigger::FishCaught);
-            }
+        let action = if self.fishing_manager.get_hook(0).is_some() {
+            1
         } else {
-            let look_dir = self.camera.forward();
-            self.fishing_manager
-                .cast_hook(p_id, self.player_physics.position, look_dir);
-        }
-    }
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    pub fn check_claim_furnace_xp(&mut self, slot: SlotType) {
-        if matches!(slot, SlotType::ContainerSlot(2))
-            && (!self.presentation_topology().is_legacy_owner())
-        {
-            if let Some(pos) = self.container_target {
-                let count = self
-                    .chunk_manager
-                    .chunks
-                    .get(&(pos.0.div_euclid(16), pos.2.div_euclid(16)))
-                    .and_then(|chunk| {
-                        chunk.get_block_entity(
-                            pos.0.rem_euclid(16) as u8,
-                            pos.1 as i16,
-                            pos.2.rem_euclid(16) as u8,
-                        )
-                    })
-                    .and_then(|entity| match entity {
-                        crate::block_entity::BlockEntity::Furnace(furnace) => furnace
-                            .slots
-                            .get(2)
-                            .and_then(|stack| stack.as_ref())
-                            .map(|stack| stack.count as u16),
-                        _ => None,
-                    })
-                    .unwrap_or(1)
-                    .clamp(1, 64);
-                let _ = self.submit_local_authority_operation(
-                    crate::network::protocol::GameplayOperation::FurnaceTakeOutput {
-                        x: pos.0,
-                        y: pos.1,
-                        z: pos.2,
-                        count,
-                    },
-                );
-            }
-            return;
-        }
-        if let SlotType::ContainerSlot(2) = slot {
-            if let Some(pos) = self.container_target {
-                let block = self.chunk_manager.get_block(pos.0, pos.1, pos.2);
-                if matches!(block, BlockType::Furnace | BlockType::FurnaceLit) {
-                    let (cx, cz) = (pos.0.div_euclid(16), pos.2.div_euclid(16));
-                    let (bx, by, bz) = (
-                        pos.0.rem_euclid(16) as u8,
-                        pos.1 as i16,
-                        pos.2.rem_euclid(16) as u8,
-                    );
-                    if let Some(chunk) = self.chunk_manager.chunks.get_mut(&(cx, cz)) {
-                        if let Some(crate::block_entity::BlockEntity::Furnace(ref mut furnace)) =
-                            chunk.get_block_entity_mut(bx, by, bz)
-                        {
-                            let xp = furnace.claim_xp();
-                            if xp > 0.0 {
-                                self.player_state.experience += xp as u32;
-                                self.audio_manager
-                                    .play_sound(crate::audio::SoundId::FurnaceSmelt);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            0
+        };
+        let look = self.camera.forward();
+        let look_milli = [
+            (look.x * 1000.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            (look.y * 1000.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            (look.z * 1000.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+        ];
+        let _ = self.submit_local_authority_operation(
+            crate::network::protocol::GameplayOperation::Fishing {
+                action,
+                hand: 0,
+                look_milli,
+            },
+        );
     }
 
     pub fn update_frame(&mut self, dt: f32) {
@@ -7903,7 +7268,6 @@ impl State {
             self.game_mode,
             self.camera_look_allowed(),
         ) {
-            let authority_mining = !self.presentation_topology().is_legacy_owner();
             let dir = Vec3::new(
                 self.camera.yaw.cos() * self.camera.pitch.cos(),
                 self.camera.pitch.sin(),
@@ -7932,35 +7296,14 @@ impl State {
                         self.mining_target = Some(target);
                         self.mining_progress = 0.0;
                         self.mining_held = held;
-                        if authority_mining {
-                            let _ = self.submit_local_authority_block_action(
-                                crate::network::protocol::BlockActionKind::StartBreak,
-                                target.x as i32,
-                                target.y as i32,
-                                target.z as i32,
-                                [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
-                                BlockType::Air,
-                            );
-                        }
-                    }
-                    #[cfg(any(test, feature = "legacy_owner"))]
-                    if !authority_mining {
-                        let mining_time = self.calculate_mining_time(block);
-                        if mining_time <= 0.0 {
-                            self.break_block(target);
-                            self.mining_target = None;
-                            self.mining_held = None;
-                            self.mining_progress = 0.0;
-                        } else {
-                            self.mining_progress += dt / mining_time;
-                            if self.mining_progress >= 1.0 {
-                                let pos = target;
-                                self.break_block(pos);
-                                self.mining_target = None;
-                                self.mining_held = None;
-                                self.mining_progress = 0.0;
-                            }
-                        }
+                        let _ = self.submit_local_authority_block_action(
+                            crate::network::protocol::BlockActionKind::StartBreak,
+                            target.x as i32,
+                            target.y as i32,
+                            target.z as i32,
+                            [hit.normal.x as i8, hit.normal.y as i8, hit.normal.z as i8],
+                            BlockType::Air,
+                        );
                     }
                 } else {
                     self.cancel_authority_break();
@@ -8093,42 +7436,6 @@ impl State {
                 Precipitation::None => {}
             }
         }
-
-        let accumulation_steps = if self.presentation_topology().is_legacy_owner() {
-            self.weather.take_snow_accumulation_steps(dt)
-        } else {
-            0
-        };
-        for _ in 0..accumulation_steps * 6 {
-            let wx = player_x + self.weather.authority_random_offset(24);
-            let wz = player_z + self.weather.authority_random_offset(24);
-            if self.weather.precipitation_at(wx, wz) != Precipitation::Snow {
-                continue;
-            }
-            let Some(surface_y) = self.surface_height(wx, wz) else {
-                continue;
-            };
-            let target_y = surface_y + 1;
-            if target_y >= world_max_y
-                || self.chunk_manager.get_block(wx, target_y, wz) != BlockType::Air
-            {
-                continue;
-            }
-            #[cfg(any(test, feature = "legacy_owner"))]
-            {
-                let support = self.chunk_manager.get_block(wx, surface_y, wz);
-                if support.properties().is_solid
-                    && !matches!(support, BlockType::Water | BlockType::Lava | BlockType::Ice)
-                {
-                    self.apply_weather_block_change(wx, target_y, wz, BlockType::SnowLayer);
-                }
-            }
-        }
-
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if lightning_due && self.presentation_topology().is_legacy_owner() {
-            self.strike_lightning();
-        }
     }
 
     fn surface_height(&self, wx: i32, wz: i32) -> Option<i32> {
@@ -8137,55 +7444,6 @@ impl State {
             .chunks
             .get(&(cx, cz))
             .map(|chunk| chunk.heightmap[bx][bz] as i32)
-    }
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    fn strike_lightning(&mut self) {
-        use crate::entity::EntityType;
-
-        if !self.presentation_topology().is_legacy_owner() {
-            return;
-        }
-        let player_pos = self.player_physics.position;
-        let living_types = [
-            EntityType::Zombie,
-            EntityType::Skeleton,
-            EntityType::Creeper,
-            EntityType::Pig,
-            EntityType::Cow,
-            EntityType::Sheep,
-            EntityType::Chicken,
-        ];
-        let living_target = self
-            .entity_manager
-            .query_radius_types(player_pos, 32.0, &living_types)
-            .filter(|entity| entity.health > 0.0)
-            .min_by(|a, b| {
-                a.position
-                    .distance_squared(player_pos)
-                    .total_cmp(&b.position.distance_squared(player_pos))
-            })
-            .map(|entity| entity.position);
-
-        let (strike_x, strike_z) = if let Some(target) = living_target {
-            (target.x.floor() as i32, target.z.floor() as i32)
-        } else {
-            (
-                player_pos.x.floor() as i32 + self.weather.authority_random_offset(30),
-                player_pos.z.floor() as i32 + self.weather.authority_random_offset(30),
-            )
-        };
-        let Some(surface_y) = self.surface_height(strike_x, strike_z) else {
-            return;
-        };
-        let strike = crate::network::protocol::LightningStrike {
-            x: strike_x,
-            y: surface_y + 1,
-            z: strike_z,
-            visual_seed: self.weather.authority_random_seed(),
-        };
-        self.network.broadcast_lightning_strike(strike);
-        self.apply_lightning_strike(strike);
     }
 
     fn apply_lightning_strike(&mut self, strike: crate::network::protocol::LightningStrike) {
@@ -8205,12 +7463,6 @@ impl State {
             listener_right,
         );
 
-        #[cfg(any(test, feature = "legacy_owner"))]
-        if self.presentation_topology().is_legacy_owner() {
-            let player_pos = self.player_physics.position;
-            self.legacy_apply_lightning_effects(strike, strike_pos, player_pos);
-        }
-
         // A short chain of bright, vertically stretched billboards forms the
         // visible bolt and persists just long enough to accompany the flash.
         let bolt_uv = weather_tile_uv(3, 1);
@@ -8227,24 +7479,6 @@ impl State {
                 0.0,
                 12.0,
             );
-        }
-
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            let fire_y = strike.y;
-            let support_y = fire_y - 1;
-            let support = self.chunk_manager.get_block(strike.x, support_y, strike.z);
-            if self.presentation_topology().is_legacy_owner()
-                && fire_y < self.chunk_manager.dimension.height().max_y_exclusive()
-                && support.properties().is_solid
-                && !matches!(
-                    support,
-                    BlockType::Water | BlockType::Lava | BlockType::Ice | BlockType::Snow
-                )
-                && self.chunk_manager.get_block(strike.x, fire_y, strike.z) == BlockType::Air
-            {
-                self.apply_weather_block_change(strike.x, fire_y, strike.z, BlockType::Fire);
-            }
         }
     }
 
@@ -8699,28 +7933,6 @@ impl State {
         }
     }
 
-    #[cfg(any(test, feature = "legacy_owner"))]
-    pub fn spawn_xp_orb(&mut self, xp_value: u32, pos: glam::Vec3) {
-        if xp_value == 0 {
-            return;
-        }
-        let id = self
-            .entity_manager
-            .spawn(crate::entity::EntityType::ExperienceOrb, pos);
-        if let Some(entity) = self.entity_manager.entities.last_mut() {
-            entity.xp_value = xp_value;
-            let rng = self
-                .total_time
-                .to_bits()
-                .wrapping_add(id.wrapping_mul(2_654_435_761) as u32);
-            let vx = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-            let vy = 2.0;
-            let vz = ((rng / 65_536) as f32 / 32_768.0 - 0.5) * 1.5;
-            entity.velocity = Vec3::new(vx, vy, vz);
-            entity.pickup_cooldown = 0.5;
-        }
-    }
-
     fn throw_dropped_item(&mut self, item: Item, count: u32) {
         self.throw_dropped_stack(crate::inventory::ItemStack::new(item, count));
     }
@@ -8833,14 +8045,7 @@ impl State {
             );
             return;
         }
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            self.legacy_take_damage_with_attacker(amount, source, attacker_pos, attacker_item);
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            let _ = (amount, source, attacker_pos, attacker_item);
-        }
+        let _ = (amount, source, attacker_pos, attacker_item);
     }
 
     pub fn respawn(&mut self) {
@@ -8851,10 +8056,6 @@ impl State {
         if self.presentation_topology().is_join_client() {
             self.network.send_respawn_request();
             return;
-        }
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            self.legacy_respawn();
         }
     }
 
@@ -8875,18 +8076,7 @@ impl State {
     pub fn handle_primary_press(&mut self) -> bool {
         self.hand_swing_started_at = self.total_time;
         self.hand_swing_until = self.total_time + 0.25;
-        let melee_consumed = if !self.presentation_topology().is_legacy_owner() {
-            self.submit_local_authority_combat()
-        } else {
-            #[cfg(any(test, feature = "legacy_owner"))]
-            {
-                self.presentation_topology().is_legacy_owner() && self.try_melee_attack()
-            }
-            #[cfg(not(any(test, feature = "legacy_owner")))]
-            {
-                false
-            }
-        };
+        let melee_consumed = self.submit_local_authority_combat();
         let decision = primary_press_decision(self.game_mode, melee_consumed);
         if decision.instant_break {
             self.handle_click(true);
@@ -8940,10 +8130,7 @@ impl State {
             return;
         }
 
-        if (!self.presentation_topology().is_legacy_owner())
-            && main_item != Item::Air
-            && !main_item.properties().is_block
-        {
+        if main_item != Item::Air && !main_item.properties().is_block {
             let _ = self.submit_local_authority_operation(
                 crate::network::protocol::GameplayOperation::ItemUse {
                     item: main_item as u32,
@@ -9045,10 +8232,7 @@ impl State {
 
         // If mainhand didn't start an item use action, check Offhand item
         if self.player_state.using_item.is_none() {
-            if (!self.presentation_topology().is_legacy_owner())
-                && offhand_item != Item::Air
-                && !offhand_item.properties().is_block
-            {
+            if offhand_item != Item::Air && !offhand_item.properties().is_block {
                 let _ = self.submit_local_authority_operation(
                     crate::network::protocol::GameplayOperation::ItemUse {
                         item: offhand_item as u32,
@@ -9142,14 +8326,7 @@ impl State {
             self.player_state.using_item = None;
             return;
         }
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            self.legacy_handle_secondary_release();
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            self.player_state.using_item = None;
-        }
+        self.player_state.using_item = None;
     }
 
     pub fn handle_click(&mut self, is_left_click: bool) {
@@ -9157,13 +8334,10 @@ impl State {
             PresentationTopology::JoinClient | PresentationTopology::Embedded => {
                 self.handle_live_world_click(is_left_click);
             }
-            #[cfg(any(test, feature = "legacy_owner"))]
-            PresentationTopology::LegacyOwner => self.legacy_handle_click(is_left_click),
-            #[cfg(not(any(test, feature = "legacy_owner")))]
             PresentationTopology::LegacyOwner => {
                 debug_assert!(
                     false,
-                    "LegacyOwner topology is unreachable in production without feature = \"legacy_owner\""
+                    "LegacyOwner topology is unreachable after leftover simulation was removed"
                 );
             }
         }
@@ -9593,82 +8767,13 @@ impl State {
             SlotType::AnvilRight => self.anvil.right = stack,
             SlotType::AnvilOutput => {}
             SlotType::ContainerSlot(i) => {
-                #[cfg(any(test, feature = "legacy_owner"))]
-                if let Some(pos) = self.container_target {
-                    if let Some(mut slots) = self.chunk_manager.container_slots(pos.0, pos.1, pos.2)
-                    {
-                        if i < slots.len() {
-                            let access = self
-                                .chunk_manager
-                                .get_block_entity(pos.0, pos.1, pos.2)
-                                .and_then(crate::block_entity::ContainerAccess::for_entity);
-                            if access.is_some_and(|access| {
-                                stack
-                                    .as_ref()
-                                    .map_or(true, |item| access.can_insert(i, item, None))
-                            }) {
-                                slots[i] = stack;
-                                if self
-                                    .chunk_manager
-                                    .set_container_slots(pos.0, pos.1, pos.2, &slots)
-                                {
-                                    self.redstone
-                                        .mark_container_changed(&self.chunk_manager, pos);
-                                    let entity = self
-                                        .chunk_manager
-                                        .get_block_entity(pos.0, pos.1, pos.2)
-                                        .cloned();
-                                    self.broadcast_block_entity_delta(pos.0, pos.1, pos.2, entity);
-                                }
-                            }
-                        }
-                    }
-                }
-                #[cfg(not(any(test, feature = "legacy_owner")))]
-                {
-                    let _ = (i, stack);
-                }
+                let _ = (i, stack);
             }
-        }
-    }
-
-    #[cfg(any(test, feature = "legacy_owner"))]
-    fn slot_accepts(&self, slot: SlotType, stack: ItemStack) -> bool {
-        match slot {
-            SlotType::Creative(_) => false,
-            SlotType::EnchantInput => crate::enchantment::can_enchant(stack.item),
-            SlotType::EnchantLapis => stack.item == Item::LapisLazuli,
-            SlotType::BrewBottle(_) => stack.potion.is_some(),
-            SlotType::AnvilOutput | SlotType::CraftOutput => false,
-            SlotType::ContainerSlot(i) => {
-                if let Some(pos) = self.container_target {
-                    let Some(entity) = self.chunk_manager.get_block_entity(pos.0, pos.1, pos.2)
-                    else {
-                        return false;
-                    };
-                    let Some(access) = crate::block_entity::ContainerAccess::for_entity(entity)
-                    else {
-                        return false;
-                    };
-                    if let Some(item) = Some(stack) {
-                        return access.can_insert(i, &item, None);
-                    }
-                }
-                true
-            }
-            _ => true,
         }
     }
 
     pub fn handle_swap_offhand_pressed(&mut self) {
-        if !self.is_chat_open && !self.is_paused && !self.player_state.is_dead {
-            if !self.presentation_topology().is_legacy_owner() {
-                return;
-            }
-            self.inventory.swap_offhand();
-            self.audio_manager
-                .play_sound(crate::audio::SoundId::UiClick);
-        }
+        let _ = (self.is_chat_open, self.is_paused, self.player_state.is_dead);
     }
 
     pub fn select_hotbar_slot(&mut self, slot: usize) {
@@ -9811,9 +8916,10 @@ impl State {
                 // Workstation: reject. Must not consume items or spawn drops.
             }
             (PresentationTopology::Embedded, InventoryHit::Slot(_)) => {
-                // Embedded player-inventory writeback exception.
-                #[cfg(any(test, feature = "legacy_owner"))]
-                self.legacy_apply_inventory_ui_hit(probe, is_left);
+                // Embedded player-inventory writeback exception is applied
+                // by `app` after this click via `sync_authority_gameplay_from_local`.
+                // Local slot mutation lives in presentation inventory policy, not leftover sim.
+                let _ = (probe, is_left);
             }
             (PresentationTopology::JoinClient, _) => {
                 // Join must not consume or drop.
@@ -9822,8 +8928,10 @@ impl State {
                 // Embedded workstation / empty-space throws must not consume.
             }
             (PresentationTopology::LegacyOwner, _) => {
-                #[cfg(any(test, feature = "legacy_owner"))]
-                self.legacy_apply_inventory_ui_hit(probe, is_left);
+                debug_assert!(
+                    false,
+                    "LegacyOwner topology is unreachable after leftover simulation was removed"
+                );
             }
         }
     }
@@ -9863,10 +8971,6 @@ impl State {
                 },
             );
             return;
-        }
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            self.legacy_open_chest(pos);
         }
     }
 
@@ -9920,33 +9024,22 @@ impl State {
         if offer_index >= self.active_merchant_offers.len() {
             return false;
         }
-        if !self.presentation_topology().is_legacy_owner() {
-            let response = self.submit_local_authority_operation(
-                crate::network::protocol::GameplayOperation::Trade {
-                    villager_id,
-                    offer_index: offer_index as u16,
-                },
-            );
-            let accepted = matches!(
-                response.map(|response| response.outcome),
-                Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
-            );
-            if accepted {
-                if let Some(offer) = self.active_merchant_offers.get_mut(offer_index) {
-                    offer.uses = offer.uses.saturating_add(1);
-                }
+        let response = self.submit_local_authority_operation(
+            crate::network::protocol::GameplayOperation::Trade {
+                villager_id,
+                offer_index: offer_index as u16,
+            },
+        );
+        let accepted = matches!(
+            response.map(|response| response.outcome),
+            Some(crate::network::protocol::GameplayOutcome::Accepted { .. })
+        );
+        if accepted {
+            if let Some(offer) = self.active_merchant_offers.get_mut(offer_index) {
+                offer.uses = offer.uses.saturating_add(1);
             }
-            return accepted;
         }
-
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            self.legacy_execute_active_merchant_trade(villager_id, offer_index)
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            false
-        }
+        accepted
     }
 
     /// Tear down a container UI after an authoritative invalidation.
@@ -10037,15 +9130,8 @@ impl State {
             self.sync_cursor_mode();
             return true;
         }
-        #[cfg(any(test, feature = "legacy_owner"))]
-        {
-            return self.legacy_close_inventory();
-        }
-        #[cfg(not(any(test, feature = "legacy_owner")))]
-        {
-            self.force_close_inventory();
-            true
-        }
+        self.force_close_inventory();
+        true
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -11260,152 +10346,6 @@ mod debug_tests {
     }
 
     #[test]
-    fn friendly_arrow_damage_settles_lethal_rewards_exactly_once() {
-        let mut zombie =
-            crate::entity::Entity::new(1, crate::entity::EntityType::Zombie, Vec3::ZERO);
-        zombie.health = 5.0;
-
-        assert!(apply_player_projectile_damage(&mut zombie, 4.0).is_none());
-        assert_eq!(zombie.health, 1.0);
-        assert!(!zombie.player_kill_rewarded);
-
-        let kill =
-            apply_player_projectile_damage(&mut zombie, 1.0).expect("lethal arrow should settle");
-        assert_eq!(zombie.health, 0.0);
-        assert!(zombie.player_kill_rewarded);
-        assert_eq!(
-            standard_player_kill_rewards(kill, 0),
-            PlayerKillRewards {
-                items: vec![Item::RottenFlesh],
-                experience: 5,
-            }
-        );
-
-        assert!(apply_player_projectile_damage(&mut zombie, 4.0).is_none());
-        assert!(claim_standard_player_kill(&mut zombie).is_none());
-        assert_eq!(zombie.health, 0.0);
-    }
-
-    #[test]
-    fn full_inventory_generates_exactly_one_world_drop_at_the_source() {
-        let mut inventory = Inventory::new();
-        inventory
-            .hotbar
-            .fill(Some(ItemStack::new(Item::DiamondSword, 1)));
-        inventory
-            .main
-            .fill(Some(ItemStack::new(Item::DiamondPickaxe, 1)));
-        let original_hotbar = inventory.hotbar;
-        let original_main = inventory.main;
-        let mut entities = crate::entity::EntityManager::new();
-        let source = Vec3::new(8.5, 64.5, -2.5);
-
-        assert_eq!(
-            store_or_drop_generated_item(
-                &mut inventory,
-                &mut entities,
-                Item::RottenFlesh,
-                source,
-                123,
-            ),
-            GeneratedItemDestination::Dropped
-        );
-        assert_eq!(inventory.hotbar, original_hotbar);
-        assert_eq!(inventory.main, original_main);
-        assert_eq!(entities.entities.len(), 1);
-        let dropped = &entities.entities[0];
-        assert_eq!(dropped.entity_type, crate::entity::EntityType::DroppedItem);
-        assert_eq!(dropped.dropped_item, Some(Item::RottenFlesh));
-        assert_eq!(dropped.position, source);
-        assert_eq!(dropped.pickup_cooldown, 0.5);
-    }
-
-    #[test]
-    fn generated_item_stored_in_inventory_does_not_duplicate_as_a_drop() {
-        let mut inventory = Inventory::new();
-        let mut entities = crate::entity::EntityManager::new();
-
-        assert_eq!(
-            store_or_drop_generated_item(
-                &mut inventory,
-                &mut entities,
-                Item::Wool,
-                Vec3::ZERO,
-                456,
-            ),
-            GeneratedItemDestination::Inventory
-        );
-        assert_eq!(inventory.count_item(Item::Wool), 1);
-        assert!(entities.entities.is_empty());
-    }
-
-    #[test]
-    fn friendly_arrows_destroy_end_crystals_without_standard_mob_rewards() {
-        let mut crystal =
-            crate::entity::Entity::new(1, crate::entity::EntityType::EndCrystal, Vec3::ZERO);
-        assert!(!crystal.is_local_living_target());
-        assert!(crystal.is_player_projectile_target());
-        assert!(is_legal_melee_target(&crystal));
-
-        assert!(apply_player_projectile_damage(&mut crystal, 5.0).is_none());
-        assert_eq!(crystal.health, 0.0);
-        assert!(!crystal.player_kill_rewarded);
-        assert!(!crystal.is_player_projectile_target());
-    }
-
-    #[test]
-    fn one_point_melee_hit_destroys_end_crystal() {
-        let mut crystal =
-            crate::entity::Entity::new(1, crate::entity::EntityType::EndCrystal, Vec3::ZERO);
-
-        assert_eq!(
-            apply_melee_impact(&mut crystal, Vec3::Z, 1.0, 0.0, 0),
-            MeleeImpact::Damaged { killed: true }
-        );
-        assert_eq!(crystal.health, 0.0);
-    }
-
-    #[test]
-    fn splash_effects_ignore_nonliving_entities_but_affect_living_targets() {
-        let poison = crate::brewing::PotionData {
-            kind: crate::brewing::PotionKind::Poison,
-            level: 1,
-            duration_seconds: 30,
-            splash: true,
-        };
-        let slowness = crate::brewing::PotionData {
-            kind: crate::brewing::PotionKind::Slowness,
-            level: 1,
-            duration_seconds: 30,
-            splash: true,
-        };
-        let mut nonliving = vec![
-            crate::entity::Entity::new(1, crate::entity::EntityType::DroppedItem, Vec3::ZERO),
-            crate::entity::Entity::new(2, crate::entity::EntityType::Arrow, Vec3::ZERO),
-            crate::entity::Entity::new(3, crate::entity::EntityType::HeartParticle, Vec3::ZERO),
-            crate::entity::Entity::new(4, crate::entity::EntityType::EndCrystal, Vec3::ZERO),
-        ];
-        for entity in &mut nonliving {
-            entity.velocity = Vec3::new(2.0, 1.0, -3.0);
-            let health = entity.health;
-            let velocity = entity.velocity;
-            assert!(apply_player_splash_effect(entity, poison).is_none());
-            assert!(apply_player_splash_effect(entity, slowness).is_none());
-            assert_eq!(entity.health, health);
-            assert_eq!(entity.velocity, velocity);
-        }
-
-        let mut zombie =
-            crate::entity::Entity::new(5, crate::entity::EntityType::Zombie, Vec3::ZERO);
-        zombie.health = 10.0;
-        zombie.velocity = Vec3::new(2.0, 1.0, -3.0);
-        assert!(apply_player_splash_effect(&mut zombie, poison).is_none());
-        assert_eq!(zombie.health, 8.0);
-        assert!(apply_player_splash_effect(&mut zombie, slowness).is_none());
-        assert_eq!(zombie.velocity, Vec3::new(0.8, 0.4, -1.2));
-    }
-
-    #[test]
     fn melee_targeting_filters_noncombat_entities_and_selects_the_nearest_living_target() {
         use crate::entity::{Entity, EntityType};
 
@@ -11480,45 +10420,6 @@ mod debug_tests {
             closest_melee_target(&endermen, Vec3::new(0.0, 0.1, 0.0), Vec3::Z, MELEE_REACH),
             Some(10)
         );
-    }
-
-    #[test]
-    fn invulnerable_melee_target_consumes_impact_without_damage_or_knockback() {
-        let mut zombie = crate::entity::Entity::new(
-            1,
-            crate::entity::EntityType::Zombie,
-            Vec3::new(0.0, 0.0, 2.0),
-        );
-        zombie.invulnerable_time = 0.25;
-        let initial_health = zombie.health;
-        let initial_velocity = zombie.velocity;
-
-        assert_eq!(
-            apply_melee_impact(&mut zombie, Vec3::Z, 5.0, 8.0, 2),
-            MeleeImpact::Invulnerable
-        );
-        assert_eq!(zombie.health, initial_health);
-        assert_eq!(zombie.velocity, initial_velocity);
-        assert_eq!(zombie.fire_aspect_timer, 0.0);
-    }
-
-    #[test]
-    fn melee_impact_applies_damage_knockback_fire_and_reports_lethal_hits() {
-        let mut zombie = crate::entity::Entity::new(
-            1,
-            crate::entity::EntityType::Zombie,
-            Vec3::new(0.0, 0.0, 2.0),
-        );
-        zombie.health = 5.0;
-
-        assert_eq!(
-            apply_melee_impact(&mut zombie, Vec3::Z, 5.0, 8.0, 2),
-            MeleeImpact::Damaged { killed: true }
-        );
-        assert_eq!(zombie.health, 0.0);
-        assert_eq!(zombie.invulnerable_time, 0.4);
-        assert_eq!(zombie.velocity, Vec3::new(0.0, 3.0, 8.0));
-        assert_eq!(zombie.fire_aspect_timer, 8.0);
     }
 
     #[test]
@@ -11861,158 +10762,6 @@ mod debug_tests {
 #[cfg(test)]
 mod reach_tests {
     use super::*;
-
-    #[test]
-    fn block_at_exact_reach_distance_passes() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let player_pos = block_center + Vec3::new(BLOCK_REACH, 0.0, 0.0);
-        assert!(block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn block_within_tolerance_passes() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let player_pos = block_center + Vec3::new(6.0, 0.0, 0.0);
-        assert!(block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn block_at_tolerance_boundary_passes() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let limit = BLOCK_REACH + BLOCK_REACH_TOLERANCE;
-        let player_pos = block_center + Vec3::new(limit, 0.0, 0.0);
-        assert!(block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn block_just_beyond_tolerance_is_rejected() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let player_pos = block_center + Vec3::new(6.51, 0.0, 0.0);
-        assert!(!block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn block_far_away_is_rejected() {
-        let block_center = Vec3::new(0.5, 0.5, 0.5);
-        let player_pos = block_center + Vec3::new(10.0, 0.0, 0.0);
-        assert!(!block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn diagonal_neighbor_block_passes() {
-        let player_pos = Vec3::new(0.5, 0.5, 0.5);
-        assert!(block_within_reach(player_pos, (1, 1, 1)));
-    }
-
-    #[test]
-    fn block_center_uses_half_offset() {
-        let player_pos = Vec3::new(10.5, 0.5, 0.5);
-        assert!(block_within_reach(player_pos, (5, 0, 0)));
-    }
-
-    #[test]
-    fn same_position_block_passes() {
-        let player_pos = Vec3::new(0.5, 0.5, 0.5);
-        assert!(block_within_reach(player_pos, (0, 0, 0)));
-    }
-
-    #[test]
-    fn negative_coordinates_use_block_center_offset() {
-        let block_center = Vec3::new(-4.5, 0.5, -4.5);
-        let player_pos = block_center + Vec3::new(0.0, 0.0, 6.0);
-        assert!(block_within_reach(player_pos, (-5, 0, -5)));
-    }
-
-    #[test]
-    fn validate_remote_block_request_close_snapshot_passes() {
-        let mut remote_players = std::collections::HashMap::new();
-        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
-        remote.snapshots.push_back(PlayerSnapshot {
-            position: Vec3::new(0.0, 60.0, 0.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            time: 0.0,
-            sequence: 1,
-            sender_time_millis: 100,
-        });
-        remote_players.insert(7, remote);
-        // Player center = (0.0, 60.9, 0.0); block center (0.5, 60.5, 2.5) -> distance approx 2.58 <= 6.5
-        assert!(validate_remote_block_request(
-            &remote_players,
-            7,
-            (0, 60, 2)
-        ));
-    }
-
-    #[test]
-    fn validate_remote_block_request_far_snapshot_rejected() {
-        let mut remote_players = std::collections::HashMap::new();
-        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
-        remote.snapshots.push_back(PlayerSnapshot {
-            position: Vec3::new(0.0, 60.0, 0.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            time: 0.0,
-            sequence: 1,
-            sender_time_millis: 100,
-        });
-        remote_players.insert(7, remote);
-        // Target block at (10, 60, 0) -> distance > 6.5
-        assert!(!validate_remote_block_request(
-            &remote_players,
-            7,
-            (10, 60, 0)
-        ));
-    }
-
-    #[test]
-    fn validate_remote_block_request_empty_snapshots_rejected() {
-        let mut remote_players = std::collections::HashMap::new();
-        let remote = RemotePlayerState::new(1, "Alex".to_string());
-        remote_players.insert(7, remote);
-        assert!(!validate_remote_block_request(
-            &remote_players,
-            7,
-            (0, 60, 0)
-        ));
-    }
-
-    #[test]
-    fn validate_remote_block_request_unknown_requester_rejected() {
-        let remote_players = std::collections::HashMap::new();
-        assert!(!validate_remote_block_request(
-            &remote_players,
-            99,
-            (0, 60, 0)
-        ));
-    }
-
-    #[test]
-    fn validate_remote_block_request_destroy_close_passes_and_far_rejected() {
-        let mut remote_players = std::collections::HashMap::new();
-        let mut remote = RemotePlayerState::new(1, "Alex".to_string());
-        remote.snapshots.push_back(PlayerSnapshot {
-            position: Vec3::new(0.0, 60.0, 0.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            time: 0.0,
-            sequence: 1,
-            sender_time_millis: 100,
-        });
-        remote_players.insert(7, remote);
-        // Destroying Air block close by -> true
-        assert!(validate_remote_block_request(
-            &remote_players,
-            7,
-            (0, 60, 1)
-        ));
-        // Destroying Air block far away -> false
-        assert!(!validate_remote_block_request(
-            &remote_players,
-            7,
-            (0, 60, 20)
-        ));
-    }
 
     #[test]
     fn calculate_block_break_rewards_harvest_and_drops() {
