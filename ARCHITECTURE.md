@@ -163,7 +163,8 @@ pass.
 Terrain is derived only:
 
 ```text
-ChunkManager -> section halo snapshot -> Rayon mesh -> identity check
+ChunkManager -> 9-column halo snapshot -> Rayon mesh (the currently
+  selected LOD; L1/L2 wait until first selected) -> identity check
   -> GPU region upload -> visibility + LOD -> wgpu
 ```
 
@@ -190,6 +191,12 @@ legacy dense constant) and not hard-coded `0..256`.
 
 Unloaded columns are not air: entity physics freezes for a tick if the
 current or predicted AABB touches missing terrain.
+
+Load lighting (`propagate_chunk_lighting`) seeds from the locked column and
+up to eight neighbors (faces, emitters, and local darker neighbors) instead of
+a per-voxel HashMap lookup. Section mesh halos copy from those same column
+refs. Runtime meshing generates only the currently selected LOD; coarser
+LODs are filled the first time the camera selects them.
 
 - `dimension.rs` picks generation per dimension.
 - `worldgen/` owns climate, density, surfaces, caves, ores, features.

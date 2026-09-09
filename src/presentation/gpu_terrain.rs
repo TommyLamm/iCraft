@@ -410,11 +410,22 @@ pub struct GpuMeshLevel {
     pub(crate) bounds: Option<MeshBounds>,
 }
 
+impl GpuMeshLevel {
+    pub(crate) fn empty() -> Self {
+        Self {
+            opaque: GpuMeshLayer::empty(),
+            transparent: GpuMeshLayer::empty(),
+            bounds: None,
+        }
+    }
+}
+
 pub struct GpuSectionMesh {
     pub(crate) levels: Option<[GpuMeshLevel; 3]>,
     pub(crate) connectivity: crate::culling::SectionConnectivityState,
     pub(crate) revision: u64,
     pub(crate) meshed_revision: u64,
+    pub(crate) built_lods: u8,
 }
 
 impl GpuSectionMesh {
@@ -424,6 +435,7 @@ impl GpuSectionMesh {
             connectivity: crate::culling::SectionConnectivityState::Invalid,
             revision: 0,
             meshed_revision: u64::MAX,
+            built_lods: 0,
         }
     }
 
@@ -440,8 +452,28 @@ impl GpuSectionMesh {
         self.levels.as_ref().map(|levels| &levels[lod as usize])
     }
 
+    pub(crate) fn lod_is_built(&self, lod: LodLevel) -> bool {
+        lod.is_in(self.built_lods)
+    }
+
+    pub(crate) fn level_for_draw(&self, lod: LodLevel) -> Option<(LodLevel, &GpuMeshLevel)> {
+        for candidate in [lod, LodLevel::L0, LodLevel::L1, LodLevel::L2] {
+            if let Some(level) = self.level(candidate) {
+                if level.opaque.bounds.is_some() || level.transparent.bounds.is_some() {
+                    return Some((candidate, level));
+                }
+            }
+        }
+        None
+    }
+
     pub(crate) fn finest_bounds(&self) -> Option<MeshBounds> {
-        self.level(LodLevel::L0).and_then(|level| level.bounds)
+        for lod in [LodLevel::L0, LodLevel::L1, LodLevel::L2] {
+            if let Some(bounds) = self.level(lod).and_then(|level| level.bounds) {
+                return Some(bounds);
+            }
+        }
+        None
     }
 
     pub(crate) fn total_indices(&self) -> usize {

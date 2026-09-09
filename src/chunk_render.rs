@@ -295,6 +295,8 @@ pub struct SectionMeshBundle {
     pub levels: [ChunkLodMeshData; 3],
     pub bounds: Option<MeshBounds>,
     pub connectivity: crate::culling::SectionConnectivity,
+    /// Bitmask of LODs actually generated (`LodLevel::MASK_*`).
+    pub built_lods: u8,
 }
 
 impl SectionMeshBundle {
@@ -550,6 +552,21 @@ pub enum LodLevel {
     L1,
     /// Coarse terrain outline.
     L2,
+}
+
+impl LodLevel {
+    pub const MASK_L0: u8 = 1 << 0;
+    pub const MASK_L1: u8 = 1 << 1;
+    pub const MASK_L2: u8 = 1 << 2;
+    pub const MASK_ALL: u8 = Self::MASK_L0 | Self::MASK_L1 | Self::MASK_L2;
+
+    pub const fn mask(self) -> u8 {
+        1 << (self as u8)
+    }
+
+    pub const fn is_in(self, mask: u8) -> bool {
+        mask & self.mask() != 0
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1596,15 +1613,12 @@ mod tests {
 
     #[test]
     fn debug_negative_world_y_encoding() {
-        let vertex = TerrainVertex::new(
-            [4.0, -32.0, 6.0],
-            [0.0; 2],
-            [0.0; 2],
-            15.0,
-            1.0,
-            (0, 0),
-        );
+        let vertex = TerrainVertex::new([4.0, -32.0, 6.0], [0.0; 2], [0.0; 2], 15.0, 1.0, (0, 0));
         let decoded = vertex.world_position((0, 0));
-        assert!((decoded.y + 32.0).abs() < 0.05, "negative world Y must round-trip, got {}", decoded.y);
+        assert!(
+            (decoded.y + 32.0).abs() < 0.05,
+            "negative world Y must round-trip, got {}",
+            decoded.y
+        );
     }
 }

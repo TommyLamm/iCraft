@@ -287,15 +287,25 @@ impl ChunkManager {
         None
     }
 
+    /// Center column plus the eight neighbors. Lighting seed and section halo
+    /// capture this once so the hot loop never does a per-voxel HashMap get.
+    pub fn column_neighborhood(&self, cx: i32, cz: i32) -> [[Option<&Chunk>; 3]; 3] {
+        std::array::from_fn(|iz| {
+            std::array::from_fn(|ix| self.chunks.get(&(cx + ix as i32 - 1, cz + iz as i32 - 1)))
+        })
+    }
+
     /// Captures the complete 18^3 worker input for a section. Missing chunks
     /// and out-of-range Y use an explicit air/zero-light sentinel; sky above
     /// the dimension retains full skylight only when the dimension has sky.
     pub fn capture_section_halo(&self, key: SectionKey) -> SectionHaloSnapshot {
         let height = self.dimension.height();
+        let has_sky = self.dimension.has_sky_light();
+        let neighborhood = self.column_neighborhood(key.cx, key.cz);
         SectionHaloSnapshot::from_chunk(key, |wx, wy, wz| {
             if !height.contains_y(wy) {
                 return MeshVoxel {
-                    sky: if wy >= height.max_y_exclusive() && self.dimension.has_sky_light() {
+                    sky: if wy >= height.max_y_exclusive() && has_sky {
                         15
                     } else {
                         0
@@ -303,18 +313,24 @@ impl ChunkManager {
                     ..MeshVoxel::default()
                 };
             }
-            let Some(((cx, cz), (bx, by, bz))) = self.world_to_local(wx, wy, wz) else {
+            let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+            let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+            let dx = cx - key.cx;
+            let dz = cz - key.cz;
+            if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) {
+                return MeshVoxel::default();
+            }
+            let Some(chunk) = neighborhood[(dz + 1) as usize][(dx + 1) as usize] else {
                 return MeshVoxel::default();
             };
-            let Some(chunk) = self.chunks.get(&(cx, cz)) else {
-                return MeshVoxel::default();
-            };
+            let bx = wx.rem_euclid(CHUNK_WIDTH as i32) as usize;
+            let bz = wz.rem_euclid(CHUNK_DEPTH as i32) as usize;
             MeshVoxel {
-                block: chunk.get_block(bx as i32, by, bz as i32),
-                state: chunk.get_block_state(bx as i32, by, bz as i32),
-                sky: chunk.get_sky_light(bx, by, bz),
-                block_light: chunk.get_block_light(bx, by, bz),
-                raw_fluid: chunk.get_fluid_level(bx, by, bz),
+                block: chunk.get_block_local(bx, wy, bz),
+                state: chunk.get_block_state(bx as i32, wy, bz as i32),
+                sky: chunk.get_sky_light(bx, wy, bz),
+                block_light: chunk.get_block_light(bx, wy, bz),
+                raw_fluid: chunk.get_fluid_level(bx, wy, bz),
             }
         })
     }
@@ -1035,6 +1051,23 @@ mod tests {
         let mut interior = HashSet::new();
         mark_section_mesh_dependencies(&mut interior, 7, 7, 7);
         assert_eq!(interior, [SectionKey::new(0, 0, 0)].into_iter().collect());
+    }
+
+    #[test]
+    fn capture_section_halo_uses_neighbor_columns() {
+        let mut manager = ChunkManager::new(0);
+        let mut center = Chunk::empty(0, 0);
+        let mut east = Chunk::empty(1, 0);
+        center.set_block_local(15, 8, 8, BlockType::Stone);
+        east.set_block_local(0, 8, 8, BlockType::Dirt);
+        east.set_sky_light(0, 8, 8, 9);
+        manager.chunks.insert((0, 0), center);
+        manager.chunks.insert((1, 0), east);
+
+        let halo = manager.capture_section_halo(SectionKey::new(0, 0, 0));
+        assert_eq!(halo.get_block(16, 9, 9), BlockType::Stone);
+        assert_eq!(halo.get_block(17, 9, 9), BlockType::Dirt);
+        assert_eq!(halo.get(17, 9, 9).sky, 9);
     }
 
     #[test]
