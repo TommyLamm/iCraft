@@ -5,16 +5,15 @@
 //! ContainerClick conservation itself is covered by plan 02.
 
 use icraft::presentation_inventory_policy::{
-    presentation_inventory_decision, should_mutate_presentation_world,
-    should_sync_authority_inventory_from_local, should_writeback_after_inventory_click,
-    PresentationInventoryAction, PresentationInventoryTarget,
+    PresentationInventoryAction, PresentationInventoryTarget, PresentationTopology,
 };
 
 #[test]
 fn embedded_gate_sends_container_op_and_rejects_world_mutations() {
-    assert!(!should_mutate_presentation_world(true, false));
+    let topology = PresentationTopology::Embedded;
+    assert!(!topology.should_mutate_world());
     assert_eq!(
-        presentation_inventory_decision(true, false, PresentationInventoryTarget::ContainerSlot),
+        topology.inventory_decision(PresentationInventoryTarget::ContainerSlot),
         PresentationInventoryAction::SendAuthorityOp
     );
     for target in [
@@ -24,54 +23,39 @@ fn embedded_gate_sends_container_op_and_rejects_world_mutations() {
         PresentationInventoryTarget::UnsupportedBreak,
     ] {
         assert_eq!(
-            presentation_inventory_decision(true, false, target),
+            topology.inventory_decision(target),
             PresentationInventoryAction::Reject,
             "{target:?}"
         );
     }
-    assert!(!should_writeback_after_inventory_click(
-        true,
-        false,
-        Some(PresentationInventoryTarget::ContainerSlot)
-    ));
+    assert!(!topology.should_writeback_after_inventory_click(Some(
+        PresentationInventoryTarget::ContainerSlot
+    )));
 }
 
 #[test]
 fn join_client_never_calls_inventory_writeback() {
-    assert!(!should_sync_authority_inventory_from_local(false, true));
-    assert!(!should_writeback_after_inventory_click(
-        false,
-        true,
-        Some(PresentationInventoryTarget::PlayerInventory)
-    ));
-    assert!(!should_mutate_presentation_world(false, true));
+    let topology = PresentationTopology::JoinClient;
+    assert!(!topology.should_sync_inventory());
+    assert!(!topology.should_writeback_after_inventory_click(Some(
+        PresentationInventoryTarget::PlayerInventory
+    )));
+    assert!(!topology.should_mutate_world());
     assert_eq!(
-        presentation_inventory_decision(false, true, PresentationInventoryTarget::Pickup),
+        topology.inventory_decision(PresentationInventoryTarget::Pickup),
         PresentationInventoryAction::Reject
     );
 }
 
 #[test]
-fn no_runtime_must_not_invoke_writeback() {
-    assert!(!should_sync_authority_inventory_from_local(false, false));
-    assert!(!should_writeback_after_inventory_click(
-        false,
-        false,
-        Some(PresentationInventoryTarget::PlayerInventory)
-    ));
-    assert!(should_mutate_presentation_world(false, false));
-}
-
-#[test]
 fn embedded_player_inventory_writeback_is_the_only_exception() {
+    let topology = PresentationTopology::Embedded;
     assert_eq!(
-        presentation_inventory_decision(true, false, PresentationInventoryTarget::PlayerInventory),
+        topology.inventory_decision(PresentationInventoryTarget::PlayerInventory),
         PresentationInventoryAction::LocalMutate
     );
-    assert!(should_sync_authority_inventory_from_local(true, false));
-    assert!(should_writeback_after_inventory_click(
-        true,
-        false,
-        Some(PresentationInventoryTarget::PlayerInventory)
-    ));
+    assert!(topology.should_sync_inventory());
+    assert!(topology.should_writeback_after_inventory_click(Some(
+        PresentationInventoryTarget::PlayerInventory
+    )));
 }
