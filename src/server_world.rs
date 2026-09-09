@@ -335,6 +335,19 @@ impl ServerWorld {
         columns.contains(&(x.div_euclid(16), z.div_euclid(16)))
     }
 
+    /// Serialize one resident column for persistence. Failed-restore
+    /// coordinates are omitted so `save_all` cannot generate-over-save.
+    pub fn chunk_save_payload(&self, cx: i32, cz: i32) -> Option<ChunkSaveData> {
+        if self.failed_restore_chunks.contains(&(cx, cz)) {
+            return None;
+        }
+        let chunk = self.chunks.chunks.get(&(cx, cz))?;
+        let metadata = self.redstone.collect_chunk_metadata(&self.chunks, cx, cz);
+        let mut data = ChunkSaveData::from_chunk_with_redstone(chunk, &metadata).ok()?;
+        data.mutation_revision = self.chunk_revision(cx, cz);
+        Some(data)
+    }
+
     /// Drop columns outside `keep` after the caller has flushed dirty ones
     /// that this session restored or generated. A failed serialize/save leaves
     /// the column resident so player builds are not discarded.
@@ -357,14 +370,9 @@ impl ServerWorld {
             }
             let dirty = self.chunks.dirty_chunks.is_dirty(cx, cz);
             if dirty {
-                let Some(chunk) = self.chunks.chunks.get(&(cx, cz)) else {
+                let Some(data) = self.chunk_save_payload(cx, cz) else {
                     continue;
                 };
-                let metadata = self.redstone.collect_chunk_metadata(&self.chunks, cx, cz);
-                let Ok(mut data) = ChunkSaveData::from_chunk_with_redstone(chunk, &metadata) else {
-                    continue;
-                };
-                data.mutation_revision = self.chunk_revision(cx, cz);
                 if flush(cx, cz, data).is_err() {
                     continue;
                 }

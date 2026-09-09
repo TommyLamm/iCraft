@@ -245,10 +245,19 @@ configured `world_dir` (default `world/`).
 
 Writes are atomic. Chunk restore is fail-closed: corrupt/empty/oversized/
 dimension-inconsistent streams error; the column is never generated or
-saved over (`ServerWorld::failed_restore_chunks`). While `ServerRuntime`
-owns a world it is the sole writer of `mutation_revisions.bin`. Desktop
-world paths go through `validated_world_path` (no symlink escape from
-`saves/`).
+saved over (`ServerWorld::failed_restore_chunks`). Autosave and shutdown
+flush only `dirty_chunks` (plus eviction of unkept dirty columns), batched
+per region file so one region is rewritten once. `SaveManager` reuses
+`region_cache` on write when the on-disk length still matches the last
+observed snapshot; a truncated or corrupt region still fail-closes and
+leaves `.bin.bak` semantics unchanged. Disk chunk streams use zlib level 1
+(`Compression::fast`); the wrapper is unchanged so older level-6 payloads
+still inflate. Live `ChunkData` projection sends uncompressed terrain
+streams instead of the disk `ChunkSaveData` envelope.
+
+While `ServerRuntime` owns a world it is the sole writer of
+`mutation_revisions.bin`. Desktop world paths go through
+`validated_world_path` (no symlink escape from `saves/`).
 
 ## Code map
 

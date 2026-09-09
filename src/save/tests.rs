@@ -1862,3 +1862,116 @@ fn player_modified_chunk_with_corrupt_inner_zlib_is_not_written_as_generated() {
         .is_err());
     fs::remove_dir_all(world_dir).unwrap();
 }
+
+#[test]
+fn save_chunks_in_writes_same_region_siblings_together() {
+    let world_dir = unique_test_dir("region_batch");
+    let mut manager = SaveManager::new(&world_dir);
+    manager
+        .save_chunks_in(
+            Dimension::Overworld,
+            [
+                (0, 0, same_region_chunk_data(0, 0, BlockType::Obsidian)),
+                (1, 0, same_region_chunk_data(1, 0, BlockType::StoneBrick)),
+            ],
+        )
+        .unwrap();
+    drop(manager);
+
+    let mut restarted = SaveManager::new(&world_dir);
+    assert_saved_marker(&mut restarted, 0, 0, BlockType::Obsidian);
+    assert_saved_marker(&mut restarted, 1, 0, BlockType::StoneBrick);
+    let region_path = world_dir.join("regions").join("r.0.0.bin");
+    let backup_path = region_path.with_extension("bin.bak");
+    assert!(
+        !backup_path.exists(),
+        "first create of a region must not invent a .bin.bak"
+    );
+    restarted
+        .save_chunk_in(
+            Dimension::Overworld,
+            2,
+            0,
+            same_region_chunk_data(2, 0, BlockType::Brick),
+        )
+        .unwrap();
+    assert!(
+        backup_path.exists(),
+        "first replacement of an existing region still creates .bin.bak once"
+    );
+    fs::remove_dir_all(world_dir).unwrap();
+}
+
+#[test]
+fn load_region_for_write_reuses_cache_when_the_file_is_gone() {
+    let world_dir = unique_test_dir("region_cache_write_hit");
+    let mut manager = SaveManager::new(&world_dir);
+    manager
+        .save_chunk_in(
+            Dimension::Overworld,
+            0,
+            0,
+            same_region_chunk_data(0, 0, BlockType::Brick),
+        )
+        .unwrap();
+    let region_path = world_dir.join("regions").join("r.0.0.bin");
+    fs::remove_file(&region_path).unwrap();
+    manager
+        .save_chunk_in(
+            Dimension::Overworld,
+            1,
+            0,
+            same_region_chunk_data(1, 0, BlockType::Cobblestone),
+        )
+        .unwrap();
+    assert_saved_marker(&mut manager, 0, 0, BlockType::Brick);
+    assert_saved_marker(&mut manager, 1, 0, BlockType::Cobblestone);
+    fs::remove_dir_all(world_dir).unwrap();
+}
+
+#[test]
+fn network_terrain_payload_is_uncompressed_and_restores() {
+    let mut chunk = Chunk::new(0, 0);
+    chunk.set_block_local(4, 70, 4, BlockType::GoldOre);
+    let payload = ChunkSaveData::network_terrain_payload(&chunk).unwrap();
+    assert_eq!(
+        payload.blocks.len(),
+        destination_voxel_count(&chunk),
+        "projection must send raw voxels, not a zlib save stream"
+    );
+    assert_eq!(payload.block_states.len(), payload.blocks.len());
+    assert_eq!(payload.fluid_levels.len(), payload.blocks.len());
+
+    let mut restored = Chunk::empty(0, 0);
+    ChunkSaveData::restore_network_payload(
+        &mut restored,
+        &payload.blocks,
+        &payload.block_states,
+        &payload.fluid_levels,
+        &payload.block_entities,
+    )
+    .unwrap();
+    assert_eq!(restored.get_block_local(4, 70, 4), BlockType::GoldOre);
+}
+
+#[test]
+fn restore_network_payload_still_accepts_disk_zlib_layout() {
+    let mut chunk = Chunk::new(0, 0);
+    chunk.set_block_local(2, 64, 2, BlockType::DiamondOre);
+    let saved = ChunkSaveData::from_chunk(&chunk).unwrap();
+    assert_ne!(
+        saved.blocks.len(),
+        destination_voxel_count(&chunk),
+        "disk save remains zlib-compressed"
+    );
+    let mut restored = Chunk::empty(0, 0);
+    ChunkSaveData::restore_network_payload(
+        &mut restored,
+        &saved.blocks,
+        &saved.block_states,
+        &saved.fluid_levels,
+        &saved.block_entities,
+    )
+    .unwrap();
+    assert_eq!(restored.get_block_local(2, 64, 2), BlockType::DiamondOre);
+}

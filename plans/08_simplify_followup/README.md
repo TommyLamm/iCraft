@@ -57,7 +57,7 @@
 | 05 | [刪熱路徑 `debug-879839.log`](05_remove_hotpath_debug_logs.md) | P0 | 主執行緒／還原不再開檔 | 無 | 已完成 |
 | 06 | [`PresentationTopology` 收成二值](06_presentation_topology_binary.md) | P0 | 點擊／背包少一個不可達模式 | 01 | 待執行 |
 | 07 | [實體狀態 dirty／批次廣播](07_entity_state_dirty_broadcast.md) | P1 | 多人 tick + encode 數量級下降 | 無 | 待執行 |
-| 08 | [Region cache、批次寫、dirty-only autosave](08_region_cache_and_dirty_autosave.md) | P1 | 消滅 N×整檔 rewrite 與 tick zlib | 無 | 待執行 |
+| 08 | [Region cache、批次寫、dirty-only autosave](08_region_cache_and_dirty_autosave.md) | P1 | 消滅 N×整檔 rewrite 與 tick zlib | 無 | 已完成 |
 | 09 | [Checksum 改增量](09_incremental_world_checksum.md) | P1 | 每 tick 每維度少掃全表 | 無 | 已完成 |
 | 10 | [漏斗 cooldown dirty、熔爐索引、紅石 sleep](10_hopper_furnace_redstone_tick.md) | P1 | 安靜世界的 tick 接近「沒事」 | 無 | 已完成 |
 | 11 | [載入光照邊界入隊與 mesh halo／LOD](11_lighting_and_mesh_hotpath.md) | P1 | 走路 hitch 與進圈 CPU | 無 | 待執行 |
