@@ -1,8 +1,8 @@
 //! Plan02: container click is a session-conserving authority transaction.
 //!
 //! Tests submit the same `GameplayOperation::ContainerClick` envelope that
-//! `NetworkServer` builds from `Packet::ContainerClickRequest`. They never
-//! call a typed internal helper as the write path.
+//! live clients send as `GameplayRequest`. They never call a typed internal
+//! helper as the write path.
 
 mod common;
 

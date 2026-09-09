@@ -11017,11 +11017,16 @@ mod debug_tests {
                 session_id: 0,
                 dimension: crate::dimension::Dimension::Overworld as u8,
                 client_revision: 0,
-                operation: crate::network::protocol::GameplayOperation::BlockUse {
+                operation: crate::network::protocol::GameplayOperation::BlockAction {
+                    action: crate::network::protocol::BlockActionKind::Place,
                     x: 8,
                     y: 80,
                     z: 8,
+                    face: [0, 1, 0],
+                    hand: 0,
+                    held: None,
                     block: BlockType::Glass.to_wire(),
+                    look_milli: [0, 0, 1000],
                 },
             })
             .expect("request should enter bounded FIFO");
@@ -11045,7 +11050,7 @@ mod debug_tests {
                     && matches!(
                         response.outcome,
                         crate::network::protocol::GameplayOutcome::Rejected {
-                            reason: crate::network::protocol::RejectReason::Unsupported
+                            reason: crate::network::protocol::RejectReason::InvalidState
                         }
                     )
             )

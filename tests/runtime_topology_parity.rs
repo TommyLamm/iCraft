@@ -9,8 +9,8 @@ use icraft::dimension::Dimension;
 use icraft::entity::EntityType;
 use icraft::inventory::{GameMode, Inventory};
 use icraft::network::protocol::{
-    GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse, ItemWire, RejectReason,
-    SlotRefWire,
+    BlockActionKind, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
+    ItemWire, RejectReason, SlotRefWire,
 };
 use icraft::server_runtime::{
     EmbeddedRuntimeOptions, LocalSessionProfile, LocalSessionStorage, RuntimeInput,
@@ -53,11 +53,16 @@ fn leftover_block_use(session_id: u64, client_revision: u64, request_id: u128) -
         session_id,
         dimension: Dimension::Overworld as u8,
         client_revision,
-        operation: GameplayOperation::BlockUse {
+        operation: GameplayOperation::BlockAction {
+            action: BlockActionKind::Place,
             x: 8,
             y: 80,
             z: 8,
+            face: [0, 1, 0],
+            hand: 0,
+            held: None,
             block: BlockType::DiamondOre.to_wire(),
+            look_milli: [0, 0, 1000],
         },
     }
 }
@@ -849,7 +854,7 @@ fn disabled_singleplayer_drains_local_request_through_fixed_tick_fifo() {
     assert!(matches!(
         response.outcome,
         GameplayOutcome::Rejected {
-            reason: RejectReason::Unsupported
+            reason: RejectReason::InvalidState
         }
     ));
     assert!(!output
@@ -893,7 +898,7 @@ fn listen_runtime_routes_local_response_to_tick_output() {
             matches!(
                 response.outcome,
                 GameplayOutcome::Rejected {
-                    reason: RejectReason::Unsupported
+                    reason: RejectReason::InvalidState
                 }
             )
         })

@@ -609,7 +609,6 @@ pub(crate) struct GameplaySessionState {
     pub(crate) last_server_sequence: ServerSequence,
     pub(crate) response_cache: VecDeque<GameplayResponse>,
     pub(crate) in_flight: HashSet<RequestId>,
-    pub(crate) active_container: Option<(u8, i32, i32, i32)>,
     pub(crate) current_dimension: u8,
 }
 
@@ -622,7 +621,6 @@ impl Default for GameplaySessionState {
             last_server_sequence: 0,
             response_cache: VecDeque::with_capacity(crate::authority::RESPONSE_CACHE_CAPACITY),
             in_flight: HashSet::new(),
-            active_container: None,
             current_dimension: 0,
         }
     }

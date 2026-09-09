@@ -7,8 +7,7 @@ use tokio::time::{self, Instant};
 use super::channels::{HostEventSendError, HostEventSender, ServerConfig, ServerToHost};
 use super::egress::{broadcast_reliably, evict_slow_clients, send_to};
 use super::protocol::{
-    wrap_legacy, Action, GameplayRequest, LegacyGameplay, Packet, PlayerId, RejectReason,
-    PROTOCOL_VERSION,
+    GameplayRequest, Packet, PlayerId, RejectReason, PROTOCOL_VERSION,
 };
 use super::session::{
     packet_bytes, queue_now_ms, queue_stats, reliable_send, reliable_send_and_wait,
@@ -72,21 +71,9 @@ pub(crate) fn prepare_gameplay_request(
     request
 }
 
-pub(crate) fn legacy_gameplay_request(
-    session: &mut ClientSession,
-    leftover: LegacyGameplay,
-    dimension: u8,
-    client_revision: u64,
-) -> Option<GameplayRequest> {
-    Some(prepare_gameplay_request(
-        session,
-        wrap_legacy(session.id, dimension, client_revision, leftover)?,
-    ))
-}
-
-/// Apply transport/session gates once for both native envelopes and legacy
-/// adapters. A rejection is sent with a real server sequence and cached;
-/// accepted requests are forwarded exactly once to the authority channel.
+/// Apply transport/session gates once. A rejection is sent with a real server
+/// sequence and cached; accepted requests are forwarded exactly once to the
+/// authority channel.
 pub(crate) async fn route_gameplay_request<S: HostEventSender>(
     sessions: &Sessions,
     id: PlayerId,
@@ -605,89 +592,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
                             break;
                         }
                     }
-                    Ok(Ok(Packet::BlockChange {
-                        dimension,
-                        revision,
-                        x,
-                        y,
-                        z,
-                        block,
-                        ..
-                    })) => {
-                        let request = {
-                            let mut sessions_guard = sessions.lock().await;
-                            let Some(session) = sessions_guard.get_mut(&id) else {
-                                disconnect_reason = "authenticated session disappeared".into();
-                                break;
-                            };
-                            legacy_gameplay_request(
-                                session,
-                                LegacyGameplay::BlockChange { x, y, z, block },
-                                dimension,
-                                revision,
-                            )
-                            .expect("BlockChange leftover always wraps")
-                        };
-                        if let Err(reason) = route_gameplay_request(
-                            &sessions,
-                            id,
-                            request,
-                            &mut request_rate,
-                            &server_to_host,
-                        )
-                        .await
-                        {
-                            disconnect_reason = reason;
-                            break;
-                        }
-                    }
-                    Ok(Ok(Packet::BlockActionRequest {
-                        action,
-                        x,
-                        y,
-                        z,
-                        block,
-                        held_item,
-                        ..
-                    })) => {
-                        let request = {
-                            let mut sessions_guard = sessions.lock().await;
-                            let Some(session) = sessions_guard.get_mut(&id) else {
-                                disconnect_reason = "authenticated session disappeared".into();
-                                break;
-                            };
-                            legacy_gameplay_request(
-                                session,
-                                LegacyGameplay::BlockAction {
-                                    action,
-                                    x,
-                                    y,
-                                    z,
-                                    block,
-                                    held_item,
-                                },
-                                session.gameplay.current_dimension,
-                                session.gameplay.last_client_revision,
-                            )
-                        };
-                        let Some(request) = request else {
-                            // Action::Use has no BlockAction kind. Do not
-                            // invent Place/StartBreak or fall back to BlockUse.
-                            continue;
-                        };
-                        if let Err(reason) = route_gameplay_request(
-                            &sessions,
-                            id,
-                            request,
-                            &mut request_rate,
-                            &server_to_host,
-                        )
-                        .await
-                        {
-                            disconnect_reason = reason;
-                            break;
-                        }
-                    }
                     Ok(Ok(Packet::ChatMessage { message, .. })) => {
                         if chat_exceeds_display_cap(&message) || !chat_rate.allow() {
                             continue;
@@ -725,145 +629,6 @@ pub(crate) async fn run_client<S: HostEventSender>(
                             break;
                         }
                     }
-                    Ok(Ok(Packet::SleepRequest { x, y, z, .. })) => {
-                        let request = {
-                            let mut sessions_guard = sessions.lock().await;
-                            let Some(session) = sessions_guard.get_mut(&id) else {
-                                disconnect_reason = "authenticated session disappeared".into();
-                                break;
-                            };
-                            let dimension = session.gameplay.current_dimension;
-                            let revision = session.gameplay.last_client_revision;
-                            legacy_gameplay_request(
-                                session,
-                                LegacyGameplay::Sleep { x, y, z },
-                                dimension,
-                                revision,
-                            )
-                            .expect("Sleep leftover always wraps")
-                        };
-                        if let Err(reason) = route_gameplay_request(
-                            &sessions,
-                            id,
-                            request,
-                            &mut request_rate,
-                            &server_to_host,
-                        )
-                        .await
-                        {
-                            disconnect_reason = reason;
-                            break;
-                        }
-                    }
-                    Ok(Ok(Packet::ContainerOpenRequest { dimension, x, y, z, .. })) => {
-                        let request = {
-                            let mut sessions_guard = sessions.lock().await;
-                            let Some(session) = sessions_guard.get_mut(&id) else {
-                                disconnect_reason = "authenticated session disappeared".into();
-                                break;
-                            };
-                            session.gameplay.active_container = Some((dimension, x, y, z));
-                            legacy_gameplay_request(
-                                session,
-                                LegacyGameplay::ContainerOpen { x, y, z },
-                                dimension,
-                                session.gameplay.last_client_revision,
-                            )
-                            .expect("ContainerOpen leftover always wraps")
-                        };
-                        if let Err(reason) = route_gameplay_request(
-                            &sessions,
-                            id,
-                            request,
-                            &mut request_rate,
-                            &server_to_host,
-                        )
-                        .await
-                        {
-                            disconnect_reason = reason;
-                            break;
-                        }
-                    }
-                    Ok(Ok(Packet::ContainerClickRequest {
-                        dimension,
-                        revision,
-                        slot_index,
-                        is_left,
-                        dragged,
-                        ..
-                    })) => {
-                        let request = {
-                            let mut sessions_guard = sessions.lock().await;
-                            let Some(session) = sessions_guard.get_mut(&id) else {
-                                disconnect_reason = "authenticated session disappeared".into();
-                                break;
-                            };
-                            match session.gameplay.active_container {
-                                Some((active_dimension, x, y, z))
-                                    if active_dimension == dimension => {
-                                        legacy_gameplay_request(
-                                            session,
-                                            LegacyGameplay::ContainerClick {
-                                                x,
-                                                y,
-                                                z,
-                                                slot: slot_index,
-                                                is_left,
-                                                dragged,
-                                            },
-                                            dimension,
-                                            revision,
-                                        )
-                                    }
-                                _ => None,
-                            }
-                        };
-                        let Some(request) = request else {
-                            continue;
-                        };
-                        if let Err(reason) = route_gameplay_request(
-                            &sessions,
-                            id,
-                            request,
-                            &mut request_rate,
-                            &server_to_host,
-                        )
-                        .await
-                        {
-                            disconnect_reason = reason;
-                            break;
-                        }
-                    }
-                    Ok(Ok(Packet::ContainerClose { dimension, x, y, z, .. })) => {
-                        let request = {
-                            let mut sessions_guard = sessions.lock().await;
-                            let Some(session) = sessions_guard.get_mut(&id) else {
-                                disconnect_reason = "authenticated session disappeared".into();
-                                break;
-                            };
-                            let request = legacy_gameplay_request(
-                                session,
-                                LegacyGameplay::ContainerClose { x, y, z },
-                                dimension,
-                                session.gameplay.last_client_revision,
-                            )
-                            .expect("ContainerClose leftover always wraps");
-                            session.gameplay.active_container = None;
-                            request
-                        };
-                        if let Err(reason) = route_gameplay_request(
-                            &sessions,
-                            id,
-                            request,
-                            &mut request_rate,
-                            &server_to_host,
-                        )
-                        .await
-                        {
-                            disconnect_reason = reason;
-                            break;
-                        }
-                    }
                     Ok(Ok(Packet::Keepalive { .. })) => {}
                     Ok(Ok(Packet::Disconnect { reason, .. })) => {
                         disconnect_reason = format!("client sent Disconnect: {reason}");
@@ -877,6 +642,11 @@ pub(crate) async fn run_client<S: HostEventSender>(
                         disconnect_reason = format!("timeout: no packet received within {CLIENT_TIMEOUT:?}");
                         break;
                     }
+                    // Leftover inbound request packets (BlockChange-as-request,
+                    // BlockActionRequest, SleepRequest, ContainerOpenRequest,
+                    // ContainerClickRequest, ContainerClose) are dropped. Live
+                    // gameplay uses GameplayRequest. Server→client BlockChange
+                    // projection is egress, not this path.
                     Ok(Ok(_)) => {}
                 }
             }

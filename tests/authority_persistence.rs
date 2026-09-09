@@ -5,6 +5,7 @@ use icraft::entity::EntityManager;
 use icraft::inventory::{GameMode, Inventory};
 use icraft::network::protocol::{
     GameplayOperation, GameplayOutcome, GameplayRequest, PlayerEffectWire,
+    BlockActionKind,
 };
 use icraft::save::{ChunkSaveData, EntitySaveData, PlayerData, SaveManager};
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
@@ -158,11 +159,16 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
                 session_id: 9,
                 dimension: Dimension::Overworld as u8,
                 client_revision: restarted.authority.current_revision(),
-                operation: GameplayOperation::BlockUse {
+                operation: GameplayOperation::BlockAction {
+                    action: BlockActionKind::Place,
                     x: 8,
                     y: 80,
                     z: 8,
+                    face: [0, 1, 0],
+                    hand: 0,
+                    held: None,
                     block: BlockType::DiamondOre.to_wire(),
+                    look_milli: [0, 0, 1000],
                 },
             },
         )
@@ -170,7 +176,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     assert!(matches!(
         response.outcome,
         GameplayOutcome::Rejected {
-            reason: icraft::network::protocol::RejectReason::Unsupported
+            reason: icraft::network::protocol::RejectReason::InvalidState
         }
     ));
     assert_eq!(restarted.authority.world().get_block(8, 80, 8), old);

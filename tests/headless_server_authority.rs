@@ -11,8 +11,8 @@ use icraft::entity::EntityType;
 use icraft::inventory::{Item, ItemStack};
 use icraft::network::client::{ClientToGame, GameToClient, NetworkClient};
 use icraft::network::protocol::{
-    ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest, GameplayResponse,
-    ItemWire, RejectReason,
+    BlockActionKind, ContainerAction, GameplayOperation, GameplayOutcome, GameplayRequest,
+    GameplayResponse, ItemWire, RejectReason, SessionSlotWire,
 };
 use icraft::redstone::Direction;
 use icraft::server_runtime::{ServerProperties, ServerRuntime};
@@ -452,11 +452,20 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
         BLOCK_REQUEST,
         1,
         block_revision,
-        GameplayOperation::BlockUse {
+        GameplayOperation::BlockAction {
+            action: BlockActionKind::Place,
             x: CHEST_POSITION.0,
             y: CHEST_POSITION.1,
             z: CHEST_POSITION.2,
+            face: [0, 1, 0],
+            hand: 0,
+            held: Some(SessionSlotWire::new(
+                ItemWire::from_stack(&ItemStack::new(Item::Stone, 1)),
+                0,
+                0,
+            )),
             block: BlockType::DiamondOre.to_wire(),
+            look_milli: [0, 0, 1000],
         },
     );
     alice.send(GameToClient::GameplayRequest {
@@ -466,7 +475,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     assert_eq!(
         block_response.outcome,
         GameplayOutcome::Rejected {
-            reason: RejectReason::Unsupported
+            reason: RejectReason::InvalidState
         }
     );
     assert_eq!(
@@ -475,7 +484,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
             .world()
             .get_block(CHEST_POSITION.0, CHEST_POSITION.1, CHEST_POSITION.2),
         BlockType::Chest,
-        "leftover BlockUse must not overwrite the seeded chest"
+        "rejected BlockAction must not overwrite the seeded chest"
     );
 
     let accepted_before_replay = runtime.metrics.requests_accepted;

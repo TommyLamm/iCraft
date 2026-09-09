@@ -528,7 +528,6 @@ pub(crate) async fn handle_host_command<S: HostEventSender>(
             if let Some(session) = sessions.lock().await.get_mut(&to) {
                 session.gameplay.current_dimension = dimension;
                 session.gameplay.last_client_revision = 0;
-                session.gameplay.active_container = None;
             }
             let packet = Packet::DimensionTransfer {
                 protocol_version: PROTOCOL_VERSION,

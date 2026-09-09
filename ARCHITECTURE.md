@@ -108,8 +108,7 @@ input
 
 - Reject before mutating. A rejection must not consume inventory, spawn
   drops, or partially write the world.
-- Place/break is `GameplayOperation::BlockAction`. `BlockUse` is a leftover
-  envelope and is always `Unsupported`.
+- Place/break is `GameplayOperation::BlockAction`.
 - Container clicks are conserving session transactions: clone player +
   container, verify the claimed cursor, apply brew/viewer locks, commit both
   sides or roll back. Client-supplied item data is never echoed as truth.
@@ -208,8 +207,13 @@ operator.
 `GameplayRequest` carries request id, client sequence, session, dimension,
 revision, and a typed operation. The bounded response cache makes retries
 idempotent. Live egress for sleep / container click / close is a
-`GameplayRequest`. Leftover `Packet` / `GameToClient` variants exist for
-inbound compatibility and tests.
+`GameplayRequest`. Leftover inbound request packets (`BlockChange` as a
+client request, `BlockActionRequest`, `SleepRequest`,
+`ContainerOpenRequest`, `ContainerClickRequest`, inbound `ContainerClose`)
+are decoded then dropped. Live desktop send uses pose / chat / disconnect /
+`GameplayRequest` / respawn. Server→client `BlockChange` projection is
+unchanged. Deleting `GameplayOperation::BlockUse` shifts later
+`GameplayOperation` bincode discriminants; handshake stays protocol v19.
 
 `NetworkServer` / `NetworkClient` run Tokio on a background thread with
 bounded/metered channels. Reliable gameplay/lifecycle output is never

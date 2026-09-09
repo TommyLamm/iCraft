@@ -1607,7 +1607,7 @@ impl Drop for ServerRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::protocol::RejectReason;
+    use crate::network::protocol::{BlockActionKind, RejectReason};
     use crate::world::BlockType;
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -1919,11 +1919,16 @@ mod tests {
                     session_id: 2,
                     dimension: Dimension::Overworld as u8,
                     client_revision: revision,
-                    operation: GameplayOperation::BlockUse {
+                    operation: GameplayOperation::BlockAction {
+                        action: BlockActionKind::Place,
                         x: 8,
                         y: 80,
                         z: 8,
+                        face: [0, 1, 0],
+                        hand: 0,
+                        held: None,
                         block: crate::world::BlockType::DiamondOre.to_wire(),
+                        look_milli: [0, 0, 1000],
                     },
                 },
             )
@@ -1931,7 +1936,7 @@ mod tests {
         assert!(matches!(
             response.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         let output = runtime.tick_with_output().unwrap();
@@ -1951,7 +1956,7 @@ mod tests {
                 ))
                 .count(),
             0,
-            "rejected leftover BlockUse must not project a BlockChange"
+            "rejected BlockAction must not project a BlockChange"
         );
         assert_eq!(
             runtime
@@ -1978,11 +1983,16 @@ mod tests {
                     session_id: 99,
                     dimension: Dimension::Overworld as u8,
                     client_revision: revision,
-                    operation: GameplayOperation::BlockUse {
+                    operation: GameplayOperation::BlockAction {
+                        action: BlockActionKind::Place,
                         x: 9,
                         y: 80,
                         z: 8,
+                        face: [0, 1, 0],
+                        hand: 0,
+                        held: None,
                         block: crate::world::BlockType::DiamondOre.to_wire(),
+                        look_milli: [0, 0, 1000],
                     },
                 },
             )
@@ -1990,7 +2000,7 @@ mod tests {
         assert!(matches!(
             response.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         assert!(!runtime
@@ -2399,11 +2409,16 @@ mod tests {
                     session_id: 1,
                     dimension: 0,
                     client_revision: 0,
-                    operation: GameplayOperation::BlockUse {
+                    operation: GameplayOperation::BlockAction {
+                        action: BlockActionKind::Place,
                         x: 8,
                         y: 80,
                         z: 8,
+                        face: [0, 1, 0],
+                        hand: 0,
+                        held: None,
                         block: 1,
+                        look_milli: [0, 0, 1000],
                     },
                 },
             )
@@ -2417,11 +2432,16 @@ mod tests {
                     session_id: 2,
                     dimension: 0,
                     client_revision: 0,
-                    operation: GameplayOperation::BlockUse {
+                    operation: GameplayOperation::BlockAction {
+                        action: BlockActionKind::Place,
                         x: 8,
                         y: 80,
                         z: 8,
+                        face: [0, 1, 0],
+                        hand: 0,
+                        held: None,
                         block: 2,
+                        look_milli: [0, 0, 1000],
                     },
                 },
             )
@@ -2429,13 +2449,13 @@ mod tests {
         assert!(matches!(
             first.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         assert!(matches!(
             second.outcome,
             GameplayOutcome::Rejected {
-                reason: RejectReason::Unsupported
+                reason: RejectReason::InvalidState
             }
         ));
         assert!(second.server_sequence > first.server_sequence);

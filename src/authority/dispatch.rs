@@ -49,17 +49,6 @@ impl AuthorityCore {
         if request.client_revision < session.last_revision {
             return self.reject_for_session(id, request_id, RejectReason::InvalidRevision, None);
         }
-        if matches!(
-            &request.operation,
-            crate::network::protocol::GameplayOperation::BlockUse { .. }
-        ) {
-            return self.reject_for_session(
-                id,
-                request_id,
-                RejectReason::Unsupported,
-                Some(request.client_sequence),
-            );
-        }
         if session.game_mode == crate::inventory::GameMode::Spectator
             && !matches!(
                 &request.operation,
@@ -100,7 +89,6 @@ impl AuthorityCore {
                 *block,
                 *look_milli,
             ),
-            GameplayOperation::BlockUse { .. } => Err(RejectReason::Unsupported),
             GameplayOperation::Container {
                 action,
                 x,

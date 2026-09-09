@@ -48,11 +48,16 @@ fn leftover_block_use(session_id: u64, request_id: u128, client_sequence: u64) -
         session_id,
         dimension: Dimension::Overworld as u8,
         client_revision: 0,
-        operation: GameplayOperation::BlockUse {
+        operation: GameplayOperation::BlockAction {
+            action: BlockActionKind::Place,
             x: 8,
             y: 80,
             z: 8,
+            face: [0, 1, 0],
+            hand: 0,
+            held: None,
             block: BlockType::Stone.to_wire(),
+            look_milli: [0, 0, 1000],
         },
     }
 }
@@ -152,10 +157,10 @@ fn checksum_after_inbound(order: [u64; 2]) -> u64 {
             matches!(
                 response.outcome,
                 GameplayOutcome::Rejected {
-                    reason: RejectReason::Unsupported
+                    reason: RejectReason::InvalidState
                 }
             ),
-            "leftover BlockUse must stay rejected: {:?}",
+            "rejected BlockAction must not mutate: {:?}",
             response.outcome
         );
     }

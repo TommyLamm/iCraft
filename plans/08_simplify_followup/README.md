@@ -51,7 +51,7 @@
 | # | 單獨執行文件 | 優先級 | 預估淨收益 | 前置依賴 | 狀態 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | 01 | [刪 leftover 模擬與 `legacy_owner`](01_remove_legacy_owner_simulation.md) | P0 | ~-5600 行模組 + `state.rs` 死分支 | 無 | 待執行 |
-| 02 | [刪 `BlockUse`／`wrap_legacy`／舊 inbound](02_remove_blockuse_and_legacy_packets.md) | P0 | 少一條永遠被拒的平行協定 | 無 | 待執行 |
+| 02 | [刪 `BlockUse`／`wrap_legacy`／舊 inbound](02_remove_blockuse_and_legacy_packets.md) | P0 | 少一條永遠被拒的平行協定 | 無 | 已完成 |
 | 03 | [刪 `NetworkHandle::Host` 與 catch-up](03_remove_network_handle_host_and_catchup.md) | P0 | 刪桌面假 listen-host 傳輸樹 | 01 | 待執行 |
 | 04 | [刪 presentation 存檔與 `world_mutation`](04_remove_presentation_save_and_world_mutation.md) | P0 | 少第二份 mutation index | 01, 03 | 待執行 |
 | 05 | [刪熱路徑 `debug-879839.log`](05_remove_hotpath_debug_logs.md) | P0 | 主執行緒／還原不再開檔 | 無 | 待執行 |

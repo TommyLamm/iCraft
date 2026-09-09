@@ -2774,18 +2774,20 @@ impl State {
             crate::presentation_inventory_policy::MultiplayerRole::Client { .. }
         ) {
             if let Some(pos) = self.container_target {
-                if let Some(request) = crate::network::protocol::wrap_legacy(
-                    0,
-                    self.current_dimension as u8,
-                    0,
-                    crate::network::protocol::LegacyGameplay::ContainerClose {
+                self.network.request_gameplay(crate::network::protocol::GameplayRequest {
+                    request_id: 0,
+                    client_sequence: 0,
+                    session_id: 0,
+                    dimension: self.current_dimension as u8,
+                    client_revision: 0,
+                    operation: crate::network::protocol::GameplayOperation::Container {
+                        action: 2,
                         x: pos.0,
                         y: pos.1,
                         z: pos.2,
+                        slot: 0,
                     },
-                ) {
-                    self.network.request_gameplay(request);
-                }
+                });
             }
         }
         let mut returning_items: Vec<ItemStack> = self

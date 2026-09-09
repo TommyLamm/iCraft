@@ -2174,7 +2174,6 @@ impl ServerWorld {
 fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> {
     match operation {
         GameplayOperation::BlockAction { x, y, z, .. }
-        | GameplayOperation::BlockUse { x, y, z, .. }
         | GameplayOperation::Sleep { x, y, z }
         | GameplayOperation::Container { x, y, z, .. }
         | GameplayOperation::ContainerClick { x, y, z, .. }

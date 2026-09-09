@@ -438,14 +438,6 @@ pub enum GameplayOperation {
         block: u32,
         look_milli: [i16; 3],
     },
-    /// Leftover client-authored voxel write. Authority rejects this as
-    /// `Unsupported`; the only legal place/break path is `BlockAction`.
-    BlockUse {
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-    },
     Container {
         action: u8,
         x: i32,
@@ -552,156 +544,6 @@ pub enum GameplayOperation {
     },
 }
 
-impl GameplayOperation {
-    /// Remap leftover `Action` + held-item envelopes onto typed `BlockAction`.
-    /// `Action::Use` has no Plan31 kind and must not become `BlockUse`.
-    /// Leftover packets have no face/look; a unit +Z look keeps the envelope
-    /// well-formed so authority, not the adapter, decides Place/StartBreak.
-    pub fn from_legacy_block_action(
-        action: Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<ItemWire>,
-    ) -> Option<Self> {
-        let action = match action {
-            Action::Place => BlockActionKind::Place,
-            Action::Break => BlockActionKind::StartBreak,
-            Action::Use => return None,
-        };
-        Some(Self::BlockAction {
-            action,
-            x,
-            y,
-            z,
-            face: [0, 0, 0],
-            hand: 0,
-            held: held_item
-                .map(|item| SessionSlotWire::new(item, item.can_break, item.can_place_on)),
-            block,
-            look_milli: [0, 0, 1000],
-        })
-    }
-}
-
-/// Leftover inbound adapters still accepted from old clients and tests.
-/// New Desktop/Join egress must send `GameplayRequest` instead.
-#[derive(Debug, Clone)]
-pub enum LegacyGameplay {
-    BlockChange {
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-    },
-    BlockAction {
-        action: Action,
-        x: i32,
-        y: i32,
-        z: i32,
-        block: u32,
-        held_item: Option<ItemWire>,
-    },
-    Sleep {
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerOpen {
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-    ContainerClick {
-        x: i32,
-        y: i32,
-        z: i32,
-        slot: u16,
-        is_left: bool,
-        dragged: Option<ItemWire>,
-    },
-    ContainerClose {
-        x: i32,
-        y: i32,
-        z: i32,
-    },
-}
-
-/// Shared leftover envelope. `request_id` / `client_sequence` stay 0 so each
-/// owner allocates through its existing prepare path. `Action::Use` returns
-/// `None` and is never synthesized as `BlockUse`.
-pub fn wrap_legacy(
-    session_id: PlayerId,
-    dimension: u8,
-    client_revision: u64,
-    leftover: LegacyGameplay,
-) -> Option<GameplayRequest> {
-    let operation = match leftover {
-        LegacyGameplay::BlockChange { x, y, z, block } => {
-            GameplayOperation::BlockUse { x, y, z, block }
-        }
-        LegacyGameplay::BlockAction {
-            action,
-            x,
-            y,
-            z,
-            block,
-            held_item,
-        } => GameplayOperation::from_legacy_block_action(action, x, y, z, block, held_item)?,
-        LegacyGameplay::Sleep { x, y, z } => GameplayOperation::Sleep { x, y, z },
-        LegacyGameplay::ContainerOpen { x, y, z } => GameplayOperation::Container {
-            action: 0,
-            x,
-            y,
-            z,
-            slot: 0,
-        },
-        LegacyGameplay::ContainerClick {
-            x,
-            y,
-            z,
-            slot,
-            is_left,
-            dragged,
-        } => {
-            if dragged.is_some() || !is_left {
-                GameplayOperation::ContainerClick {
-                    x,
-                    y,
-                    z,
-                    slot,
-                    is_left,
-                    dragged,
-                }
-            } else {
-                GameplayOperation::Container {
-                    action: 1,
-                    x,
-                    y,
-                    z,
-                    slot,
-                }
-            }
-        }
-        LegacyGameplay::ContainerClose { x, y, z } => GameplayOperation::Container {
-            action: 2,
-            x,
-            y,
-            z,
-            slot: 0,
-        },
-    };
-    Some(GameplayRequest {
-        request_id: 0,
-        client_sequence: 0,
-        session_id,
-        dimension,
-        client_revision,
-        operation,
-    })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockActionKind {
     StartBreak,
@@ -760,7 +602,6 @@ impl GameplayRequest {
 
         match &self.operation {
             GameplayOperation::BlockAction { x, y, z, .. }
-            | GameplayOperation::BlockUse { x, y, z, .. }
             | GameplayOperation::Sleep { x, y, z }
             | GameplayOperation::Container { x, y, z, .. }
             | GameplayOperation::ContainerClick { x, y, z, .. }
@@ -970,8 +811,7 @@ impl GameplayRequest {
                 }
                 source.validate_bounds()?;
             }
-            GameplayOperation::BlockUse { .. }
-            | GameplayOperation::Combat { .. }
+            GameplayOperation::Combat { .. }
             | GameplayOperation::Sleep { .. }
             | GameplayOperation::Trade { .. }
             | GameplayOperation::Mount { .. } => {}
@@ -1787,105 +1627,6 @@ mod tests {
         };
         let decoded = Packet::decode(&p.encode()).unwrap();
         assert_eq!(p, decoded);
-    }
-
-    #[test]
-    fn wrap_legacy_use_stays_none_and_container_split_is_bit_identical() {
-        assert!(wrap_legacy(
-            7,
-            1,
-            9,
-            LegacyGameplay::BlockAction {
-                action: Action::Use,
-                x: 1,
-                y: 2,
-                z: 3,
-                block: 4,
-                held_item: None,
-            },
-        )
-        .is_none());
-        assert!(
-            GameplayOperation::from_legacy_block_action(Action::Use, 1, 2, 3, 4, None).is_none()
-        );
-
-        let left_empty = wrap_legacy(
-            7,
-            1,
-            9,
-            LegacyGameplay::ContainerClick {
-                x: 2,
-                y: 70,
-                z: 5,
-                slot: 4,
-                is_left: true,
-                dragged: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(left_empty.request_id, 0);
-        assert_eq!(left_empty.client_sequence, 0);
-        assert_eq!(left_empty.session_id, 7);
-        assert_eq!(left_empty.dimension, 1);
-        assert_eq!(left_empty.client_revision, 9);
-        assert!(matches!(
-            left_empty.operation,
-            GameplayOperation::Container {
-                action: 1,
-                x: 2,
-                y: 70,
-                z: 5,
-                slot: 4,
-            }
-        ));
-
-        let right = wrap_legacy(
-            7,
-            1,
-            9,
-            LegacyGameplay::ContainerClick {
-                x: 2,
-                y: 70,
-                z: 5,
-                slot: 4,
-                is_left: false,
-                dragged: None,
-            },
-        )
-        .unwrap();
-        assert!(matches!(
-            right.operation,
-            GameplayOperation::ContainerClick {
-                x: 2,
-                y: 70,
-                z: 5,
-                slot: 4,
-                is_left: false,
-                dragged: None,
-            }
-        ));
-
-        let block = wrap_legacy(
-            3,
-            0,
-            1,
-            LegacyGameplay::BlockChange {
-                x: 3,
-                y: 80,
-                z: -4,
-                block: 7,
-            },
-        )
-        .unwrap();
-        assert!(matches!(
-            block.operation,
-            GameplayOperation::BlockUse {
-                x: 3,
-                y: 80,
-                z: -4,
-                block: 7,
-            }
-        ));
     }
 
     #[test]
