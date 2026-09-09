@@ -35,6 +35,8 @@ const WORLD_BOUND: i32 = 30_000_000;
 pub const FIXED_DT: f32 = 1.0 / 20.0;
 const MAX_AUTOMATION_TRANSFERS: usize = 64;
 const MAX_FLUID_UPDATES: usize = 256;
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
 
 /// All state required to advance one deterministic world tick.
 pub struct ServerWorld {
@@ -67,6 +69,9 @@ pub struct ServerWorld {
     pending_redstone_actions: Vec<RedstoneAction>,
     pub sleeping_players: BTreeSet<PlayerId>,
     block_revisions: BTreeMap<(i32, i32, i32), u64>,
+    /// XOR of per-entry FNV-1a fingerprints for `block_revisions`.
+    /// Maintained on insert/remove so idle ticks do not scan the map.
+    block_revision_checksum: u64,
     chunk_revisions: BTreeMap<(i32, i32), u64>,
     /// Columns whose on-disk payload failed inflate/length checks. They are
     /// never inserted, generated, or written back so a later save cannot
@@ -133,6 +138,7 @@ impl ServerWorld {
             pending_redstone_actions: Vec::new(),
             sleeping_players: BTreeSet::new(),
             block_revisions: BTreeMap::new(),
+            block_revision_checksum: 0,
             chunk_revisions: BTreeMap::new(),
             failed_restore_chunks: BTreeSet::new(),
         };
@@ -208,7 +214,7 @@ impl ServerWorld {
             chest.ensure_loot_generated(self.seed, position);
             chest.revision = revision;
         }
-        self.block_revisions.insert(position, revision);
+        self.set_block_revision(position, revision);
         self.chunk_revisions.insert(
             (position.0.div_euclid(16), position.2.div_euclid(16)),
             revision,
@@ -370,8 +376,31 @@ impl ServerWorld {
         self.chunks.chunks.remove(&(cx, cz));
         self.chunks.dirty_chunks.remove(cx, cz);
         self.chunk_revisions.remove(&(cx, cz));
-        self.block_revisions
-            .retain(|&(x, _y, z), _| x.div_euclid(16) != cx || z.div_euclid(16) != cz);
+        let stale: Vec<_> = self
+            .block_revisions
+            .keys()
+            .copied()
+            .filter(|&(x, _y, z)| x.div_euclid(16) == cx && z.div_euclid(16) == cz)
+            .collect();
+        for position in stale {
+            self.clear_block_revision(position);
+        }
+    }
+
+    fn set_block_revision(&mut self, position: (i32, i32, i32), revision: u64) {
+        if let Some(old) = self.block_revisions.insert(position, revision) {
+            if old == revision {
+                return;
+            }
+            self.block_revision_checksum ^= block_revision_fingerprint(position, old);
+        }
+        self.block_revision_checksum ^= block_revision_fingerprint(position, revision);
+    }
+
+    fn clear_block_revision(&mut self, position: (i32, i32, i32)) {
+        if let Some(old) = self.block_revisions.remove(&position) {
+            self.block_revision_checksum ^= block_revision_fingerprint(position, old);
+        }
     }
 
     /// Restore a persisted chunk into the authoritative map. The payload is
@@ -832,7 +861,7 @@ impl ServerWorld {
             }
         }
         let revision = self.revisions.allocate();
-        self.block_revisions.insert((x, y, z), revision);
+        self.set_block_revision((x, y, z), revision);
         self.chunk_revisions
             .insert((x.div_euclid(16), z.div_euclid(16)), revision);
 
@@ -1497,7 +1526,7 @@ impl ServerWorld {
 
     fn touch_revision(&mut self, x: i32, y: i32, z: i32) -> WorldMutation {
         let revision = self.revisions.allocate();
-        self.block_revisions.insert((x, y, z), revision);
+        self.set_block_revision((x, y, z), revision);
         self.chunk_revisions
             .insert((x.div_euclid(16), z.div_euclid(16)), revision);
         WorldMutation {
@@ -1517,7 +1546,7 @@ impl ServerWorld {
     fn record_fluid_mutation(&mut self, mutation: FluidMutation) -> WorldMutation {
         let (x, y, z) = mutation.position;
         let revision = self.revisions.allocate();
-        self.block_revisions.insert((x, y, z), revision);
+        self.set_block_revision((x, y, z), revision);
         self.chunk_revisions
             .insert((x.div_euclid(16), z.div_euclid(16)), revision);
         WorldMutation {
@@ -2072,103 +2101,102 @@ impl ServerWorld {
     }
 
     pub(crate) fn checksum(&self, mutations: &[WorldMutation]) -> u64 {
-        // Stable FNV-1a over authoritative values.  HashMap iteration is never
-        // used directly; chunks and block revisions are sorted first.
-        let mut hash = 0xcbf29ce484222325u64;
-        let mut write = |bytes: &[u8]| {
-            for byte in bytes {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-        };
-        write(&self.time.to_le_bytes());
-        write(&self.revisions.current().to_le_bytes());
-        write(&[
-            self.rules.keep_inventory as u8,
-            self.rules.mob_griefing as u8,
-        ]);
-        write(&[
-            self.rules.do_daylight_cycle as u8,
-            self.rules.do_mob_spawning as u8,
-            self.difficulty.as_u8(),
-        ]);
+        // Stable FNV-1a over authoritative values. Block revisions are mixed
+        // from the running XOR aggregate (updated on mutation) so idle ticks
+        // do not scan the resident map. Entities are sorted once and hashed
+        // in a single pass.
+        let mut hash = FNV_OFFSET;
+        fnv1a_write(&mut hash, &self.time.to_le_bytes());
+        fnv1a_write(&mut hash, &self.revisions.current().to_le_bytes());
+        fnv1a_write(
+            &mut hash,
+            &[
+                self.rules.keep_inventory as u8,
+                self.rules.mob_griefing as u8,
+            ],
+        );
+        fnv1a_write(
+            &mut hash,
+            &[
+                self.rules.do_daylight_cycle as u8,
+                self.rules.do_mob_spawning as u8,
+                self.difficulty.as_u8(),
+            ],
+        );
         for mutation in mutations {
-            write(&mutation.dimension.to_le_bytes());
-            write(&mutation.position.0.to_le_bytes());
-            write(&mutation.position.1.to_le_bytes());
-            write(&mutation.position.2.to_le_bytes());
-            write(&mutation.block.to_le_bytes());
-            write(&mutation.state.to_le_bytes());
-            write(&mutation.raw_fluid.to_le_bytes());
-            write(&mutation.revision.to_le_bytes());
+            fnv1a_write(&mut hash, &mutation.dimension.to_le_bytes());
+            fnv1a_write(&mut hash, &mutation.position.0.to_le_bytes());
+            fnv1a_write(&mut hash, &mutation.position.1.to_le_bytes());
+            fnv1a_write(&mut hash, &mutation.position.2.to_le_bytes());
+            fnv1a_write(&mut hash, &mutation.block.to_le_bytes());
+            fnv1a_write(&mut hash, &mutation.state.to_le_bytes());
+            fnv1a_write(&mut hash, &mutation.raw_fluid.to_le_bytes());
+            fnv1a_write(&mut hash, &mutation.revision.to_le_bytes());
         }
-        for (&position, &revision) in &self.block_revisions {
-            write(&position.0.to_le_bytes());
-            write(&position.1.to_le_bytes());
-            write(&position.2.to_le_bytes());
-            write(&revision.to_le_bytes());
-        }
-        let mut entities: Vec<_> = self
-            .entities
-            .entities
-            .iter()
-            .map(|entity| {
-                (
-                    entity.id,
-                    entity.position.x.to_bits(),
-                    entity.position.y.to_bits(),
-                    entity.position.z.to_bits(),
-                    entity.ai_phase,
-                )
-            })
-            .collect();
-        entities.sort_unstable();
-        for entity in entities {
-            write(&entity.0.to_le_bytes());
-            write(&entity.1.to_le_bytes());
-            write(&entity.2.to_le_bytes());
-            write(&entity.3.to_le_bytes());
-            write(&entity.4.to_le_bytes());
-        }
-        // Entity ids/positions alone are insufficient for automation
-        // convergence: an Arrow and a DroppedItem can share the same pose.
-        // Include the stable type and complete dropped/potion payload without
-        // hashing transient random physics.
-        let mut entity_payloads: Vec<_> = self
-            .entities
-            .entities
-            .iter()
-            .map(|entity| (entity.id, entity))
-            .collect();
-        entity_payloads.sort_unstable_by_key(|(id, _)| *id);
-        for (id, entity) in entity_payloads {
-            write(&id.to_le_bytes());
-            write(&[entity.entity_type.to_wire()]);
+        fnv1a_write(&mut hash, &self.block_revision_checksum.to_le_bytes());
+        let mut order: Vec<usize> = (0..self.entities.entities.len()).collect();
+        order.sort_unstable_by_key(|&index| {
+            let entity = &self.entities.entities[index];
+            (
+                entity.id,
+                entity.position.x.to_bits(),
+                entity.position.y.to_bits(),
+                entity.position.z.to_bits(),
+                entity.ai_phase,
+            )
+        });
+        for index in order {
+            let entity = &self.entities.entities[index];
+            fnv1a_write(&mut hash, &entity.id.to_le_bytes());
+            fnv1a_write(&mut hash, &entity.position.x.to_bits().to_le_bytes());
+            fnv1a_write(&mut hash, &entity.position.y.to_bits().to_le_bytes());
+            fnv1a_write(&mut hash, &entity.position.z.to_bits().to_le_bytes());
+            fnv1a_write(&mut hash, &entity.ai_phase.to_le_bytes());
+            fnv1a_write(&mut hash, &[entity.entity_type.to_wire()]);
             let legacy_payload = entity
                 .dropped_item
                 .map(|item| crate::inventory::ItemStack::new(item, entity.dropped_count.max(1)));
             let payload = entity.dropped_stack.as_ref().or(legacy_payload.as_ref());
             if let Some(stack) = payload {
                 let wire = ItemWire::from_stack(stack);
-                write(&wire.item.to_le_bytes());
-                write(&wire.count.to_le_bytes());
-                write(&wire.durability.to_le_bytes());
-                write(&wire.enchantments);
-                write(&wire.custom_name);
-                write(&wire.can_break.to_le_bytes());
-                write(&wire.can_place_on.to_le_bytes());
+                fnv1a_write(&mut hash, &wire.item.to_le_bytes());
+                fnv1a_write(&mut hash, &wire.count.to_le_bytes());
+                fnv1a_write(&mut hash, &wire.durability.to_le_bytes());
+                fnv1a_write(&mut hash, &wire.enchantments);
+                fnv1a_write(&mut hash, &wire.custom_name);
+                fnv1a_write(&mut hash, &wire.can_break.to_le_bytes());
+                fnv1a_write(&mut hash, &wire.can_place_on.to_le_bytes());
                 if let Some(potion) = wire.potion {
-                    write(&[1, potion.kind, potion.level, potion.splash as u8]);
-                    write(&potion.duration_seconds.to_le_bytes());
+                    fnv1a_write(
+                        &mut hash,
+                        &[1, potion.kind, potion.level, potion.splash as u8],
+                    );
+                    fnv1a_write(&mut hash, &potion.duration_seconds.to_le_bytes());
                 } else {
-                    write(&[0]);
+                    fnv1a_write(&mut hash, &[0]);
                 }
             } else {
-                write(&[0]);
+                fnv1a_write(&mut hash, &[0]);
             }
         }
         hash
     }
+}
+
+fn fnv1a_write(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn block_revision_fingerprint(position: (i32, i32, i32), revision: u64) -> u64 {
+    let mut hash = FNV_OFFSET;
+    fnv1a_write(&mut hash, &position.0.to_le_bytes());
+    fnv1a_write(&mut hash, &position.1.to_le_bytes());
+    fnv1a_write(&mut hash, &position.2.to_le_bytes());
+    fnv1a_write(&mut hash, &revision.to_le_bytes());
+    hash
 }
 
 fn operation_position(operation: &GameplayOperation) -> Option<(i32, i32, i32)> {
@@ -2877,6 +2905,94 @@ mod tests {
             plain.checksum(&[plain_mutation]),
             waterlogged.checksum(&[waterlogged_mutation])
         );
+    }
+
+    fn folded_block_revision_checksum(world: &ServerWorld) -> u64 {
+        world
+            .block_revisions
+            .iter()
+            .fold(0u64, |acc, (&position, &revision)| {
+                acc ^ block_revision_fingerprint(position, revision)
+            })
+    }
+
+    fn superflat_world(seed: u32) -> ServerWorld {
+        ServerWorld::new(
+            seed,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            WorldRules::default(),
+            2,
+        )
+    }
+
+    #[test]
+    fn running_revision_checksum_matches_sorted_map_fold() {
+        let mut world = superflat_world(7);
+        assert_eq!(world.block_revision_checksum, 0);
+        world
+            .set_block(8, 80, 8, BlockType::Stone, 0)
+            .unwrap()
+            .unwrap();
+        world
+            .set_block(4, 80, 4, BlockType::Dirt, 0)
+            .unwrap()
+            .unwrap();
+        world
+            .set_block(8, 80, 8, BlockType::OakPlanks, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            world.block_revision_checksum,
+            folded_block_revision_checksum(&world)
+        );
+        world.remove_resident_chunk(0, 0);
+        assert!(world.block_revisions.is_empty());
+        assert_eq!(world.block_revision_checksum, 0);
+        assert_eq!(
+            world.block_revision_checksum,
+            folded_block_revision_checksum(&world)
+        );
+    }
+
+    #[test]
+    fn checksum_is_independent_of_revision_insert_order() {
+        let mut first = superflat_world(7);
+        let mut second = superflat_world(7);
+        first.set_block_revision((1, 80, 1), 3);
+        first.set_block_revision((8, 80, 8), 9);
+        second.set_block_revision((8, 80, 8), 9);
+        second.set_block_revision((1, 80, 1), 3);
+        assert_eq!(first.block_revision_checksum, second.block_revision_checksum);
+        assert_eq!(first.checksum(&[]), second.checksum(&[]));
+    }
+
+    #[test]
+    fn empty_ticks_keep_matching_checksums_for_identical_worlds() {
+        let tick = || {
+            let mut world = superflat_world(11);
+            world
+                .set_block(8, 80, 8, BlockType::Stone, 0)
+                .unwrap()
+                .unwrap();
+            world
+                .entities
+                .spawn(EntityType::Zombie, Vec3::new(10.0, 80.0, 10.0));
+            world.tick(&[(7, [8.0, 80.0, 8.0])]);
+            world.tick(&[(7, [8.0, 80.0, 8.0])])
+        };
+        assert_eq!(tick(), tick());
+    }
+
+    #[test]
+    fn checksum_distinguishes_entity_type_at_same_pose() {
+        let mut arrow = superflat_world(7);
+        let mut dropped = superflat_world(7);
+        let position = Vec3::new(10.0, 80.0, 10.0);
+        arrow.entities.spawn(EntityType::Arrow, position);
+        dropped.entities.spawn(EntityType::DroppedItem, position);
+        assert_ne!(arrow.checksum(&[]), dropped.checksum(&[]));
     }
 
     #[test]
