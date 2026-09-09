@@ -109,10 +109,6 @@ fn point_in_bounds(x: f32, y: f32, bounds: [f32; 4]) -> bool {
     x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3]
 }
 
-fn terrain_translucent_cull_mode() -> Option<wgpu::Face> {
-    None
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PrimaryPressDecision {
     keep_held_mining: bool,
@@ -3036,7 +3032,8 @@ impl State {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Cw,
-                    cull_mode: terrain_translucent_cull_mode(),
+                    // Translucent terrain is double-sided; there is no live cull mode.
+                    cull_mode: None,
                     polygon_mode: wgpu::PolygonMode::Fill,
                     unclipped_depth: false,
                     conservative: false,
@@ -9778,11 +9775,6 @@ mod debug_tests {
 
         bridge.shutdown().expect("runtime save/shutdown");
         let _ = std::fs::remove_dir_all(world_dir);
-    }
-
-    #[test]
-    fn terrain_translucent_pipeline_is_double_sided() {
-        assert_eq!(terrain_translucent_cull_mode(), None);
     }
 
     fn rects_overlap(a: InventoryUiRect, b: InventoryUiRect) -> bool {

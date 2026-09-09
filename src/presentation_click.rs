@@ -1,6 +1,7 @@
 //! Pure world-click and inventory-click hit resolution.
 //!
-//! Crate-internal / desktop-adjacent: not part of the server/tests contract.
+//! Desktop binary-only (`mod` in `src/main.rs`). Not part of the `icraft`
+//! library, so `icraft-server` does not compile this file.
 //! `presentation_inventory_policy` is the thin public cut for integration tests.
 //!
 //! No GPU and no `State` fields. Join and Embedded share this resolver, then

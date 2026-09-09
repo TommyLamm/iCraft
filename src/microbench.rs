@@ -1,6 +1,7 @@
 //! Deterministic storage/engine microbenchmarks.
 //!
-//! Shared across library tests and the desktop binary `--microbench` flag.
+//! The library compiles this module only under `cfg(test)` or feature
+//! `harness`. The desktop `--microbench` flag uses `src/main.rs`'s own `mod`.
 //! Run with `cargo test --release microbench -- --ignored --nocapture`.
 //! Each JSON line contains a stable operation name, iteration count, elapsed
 //! nanoseconds per operation, and a checksum of the observed results.

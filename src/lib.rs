@@ -15,8 +15,12 @@
 //!
 //! Additional modules are `pub` so the desktop binary crate can re-export
 //! them. They are not a dedicated-server or integration-test API.
-//! `sim_harness` and `final_acceptance` compile only under `cfg(test)` or
-//! feature `harness`.
+//! `sim_harness`, `final_acceptance`, and `microbench` compile only under
+//! `cfg(test)` or feature `harness`.
+//!
+//! GPU frame pooling (`gpu_frame_resources`) and presentation click policy
+//! (`presentation_click`) are desktop binary modules in `main.rs`. Do not
+//! add them here — that would compile them into `icraft-server`.
 //!
 //! `src/presentation/` is the Plan 10 desktop fence and **must not** be
 //! added to this library. GPU menu, terrain arenas, and frame encode stay
@@ -56,29 +60,32 @@ pub mod chunk_render;
 pub mod chunk_schedule;
 pub mod commands;
 pub mod culling;
-pub mod fluid;
-pub mod gpu_frame_resources;
 pub mod interaction;
 pub mod lighting;
 pub mod localization;
-pub mod microbench;
-pub mod mob;
 pub mod navigation;
 pub mod perf;
 pub mod physics;
-pub mod presentation_click;
-pub mod rail;
 pub mod resources;
 pub mod vehicle;
 pub mod village;
 pub mod weather;
-pub mod world_tick;
+
+// Shared simulation used by authority / ServerWorld. Not a dedicated-server
+// or integration-test import; desktop files do not `use crate::` these.
+pub(crate) mod fluid;
+pub(crate) mod mob;
+pub(crate) mod rail;
+pub(crate) mod world_tick;
 
 // Still crate-internal. Desktop-only files do not `use crate::` these.
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod final_acceptance;
 pub(crate) mod loot;
+// `pub` because desktop `State` and `ServerWorld` expose `RecipeManager`.
 pub mod recipes;
+#[cfg(any(test, feature = "harness"))]
+pub(crate) mod microbench;
 #[cfg(any(test, feature = "harness"))]
 pub(crate) mod sim_harness;
 pub(crate) mod voxel_shape;

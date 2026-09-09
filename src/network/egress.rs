@@ -653,11 +653,6 @@ pub(crate) async fn broadcast_pose_inner(sessions: &Sessions, packet: Packet) {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
-    broadcast_pose_inner(sessions, packet).await;
-}
-
 pub(crate) async fn broadcast_state(sessions: &Sessions, packet: Packet) {
     let mailboxes: Vec<_> = sessions
         .lock()

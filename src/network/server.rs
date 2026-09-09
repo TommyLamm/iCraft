@@ -20,8 +20,8 @@ pub(crate) use super::channels::{
     HANDSHAKE_TIMEOUT, MAX_CATCHUP_QUEUE_DEPTH,
 };
 pub(crate) use super::egress::{
-    broadcast_pose, broadcast_pose_inner, broadcast_reliably, broadcast_state, broadcast_to,
-    evict_slow_clients, handle_host_command, normalize_host_response, send_to,
+    broadcast_reliably, broadcast_state, broadcast_to, evict_slow_clients, handle_host_command,
+    normalize_host_response, send_to,
 };
 pub(crate) use super::ingress::{
     authenticate_handshake_username, chat_exceeds_display_cap, legacy_gameplay_request,
@@ -284,7 +284,7 @@ impl<S: HostEventSender> NetworkServer<S> {
 impl NetworkServer<std_mpsc::Sender<ServerToHost>> {
     #[cfg(test)]
     pub(crate) async fn broadcast_pose(sessions: &Sessions, packet: Packet) {
-        broadcast_pose(sessions, packet).await;
+        super::egress::broadcast_pose_inner(sessions, packet).await;
     }
 }
 

@@ -4,26 +4,31 @@
 //! `pub use` so desktop files can keep `crate::world` (and friends) without
 //! compiling those sources a second time. Desktop-only GPU/menu modules
 //! stay declared here and must not be added to `lib.rs`.
+//! `--microbench` uses this crate's `mod microbench`, not the library
+//! `harness` / `cfg(test)` copy.
 
 pub use icraft::{
     accessibility, advancements, authority, block_entity, block_model, boss, brewing,
     chunk_manager, chunk_render, chunk_schedule, commands, container_sessions, culling, dimension,
-    enchantment, entity, fishing, fluid, game_rules, gpu_frame_resources, interaction, inventory,
-    lighting, localization, microbench, mob, navigation, network, passive_mob, perf, physics,
-    player, presentation_click, presentation_inventory_policy, rail, recipes, redstone, resources,
-    save, server_runtime, server_world, structure, vehicle, village, weather, world, world_tick,
+    enchantment, entity, fishing, game_rules, interaction, inventory, lighting, localization,
+    navigation, network, passive_mob, perf, physics, player, presentation_inventory_policy, recipes,
+    redstone, resources, save, server_runtime, server_world, structure, vehicle, village, weather,
+    world,
 };
 
 mod app;
 mod audio;
 mod camera;
-#[allow(dead_code)]
+#[cfg(any(test, feature = "harness"))]
 mod dynamic_resolution;
+mod gpu_frame_resources;
 mod hand_renderer;
 mod menu;
+mod microbench;
 mod mob_renderer;
 mod particles;
 mod presentation;
+mod presentation_click;
 mod state;
 mod texture;
 

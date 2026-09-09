@@ -1,5 +1,7 @@
 //! GPU-timing driven dynamic render-resolution control.
 //!
+//! Not compiled into the default desktop binary: there is no live upscale
+//! pass. The module is available under `cfg(test)` / feature `harness`.
 //! The controller is deliberately independent of wgpu.  A renderer can feed
 //! completed, frame-tagged timestamp results when they become available and
 //! use the returned quantized scale to decide whether to recreate its target.

@@ -8,7 +8,7 @@ Tokio TCP. Source and tests are the contract; `plans/` is history.
 
 | Target | Entrypoint | Owns |
 | --- | --- | --- |
-| `icraft` | `src/main.rs` | winit/wgpu/rodio loop, menu, input, presentation. `--microbench` calls `icraft::microbench::run()`. |
+| `icraft` | `src/main.rs` | winit/wgpu/rodio loop, menu, input, presentation. `--microbench` calls this crate's `mod microbench`. |
 | `icraft-server` | `src/bin/icraft-server.rs` | Headless `ServerRuntime`, TCP, console, autosave/shutdown. |
 | `icraft` lib | `src/lib.rs` | Shared authority, world, network, persistence. |
 
@@ -16,17 +16,22 @@ Desktop `main.rs` re-exports the library (`pub use icraft::{world, …}`) so
 desktop files keep `crate::world` paths. Shared source compiles once.
 
 **Do not add to `lib.rs`:** `menu`, `camera`, `audio`, `texture`,
-`src/presentation/`. That would compile wgpu/audio into `icraft-server`.
+`gpu_frame_resources`, `presentation_click`, `src/presentation/`. That would
+compile wgpu/audio/click policy into `icraft-server`.
 `presentation_inventory_policy` is the thin, GPU-free policy cut used by
 server and tests.
 
 `lib.rs` has two `pub` layers: the server/tests contract (authority, world,
 network, save, `presentation_inventory_policy`, …) and extra `pub` modules so
-the desktop crate can re-export them. `loot`, `voxel_shape`, and `worldgen`
-are `pub(crate)`. `sim_harness` / `final_acceptance` compile only under
-`cfg(test)` or feature `harness`. Leftover renderer-owned world simulation
-(`legacy_sim` / `legacy_interaction` / `legacy_systems`) and feature
-`legacy_owner` are gone.
+the desktop crate can re-export them. `loot`, `voxel_shape`, `worldgen`,
+`fluid`, `mob`, `rail`, and `world_tick` are `pub(crate)`. `recipes` stays
+`pub` because desktop `State` and `ServerWorld` expose `RecipeManager`.
+`sim_harness` / `final_acceptance` / `microbench` compile only under
+`cfg(test)` or feature `harness`. Desktop `--microbench` is `src/main.rs`'s
+own `mod`. `dynamic_resolution` is not in the default desktop compile (no
+live upscale pass; `cfg(test)` / `harness` only). Leftover renderer-owned
+world simulation (`legacy_sim` / `legacy_interaction` / `legacy_systems`)
+and feature `legacy_owner` are gone.
 
 New gameplay belongs in `AuthorityCore` / `ServerWorld`. Start in the narrow
 domain module, then check projection, save, and protocol. Do not add
@@ -249,7 +254,7 @@ go through `validated_world_path` (no symlink escape from `saves/`).
 | Area | Files |
 | --- | --- |
 | Desktop loop | `src/main.rs`, `src/app.rs`, `src/menu.rs`, `src/state.rs`, `src/audio.rs` |
-| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. |
+| Presentation (desktop-only) | `src/presentation/` — `embedded_runtime.rs`, `network_event.rs`, `frame.rs` are `#[path]` children of `state`. `gpu_frame_resources` / `presentation_click` / `microbench` are `mod` in `main.rs`. |
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
 | Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |
 | World | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |

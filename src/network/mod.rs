@@ -1,8 +1,8 @@
-pub mod channels;
+pub(crate) mod channels;
 pub mod client;
-pub mod egress;
-pub mod ingress;
+pub(crate) mod egress;
+pub(crate) mod ingress;
 pub mod protocol;
 pub mod server;
-pub mod session;
+pub(crate) mod session;
 pub mod transport;
