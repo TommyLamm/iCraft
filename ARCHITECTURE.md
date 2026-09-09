@@ -132,6 +132,10 @@ input
   simulation union, not the unbounded residency map. Columns that leave every
   session's view/simulation sets (plus `interest::RESIDENCY_HYSTERESIS`, same
   Chebyshev ring as client unload) are flushed if dirty and evicted.
+- Entity spawn/despawn follows view-distance interest. `EntityState` follows
+  simulation-distance and is sent only when pose, health, or animation
+  changed, or when the entity newly entered that session's simulation set.
+  Stationary entities are not re-encoded every tick.
 - `EmbeddedRuntimeBridge::sync_local_inventory` may write back only
   inventory, cursor, and selected hotbar. Health, hunger, XP, mining, and
   mounts stay server-owned. Join clients never use this path.

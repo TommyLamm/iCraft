@@ -16,6 +16,31 @@ use crate::network::protocol::{
 use crate::network::server::HostToServer;
 use crate::save::ChunkSaveData;
 use glam::Vec3;
+use std::collections::HashMap;
+
+/// Pose / health / anim signature used to skip unchanged entity state fanout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EntityBroadcastFingerprint {
+    position: [f32; 3],
+    velocity: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    health: f32,
+    animation_state: u8,
+}
+
+impl EntityBroadcastFingerprint {
+    fn from_entity(entity: &crate::entity::Entity) -> Self {
+        Self {
+            position: entity.position.to_array(),
+            velocity: entity.velocity.to_array(),
+            yaw: entity.yaw,
+            pitch: entity.pitch,
+            health: entity.health,
+            animation_state: entity_animation_state(entity),
+        }
+    }
+}
 
 impl ServerRuntime {
     pub(super) fn route_container_result(
@@ -737,32 +762,73 @@ impl ServerRuntime {
             self.routed_mutations.remove(&oldest);
         }
 
-        // Entity AI runs inside AuthorityCore::tick.  Emit state only to
-        // sessions whose simulation-distance set contains that entity.
+        // Entity AI runs inside AuthorityCore::tick. Emit pose/health/anim
+        // only when it changed, or when the entity newly entered a session's
+        // simulation set. Stationary entities are not re-encoded.
         for dimension in self.authority.dimensions() {
-            let mut entities: Vec<_> = self
-                .authority
-                .world_ref(dimension)
-                .map(|world| {
-                    world
-                        .entities
-                        .entities
-                        .iter()
-                        .map(|entity| (entity.id, entity_state_wire(entity)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            entities.sort_by_key(|(id, _)| *id);
-            for (entity_id, state) in entities {
-                let targets = self.queue_interest_update(
-                    dimension,
-                    // Snapshot revision is an aggregate max across worlds and
-                    // cannot be used as a client gate for this dimension.
-                    self.authority.revision_for_dimension(dimension),
-                    InterestKind::EntityState(entity_id),
-                );
-                for target in targets {
-                    self.send_entity_state(target, dimension, snapshot.tick, state);
+            let revision = self.authority.revision_for_dimension(dimension);
+            let mut session_ids: Vec<_> = self.players.keys().copied().collect();
+            session_ids.sort_unstable();
+            let mut encoded: HashMap<u64, EntityStateWire> = HashMap::new();
+            for session_id in session_ids {
+                let entity_ids = {
+                    let Some(session) = self.players.get_mut(&session_id) else {
+                        continue;
+                    };
+                    if session.interest.dimension != dimension {
+                        continue;
+                    }
+                    session.prune_projected_entity_states();
+                    let mut entity_ids: Vec<_> =
+                        session.interest.simulation_entities.iter().copied().collect();
+                    entity_ids.sort_unstable();
+                    entity_ids
+                };
+                for entity_id in entity_ids {
+                    let fingerprint = {
+                        let Some(entity) = self
+                            .authority
+                            .world_ref(dimension)
+                            .and_then(|world| world.entities.get_by_id(entity_id))
+                        else {
+                            continue;
+                        };
+                        EntityBroadcastFingerprint::from_entity(entity)
+                    };
+                    let Some(dirty) = self.players.get(&session_id).map(|session| {
+                        session.last_projected_entity_states.get(&entity_id) != Some(&fingerprint)
+                    }) else {
+                        continue;
+                    };
+                    if !dirty {
+                        continue;
+                    }
+                    let state = if let Some(&state) = encoded.get(&entity_id) {
+                        state
+                    } else {
+                        let Some(state) = self
+                            .authority
+                            .world_ref(dimension)
+                            .and_then(|world| world.entities.get_by_id(entity_id))
+                            .map(entity_state_wire)
+                        else {
+                            continue;
+                        };
+                        encoded.insert(entity_id, state);
+                        state
+                    };
+                    self.record_interest_update(
+                        session_id,
+                        dimension,
+                        revision,
+                        InterestKind::EntityState(entity_id),
+                    );
+                    self.send_entity_state(session_id, dimension, snapshot.tick, state);
+                    if let Some(session) = self.players.get_mut(&session_id) {
+                        session
+                            .last_projected_entity_states
+                            .insert(entity_id, fingerprint);
+                    }
                 }
             }
         }
@@ -820,6 +886,7 @@ impl ServerRuntime {
         session
             .interest
             .update_simulation_entities(simulation_entities);
+        session.prune_projected_entity_states();
     }
 
     pub(super) fn update_interest_for(
@@ -839,7 +906,7 @@ impl ServerRuntime {
         position: [f32; 3],
         sequence: u64,
     ) {
-        let (entity_states, simulation_entities) = self
+        let (entities, simulation_entities) = self
             .authority
             .world_ref(dimension)
             .map(|world| {
@@ -849,7 +916,7 @@ impl ServerRuntime {
                         Vec3::from_array(position),
                         f32::from(self.properties.view_distance) * 16.0,
                     )
-                    .map(|entity| (entity.id, entity_state_wire(entity)))
+                    .map(|entity| entity.id)
                     .collect::<Vec<_>>();
                 let simulation_entities = world
                     .entities
@@ -862,10 +929,6 @@ impl ServerRuntime {
                 (entities, simulation_entities)
             })
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
-        let entities: Vec<_> = entity_states
-            .iter()
-            .map(|(entity_id, _)| *entity_id)
-            .collect();
         let (entity_delta, old_dimension, departed_containers) = {
             let Some(session) = self.players.get_mut(&id) else {
                 return;
@@ -894,10 +957,12 @@ impl ServerRuntime {
                 entity_delta.entered = session.interest.entities.iter().copied().collect();
                 entity_delta.entered.sort_unstable();
                 session.pending_initial_chunks.clear();
+                session.last_projected_entity_states.clear();
             }
             session
                 .interest
                 .update_simulation_entities(simulation_entities);
+            session.prune_projected_entity_states();
             session
                 .pending_initial_chunks
                 .retain(|(queued_dimension, cx, cz)| {
@@ -928,9 +993,11 @@ impl ServerRuntime {
                 self.authority.revision_for_dimension(dimension),
                 InterestKind::Entity(entity_id),
             );
-            if let Some(state) = entity_states
-                .iter()
-                .find_map(|(id, state)| (*id == entity_id).then_some(*state))
+            if let Some(state) = self
+                .authority
+                .world_ref(dimension)
+                .and_then(|world| world.entities.get_by_id(entity_id))
+                .map(entity_state_wire)
             {
                 self.send_entity_spawn(id, dimension, sequence, state);
             }
@@ -1056,11 +1123,15 @@ impl ServerRuntime {
     }
 }
 
-pub(super) fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
-    let animation_state = u8::from(entity.on_ground)
+fn entity_animation_state(entity: &crate::entity::Entity) -> u8 {
+    u8::from(entity.on_ground)
         | (u8::from(entity.target_player) << 1)
         | (u8::from(entity.is_ignited) << 2)
-        | (u8::from(entity.fire_aspect_timer > 0.0) << 3);
+        | (u8::from(entity.fire_aspect_timer > 0.0) << 3)
+}
+
+pub(super) fn entity_state_wire(entity: &crate::entity::Entity) -> EntityStateWire {
+    let animation_state = entity_animation_state(entity);
     let item = entity
         .dropped_stack
         .as_ref()
