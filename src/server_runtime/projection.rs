@@ -25,7 +25,6 @@ impl ServerRuntime {
         x: i32,
         y: i32,
         z: i32,
-        slot: u16,
         action: ContainerAction,
     ) {
         let position = (x, y, z);
@@ -57,89 +56,106 @@ impl ServerRuntime {
                 ContainerAction::Close => {
                     session.interest.open_containers.remove(&position);
                 }
-                ContainerAction::Open | ContainerAction::Click => {
+                ContainerAction::Open => {
                     session.interest.open_containers.insert(position);
                 }
             }
         }
         self.queue_interest_update(dimension, revision, InterestKind::BlockEntity(position));
+        self.queue_interest_update(dimension, revision, InterestKind::Container(position));
+        if let ContainerAction::Open = action {
+            let slots = self
+                .authority
+                .world_mut(dimension)
+                .and_then(|world| world.container_slots_wire(position))
+                .unwrap_or_default();
+            self.send_targeted(
+                id,
+                slots,
+                |slots| RuntimePresentationEvent::ContainerOpenResult {
+                    target: id,
+                    dimension: dimension as u8,
+                    success: true,
+                    position,
+                    slots,
+                    revision,
+                },
+                |slots| HostToServer::SendContainerOpenResult {
+                    to: id,
+                    dimension: dimension as u8,
+                    success: true,
+                    x,
+                    y,
+                    z,
+                    slots,
+                    revision,
+                },
+            );
+        }
+    }
+
+    pub(super) fn route_container_click_result(
+        &mut self,
+        id: u64,
+        revision: u64,
+        x: i32,
+        y: i32,
+        z: i32,
+        slot: u16,
+    ) {
+        let position = (x, y, z);
+        let dimension = self
+            .authority
+            .session(id)
+            .and_then(|session| Dimension::from_wire(session.dimension))
+            .unwrap_or_else(|| self.authority.active_dimension());
+        if let Some(session) = self.players.get_mut(&id) {
+            session.interest.open_containers.insert(position);
+        }
+        self.queue_interest_update(dimension, revision, InterestKind::BlockEntity(position));
         let container_targets =
             self.queue_interest_update(dimension, revision, InterestKind::Container(position));
-        match action {
-            ContainerAction::Open => {
-                let slots = self
-                    .authority
-                    .world_mut(dimension)
-                    .and_then(|world| world.container_slots_wire(position))
-                    .unwrap_or_default();
-                self.send_targeted(
-                    id,
-                    slots,
-                    |slots| RuntimePresentationEvent::ContainerOpenResult {
-                        target: id,
-                        dimension: dimension as u8,
-                        success: true,
-                        position,
-                        slots,
-                        revision,
-                    },
-                    |slots| HostToServer::SendContainerOpenResult {
-                        to: id,
-                        dimension: dimension as u8,
-                        success: true,
-                        x,
-                        y,
-                        z,
-                        slots,
-                        revision,
-                    },
+        let slot_value = self
+            .authority
+            .world_mut(dimension)
+            .and_then(|world| world.container_slot_wire(position, slot))
+            .flatten();
+        let session_state = self.authority.session(id).map(|session| session.gameplay);
+        let dragged = session_state
+            .and_then(|state| state.cursor)
+            .map(|slot| slot.item);
+        if let Some(state) = session_state {
+            if let Some(session) = self.players.get_mut(&id) {
+                session.last_projected_session_revision = Some((dimension, state.revision));
+            }
+            self.send_session_update(id, revision, dimension, state);
+        }
+        self.send_targeted(
+            id,
+            (),
+            |_| RuntimePresentationEvent::ContainerClickResult {
+                target: id,
+                dimension: dimension as u8,
+                success: true,
+                slot_index: slot,
+                slot: slot_value,
+                dragged,
+            },
+            |_| HostToServer::SendContainerClickResult {
+                to: id,
+                dimension: dimension as u8,
+                success: true,
+                slot_index: slot,
+                slot: slot_value,
+                dragged,
+            },
+        );
+        for target in container_targets {
+            if target != id {
+                self.send_container_slot_update(
+                    target, dimension, revision, position, slot, slot_value,
                 );
             }
-            ContainerAction::Click => {
-                let slot_value = self
-                    .authority
-                    .world_mut(dimension)
-                    .and_then(|world| world.container_slot_wire(position, slot))
-                    .flatten();
-                let session_state = self.authority.session(id).map(|session| session.gameplay);
-                let dragged = session_state
-                    .and_then(|state| state.cursor)
-                    .map(|slot| slot.item);
-                if let Some(state) = session_state {
-                    if let Some(session) = self.players.get_mut(&id) {
-                        session.last_projected_session_revision = Some((dimension, state.revision));
-                    }
-                    self.send_session_update(id, revision, dimension, state);
-                }
-                self.send_targeted(
-                    id,
-                    (),
-                    |_| RuntimePresentationEvent::ContainerClickResult {
-                        target: id,
-                        dimension: dimension as u8,
-                        success: true,
-                        slot_index: slot,
-                        slot: slot_value,
-                        dragged,
-                    },
-                    |_| HostToServer::SendContainerClickResult {
-                        to: id,
-                        dimension: dimension as u8,
-                        success: true,
-                        slot_index: slot,
-                        slot: slot_value,
-                        dragged,
-                    },
-                );
-                for target in container_targets {
-                    if target != id {
-                        self.send_container_slot_update(
-                            target, dimension, revision, position, slot, slot_value,
-                        );
-                    }
-                }
-            }
-            ContainerAction::Close => {}
         }
     }
 
@@ -435,7 +451,7 @@ impl ServerRuntime {
     pub(super) fn force_close_player_containers(&mut self, id: u64) {
         let Some((dimension, positions)) = self.players.get(&id).map(|session| {
             (
-                session.dimension,
+                session.interest.dimension,
                 session
                     .interest
                     .open_containers
@@ -638,7 +654,7 @@ impl ServerRuntime {
             if let Some((dimension, position)) = self
                 .players
                 .get(&id)
-                .map(|session| (session.dimension, session.data.position))
+                .map(|session| (session.interest.dimension, session.data.position))
             {
                 self.update_interest_for_at(id, dimension, position, snapshot.tick);
             }
@@ -755,7 +771,7 @@ impl ServerRuntime {
                 continue;
             };
             let should_send = self.players.get(&update.player_id).is_some_and(|session| {
-                session.dimension == dimension
+                session.interest.dimension == dimension
                     && session.last_projected_session_revision.map_or(
                         true,
                         |(projected_dimension, revision)| {
@@ -777,12 +793,12 @@ impl ServerRuntime {
     pub(super) fn update_interest(&mut self, session: &mut PlayerSessionState) {
         let _ = session
             .interest
-            .update_position(session.dimension, session.data.position);
+            .update_position(session.interest.dimension, session.data.position);
         let center = Vec3::from_array(session.data.position);
         let radius = f32::from(session.interest.view_distance) * 16.0;
         let (entities, simulation_entities) = self
             .authority
-            .world_ref(session.dimension)
+            .world_ref(session.interest.dimension)
             .map(|world| {
                 let entities = world
                     .entities
@@ -857,7 +873,6 @@ impl ServerRuntime {
             let old_dimension = session.interest.dimension;
             let old_entities = session.interest.entities.clone();
             let old_open_containers = session.interest.open_containers.clone();
-            session.dimension = dimension;
             let mut chunk_delta = session.interest.update_position(dimension, position);
             let center_chunk = (
                 (position[0] / 16.0).floor() as i32,

@@ -85,13 +85,18 @@ compatibility key, not a moved slot.
 Two session records stay separate because interest and the save codec cannot
 enter the deterministic core:
 
-- `SessionContract` in `AuthorityCore`
-- `PlayerSessionState` in `ServerRuntime`
+- `SessionContract` in `AuthorityCore` owns pose, dimension, and the accepted
+  client sequence.
+- `PlayerSessionState` in `ServerRuntime` owns interest, the save codec,
+  `Instant` pose clocks, and teleport allowance.
 
 Pose / dimension / gameplay overlays go only through
 `write_pose`, `sync_pose_from_authority`, `sync_dimension`, and
 `sync_gameplay_projection` in `src/server_runtime/session_sync.rs`.
 `teleport_session` grants `teleport_allowance` before `write_pose`.
+TCP ingress still rejects out-of-order sequences before they cross the host
+channel (the network thread has no `AuthorityCore`); that watermark is not a
+second accepted-sequence source.
 
 ## Mutation path
 
@@ -109,7 +114,9 @@ input
 - Reject before mutating. A rejection must not consume inventory, spawn
   drops, or partially write the world.
 - Place/break is `GameplayOperation::BlockAction`.
-- Container clicks are conserving session transactions: clone player +
+- Container open/close is `GameplayOperation::Container`. Clicks are
+  `ContainerClick` only; leftover `Container { action: 1 }` is rejected.
+  Clicks are conserving session transactions: clone player +
   container, verify the claimed cursor, apply brew/viewer locks, commit both
   sides or roll back. Client-supplied item data is never echoed as truth.
 - Revisions are `(dimension, revision)`. The aggregate snapshot revision is
@@ -207,7 +214,8 @@ operator.
 `GameplayRequest` carries request id, client sequence, session, dimension,
 revision, and a typed operation. The bounded response cache makes retries
 idempotent. Live egress for sleep / container click / close is a
-`GameplayRequest`. Leftover inbound request packets (`BlockChange` as a
+`GameplayRequest`. `Container` wire values are Open=`0` and Close=`2`;
+leftover Click=`1` fails bounds validation. Leftover inbound request packets (`BlockChange` as a
 client request, `BlockActionRequest`, `SleepRequest`,
 `ContainerOpenRequest`, `ContainerClickRequest`, inbound `ContainerClose`)
 are decoded then dropped. Live desktop send uses pose / chat / disconnect /

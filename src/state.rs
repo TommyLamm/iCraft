@@ -5007,33 +5007,13 @@ impl State {
         position: (i32, i32, i32),
         action: crate::network::protocol::ContainerAction,
         slot: u16,
-        is_left: bool,
     ) -> bool {
-        let operation = match action {
-            crate::network::protocol::ContainerAction::Open
-            | crate::network::protocol::ContainerAction::Close => {
-                crate::network::protocol::GameplayOperation::Container {
-                    action: action.to_wire(),
-                    x: position.0,
-                    y: position.1,
-                    z: position.2,
-                    slot,
-                }
-            }
-            crate::network::protocol::ContainerAction::Click => {
-                crate::network::protocol::GameplayOperation::ContainerClick {
-                    x: position.0,
-                    y: position.1,
-                    z: position.2,
-                    slot,
-                    is_left,
-                    dragged: self
-                        .inventory
-                        .dragged
-                        .as_ref()
-                        .map(crate::network::protocol::ItemWire::from_stack),
-                }
-            }
+        let operation = crate::network::protocol::GameplayOperation::Container {
+            action: action.to_wire(),
+            x: position.0,
+            y: position.1,
+            z: position.2,
+            slot,
         };
         let Some(response) = self.submit_local_authority_operation(operation) else {
             return false;
@@ -5045,8 +5025,7 @@ impl State {
             return false;
         }
         match action {
-            crate::network::protocol::ContainerAction::Open
-            | crate::network::protocol::ContainerAction::Click => false,
+            crate::network::protocol::ContainerAction::Open => false,
             crate::network::protocol::ContainerAction::Close => {
                 self.container_target = None;
                 self.container_is_double = false;
@@ -9778,11 +9757,19 @@ impl State {
 
     fn submit_inventory_container_click(&mut self, slot: usize, is_left: bool) {
         if let Some(position) = self.container_target {
-            let _ = self.submit_local_authority_container_action(
-                position,
-                crate::network::protocol::ContainerAction::Click,
-                slot as u16,
-                is_left,
+            let _ = self.submit_local_authority_operation(
+                crate::network::protocol::GameplayOperation::ContainerClick {
+                    x: position.0,
+                    y: position.1,
+                    z: position.2,
+                    slot: slot as u16,
+                    is_left,
+                    dragged: self
+                        .inventory
+                        .dragged
+                        .as_ref()
+                        .map(crate::network::protocol::ItemWire::from_stack),
+                },
             );
         }
     }
@@ -9991,7 +9978,6 @@ impl State {
                     pos,
                     crate::network::protocol::ContainerAction::Close,
                     0,
-                    true,
                 )
             } else {
                 self.inventory.is_open = false;

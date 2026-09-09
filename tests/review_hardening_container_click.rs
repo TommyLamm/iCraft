@@ -496,29 +496,31 @@ fn metadata_mismatch_on_same_item_is_forged_and_rejected() {
 }
 
 #[test]
-fn legacy_container_click_envelope_extracts_into_inventory() {
+fn leftover_container_click_envelope_is_rejected() {
     let mut core = new_core();
     seed_chest(&mut core, &[(2, ItemStack::new(Item::Coal, 3))]);
     open_chest(&mut core, 1, 1);
     let before = conserved_totals(&core);
 
-    accepted(&submit(
-        &mut core,
-        2,
-        2,
-        GameplayOperation::Container {
-            action: ContainerAction::Click.to_wire(),
-            x: CHEST.0,
-            y: CHEST.1,
-            z: CHEST.2,
-            slot: 2,
-        },
-    ));
+    rejected(
+        &submit(
+            &mut core,
+            2,
+            2,
+            GameplayOperation::Container {
+                action: 1,
+                x: CHEST.0,
+                y: CHEST.1,
+                z: CHEST.2,
+                slot: 2,
+            },
+        ),
+        RejectReason::InvalidState,
+    );
 
     assert_eq!(conserved_totals(&core), before);
-    assert!(chest_slot(&core, 2).is_none());
     assert_eq!(
-        core.session(SESSION_ID).unwrap().gameplay.inventory[0].and_then(stack_from_slot),
+        chest_slot(&core, 2),
         Some(ItemStack::new(Item::Coal, 3))
     );
 }

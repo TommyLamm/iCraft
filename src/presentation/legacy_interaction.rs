@@ -2383,12 +2383,7 @@ impl State {
                     SlotType::ContainerSlot(slot)
                         if !self.presentation_topology().is_legacy_owner() =>
                     {
-                        self.submit_local_authority_container_action(
-                            self.container_target.unwrap_or((0, 0, 0)),
-                            crate::network::protocol::ContainerAction::Click,
-                            slot as u16,
-                            is_left,
-                        );
+                        self.submit_inventory_container_click(slot, is_left);
                     }
                     _ => {
                         let max_stack = slot_item

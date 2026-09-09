@@ -102,9 +102,6 @@ impl AuthorityCore {
                 Some(ContainerAction::Close) => self
                     .world_mut_active()
                     .close_container(*x, *y, *z, *slot, id),
-                Some(ContainerAction::Click) => {
-                    self.apply_container_click(id, (*x, *y, *z), *slot, true, None)
-                }
                 None => Err(RejectReason::InvalidState),
             },
             GameplayOperation::ContainerClick {
@@ -221,29 +218,28 @@ impl AuthorityCore {
         let Some(food) = item_kind.food_properties() else {
             return Err(RejectReason::Unsupported);
         };
-        let Some(session) = self.sessions.get(&session_id) else {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
             return Err(RejectReason::Unauthorized);
         };
+        let game_mode = session.game_mode;
         let original_gameplay = session.gameplay;
-        let mut gameplay = original_gameplay;
-        let hunger = gameplay.hunger_milli as f32 / 1000.0;
-        if hunger >= 20.0 && !food.always_edible && session.game_mode != GameMode::Creative {
+        if !session.gameplay.transact(|gameplay| {
+            let hunger = gameplay.hunger_milli as f32 / 1000.0;
+            if hunger >= 20.0 && !food.always_edible && game_mode != GameMode::Creative {
+                return false;
+            }
+            gameplay.hunger_milli = ((hunger + food.hunger).min(20.0) * 1000.0).round() as u32;
+            gameplay.saturation_milli = ((gameplay.saturation_milli as f32 / 1000.0
+                + food.saturation)
+                .min(gameplay.hunger_milli as f32 / 1000.0)
+                * 1000.0)
+                .round() as u32;
+            if game_mode != GameMode::Creative && !gameplay.remove_item(item, u32::from(count)) {
+                return false;
+            }
+            preserves_brew_locks(&original_gameplay, gameplay)
+        }) {
             return Err(RejectReason::InvalidState);
-        }
-        gameplay.hunger_milli = ((hunger + food.hunger).min(20.0) * 1000.0).round() as u32;
-        gameplay.saturation_milli = ((gameplay.saturation_milli as f32 / 1000.0 + food.saturation)
-            .min(gameplay.hunger_milli as f32 / 1000.0)
-            * 1000.0)
-            .round() as u32;
-        if session.game_mode != GameMode::Creative && !gameplay.remove_item(item, u32::from(count))
-        {
-            return Err(RejectReason::InvalidState);
-        }
-        if !preserves_brew_locks(&original_gameplay, &gameplay) {
-            return Err(RejectReason::InvalidState);
-        }
-        if let Some(session) = self.sessions.get_mut(&session_id) {
-            session.gameplay = gameplay;
         }
         Ok(None)
     }

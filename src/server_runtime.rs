@@ -754,14 +754,15 @@ pub struct ServerMetrics {
     pub last_save_latency_ms: u64,
 }
 
+/// Runtime session record kept separate from authority `SessionContract`.
+/// Interest, the save codec, pose clocks, and teleport allowance live here.
+/// Authoritative pose / dimension / accepted sequence live on the contract.
 #[derive(Debug, Clone)]
 pub struct PlayerSessionState {
     pub id: u64,
     pub username: String,
     pub storage: LocalSessionStorage,
     pub data: PlayerData,
-    pub dimension: Dimension,
-    pub last_client_sequence: u64,
     pub interest: InterestSet,
     pub effects: Vec<PlayerEffectWire>,
     pub(super) pending_initial_chunks: VecDeque<(Dimension, i32, i32)>,
@@ -787,8 +788,6 @@ impl PlayerSessionState {
             username,
             storage,
             data,
-            dimension,
-            last_client_sequence: 0,
             interest: InterestSet::new(dimension, view_distance, simulation_distance),
             effects: Vec::new(),
             pending_initial_chunks: VecDeque::new(),
@@ -1388,7 +1387,7 @@ impl ServerRuntime {
         let mut keep = BTreeSet::new();
         let mut any_session = false;
         for session in self.players.values() {
-            if session.dimension != dimension {
+            if session.interest.dimension != dimension {
                 continue;
             }
             any_session = true;
@@ -1450,7 +1449,7 @@ impl ServerRuntime {
                     dimension
                 })
             })
-            .unwrap_or(session.dimension);
+            .unwrap_or(session.interest.dimension);
         match session.storage {
             LocalSessionStorage::Named => self.save_manager.save_dedicated_player(
                 &session.username,
@@ -2523,9 +2522,12 @@ mod tests {
             .handle_event(ServerToHost::ClientRespawnRequest { id: 1 })
             .unwrap();
         let player = runtime.players.get(&1).unwrap();
-        assert_eq!(player.dimension, runtime.level.spawn_dimension);
+        assert_eq!(player.interest.dimension, runtime.level.spawn_dimension);
         let authority_session = runtime.authority.session(1).unwrap();
-        assert_eq!(authority_session.dimension, player.dimension as u8);
+        assert_eq!(
+            authority_session.dimension,
+            player.interest.dimension as u8
+        );
         assert_eq!(authority_session.position, player.data.position);
         assert!(!authority_session.gameplay.is_dead);
         assert_eq!(

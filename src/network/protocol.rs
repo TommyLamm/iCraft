@@ -159,14 +159,12 @@ pub const MIN_BLOCK_Y: i32 = -64;
 pub const MAX_BLOCK_Y: i32 = 319;
 pub const MAX_SESSION_VELOCITY_MILLI: i32 = 1_000_000;
 
-/// Stable wire mapping for container interactions.  The gameplay envelope
-/// keeps the historical `u8` field for backwards-compatible bincode/TCP
-/// decoding, while authority code must convert through this type instead of
-/// treating every non-zero action as "open".
+/// Stable wire mapping for container open/close. Click uses
+/// `GameplayOperation::ContainerClick`. Wire value `1` is leftover Click and
+/// is rejected by `from_wire`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContainerAction {
     Open,
-    Click,
     Close,
 }
 
@@ -174,7 +172,6 @@ impl ContainerAction {
     pub const fn from_wire(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::Open),
-            1 => Some(Self::Click),
             2 => Some(Self::Close),
             _ => None,
         }
@@ -183,7 +180,6 @@ impl ContainerAction {
     pub const fn to_wire(self) -> u8 {
         match self {
             Self::Open => 0,
-            Self::Click => 1,
             Self::Close => 2,
         }
     }
@@ -445,10 +441,8 @@ pub enum GameplayOperation {
         z: i32,
         slot: u16,
     },
-    /// Payload-preserving click envelope used by legacy packet adapters.  The
-    /// historical `Container` variant remains byte-compatible for open/close
-    /// requests; clicks carry their cursor/drag intent here instead of
-    /// silently discarding it at the transport boundary.
+    /// Canonical container click. Open/close stay on `Container`; leftover
+    /// `Container { action: 1 }` is rejected at bounds validation.
     ContainerClick {
         x: i32,
         y: i32,
@@ -1957,7 +1951,7 @@ mod tests {
             dimension: 0,
             client_revision: 12,
             operation: GameplayOperation::Container {
-                action: 1,
+                action: ContainerAction::Open.to_wire(),
                 x: 4,
                 y: 64,
                 z: -2,
@@ -2076,7 +2070,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_container_and_combat_encodings_remain_accepted() {
+    fn leftover_container_click_wire_is_rejected() {
         let request = |operation| GameplayRequest {
             request_id: 1,
             client_sequence: 1,
@@ -2085,8 +2079,19 @@ mod tests {
             client_revision: 0,
             operation,
         };
+        assert_eq!(
+            request(GameplayOperation::Container {
+                action: 1,
+                x: 0,
+                y: 64,
+                z: 0,
+                slot: MAX_CONTAINER_SLOTS - 1,
+            })
+            .validate_bounds(),
+            Err(RejectReason::InvalidState)
+        );
         request(GameplayOperation::Container {
-            action: ContainerAction::Click.to_wire(),
+            action: ContainerAction::Close.to_wire(),
             x: 0,
             y: 64,
             z: 0,

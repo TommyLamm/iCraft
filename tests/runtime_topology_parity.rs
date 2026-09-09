@@ -747,7 +747,9 @@ fn plan24_plan22_gameplay_vectors_match_all_runtime_topologies() {
             .unwrap();
         let reconnect_output = harness.runtime.tick_with_output().unwrap();
         assert_eq!(
-            harness.runtime.players[&TOPOLOGY_VICTIM_ID].dimension,
+            harness.runtime.players[&TOPOLOGY_VICTIM_ID]
+                .interest
+                .dimension,
             Dimension::Nether
         );
         assert!(reconnect_output.presentation_events.iter().all(|event| {
@@ -962,7 +964,7 @@ fn world_player_storage_loads_and_rewrites_legacy_player_dat() {
     .unwrap();
     let session = &runtime.players[&local_id];
     assert_eq!(session.storage, LocalSessionStorage::WorldPlayer);
-    assert_eq!(session.dimension, Dimension::Nether);
+    assert_eq!(session.interest.dimension, Dimension::Nether);
     assert_eq!(session.data.position, [13.0, 72.0, -9.0]);
     assert_eq!(
         runtime.authority.session(local_id).unwrap().game_mode,
@@ -985,7 +987,10 @@ fn world_player_storage_loads_and_rewrites_legacy_player_dat() {
         EmbeddedRuntimeOptions::singleplayer(LocalSessionProfile::new(restart_id, "legacy")),
     )
     .unwrap();
-    assert_eq!(restored.players[&restart_id].dimension, Dimension::End);
+    assert_eq!(
+        restored.players[&restart_id].interest.dimension,
+        Dimension::End
+    );
     assert_eq!(
         restored
             .authority

@@ -1462,10 +1462,6 @@ impl ServerWorld {
                 match action {
                     ContainerAction::Open => self.open_container(*x, *y, *z, *slot, player_id),
                     ContainerAction::Close => self.close_container(*x, *y, *z, *slot, player_id),
-                    ContainerAction::Click => {
-                        self.ensure_container_slot(*x, *y, *z, *slot)?;
-                        Err(RejectReason::Unsupported)
-                    }
                 }
             }
             GameplayOperation::ContainerClick { x, y, z, slot, .. } => {

@@ -789,7 +789,7 @@ fn two_clients_share_headless_authority_with_revision_interest_and_reconnect() {
     );
     let reconnected_id = reconnected.player_id().expect("alice reconnected");
     assert_eq!(
-        restarted.players[&reconnected_id].dimension,
+        restarted.players[&reconnected_id].interest.dimension,
         Dimension::Overworld
     );
     reconnected.disconnect_and_join();

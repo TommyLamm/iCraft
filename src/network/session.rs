@@ -598,9 +598,10 @@ impl Default for CatchupMailbox {
 }
 
 /// Transport-side state for the authoritative gameplay envelope. The
-/// authority core owns the world mutation, while the network owns the
-/// authenticated identity and bounded replay window needed before/after the
-/// request crosses the host channel.
+/// authority core owns accepted sequences and world mutation. The network
+/// allocates missing client sequences and keeps a bounded replay window so
+/// out-of-order packets never cross the host channel (NetworkServer tests
+/// and the TCP thread have no AuthorityCore).
 #[derive(Debug)]
 pub(crate) struct GameplaySessionState {
     pub(crate) next_request_id: RequestId,

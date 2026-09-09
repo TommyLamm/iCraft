@@ -103,6 +103,11 @@ pub(crate) async fn route_gameplay_request<S: HostEventSender>(
             session.metrics.record_rejected_request();
             immediate_response = Some(state.rejection(request.request_id, reason));
         } else if request.client_sequence <= state.last_client_sequence {
+            // Ingress must keep this gate: the TCP thread cannot ask
+            // AuthorityCore whether a sequence was accepted, and NetworkServer
+            // unit tests have no host gameplay loop. Transport allocates when
+            // `client_sequence == 0`; authority `SessionContract` remains the
+            // accepted-sequence source for gameplay.
             session.metrics.record_rejected_request();
             immediate_response =
                 Some(state.rejection(request.request_id, RejectReason::OutOfOrder));

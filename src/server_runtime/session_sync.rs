@@ -2,8 +2,8 @@
 //!
 //! Authority `SessionContract` and runtime `PlayerSessionState` stay separate
 //! types (interest / save codec cannot enter the deterministic core). These
-//! helpers are the only production writers of the mirrored pose, dimension,
-//! and gameplay-projection fields.
+//! helpers are the only production writers of pose (`PlayerData` + contract),
+//! dimension (interest set + contract), and gameplay-projection fields.
 
 use super::{apply_gameplay_to_player_data, ServerRuntime};
 use crate::dimension::Dimension;
@@ -36,7 +36,11 @@ impl ServerRuntime {
             return false;
         }
         if refresh_interest {
-            if let Some(dimension) = self.players.get(&id).map(|session| session.dimension) {
+            if let Some(dimension) = self
+                .players
+                .get(&id)
+                .map(|session| session.interest.dimension)
+            {
                 self.update_interest_for(id, dimension, position);
             }
         }
@@ -56,10 +60,10 @@ impl ServerRuntime {
         self.write_pose(id, position, yaw, pitch, refresh_interest)
     }
 
-    /// Write dimension to both the runtime session and the authority contract.
+    /// Write dimension to the authority contract and the runtime interest set.
     pub(super) fn sync_dimension(&mut self, id: u64, dimension: Dimension) {
         if let Some(session) = self.players.get_mut(&id) {
-            session.dimension = dimension;
+            session.interest.dimension = dimension;
         }
         if let Some(authority_session) = self.authority.session_mut(id) {
             authority_session.dimension = dimension as u8;

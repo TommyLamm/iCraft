@@ -68,12 +68,7 @@ fn end_gateway_hop_accepts_destination_pose() {
             .set_block(GATEWAY.0, GATEWAY.1, GATEWAY.2, BlockType::EndGateway, 0)
             .unwrap();
     });
-    if let Some(session) = runtime.players.get_mut(&LOCAL_ID) {
-        session.data.position = GATEWAY_POSE;
-    }
-    if let Some(session) = runtime.authority.session_mut(LOCAL_ID) {
-        session.position = GATEWAY_POSE;
-    }
+    assert!(runtime.teleport_session(LOCAL_ID, GATEWAY_POSE));
 
     input
         .try_send(ServerToHost::ClientPosition {
@@ -168,13 +163,7 @@ fn alive_respawn_request_does_not_mutate_session() {
     gameplay.health_milli = 12_000;
     gameplay.hunger_milli = 9_000;
     assert!(runtime.authority.set_session_gameplay(LOCAL_ID, gameplay));
-    if let Some(session) = runtime.players.get_mut(&LOCAL_ID) {
-        session.data.position = pose;
-        session.dimension = Dimension::Nether;
-    }
-    if let Some(session) = runtime.authority.session_mut(LOCAL_ID) {
-        session.position = pose;
-    }
+    assert!(runtime.teleport_session(LOCAL_ID, pose));
     let before_inventory = runtime
         .authority
         .session(LOCAL_ID)
@@ -195,7 +184,7 @@ fn alive_respawn_request_does_not_mutate_session() {
 
     let player = runtime.players.get(&LOCAL_ID).unwrap();
     let authority = runtime.authority.session(LOCAL_ID).unwrap();
-    assert_eq!(player.dimension, Dimension::Nether);
+    assert_eq!(player.interest.dimension, Dimension::Nether);
     assert_eq!(player.data.position, pose);
     assert_eq!(authority.dimension, Dimension::Nether as u8);
     assert_eq!(authority.position, pose);

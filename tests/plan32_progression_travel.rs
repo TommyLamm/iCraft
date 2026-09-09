@@ -198,7 +198,10 @@ fn singleplayer_typed_nether_activation_and_transfer() {
         ));
     }
     assert!(transferred);
-    assert_eq!(runtime.players[&LOCAL_ID].dimension, Dimension::Nether);
+    assert_eq!(
+        runtime.players[&LOCAL_ID].interest.dimension,
+        Dimension::Nether
+    );
     assert_eq!(
         runtime.authority.session(LOCAL_ID).unwrap().dimension,
         Dimension::Nether as u8
@@ -296,7 +299,7 @@ fn run_tcp_travel(label: &str, listen: bool) {
             "Plan32 cached portal duplicate and TCP transfer",
             |runtime, views| {
                 runtime.metrics.duplicate_requests > duplicate_before
-                    && runtime.players[&owner].dimension == Dimension::Nether
+                    && runtime.players[&owner].interest.dimension == Dimension::Nether
                     && views[0].events().iter().any(|event| {
                         matches!(
                             event,
@@ -371,7 +374,7 @@ fn run_tcp_travel(label: &str, listen: bool) {
                     runtime
                         .players
                         .get(&id)
-                        .is_some_and(|session| session.dimension == Dimension::Nether)
+                        .is_some_and(|session| session.interest.dimension == Dimension::Nether)
                 })
             },
         );
@@ -461,7 +464,7 @@ fn dedicated_tcp_combat_completes_generated_dragon_lifecycle() {
             &mut runtime,
             &mut refs,
             "Plan32 generated End dragon",
-            |runtime, _| runtime.players[&owner].dimension == Dimension::End,
+            |runtime, _| runtime.players[&owner].interest.dimension == Dimension::End,
         );
     }
     runtime.tick().unwrap();

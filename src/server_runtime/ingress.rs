@@ -72,7 +72,8 @@ impl ServerRuntime {
                 if !is_dead {
                     return Ok(());
                 }
-                let previous_dimension = self.players.get(&id).map(|session| session.dimension);
+                let previous_dimension =
+                    self.players.get(&id).map(|session| session.interest.dimension);
                 if let Some(dimension) = previous_dimension {
                     self.authority
                         .with_world(dimension, |world| world.close_container_viewers_forced(id));
@@ -181,7 +182,7 @@ impl ServerRuntime {
             self.properties.simulation_distance,
         );
         session.effects = effects;
-        let dimension = session.dimension as u8;
+        let dimension = session.interest.dimension as u8;
         let mut authority_session = SessionContract::new(
             id,
             session.username.clone(),
@@ -318,7 +319,7 @@ impl ServerRuntime {
 
     pub(super) fn handle_leave(&mut self, id: u64) -> io::Result<()> {
         if let Some(session) = self.players.remove(&id) {
-            let dimension = session.dimension;
+            let dimension = session.interest.dimension;
             for &position in &session.interest.open_containers {
                 let _ = self.authority.with_world(dimension, |world| {
                     world.close_container_viewer_forced(id, position)
@@ -365,12 +366,11 @@ impl ServerRuntime {
         ) {
             return Ok(());
         }
-        let dimension = session.dimension;
+        let dimension = session.interest.dimension;
         let _ = session;
         if !self.write_pose(id, position, yaw, pitch, true) {
             return Ok(());
         }
-        self.sync_dimension(id, dimension);
         let block_position = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
         let mut targets: Vec<_> = self
             .players
@@ -443,9 +443,9 @@ impl ServerRuntime {
                 .filter(|session| {
                     session
                         .interest
-                        .wants(session.dimension, InterestKind::Block((*x, 0, *z)))
+                        .wants(session.interest.dimension, InterestKind::Block((*x, 0, *z)))
                 })
-                .map(|session| session.dimension)
+                .map(|session| session.interest.dimension)
             {
                 let _ = self.authority.with_world(dimension, |world| {
                     world.ensure_chunk(target.0.div_euclid(16), target.1.div_euclid(16));
@@ -461,9 +461,6 @@ impl ServerRuntime {
         match &response.outcome {
             GameplayOutcome::Accepted { revision } => {
                 self.metrics.requests_accepted = self.metrics.requests_accepted.saturating_add(1);
-                if let Some(session) = self.players.get_mut(&id) {
-                    session.last_client_sequence = request.client_sequence;
-                }
                 if let Some(dimension) = self
                     .authority
                     .session(id)
@@ -490,11 +487,11 @@ impl ServerRuntime {
                         y,
                         z,
                         action,
-                        slot,
+                        slot: _,
                     } => {
                         let action = ContainerAction::from_wire(action)
                             .expect("authority accepted only a typed container action");
-                        self.route_container_result(id, *revision, x, y, z, slot, action);
+                        self.route_container_result(id, *revision, x, y, z, action);
                         // Container open/close changes the authoritative chest
                         // block state.  It is published by the next snapshot
                         // (including a double-chest partner mutation), so do
@@ -508,15 +505,7 @@ impl ServerRuntime {
                         dragged: _,
                         is_left: _,
                     } => {
-                        self.route_container_result(
-                            id,
-                            *revision,
-                            x,
-                            y,
-                            z,
-                            slot,
-                            ContainerAction::Click,
-                        );
+                        self.route_container_click_result(id, *revision, x, y, z, slot);
                         let dimension = self
                             .authority
                             .session(id)
@@ -567,7 +556,7 @@ impl ServerRuntime {
         let Some((_old_dimension, position)) = self
             .players
             .get(&id)
-            .map(|session| (session.dimension, session.data.position))
+            .map(|session| (session.interest.dimension, session.data.position))
         else {
             return false;
         };

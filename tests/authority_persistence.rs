@@ -139,7 +139,7 @@ fn runtime_reconnects_dimension_and_routes_without_cross_dimension_leak() {
     let mut restarted = ServerRuntime::new(properties).unwrap();
     restarted.login_session(9, "ALICE").unwrap();
     let session = restarted.players.get(&9).unwrap();
-    assert_eq!(session.dimension, Dimension::Nether);
+    assert_eq!(session.interest.dimension, Dimension::Nether);
     assert_eq!(session.data.health, 6.0);
     assert_eq!(session.effects.len(), 1);
 
