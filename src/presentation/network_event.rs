@@ -11,14 +11,6 @@ impl State {
             NetworkInbound::GameplayResponse { response } => {
                 self.last_gameplay_response = Some(response);
             }
-            NetworkInbound::GameplayRequest { id, mut request } => {
-                // Embedded listen transport is owned by ServerRuntime.  A
-                // State-side inbound GameplayRequest would be a second
-                // authority path; retain this legacy arm only for clients,
-                // where NetworkClient remains the presentation transport.
-                request.session_id = id;
-                let _ = request;
-            }
             NetworkInbound::Connected {
                 player_id,
                 seed,
@@ -104,21 +96,8 @@ impl State {
                         format!("{username} joined the game"),
                     );
                 }
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    self.remote_player_health
-                        .entry(id)
-                        .or_insert_with(PlayerState::new);
-                    self.remote_player_effects.entry(id).or_default();
-                    self.network.notify_player_join(id, username);
-                    self.send_time_sync_to(id);
-                    self.network.send_world_rules_to(self.world_rules, id);
-                    self.schedule_player_catchup(id);
-                }
             }
             NetworkInbound::PlayerLeave(id) => {
-                self.pending_player_catchups.remove(&id);
-                self.remote_player_health.remove(&id);
-                self.remote_player_effects.remove(&id);
                 self.container_sessions.close_by_player(id);
                 if let Some(remote) = self.remote_players.remove(&id) {
                     push_chat_history(
@@ -184,7 +163,6 @@ impl State {
                         .insert(id, RemotePlayerState::new(entity_id, username));
                 }
 
-                let mut canonical_snapshot = None;
                 if let Some(remote) = self.remote_players.get_mut(&id) {
                     let arrival = self.network_time;
                     let result = remote.push_snapshot(
@@ -211,21 +189,6 @@ impl State {
                         entity.yaw = snap_yaw;
                         entity.pitch = snap_pitch;
                     }
-                    if result != SnapshotPushResult::Rejected {
-                        canonical_snapshot = remote.snapshots.back().copied();
-                    }
-                }
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    if let Some(snapshot) = canonical_snapshot {
-                        self.network.broadcast_player_position(
-                            id,
-                            snapshot.sequence,
-                            snapshot.sender_time_millis,
-                            snapshot.position,
-                            snapshot.yaw,
-                            snapshot.pitch,
-                        );
-                    }
                 }
             }
             NetworkInbound::PlayerAction { id, action } => {
@@ -236,16 +199,6 @@ impl State {
                             | crate::network::protocol::Action::Break
                             | crate::network::protocol::Action::Use => 0.25,
                         };
-                    }
-                }
-                if matches!(self.role, MultiplayerRole::Host { .. }) {
-                    if let NetworkHandle::Host { host_to_server, .. } = &self.network {
-                        let _ = host_to_server.tracked_send(
-                            crate::network::server::HostToServer::BroadcastPlayerAction {
-                                id,
-                                action,
-                            },
-                        );
                     }
                 }
             }
@@ -438,108 +391,11 @@ impl State {
                     self.apply_lightning_strike(strike);
                 }
             }
-            NetworkInbound::ChatFromClient { id, message } => {
-                let sender = self
-                    .remote_players
-                    .get(&id)
-                    .map(|remote| remote.username.clone())
-                    .filter(|username| !username.is_empty())
-                    .unwrap_or_else(|| format!("Player {id}"));
-                let Some(message) = normalized_chat_message(&message) else {
-                    return;
-                };
-                push_chat_history(&mut self.chat_messages, sender.clone(), message.clone());
-                self.network.send_chat(sender, message);
-            }
             NetworkInbound::Chat { sender, message } => {
                 let Some(message) = normalized_chat_message(&message) else {
                     return;
                 };
                 push_chat_history(&mut self.chat_messages, sender, message);
-            }
-            NetworkInbound::CatchupAccepted {
-                id,
-                dimension,
-                cx,
-                cz,
-                revision,
-            } => {
-                let key = crate::dimension::Dimension::from_wire(dimension).map(|dimension| {
-                    PlayerCatchupKey {
-                        player_id: id,
-                        dimension,
-                        cx,
-                        cz,
-                        revision,
-                    }
-                });
-                if let Some(key) = key {
-                    if let Some(entry) = self
-                        .pending_player_catchups
-                        .get_mut(&id)
-                        .and_then(|entries| entries.iter_mut().find(|entry| entry.key == key))
-                    {
-                        entry.status = CatchupStatus::AwaitingAck {
-                            since: Instant::now(),
-                        };
-                    }
-                }
-            }
-            NetworkInbound::CatchupBackpressured {
-                id,
-                dimension,
-                cx,
-                cz,
-                revision,
-                mailbox_full_count,
-            } => {
-                self.perf_counters.network_catchup_mailbox_full = self
-                    .perf_counters
-                    .network_catchup_mailbox_full
-                    .max(mailbox_full_count);
-                let key = crate::dimension::Dimension::from_wire(dimension).map(|dimension| {
-                    PlayerCatchupKey {
-                        player_id: id,
-                        dimension,
-                        cx,
-                        cz,
-                        revision,
-                    }
-                });
-                if let Some(key) = key {
-                    if let Some(entry) = self
-                        .pending_player_catchups
-                        .get_mut(&id)
-                        .and_then(|entries| entries.iter_mut().find(|entry| entry.key == key))
-                    {
-                        entry.retries = entry.retries.saturating_add(1);
-                        entry.status = CatchupStatus::Pending;
-                    }
-                }
-            }
-            NetworkInbound::CatchupAck {
-                id,
-                dimension,
-                cx,
-                cz,
-                revision,
-            } => {
-                if let Some(dimension) = crate::dimension::Dimension::from_wire(dimension) {
-                    if let Some(entries) = self.pending_player_catchups.get_mut(&id) {
-                        entries.retain(|entry| {
-                            entry.key
-                                != (PlayerCatchupKey {
-                                    player_id: id,
-                                    dimension,
-                                    cx,
-                                    cz,
-                                    revision,
-                                })
-                        });
-                    }
-                    self.pending_player_catchups
-                        .retain(|_, entries| !entries.is_empty());
-                }
             }
             NetworkInbound::ContainerClose {
                 id,
@@ -648,85 +504,6 @@ impl State {
                         }
                         if let Some(entity) = self.chunk_manager.get_block_entity_mut(x, y, z) {
                             entity.set_revision(revision);
-                        }
-                    }
-                }
-            }
-            NetworkInbound::ClientRespawnRequest { id } => {
-                if matches!(&self.network, NetworkHandle::Host { .. }) {
-                    if let Some(remote) = self.remote_players.get_mut(&id) {
-                        if remote.is_dead || remote.health <= 0.0 {
-                            let mut spawn_pos = None;
-                            let mut spawn_dim = crate::dimension::Dimension::Overworld;
-
-                            if let (Some(bed_p), Some(dim)) =
-                                (remote.spawn_point, remote.spawn_dimension)
-                            {
-                                let chunk_pos = (bed_p[0], bed_p[1], bed_p[2]);
-                                if self.chunk_manager.get_block(
-                                    chunk_pos.0,
-                                    chunk_pos.1,
-                                    chunk_pos.2,
-                                ) == crate::world::BlockType::Bed
-                                {
-                                    let (safe_p, safe) = crate::world::find_safe_spawn_position(
-                                        &self.chunk_manager,
-                                        chunk_pos,
-                                    );
-                                    if safe {
-                                        spawn_pos = Some(safe_p);
-                                        spawn_dim = dim;
-                                    }
-                                }
-                                if spawn_pos.is_none() {
-                                    remote.spawn_point = None;
-                                    remote.spawn_dimension = None;
-                                }
-                            }
-
-                            if spawn_pos.is_none() {
-                                spawn_dim = crate::dimension::Dimension::Overworld;
-                                let target_p =
-                                    (self.world_spawn.0, self.world_spawn.1, self.world_spawn.2);
-                                let (safe_p, safe) = crate::world::find_safe_spawn_position(
-                                    &self.chunk_manager,
-                                    target_p,
-                                );
-                                if safe {
-                                    spawn_pos = Some(safe_p);
-                                } else {
-                                    spawn_pos = Some(Vec3::new(
-                                        target_p.0 as f32 + 0.5,
-                                        target_p.1 as f32,
-                                        target_p.2 as f32 + 0.5,
-                                    ));
-                                }
-                            }
-
-                            let respawn_p = spawn_pos.unwrap_or_else(|| Vec3::new(8.0, 80.0, 8.0));
-                            remote.health = 20.0;
-                            remote.hunger = 20.0;
-                            remote.is_dead = false;
-                            remote.is_sleeping = false;
-
-                            if let Some(entity) =
-                                self.entity_manager.get_by_id_mut(remote.entity_id)
-                            {
-                                entity.position = respawn_p;
-                                entity.health = 20.0;
-                            }
-
-                            self.container_sessions.close_by_player(id);
-                            self.network.send_respawn_result(
-                                id,
-                                respawn_p.to_array(),
-                                spawn_dim as u8,
-                            );
-                            let mut respawn_state = PlayerState::new();
-                            respawn_state.health = 20.0;
-                            respawn_state.hunger = 20.0;
-                            respawn_state.is_dead = false;
-                            self.network.broadcast_player_health(0, id, &respawn_state);
                         }
                     }
                 }

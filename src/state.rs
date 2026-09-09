@@ -1440,8 +1440,6 @@ impl State {
         self.sync_cursor_mode();
 
         clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
-        self.remote_player_health.clear();
-        self.remote_player_effects.clear();
         self.clear_replicated_entities();
         self.fishing_manager.active_hooks.clear();
         self.current_dimension = target;
@@ -2298,36 +2296,6 @@ fn project_name_tag(position: Vec3, view_proj: Mat4) -> Option<Vec2> {
     Some(Vec2::new(ndc.x, ndc.y))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CatchupStatus {
-    Pending,
-    #[allow(dead_code)]
-    WorkerInFlight,
-    #[allow(dead_code)]
-    ServerSubmission {
-        since: Instant,
-    },
-    AwaitingAck {
-        since: Instant,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct PlayerCatchupKey {
-    pub player_id: crate::network::protocol::PlayerId,
-    pub dimension: crate::dimension::Dimension,
-    pub cx: i32,
-    pub cz: i32,
-    pub revision: u64,
-}
-
-#[derive(Debug)]
-struct PlayerCatchupEntry {
-    key: PlayerCatchupKey,
-    status: CatchupStatus,
-    retries: u8,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CameraPerspective {
     #[default]
@@ -2633,17 +2601,6 @@ pub struct State {
         std::collections::HashMap<crate::network::protocol::PlayerId, RemotePlayerState>,
     /// Client-only visual copies of host-owned non-player entities.
     replicated_entities: std::collections::HashMap<u64, ReplicatedEntityState>,
-    /// Host-only set used to emit reliable spawn/despawn lifecycle edges.
-    replicated_entity_ids: std::collections::HashSet<u64>,
-    entity_replication_sequence: u64,
-    /// Host-owned survival state for joining players. Clients display only the
-    /// replicated entry matching `local_player_id`.
-    remote_player_health:
-        std::collections::HashMap<crate::network::protocol::PlayerId, PlayerState>,
-    remote_player_effects: std::collections::HashMap<
-        crate::network::protocol::PlayerId,
-        crate::brewing::EffectManager,
-    >,
     client_player_health_sequence: u64,
     client_player_effect_sequence: u64,
     /// Private session projection ordering is independent from the legacy
@@ -2666,7 +2623,6 @@ pub struct State {
     pub active_merchant_profession: crate::village::poi::VillagerProfession,
     pub active_merchant_level: crate::village::trade::VillagerLevel,
     pub active_merchant_xp: u32,
-    network_time_sync_timer: f32,
     network_time: f64,
     /// Client-only: chunk payloads that arrived from the host before the chunk
     /// was streamed in. Applied when `update_chunks` loads the coordinate.
@@ -2686,11 +2642,6 @@ pub struct State {
     #[allow(dead_code)]
     mutation_index_persist_in_flight: Option<u64>,
     mutation_index_dirty: bool,
-    /// Host-only ACK-owned catch-up entries per joining client.
-    pending_player_catchups:
-        std::collections::HashMap<crate::network::protocol::PlayerId, Vec<PlayerCatchupEntry>>,
-    #[allow(dead_code)]
-    catchup_round_robin_cursor: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4153,10 +4104,6 @@ impl State {
             local_player_id: embedded_session_id,
             remote_players: std::collections::HashMap::new(),
             replicated_entities: std::collections::HashMap::new(),
-            replicated_entity_ids: std::collections::HashSet::new(),
-            entity_replication_sequence: 0,
-            remote_player_health: std::collections::HashMap::new(),
-            remote_player_effects: std::collections::HashMap::new(),
             client_player_health_sequence: 0,
             client_player_effect_sequence: 0,
             client_session_projection: None,
@@ -4176,7 +4123,6 @@ impl State {
             active_merchant_profession: crate::village::poi::VillagerProfession::Unemployed,
             active_merchant_level: crate::village::trade::VillagerLevel::Novice,
             active_merchant_xp: 0,
-            network_time_sync_timer: 0.0,
             network_time: 0.0,
             pending_chunk_payloads: std::collections::HashMap::new(),
             pending_block_changes: std::collections::HashMap::new(),
@@ -4185,8 +4131,6 @@ impl State {
             mutation_revision_generation: u64::from(mutation_index_dirty),
             mutation_index_persist_in_flight: None,
             mutation_index_dirty,
-            pending_player_catchups: std::collections::HashMap::new(),
-            catchup_round_robin_cursor: 0,
         };
 
         // Restore persisted redstone component metadata (facing/delay/comparator
@@ -5138,59 +5082,6 @@ impl State {
         self.save_error.get_or_insert(message);
     }
 
-    fn schedule_player_catchup(&mut self, player_id: crate::network::protocol::PlayerId) {
-        // Restoring NetworkHandle::Host requires deleting this path or wiring
-        // it to ServerRuntime. Embedded runtime already owns catch-up.
-        if self.has_in_process_runtime() {
-            return;
-        }
-        let entries = self
-            .mutation_revisions
-            .entries_in(self.current_dimension)
-            .map(|((cx, cz), revision)| PlayerCatchupEntry {
-                key: PlayerCatchupKey {
-                    player_id,
-                    dimension: self.current_dimension,
-                    cx,
-                    cz,
-                    revision,
-                },
-                status: CatchupStatus::Pending,
-                retries: 0,
-            })
-            .collect();
-        self.pending_player_catchups.insert(player_id, entries);
-    }
-
-    fn process_join_catchups(&mut self) {
-        // Catch-up and mutation-index persist are authority work;
-        // ServerRuntime already owns them.
-        if self.has_in_process_runtime() {
-            return;
-        }
-    }
-
-    fn weather_sync_fields(&self) -> (u8, f32) {
-        let snapshot = self.weather.snapshot();
-        (snapshot.current.wire_value(), snapshot.remaining_ticks)
-    }
-
-    fn broadcast_time_sync(&self) {
-        let (weather, weather_remaining_ticks) = self.weather_sync_fields();
-        self.network
-            .broadcast_time_sync(self.world_time.ticks, weather, weather_remaining_ticks);
-    }
-
-    fn send_time_sync_to(&self, player_id: crate::network::protocol::PlayerId) {
-        let (weather, weather_remaining_ticks) = self.weather_sync_fields();
-        self.network.send_time_sync_to(
-            self.world_time.ticks,
-            weather,
-            weather_remaining_ticks,
-            player_id,
-        );
-    }
-
     fn drain_network_events(&mut self) {
         // Transport draining is bounded by `NetworkHandle`; every event it
         // yields is classified immediately so an apply-budget boundary can
@@ -5359,116 +5250,6 @@ impl State {
         );
     }
 
-    fn update_network_time_sync(&mut self, dt: f32) {
-        if !matches!(self.role, MultiplayerRole::Host { .. }) || !self.network_ready {
-            return;
-        }
-        self.network_time_sync_timer += dt;
-        if self.network_time_sync_timer >= 1.0 {
-            self.network_time_sync_timer %= 1.0;
-            self.broadcast_time_sync();
-        }
-    }
-
-    fn broadcast_authoritative_replication(&mut self, dt: f32) {
-        if self.has_in_process_runtime()
-            || !matches!(self.role, MultiplayerRole::Host { .. })
-            || !self.network_ready
-        {
-            return;
-        }
-
-        self.entity_replication_sequence = self.entity_replication_sequence.wrapping_add(1).max(1);
-        let sequence = self.entity_replication_sequence;
-        let states: Vec<_> = self
-            .entity_manager
-            .entities
-            .iter()
-            .filter(|entity| is_replicated_entity_type(entity.entity_type))
-            .map(entity_state_wire)
-            .collect();
-        let current_ids: std::collections::HashSet<_> =
-            states.iter().map(|state| state.entity_id).collect();
-
-        let mut despawned: Vec<_> = self
-            .replicated_entity_ids
-            .difference(&current_ids)
-            .copied()
-            .collect();
-        despawned.sort_unstable();
-        for entity_id in despawned {
-            self.network
-                .broadcast_entity_despawn(self.current_dimension, sequence, entity_id);
-        }
-
-        for state in &states {
-            if !self.replicated_entity_ids.contains(&state.entity_id) {
-                self.network
-                    .broadcast_entity_spawn(self.current_dimension, sequence, *state);
-            }
-            self.network
-                .broadcast_entity_state(self.current_dimension, sequence, *state);
-        }
-        self.replicated_entity_ids = current_ids;
-
-        self.network
-            .broadcast_player_health(sequence, 0, &self.player_state);
-        self.network.broadcast_player_effects(
-            sequence,
-            0,
-            self.potion_effects
-                .active
-                .iter()
-                .copied()
-                .map(effect_to_wire)
-                .collect(),
-        );
-
-        let remote_positions: Vec<_> = self
-            .remote_players
-            .iter()
-            .filter_map(|(id, remote)| {
-                remote
-                    .snapshots
-                    .back()
-                    .map(|snapshot| (*id, snapshot.position))
-            })
-            .collect();
-        for (player_id, position) in remote_positions {
-            let state = self
-                .remote_player_health
-                .entry(player_id)
-                .or_insert_with(PlayerState::new);
-            if let Some((amount, source)) = state.update(dt, false) {
-                state.take_damage(amount, source);
-            }
-            let effects = self.remote_player_effects.entry(player_id).or_default();
-            let effect_health = effects.update(dt);
-            if effect_health > 0.0 {
-                state.health = (state.health + effect_health).min(state.max_health);
-            } else if effect_health < 0.0 && state.health > 1.0 {
-                state.take_damage((-effect_health).min(state.health - 1.0), DamageSource::Mob);
-            }
-
-            if self.game_mode != GameMode::Creative
-                && self
-                    .entity_manager
-                    .query_radius(position, 2.2)
-                    .any(|entity| entity.entity_type.is_hostile() && entity.health > 0.0)
-            {
-                state.take_damage(3.0, DamageSource::Mob);
-            }
-
-            self.network
-                .broadcast_player_health(sequence, player_id, state);
-            self.network.broadcast_player_effects(
-                sequence,
-                player_id,
-                effects.active.iter().copied().map(effect_to_wire).collect(),
-            );
-        }
-    }
-
     pub fn shutdown_network(&mut self) {
         if let Some(runtime) = self.embedded_runtime.as_mut() {
             if let Err(error) = runtime.shutdown() {
@@ -5550,10 +5331,6 @@ impl State {
         self.world_rules = rules.normalized();
         self.player_physics
             .set_no_clip(self.game_mode_policy().can_phase);
-    }
-
-    pub fn broadcast_world_rules(&self) {
-        self.network.broadcast_world_rules(self.world_rules);
     }
 
     pub fn open_chat(&mut self) {
@@ -5655,10 +5432,8 @@ impl State {
                         }
                     }
                     if matches!(&command, Command::GameRule { .. }) {
-                        self.broadcast_world_rules();
                         self.translate("command.game_rule_updated_authority")
                     } else if matches!(&command, Command::Time(_)) {
-                        self.broadcast_time_sync();
                         let ticks = self.world_time.ticks.to_string();
                         self.translation_catalog
                             .format_lookup("command.time_now", &[("ticks", &ticks)])
@@ -6766,14 +6541,8 @@ impl State {
             self.world_time.tick_accumulator -= new_ticks as f32;
         }
         if self.current_dimension == crate::dimension::Dimension::Overworld {
-            let weather_update = if !self.world_rules.do_weather_cycle {
-                crate::weather::WeatherUpdate::default()
-            } else {
+            if self.world_rules.do_weather_cycle {
                 self.weather.update_client(elapsed_world_ticks, dt);
-                crate::weather::WeatherUpdate::default()
-            };
-            if weather_update.changed {
-                self.broadcast_time_sync();
             }
         } else {
             self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
@@ -7036,8 +6805,6 @@ impl State {
         self.total_time += dt;
         self.end_flash_time = (self.end_flash_time - dt.max(0.0)).max(0.0);
 
-        self.broadcast_authoritative_replication(dt);
-
         self.perf_recorder.record(
             crate::perf::ScopeId::WorldTick,
             world_tick_started.elapsed(),
@@ -7141,8 +6908,6 @@ impl State {
             self.base_fov
         };
         self.camera.fov = self.camera.fov + (target_fov - self.camera.fov) * dt * 10.0;
-
-        self.update_network_time_sync(dt);
 
         // Torch smoke presentation updates
         self.torch_smoke_timer += dt;
@@ -7335,7 +7100,6 @@ impl State {
         self.network_time += f64::from(dt);
         let network_started = Instant::now();
         self.drain_network_events();
-        self.process_join_catchups();
         self.perf_recorder.record(
             crate::perf::ScopeId::NetworkDrain,
             network_started.elapsed(),
@@ -10563,33 +10327,9 @@ mod debug_tests {
     }
 
     #[test]
-    fn host_inbound_gameplay_request_preserves_authenticated_player_id() {
-        let (inbound_tx, inbound_rx) = std::sync::mpsc::channel();
-        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(16);
-        let handle = NetworkHandle::Host {
-            server_to_host: inbound_rx,
-            host_to_server: outbound_tx,
-            thread: None,
-        };
-        let request = crate::network::protocol::GameplayRequest {
-            request_id: 42,
-            client_sequence: 1,
-            session_id: 7,
-            dimension: 0,
-            client_revision: 0,
-            operation: crate::network::protocol::GameplayOperation::Command {
-                command: "/help".into(),
-            },
-        };
-        inbound_tx
-            .send(crate::network::server::ServerToHost::GameplayRequest { id: 7, request })
-            .unwrap();
-
-        let events = handle.drain_inbound();
-        assert!(matches!(
-            events.as_slice(),
-            [NetworkInbound::GameplayRequest { id: 7, request: req }] if req.request_id == 42
-        ));
+    fn network_handle_none_drains_no_inbound_events() {
+        let handle = NetworkHandle::None;
+        assert!(handle.drain_inbound().is_empty());
     }
 
     #[test]

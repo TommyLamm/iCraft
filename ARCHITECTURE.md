@@ -59,9 +59,8 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
   `GameplayRequest`s and applies revision-gated projections.
 - Embedded presentation peeks `dimension.dat` so the first projected columns
   are not dropped. Player and terrain arrive from `ServerRuntime`.
-- Production `NetworkHandle` is `None` (embedded) or `Client` (join).
-  `NetworkHandle::Host` is leftover in-process transport. Listen-host TCP is
-  owned by `ServerRuntime`, not a second GPU-thread server.
+- `NetworkHandle` is `None` (embedded singleplayer / listen-host) or `Client`
+  (join). Listen-host TCP is owned by `ServerRuntime`, not a GPU-thread server.
 - `State::tick_authority_boundary` is the embedded 20 Hz tick. There is no
   separate `AuthorityBoundary` type.
 

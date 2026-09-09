@@ -12,11 +12,11 @@ Listen-host 輸出已由 `ServerRuntime` 走 TCP。`process_join_catchups` 在�
 
 ## 精確 acceptance
 
-- [ ] `NetworkHandle` 只留 `None | Client`。
-- [ ] 刪所有 `if let NetworkHandle::Host` 廣播／catch-up 方法。
-- [ ] 刪 `CatchupStatus`、`pending_player_catchups`、空的 `process_join_catchups` 與其每 tick 呼叫。
-- [ ] 單元測試改成 `None`／`Client` 或不測 Host 傳輸。
-- [ ] `cargo check --all-targets` 通過。
+- [x] `NetworkHandle` 只留 `None | Client`。
+- [x] 刪所有 `if let NetworkHandle::Host` 廣播／catch-up 方法。
+- [x] 刪 `CatchupStatus`、`pending_player_catchups`、空的 `process_join_catchups` 與其每 tick 呼叫。
+- [x] 單元測試改成 `None`／`Client` 或不測 Host 傳輸。
+- [x] `cargo check --all-targets` 通過。
 
 ## 預計檔案與測試
 
@@ -33,3 +33,27 @@ Listen-host 輸出已由 `ServerRuntime` 走 TCP。`process_join_catchups` 在�
 
 - 刪 presentation `SaveManager`（04）。
 - 改 `ServerRuntime` TCP listen-host。
+
+## 實作與證據
+
+### 改了什麼
+
+- `NetworkHandle` 只留 `None | Client`；刪 Host drain 與所有 Host 廣播／catch-up 方法。
+- 刪 `CatchupStatus`、`PlayerCatchupEntry`、`pending_player_catchups`、空的 `process_join_catchups` 與每 tick 呼叫。
+- 清掉只服務 leftover Host 傳輸的 inbound 臂（catch-up ACK、`ClientRespawnRequest`、`ChatFromClient`、Host `GameplayRequest`）與桌面側 Host 廣播呼叫。
+- `host_inbound_gameplay_request_preserves_authenticated_player_id` 改成 `network_handle_none_drains_no_inbound_events`；Client drain 測試保留。
+- `ARCHITECTURE.md`：`NetworkHandle` 契約改成只有 `None`／`Client`。
+
+### 測了什麼
+
+- `cargo check --all-targets`：通過。
+- `cargo test --bin icraft -- network_handle`：2 passed（`network_handle_none_drains_no_inbound_events`、`network_handle_preserves_client_chat_and_disconnect_payloads`）。
+- `cargo test --bin icraft -- client_block_change_is_classified_as_host_authority`：1 passed。
+- `cargo test --bin icraft`：181 passed。
+
+### 留下的缺口
+
+- presentation `SaveManager`、`mutation_revisions` 仍在（04）。
+- `ServerRuntime` TCP listen-host 與 `ServerToHost`／`HostToServer` 通道未改。
+- `PresentationTopology::LegacyOwner` 仍在（06）。
+- `RemotePlayerState` 上部分 Host 廣播用欄位現在只寫不讀；debug overlay 的 `network_catchup_mailbox_full` 永遠為 0。
