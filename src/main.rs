@@ -11,8 +11,7 @@ pub use icraft::{
     enchantment, entity, fishing, fluid, game_rules, gpu_frame_resources, interaction, inventory,
     lighting, localization, microbench, mob, navigation, network, passive_mob, perf, physics,
     player, presentation_click, presentation_inventory_policy, rail, recipes, redstone, resources,
-    save, server_runtime, server_world, structure, vehicle, village, weather, world,
-    world_mutation, world_tick,
+    save, server_runtime, server_world, structure, vehicle, village, weather, world, world_tick,
 };
 
 mod app;

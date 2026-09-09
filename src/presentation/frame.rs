@@ -51,13 +51,7 @@ impl State {
         self.perf_counters.save_in_flight = 0;
         self.perf_counters.save_in_flight_bytes = 0;
         self.perf_counters.save_drop = 0;
-        if let Some(mgr) = self
-            .save_manager
-            .as_ref()
-            .and_then(|manager| manager.try_lock().ok())
-        {
-            self.perf_counters.loaded_region_cache_bytes = mgr.region_cache_bytes();
-        }
+        self.perf_counters.loaded_region_cache_bytes = 0;
 
         let lod_thresholds = LodThresholds::new(render_blocks * 0.5, render_blocks * 0.75);
         self.terrain_candidates_scratch.clear();

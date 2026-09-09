@@ -1,11 +1,37 @@
+use crate::block_entity::BlockEntity;
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::WorldHeight;
 use crate::entity::EntityType;
 use crate::inventory::ItemStack;
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
-use crate::world_mutation::{BlockMutationRequest, MutationCause};
 use glam::Vec3;
 use std::collections::BTreeSet;
+
+/// Why a random-tick (or leftover helper) asked to change a block.
+/// Authority applies `pos` / `new_block` / `new_state` through
+/// `ServerWorld::set_block` and does not branch on this tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum MutationCause {
+    PlayerPlace { player_id: Option<u64> },
+    PlayerBreak { player_id: Option<u64> },
+    Redstone,
+    Explosion,
+    System,
+}
+
+/// Block change requested by random ticks. Applied by `ServerWorld`, not by
+/// leftover presentation `apply_batch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockMutationRequest {
+    pub pos: (i32, i32, i32),
+    pub new_block: BlockType,
+    pub new_state: u8,
+    #[allow(dead_code)]
+    pub new_entity: Option<BlockEntity>,
+    #[allow(dead_code)]
+    pub cause: MutationCause,
+}
 
 /// Statistics for random tick sampling per frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

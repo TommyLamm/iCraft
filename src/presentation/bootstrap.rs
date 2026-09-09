@@ -122,9 +122,7 @@ pub(crate) async fn create_gpu_context(
 }
 
 pub(crate) struct LaunchWorldState {
-    pub save_manager: Option<std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>>,
     pub current_dimension: crate::dimension::Dimension,
-    pub mutation_revisions: crate::save::MutationRevisionIndex,
     pub player_physics: PlayerPhysics,
     pub game_mode: GameMode,
     pub inventory: Inventory,
@@ -140,7 +138,6 @@ pub(crate) struct LaunchWorldState {
     pub bonus_chest: bool,
     pub cheats_enabled: bool,
     pub advancement_progress: crate::advancements::AdvancementProgressData,
-    pub mutation_index_load_error: Option<String>,
     pub has_save: bool,
 }
 
@@ -155,11 +152,9 @@ pub(crate) fn load_launch_world_state(
     in_process_authority: bool,
 ) -> LaunchWorldState {
     // Join clients never own world persistence. They apply revision-gated
-    // projections only and must not create a local save tree, chunk save
-    // worker, or snapshot worker against `icraft_multiplayer_client`.
+    // projections only and must not create a local save tree.
     // Embedded Singleplayer / listen-host already own the world through
-    // ServerRuntime. Presentation SaveManager is leftover and stays None.
-    let save_manager = None;
+    // ServerRuntime. Presentation has no SaveManager.
     let current_dimension = if is_client {
         crate::dimension::Dimension::Overworld
     } else if in_process_authority {
@@ -169,7 +164,6 @@ pub(crate) fn load_launch_world_state(
     } else {
         crate::dimension::Dimension::Overworld
     };
-    let mutation_revisions = crate::save::MutationRevisionIndex::default();
 
     let player_physics = PlayerPhysics::new(Vec3::new(8.0, 80.0, 8.0));
     let creation_options = crate::save::load_world_creation_options(&launch.world_dir);
@@ -200,9 +194,7 @@ pub(crate) fn load_launch_world_state(
     let has_save = false;
 
     LaunchWorldState {
-        save_manager,
         current_dimension,
-        mutation_revisions,
         player_physics,
         game_mode,
         inventory,
@@ -218,7 +210,6 @@ pub(crate) fn load_launch_world_state(
         bonus_chest,
         cheats_enabled,
         advancement_progress,
-        mutation_index_load_error: None,
         has_save,
     }
 }

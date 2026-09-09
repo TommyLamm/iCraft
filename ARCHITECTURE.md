@@ -57,6 +57,8 @@ All server paths -> AuthorityCore -> BTreeMap<Dimension, ServerWorld>
   socket input share one bounded FIFO.
 - A join client never runs authority, worldgen, or `SaveManager`. It sends
   `GameplayRequest`s and applies revision-gated projections.
+- Desktop `State` has no `SaveManager`. Embedded saves go through
+  `ServerRuntime`; join clients persist nothing locally.
 - Embedded presentation peeks `dimension.dat` so the first projected columns
   are not dropped. Player and terrain arrive from `ServerRuntime`.
 - `NetworkHandle` is `None` (embedded singleplayer / listen-host) or `Client`
@@ -131,9 +133,9 @@ input
   mounts stay server-owned. Join clients never use this path.
 
 Leftover renderer-owned world simulation is gone. World mutation belongs in
-`AuthorityCore` / `ServerWorld`. Presentation `SaveManager` and
-`world_mutation::apply_batch` are leftover persistence helpers, not the
-authority mutation root.
+`AuthorityCore` / `ServerWorld`. Desktop `State` has no `SaveManager` and no
+presentation mutation index. Random ticks emit `world_tick::BlockMutationRequest`,
+which `ServerWorld` applies; durable writes stay on `ServerRuntime`.
 
 ## Tick vs frame
 
@@ -237,10 +239,10 @@ configured `world_dir` (default `world/`).
 
 Writes are atomic. Chunk restore is fail-closed: corrupt/empty/oversized/
 dimension-inconsistent streams error; the column is never generated or
-saved over (`ServerWorld::failed_restore_chunks`). While `ServerRuntime`
-owns a world it is the sole writer of `mutation_revisions.bin`. Desktop
-world paths go through `validated_world_path` (no symlink escape from
-`saves/`).
+saved over (`ServerWorld::failed_restore_chunks`). `ServerRuntime` is the
+sole `SaveManager` owner and the sole writer of `mutation_revisions.bin`.
+Desktop `State` does not keep a second mutation index. Desktop world paths
+go through `validated_world_path` (no symlink escape from `saves/`).
 
 ## Code map
 

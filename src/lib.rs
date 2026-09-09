@@ -72,7 +72,6 @@ pub mod resources;
 pub mod vehicle;
 pub mod village;
 pub mod weather;
-pub mod world_mutation;
 pub mod world_tick;
 
 // Still crate-internal. Desktop-only files do not `use crate::` these.

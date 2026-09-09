@@ -1105,7 +1105,6 @@ struct ChunkLoadResult {
     generation: u64,
     lifetime: u64,
     chunk: Chunk,
-    mutated: bool,
     restore_failed: bool,
     redstone_metadata: Vec<crate::redstone::RedstoneComponentMetadata>,
 }
@@ -1286,24 +1285,6 @@ impl State {
         self.player_physics.set_flying(false);
         self.jump_taps.reset();
         let source = self.current_dimension;
-        if !self.has_in_process_runtime() {
-            if let Some(save_manager) = self.save_manager.as_ref() {
-                let mut manager = save_manager.lock().unwrap_or_else(|e| e.into_inner());
-                for ((cx, cz), _) in self.chunk_manager.dirty_chunks.dirty_revisions() {
-                    if let Some(chunk) = self.chunk_manager.chunks.get(&(cx, cz)) {
-                        let redstone_metadata =
-                            self.redstone
-                                .collect_chunk_metadata(&self.chunk_manager, cx, cz);
-                        if let Ok(data) = crate::save::ChunkSaveData::from_chunk_with_redstone(
-                            chunk,
-                            &redstone_metadata,
-                        ) {
-                            let _ = manager.save_chunk_in(source, cx, cz, data);
-                        }
-                    }
-                }
-            }
-        }
 
         let mut destination =
             crate::dimension::transform_position(source, target, self.player_physics.position);
@@ -1313,17 +1294,11 @@ impl State {
             destination = Vec3::new(8.5, 80.0, 8.5);
         }
 
-        if !self.has_in_process_runtime() {
-            if let Err(error) = self.save_current_dimension_entities() {
-                eprintln!("[Save] Could not save dimension entities: {error}");
-            }
-        }
         self.current_dimension = target;
         let render_distance = self.chunk_manager.render_distance;
         self.teardown_terrain_runtime("dimension switch");
         self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
         self.entity_manager = crate::entity::EntityManager::new();
-        self.load_current_dimension_entities();
         self.particles = crate::particles::ParticleSystem::new();
         self.redstone = crate::redstone::RedstoneSystem::new();
         self.redstone_tick_timer = 0.0;
@@ -1342,7 +1317,7 @@ impl State {
 
         let cx = (destination.x / CHUNK_WIDTH as f32).floor() as i32;
         let cz = (destination.z / CHUNK_DEPTH as f32).floor() as i32;
-        let mut chunk = crate::dimension::generate_chunk_with_options(
+        let chunk = crate::dimension::generate_chunk_with_options(
             target,
             cx,
             cz,
@@ -1352,54 +1327,12 @@ impl State {
                 generate_structures: self.generate_structures,
             },
         );
-        let mut restored_redstone = Vec::new();
-        let saved_chunk = self
-            .save_manager
-            .as_ref()
-            .and_then(|manager| manager.lock().unwrap().load_chunk_in(target, cx, cz));
-        let mut restore_ok = true;
-        if let Some(saved) = saved_chunk {
-            let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk)
-                .ok()
-                .map(|data| data.blocks);
-            if generated_blocks.as_ref() != Some(&saved.blocks) {
-                match self.mutation_revisions.ensure_at_least(target, cx, cz, 1) {
-                    Ok(true) => {
-                        self.mutation_revision_generation =
-                            self.mutation_revision_generation.saturating_add(1);
-                        self.mutation_index_dirty = true;
-                    }
-                    Ok(false) => {}
-                    Err(error) => self.report_mutation_revision_error(
-                        error,
-                        "restoring a mutated destination chunk",
-                    ),
-                }
-            }
-            restored_redstone = saved.redstone_metadata();
-            if let Err(error) = saved.restore_to_chunk(&mut chunk) {
-                eprintln!(
-                    "[Save] skipping corrupt saved chunk ({cx}, {cz}) in {target:?}: {error}"
-                );
-                restore_ok = false;
-            }
-        }
-        if restore_ok {
-            self.chunk_manager.chunks.insert((cx, cz), chunk);
-            if !restored_redstone.is_empty() {
-                self.redstone.restore_chunk_metadata(
-                    &self.chunk_manager,
-                    cx,
-                    cz,
-                    &restored_redstone,
-                );
-            }
-            let lifetime = self.next_chunk_lifetime();
-            self.chunk_lifetimes.insert((cx, cz), lifetime);
-            self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
-            let mut dirty = std::collections::HashSet::new();
-            crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
-        }
+        self.chunk_manager.chunks.insert((cx, cz), chunk);
+        let lifetime = self.next_chunk_lifetime();
+        self.chunk_lifetimes.insert((cx, cz), lifetime);
+        self.chunk_meshes.insert((cx, cz), ChunkMesh::pending());
+        let mut dirty = std::collections::HashSet::new();
+        crate::lighting::propagate_chunk_lighting(&mut self.chunk_manager, cx, cz, &mut dirty);
 
         let _ = (cx, cz);
         self.player_physics.position = destination;
@@ -1410,15 +1343,6 @@ impl State {
         self.camera.position = destination + Vec3::new(0.0, 1.6, 0.0);
         self.portal_contact_time = 0.0;
         self.portal_cooldown = 3.0;
-        if !self.has_in_process_runtime() {
-            let _ = self
-                .save_manager
-                .as_ref()
-                .expect("authoritative world owns SaveManager")
-                .lock()
-                .unwrap()
-                .save_current_dimension(target);
-        }
         println!("[Dimension] {} -> {}", source.name(), target.name());
     }
 
@@ -2509,7 +2433,6 @@ pub struct State {
     pub lava_damage_timer: f32,
     pub cactus_damage_timer: f32,
     boss_maintenance_timer: f32,
-    pub save_manager: Option<std::sync::Arc<std::sync::Mutex<crate::save::SaveManager>>>,
     pub autosave_timer: f32,
     pub is_saving: bool,
     pub save_error: Option<String>,
@@ -2635,13 +2558,6 @@ pub struct State {
         std::collections::HashMap<(i32, i32, i32), (u64, u32, u8, u8)>,
     >,
     client_chunk_revisions: std::collections::HashMap<(crate::dimension::Dimension, i32, i32), u64>,
-    /// Host-only persistent latest revision per mutated chunk. Keeping only
-    /// the latest value bounds history while retaining unloaded coordinates.
-    mutation_revisions: crate::save::MutationRevisionIndex,
-    mutation_revision_generation: u64,
-    #[allow(dead_code)]
-    mutation_index_persist_in_flight: Option<u64>,
-    mutation_index_dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2875,9 +2791,7 @@ impl State {
         let depth_view = Self::create_depth_texture(&device, &config);
 
         let crate::presentation::bootstrap::LaunchWorldState {
-            save_manager,
             current_dimension,
-            mut mutation_revisions,
             player_physics,
             game_mode,
             inventory,
@@ -2893,14 +2807,12 @@ impl State {
             bonus_chest,
             cheats_enabled,
             advancement_progress,
-            mut mutation_index_load_error,
             has_save,
         } = crate::presentation::bootstrap::load_launch_world_state(
             &launch,
             is_client,
             in_process_authority,
         );
-        let mut mutation_index_dirty = false;
         let keys = KeyState::default();
 
         let mut resource_pack_manager = crate::resources::ResourcePackManager::discover_default();
@@ -3331,7 +3243,7 @@ impl State {
             let initial_radius = initial_chunk_radius(render_distance);
             for cx in player_chunk_x - initial_radius..=player_chunk_x + initial_radius {
                 for cz in player_chunk_z - initial_radius..=player_chunk_z + initial_radius {
-                    let mut chunk = crate::dimension::generate_chunk_with_options(
+                    let chunk = crate::dimension::generate_chunk_with_options(
                         current_dimension,
                         cx,
                         cz,
@@ -3341,40 +3253,6 @@ impl State {
                             generate_structures,
                         },
                     );
-                    let saved_chunk = {
-                        let mut manager = save_manager
-                            .as_ref()
-                            .expect("authoritative world owns SaveManager")
-                            .lock()
-                            .unwrap();
-                        manager.load_chunk_in(current_dimension, cx, cz)
-                    };
-                    if let Some(data) = saved_chunk {
-                        let generated_blocks = crate::save::ChunkSaveData::from_chunk(&chunk)
-                            .ok()
-                            .map(|generated| generated.blocks);
-                        if generated_blocks.as_ref() != Some(&data.blocks) {
-                            match mutation_revisions.ensure_at_least(current_dimension, cx, cz, 1) {
-                                Ok(changed) => mutation_index_dirty |= changed,
-                                Err(error) => {
-                                    let message = format!(
-                                        "Mutation revision tracking capacity was exhausted while \
-                                         restoring spawn chunk ({cx}, {cz}): {error}"
-                                    );
-                                    eprintln!("[Save] {message}");
-                                    mutation_index_load_error.get_or_insert(message);
-                                }
-                            }
-                        }
-                        let metadata = data.redstone_metadata();
-                        if let Err(error) = data.restore_to_chunk(&mut chunk) {
-                            eprintln!("[Save] skipping corrupt saved chunk ({cx}, {cz}): {error}");
-                            continue;
-                        }
-                        if !metadata.is_empty() {
-                            pending_redstone_metadata.push((cx, cz, metadata));
-                        }
-                    }
                     chunk_manager.chunks.insert((cx, cz), chunk);
                 }
             }
@@ -4017,10 +3895,9 @@ impl State {
             lava_damage_timer: 0.0,
             cactus_damage_timer: 0.0,
             boss_maintenance_timer: 0.0,
-            save_manager,
             autosave_timer: 0.0,
             is_saving: false,
-            save_error: mutation_index_load_error,
+            save_error: None,
             is_sprinting: false,
             sprint_toggle_latched: false,
             sneak_toggle_latched: false,
@@ -4127,10 +4004,6 @@ impl State {
             pending_chunk_payloads: std::collections::HashMap::new(),
             pending_block_changes: std::collections::HashMap::new(),
             client_chunk_revisions: std::collections::HashMap::new(),
-            mutation_revisions,
-            mutation_revision_generation: u64::from(mutation_index_dirty),
-            mutation_index_persist_in_flight: None,
-            mutation_index_dirty,
         };
 
         // Restore persisted redstone component metadata (facing/delay/comparator
@@ -4155,7 +4028,6 @@ impl State {
 
         let initial_mesh_coords: Vec<_> = state.chunk_meshes.keys().copied().collect();
         state.invalidate_chunk_meshes(initial_mesh_coords, DependencyReason::ChunkLoad);
-        state.load_current_dimension_entities();
 
         state
     }
@@ -5069,19 +4941,6 @@ impl State {
             )
     }
 
-    fn report_mutation_revision_error(
-        &mut self,
-        error: crate::save::MutationRevisionIndexCapacityError,
-        operation: &str,
-    ) {
-        let message = format!(
-            "Mutation revision tracking capacity was exhausted while {operation}: {error}. \
-             Multiplayer mutation delivery has been stopped to avoid sending an untracked revision."
-        );
-        eprintln!("[Save] {message}");
-        self.save_error.get_or_insert(message);
-    }
-
     fn drain_network_events(&mut self) {
         // Transport draining is bounded by `NetworkHandle`; every event it
         // yields is classified immediately so an apply-budget boundary can
@@ -5521,14 +5380,6 @@ impl State {
         }
     }
 
-    pub fn trigger_background_save(&self) -> crate::save::SaveResult<()> {
-        // ServerRuntime owns authoritative chunk/entity/player persistence
-        // and performs bounded autosaves from its fixed tick. State's
-        // renderer cache must never be serialized as a second authority.
-        let _ = self;
-        Ok(())
-    }
-
     pub fn save_synchronously(&mut self) -> crate::save::SaveResult<()> {
         if self.presentation_topology().is_join_client() {
             return Ok(());
@@ -5544,58 +5395,7 @@ impl State {
                 })?;
             return Ok(());
         }
-        // Mark all currently loaded chunks dirty for complete save and quit flush
-        for &coord in self.chunk_manager.chunks.keys() {
-            self.chunk_manager.dirty_chunks.mark_dirty(coord.0, coord.1);
-        }
-        self.trigger_background_save()?;
-        println!("[Save] Synchronously saved world state.");
         Ok(())
-    }
-
-    pub fn save_current_dimension_entities(&self) -> crate::save::SaveResult<()> {
-        let Some(save_manager) = self.save_manager.as_ref() else {
-            return Ok(());
-        };
-        let save_manager = match save_manager.lock() {
-            Ok(mgr) => mgr,
-            Err(error) => error.into_inner(),
-        };
-        let persistent_entities: Vec<crate::save::EntitySaveData> = self
-            .entity_manager
-            .entities
-            .iter()
-            .map(crate::save::EntitySaveData::from)
-            .filter(|data| data.should_persist())
-            .collect();
-
-        let path = save_manager.entities_file_path(self.current_dimension);
-        save_manager
-            .save_entities_in(self.current_dimension, &persistent_entities)
-            .map_err(|error| crate::save::SaveError::Io {
-                operation: "save entities",
-                path,
-                message: error.to_string(),
-            })
-    }
-
-    pub fn load_current_dimension_entities(&mut self) {
-        let Some(save_manager) = self.save_manager.as_ref() else {
-            return;
-        };
-        let save_manager = match save_manager.lock() {
-            Ok(mgr) => mgr,
-            Err(_) => return,
-        };
-        let saved_entities = save_manager.load_entities_in(self.current_dimension);
-        if saved_entities.is_empty() {
-            return;
-        }
-
-        self.entity_manager.entities.clear();
-        for data in &saved_entities {
-            self.entity_manager.add_restored_entity(data);
-        }
     }
 
     pub fn trigger_advancement(&mut self, trigger: crate::advancements::AdvancementTrigger) {
@@ -5909,25 +5709,6 @@ impl State {
                     }
 
                     let (cx, cz) = result.coord;
-                    if result.mutated {
-                        match self.mutation_revisions.ensure_at_least(
-                            self.current_dimension,
-                            cx,
-                            cz,
-                            1,
-                        ) {
-                            Ok(true) => {
-                                self.mutation_revision_generation =
-                                    self.mutation_revision_generation.saturating_add(1);
-                                self.mutation_index_dirty = true;
-                            }
-                            Ok(false) => {}
-                            Err(error) => self.report_mutation_revision_error(
-                                error,
-                                "integrating a mutated streamed chunk",
-                            ),
-                        }
-                    }
                     let load_bytes = result.chunk.memory_usage() as u64;
                     self.chunk_manager.chunks.insert(result.coord, result.chunk);
                     self.chunk_lifetimes.insert(result.coord, result.lifetime);
@@ -6130,7 +5911,6 @@ impl State {
                 generation,
                 lifetime,
                 chunk,
-                mutated: false,
                 restore_failed: false,
                 redstone_metadata: Vec::new(),
             }));

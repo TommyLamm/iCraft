@@ -30,8 +30,8 @@ pub use region::{
 };
 
 /// Read-only `dimension.dat` peek. Embedded presentation uses this so it can
-/// start in the last persisted dimension without constructing a writable
-/// presentation `SaveManager`.
+/// start in the last persisted dimension without constructing a presentation
+/// `SaveManager`.
 pub fn peek_current_dimension(world_dir: &Path) -> Dimension {
     match fs::read(world_dir.join("dimension.dat"))
         .ok()
@@ -431,6 +431,8 @@ impl SaveManager {
 
     /// Presentation must not write `mutation_revisions.bin` while an
     /// in-process `ServerRuntime` already owns this world directory.
+    /// Desktop presentation no longer holds a `SaveManager`; this skip is
+    /// retained for tests and any leftover caller.
     /// Returns `Ok(false)` when the write is skipped.
     pub fn save_mutation_revision_index_unless_runtime(
         &self,
