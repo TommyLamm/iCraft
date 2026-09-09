@@ -589,4 +589,27 @@ mod tests {
         assert_eq!(merchant_offer_at(0.0, 0.19, 3), Some(1));
         assert_eq!(merchant_offer_at(0.9, 0.28, 3), None);
     }
+
+    #[test]
+    fn collect_inventory_ui_hits_covers_merchant_enchant_and_recipe_book() {
+        let hits = collect_inventory_ui_hits(0.0, 0.28, true, true, 3, true, true);
+        assert_eq!(hits.merchant, Some(0));
+        assert!(!hits.recipe_book);
+        assert_eq!(hits.enchant, None);
+
+        let enchant = collect_inventory_ui_hits(0.3, 0.24, true, false, 0, false, true);
+        assert_eq!(enchant.enchant, Some(0));
+        assert!(enchant.merchant.is_none());
+        assert!(!enchant.recipe_book);
+
+        let recipe = collect_inventory_ui_hits(-0.7, 0.0, true, false, 0, true, false);
+        assert!(recipe.recipe_book);
+        assert!(recipe.merchant.is_none());
+        assert!(recipe.enchant.is_none());
+
+        let right_click = collect_inventory_ui_hits(0.0, 0.28, false, true, 3, true, true);
+        assert!(right_click.merchant.is_none());
+        assert!(!right_click.recipe_book);
+        assert!(right_click.enchant.is_none());
+    }
 }
