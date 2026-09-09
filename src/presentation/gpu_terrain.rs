@@ -95,7 +95,7 @@ impl RenderRegion {
             (region_coord.0
                 * crate::chunk_render::REGION_SIZE_CHUNKS
                 * crate::world::CHUNK_WIDTH as i32) as f32,
-            0.0,
+            crate::chunk_render::REGION_ORIGIN_Y,
             (region_coord.1
                 * crate::chunk_render::REGION_SIZE_CHUNKS
                 * crate::world::CHUNK_DEPTH as i32) as f32,

@@ -92,16 +92,9 @@ impl ConnectionReader {
 
 impl ConnectionWriter {
     pub async fn send(&mut self, packet: &Packet) -> io::Result<()> {
-        let payload = packet.encode();
-        let len = u32::try_from(payload.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "packet payload exceeds u32 length",
-            )
-        })?;
-        let mut frame = Vec::with_capacity(LEN_HEADER + payload.len());
-        frame.extend_from_slice(&len.to_be_bytes());
-        frame.extend_from_slice(&payload);
+        let frame = packet
+            .encode_frame()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.stream.write_all(&frame).await?;
         Ok(())
     }

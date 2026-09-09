@@ -39,41 +39,48 @@ pub fn calculate_block_break_rewards(
                 tool.tool_type == old_block.preferred_tool() && tool.material >= minimum
             })
     });
+    let silk_touch = held_stack
+        .map(|stack| stack.enchantments.level_of(Enchantment::SilkTouch) > 0)
+        .unwrap_or(false);
     let mut drops = Vec::new();
     if eligible {
-        let silk_touch = held_stack
-            .map(|stack| stack.enchantments.level_of(Enchantment::SilkTouch) > 0)
-            .unwrap_or(false);
         let fortune = held_stack
             .map(|stack| stack.enchantments.level_of(Enchantment::Fortune(1)) as u32)
             .unwrap_or(0);
         if silk_touch {
             drops.push(ItemStack::new(Item::from_block(old_block), 1));
         } else {
-            let base_drop = match old_block {
-                BlockType::CoalOre => Item::Coal,
-                BlockType::DiamondOre => Item::Diamond,
-                BlockType::RedstoneOre => Item::Redstone,
-                _ => Item::from_block(old_block),
-            };
-            let fortune_eligible = matches!(
+            let specialized_crop = matches!(
                 old_block,
-                BlockType::CoalOre | BlockType::DiamondOre | BlockType::RedstoneOre
+                BlockType::WheatCrop
+                    | BlockType::CarrotCrop
+                    | BlockType::PotatoCrop
+                    | BlockType::TallGrass
             );
-            let bonus = if fortune_eligible && fortune > 0 {
-                ((pos.0 as u32)
-                    .wrapping_mul(31)
-                    .wrapping_add((pos.1 as u32).wrapping_mul(17))
-                    .wrapping_add((pos.2 as u32).wrapping_mul(13))
-                    % (fortune + 1))
-                    + fortune / 2
-            } else {
-                0
-            };
-            drops.extend((0..=bonus).map(|_| ItemStack::new(base_drop, 1)));
+            if !specialized_crop {
+                let base_drop = match old_block {
+                    BlockType::CoalOre => Item::Coal,
+                    BlockType::DiamondOre => Item::Diamond,
+                    BlockType::RedstoneOre => Item::Redstone,
+                    _ => Item::from_block(old_block),
+                };
+                let fortune_eligible = matches!(
+                    old_block,
+                    BlockType::CoalOre | BlockType::DiamondOre | BlockType::RedstoneOre
+                );
+                let bonus = if fortune_eligible && fortune > 0 {
+                    ((pos.0 as u32)
+                        .wrapping_mul(31)
+                        .wrapping_add((pos.1 as u32).wrapping_mul(17))
+                        .wrapping_add((pos.2 as u32).wrapping_mul(13))
+                        % (fortune + 1))
+                        + fortune / 2
+                } else {
+                    0
+                };
+                drops.extend((0..=bonus).map(|_| ItemStack::new(base_drop, 1)));
+            }
         }
-        // Keep a deterministic crop/decoration subset from the existing
-        // helper's contract; unsupported tables intentionally drop nothing.
         match old_block {
             BlockType::TallGrass if drops.is_empty() => {
                 let seed = (pos.0 as u32)
@@ -98,11 +105,38 @@ pub fn calculate_block_break_rewards(
         }
     }
 
-    let xp = match old_block {
-        BlockType::DiamondOre => 5,
-        BlockType::CoalOre | BlockType::IronOre | BlockType::GoldOre | BlockType::RedstoneOre => 2,
-        _ => 0,
+    let xp = if eligible && !silk_touch {
+        match old_block {
+            BlockType::DiamondOre => 5,
+            BlockType::CoalOre
+            | BlockType::IronOre
+            | BlockType::GoldOre
+            | BlockType::RedstoneOre => 2,
+            _ => 0,
+        }
+    } else {
+        0
     };
+    // #region agent log
+    if xp > 0 {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("debug-879839.log")
+            .and_then(|mut f| {
+                writeln!(
+                    f,
+                    "{{\"sessionId\":\"879839\",\"hypothesisId\":\"G\",\"location\":\"authority/mining.rs:calculate_block_break_rewards\",\"message\":\"xp vs eligibility\",\"data\":{{\"eligible\":{},\"xp\":{},\"drop_count\":{}}},\"timestamp\":{}}}",
+                    eligible, xp, drops.len(), ts
+                )
+            });
+    }
+    // #endregion
     BlockBreakRewards {
         drops,
         xp,
@@ -178,7 +212,7 @@ mod tests {
         assert_eq!(rewards.drops[0].item, Item::Diamond);
         assert_eq!(rewards.xp, 5);
 
-        // DiamondOre with SilkTouch -> drops DiamondOre block
+        // DiamondOre with SilkTouch -> drops DiamondOre block, no XP
         let mut silk_pick = ItemStack::new(Item::IronPickaxe, 1);
         silk_pick
             .enchantments
@@ -191,6 +225,7 @@ mod tests {
             GameMode::Survival,
         );
         assert_eq!(rewards.drops[0].item, Item::DiamondOre);
+        assert_eq!(rewards.xp, 0);
 
         // Creative mode -> zero drops
         let rewards = calculate_block_break_rewards(
@@ -207,26 +242,23 @@ mod tests {
     fn calculate_block_break_rewards_mature_and_immature_crops() {
         let pos = (10, 60, 10);
 
-        // Mature Wheat (age 7) -> drops Wheat + Wheat (base drop + age branch)
+        // Mature Wheat (age 7) -> Wheat
         let mature_wheat =
             calculate_block_break_rewards(BlockType::WheatCrop, 7, pos, None, GameMode::Survival);
-        assert_eq!(mature_wheat.drops.len(), 2);
+        assert_eq!(mature_wheat.drops.len(), 1);
         assert_eq!(mature_wheat.drops[0].item, Item::Wheat);
-        assert_eq!(mature_wheat.drops[1].item, Item::Wheat);
 
-        // Immature Wheat (age 3) -> drops Wheat + Seeds (base drop + age branch)
+        // Immature Wheat (age 3) -> Seeds
         let immature_wheat =
             calculate_block_break_rewards(BlockType::WheatCrop, 3, pos, None, GameMode::Survival);
-        assert_eq!(immature_wheat.drops.len(), 2);
-        assert_eq!(immature_wheat.drops[0].item, Item::Wheat);
-        assert_eq!(immature_wheat.drops[1].item, Item::Seeds);
+        assert_eq!(immature_wheat.drops.len(), 1);
+        assert_eq!(immature_wheat.drops[0].item, Item::Seeds);
 
-        // Immature Carrot (age 2) -> drops 2 Carrot (base drop + age branch)
+        // Immature Carrot (age 2) -> Carrot
         let immature_carrot =
             calculate_block_break_rewards(BlockType::CarrotCrop, 2, pos, None, GameMode::Survival);
-        assert_eq!(immature_carrot.drops.len(), 2);
+        assert_eq!(immature_carrot.drops.len(), 1);
         assert_eq!(immature_carrot.drops[0].item, Item::Carrot);
-        assert_eq!(immature_carrot.drops[1].item, Item::Carrot);
     }
 
     #[test]
@@ -240,5 +272,45 @@ mod tests {
 
         let bedrock = mining_time_seconds(BlockType::Bedrock, None);
         assert_eq!(bedrock, f32::MAX);
+    }
+
+    #[test]
+    fn debug_ore_xp_and_crop_drops() {
+        let pos = (10, 60, 10);
+        let bare_iron =
+            calculate_block_break_rewards(BlockType::IronOre, 0, pos, None, GameMode::Survival);
+        let immature =
+            calculate_block_break_rewards(BlockType::WheatCrop, 3, pos, None, GameMode::Survival);
+        let tall =
+            calculate_block_break_rewards(BlockType::TallGrass, 0, pos, None, GameMode::Survival);
+        // #region agent log
+        {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug-879839.log")
+                .and_then(|mut f| {
+                    writeln!(
+                        f,
+                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"G\",\"location\":\"authority/mining.rs:debug_ore_xp_and_crop_drops\",\"message\":\"rewards\",\"data\":{{\"iron_xp\":{},\"iron_drops\":{},\"wheat_drops\":{},\"first_wheat\":{:?},\"grass_drops\":{},\"first_grass\":{:?}}},\"timestamp\":{}}}",
+                        bare_iron.xp, bare_iron.drops.len(), immature.drops.len(),
+                        immature.drops.first().map(|d| format!("{:?}", d.item)).unwrap_or_default(),
+                        tall.drops.len(),
+                        tall.drops.first().map(|d| format!("{:?}", d.item)).unwrap_or_default(),
+                        ts
+                    )
+                });
+        }
+        // #endregion
+        assert_eq!(bare_iron.xp, 0);
+        assert!(bare_iron.drops.is_empty());
+        assert_eq!(immature.drops.len(), 1);
+        assert_eq!(immature.drops[0].item, Item::Seeds);
+        assert!(tall.drops.iter().all(|d| d.item != Item::TallGrass));
     }
 }

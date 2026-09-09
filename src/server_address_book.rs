@@ -409,16 +409,9 @@ fn ping_once(address: &str, timeout: Duration) -> ServerPingResult {
         let req_packet = Packet::ServerListPingRequest {
             protocol_version: PROTOCOL_VERSION,
         };
-        let payload = req_packet.encode();
-        let len = u32::try_from(payload.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "packet payload exceeds u32 length",
-            )
-        })?;
-        let mut frame = Vec::with_capacity(4 + payload.len());
-        frame.extend_from_slice(&len.to_be_bytes());
-        frame.extend_from_slice(&payload);
+        let frame = req_packet
+            .encode_frame()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         stream.write_all(&frame)?;
 
         let mut len_buf = [0u8; 4];

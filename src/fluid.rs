@@ -187,10 +187,39 @@ fn desired_flow(
     is_lava: bool,
 ) -> Option<(u8, bool)> {
     if chunk_manager.dimension.height().contains_y(wy + 1)
-        && is_water_source_at(chunk_manager, (wx, wy + 1, wz), target_type, is_lava)
+        && is_same_fluid_at(chunk_manager, (wx, wy + 1, wz), target_type, is_lava)
     {
         return Some((0, true));
     }
+    // #region agent log
+    if chunk_manager.dimension.height().contains_y(wy + 1)
+        && chunk_manager.get_block(wx, wy + 1, wz) == target_type
+        && !is_water_source_at(chunk_manager, (wx, wy + 1, wz), target_type, is_lava)
+    {
+        use std::io::Write;
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug-879839.log")
+                .and_then(|mut f| {
+                    writeln!(
+                        f,
+                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"F\",\"location\":\"fluid.rs:desired_flow\",\"message\":\"above fluid rejected as non-source\",\"data\":{{\"pos\":[{},{},{}],\"above_level\":{},\"above_falling\":{}}},\"timestamp\":{}}}",
+                        wx, wy, wz,
+                        chunk_manager.get_fluid_level(wx, wy + 1, wz),
+                        chunk_manager.get_fluid_falling(wx, wy + 1, wz),
+                        ts
+                    )
+                });
+        }
+    }
+    // #endregion
 
     // Two adjacent source blocks above a supporting block create an infinite
     // water source. Lava intentionally does not use this rule.
@@ -215,7 +244,7 @@ fn desired_flow(
     for (dx, _, dz) in HORIZONTAL_DIRECTIONS {
         let nx = wx + dx;
         let nz = wz + dz;
-        if !is_water_source_at(chunk_manager, (nx, wy, nz), target_type, is_lava) {
+        if !is_same_fluid_at(chunk_manager, (nx, wy, nz), target_type, is_lava) {
             continue;
         }
 
@@ -242,6 +271,19 @@ fn desired_flow(
     }
 
     best_level.map(|level| (level + 1, false))
+}
+
+fn is_same_fluid_at(
+    chunk_manager: &ChunkManager,
+    pos: BlockPos,
+    target_type: BlockType,
+    is_lava: bool,
+) -> bool {
+    let (wx, wy, wz) = pos;
+    if !is_lava && target_type == BlockType::Water && chunk_manager.is_waterlogged(wx, wy, wz) {
+        return true;
+    }
+    chunk_manager.get_block(wx, wy, wz) == target_type
 }
 
 fn is_water_source_at(
@@ -448,5 +490,73 @@ mod tests {
             0,
             "Y=0 over air must not form an infinite source"
         );
+    }
+
+    #[test]
+    fn debug_waterfall_and_horizontal_spread() {
+        let mut manager = ChunkManager::new(1);
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+        manager.set_block(8, 120, 8, BlockType::Water);
+        for y in 100..120 {
+            manager.set_block(8, y, 8, BlockType::Air);
+            manager.set_block(9, y, 8, BlockType::Air);
+        }
+        manager.set_block(8, 100, 8, BlockType::Stone);
+        manager.set_block(9, 100, 8, BlockType::Stone);
+        manager.set_block(10, 100, 8, BlockType::Stone);
+
+        for _ in 0..64 {
+            tick_all_loaded_fluids(&mut manager, false, 256);
+            if manager.pending_fluid_updates(false) == 0 {
+                break;
+            }
+        }
+        let y118 = manager.get_block(8, 118, 8);
+        let y118_falling = manager.get_fluid_falling(8, 118, 8);
+        let side = manager.get_block(9, 101, 8);
+        let side_level = manager.get_fluid_level(9, 101, 8);
+        // #region agent log
+        {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug-879839.log")
+                .and_then(|mut f| {
+                    writeln!(
+                        f,
+                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"F\",\"location\":\"fluid.rs:debug_waterfall_and_horizontal_spread\",\"message\":\"flow after ticks\",\"data\":{{\"y118_water\":{},\"y118_falling\":{},\"side_water\":{},\"side_level\":{}}},\"timestamp\":{}}}",
+                        y118 == BlockType::Water, y118_falling, side == BlockType::Water, side_level, ts
+                    )
+                });
+        }
+        // #endregion
+        assert_eq!(y118, BlockType::Water);
+        assert!(y118_falling);
+        assert_eq!(side, BlockType::Water);
+    }
+
+    #[test]
+    fn source_on_ground_spreads_horizontally() {
+        let mut manager = ChunkManager::new(1);
+        manager.chunks.insert((0, 0), Chunk::empty(0, 0));
+        manager.set_block(8, 79, 8, BlockType::Stone);
+        manager.set_block(9, 79, 8, BlockType::Stone);
+        manager.set_block(10, 79, 8, BlockType::Stone);
+        manager.set_block(8, 80, 8, BlockType::Water);
+        for _ in 0..32 {
+            tick_all_loaded_fluids(&mut manager, false, 256);
+            if manager.pending_fluid_updates(false) == 0 {
+                break;
+            }
+        }
+        assert_eq!(manager.get_block(9, 80, 8), BlockType::Water);
+        assert_eq!(manager.get_fluid_level(9, 80, 8), 1);
+        assert_eq!(manager.get_block(10, 80, 8), BlockType::Water);
+        assert_eq!(manager.get_fluid_level(10, 80, 8), 2);
     }
 }

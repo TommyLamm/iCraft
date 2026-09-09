@@ -265,6 +265,28 @@ impl ChunkManager {
         self.get_loaded_block(wx, wy, wz).unwrap_or(BlockType::Air)
     }
 
+    /// Highest solid block in a loaded column, starting from the heightmap.
+    /// Unloaded or empty columns return `None` (same as scanning Air).
+    pub fn highest_solid_y(&self, wx: i32, wz: i32) -> Option<i32> {
+        let height = self.dimension.height();
+        let cx = wx.div_euclid(CHUNK_WIDTH as i32);
+        let cz = wz.div_euclid(CHUNK_DEPTH as i32);
+        let bx = wx.rem_euclid(CHUNK_WIDTH as i32) as usize;
+        let bz = wz.rem_euclid(CHUNK_DEPTH as i32) as usize;
+        let chunk = self.chunks.get(&(cx, cz))?;
+        let mapped = chunk.heightmap[bx][bz];
+        if mapped == crate::world::NO_HEIGHT {
+            return None;
+        }
+        let start_y = (mapped as i32).clamp(height.min_y(), height.max_y_exclusive() - 1);
+        for y in (height.min_y()..=start_y).rev() {
+            if chunk.get_block_local(bx, y, bz).properties().is_solid {
+                return Some(y);
+            }
+        }
+        None
+    }
+
     /// Captures the complete 18^3 worker input for a section. Missing chunks
     /// and out-of-range Y use an explicit air/zero-light sentinel; sky above
     /// the dimension retains full skylight only when the dimension has sky.

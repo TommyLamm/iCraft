@@ -10,6 +10,7 @@ use crate::chunk_manager::ChunkManager;
 use crate::chunk_render::{Frustum, MeshBounds};
 use crate::culling::connectivity::{is_section_occluder, SectionConnectivity};
 use crate::culling::los::is_los_blocked;
+use crate::dimension::WorldHeight;
 use crate::entity::{Entity, EntityType};
 
 #[derive(Debug)]
@@ -62,6 +63,7 @@ pub fn traverse_section_visibility_with_scratch<F>(
     cam_sec_y: i8,
     cam_sec_z: i32,
     render_distance: i32,
+    world_height: WorldHeight,
     frustum: &Frustum,
     get_connectivity: F,
     visible_sections: &mut HashSet<(i32, i8, i32)>,
@@ -72,6 +74,9 @@ pub fn traverse_section_visibility_with_scratch<F>(
     visible_sections.clear();
     scratch.visited_entry.clear();
     scratch.queue.clear();
+
+    let min_sec = world_height.min_section_y() as i32;
+    let max_sec = world_height.max_section_y_exclusive() as i32;
 
     let start = (cam_sec_x, cam_sec_y, cam_sec_z);
     visible_sections.insert(start);
@@ -103,9 +108,6 @@ pub fn traverse_section_visibility_with_scratch<F>(
                     _ => continue,
                 };
 
-                let min_sec = crate::dimension::WorldHeight::OVERWORLD.min_section_y() as i32;
-                let max_sec =
-                    crate::dimension::WorldHeight::OVERWORLD.max_section_y_exclusive() as i32;
                 if target_y_raw < min_sec || target_y_raw >= max_sec {
                     continue;
                 }
@@ -358,7 +360,32 @@ impl EntityLosManager {
             camera_cell.1.max(target_cell.1),
             camera_cell.2.max(target_cell.2),
         );
-        if min.1 < 0 || max.1 >= crate::world::CHUNK_HEIGHT as i32 {
+        let height = manager.dimension.height();
+        if min.1 < height.min_y() || max.1 >= height.max_y_exclusive() {
+            // #region agent log
+            {
+                use std::io::Write;
+                static Y_LOGS: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                if Y_LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("debug-879839.log")
+                        .and_then(|mut f| {
+                            writeln!(
+                                f,
+                                "{{\"sessionId\":\"879839\",\"hypothesisId\":\"E\",\"location\":\"culling/visibility.rs:make_snapshot\",\"message\":\"LOS snapshot rejected Y range\",\"data\":{{\"min_y\":{},\"max_y\":{},\"chunk_height\":{}}},\"timestamp\":{}}}",
+                                min.1, max.1, crate::world::CHUNK_HEIGHT, ts
+                            )
+                        });
+                }
+            }
+            // #endregion
             self.counters.fail_open = self.counters.fail_open.saturating_add(1);
             return None;
         }
@@ -709,6 +736,7 @@ mod tests {
             0,
             0,
             1,
+            WorldHeight::OVERWORLD,
             &frustum,
             |_, _, _| Some(SectionConnectivity::FULL),
             &mut visible_sections,
@@ -724,6 +752,7 @@ mod tests {
                 0,
                 0,
                 1,
+                WorldHeight::OVERWORLD,
                 &frustum,
                 |_, _, _| Some(SectionConnectivity::FULL),
                 &mut visible_sections,
@@ -968,5 +997,38 @@ mod entity_los_tests {
         let result = complete_request(&mut los, &request_rx, &result_tx);
         assert!(result.is_visible);
         assert!(los.is_entity_visible(&normal, CAMERA, CAMERA_CELL, &chunks));
+    }
+
+    #[test]
+    fn debug_los_snapshot_rejects_negative_y() {
+        let chunks = loaded_manager(1);
+        let cam = Vec3::new(0.2, 1.2, 0.2);
+        let cam_cell = (0, 1, 0);
+        let mob = Entity::new(21, EntityType::Zombie, Vec3::new(20.8, -20.2, 0.2));
+        let (mut los, request_rx, _result_tx) = harness(4);
+        let visible = los.is_entity_visible(&mob, cam, cam_cell, &chunks);
+        let queued = request_rx.try_recv().is_ok();
+        // #region agent log
+        {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug-879839.log")
+                .and_then(|mut f| {
+                    writeln!(
+                        f,
+                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"E\",\"location\":\"culling/visibility.rs:debug_los_snapshot_rejects_negative_y\",\"message\":\"below-zero LOS\",\"data\":{{\"visible\":{},\"queued\":{},\"fail_open\":{}}},\"timestamp\":{}}}",
+                        visible, queued, los.counters.fail_open, ts
+                    )
+                });
+        }
+        // #endregion
+        let _ = (visible, queued);
+        assert!(queued, "below-zero LOS must queue a terrain snapshot");
     }
 }

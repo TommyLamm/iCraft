@@ -38,12 +38,38 @@ impl TerrainVertex {
         let reg_origin_x = (region_coord.0 * REGION_SIZE_CHUNKS * 16) as f32;
         let reg_origin_z = (region_coord.1 * REGION_SIZE_CHUNKS * 16) as f32;
         let rel_x = (position[0] - reg_origin_x).max(0.0);
-        let rel_y = position[1].max(0.0);
+        let rel_y = (position[1] - REGION_ORIGIN_Y).max(0.0);
         let rel_z = (position[2] - reg_origin_z).max(0.0);
 
         let px = (rel_x * 32.0).round() as u16;
         let py = (rel_y * 32.0).round() as u16;
         let pz = (rel_z * 32.0).round() as u16;
+
+        // #region agent log
+        if position[1] < 0.0 {
+            use std::io::Write;
+            static NEG_Y_LOGS: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
+            if NEG_Y_LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let decoded = py as f32 / 32.0 + REGION_ORIGIN_Y;
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("debug-879839.log")
+                    .and_then(|mut f| {
+                        writeln!(
+                            f,
+                            "{{\"sessionId\":\"879839\",\"hypothesisId\":\"A\",\"location\":\"chunk_render.rs:TerrainVertex::new\",\"message\":\"negative world Y encoded\",\"data\":{{\"input_y\":{},\"clamped_rel_y\":{},\"encoded_py\":{},\"decoded_y\":{}}},\"timestamp\":{}}}",
+                            position[1], rel_y, py, decoded, ts
+                        )
+                    });
+            }
+        }
+        // #endregion
 
         let light_u32 = light_level as u32;
         let sky_light = (light_u32 & 0x0F) as u16;
@@ -80,7 +106,7 @@ impl TerrainVertex {
         let reg_origin_x = (region_coord.0 * REGION_SIZE_CHUNKS * 16) as f32;
         let reg_origin_z = (region_coord.1 * REGION_SIZE_CHUNKS * 16) as f32;
         let x = self.pos[0] as f32 / 32.0 + reg_origin_x;
-        let y = self.pos[1] as f32 / 32.0;
+        let y = self.pos[1] as f32 / 32.0 + REGION_ORIGIN_Y;
         let z = self.pos[2] as f32 / 32.0 + reg_origin_z;
         Vec3::new(x, y, z)
     }
@@ -88,7 +114,7 @@ impl TerrainVertex {
     pub fn local_position(&self) -> [f32; 3] {
         [
             self.pos[0] as f32 / 32.0,
-            self.pos[1] as f32 / 32.0,
+            self.pos[1] as f32 / 32.0 + REGION_ORIGIN_Y,
             self.pos[2] as f32 / 32.0,
         ]
     }
@@ -610,6 +636,8 @@ pub fn select_lod_for_bounds(
 
 /// Number of chunks along one axis in a single render region (8x8 chunks).
 pub const REGION_SIZE_CHUNKS: i32 = 8;
+/// Packed vertex Y is stored relative to Overworld min_y so Y < 0 survives u16 packing.
+pub const REGION_ORIGIN_Y: f32 = crate::dimension::WorldHeight::OVERWORLD.min_y() as f32;
 
 /// Maps a chunk coordinate (cx, cz) to its 8x8 render region coordinate.
 pub fn chunk_to_region_coord(cx: i32, cz: i32) -> (i32, i32) {
@@ -1590,5 +1618,40 @@ mod tests {
                 .expect("terrain AO mapping must preserve each discrete level");
             search_from += branch_offset + branch.len();
         }
+    }
+
+    #[test]
+    fn debug_negative_world_y_encoding() {
+        let vertex = TerrainVertex::new(
+            [4.0, -32.0, 6.0],
+            [0.0; 2],
+            [0.0; 2],
+            15.0,
+            1.0,
+            (0, 0),
+        );
+        let decoded = vertex.world_position((0, 0));
+        // #region agent log
+        {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug-879839.log")
+                .and_then(|mut f| {
+                    writeln!(
+                        f,
+                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"A\",\"location\":\"chunk_render.rs:debug_negative_world_y_encoding\",\"message\":\"roundtrip\",\"data\":{{\"input_y\":-32.0,\"decoded_y\":{},\"encoded_py\":{}}},\"timestamp\":{}}}",
+                        decoded.y, vertex.pos[1], ts
+                    )
+                });
+        }
+        // #endregion
+        let _ = decoded;
+        assert!((decoded.y + 32.0).abs() < 0.05, "negative world Y must round-trip, got {}", decoded.y);
     }
 }

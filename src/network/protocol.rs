@@ -1741,6 +1741,18 @@ impl Packet {
         bincode::serialize(self).expect("packet serialization is infallible")
     }
 
+    /// 4-byte big-endian length prefix plus bincode payload.
+    pub fn encode_frame(&self) -> Result<Vec<u8>, &'static str> {
+        let payload = self.encode();
+        if payload.len() > MAX_PACKET_SIZE {
+            return Err("packet payload exceeds maximum");
+        }
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        Ok(frame)
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Packet, bincode::Error> {
         if bytes.len() > MAX_PACKET_SIZE {
             return Err(Box::new(bincode::ErrorKind::SizeLimit));

@@ -1657,8 +1657,8 @@ impl State {
 
             let old_properties = old.properties();
             let new_properties = block.properties();
-            if old_properties.is_solid != new_properties.is_solid {
-                if new_properties.is_solid {
+            if old_properties.is_opaque() != new_properties.is_opaque() {
+                if new_properties.is_opaque() {
                     crate::lighting::update_sky_light_after_placed(
                         &mut self.chunk_manager,
                         x,

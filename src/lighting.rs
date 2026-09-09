@@ -814,4 +814,51 @@ mod tests {
         update_sky_light_after_removed(&mut chunk_manager, 8, 256, 8, &mut dirty_chunks);
         assert_eq!(chunk_manager.get_sky_light(8, 256, 8), 15);
     }
+
+    #[test]
+    fn debug_network_restore_cannot_reseed_sky() {
+        let mut src = empty_fully_lit_overworld_column();
+        src.set_block(8, 70, 8, BlockType::Stone);
+        src.set_sky_light(8, 70, 8, 0);
+        let chunk = src.chunks.get(&(0, 0)).unwrap();
+        let save = crate::save::ChunkSaveData::from_chunk(chunk).unwrap();
+        let mut dst = Chunk::empty(0, 0);
+        crate::save::format::ChunkSaveData::restore_network_payload(
+            &mut dst,
+            &save.blocks,
+            &save.block_states,
+            &save.fluid_levels,
+            &save.block_entities,
+        )
+        .unwrap();
+        let sky_after_restore = dst.get_sky_light(8, 71, 8);
+        let mut restored_manager = ChunkManager::new(0);
+        restored_manager.chunks.insert((0, 0), dst);
+        let mut dirty = HashSet::new();
+        propagate_chunk_lighting(&mut restored_manager, 0, 0, &mut dirty);
+        let sky_after_propagate = restored_manager.get_sky_light(8, 71, 8);
+        // #region agent log
+        {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug-879839.log")
+                .and_then(|mut f| {
+                    writeln!(
+                        f,
+                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"C\",\"location\":\"lighting.rs:debug_network_restore_cannot_reseed_sky\",\"message\":\"sky after restore+propagate\",\"data\":{{\"after_restore\":{},\"after_propagate\":{}}},\"timestamp\":{}}}",
+                        sky_after_restore, sky_after_propagate, ts
+                    )
+                });
+        }
+        // #endregion
+        let _ = (sky_after_restore, sky_after_propagate);
+        assert_eq!(sky_after_restore, 15);
+        assert_eq!(sky_after_propagate, 15);
+    }
 }

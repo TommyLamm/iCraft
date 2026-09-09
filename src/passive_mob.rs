@@ -36,21 +36,8 @@ pub fn spawn_passive_mobs(
     let spawn_x = (player_pos.x + angle.cos() * dist) as i32;
     let spawn_z = (player_pos.z + angle.sin() * dist) as i32;
 
-    // Find highest solid block
     let height = chunk_manager.dimension.height();
-    let mut highest_y = None;
-    for y in (height.min_y()..height.max_y_exclusive()).rev() {
-        if chunk_manager
-            .get_block(spawn_x, y, spawn_z)
-            .properties()
-            .is_solid
-        {
-            highest_y = Some(y);
-            break;
-        }
-    }
-
-    if let Some(solid_y) = highest_y {
+    if let Some(solid_y) = chunk_manager.highest_solid_y(spawn_x, spawn_z) {
         let spawn_y = solid_y + 1;
         if height.contains_y(spawn_y) && height.contains_y(spawn_y + 1) {
             let block_below = chunk_manager.get_block(spawn_x, solid_y, spawn_z);
@@ -72,10 +59,6 @@ pub fn spawn_passive_mobs(
                 entity_manager.spawn(
                     et,
                     Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5),
-                );
-                println!(
-                    "[Debug] Spawned passive {:?} at ({}, {}, {})",
-                    et, spawn_x, spawn_y, spawn_z
                 );
             }
         }

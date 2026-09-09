@@ -277,8 +277,8 @@ fn apply_synced_block_change(
     let old_properties = previous.properties();
     let new_properties = block.properties();
     let mut dirty_chunks = std::collections::HashSet::new();
-    if old_properties.is_solid != new_properties.is_solid {
-        if new_properties.is_solid {
+    if old_properties.is_opaque() != new_properties.is_opaque() {
+        if new_properties.is_opaque() {
             crate::lighting::update_sky_light_after_placed(
                 chunk_manager,
                 x,
@@ -5002,14 +5002,6 @@ impl State {
         })
     }
 
-    fn project_authority_container(&mut self, position: (i32, i32, i32)) -> bool {
-        let _ = position;
-        // RuntimeTickOutput currently has no container/session payload.  Do
-        // not read renderer slots or fabricate an ACK as a local fallback;
-        // C3 will add the typed presentation projection lane.
-        false
-    }
-
     fn submit_local_authority_container_action(
         &mut self,
         position: (i32, i32, i32),
@@ -5054,13 +5046,7 @@ impl State {
         }
         match action {
             crate::network::protocol::ContainerAction::Open
-            | crate::network::protocol::ContainerAction::Click => {
-                let projected = self.project_authority_container(position);
-                if projected && matches!(action, crate::network::protocol::ContainerAction::Click) {
-                    self.inventory.dragged = None;
-                }
-                projected
-            }
+            | crate::network::protocol::ContainerAction::Click => false,
             crate::network::protocol::ContainerAction::Close => {
                 self.container_target = None;
                 self.container_is_double = false;
@@ -6817,10 +6803,9 @@ impl State {
                 self.scheduler.spiral_offsets = crate::chunk_schedule::precompute_spiral_offsets(r);
             }
 
-            let hysteresis_r = (r as i32) + crate::chunk_schedule::UNLOAD_HYSTERESIS;
             let mut to_unload = Vec::new();
             for &(cx, cz) in self.chunk_manager.chunks.keys() {
-                if (cx - px).abs() > hysteresis_r || (cz - pz).abs() > hysteresis_r {
+                if !crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r) {
                     to_unload.push((cx, cz));
                 }
             }
@@ -6864,7 +6849,7 @@ impl State {
             }
             let mut removed_mesh_keys = Vec::new();
             for &(cx, cz) in self.chunk_meshes.keys() {
-                if (cx - px).abs() > hysteresis_r || (cz - pz).abs() > hysteresis_r {
+                if !crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r) {
                     removed_mesh_keys.push((cx, cz));
                 }
             }
@@ -6874,7 +6859,7 @@ impl State {
                 }
             }
             self.chunk_load_in_flight.retain(|&(cx, cz), _| {
-                (cx - px).abs() <= hysteresis_r && (cz - pz).abs() <= hysteresis_r
+                crate::chunk_schedule::within_unload_hysteresis(cx, cz, px, pz, r)
             });
 
             // Rebuild pending_load_queue in spiral order
@@ -8042,6 +8027,7 @@ impl State {
     fn update_weather_effects(&mut self, dt: f32, #[allow(unused_variables)] lightning_due: bool) {
         use crate::weather::Precipitation;
 
+        let world_max_y = self.chunk_manager.dimension.height().max_y_exclusive();
         let player_x = self.player_physics.position.x.floor() as i32;
         let player_z = self.player_physics.position.z.floor() as i32;
         if self.weather.precipitation_at(player_x, player_z) == Precipitation::Rain {
@@ -8067,7 +8053,7 @@ impl State {
             let Some(surface_y) = self.surface_height(wx, wz) else {
                 continue;
             };
-            if surface_y >= CHUNK_HEIGHT as i32 - 2 {
+            if surface_y >= world_max_y - 2 {
                 continue;
             }
 
@@ -8123,7 +8109,7 @@ impl State {
                 continue;
             };
             let target_y = surface_y + 1;
-            if target_y >= CHUNK_HEIGHT as i32
+            if target_y >= world_max_y
                 || self.chunk_manager.get_block(wx, target_y, wz) != BlockType::Air
             {
                 continue;
@@ -8249,7 +8235,7 @@ impl State {
             let support_y = fire_y - 1;
             let support = self.chunk_manager.get_block(strike.x, support_y, strike.z);
             if self.presentation_topology().is_legacy_owner()
-                && fire_y < CHUNK_HEIGHT as i32
+                && fire_y < self.chunk_manager.dimension.height().max_y_exclusive()
                 && support.properties().is_solid
                 && !matches!(
                     support,
@@ -9859,8 +9845,8 @@ impl State {
 
     fn open_chest(&mut self, pos: (i32, i32, i32)) {
         if self.has_in_process_runtime() {
-            // Authority-boundary callers must use project_authority_container
-            // after an accepted Container::Open response.
+            // Embedded / listen-host chests open through the authority
+            // Container::Open request; presentation must not mutate locally.
             return;
         }
         if !self.game_mode_policy().can_use_containers {
@@ -12075,6 +12061,7 @@ mod reach_tests {
             GameMode::Survival,
         );
         assert_eq!(rewards.drops[0].item, Item::DiamondOre);
+        assert_eq!(rewards.xp, 0);
 
         // Creative mode -> zero drops
         let rewards = calculate_block_break_rewards(
@@ -12091,26 +12078,23 @@ mod reach_tests {
     fn calculate_block_break_rewards_mature_and_immature_crops() {
         let pos = (10, 60, 10);
 
-        // Mature Wheat (age 7) -> drops Wheat + Wheat (base drop + age branch)
+        // Mature Wheat (age 7) -> Wheat
         let mature_wheat =
             calculate_block_break_rewards(BlockType::WheatCrop, 7, pos, None, GameMode::Survival);
-        assert_eq!(mature_wheat.drops.len(), 2);
+        assert_eq!(mature_wheat.drops.len(), 1);
         assert_eq!(mature_wheat.drops[0].item, Item::Wheat);
-        assert_eq!(mature_wheat.drops[1].item, Item::Wheat);
 
-        // Immature Wheat (age 3) -> drops Wheat + Seeds (base drop + age branch)
+        // Immature Wheat (age 3) -> Seeds
         let immature_wheat =
             calculate_block_break_rewards(BlockType::WheatCrop, 3, pos, None, GameMode::Survival);
-        assert_eq!(immature_wheat.drops.len(), 2);
-        assert_eq!(immature_wheat.drops[0].item, Item::Wheat);
-        assert_eq!(immature_wheat.drops[1].item, Item::Seeds);
+        assert_eq!(immature_wheat.drops.len(), 1);
+        assert_eq!(immature_wheat.drops[0].item, Item::Seeds);
 
-        // Immature Carrot (age 2) -> drops 2 Carrot (base drop + age branch)
+        // Immature Carrot (age 2) -> Carrot
         let immature_carrot =
             calculate_block_break_rewards(BlockType::CarrotCrop, 2, pos, None, GameMode::Survival);
-        assert_eq!(immature_carrot.drops.len(), 2);
+        assert_eq!(immature_carrot.drops.len(), 1);
         assert_eq!(immature_carrot.drops[0].item, Item::Carrot);
-        assert_eq!(immature_carrot.drops[1].item, Item::Carrot);
     }
 
     #[test]

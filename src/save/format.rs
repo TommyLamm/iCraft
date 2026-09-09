@@ -1090,6 +1090,26 @@ impl ChunkSaveData {
         fluid_levels: &[u8],
         block_entities: &[u8],
     ) -> io::Result<()> {
+        // #region agent log
+        {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug-879839.log")
+                .and_then(|mut f| {
+                    writeln!(
+                        f,
+                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"C\",\"location\":\"save/format.rs:restore_network_payload\",\"message\":\"network restore zeros light\",\"data\":{{\"chunk\":[{},{}],\"block_bytes\":{},\"forced_sky_len\":0,\"forced_block_len\":0}},\"timestamp\":{}}}",
+                        chunk.chunk_x, chunk.chunk_z, blocks.len(), ts
+                    )
+                });
+        }
+        // #endregion
         let save_data = ChunkSaveData {
             chunk_x: chunk.chunk_x,
             chunk_z: chunk.chunk_z,
@@ -1103,7 +1123,9 @@ impl ChunkSaveData {
             block_entities: block_entities.to_vec(),
             data_version: CHUNK_SAVE_DATA_VERSION,
         };
-        save_data.restore_to_chunk(chunk)
+        save_data.restore_to_chunk(chunk)?;
+        chunk.recompute_direct_column_lighting();
+        Ok(())
     }
 
     pub fn restore_to_chunk(&self, chunk: &mut Chunk) -> io::Result<()> {

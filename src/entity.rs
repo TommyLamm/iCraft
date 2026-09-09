@@ -643,17 +643,8 @@ fn aabb_touches_unloaded_column(chunk_manager: &ChunkManager, aabb: &AABB) -> bo
 use std::collections::HashMap;
 
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct EntityScratch {
-    pub arrows_to_spawn: Vec<(Vec3, Vec3)>,
-    pub explosions: Vec<Vec3>,
-    pub blocks_removed: Vec<(i32, i32, i32)>,
-    pub items_to_drop: Vec<(crate::inventory::Item, Vec3)>,
-    pub death_sounds: Vec<Vec3>,
-    pub hearts_to_spawn: Vec<Vec3>,
-    pub baby_mobs_to_spawn: Vec<(EntityType, Vec3)>,
     pub id_list: Vec<u64>,
-    pub usize_list: Vec<usize>,
 }
 
 /// Classification used by the R5.9 query audit.  Global simulation and
@@ -673,21 +664,6 @@ pub const fn is_global_entity_maintenance(kind: EntityIterationKind) -> bool {
     )
 }
 
-impl EntityScratch {
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.arrows_to_spawn.clear();
-        self.explosions.clear();
-        self.blocks_removed.clear();
-        self.items_to_drop.clear();
-        self.death_sounds.clear();
-        self.hearts_to_spawn.clear();
-        self.baby_mobs_to_spawn.clear();
-        self.id_list.clear();
-        self.usize_list.clear();
-    }
-}
-
 pub struct EntityManager {
     pub entities: Vec<Entity>,
     pub id_to_index: HashMap<u64, usize>,
@@ -696,7 +672,6 @@ pub struct EntityManager {
     /// Last bucket recorded for each entity. This lets position changes move a
     /// single id between buckets without rebuilding the whole index.
     entity_chunks: HashMap<u64, (i32, i32)>,
-    #[allow(dead_code)]
     pub scratch: EntityScratch,
     next_id: u64,
     #[cfg(test)]

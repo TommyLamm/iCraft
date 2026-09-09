@@ -1044,8 +1044,8 @@ impl State {
         let old_properties = old.properties();
         let new_properties = block.properties();
         let mut dirty_chunks = std::collections::HashSet::new();
-        if old_properties.is_solid != new_properties.is_solid {
-            if new_properties.is_solid {
+        if old_properties.is_opaque() != new_properties.is_opaque() {
+            if new_properties.is_opaque() {
                 crate::lighting::update_sky_light_after_placed(
                     &mut self.chunk_manager,
                     wx,
@@ -1142,8 +1142,8 @@ impl State {
             let old_properties = mutation.old_block.properties();
             let new_properties = mutation.new_block.properties();
 
-            if old_properties.is_solid != new_properties.is_solid {
-                if new_properties.is_solid {
+            if old_properties.is_opaque() != new_properties.is_opaque() {
+                if new_properties.is_opaque() {
                     crate::lighting::update_sky_light_after_placed(
                         &mut self.chunk_manager,
                         wx,

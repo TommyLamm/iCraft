@@ -10,6 +10,20 @@ pub const MAX_INTEGRATE_LOADS: usize = 2;
 pub const MAX_INTEGRATE_LOAD_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
 pub const MAX_DIRTY_MESH_QUEUE: usize = 16_384;
 
+/// Chebyshev `view + UNLOAD_HYSTERESIS` membership used by client unload and
+/// authority residency.
+#[inline]
+pub fn within_unload_hysteresis(
+    cx: i32,
+    cz: i32,
+    player_cx: i32,
+    player_cz: i32,
+    view_distance: i32,
+) -> bool {
+    let radius = view_distance.saturating_add(UNLOAD_HYSTERESIS);
+    (cx - player_cx).abs() <= radius && (cz - player_cz).abs() <= radius
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct DirtySectionWork {
     pub identity: SectionIdentity,

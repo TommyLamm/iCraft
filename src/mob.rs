@@ -113,13 +113,7 @@ pub fn explode(
 }
 
 fn get_highest_solid_y(chunk_manager: &ChunkManager, x: i32, z: i32) -> Option<i32> {
-    let height = chunk_manager.dimension.height();
-    for y in (height.min_y..height.max_y_exclusive()).rev() {
-        if chunk_manager.get_block(x, y, z).properties().is_solid {
-            return Some(y);
-        }
-    }
-    None
+    chunk_manager.highest_solid_y(x, z)
 }
 
 /// Deterministic time-and-position-varying PRNG helper for ambient mob spawning.
@@ -187,10 +181,6 @@ pub fn spawn_mobs(
                     entity_manager.spawn(
                         et,
                         Vec3::new(spawn_x as f32 + 0.5, spawn_y as f32, spawn_z as f32 + 0.5),
-                    );
-                    println!(
-                        "[Debug] Spawned {:?} at ({}, {}, {})",
-                        et, spawn_x, spawn_y, spawn_z
                     );
                 }
             }

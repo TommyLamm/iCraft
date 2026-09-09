@@ -51,6 +51,18 @@ impl WorldGenContext {
     pub fn block_at(&self, wx: i32, wy: i32, wz: i32) -> Option<crate::world::BlockType> {
         let surface_y = self.surface_height_at(wx, wz);
         let biome = self.biome_at(wx, wz);
+        self.block_at_sampled(wx, wy, wz, surface_y, biome)
+    }
+
+    /// Column fill after `surface_height_at` / `biome_at` have already been sampled.
+    pub fn block_at_sampled(
+        &self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        surface_y: i32,
+        biome: crate::world::Biome,
+    ) -> Option<crate::world::BlockType> {
         surface::block_for_column(self, wx, wy, wz, surface_y, biome)
     }
 

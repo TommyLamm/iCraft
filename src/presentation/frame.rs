@@ -33,6 +33,7 @@ impl State {
                 cam_sec_y_raw as i8,
                 cam_sec_z,
                 r_i32,
+                height,
                 &frustum,
                 |x, sy, z| {
                     self.chunk_meshes

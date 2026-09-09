@@ -90,15 +90,21 @@ impl Chunk {
                 let wx = chunk_x * CHUNK_WIDTH as i32 + x as i32;
                 let wz = chunk_z * CHUNK_DEPTH as i32 + z as i32;
                 let surface_y = ctx.surface_height_at(wx, wz);
+                let biome = ctx.biome_at(wx, wz);
 
                 for wy in min_y..height.max_y_exclusive() {
                     let ly = (wy - min_y) as usize;
-                    let block = ctx.block_at(wx, wy, wz).unwrap_or(BlockType::Air);
+                    let block = ctx
+                        .block_at_sampled(wx, wy, wz, surface_y, biome)
+                        .unwrap_or(BlockType::Air);
                     blocks[x][ly][z] = block;
                 }
 
-                // Carve caves after surface generation.
-                for wy in min_y..height.max_y_exclusive() {
+                // Carve caves after surface generation. Density fill only places
+                // solids at or below the surface, so the carver has nothing to do
+                // above `surface_y`.
+                let carve_top = surface_y.min(height.max_y_exclusive() - 1);
+                for wy in min_y..=carve_top {
                     let ly = (wy - min_y) as usize;
                     let current = blocks[x][ly][z];
                     if current == BlockType::Air || current == BlockType::Water {
@@ -598,6 +604,27 @@ impl Chunk {
         let ly = world_y_to_local_y(wy) as usize;
         let idx = (ly << 8) | (z << 4) | x;
         sec.set_fluid_level(idx, level);
+    }
+
+    /// Rebuild column sky/block light from the current blocks. Used when a
+    /// network payload omits light streams so join clients are not left dark.
+    pub fn recompute_direct_column_lighting(&mut self) {
+        let min_y = self.min_section_y as i32 * 16;
+        let max_y = min_y + (self.sections.len() as i32) * 16;
+        let enable_sky = self.min_section_y < 0 || self.sections.len() * 16 > 128;
+        for x in 0..CHUNK_WIDTH {
+            for z in 0..CHUNK_DEPTH {
+                let mut direct_sky = if enable_sky { 15u8 } else { 0u8 };
+                for wy in (min_y..max_y).rev() {
+                    let block = self.get_block_local(x, wy, z);
+                    if enable_sky && block.properties().is_opaque() {
+                        direct_sky = 0;
+                    }
+                    self.set_sky_light(x, wy, z, direct_sky);
+                    self.set_block_light(x, wy, z, block.properties().light_emission);
+                }
+            }
+        }
     }
 }
 

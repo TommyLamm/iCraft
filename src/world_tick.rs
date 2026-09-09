@@ -1,8 +1,10 @@
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::WorldHeight;
+use crate::entity::EntityType;
 use crate::inventory::ItemStack;
 use crate::world::{BlockType, CHUNK_DEPTH, CHUNK_WIDTH};
 use crate::world_mutation::{BlockMutationRequest, MutationCause};
+use glam::Vec3;
 use std::collections::BTreeSet;
 
 /// Statistics for random tick sampling per frame.
@@ -519,17 +521,40 @@ pub fn tick_hoppers_in_columns(
     hoppers.sort_unstable_by_key(|&(x, y, z, _, _, _)| (x, y, z));
 
     for (x, y, z, facing, cooldown, is_powered) in hoppers {
-        if result.transfers >= budget || is_powered {
+        if is_powered {
             continue;
         }
         if cooldown > 0 {
             if let Some(BlockEntity::Hopper(h)) = chunk_manager.get_block_entity_mut(x, y, z) {
                 h.transfer_cooldown = h.transfer_cooldown.saturating_sub(1);
-                // Cooldown is authoritative runtime/save state, but it is not a
-                // container slot mutation.  Keep the chunk dirty for persistence
-                // without waking comparators or broadcasting an update every tick.
                 chunk_manager.mark_block_entity_dirty(x, z);
             }
+            continue;
+        }
+        if result.transfers >= budget {
+            // #region agent log
+            {
+                use std::io::Write;
+                static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("debug-879839.log")
+                        .and_then(|mut f| {
+                            writeln!(
+                                f,
+                                "{{\"sessionId\":\"879839\",\"hypothesisId\":\"I\",\"location\":\"world_tick.rs:tick_hoppers\",\"message\":\"budget skip after cooldown handled\",\"data\":{{\"pos\":[{},{},{}],\"cooldown\":{},\"transfers\":{},\"budget\":{}}},\"timestamp\":{}}}",
+                                x, y, z, cooldown, result.transfers, budget, ts
+                            )
+                        });
+                }
+            }
+            // #endregion
             continue;
         }
 
@@ -558,13 +583,12 @@ pub fn tick_hoppers_in_columns(
         if !transferred {
             // Dropped items are deterministic by entity id.  Only the small
             // pickup volume immediately above the hopper is considered.
+            let pickup_center = Vec3::new(x as f32 + 0.5, y as f32 + 1.625, z as f32 + 0.5);
             let candidate = entity_manager.as_deref().and_then(|entities| {
                 entities
-                    .entities
-                    .iter()
+                    .query_radius_types(pickup_center, 2.0, &[EntityType::DroppedItem])
                     .filter(|entity| {
-                        entity.entity_type == crate::entity::EntityType::DroppedItem
-                            && entity.pickup_cooldown <= 0.0
+                        entity.pickup_cooldown <= 0.0
                             && entity.position.x >= x as f32 - 0.5
                             && entity.position.x <= x as f32 + 1.5
                             && entity.position.z >= z as f32 - 0.5
@@ -1157,5 +1181,59 @@ mod tests {
             remaining.dropped_stack,
             Some(ItemStack { count: 2, ..stack })
         );
+    }
+
+    #[test]
+    fn debug_hopper_budget_skips_cooldown() {
+        use crate::block_entity::{BlockEntity, HopperBlockEntity};
+        use crate::inventory::{Item, ItemStack};
+        use crate::redstone::Direction;
+
+        let mut manager = ChunkManager::new(2);
+        manager
+            .chunks
+            .insert((0, 0), crate::world::Chunk::new(0, 0));
+        manager.set_block(0, 64, 0, BlockType::Hopper);
+        manager.set_block(1, 64, 0, BlockType::Chest);
+        manager.set_block(2, 64, 0, BlockType::Hopper);
+        let mut left = HopperBlockEntity::with_facing(Direction::East);
+        left.slots[0] = Some(ItemStack::new(Item::Stone, 1));
+        manager.set_block_entity(0, 64, 0, Some(BlockEntity::Hopper(left)));
+        manager.set_block_entity(
+            1,
+            64,
+            0,
+            Some(BlockEntity::Chest(crate::block_entity::ChestBlockEntity::new())),
+        );
+        let mut right = HopperBlockEntity::with_facing(Direction::West);
+        right.transfer_cooldown = 4;
+        manager.set_block_entity(2, 64, 0, Some(BlockEntity::Hopper(right)));
+
+        tick_all_loaded_hoppers(&mut manager, 1);
+        let remaining = match manager.get_block_entity(2, 64, 0) {
+            Some(BlockEntity::Hopper(h)) => h.transfer_cooldown,
+            _ => 255,
+        };
+        // #region agent log
+        {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("debug-879839.log")
+                .and_then(|mut f| {
+                    writeln!(
+                        f,
+                        "{{\"sessionId\":\"879839\",\"hypothesisId\":\"I\",\"location\":\"world_tick.rs:debug_hopper_budget_skips_cooldown\",\"message\":\"cooldown after budget tick\",\"data\":{{\"remaining\":{}}},\"timestamp\":{}}}",
+                        remaining, ts
+                    )
+                });
+        }
+        // #endregion
+        assert_eq!(remaining, 3);
     }
 }
