@@ -6,7 +6,7 @@
 use super::*;
 use crate::authority::contract::{AuthoritySnapshot, SessionGameplayState};
 use crate::authority::interest::{
-    InterestKind, RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
+    InterestKind, InterestSet, RoutedInterestUpdate, MAX_INTEREST_UPDATES_PER_TICK,
 };
 use crate::dimension::Dimension;
 use crate::network::protocol::{
@@ -860,26 +860,38 @@ impl ServerRuntime {
     }
 
     pub(super) fn update_interest(&mut self, session: &mut PlayerSessionState) {
+        let view_distance = self.properties.view_distance;
+        let simulation_distance = self.properties.simulation_distance;
         let _ = session
             .interest
-            .update_position(session.interest.dimension, session.data.position);
-        let center = Vec3::from_array(session.data.position);
-        let radius = f32::from(session.interest.view_distance) * 16.0;
+            .set_distances(view_distance, simulation_distance);
+        let dimension = session.interest.dimension;
+        let position = session.data.position;
+        let chunk_delta = session.interest.update_position(dimension, position);
+        let spatial_revision = self
+            .authority
+            .world_ref(dimension)
+            .map(|world| world.entities.spatial_revision())
+            .unwrap_or(0);
+        let entities_unchanged = chunk_delta.entered.is_empty()
+            && chunk_delta.departed.is_empty()
+            && session.interest.entity_spatial_revision == Some(spatial_revision);
+        if entities_unchanged {
+            return;
+        }
+        let center = Vec3::from_array(position);
         let (entities, simulation_entities) = self
             .authority
-            .world_ref(session.interest.dimension)
+            .world_ref(dimension)
             .map(|world| {
                 let entities = world
                     .entities
-                    .query_radius(center, radius)
+                    .query_radius(center, f32::from(view_distance) * 16.0)
                     .map(|entity| entity.id)
                     .collect();
                 let simulation_entities = world
                     .entities
-                    .query_radius(
-                        center,
-                        f32::from(session.interest.simulation_distance) * 16.0,
-                    )
+                    .query_radius(center, f32::from(simulation_distance) * 16.0)
                     .map(|entity| entity.id)
                     .collect();
                 (entities, simulation_entities)
@@ -889,6 +901,7 @@ impl ServerRuntime {
         session
             .interest
             .update_simulation_entities(simulation_entities);
+        session.interest.entity_spatial_revision = Some(spatial_revision);
         session.prune_projected_entity_states();
     }
 
@@ -909,6 +922,30 @@ impl ServerRuntime {
         position: [f32; 3],
         sequence: u64,
     ) {
+        let view_distance = self.properties.view_distance;
+        let simulation_distance = self.properties.simulation_distance;
+        let spatial_revision = self
+            .authority
+            .world_ref(dimension)
+            .map(|world| world.entities.spatial_revision())
+            .unwrap_or(0);
+
+        let can_skip = self.players.get(&id).is_some_and(|session| {
+            session.interest.view_distance == view_distance
+                && session.interest.simulation_distance == simulation_distance
+                && session.interest.current_chunk_anchor()
+                    == Some(InterestSet::chunk_anchor_for(
+                        dimension,
+                        position,
+                        view_distance,
+                        simulation_distance,
+                    ))
+                && session.interest.entity_spatial_revision == Some(spatial_revision)
+        });
+        if can_skip {
+            return;
+        }
+
         let (entities, simulation_entities) = self
             .authority
             .world_ref(dimension)
@@ -917,7 +954,7 @@ impl ServerRuntime {
                     .entities
                     .query_radius(
                         Vec3::from_array(position),
-                        f32::from(self.properties.view_distance) * 16.0,
+                        f32::from(view_distance) * 16.0,
                     )
                     .map(|entity| entity.id)
                     .collect::<Vec<_>>();
@@ -925,17 +962,21 @@ impl ServerRuntime {
                     .entities
                     .query_radius(
                         Vec3::from_array(position),
-                        f32::from(self.properties.simulation_distance) * 16.0,
+                        f32::from(simulation_distance) * 16.0,
                     )
                     .map(|entity| entity.id)
                     .collect();
                 (entities, simulation_entities)
             })
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
+
         let (entity_delta, old_dimension, departed_containers) = {
             let Some(session) = self.players.get_mut(&id) else {
                 return;
             };
+            let _ = session
+                .interest
+                .set_distances(view_distance, simulation_distance);
             let old_dimension = session.interest.dimension;
             let old_entities = session.interest.entities.clone();
             let old_open_containers = session.interest.open_containers.clone();
@@ -965,6 +1006,7 @@ impl ServerRuntime {
             session
                 .interest
                 .update_simulation_entities(simulation_entities);
+            session.interest.entity_spatial_revision = Some(spatial_revision);
             session.prune_projected_entity_states();
             session
                 .pending_initial_chunks

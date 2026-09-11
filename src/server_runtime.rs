@@ -3018,6 +3018,42 @@ mod tests {
     }
 
     #[test]
+    fn stationary_session_skips_chunk_interest_rebuild_across_ticks() {
+        let (mut runtime, _input) = embedded_runtime("stationary_interest");
+        runtime.run_for_ticks(4).unwrap();
+        let rebuilds_before = runtime
+            .players
+            .get(&99)
+            .map(|session| session.interest.chunk_rebuilds())
+            .expect("local session");
+        let chunks_before = runtime
+            .players
+            .get(&99)
+            .map(|session| session.interest.chunks.clone())
+            .expect("local session");
+        let sim_before = runtime
+            .players
+            .get(&99)
+            .map(|session| session.interest.simulation_chunks.clone())
+            .expect("local session");
+
+        runtime.tick().unwrap();
+        runtime.tick().unwrap();
+
+        let session = runtime.players.get(&99).expect("local session");
+        assert_eq!(
+            session.interest.chunk_rebuilds(),
+            rebuilds_before,
+            "stationary ticks must not rebuild chunk HashSets"
+        );
+        assert_eq!(session.interest.chunks, chunks_before);
+        assert_eq!(session.interest.simulation_chunks, sim_before);
+
+        let _ = runtime.shutdown();
+        let _ = fs::remove_dir_all(&runtime.world_dir);
+    }
+
+    #[test]
     fn empty_dimension_keeps_only_capped_spawn_ring() {
         let mut properties = ServerProperties::default();
         properties.bind = "127.0.0.1".into();

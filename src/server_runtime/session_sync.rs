@@ -36,6 +36,9 @@ impl ServerRuntime {
             return false;
         }
         if refresh_interest {
+            if let Some(session) = self.players.get_mut(&id) {
+                session.interest.invalidate_anchor();
+            }
             if let Some(dimension) = self
                 .players
                 .get(&id)

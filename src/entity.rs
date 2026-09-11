@@ -703,6 +703,10 @@ pub struct EntityManager {
     entity_chunks: HashMap<u64, (i32, i32)>,
     pub scratch: EntityScratch,
     next_id: u64,
+    /// Bumped when spatial bucket membership changes (spawn / despawn /
+    /// chunk-crossing sync / rebuild). Interest routing uses this to skip
+    /// `query_radius` for stationary sessions while the index is quiet.
+    spatial_revision: u64,
     #[cfg(test)]
     position_sync_visits: u64,
 }
@@ -721,9 +725,18 @@ impl EntityManager {
             entity_chunks: HashMap::new(),
             scratch: EntityScratch::default(),
             next_id: next_id.max(1),
+            spatial_revision: 0,
             #[cfg(test)]
             position_sync_visits: 0,
         }
+    }
+
+    pub fn spatial_revision(&self) -> u64 {
+        self.spatial_revision
+    }
+
+    fn bump_spatial_revision(&mut self) {
+        self.spatial_revision = self.spatial_revision.wrapping_add(1);
     }
 
     pub fn rebuild_indexes(&mut self) {
@@ -748,6 +761,7 @@ impl EntityManager {
                 .push(entity.id);
             self.entity_chunks.insert(entity.id, chunk_pos);
         }
+        self.bump_spatial_revision();
     }
 
     fn chunk_for(position: Vec3) -> (i32, i32) {
@@ -784,6 +798,7 @@ impl EntityManager {
         }
         self.spatial_buckets.entry(new_chunk).or_default().push(id);
         self.entity_chunks.insert(id, new_chunk);
+        self.bump_spatial_revision();
     }
 
     /// Synchronize only entities whose positions may have changed.
@@ -842,6 +857,7 @@ impl EntityManager {
         let chunk_pos = Self::chunk_for(pos);
         self.spatial_buckets.entry(chunk_pos).or_default().push(id);
         self.entity_chunks.insert(id, chunk_pos);
+        self.bump_spatial_revision();
         id
     }
 
@@ -858,6 +874,7 @@ impl EntityManager {
         let chunk_pos = Self::chunk_for(pos);
         self.spatial_buckets.entry(chunk_pos).or_default().push(id);
         self.entity_chunks.insert(id, chunk_pos);
+        self.bump_spatial_revision();
         id
     }
 
@@ -893,6 +910,7 @@ impl EntityManager {
         {
             self.spatial_buckets.remove(&removed_chunk_pos);
         }
+        self.bump_spatial_revision();
         removed
     }
 
@@ -925,6 +943,7 @@ impl EntityManager {
         self.type_buckets.clear();
         self.spatial_buckets.clear();
         self.entity_chunks.clear();
+        self.bump_spatial_revision();
     }
 
     pub fn count_passive(&self) -> usize {

@@ -145,6 +145,14 @@ input
   simulation union, not the unbounded residency map. Columns that leave every
   session's view/simulation sets (plus `interest::RESIDENCY_HYSTERESIS`, same
   Chebyshev ring as client unload) are flushed if dirty and evicted.
+- Interest caches a column key
+  `(dimension, chunk_x, chunk_z, view_distance, simulation_distance)`. When a
+  session stays on that key, chunk HashSets are not rebuilt and
+  `chunks_around` is not re-run. Entity interest skips both `query_radius`
+  calls while that key and `EntityManager::spatial_revision` are unchanged;
+  otherwise it diffs ids into the live sets without `mem::take`. Teleport
+  (`write_pose` with refresh), dimension change, and view/simulation distance
+  changes invalidate the anchor and force a full refresh.
 - `AuthorityCore` keeps a `BTreeMap<u8, Vec<PlayerId>>` session index, updated
   on register / remove / `set_session_dimension`. The four per-dimension tick
   phases look it up instead of filtering the full session table. Snapshot
