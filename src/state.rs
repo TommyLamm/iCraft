@@ -8068,9 +8068,9 @@ impl State {
         if self.presentation_topology().is_join_client() {
             return;
         }
-        if matches!(slot, SlotType::ContainerSlot(_))
-            && !self.presentation_topology().should_mutate_world()
-        {
+        // Presentation never mutates authority-owned container slots locally;
+        // container clicks go through GameplayOperation::ContainerClick.
+        if matches!(slot, SlotType::ContainerSlot(_)) {
             return;
         }
         match slot {
@@ -8092,9 +8092,7 @@ impl State {
             SlotType::AnvilLeft => self.anvil.left = stack,
             SlotType::AnvilRight => self.anvil.right = stack,
             SlotType::AnvilOutput => {}
-            SlotType::ContainerSlot(i) => {
-                let _ = (i, stack);
-            }
+            SlotType::ContainerSlot(_) => {}
         }
     }
 
@@ -8114,29 +8112,18 @@ impl State {
         self.anvil.refresh();
     }
 
+    fn resolve_inventory_hit(
+        &self,
+        is_left: bool,
+    ) -> Option<(PresentationInventoryTarget, InventoryHit<SlotType>)> {
+        let hit = self.probe_inventory_click(is_left).authority_hit();
+        presentation_target_for_authority_hit(hit).map(|target| (target, hit))
+    }
+
     fn presentation_inventory_click_target(&self) -> Option<PresentationInventoryTarget> {
-        let mouse_x = self.mouse_ndc[0];
-        let mouse_y = self.mouse_ndc[1];
         // Writeback has no mouse-button; overlay geometry matches the historical
         // always-on hit test (`collect_inventory_ui_hits` with `is_left = true`).
-        let ui = collect_inventory_ui_hits(
-            mouse_x,
-            mouse_y,
-            true,
-            self.active_station == Some(StationKind::Merchant),
-            self.active_merchant_offers.len(),
-            self.recipe_book_open,
-            self.active_station == Some(StationKind::Enchanting),
-        );
-        if ui.merchant.is_some() || ui.enchant.is_some() || ui.recipe_book {
-            return Some(PresentationInventoryTarget::Workstation);
-        }
-        self.get_inventory_slots()
-            .into_iter()
-            .find(|&(_, x0, x1, y0, y1)| {
-                mouse_x >= x0 && mouse_x <= x1 && mouse_y >= y0 && mouse_y <= y1
-            })
-            .map(|(slot, _, _, _, _)| presentation_target_for_slot(slot))
+        self.resolve_inventory_hit(true).map(|(target, _)| target)
     }
 
     pub(crate) fn should_writeback_after_inventory_click(&self) -> bool {

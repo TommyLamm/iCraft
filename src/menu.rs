@@ -4227,8 +4227,7 @@ fn hash(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(127.1, 311.7)))
 mod tests {
     use super::*;
     use crate::presentation_inventory_policy::{
-        presentation_chunk_load_policy, schedule_presentation_chunk_load,
-        PresentationChunkLoadPolicy,
+        schedule_presentation_chunk_load, PresentationChunkLoadPolicy, PresentationTopology,
     };
     use std::collections::HashMap;
 
@@ -4697,31 +4696,32 @@ mod tests {
     fn join_client_load_policy_never_generates_or_mutates() {
         let client = join_client_role();
         assert!(client.is_join_client());
+        let join_policy = PresentationTopology::from(&client, false).chunk_load_policy();
         assert_eq!(
-            presentation_chunk_load_policy(&client),
+            join_policy,
             PresentationChunkLoadPolicy::AwaitAuthoritativePayload
         );
 
         let mut generated = false;
-        let loaded =
-            schedule_presentation_chunk_load(presentation_chunk_load_policy(&client), || {
-                generated = true;
-                1
-            });
+        let loaded = schedule_presentation_chunk_load(join_policy, || {
+            generated = true;
+            1
+        });
         assert!(loaded.is_none());
         assert!(!generated);
 
         assert_eq!(
-            presentation_chunk_load_policy(&MultiplayerRole::Singleplayer),
+            PresentationTopology::from(&MultiplayerRole::Singleplayer, true).chunk_load_policy(),
             PresentationChunkLoadPolicy::GenerateLocally
         );
         assert_eq!(
-            presentation_chunk_load_policy(&MultiplayerRole::Host { port: 25565 }),
+            PresentationTopology::from(&MultiplayerRole::Host { port: 25565 }, true)
+                .chunk_load_policy(),
             PresentationChunkLoadPolicy::GenerateLocally
         );
         assert_eq!(
             schedule_presentation_chunk_load(
-                presentation_chunk_load_policy(&MultiplayerRole::Singleplayer),
+                PresentationTopology::Embedded.chunk_load_policy(),
                 || 7
             ),
             Some(7)

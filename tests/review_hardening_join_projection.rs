@@ -1,8 +1,8 @@
 use icraft::chunk_manager::ChunkManager;
 use icraft::dimension::Dimension;
 use icraft::presentation_inventory_policy::{
-    presentation_chunk_load_policy, schedule_presentation_chunk_load, MultiplayerRole,
-    PresentationChunkLoadPolicy,
+    schedule_presentation_chunk_load, MultiplayerRole, PresentationChunkLoadPolicy,
+    PresentationTopology,
 };
 use icraft::world::{BlockType, Chunk};
 
@@ -17,14 +17,15 @@ fn join_client() -> MultiplayerRole {
 #[test]
 fn schedule_chunk_load_does_not_insert_generated_column_for_join_client() {
     let role = join_client();
+    let policy = PresentationTopology::from(&role, false).chunk_load_policy();
     assert_eq!(
-        presentation_chunk_load_policy(&role),
+        policy,
         PresentationChunkLoadPolicy::AwaitAuthoritativePayload
     );
 
     let mut manager = ChunkManager::new_in_dimension(2, Dimension::Overworld);
     let mut generated = false;
-    let loaded = schedule_presentation_chunk_load(presentation_chunk_load_policy(&role), || {
+    let loaded = schedule_presentation_chunk_load(policy, || {
         generated = true;
         icraft::dimension::generate_chunk_with_options(
             Dimension::Overworld,
@@ -55,15 +56,18 @@ fn chunk_data_inserts_column_matching_payload_without_prior_worldgen() {
     let payload = icraft::save::ChunkSaveData::from_chunk(&source).expect("compress payload");
 
     let mut manager = ChunkManager::new_in_dimension(2, Dimension::Overworld);
-    let scheduled = schedule_presentation_chunk_load(presentation_chunk_load_policy(&role), || {
-        icraft::dimension::generate_chunk_with_options(
-            Dimension::Overworld,
-            3,
-            -1,
-            1,
-            icraft::dimension::WorldGenerationOptions::default(),
-        )
-    });
+    let scheduled = schedule_presentation_chunk_load(
+        PresentationTopology::from(&role, false).chunk_load_policy(),
+        || {
+            icraft::dimension::generate_chunk_with_options(
+                Dimension::Overworld,
+                3,
+                -1,
+                1,
+                icraft::dimension::WorldGenerationOptions::default(),
+            )
+        },
+    );
     assert!(
         scheduled.is_none(),
         "schedule before ChunkData must not produce a column"
@@ -98,15 +102,16 @@ fn chunk_data_inserts_column_matching_payload_without_prior_worldgen() {
 #[test]
 fn join_client_must_not_mutate_presentation_chunks() {
     assert_eq!(
-        presentation_chunk_load_policy(&join_client()),
+        PresentationTopology::from(&join_client(), false).chunk_load_policy(),
         PresentationChunkLoadPolicy::AwaitAuthoritativePayload
     );
     assert_eq!(
-        presentation_chunk_load_policy(&MultiplayerRole::Singleplayer),
+        PresentationTopology::from(&MultiplayerRole::Singleplayer, true).chunk_load_policy(),
         PresentationChunkLoadPolicy::GenerateLocally
     );
     assert_eq!(
-        presentation_chunk_load_policy(&MultiplayerRole::Host { port: 25565 }),
+        PresentationTopology::from(&MultiplayerRole::Host { port: 25565 }, true)
+            .chunk_load_policy(),
         PresentationChunkLoadPolicy::GenerateLocally
     );
 }

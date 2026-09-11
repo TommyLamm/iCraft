@@ -59,18 +59,13 @@ impl PresentationTopology {
         matches!(self, Self::JoinClient)
     }
 
-    /// Presentation never locally mutates authority-owned world state.
-    pub fn should_mutate_world(self) -> bool {
-        match self {
-            Self::Embedded | Self::JoinClient => false,
-        }
-    }
-
     /// Embedded session inventory may write back into the in-process runtime.
     pub fn should_sync_inventory(self) -> bool {
         matches!(self, Self::Embedded)
     }
 
+    /// Sole chunk-load gate: Join awaits authoritative columns; Embedded may
+    /// generate locally. Role helpers must go through this method.
     pub fn chunk_load_policy(self) -> PresentationChunkLoadPolicy {
         if self.is_join_client() {
             PresentationChunkLoadPolicy::AwaitAuthoritativePayload
@@ -96,10 +91,7 @@ impl PresentationTopology {
                     PresentationInventoryAction::LocalMutate
                 }
             }
-            PresentationInventoryTarget::Workstation
-            | PresentationInventoryTarget::Pickup
-            | PresentationInventoryTarget::FarmlandTrample
-            | PresentationInventoryTarget::UnsupportedBreak => {
+            PresentationInventoryTarget::Workstation | PresentationInventoryTarget::Pickup => {
                 PresentationInventoryAction::Reject
             }
         }
@@ -123,14 +115,6 @@ pub enum PresentationChunkLoadPolicy {
     AwaitAuthoritativePayload,
 }
 
-pub fn presentation_chunk_load_policy(role: &MultiplayerRole) -> PresentationChunkLoadPolicy {
-    if role.is_join_client() {
-        PresentationChunkLoadPolicy::AwaitAuthoritativePayload
-    } else {
-        PresentationChunkLoadPolicy::GenerateLocally
-    }
-}
-
 /// Testable load-schedule gate. `generate` is invoked only when the role is
 /// allowed to materialize a local column.
 pub fn schedule_presentation_chunk_load<T>(
@@ -143,7 +127,7 @@ pub fn schedule_presentation_chunk_load<T>(
     }
 }
 
-/// What a presentation click / pickup / trampling / unsupported-break should do.
+/// What a presentation click / pickup should do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationInventoryAction {
     /// Queue a typed authority operation and wait for a projection.
@@ -165,12 +149,9 @@ pub enum PresentationInventoryTarget {
     /// Enchanting / anvil / recipe-book furnace fills that spend levels or
     /// write workstation block entities.
     Workstation,
-    /// Walking over a dropped stack or XP orb.
+    /// Walking over a dropped stack or XP orb. Always Reject; pickup is
+    /// authority-only (local collection removed in Plan 03).
     Pickup,
-    /// Sprint / fall trampling of farmland.
-    FarmlandTrample,
-    /// Gravity-unsupported block break while integrating a loaded chunk.
-    UnsupportedBreak,
 }
 
 #[cfg(test)]
@@ -188,13 +169,10 @@ mod tests {
             PresentationTopology::from(&MultiplayerRole::Host { port: 25565 }, true),
             PresentationTopology::Embedded
         );
-        assert!(!topology.should_mutate_world());
         for target in [
             PresentationInventoryTarget::ContainerSlot,
             PresentationInventoryTarget::Workstation,
             PresentationInventoryTarget::Pickup,
-            PresentationInventoryTarget::FarmlandTrample,
-            PresentationInventoryTarget::UnsupportedBreak,
         ] {
             let action = topology.inventory_decision(target);
             assert_ne!(
@@ -214,6 +192,10 @@ mod tests {
         assert_eq!(
             topology.inventory_decision(PresentationInventoryTarget::Pickup),
             PresentationInventoryAction::Reject
+        );
+        assert_eq!(
+            topology.chunk_load_policy(),
+            PresentationChunkLoadPolicy::GenerateLocally
         );
     }
 
@@ -242,7 +224,6 @@ mod tests {
             ),
             PresentationTopology::JoinClient
         );
-        assert!(!topology.should_mutate_world());
         assert!(!topology.should_sync_inventory());
         assert!(!topology.should_writeback_after_inventory_click(Some(
             PresentationInventoryTarget::PlayerInventory
@@ -260,12 +241,8 @@ mod tests {
             PresentationInventoryAction::Reject
         );
         assert_eq!(
-            topology.inventory_decision(PresentationInventoryTarget::FarmlandTrample),
-            PresentationInventoryAction::Reject
-        );
-        assert_eq!(
-            topology.inventory_decision(PresentationInventoryTarget::UnsupportedBreak),
-            PresentationInventoryAction::Reject
+            topology.chunk_load_policy(),
+            PresentationChunkLoadPolicy::AwaitAuthoritativePayload
         );
     }
 

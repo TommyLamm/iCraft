@@ -11,7 +11,6 @@ use icraft::presentation_inventory_policy::{
 #[test]
 fn embedded_gate_sends_container_op_and_rejects_world_mutations() {
     let topology = PresentationTopology::Embedded;
-    assert!(!topology.should_mutate_world());
     assert_eq!(
         topology.inventory_decision(PresentationInventoryTarget::ContainerSlot),
         PresentationInventoryAction::SendAuthorityOp
@@ -19,8 +18,6 @@ fn embedded_gate_sends_container_op_and_rejects_world_mutations() {
     for target in [
         PresentationInventoryTarget::Workstation,
         PresentationInventoryTarget::Pickup,
-        PresentationInventoryTarget::FarmlandTrample,
-        PresentationInventoryTarget::UnsupportedBreak,
     ] {
         assert_eq!(
             topology.inventory_decision(target),
@@ -40,7 +37,6 @@ fn join_client_never_calls_inventory_writeback() {
     assert!(!topology.should_writeback_after_inventory_click(Some(
         PresentationInventoryTarget::PlayerInventory
     )));
-    assert!(!topology.should_mutate_world());
     assert_eq!(
         topology.inventory_decision(PresentationInventoryTarget::Pickup),
         PresentationInventoryAction::Reject
