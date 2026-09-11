@@ -1171,6 +1171,27 @@ mod tests {
     }
 
     #[test]
+    fn moved_entity_remains_findable_via_query_radius_after_incremental_sync() {
+        // Combat / pickup spatial queries must still see entities after a
+        // chunk-crossing move that only syncs the mover id list.
+        let mut em = EntityManager::new();
+        let id = em.spawn(EntityType::Pig, Vec3::new(15.0, 4.0, 0.0));
+        em.get_by_id_mut(id).unwrap().position = Vec3::new(17.0, 4.0, 0.0);
+        em.sync_entity_positions(&[id]);
+
+        assert!(
+            em.query_radius(Vec3::new(17.0, 4.0, 0.0), 0.5)
+                .any(|entity| entity.id == id),
+            "incremental sync must keep the mover in the destination bucket"
+        );
+        assert!(
+            !em.query_radius(Vec3::new(15.0, 4.0, 0.0), 0.5)
+                .any(|entity| entity.id == id),
+            "mover must leave the old bucket after incremental sync"
+        );
+    }
+
+    #[test]
     fn test_ray_aabb_intersection() {
         let box_pos = Vec3::new(0.0, 0.0, 0.0);
         let aabb = AABB::new(box_pos, Vec3::ONE);

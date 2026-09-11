@@ -172,7 +172,12 @@ input
   comparator/observer refresh until a container mutation, plate occupancy
   change, scheduled/dirty work, or loaded-chunk set change wakes it. Grounded
   dropped items with near-zero velocity skip XYZ physics until the support
-  block changes or an external push applies velocity.
+  block changes or an external push applies velocity. Living entities that are
+  sitting, anchored, grounded (or flying with zero velocity), and not in
+  hostile chase skip `update_physics` and `ai_phase` bumps; hostiles only write
+  chase velocity when a player is within range and the desired speed differs.
+  `tick_entities` syncs spatial buckets via a mover id list
+  (`sync_entity_positions`), not a full-table `sync_positions` scan.
 - `EmbeddedRuntimeBridge::sync_local_inventory` may write back only
   inventory, cursor, and selected hotbar. Health, hunger, XP, mining, and
   mounts stay server-owned. Join clients never use this path.

@@ -14,7 +14,7 @@ use crate::authority::transactions::{self, WorkstationContext};
 use crate::block_entity::{default_stub_for_block, BlockEntity, ContainerAccess};
 use crate::chunk_manager::ChunkManager;
 use crate::dimension::{generate_chunk_with_options, Dimension, WorldGenerationOptions};
-use crate::entity::{EntityManager, EntityType};
+use crate::entity::{Entity, EntityManager, EntityType};
 use crate::fluid::FluidMutation;
 use crate::game_rules::{Difficulty, WorldRules, WorldType};
 use crate::inventory::ItemStack;
@@ -29,6 +29,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const WORLD_BOUND: i32 = 30_000_000;
 pub const FIXED_DT: f32 = 1.0 / 20.0;
+/// Near-zero velocity gate shared with settled dropped-item physics skip.
+const ENTITY_IDLE_VELOCITY_EPS: f32 = 1e-4;
+/// Horizontal chase radius for the generic hostile velocity consumer.
+/// Outside this range hostiles must not rewrite chase velocity every tick.
+const HOSTILE_CHASE_RANGE: f32 = 40.0;
 const MAX_AUTOMATION_TRANSFERS: usize = 64;
 const MAX_FLUID_UPDATES: usize = 256;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
@@ -1985,6 +1990,9 @@ impl ServerWorld {
         }
         let chunks = &self.chunks;
         let mut checksum_inputs_changed = false;
+        let mut moved_ids = std::mem::take(&mut self.entities.scratch.id_list);
+        moved_ids.clear();
+        let chase_range_sq = HOSTILE_CHASE_RANGE * HOSTILE_CHASE_RANGE;
         for entity in &mut self.entities.entities {
             if entity.entity_type == EntityType::FishingHook {
                 continue;
@@ -1994,26 +2002,53 @@ impl ServerWorld {
             entity.action_cooldown = (entity.action_cooldown - FIXED_DT).max(0.0);
             entity.invulnerable_time = (entity.invulnerable_time - FIXED_DT).max(0.0);
             entity.fire_aspect_timer = (entity.fire_aspect_timer - FIXED_DT).max(0.0);
-            if entity.entity_type.is_hostile() && !matches!(self.difficulty, Difficulty::Peaceful) {
-                if let Some((_, target)) =
-                    player_positions.iter().min_by(|(_, left), (_, right)| {
-                        entity
-                            .position
-                            .distance_squared(Vec3::from_array(*left))
-                            .total_cmp(&entity.position.distance_squared(Vec3::from_array(*right)))
-                    })
-                {
+
+            // Hostile chase: only write velocity when a player is in range and
+            // the desired horizontal speed differs. Out-of-range / no-player
+            // ticks must not re-assign the same chase vector (keeps EntityState
+            // fingerprints and Plan 08 checksum idle reuse honest).
+            let mut chasing = false;
+            if entity.entity_type.is_hostile() && !matches!(self.difficulty, Difficulty::Peaceful)
+            {
+                let nearest = player_positions.iter().min_by(|(_, left), (_, right)| {
+                    entity
+                        .position
+                        .distance_squared(Vec3::from_array(*left))
+                        .total_cmp(&entity.position.distance_squared(Vec3::from_array(*right)))
+                });
+                if let Some((_, target)) = nearest.filter(|(_, target)| {
+                    entity.position.distance_squared(Vec3::from_array(*target)) <= chase_range_sq
+                }) {
+                    chasing = true;
                     let direction =
                         (Vec3::from_array(*target) - entity.position).normalize_or_zero();
                     let speed = self.difficulty.hostile_chase_speed_milli() as f32 / 1_000.0;
-                    entity.velocity.x = direction.x * 1.2 * speed;
-                    entity.velocity.z = direction.z * 1.2 * speed;
+                    let desired_x = direction.x * 1.2 * speed;
+                    let desired_z = direction.z * 1.2 * speed;
+                    if entity.velocity.x != desired_x || entity.velocity.z != desired_z {
+                        entity.velocity.x = desired_x;
+                        entity.velocity.z = desired_z;
+                    }
                     entity.target_player = true;
+                } else if entity.target_player {
+                    entity.target_player = false;
                 }
             }
+
+            // Stationary living / sitting entities skip AI phase bumps and
+            // physics. Dropped items keep the existing grounded skip inside
+            // `update_physics` (pickup cooldown still ticks there). Unloaded
+            // column freeze stays inside `update_physics` for movers.
+            if entity_skips_idle_physics(entity, chasing) {
+                continue;
+            }
+
             entity.ai_phase = entity.ai_phase.wrapping_add(1);
             entity.ai_timer += FIXED_DT;
             entity.update_physics(FIXED_DT, chunks);
+            if entity.position != prev_position {
+                moved_ids.push(entity.id);
+            }
             if entity.position != prev_position || entity.ai_phase != prev_ai_phase {
                 checksum_inputs_changed = true;
             }
@@ -2021,7 +2056,8 @@ impl ServerWorld {
         if checksum_inputs_changed {
             self.entities.mark_checksum_inputs_changed();
         }
-        self.entities.sync_positions();
+        self.entities.sync_entity_positions(&moved_ids);
+        self.entities.scratch.id_list = moved_ids;
 
         if let Some((_, first_pos)) = player_positions.first() {
             let player_vec = Vec3::from_array(*first_pos);
@@ -2185,6 +2221,22 @@ fn entity_checksum_keys(entities: &EntityManager) -> Vec<(u64, u32, u32, u32, u8
             )
         })
         .collect()
+}
+
+/// Living entities that are truly idle skip `update_physics` and `ai_phase`
+/// bumps so Plan 08 entity fingerprints stay reusable. Non-living movers
+/// (drops, projectiles, vehicles) keep their existing physics paths.
+fn entity_skips_idle_physics(entity: &Entity, chasing: bool) -> bool {
+    if chasing || !entity.entity_type.is_living() {
+        return false;
+    }
+    if entity.velocity.length_squared() > ENTITY_IDLE_VELOCITY_EPS {
+        return false;
+    }
+    entity.is_sitting
+        || entity.entity_type.is_anchored()
+        || entity.on_ground
+        || entity.entity_type.uses_flying_physics()
 }
 
 fn fnv1a_write(hash: &mut u64, bytes: &[u8]) {
@@ -3009,6 +3061,126 @@ mod tests {
         twin.tick(&[]);
         twin.tick(&[]);
         assert_eq!(after, twin.checksum(&[]));
+    }
+
+    #[test]
+    fn stationary_living_entity_skips_physics_and_reuses_checksum_fingerprint() {
+        let mut world = superflat_world(13);
+        world.rules.do_mob_spawning = false;
+        world.rules.do_daylight_cycle = false;
+        let id = world
+            .entities
+            .spawn(EntityType::Pig, Vec3::new(8.0, 80.0, 8.0));
+        {
+            let entity = world.entities.get_by_id_mut(id).unwrap();
+            entity.on_ground = true;
+            entity.velocity = Vec3::ZERO;
+            entity.ai_phase = 7;
+        }
+        let phase = world.entities.get_by_id(id).unwrap().ai_phase;
+        let pos = world.entities.get_by_id(id).unwrap().position;
+        let _ = world.checksum(&[]);
+        let builds = world.entities.entity_fingerprint_builds();
+        world.tick(&[]);
+        world.tick(&[]);
+        let entity = world.entities.get_by_id(id).unwrap();
+        assert_eq!(entity.ai_phase, phase);
+        assert_eq!(entity.position, pos);
+        assert_eq!(world.entities.entity_fingerprint_builds(), builds);
+    }
+
+    #[test]
+    fn sitting_living_entity_skips_physics_while_airborne_velocity_is_zero() {
+        let mut world = superflat_world(13);
+        world.rules.do_mob_spawning = false;
+        world.rules.do_daylight_cycle = false;
+        let id = world
+            .entities
+            .spawn(EntityType::Wolf, Vec3::new(8.0, 90.0, 8.0));
+        {
+            let entity = world.entities.get_by_id_mut(id).unwrap();
+            entity.is_sitting = true;
+            entity.on_ground = false;
+            entity.velocity = Vec3::ZERO;
+            entity.ai_phase = 3;
+        }
+        let phase = world.entities.get_by_id(id).unwrap().ai_phase;
+        let pos = world.entities.get_by_id(id).unwrap().position;
+        world.tick(&[]);
+        let entity = world.entities.get_by_id(id).unwrap();
+        assert_eq!(entity.ai_phase, phase);
+        assert_eq!(entity.position, pos);
+    }
+
+    #[test]
+    fn hostile_out_of_chase_range_does_not_rewrite_velocity_each_tick() {
+        let mut world = ServerWorld::new_with_difficulty(
+            7,
+            Dimension::Overworld,
+            WorldType::Superflat,
+            false,
+            {
+                let mut rules = WorldRules::default();
+                rules.do_mob_spawning = false;
+                rules.do_daylight_cycle = false;
+                rules
+            },
+            2,
+            Difficulty::Normal,
+        );
+        let id = world
+            .entities
+            .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 8.0));
+        {
+            let entity = world.entities.get_by_id_mut(id).unwrap();
+            entity.on_ground = true;
+            entity.velocity = Vec3::ZERO;
+            entity.target_player = false;
+            entity.ai_phase = 4;
+        }
+        // Player is beyond HOSTILE_CHASE_RANGE (40); chase must not arm.
+        world.tick(&[(7, [8.0, 80.0, 80.0])]);
+        world.tick(&[(7, [8.0, 80.0, 80.0])]);
+        let entity = world.entities.get_by_id(id).unwrap();
+        assert_eq!(entity.velocity, Vec3::ZERO);
+        assert!(!entity.target_player);
+        assert_eq!(entity.ai_phase, 4);
+    }
+
+    #[test]
+    fn tick_entities_keeps_moved_entity_findable_via_query_radius() {
+        let mut world = superflat_world(19);
+        world.rules.do_mob_spawning = false;
+        world.rules.do_daylight_cycle = false;
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                world.ensure_chunk(cx, cz);
+            }
+        }
+        let id = world
+            .entities
+            .spawn(EntityType::Zombie, Vec3::new(8.0, 80.0, 8.0));
+        {
+            let entity = world.entities.get_by_id_mut(id).unwrap();
+            entity.on_ground = true;
+            entity.velocity = Vec3::ZERO;
+        }
+        // In-range player east of the zombie so chase writes +X velocity and
+        // the mover crosses into chunk (1, 0) under incremental sync.
+        world.tick(&[(7, [24.0, 80.0, 8.0])]);
+        let pos = world.entities.get_by_id(id).unwrap().position;
+        assert!(
+            pos.x > 8.0,
+            "chasing hostile must move toward the player (got x={})",
+            pos.x
+        );
+        assert!(
+            world
+                .entities
+                .query_radius(pos, 1.0)
+                .any(|entity| entity.id == id),
+            "moved ids must stay in spatial buckets after incremental sync"
+        );
     }
 
     #[test]
