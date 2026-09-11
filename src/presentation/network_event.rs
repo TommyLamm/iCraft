@@ -8,9 +8,7 @@ impl State {
             NetworkInbound::StatusUpdate(msg) => {
                 self.network_status = Some(msg);
             }
-            NetworkInbound::GameplayResponse { response } => {
-                self.last_gameplay_response = Some(response);
-            }
+            NetworkInbound::GameplayResponse { response: _ } => {}
             NetworkInbound::Connected {
                 player_id,
                 seed,
@@ -61,7 +59,6 @@ impl State {
                 self.chat_input.clear();
                 clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
                 self.force_close_inventory();
-                self.container_sessions.sessions.clear();
                 self.clear_replicated_entities();
                 self.client_session_projection = None;
                 self.set_paused(true);
@@ -98,7 +95,6 @@ impl State {
                 }
             }
             NetworkInbound::PlayerLeave(id) => {
-                self.container_sessions.close_by_player(id);
                 if let Some(remote) = self.remote_players.remove(&id) {
                     push_chat_history(
                         &mut self.chat_messages,

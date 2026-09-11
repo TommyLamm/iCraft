@@ -149,7 +149,7 @@ pub struct FishingCancelOutcome {
 
 /// Position the world layer must inspect for open water before calling
 /// [`tick`]. Flying hooks probe the post-physics position, matching the legacy
-/// `FishingManager`; floating/nibbling hooks probe their current position.
+/// Authority fishing domain. Floating/nibbling hooks probe their current position.
 pub fn water_probe_position(state: &SessionGameplayState) -> Result<[i32; 3], FishingDomainError> {
     let mut hook = state.fishing_hook.ok_or(FishingDomainError::NoActiveHook)?;
     validate_hook(hook)?;

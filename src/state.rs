@@ -1290,11 +1290,8 @@ impl State {
         self.mining_target = None;
         self.mining_progress = 0.0;
         self.left_mouse_pressed = false;
-        self.water_tick_timer = 0.0;
-        self.lava_tick_timer = 0.0;
         self.lava_damage_timer = 0.0;
         self.cactus_damage_timer = 0.0;
-        self.boss_maintenance_timer = 0.0;
         self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
 
         let cx = (destination.x / CHUNK_WIDTH as f32).floor() as i32;
@@ -1347,13 +1344,12 @@ impl State {
 
         clear_remote_players(&mut self.remote_players, &mut self.entity_manager);
         self.clear_replicated_entities();
-        self.fishing_manager.active_hooks.clear();
+        self.presented_fishing_hook_entity = None;
         self.current_dimension = target;
         let render_distance = self.chunk_manager.render_distance;
         self.teardown_terrain_runtime("authority dimension projection");
         self.chunk_manager = ChunkManager::new_in_dimension(render_distance, target);
         self.entity_manager = crate::entity::EntityManager::new();
-        self.mount_manager = crate::vehicle::MountManager::new();
         self.particles = crate::particles::ParticleSystem::new();
         self.pending_chunk_payloads.clear();
         self.pending_block_changes.clear();
@@ -1361,11 +1357,8 @@ impl State {
         self.mining_target = None;
         self.mining_progress = 0.0;
         self.left_mouse_pressed = false;
-        self.water_tick_timer = 0.0;
-        self.lava_tick_timer = 0.0;
         self.lava_damage_timer = 0.0;
         self.cactus_damage_timer = 0.0;
-        self.boss_maintenance_timer = 0.0;
         self.audio_manager.stop_looping_sound(RAIN_LOOP_ID);
     }
 
@@ -2351,9 +2344,8 @@ pub struct State {
     /// F5 cycles first person, third-person back, and third-person front.
     pub camera_perspective: CameraPerspective,
     pub entity_manager: crate::entity::EntityManager,
-    pub mount_manager: crate::vehicle::MountManager,
-    pub fishing_manager: crate::fishing::FishingManager,
-    pub map_manager: crate::navigation::MapManager,
+    /// Authority session overlay: local player's fishing hook entity id, if any.
+    presented_fishing_hook_entity: Option<u64>,
     mob_instanced_pipeline: wgpu::RenderPipeline,
     particle_instanced_pipeline: wgpu::RenderPipeline,
 
@@ -2406,11 +2398,8 @@ pub struct State {
     pub translation_catalog: crate::localization::TranslationCatalog,
     pub footstep_accumulator: f32,
     pub was_on_ground: bool,
-    pub water_tick_timer: f32,
-    pub lava_tick_timer: f32,
     pub lava_damage_timer: f32,
     pub cactus_damage_timer: f32,
-    boss_maintenance_timer: f32,
     pub is_saving: bool,
     pub save_error: Option<String>,
     pub is_sprinting: bool,
@@ -2457,7 +2446,6 @@ pub struct State {
     pub active_station: Option<StationKind>,
     pub container_target: Option<(i32, i32, i32)>,
     pub container_is_double: bool,
-    pub container_sessions: crate::container_sessions::ContainerSessionManager,
     pub enchanting: crate::enchantment::EnchantingState,
     pub brewing: crate::brewing::BrewingStandState,
     pub anvil: crate::enchantment::AnvilState,
@@ -2480,8 +2468,6 @@ pub struct State {
     pub current_dimension: crate::dimension::Dimension,
     portal_contact_time: f32,
     portal_cooldown: f32,
-    wither_effect_timer: f32,
-    wither_damage_timer: f32,
     pub advancement_manager: crate::advancements::AdvancementManager,
     pub advancement_gui: crate::advancements::AdvancementGui,
     pub role: MultiplayerRole,
@@ -2504,16 +2490,12 @@ pub struct State {
     /// orders snapshots within a dimension.
     client_session_projection: Option<(u8, u64, u64)>,
     pub network_status: Option<String>,
-    pub last_gameplay_response: Option<crate::network::protocol::GameplayResponse>,
     pub chat_messages: std::collections::VecDeque<(String, String)>,
     pub chat_input: String,
     pub is_chat_open: bool,
     pub connection_lost: bool,
     network_position_timer: f32,
     network_pose_sequence: u32,
-    pub poi_manager: crate::village::PoiManager,
-    pub merchant_sessions: crate::village::MerchantSessionManager,
-    pub raid_manager: crate::village::RaidManager,
     pub active_merchant_villager_id: Option<u64>,
     pub active_merchant_offers: Vec<crate::village::trade::TradeOffer>,
     pub active_merchant_profession: crate::village::poi::VillagerProfession,
@@ -3711,9 +3693,7 @@ impl State {
             show_debug,
             camera_perspective: CameraPerspective::FirstPerson,
             entity_manager: crate::entity::EntityManager::new(),
-            mount_manager: crate::vehicle::MountManager::new(),
-            fishing_manager: crate::fishing::FishingManager::new(),
-            map_manager: crate::navigation::MapManager::new(),
+            presented_fishing_hook_entity: None,
             mob_instanced_pipeline,
             particle_instanced_pipeline,
             mob_cuboid_proto_vbuf,
@@ -3756,11 +3736,8 @@ impl State {
             translation_catalog,
             footstep_accumulator: 0.0,
             was_on_ground: false,
-            water_tick_timer: 0.0,
-            lava_tick_timer: 0.0,
             lava_damage_timer: 0.0,
             cactus_damage_timer: 0.0,
-            boss_maintenance_timer: 0.0,
             is_saving: false,
             save_error: None,
             is_sprinting: false,
@@ -3810,7 +3787,6 @@ impl State {
             active_station: None,
             container_target: None,
             container_is_double: false,
-            container_sessions: crate::container_sessions::ContainerSessionManager::new(),
             enchanting: crate::enchantment::EnchantingState::default(),
             brewing: crate::brewing::BrewingStandState::default(),
             anvil: crate::enchantment::AnvilState::default(),
@@ -3831,8 +3807,6 @@ impl State {
             current_dimension,
             portal_contact_time: 0.0,
             portal_cooldown: 0.0,
-            wither_effect_timer: 0.0,
-            wither_damage_timer: 0.0,
             advancement_manager,
             advancement_gui,
             role,
@@ -3847,16 +3821,12 @@ impl State {
             client_player_effect_sequence: 0,
             client_session_projection: None,
             network_status: is_client.then(|| "CONNECTING TO SERVER...".to_string()),
-            last_gameplay_response: None,
             chat_messages: std::collections::VecDeque::new(),
             chat_input: String::new(),
             is_chat_open: false,
             connection_lost: false,
             network_position_timer: 0.0,
             network_pose_sequence: 0,
-            poi_manager: crate::village::PoiManager::new(),
-            merchant_sessions: crate::village::MerchantSessionManager::new(),
-            raid_manager: crate::village::RaidManager::new(),
             active_merchant_villager_id: None,
             active_merchant_offers: Vec::new(),
             active_merchant_profession: crate::village::poi::VillagerProfession::Unemployed,
@@ -4367,40 +4337,19 @@ impl State {
             self.mining_held = None;
             self.mining_cancel_sent = false;
         }
-        self.mount_manager.dismount(0);
-        if let Some(vehicle_id) = gameplay.mounted_entity {
-            if let Some(vehicle) = self.entity_manager.get_by_id(vehicle_id) {
-                let capacity = if vehicle.entity_type == crate::entity::EntityType::Boat {
-                    2
-                } else {
-                    1
-                };
-                let _ = self.mount_manager.mount(vehicle_id, 0, capacity);
-            }
-        }
+
         if let Some(dimension) = crate::dimension::Dimension::from_wire(dimension) {
             self.reset_presented_dimension(dimension);
         }
 
-        let owner_id = self.local_player_id.unwrap_or(0);
-        if let Some(hook) = gameplay.fishing_hook {
-            if let Some(stage) = crate::fishing::FishingHookStage::from_wire(hook.stage) {
-                self.fishing_manager.active_hooks.insert(
-                    owner_id,
-                    crate::fishing::FishingHook {
-                        entity_id: hook.entity_id,
-                        owner_player_id: owner_id,
-                        position: hook.position_milli.map(|value| value as f32 / 1000.0),
-                        velocity: hook.velocity_milli.map(|value| value as f32 / 1000.0),
-                        stage,
-                        wait_ticks_remaining: hook.wait_ticks_remaining,
-                        bite_ticks_remaining: hook.bite_ticks_remaining,
-                    },
-                );
+        self.presented_fishing_hook_entity = match gameplay.fishing_hook {
+            Some(hook)
+                if crate::fishing::FishingHookStage::from_wire(hook.stage).is_some() =>
+            {
+                Some(hook.entity_id)
             }
-        } else {
-            self.fishing_manager.active_hooks.remove(&owner_id);
-        }
+            _ => None,
+        };
 
         if let Some(brew) = gameplay.brew {
             self.active_station = Some(StationKind::Brewing);
@@ -6092,7 +6041,6 @@ impl State {
             self.brewing.update(dt);
             let _ = self.potion_effects.update(dt);
         }
-        self.wither_damage_timer = 0.0;
 
         let can_sprint = sprint_allowed(self.game_mode, self.player_state.hunger);
 
@@ -6386,7 +6334,7 @@ impl State {
     }
 
     pub fn use_fishing_rod(&mut self) {
-        let action = if self.fishing_manager.get_hook(0).is_some() {
+        let action = if self.presented_fishing_hook_entity.is_some() {
             1
         } else {
             0
@@ -8258,11 +8206,8 @@ impl State {
                     let profession = entity.profession;
                     let level = entity.villager_level;
                     let xp = entity.villager_xp;
-                    let offers = if entity.offers.is_empty() {
-                        crate::village::trade::generate_offers_for_level(profession, level)
-                    } else {
-                        entity.offers.clone()
-                    };
+                    // Offers are authority/entity projection only — never generate on GPU.
+                    let offers = entity.offers.clone();
                     Some((profession, level, xp, offers))
                 } else {
                     None
@@ -8333,10 +8278,6 @@ impl State {
         self.anvil.right = None;
         self.anvil.output = None;
         self.anvil.rename.clear();
-        if let Some(villager_id) = self.active_merchant_villager_id {
-            self.merchant_sessions
-                .close_sessions_for_villager(villager_id);
-        }
         self.active_merchant_villager_id = None;
         self.active_merchant_offers.clear();
         self.inventory.is_open = false;

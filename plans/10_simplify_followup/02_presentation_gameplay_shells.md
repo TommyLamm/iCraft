@@ -24,13 +24,13 @@
 
 ## 精確 acceptance
 
-- [ ] 上表 `State` 欄位、建構、dimension-switch reset、disconnect 清理全部刪除。
-- [ ] `navigation.rs`、`village/poi.rs`、`village/raid.rs`、`vehicle.rs`、`rail.rs` 的 manager／tick 型別刪除或改 `#[cfg(test)]`；保留 `VillagerProfession`／`TradeOffer`／`EntityType::{Minecart,Boat}` wire。
-- [ ] `container_sessions` 從 `lib.rs` server 契約移除（刪檔或改 `pub(crate)` + `cfg(test)`）。
-- [ ] presentation `FishingManager` 刪除；cast／reel HUD 只讀投影 hook 實體與 session overlay。
-- [ ] 商人 UI 只顯示投影 offers；不再本地 `generate_offers_for_level`。
-- [ ] `cargo check --bin icraft-server` 通過且不再編 `container_sessions`／`poi`／`raid`／`vehicle`／`rail` manager。
-- [ ] `ARCHITECTURE.md` Code map 拿掉 `container_sessions.rs`，Gameplay 列調整。
+- [x] 上表 `State` 欄位、建構、dimension-switch reset、disconnect 清理全部刪除。
+- [x] `navigation.rs`、`village/poi.rs`、`village/raid.rs`、`vehicle.rs`、`rail.rs` 的 manager／tick 型別刪除或改 `#[cfg(test)]`；保留 `VillagerProfession`／`TradeOffer`／`EntityType::{Minecart,Boat}` wire。
+- [x] `container_sessions` 從 `lib.rs` server 契約移除（刪檔或改 `pub(crate)` + `cfg(test)`）。
+- [x] presentation `FishingManager` 刪除；cast／reel HUD 只讀投影 hook 實體與 session overlay。
+- [x] 商人 UI 只顯示投影 offers；不再本地 `generate_offers_for_level`。
+- [x] `cargo check --bin icraft-server` 通過且不再編 `container_sessions`／`poi`／`raid`／`vehicle`／`rail` manager。
+- [x] `ARCHITECTURE.md` Code map 拿掉 `container_sessions.rs`，Gameplay 列調整。
 
 ## 預計檔案與測試
 
@@ -49,3 +49,33 @@
 - Q-drop、環境傷害、`switch_dimension` worldgen、join 本地模擬（Plan 03）。
 - presentation `RedstoneSystem` 空殼（09 波 05）。
 - weather／advancements 桌面化（Plan 06）。
+
+## 實作與證據
+
+### 改了什麼
+
+- **State**：刪除 `map_manager`／`poi_manager`／`raid_manager`／`mount_manager`／`fishing_manager`／`container_sessions`／`merchant_sessions`／`last_gameplay_response` 與五個死 timer；投影掛鉤改為 `presented_fishing_hook_entity: Option<u64>`（來自 session overlay `gameplay.fishing_hook`）；商人窗只 clone `entity.offers`，不再呼叫 `generate_offers_for_level`。
+- **network_event**：`GameplayResponse` 不再寫入；disconnect／PlayerLeave 不再碰 presentation container sessions（直接 `force_close_inventory`／關 UI）。
+- **lib 契約**：`container_sessions` 改 `#[cfg(test)] mod`（退出 server 契約）；`vehicle`／`rail`／`village::raid` 與 POI／Map／MerchantSession／Fishing managers 改 `cfg(test)`；保留 `VillagerProfession`／`TradeOffer`／`FishingHookStage` 與 authority fishing helpers。
+- **ARCHITECTURE.md**：Code map 拿掉 `container_sessions.rs`；註明 presentation shells 為 test-only。
+
+### 死路徑證據（刪前／後）
+
+- 刪後 `rg`：State 上已無 `map_manager|poi_manager|raid_manager|mount_manager|fishing_manager|container_sessions|merchant_sessions|last_gameplay_response|water_tick_timer`。
+- `create_map`／`register_poi`／`MountManager::`／`FishingManager::`／`ContainerSessionManager::`／`open_session` 僅剩各模組 `#[cfg(test)]` 測試（及 `cfg(test)` 型別本體）。
+- `generate_offers_for_level` 僅剩 `village/trade.rs` 測試呼叫，State 無引用。
+
+### 測了什麼
+
+- `cargo check --all-targets`：通過
+- `cargo check --bin icraft-server`：通過（managers 不進 production 編譯單元）
+- `cargo test --bin icraft`：187 passed
+- `cargo test --lib village::`：7 passed；`vehicle::` 3；`rail::` 2；`fishing::` 8；`container_sessions::` 5
+- `cargo test --test plan33_tcp_fishing_lifecycle`：3 passed
+- `cargo test --test review_hardening_container_click`：9 passed
+
+### 留下的缺口
+
+- `generate_offers_for_level` 仍在 lib（僅測試用）；權威尚未有 live villager offer 生成路徑時，投影 offers 可能為空，商人 UI 會開空表。
+- `mounted_entity` session overlay 仍投影到 State，但不再寫入本地 `MountManager`（渲染若需坐姿，應之後直接讀 entity／overlay，不在本計劃）。
+- Plan 03 的 leftover 本地突變（Q-drop、環境傷害、`switch_dimension` worldgen 等）未動。

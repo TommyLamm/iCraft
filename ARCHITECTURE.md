@@ -24,8 +24,12 @@ server and tests.
 `lib.rs` has two `pub` layers: the server/tests contract (authority, world,
 network, save, `presentation_inventory_policy`, …) and extra `pub` modules so
 the desktop crate can re-export them. `loot`, `voxel_shape`, `worldgen`,
-`fluid`, `mob`, `rail`, and `world_tick` are `pub(crate)`. `recipes` stays
-`pub` because desktop `State` and `ServerWorld` expose `RecipeManager`.
+`fluid`, `mob`, and `world_tick` are `pub(crate)`. `rail` and presentation
+shells (`vehicle`, `container_sessions`, POI/raid managers, map manager,
+presentation `FishingManager`) are `cfg(test)` only — desktop `State` no
+longer owns them; live container viewers and fishing hooks live on
+`ServerWorld` / session overlay. `recipes` stays `pub` because desktop
+`State` and `ServerWorld` expose `RecipeManager`.
 Desktop `--microbench` is `src/main.rs`'s `mod microbench` behind feature
 `microbench` (`cargo run --features microbench -- --microbench`); it is not
 compiled into the library or `icraft-server`. Settings keys
@@ -376,7 +380,7 @@ symlink escape from `saves/`).
 | Authority | `src/authority/` (`tick.rs`, `portals.rs`, `dispatch.rs`, `combat.rs`, `contract.rs`, `fishing.rs`, `interest.rs`, `mining.rs`, `transactions.rs`) |
 | Runtime | `src/server_runtime.rs` plus `ingress.rs`, `projection.rs`, `session_sync.rs`; `src/server_world.rs`; `src/bin/icraft-server.rs` |
 | World | `src/world/` (`block.rs`, `section.rs`, `chunk.rs`, `mesh.rs`), `src/chunk_manager.rs`, `src/dimension.rs`, `src/worldgen/`, `src/structure/` |
-| Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/container_sessions.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs` |
+| Gameplay | `src/player.rs`, `src/physics.rs`, `src/inventory/`, `src/block_entity.rs`, `src/redstone.rs`, `src/fluid.rs`, `src/world_tick.rs`, `src/entity.rs`, `src/mob.rs`, `src/passive_mob.rs`, `src/village/` (`VillagerProfession` / `TradeOffer`; POI/raid/merchant-session managers are `cfg(test)` only), `src/fishing.rs` (wire stages + authority helpers; presentation `FishingManager` is `cfg(test)` only) |
 | Render | `src/chunk_schedule.rs`, `src/chunk_render.rs`, `src/culling/`, `src/block_model.rs`, `src/shader.wgsl` |
 | Network | `src/network/` (`protocol.rs`, `transport.rs`, `server.rs`, `client.rs`, `ingress.rs`, `egress.rs`; `loopback_test.rs` is `cfg(test)` only) |
 | Save / assets | `src/save/` (`format.rs`, `region.rs`, `player.rs`, `index.rs`), `src/resources.rs` |

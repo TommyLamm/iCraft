@@ -1,5 +1,8 @@
+#[cfg(test)]
 use crate::dimension::Dimension;
+#[cfg(test)]
 use crate::world::BlockType;
+#[cfg(test)]
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -43,6 +46,8 @@ impl VillagerProfession {
     }
 }
 
+/// Presentation/test-only POI types. Authority never registers or claims POIs.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PoiType {
     Bed,
@@ -50,6 +55,7 @@ pub enum PoiType {
     MeetingPoint,
 }
 
+#[cfg(test)]
 impl PoiType {
     pub fn from_block_type(block: BlockType) -> Option<Self> {
         match block {
@@ -67,6 +73,7 @@ impl PoiType {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PoiEntry {
     pub pos: (i32, i32, i32),
@@ -74,6 +81,7 @@ pub struct PoiEntry {
     pub owner_entity_id: Option<u64>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Village {
     pub id: u64,
@@ -84,6 +92,8 @@ pub struct Village {
     pub villager_ids: Vec<u64>,
 }
 
+/// Dead outside tests: constructed only on former State shells; ServerWorld never ticks it.
+#[cfg(test)]
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PoiManager {
     /// Maps (Dimension, (x, y, z)) -> PoiEntry
@@ -95,6 +105,7 @@ pub struct PoiManager {
     pub next_village_id: u64,
 }
 
+#[cfg(test)]
 impl PoiManager {
     pub fn new() -> Self {
         Self::default()

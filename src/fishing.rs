@@ -1,10 +1,12 @@
-use crate::inventory::ItemStack;
+#[cfg(test)]
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use crate::inventory::ItemStack;
 
-/// Fishing simulation constants shared by the presentation manager and the
-/// authoritative fixed-tick domain. Durability is remaining durability, which
-/// matches the existing `ItemStack` convention used by tool damage.
+/// Fishing simulation constants shared by tests and the authoritative fixed-tick
+/// domain. Durability is remaining durability, which matches the existing
+/// `ItemStack` convention used by tool damage.
 pub const FISHING_FIXED_TICK_HZ: i32 = 20;
 pub const FISHING_INITIAL_WAIT_TICKS: u32 = 100;
 pub const FISHING_BITE_WINDOW_TICKS: u32 = 40;
@@ -42,7 +44,7 @@ impl FishingHookStage {
 }
 
 /// Convert a bounded protocol look vector into the launch velocity used by
-/// `FishingHook::new`, but entirely with integer arithmetic. The fixed 32-step
+/// authority cast, but entirely with integer arithmetic. The fixed 32-step
 /// square-root keeps runtime work bounded for attacker-controlled inputs.
 pub fn authoritative_launch_velocity_milli(look_milli: [i16; 3]) -> Option<[i32; 3]> {
     let squared = look_milli.into_iter().try_fold(0u64, |total, component| {
@@ -97,6 +99,7 @@ fn integer_sqrt(value: u64) -> u32 {
     root.min(u64::from(u32::MAX)) as u32
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FishingHook {
     pub entity_id: u64,
@@ -108,6 +111,7 @@ pub struct FishingHook {
     pub bite_ticks_remaining: u32,
 }
 
+#[cfg(test)]
 impl FishingHook {
     pub fn new(entity_id: u64, owner_player_id: u64, spawn_pos: Vec3, launch_dir: Vec3) -> Self {
         let initial_vel = launch_dir.normalize_or_zero() * 14.0 + Vec3::new(0.0, 3.0, 0.0);
@@ -139,6 +143,7 @@ impl FishingHook {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum FishingResult {
     Caught(ItemStack),
@@ -147,12 +152,16 @@ pub enum FishingResult {
     Missed,
 }
 
+/// Presentation fishing manager. Dead outside tests: authority owns hooks in
+/// `SessionGameplayState` / `authority::fishing`; State only mirrors entity id.
+#[cfg(test)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FishingManager {
     pub active_hooks: std::collections::HashMap<u64, FishingHook>,
     next_hook_entity_id: u64,
 }
 
+#[cfg(test)]
 impl FishingManager {
     pub fn new() -> Self {
         Self {

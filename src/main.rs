@@ -9,11 +9,10 @@
 
 pub use icraft::{
     accessibility, advancements, authority, block_entity, block_model, boss, brewing,
-    chunk_manager, chunk_render, chunk_schedule, commands, container_sessions, culling, dimension,
+    chunk_manager, chunk_render, chunk_schedule, commands, culling, dimension,
     enchantment, entity, fishing, game_rules, interaction, inventory, lighting, localization,
     navigation, network, passive_mob, perf, physics, player, presentation_inventory_policy, recipes,
-    redstone, resources, save, server_runtime, server_world, structure, vehicle, village, weather,
-    world,
+    redstone, resources, save, server_runtime, server_world, structure, village, weather, world,
 };
 
 mod app;
